@@ -291,4 +291,5 @@ def extract_track_metadata(
         "bpm": _safe_int(get_tag_value("bpm", "tempo")),
         "danceability": _safe_float(get_tag_value("danceability")),
         "comment": get_tag_value("comment", "comments", "description") or "",
+        "navidrome_added_at": track.get("created"),
     }
