@@ -303,6 +303,7 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "musicbrainz_last_updated": "TIMESTAMP", "discogs_last_updated": "TIMESTAMP",
         "pending_mb_updates": "TEXT", "mb_ignored_fields": "TEXT",
         "verification_status": "TEXT", "verification_checked_at": "TIMESTAMP", "verification_error": "TEXT",
+        "navidrome_added_at": "TIMESTAMP",
     },
     "download_queue": {
         "source": "TEXT DEFAULT 'soulseek'", "source_id": "TEXT", "search_query": "TEXT",
