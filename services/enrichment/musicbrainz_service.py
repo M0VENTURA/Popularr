@@ -855,7 +855,7 @@ class MusicBrainzService:
                 "recording.get",
                 self.http.get_recording,
                 mbid,
-                inc="artist-credits+releases+work-rels+genres",
+                inc="artist-credits+releases+release-groups+work-rels+genres",
                 log_context={**context, "mbid": mbid},
             )
             if not recording:
@@ -899,7 +899,7 @@ class MusicBrainzService:
                 "recording.bulk_get",
                 self.http.get_recordings_bulk,
                 mbids,
-                inc="artist-credits+releases+work-rels+genres",
+                inc="artist-credits+releases+release-groups+work-rels+genres",
                 log_context=context,
             ) or {}
             results: dict[str, dict[str, Any]] = {}
@@ -967,8 +967,11 @@ class MusicBrainzService:
         specific_title = str(specific_release.get("title") or "").strip()
         version_release_year = _year_of(specific_release.get("date"))
 
+        release_group = specific_release.get("release-group") or {}
+        release_group_title = str(release_group.get("title") or "").strip()
+
         authoritative_album = str(album_name or "").strip()
-        effective_album = authoritative_album or specific_title
+        effective_album = authoritative_album or release_group_title or specific_title
         effective_year = (
             original_release_year
             if original_release_year is not None
@@ -1282,7 +1285,7 @@ class MusicBrainzService:
                     self.http.search_recordings,
                     " OR ".join(query_groups),
                     limit=min(100, len(chunk) * candidates_per_entry),
-                    inc="releases+work-rels+genres",
+                    inc="releases+release-groups+work-rels+genres",
                     log_context=chunk_context,
                 ) or []
             except Exception as exc:
@@ -2955,4 +2958,4 @@ def compare_musicbrainz_release(
         return result
     except Exception as exc:
         logger.exception("[MB] release comparison failed", error=_error(exc), **context)
-        return {"success": False, "error": str(exc)}
+        return {"success": False, "error": "Could not fetch MusicBrainz release data"}
