@@ -2,18 +2,11 @@
 
 This module handles genre collection, normalization, and aggregation from multiple
 music metadata sources (MusicBrainz, Discogs, AudioDB, Last.fm).
-
-Key Responsibilities:
-    - Genre name normalization and synonym resolution
-    - Conflict detection and removal (e.g., "electronic" vs "punk")
-    - Weighted aggregation from multiple sources
-    - Top-N genre selection based on source authority and cross-source agreement
-    - Rank-decay voting to penalize low-frequency meme tags
-    - Native JSONB compatibility (handling pre-parsed lists/dicts from PostgreSQL)
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -179,7 +172,6 @@ def _source_weight(source: str) -> float:
         weights = get_genre_weights() or {}
     except Exception:
         weights = GENRE_WEIGHTS or {}
-        
     if source in weights:
         return float(weights[source] or 0)
     if source == "essentia":
@@ -275,7 +267,6 @@ def _vote_genres(
 
     for source, genres in (source_map or {}).items():
         base_weight = _source_weight(source)
-        # JSONB safety: if genres is stored as a list/dict natively or string, normalize to iterable list
         if isinstance(genres, str):
             try:
                 genres = json.loads(genres)
