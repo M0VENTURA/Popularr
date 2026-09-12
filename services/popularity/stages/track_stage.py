@@ -390,6 +390,103 @@ def _strip_album_type_columns(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Writer/composer normalization
+# ---------------------------------------------------------------------------
+#
+# `writer` is stored in the DB as a JSON-encoded array of plain strings, e.g.
+# '["J. Hasek", "R. Johnson"]'. Historically, a bug re-fed the *already
+# JSON-encoded* column value back into the encoder on subsequent scans
+# instead of decoding it first, producing a value that was JSON-encoded
+# multiple times over (a JSON array containing, as one of its own string
+# elements, a mangled/escaped copy of a previous JSON array). Each rescan
+# added another layer, and Postgres eventually rejected the result outright
+# with "invalid input syntax for type json ... input string ended
+# unexpectedly" once a bracket/quote ended up unbalanced.
+#
+# `_coerce_writer_list` fully unwraps any such nesting (bounded, so a
+# pathological value can't loop forever), and defensively drops any element
+# that still looks like leftover JSON syntax rather than a plain composer
+# name, so a corrupted value can never be silently re-embedded.
+
+_MAX_WRITER_UNWRAP_PASSES = 5
+
+
+def _looks_like_json_fragment(value: str) -> bool:
+    """True if a string still looks like it holds JSON syntax rather than a plain name."""
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if stripped[0] in "[{" or stripped[-1] in "]}":
+        return True
+    # Doubled single-quotes ('' ) are what Postgres/JSON round-tripping produces
+    # when a quote character gets escaped one layer too many.
+    if "''" in stripped:
+        return True
+    if '\\"' in stripped:
+        return True
+    return False
+
+
+def _coerce_writer_list(raw: Any) -> list[str]:
+    """Safely coerce a (possibly multiply JSON-encoded) writer value into a
+    clean, flat list of plain composer-name strings.
+
+    Unlike the previous implementation, this fully unwraps repeated
+    JSON-encoding (bounded to a handful of passes) instead of doing a single
+    `json.loads()` and giving up, and it rejects any resulting element that
+    still looks like JSON syntax instead of blindly trusting `strip("'\"")`
+    to have cleaned it up.
+    """
+    value: Any = raw
+    for _ in range(_MAX_WRITER_UNWRAP_PASSES):
+        if isinstance(value, list):
+            break
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped or stripped.lower() in ("[]", "null", "none"):
+                return []
+            try:
+                value = json.loads(stripped)
+                continue
+            except Exception:
+                # Not valid JSON at all: treat the whole string as a single
+                # composer name (after trimming stray quote characters).
+                value = [stripped]
+                break
+        else:
+            # Unexpected type (number, dict, etc.) - nothing sensible to do.
+            return []
+    else:
+        # Exceeded the unwrap budget without reaching a list - bail out
+        # rather than risk looping on a pathological/adversarial value.
+        return []
+
+    if not isinstance(value, list):
+        return []
+
+    flat_writers: list[str] = []
+
+    def _add_candidate(candidate: Any) -> None:
+        if isinstance(candidate, (list, tuple)):
+            for sub in candidate:
+                _add_candidate(sub)
+            return
+        text = str(candidate or "").strip().strip("'\"").strip()
+        if not text:
+            return
+        if _looks_like_json_fragment(text):
+            # Refuse to store fragments of leftover JSON as a "composer name".
+            return
+        if text not in flat_writers:
+            flat_writers.append(text)
+
+    for item in value:
+        _add_candidate(item)
+
+    return flat_writers
+
+
 LB_SECONDARY_MIN_LF_LISTENERS = 5000
 LB_SECONDARY_LF_RATIO = 0.05
 
@@ -579,10 +676,10 @@ def _resolve_track_mb_metadata(
             mb_data = _batch_mb.get(f"{artist.lower()}::{title.lower()}")
             if not mb_data and batch_artist and batch_title:
                 mb_data = _batch_mb.get(f"{batch_artist.lower()}::{batch_title.lower()}")
-            
+
             mb_service = get_shared_mb_service()
             _from_batch = bool(mb_data)
-            
+
             if not mb_data:
                 mb_data = mb_service.lookup_recording_metadata(title, artist)
                 _from_batch = False
@@ -597,45 +694,67 @@ def _resolve_track_mb_metadata(
             if confidence is not None:
                 payload["musicbrainz_confidence"] = confidence
 
-            if recording_mbid and not _from_batch:
-                _existing_writer = _as_str(track.get("writer") or "")
-                if not _existing_writer or _existing_writer.strip().lower() in ("[]", "null", "none", ""):
-                    _batch_writer = (mb_data or {}).get("writer") or []
-                    if not _batch_writer:
-                        try:
-                            _batch_writer = mb_service.get_composers_for_recording(recording_mbid) or []
-                        except Exception as exc:
-                            logger.debug("Composer fetch failed", track_id=track_id, error=str(exc))
-                    
-                    flat_writers = []
-                    if isinstance(_batch_writer, str):
-                        try:
-                            _batch_writer = json.loads(_batch_writer)
-                        except Exception:
-                            _batch_writer = [_batch_writer]
-                    
-                    if isinstance(_batch_writer, list):
-                        for w in _batch_writer:
-                            if isinstance(w, str):
-                                cleaned = w.strip("'\"")
-                                if cleaned and cleaned not in flat_writers:
-                                    flat_writers.append(cleaned)
-                            elif isinstance(w, (list, tuple)):
-                                for sub in w:
-                                    sub_str = str(sub).strip("'\"")
-                                    if sub_str and sub_str not in flat_writers:
-                                        flat_writers.append(sub_str)
-                    
-                    if flat_writers:
-                        payload["writer"] = json.dumps(flat_writers, ensure_ascii=False)
-            
+            # --- Writer / composer handling -----------------------------
+            # IMPORTANT: this sanitization step runs regardless of whether
+            # `mb_data` came from the batch cache or a live lookup. The
+            # previous version only ran when `_from_batch` was False, which
+            # meant any track resolved from a pre-built album batch (the
+            # common case) never had its `writer` column re-validated -
+            # a corrupted value already sitting on `track` just flowed
+            # straight through to persistence, unchanged, on every single
+            # scan indefinitely.
+            _raw_existing_writer = track.get("writer")
+            _sanitized_existing_writer = (
+                _coerce_writer_list(_raw_existing_writer) if _raw_existing_writer else []
+            )
+            _existing_writer_already_clean = False
+            if _raw_existing_writer:
+                try:
+                    _parsed_existing = (
+                        json.loads(_raw_existing_writer)
+                        if isinstance(_raw_existing_writer, str)
+                        else _raw_existing_writer
+                    )
+                    _existing_writer_already_clean = (
+                        isinstance(_parsed_existing, list)
+                        and _parsed_existing == _sanitized_existing_writer
+                    )
+                except Exception:
+                    _existing_writer_already_clean = False
+
+            if _raw_existing_writer and not _existing_writer_already_clean:
+                # The stored value was malformed, double-encoded, or
+                # otherwise unparseable as a clean list - repair it in
+                # place using whatever plain composer names can be
+                # salvaged (possibly none, which clears it to "[]").
+                payload["writer"] = json.dumps(_sanitized_existing_writer)
+                logger.info(
+                    "[MB] repaired malformed writer column",
+                    track_id=track_id,
+                    recovered_count=len(_sanitized_existing_writer),
+                )
+
+            if recording_mbid and not _sanitized_existing_writer:
+                _batch_writer = (mb_data or {}).get("writer") or []
+                if not _batch_writer and not _from_batch:
+                    try:
+                        _batch_writer = mb_service.get_composers_for_recording(recording_mbid) or []
+                    except Exception as exc:
+                        logger.debug("Composer fetch failed", track_id=track_id, error=str(exc))
+
+                flat_writers = _coerce_writer_list(_batch_writer)
+
+                if flat_writers:
+                    payload["writer"] = json.dumps(flat_writers)
+            # -------------------------------------------------------------
+
             if mb_data.get("title"):
                 payload["musicbrainz_title"] = mb_data["title"]
-            
+
             _artist_mbid = mb_data.get("artist_mbid")
             if _artist_mbid and not _as_str(track.get("musicbrainz_artistid") or track.get("musicbrainz_artist_id")):
                 payload["musicbrainz_artistid"] = _artist_mbid
-            
+
             _mb_isrc = _as_str(mb_data.get("isrc") or "").strip()
             if _mb_isrc and not _as_str(track.get("isrc") or "").strip():
                 payload["isrc"] = _mb_isrc
@@ -643,11 +762,11 @@ def _resolve_track_mb_metadata(
             _existing_album = _as_str(track.get("album") or "").strip()
             if mb_data.get("album") and not _existing_album:
                 payload["album"] = mb_data["album"]
-                
+
             _existing_artist = _as_str(track.get("artist") or "").strip()
             if mb_data.get("artist") and not _existing_artist:
                 payload["artist"] = mb_data["artist"]
-                
+
             _existing_year = _as_str(track.get("year") or "").strip()
             _mb_year = _as_str(mb_data.get("year") or "").strip()
             if _mb_year:
@@ -660,7 +779,7 @@ def _resolve_track_mb_metadata(
                             _should_update_year = True
                     except ValueError:
                         pass
-                
+
                 if _should_update_year:
                     payload["year"] = _mb_year
 
@@ -698,7 +817,7 @@ def process_track(
     track_id = _as_str(raw_track_id)
     track_title = _as_str(track.get("title"))
     track_artist = _as_str(track.get("artist"))
-    
+
     from helpers.logging_config import log_unified
 
     _track_started = time.monotonic()
@@ -726,7 +845,7 @@ def process_track(
     refresh_popularity = bool(options.get("refresh_popularity_if_due"))
     singles_detection_only = bool(options.get("singles_detection_only"))
     singles_pass = bool(options.get("singles_only")) or bool(options.get("singles_with_missing_popularity"))
-    
+
     _has_stored_popularity = (
         float(track.get("final_score") or track.get("popularity") or 0) > 0
         or int(track.get("lastfm_listeners") or 0) >= 25
@@ -861,7 +980,7 @@ def process_track(
                 or effective_track.get("musicbrainz_trackid")
             )
             isrc = _as_str(effective_track.get("isrc") or "").strip()
-            
+
             if isrc.startswith("[") and isrc.endswith("]"):
                 from helpers.normalization_service import normalize_isrc
                 isrc = normalize_isrc(isrc)
@@ -909,7 +1028,7 @@ def process_track(
             ) and bool(
                 effective_track.get("final_score") and _has_credible_data
             )
-            
+
             if _cached:
                 lastfm_listeners = _as_int(effective_track.get("lastfm_listeners") or 0)
                 lastfm_playcount = _as_int(effective_track.get("lastfm_playcount") or 0)
@@ -930,13 +1049,13 @@ def process_track(
             else:
                 lastfm_listeners = _as_int(effective_track.get("lastfm_listeners") or 0)
                 lastfm_playcount = _as_int(effective_track.get("lastfm_playcount") or 0)
-                
+
                 _prefetch_entry = (prefetched_popularity or {}).get(
                     normalize_for_aggregation(raw_title or title or "")
                 )
                 if _force and _prefetch_entry and not _prefetch_entry.get("_album_tracklist"):
                     _prefetch_entry = None
-                    
+
                 if (
                     _force
                     or not has_fresh_lf
@@ -951,7 +1070,7 @@ def process_track(
                         update_payload["lastfm_last_updated"] = now_ts
                         update_payload["_from_prefetch"] = True
                         if not effective_track.get("lastfm_tags") and _prefetch_entry.get("lastfm_tags"):
-                            update_payload["lastfm_tags"] = json.dumps(_prefetch_entry["lastfm_tags"], ensure_ascii=False)
+                            update_payload["lastfm_tags"] = _prefetch_entry["lastfm_tags"]
                     else:
                         try:
                             from helpers.config_helpers import get_config
@@ -984,7 +1103,7 @@ def process_track(
                                             if len(_agg_tags) >= 15:
                                                 break
                                         if _agg_tags:
-                                            update_payload["lastfm_tags"] = json.dumps(_agg_tags, ensure_ascii=False)
+                                            update_payload["lastfm_tags"] = _agg_tags
                                 else:
                                     lf_result = lf.get_track_info(artist, title)
                                     lastfm_listeners = _as_int(lf_result.get("listeners") if isinstance(lf_result, dict) else 0)
@@ -995,10 +1114,7 @@ def process_track(
                                 toptags = lf_result.get("toptags", {}) if isinstance(lf_result, dict) else {}
                                 tag_list = toptags.get("tag", []) if isinstance(toptags, dict) else []
                                 if tag_list:
-                                    update_payload["lastfm_tags"] = json.dumps(
-                                        [t.get("name", "") for t in tag_list if isinstance(t, dict) and t.get("name")],
-                                        ensure_ascii=False
-                                    )
+                                    update_payload["lastfm_tags"] = [t.get("name", "") for t in tag_list if isinstance(t, dict) and t.get("name")]
                             else:
                                 lastfm_listeners = 0
                                 lastfm_playcount = 0
@@ -1033,7 +1149,7 @@ def process_track(
                 # --- ListenBrainz ---
                 listenbrainz_listens = _as_int(effective_track.get("listenbrainz_listens") or 0)
                 listenbrainz_users = _as_int(effective_track.get("listenbrainz_users") or 0)
-                
+
                 if _force or not has_fresh_lb or listenbrainz_listens == 0:
                     _lb_source = "none"
                     _album_tracklist_entry = bool(_prefetch_entry and _prefetch_entry.get("_album_tracklist"))
@@ -1219,7 +1335,7 @@ def process_track(
                     sd_discogs_token = ""
             except Exception:
                 sd_discogs_token = ""
-            
+
             sd_lastfm_client = None
             try:
                 from helpers.config_helpers import get_config as _get_cfg
@@ -1319,8 +1435,8 @@ def process_track(
 
             _sd_title_lower = str(sd_title or "").lower()
             _known_global_hits = [
-                "toxic", "oops", "baby one more time", "slave 4 u", "lucky", 
-                "everytime", "stronger", "sometimes", "overprotected", "prerogative", 
+                "toxic", "oops", "baby one more time", "slave 4 u", "lucky",
+                "everytime", "stronger", "sometimes", "overprotected", "prerogative",
                 "crazy", "boys", "outrageous", "girl, not yet a woman", "somethin", "me against the music"
             ]
             _is_known_hit = any(hit in _sd_title_lower for hit in _known_global_hits) or int(lastfm_listeners or 0) >= 300_000
@@ -1335,12 +1451,12 @@ def process_track(
                         update_payload["single_confidence"] = sd_result.get("confidence", "low")
                     update_payload["single_confidence_score"] = sd_result.get("confidence_score", 0.0)
                     update_payload["single_status"] = sd_result.get("single_status", "none")
-                    update_payload["single_sources"] = json.dumps(sd_result.get("sources", []), ensure_ascii=False)
+                    update_payload["single_sources"] = sd_result.get("sources", [])
                 else:
                     update_payload["is_single"] = True
                     update_payload["single_confidence"] = "medium"
                     update_payload["single_confidence_score"] = 0.85
-                    update_payload["single_sources"] = json.dumps([{"source": "hit_safeguard", "matched": True}], ensure_ascii=False)
+                    update_payload["single_sources"] = [{"source": "hit_safeguard", "matched": True}]
                     _single_summary = "Single: MEDIUM (hit safeguard)"
 
                 update_payload["single_detection_last_updated"] = sd_now
@@ -1354,7 +1470,7 @@ def process_track(
                     update_payload["is_single"] = False
                     update_payload["single_confidence"] = "low"
                     update_payload["single_confidence_score"] = 0.0
-                    update_payload["single_sources"] = json.dumps([])
+                    update_payload["single_sources"] = []
                     _single_summary = "Single: LOW (below top-50% album popularity)"
 
         except Exception as e:
@@ -1412,8 +1528,7 @@ def process_track(
                             mb_genres, _ = _MB_RECORDING_GENRE_CACHE[_rec_mbid]
 
                     if mb_genres:
-                        _mb_names = [g.get("name") for g in mb_genres if isinstance(g, dict) and g.get("name")]
-                        update_payload["musicbrainz_genres"] = json.dumps(_mb_names, ensure_ascii=False)
+                        update_payload["musicbrainz_genres"] = [g.get("name") for g in mb_genres if isinstance(g, dict) and g.get("name")]
                 except Exception as e:
                     logger.debug("MusicBrainz genre fetch failed", track_id=track_id, error=str(e))
 
@@ -1431,7 +1546,7 @@ def process_track(
                             genres = results[0].get("genre", []) or []
                             styles = results[0].get("style", []) or []
                             if genres or styles:
-                                update_payload["discogs_genres"] = json.dumps(list(set(genres + styles)), ensure_ascii=False)
+                                update_payload["discogs_genres"] = list(set(genres + styles))
                 except Exception as e:
                     logger.debug("Discogs genre fetch failed", track_id=track_id, error=str(e))
 
@@ -1443,7 +1558,7 @@ def process_track(
                         lb_tags = get_recording_tags(_lb_mbid) or []
                         names = [str(t.get("tag") or t.get("name") or "").strip() for t in lb_tags if isinstance(t, dict)]
                         if names:
-                            update_payload["listenbrainz_genres"] = json.dumps([n for n in names if n], ensure_ascii=False)
+                            update_payload["listenbrainz_genres"] = [n for n in names if n]
                 except Exception as e:
                     logger.debug("ListenBrainz genre fetch failed", track_id=track_id, error=str(e))
         except Exception as e:
@@ -1479,8 +1594,7 @@ def process_track(
                             _mbg = json.loads(_mbg)
                         except Exception:
                             _mbg = []
-                    _cover_list = ["Cover"] + [g for g in _mbg if g != "Cover"]
-                    update_payload["musicbrainz_genres"] = json.dumps(_cover_list, ensure_ascii=False)
+                    update_payload["musicbrainz_genres"] = ["Cover"] + [g for g in _mbg if g != "Cover"]
         except Exception as e:
             logger.debug("Cover detection failed", track_id=track_id, error=str(e))
 
@@ -1506,9 +1620,9 @@ def process_track(
                     source_map[source_name] = raw
 
             aggregated = aggregate_genres(
-                source_map, 
-                max_genres=2, 
-                context_title=_as_str(effective_track.get("title")), 
+                source_map,
+                max_genres=2,
+                context_title=_as_str(effective_track.get("title")),
                 context_album=_as_str(album_context.get("album"))
             )
             if aggregated:
@@ -1529,7 +1643,7 @@ def process_track(
                         _album_years.append(int(str(_y)[:4]))
                     except ValueError:
                         pass
-            
+
             _pl_year = _as_str(update_payload.get("year")).strip()
             if _pl_year:
                 try:
@@ -1540,7 +1654,7 @@ def process_track(
             if _album_years:
                 _min_year = min(_album_years)
                 _curr_year = _as_str(update_payload.get("year") or track.get("year") or track.get("release_year")).strip()
-                
+
                 _update_needed = False
                 if not _curr_year:
                     _update_needed = True
@@ -1550,7 +1664,7 @@ def process_track(
                             _update_needed = True
                     except ValueError:
                         _update_needed = True
-                        
+
                 if _update_needed:
                     update_payload["year"] = str(_min_year)
         except Exception as e:
@@ -1594,7 +1708,7 @@ def process_track(
     except (TypeError, ValueError):
         _stored_stars = 0
     _stars_part = f" | Stars: {'★' * _stored_stars}" if 1 <= _stored_stars <= 5 else ""
-    
+
     _src_names: list[str] = []
     try:
         _src_raw = update_payload.get("single_sources") or track.get("single_sources") or []
@@ -1606,7 +1720,7 @@ def process_track(
         ]
     except Exception:
         _src_names = []
-        
+
     _isrc_part = f" | ISRC: {_isrc_found}" if _isrc_found else ""
     _track_total_elapsed = time.monotonic() - _track_started
     _consolidated = (
@@ -1619,7 +1733,7 @@ def process_track(
     )
     if _src_names:
         _consolidated += f" | Matched: {', '.join(_src_names)}"
-        
+
     if metadata_only:
         logger.debug(_consolidated)
     else:
