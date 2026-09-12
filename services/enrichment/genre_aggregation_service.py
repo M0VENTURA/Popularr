@@ -8,6 +8,7 @@ Key Responsibilities:
     - Conflict detection and removal (e.g., "electronic" vs "punk")
     - Weighted aggregation from multiple sources
     - Top-N genre selection based on source authority and cross-source agreement
+    - Rank-decay voting to penalize low-frequency meme tags
 
 Voting contract: only online metadata sources (Last.fm, MusicBrainz, Discogs)
 are allowed to contribute vote weight. Navidrome's local tags are NEVER added
@@ -27,6 +28,7 @@ silently change which genres survive the cut.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from collections import defaultdict
 from typing import Any
@@ -321,6 +323,9 @@ def _vote_genres(
     passed in here, since anything in ``source_map`` contributes both
     vote weight *and* counts toward cross-source agreement.
 
+    Uses a rank-decay discount based on the order of genres provided by the
+    upstream source, heavily penalizing tag-spam at the bottom of the list.
+
     Returns:
         votes: key -> summed weight
         spellings: key -> [(weight, display spelling), ...]
@@ -332,15 +337,20 @@ def _vote_genres(
     source_hits: dict[str, set[str]] = defaultdict(set)
 
     for source, genres in (source_map or {}).items():
-        weight = _source_weight(source)
-        for genre in genres or []:
+        base_weight = _source_weight(source)
+        for rank, genre in enumerate(genres or []):
             if is_junk_genre(genre) or is_admin_genre(genre):
                 continue
             key = normalize_genre_for_vote(genre)
             if not key:
                 continue
-            votes[key] += weight
-            spellings[key].append((weight, normalize_genre(genre)))
+                
+            # Rank decay: 1.0 for the first item, ~0.63 for the second, 0.5 for the third, etc.
+            decay = 1.0 / math.log2(rank + 2)
+            weighted_vote = base_weight * decay
+            
+            votes[key] += weighted_vote
+            spellings[key].append((weighted_vote, normalize_genre(genre)))
             source_hits[key].add(source)
 
     for key, (weight, spelling) in (extra_votes or {}).items():
