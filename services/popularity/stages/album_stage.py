@@ -823,8 +823,8 @@ def _fetch_similar_artists(artist: str, options: dict[str, Any]) -> dict[str, li
                         """),
                         {
                             "artist": artist,
-                            "lf": json.dumps(result["lastfm"]) if result["lastfm"] else None,
-                            "lb": json.dumps(result["listenbrainz"]) if result["listenbrainz"] else None,
+                            "lf": json.dumps(result["lastfm"], ensure_ascii=False) if result["lastfm"] else None,
+                            "lb": json.dumps(result["listenbrainz"], ensure_ascii=False) if result["listenbrainz"] else None,
                             "updated": datetime.now(timezone.utc).isoformat(),
                         },
                     )
@@ -1241,7 +1241,7 @@ def _inject_album_genre(
     session: Any | None = None,
 ) -> None:
     mb_json, genres_csv = _genre_values(label, mb_genres_raw, genres_raw)
-    params = {"mb": json.dumps(mb_json), "genres": genres_csv, "track_id": str(track_id)}
+    params = {"mb": json.dumps(mb_json, ensure_ascii=False), "genres": genres_csv, "track_id": str(track_id)}
     statement = text(
         "UPDATE tracks SET musicbrainz_genres = :mb::jsonb, genres = :genres WHERE id = :track_id"
     )
@@ -1295,7 +1295,7 @@ def _fetch_artist_lastfm_tags(artist: str) -> None:
             with db_session() as session:
                 result = session.execute(
                     text("UPDATE artists SET lastfm_artist_tags = :tags WHERE name = :artist"),
-                    {"tags": json.dumps(names), "artist": artist},
+                    {"tags": json.dumps(names, ensure_ascii=False), "artist": artist},
                 )
                 rows_updated = result.rowcount
         Logger.info("[ENRICH] Last.fm artist tags persisted", tag_count=len(names), rows_updated=rows_updated, **context)
@@ -1467,7 +1467,7 @@ def _drop_live_genres_from_json(raw: Any) -> str | None:
         return None
     parsed = _json_list(raw)
     kept = [value for value in parsed if str(value).strip().casefold() not in {"live", "acoustic"}]
-    return json.dumps(kept) if kept != parsed else None
+    return json.dumps(kept, ensure_ascii=False) if kept != parsed else None
 
 
 def _drop_live_genres_from_csv(raw: Any) -> str | None:
