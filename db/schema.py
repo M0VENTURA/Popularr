@@ -29,7 +29,7 @@ TABLES_TO_ENSURE: dict[str, str] = {
             artist_name TEXT PRIMARY KEY,
             genres TEXT,
             lastfm_tags TEXT,
-            musicbrainz_genres TEXT,
+            musicbrainz_genres JSONB,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """,
@@ -68,7 +68,7 @@ TABLES_TO_ENSURE: dict[str, str] = {
             id BIGSERIAL PRIMARY KEY, artist TEXT NOT NULL, title TEXT NOT NULL, 
             lastfm_listeners INTEGER DEFAULT 0, lastfm_playcount BIGINT DEFAULT 0, 
             listenbrainz_listens INTEGER DEFAULT 0, listenbrainz_users INTEGER DEFAULT 0, 
-            lastfm_tags TEXT,
+            lastfm_tags JSONB,
             source TEXT DEFAULT 'bulk', updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             CONSTRAINT uq_track_popularity_artist_title UNIQUE (artist, title)
         )
@@ -130,8 +130,8 @@ TABLES_TO_ENSURE: dict[str, str] = {
             total_tracks INTEGER, monitoring_folder_path TEXT, final_folder_path TEXT, 
             status TEXT DEFAULT 'active', method TEXT, discovered_count INTEGER DEFAULT 0, 
             organized_count INTEGER DEFAULT 0, finalized_count INTEGER DEFAULT 0, 
-            album_artist TEXT, genres TEXT, lastfm_genres TEXT, discogs_genres TEXT, 
-            musicbrainz_genres TEXT, cover_art_url TEXT, release_source TEXT, 
+            album_artist TEXT, genres TEXT, lastfm_genres JSONB, discogs_genres JSONB, 
+            musicbrainz_genres JSONB, cover_art_url TEXT, release_source TEXT, 
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, finalized_at TIMESTAMP
         )
@@ -265,13 +265,13 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         
         # Single Detection
         "single_confidence": "TEXT", "single_confidence_score": "DOUBLE PRECISION",
-        "single_status": "TEXT", "single_sources": "TEXT", "single_sources_used": "TEXT",
+        "single_status": "TEXT", "single_sources": "JSONB", "single_sources_used": "TEXT",
         "single_detection_last_updated": "TIMESTAMP", "single_manual_override": "BOOLEAN DEFAULT FALSE",
         
-        # Genres & Classifications
-        "genres": "TEXT", "genre": "TEXT", "manual_genres": "TEXT", "navidrome_genres": "TEXT", 
-        "spotify_genres": "TEXT", "listenbrainz_genres": "TEXT", "discogs_genres": "TEXT", 
-        "musicbrainz_genres": "TEXT", "essentia_genres": "TEXT",
+        # Genres & Classifications (Migrated to JSONB for high-performance indexing/storage)
+        "genres": "TEXT", "genre": "TEXT", "manual_genres": "JSONB", "navidrome_genres": "JSONB", 
+        "spotify_genres": "JSONB", "listenbrainz_genres": "JSONB", "discogs_genres": "JSONB", 
+        "musicbrainz_genres": "JSONB", "essentia_genres": "JSONB",
         
         # Mood & Audio Features (Essentia)
         "mood": "TEXT", "mood_confidence": "DOUBLE PRECISION", "mood_source": "TEXT",
@@ -284,7 +284,7 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "popularity": "DOUBLE PRECISION", "final_score": "DOUBLE PRECISION",
         "spotify_score": "DOUBLE PRECISION", 
         "lastfm_score": "DOUBLE PRECISION", "lastfm_listeners": "INTEGER", "lastfm_playcount": "BIGINT",
-        "lastfm_tags": "TEXT", "lastfm_last_updated": "TIMESTAMP",
+        "lastfm_tags": "JSONB", "lastfm_last_updated": "TIMESTAMP",
         "listenbrainz_score": "DOUBLE PRECISION", "listenbrainz_listens": "INTEGER",
         "listenbrainz_users": "INTEGER", "listenbrainz_last_updated": "TIMESTAMP",
         "popularity_marked": "BOOLEAN DEFAULT FALSE", "popularity_frozen": "BOOLEAN DEFAULT FALSE",
@@ -352,7 +352,7 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
     },
     "musicbrainz_releases": {
         "album_artist": "TEXT", "genres": "TEXT", 
-        "lastfm_genres": "TEXT", "discogs_genres": "TEXT", "musicbrainz_genres": "TEXT",
+        "lastfm_genres": "JSONB", "discogs_genres": "JSONB", "musicbrainz_genres": "JSONB",
         "cover_art_url": "TEXT", "release_source": "TEXT"
     },
     "musicbrainz_release_tracks": {
@@ -362,7 +362,7 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "is_promo": "BOOLEAN DEFAULT FALSE", "category": "TEXT"
     },
     "missing_releases": {"tracklist": "TEXT"},
-    "track_popularity_cache": {"lastfm_tags": "TEXT"},
+    "track_popularity_cache": {"lastfm_tags": "JSONB"},
     "scan_history": {
         "scan_type": "TEXT", "artist": "TEXT", "album": "TEXT", "status": "TEXT", "message": "TEXT",
         "started_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "completed_at": "TIMESTAMP", 
@@ -416,6 +416,10 @@ INDEXES_TO_ENSURE: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_mb_release_tracks_status ON musicbrainz_release_tracks(release_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_folder_matches_folder_path ON folder_matches (folder_path)",
     "CREATE INDEX IF NOT EXISTS idx_user_favourites_user ON user_favourites (username, entity_type)",
+    # GIN indexes for JSONB genre / tag columns to support fast querying/containment checks
+    "CREATE INDEX IF NOT EXISTS idx_tracks_mb_genres_gin ON tracks USING gin (musicbrainz_genres)",
+    "CREATE INDEX IF NOT EXISTS idx_tracks_discogs_genres_gin ON tracks USING gin (discogs_genres)",
+    "CREATE INDEX IF NOT EXISTS idx_tracks_lastfm_tags_gin ON tracks USING gin (lastfm_tags)",
 )
 
 # =============================================================================
