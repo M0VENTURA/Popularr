@@ -566,7 +566,6 @@ def _resolve_track_mb_metadata(
     )
     _has_genres = _has_real_genres(track)
     
-    # NEW: Force metadata lookup if the track is flagged as missing core components
     _needs_enrichment = _track_needs_metadata_enrichment(track)
     _force_meta = bool(force_meta) or _needs_enrichment
 
@@ -630,9 +629,23 @@ def _resolve_track_mb_metadata(
             if mb_data.get("artist") and not _existing_artist:
                 payload["artist"] = mb_data["artist"]
                 
+            # Take the earliest release year known from MusicBrainz
             _existing_year = _as_str(track.get("year") or "").strip()
-            if mb_data.get("year") and not _existing_year:
-                payload["year"] = mb_data["year"]
+            _mb_year = _as_str(mb_data.get("year") or "").strip()
+            if _mb_year:
+                _should_update_year = False
+                if not _existing_year or _force_meta:
+                    _should_update_year = True
+                else:
+                    try:
+                        # Override local year if MB knows an older original year
+                        if int(str(_mb_year)[:4]) < int(str(_existing_year)[:4]):
+                            _should_update_year = True
+                    except ValueError:
+                        pass
+                
+                if _should_update_year:
+                    payload["year"] = _mb_year
 
     return {
         "mb_data": mb_data,
@@ -1743,6 +1756,50 @@ def process_track(
 
         except Exception as e:
             logger.debug("Genre aggregation failed", track_id=track_id, error=str(e))
+
+    # -------------------------------------------------------------------------
+    # 5.5 ALBUM YEAR UNIFICATION
+    # -------------------------------------------------------------------------
+    if not popularity_only and not singles_detection_only:
+        try:
+            _album_years = []
+            
+            # Gather all years currently stored on the album's tracks
+            for _at in (album_tracks or []):
+                _y = _as_str(_at.get("year") or _at.get("release_year")).strip()
+                if _y:
+                    try:
+                        _album_years.append(int(str(_y)[:4]))
+                    except ValueError:
+                        pass
+            
+            # Also factor in the year we just resolved from MusicBrainz (if any)
+            _pl_year = _as_str(update_payload.get("year")).strip()
+            if _pl_year:
+                try:
+                    _album_years.append(int(str(_pl_year)[:4]))
+                except ValueError:
+                    pass
+
+            if _album_years:
+                _min_year = min(_album_years)
+                _curr_year = _as_str(update_payload.get("year") or track.get("year") or track.get("release_year")).strip()
+                
+                _update_needed = False
+                if not _curr_year:
+                    _update_needed = True
+                else:
+                    try:
+                        # Override if the current year is newer than the oldest known year
+                        if int(str(_curr_year)[:4]) > _min_year:
+                            _update_needed = True
+                    except ValueError:
+                        _update_needed = True
+                        
+                if _update_needed:
+                    update_payload["year"] = str(_min_year)
+        except Exception as e:
+            logger.debug("Album year unification failed", track_id=track_id, error=str(e))
 
     # -------------------------------------------------------------------------
     # 6. PERSISTENCE
