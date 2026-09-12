@@ -220,38 +220,64 @@ def _genre_min_weight() -> float:
 
 def _parse_genre_input(raw: Any) -> list[str]:
     """Robust parser handling lists, dicts, JSONB scalars, and delimited strings."""
-    if not raw:
-        return []
-    if isinstance(raw, (list, tuple)):
-        res = []
-        for item in raw:
-            if isinstance(item, dict):
-                name = item.get("name") or item.get("tag") or ""
-                if name:
-                    res.append(str(name))
-            elif item is not None:
-                res.append(str(item))
-        return res
-    if isinstance(raw, dict):
-        res = []
-        for _, v in raw.items():
-            if isinstance(v, dict):
-                name = v.get("name") or v.get("tag") or ""
-                if name:
-                    res.append(str(name))
-            elif v is not None:
-                res.append(str(v))
-        return res
-    if isinstance(raw, str):
-        stripped = raw.strip()
-        if not stripped or stripped.lower() in ("[]", "{}", "null", "none"):
+    
+    def _extract(r: Any) -> list[str]:
+        if not r:
             return []
-        try:
-            parsed = json.loads(stripped)
-            return _parse_genre_input(parsed)
-        except Exception:
+        if isinstance(r, (list, tuple)):
+            res = []
+            for item in r:
+                if isinstance(item, dict):
+                    name = item.get("name") or item.get("tag") or ""
+                    if name:
+                        res.extend(_extract(str(name)))
+                elif item is not None:
+                    res.extend(_extract(str(item)))
+            return res
+            
+        if isinstance(r, dict):
+            res = []
+            for _, v in r.items():
+                if isinstance(v, dict):
+                    name = v.get("name") or v.get("tag") or ""
+                    if name:
+                        res.extend(_extract(str(name)))
+                elif v is not None:
+                    res.extend(_extract(str(v)))
+            return res
+            
+        if isinstance(r, str):
+            stripped = r.strip()
+            if not stripped or stripped.lower() in ("[]", "{}", "null", "none"):
+                return []
+                
+            if stripped.startswith("[") or stripped.startswith("{"):
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, (list, dict)):
+                        return _extract(parsed)
+                except Exception:
+                    pass
+                    
+            # Forcefully split any string by common delimiters to kill the genre tumors
             return [g.strip() for g in re.split(r"[,;/\\]+", stripped) if g.strip()]
-    return []
+            
+        return []
+
+    raw_list = _extract(raw)
+    
+    # Deduplicate while preserving vote decay order
+    seen = set()
+    clean = []
+    for g in raw_list:
+        if not g:
+            continue
+        k = g.lower()
+        if k not in seen:
+            seen.add(k)
+            clean.append(g)
+            
+    return clean
 
 
 def _suppress_generic_parents(genres: list[str]) -> list[str]:
