@@ -1147,11 +1147,14 @@ def run_scan(
         try:
             record_scan(scan_type, "started", message=f"{scan_type} scan: {artist} - {album}", artist=artist, album=album)
 
-            album_result = enrich_album(
+            album_result = _bounded_call_report(
+                enrich_album,
                 album_row=album_row,
                 album_context=album_context,
                 stat_eligible_tracks=stat_eligible_tracks,
                 options=options,
+                section="enrich_album",
+                log_context={"artist": artist, "album": album},
             ) or {}
 
             track_dicts = [tc["track"] for tc in track_contexts if tc.get("track")]
