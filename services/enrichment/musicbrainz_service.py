@@ -71,14 +71,14 @@ from api_clients.musicbrainz_http import (
     escape_lucene_special_chars as Escape_lucene_special_chars,
 )
 from helpers.normalization_service import (
-    Edition_annotations_compatible,
-    Normalize_string,
-    Normalize_title_for_lookup,
-    Normalize_title_for_lucene_query,
-    Normalize_title_for_mbid_match,
-    Strip_featured_artist,
-    Strip_search_keywords,
-    Strip_single_release_suffix,
+    edition_annotations_compatible as Edition_annotations_compatible,
+    normalize_string as Normalize_string,
+    normalize_title_for_lookup as Normalize_title_for_lookup,
+    normalize_title_for_lucene_query as Normalize_title_for_lucene_query,
+    normalize_title_for_mbid_match as Normalize_title_for_mbid_match,
+    strip_featured_artist as Strip_featured_artist,
+    strip_search_keywords as Strip_search_keywords,
+    strip_single_release_suffix as Strip_single_release_suffix,
 )
 
 Logger = structlog.get_logger(__name__)
