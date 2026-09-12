@@ -12,7 +12,7 @@ import concurrent.futures
 from collections import Counter
 from datetime import datetime
 from difflib import SequenceMatcher
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 import structlog
 from sqlalchemy import text
@@ -100,6 +100,43 @@ from services.enrichment.single_detection_context_service import get_artist_last
 from services.enrichment.cover_detection_service import detect_covers_for_album
 
 logger = structlog.get_logger(__name__)
+
+T = TypeVar("T")
+
+
+def _bounded_call_report(
+    func: Callable[..., T],
+    *args: Any,
+    section: str = "bounded_call",
+    log_context: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Execute a function with structured start/completion/failure logging.
+
+    Returns the function's result, or None if it raised.
+    """
+    context = dict(log_context or {})
+    start_ts = time.monotonic()
+    logger.info("[SCAN] section started", section=section, **context)
+    try:
+        result = func(*args, **kwargs)
+    except Exception as exc:
+        logger.exception(
+            "[SCAN] section failed",
+            section=section,
+            elapsed_s=round(time.monotonic() - start_ts, 3),
+            error=f"{type(exc).__name__}: {exc}",
+            **context,
+        )
+        return None
+    else:
+        logger.info(
+            "[SCAN] section completed",
+            section=section,
+            elapsed_s=round(time.monotonic() - start_ts, 3),
+            **context,
+        )
+        return result
 
 
 def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
