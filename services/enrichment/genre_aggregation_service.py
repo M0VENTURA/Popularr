@@ -67,10 +67,6 @@ _CHRISTMAS_KEYWORDS = [
     "deck the halls", "winter wonderland", "feliz navidad",
     "rudolph", "santa claus", "sleigh bells", "noel", "hanukkah",
 ]
-_LIVE_PATTERNS = [
-    r"\blive\b", r"\bunplugged\b", r"\bconcert\b",
-    r"\bat\s+\w+\s+(arena|stadium|hall|club|theatre|theater)",
-]
 
 # Curated "specific implies suppress these generics" relationships that
 # are NOT simple substring/word-boundary matches of the generic label
@@ -124,6 +120,7 @@ def _strip_admin_genre_markers(value: str) -> str:
         return ""
     text_value = value
     text_value = re.sub(r"\([^)]*\)", "", text_value)
+    text_value = re.sub(r"\[[^\]]*\]", "", text_value)
     text_value = re.sub(
         r"[-–—/\\]+\s*(remaster|remastered|bonus track|bonus|edit|radio edit|album version|single version|reissue|remastered version)\s*$",
         "",
@@ -318,19 +315,8 @@ def _vote_genres(
 ) -> tuple[dict[str, float], dict[str, list[tuple[float, str]]], dict[str, set[str]]]:
     """Tally votes from online metadata sources only.
 
-    ``source_map`` is expected to contain only real online sources
-    (lastfm / musicbrainz / discogs, etc.) — Navidrome tags must never be
-    passed in here, since anything in ``source_map`` contributes both
-    vote weight *and* counts toward cross-source agreement.
-
     Uses a rank-decay discount based on the order of genres provided by the
     upstream source, heavily penalizing tag-spam at the bottom of the list.
-
-    Returns:
-        votes: key -> summed weight
-        spellings: key -> [(weight, display spelling), ...]
-        source_hits: key -> set of distinct source names that voted for it
-                     (used to rank by cross-source agreement first)
     """
     votes: dict[str, float] = defaultdict(float)
     spellings: dict[str, list[tuple[float, str]]] = defaultdict(list)
@@ -345,7 +331,6 @@ def _vote_genres(
             if not key:
                 continue
                 
-            # Rank decay: 1.0 for the first item, ~0.63 for the second, 0.5 for the third, etc.
             decay = 1.0 / math.log2(rank + 2)
             weighted_vote = base_weight * decay
             
@@ -366,14 +351,11 @@ def _context_boost_votes(context_title: str, context_album: str) -> dict[str, tu
     boosts: dict[str, tuple[float, str]] = {}
     if any(kw in context_lower for kw in _CHRISTMAS_KEYWORDS):
         boosts["christmas"] = (2.0, "christmas")
-    # Live is intentionally excluded from consuming a top-tier core genre slot.
+    # Live is intentionally excluded from consuming a core genre slot.
     return boosts
 
 
 def _normalize_nav_keys(nav_genres: list[str] | None) -> frozenset[str]:
-    """Turn raw Navidrome tags into the same normalized-key space used for
-    voting, so they can be compared for tie-breaking. This must never be
-    fed into ``_vote_genres`` — Navidrome contributes zero vote weight."""
     if not nav_genres:
         return frozenset()
     keys = set()
@@ -394,11 +376,6 @@ def _rank_genres(
     max_genres: int,
     nav_keys: frozenset[str] = frozenset(),
 ) -> list[str]:
-    """Rank candidates by (# distinct online sources agreeing, vote weight),
-    using Navidrome membership only as a final tie-breaker when both of
-    those are equal. Navidrome never adds weight and never changes the
-    number of "agreeing sources" for a candidate.
-    """
     min_weight = _genre_min_weight()
     qualified = [k for k, v in votes.items() if min_weight <= 0 or v >= min_weight]
 
@@ -428,9 +405,12 @@ def _rank_genres(
 
 def _append_extra_genres(genres: list[str], title: str, album: str) -> list[str]:
     """Appends Cover and Live as extra admin genres without consuming a core slot."""
+    title_lower = str(title or "").lower()
     context_lower = f"{title or ''} {album or ''}".lower()
     
-    if any(re.search(p, context_lower) for p in _LIVE_PATTERNS):
+    # Strict suffix check on the TITLE itself for [live], (live), [acoustic], (unplugged) at the very end
+    if bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", title_lower)) or \
+       any(re.search(p, context_lower) for p in [r"\bconcert\b", r"\bat\s+\w+\s+(arena|stadium|hall|club|theatre|theater)"]):
         if not any(g.lower() == "live" for g in genres):
             genres.append("Live")
             
@@ -448,12 +428,6 @@ def aggregate_genres(
     context_album: str = "",
     nav_genres: list[str] | None = None,
 ) -> list[str]:
-    """Top genres from online sources only (Last.fm / MusicBrainz / Discogs).
-
-    ``nav_genres``, if provided, is used ONLY to break ties between
-    candidates that are otherwise equal on source agreement and vote
-    weight — it never adds vote weight of its own.
-    """
     votes, spellings, source_hits = _vote_genres(
         source_map,
         extra_votes=_context_boost_votes(context_title, context_album),
@@ -469,15 +443,6 @@ def get_top_genres_with_navidrome(
     title: str = "",
     album: str = "",
 ) -> tuple[list[str], list[str]]:
-    """Returns (online_top, nav_cleaned).
-
-    ``online_top`` is ranked purely from Last.fm/MusicBrainz/Discogs, with
-    Navidrome used only to break exact ties. ``nav_cleaned`` is the raw
-    cleaned Navidrome tag list, returned for visibility/debugging only —
-    callers that want to store genres should use ``online_top`` (or
-    ``sync_confident_genres``) and treat it as the source of truth,
-    overwriting whatever Navidrome had.
-    """
     votes, spellings, source_hits = _vote_genres(
         sources,
         extra_votes=_context_boost_votes(title, album),
@@ -502,12 +467,6 @@ def rank_genres_with_local_tags(
     *,
     max_genres: int = 2,
 ) -> list[str]:
-    """Top genres from online sources only; Navidrome tags are used purely
-    as a tie-breaker (they no longer add vote weight — previously this
-    function injected Navidrome tags into the vote total via a
-    ``nav_weight``, which let a single local tag outrank genres that all
-    three online sources agreed on).
-    """
     votes, spellings, source_hits = _vote_genres(
         sources,
         extra_votes=_context_boost_votes(title, album),
@@ -558,12 +517,6 @@ def sync_confident_genres(
     context_title: str = "",
     context_album: str = "",
 ) -> list[str]:
-    """Compute the confident genre list from Last.fm/MusicBrainz/Discogs
-    (Navidrome used only as a tie-breaker), then overwrite the track's
-    stored ``genres`` column with that list — clearing out whatever
-    Navidrome-sourced genres were there before, unconditionally (not just
-    when the column was previously empty).
-    """
     top = aggregate_genres(
         source_map,
         max_genres=max_genres,
@@ -595,15 +548,10 @@ def sync_confident_genres(
 
 
 def adjust_genres(genres: list[str], artist_is_metal: bool = False) -> list[str]:
-    """Remap certain genre labels to their metal-adjacent equivalents when
-    the artist is known to be a metal act, enforce standard spellings for
-    common divergent genres, and apply generic-parent suppression.
-    """
     adjusted = []
     for g in genres:
         g_lower = g.lower()
 
-        # 1. Display name standardization for common fragmented genres
         if g_lower == "goth rock":
             g = "Gothic rock"
             g_lower = "gothic rock"
@@ -614,7 +562,6 @@ def adjust_genres(genres: list[str], artist_is_metal: bool = False) -> list[str]
             g = "Hip-hop"
             g_lower = "hip-hop"
 
-        # 2. Metal-specific genre upgrades
         if artist_is_metal:
             if g_lower in ("prog rock", "progressive rock", "prog"):
                 adjusted.append("Progressive metal")
@@ -653,21 +600,18 @@ def enrich_genres_aggressively(artist_name: str, conn: Any = None, verbose: bool
             if verbose:
                 logger.info(f"{source} genres found", artist=artist_name, count=len(kept))
 
-    # Collect from Discogs
     try:
         from services.enrichment.discogs_service import get_discogs_genres
         _add_clean(get_discogs_genres(artist_name, ""), "Discogs")
     except Exception as e:
         logger.debug("Discogs genre lookup failed", artist=artist_name, error=str(e))
 
-    # Collect from AudioDB
     try:
         from api_clients.audiodb import get_audiodb_genres
         _add_clean(get_audiodb_genres(artist_name), "AudioDB")
     except Exception as e:
         logger.debug("AudioDB genre lookup failed", artist=artist_name, error=str(e))
 
-    # Collect from MusicBrainz
     try:
         from services.enrichment.musicbrainz_service import get_shared_mb_client
         from api_clients.musicbrainz_http import escape_lucene_special_chars
@@ -685,7 +629,6 @@ def enrich_genres_aggressively(artist_name: str, conn: Any = None, verbose: bool
     except Exception as e:
         logger.debug("MusicBrainz genre lookup failed", artist=artist_name, error=str(e))
 
-    # Collect from Last.fm
     try:
         from helpers.config_helpers import get_config
         lastfm_config = (get_config().get("api_integrations", {}) or {}).get("lastfm", {}) or {}
@@ -704,7 +647,6 @@ def enrich_genres_aggressively(artist_name: str, conn: Any = None, verbose: bool
     except Exception as e:
         logger.debug("Last.fm genre lookup failed", artist=artist_name, error=str(e))
 
-    # Persist to database
     if genres_collected:
         try:
             with db_session() as session:
