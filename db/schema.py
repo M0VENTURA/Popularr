@@ -247,14 +247,11 @@ TABLES_TO_ENSURE: dict[str, str] = {
 
 COLUMN_REGISTRY: dict[str, dict[str, str]] = {
     "tracks": {
-        # Base Identifiers & Metadata
         "artist_id": "TEXT", "artist": "TEXT", "album_artist": "TEXT", "album": "TEXT",
         "title": "TEXT", "duration": "DOUBLE PRECISION", "file_path": "TEXT",
         "track_number": "TEXT", "disc_number": "TEXT", "year": "TEXT", "release_year": "INTEGER",
         "releasecountry": "TEXT", "releasetype": "TEXT", "writer": "TEXT", 
         "work": "TEXT", "isrc": "TEXT", "base_track_id": "TEXT",
-        
-        # Flags & Modifiers
         "is_single": "BOOLEAN DEFAULT FALSE",
         "is_cover": "BIGINT DEFAULT 0", "is_cover_reason": "TEXT", "original_cover_artist": "TEXT",
         "cover_manual_override": "BOOLEAN DEFAULT FALSE", "cover_last_checked": "TIMESTAMP",
@@ -262,24 +259,16 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "album_context_live": "BIGINT DEFAULT 0", "alternate_take": "BIGINT DEFAULT 0", 
         "is_compilation": "BIGINT DEFAULT 0",
         "iswc": "TEXT", "lyricist": "TEXT", "original_title": "TEXT",
-        
-        # Single Detection
         "single_confidence": "TEXT", "single_confidence_score": "DOUBLE PRECISION",
         "single_status": "TEXT", "single_sources": "JSONB", "single_sources_used": "TEXT",
         "single_detection_last_updated": "TIMESTAMP", "single_manual_override": "BOOLEAN DEFAULT FALSE",
-        
-        # Genres & Classifications (Migrated to JSONB for high-performance indexing/storage)
         "genres": "TEXT", "genre": "TEXT", "manual_genres": "JSONB", "navidrome_genres": "JSONB", 
         "spotify_genres": "JSONB", "listenbrainz_genres": "JSONB", "discogs_genres": "JSONB", 
         "musicbrainz_genres": "JSONB", "essentia_genres": "JSONB",
-        
-        # Mood & Audio Features (Essentia)
         "mood": "TEXT", "mood_confidence": "DOUBLE PRECISION", "mood_source": "TEXT",
         "mood_last_updated": "TIMESTAMP", "danceability": "DOUBLE PRECISION",
         "bpm": "DOUBLE PRECISION", "essentia_last_updated": "TIMESTAMP", 
         "essentia_model_version": "TEXT", "essentia_scan_version": "TEXT",
-        
-        # Scoring, Popularity & Playcounts
         "stars": "INTEGER", "star_rating": "INTEGER",
         "popularity": "DOUBLE PRECISION", "final_score": "DOUBLE PRECISION",
         "spotify_score": "DOUBLE PRECISION", 
@@ -289,16 +278,12 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "listenbrainz_users": "INTEGER", "listenbrainz_last_updated": "TIMESTAMP",
         "popularity_marked": "BOOLEAN DEFAULT FALSE", "popularity_frozen": "BOOLEAN DEFAULT FALSE",
         "popularity_frozen_at": "TIMESTAMP",
-        
-        # External Provider IDs (MB, Discogs, etc)
         "mbid": "TEXT", "suggested_mbid": "TEXT", "recording_mbid": "TEXT",
         "musicbrainz_id": "TEXT", "musicbrainz_trackid": "TEXT", "musicbrainz_albumid": "TEXT",
         "musicbrainz_album_mbid": "TEXT", "musicbrainz_artistid": "TEXT", "musicbrainz_albumartistid": "TEXT",
         "musicbrainz_releasegroupid": "TEXT", "musicbrainz_releasetrackid": "TEXT",
         "musicbrainz_workid": "TEXT", "musicbrainz_albumstatus": "TEXT", "musicbrainz_albumtype": "TEXT",
         "discogs_artist_id": "TEXT", "spotify_album_type": "TEXT",
-        
-        # System & Sync
         "last_scanned": "TEXT", "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", 
         "musicbrainz_last_updated": "TIMESTAMP", "discogs_last_updated": "TIMESTAMP",
         "pending_mb_updates": "TEXT", "mb_ignored_fields": "TEXT",
@@ -389,6 +374,32 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
 # =============================================================================
 
 INDEXES_TO_ENSURE: tuple[str, ...] = (
+    # JSONB Migration: Safely alter existing text columns to JSONB natively before building GIN indexes
+    """DO $$ 
+    BEGIN 
+        -- Migrate tracks table
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='tracks' AND column_name='musicbrainz_genres' AND data_type IN ('text', 'character varying')) THEN 
+            ALTER TABLE tracks 
+                ALTER COLUMN musicbrainz_genres TYPE JSONB USING (CASE WHEN musicbrainz_genres IS NULL OR trim(musicbrainz_genres) = '' THEN '[]'::jsonb WHEN left(trim(musicbrainz_genres), 1) IN ('[', '{') THEN musicbrainz_genres::jsonb ELSE to_jsonb(string_to_array(musicbrainz_genres, ',')) END),
+                ALTER COLUMN discogs_genres TYPE JSONB USING (CASE WHEN discogs_genres IS NULL OR trim(discogs_genres) = '' THEN '[]'::jsonb WHEN left(trim(discogs_genres), 1) IN ('[', '{') THEN discogs_genres::jsonb ELSE to_jsonb(string_to_array(discogs_genres, ',')) END),
+                ALTER COLUMN lastfm_tags TYPE JSONB USING (CASE WHEN lastfm_tags IS NULL OR trim(lastfm_tags) = '' THEN '[]'::jsonb WHEN left(trim(lastfm_tags), 1) IN ('[', '{') THEN lastfm_tags::jsonb ELSE to_jsonb(string_to_array(lastfm_tags, ',')) END),
+                ALTER COLUMN single_sources TYPE JSONB USING (CASE WHEN single_sources IS NULL OR trim(single_sources) = '' THEN '[]'::jsonb WHEN left(trim(single_sources), 1) IN ('[', '{') THEN single_sources::jsonb ELSE to_jsonb(string_to_array(single_sources, ',')) END);
+        END IF;
+
+        -- Migrate track_popularity_cache
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='track_popularity_cache' AND column_name='lastfm_tags' AND data_type IN ('text', 'character varying')) THEN 
+            ALTER TABLE track_popularity_cache 
+                ALTER COLUMN lastfm_tags TYPE JSONB USING (CASE WHEN lastfm_tags IS NULL OR trim(lastfm_tags) = '' THEN '[]'::jsonb WHEN left(trim(lastfm_tags), 1) IN ('[', '{') THEN lastfm_tags::jsonb ELSE to_jsonb(string_to_array(lastfm_tags, ',')) END);
+        END IF;
+
+        -- Migrate musicbrainz_releases
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='musicbrainz_releases' AND column_name='musicbrainz_genres' AND data_type IN ('text', 'character varying')) THEN 
+            ALTER TABLE musicbrainz_releases 
+                ALTER COLUMN lastfm_genres TYPE JSONB USING (CASE WHEN lastfm_genres IS NULL OR trim(lastfm_genres) = '' THEN '[]'::jsonb WHEN left(trim(lastfm_genres), 1) IN ('[', '{') THEN lastfm_genres::jsonb ELSE to_jsonb(string_to_array(lastfm_genres, ',')) END),
+                ALTER COLUMN discogs_genres TYPE JSONB USING (CASE WHEN discogs_genres IS NULL OR trim(discogs_genres) = '' THEN '[]'::jsonb WHEN left(trim(discogs_genres), 1) IN ('[', '{') THEN discogs_genres::jsonb ELSE to_jsonb(string_to_array(discogs_genres, ',')) END),
+                ALTER COLUMN musicbrainz_genres TYPE JSONB USING (CASE WHEN musicbrainz_genres IS NULL OR trim(musicbrainz_genres) = '' THEN '[]'::jsonb WHEN left(trim(musicbrainz_genres), 1) IN ('[', '{') THEN musicbrainz_genres::jsonb ELSE to_jsonb(string_to_array(musicbrainz_genres, ',')) END);
+        END IF;
+    END $$;""",
     "CREATE INDEX IF NOT EXISTS idx_tracks_artist_id ON tracks (artist_id)",
     "CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks (artist)",
     "CREATE INDEX IF NOT EXISTS idx_tracks_album_artist ON tracks (album_artist)",
@@ -416,7 +427,6 @@ INDEXES_TO_ENSURE: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_mb_release_tracks_status ON musicbrainz_release_tracks(release_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_folder_matches_folder_path ON folder_matches (folder_path)",
     "CREATE INDEX IF NOT EXISTS idx_user_favourites_user ON user_favourites (username, entity_type)",
-    # GIN indexes for JSONB genre / tag columns to support fast querying/containment checks
     "CREATE INDEX IF NOT EXISTS idx_tracks_mb_genres_gin ON tracks USING gin (musicbrainz_genres)",
     "CREATE INDEX IF NOT EXISTS idx_tracks_discogs_genres_gin ON tracks USING gin (discogs_genres)",
     "CREATE INDEX IF NOT EXISTS idx_tracks_lastfm_tags_gin ON tracks USING gin (lastfm_tags)",
