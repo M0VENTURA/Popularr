@@ -106,12 +106,30 @@ def _bounded_call_report(
     *args: Any,
     section: str = "bounded_call",
     log_context: dict[str, Any] | None = None,
+    seconds: float | None = None,
+    label: str | None = None,
     **kwargs: Any,
 ) -> Any:
     """Execute a function with structured start/completion/failure logging.
 
-    Dynamically filters out any unexpected keyword arguments (like seconds or label)
-    to prevent TypeErrors, and returns an empty dict on failure.
+    Dynamically filters out any keyword arguments `func` doesn't accept, to
+    prevent TypeErrors when wrapping bare-signature callables.
+
+    Two distinct contracts, selected by whether `seconds` is supplied:
+
+    - `seconds` omitted (the default): behaves exactly as before - the call
+      runs inline with no timeout, and this returns whatever `func` returned
+      on success, or `{}` on exception. Existing callers (e.g. `enrich_album`)
+      rely on getting the raw return value back, not a wrapped report.
+
+    - `seconds` supplied: the call runs on a background thread with a hard
+      wall-clock budget, and this ALWAYS returns a report dict shaped like
+      `{"ok": bool, "result": Any, "abandoned": bool, "reason": str | None,
+      "budget_seconds": float | None}` - regardless of whether `func` raised,
+      timed out, or returned `None` on success. This is what protects the
+      full-scan artist loop from a hung artist, and from crashing on
+      `.get("ok")` when the wrapped call legitimately returns `None`
+      (e.g. a `-> None` wrapper function with no explicit return).
     """
     try:
         sig = inspect.signature(func)
@@ -121,31 +139,107 @@ def _bounded_call_report(
             allowed_keys = set(parameters.keys())
             kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
     except Exception:
-        kwargs.pop("seconds", None)
-        kwargs.pop("label", None)
+        pass
 
     context = dict(log_context or {})
+    if label:
+        context.setdefault("label", label)
     start_ts = time.monotonic()
     logger.info("[SCAN] section started", section=section, **context)
-    try:
-        result = func(*args, **kwargs)
-    except Exception as exc:
+
+    # ---------------------------------------------------------------------
+    # No timeout requested - preserve the original inline behaviour exactly,
+    # so existing callers that expect the raw return value (not a wrapped
+    # report dict) keep working unchanged.
+    # ---------------------------------------------------------------------
+    if seconds is None:
+        try:
+            result = func(*args, **kwargs)
+        except Exception as exc:
+            logger.exception(
+                "[SCAN] section failed",
+                section=section,
+                elapsed_s=round(time.monotonic() - start_ts, 3),
+                error=f"{type(exc).__name__}: {exc}",
+                **context,
+            )
+            return {}  # Guard against downstream NoneType attribute errors
+        else:
+            logger.info(
+                "[SCAN] section completed",
+                section=section,
+                elapsed_s=round(time.monotonic() - start_ts, 3),
+                **context,
+            )
+            return result
+
+    # ---------------------------------------------------------------------
+    # Timeout requested - run on a worker thread and abandon it (i.e. stop
+    # waiting; Python cannot forcibly kill a running thread) if it doesn't
+    # finish within `seconds`. Always returns a report dict with an "ok"
+    # key so callers can safely do `report.get("ok")` no matter what
+    # happened - success, exception, or abandonment.
+    # ---------------------------------------------------------------------
+    _outcome: dict[str, Any] = {}
+    _errors: list[BaseException] = []
+
+    def _target() -> None:
+        try:
+            _outcome["result"] = func(*args, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 - captured for the caller
+            _errors.append(exc)
+
+    thread = threading.Thread(target=_target, name=f"bounded-call-{section}", daemon=True)
+    thread.start()
+    thread.join(timeout=seconds)
+    elapsed = round(time.monotonic() - start_ts, 3)
+
+    if thread.is_alive():
+        logger.warning(
+            "[SCAN] section abandoned (timeout)",
+            section=section,
+            elapsed_s=elapsed,
+            budget_seconds=seconds,
+            **context,
+        )
+        return {
+            "ok": False,
+            "result": None,
+            "abandoned": True,
+            "reason": f"exceeded {seconds}s budget",
+            "budget_seconds": seconds,
+        }
+
+    if _errors:
+        exc = _errors[0]
         logger.exception(
             "[SCAN] section failed",
             section=section,
-            elapsed_s=round(time.monotonic() - start_ts, 3),
+            elapsed_s=elapsed,
             error=f"{type(exc).__name__}: {exc}",
             **context,
         )
-        return {}  # Guard against downstream NoneType attribute errors
-    else:
-        logger.info(
-            "[SCAN] section completed",
-            section=section,
-            elapsed_s=round(time.monotonic() - start_ts, 3),
-            **context,
-        )
-        return result
+        return {
+            "ok": False,
+            "result": None,
+            "abandoned": False,
+            "reason": f"{type(exc).__name__}: {exc}",
+            "budget_seconds": seconds,
+        }
+
+    logger.info(
+        "[SCAN] section completed",
+        section=section,
+        elapsed_s=elapsed,
+        **context,
+    )
+    return {
+        "ok": True,
+        "result": _outcome.get("result"),
+        "abandoned": False,
+        "reason": None,
+        "budget_seconds": seconds,
+    }
 
 
 def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
