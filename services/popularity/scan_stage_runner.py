@@ -801,7 +801,7 @@ def _persist_popularity_marking(rows: list[dict[str, Any]]) -> None:
                     {
                         "marked": bool(tr.get("popularity_marked")),
                         "conf": str(tr.get("single_confidence") or "low"),
-                        "sources": json.dumps(tr.get("single_sources") or []),
+                        "sources": json.dumps(tr.get("single_sources") or [], ensure_ascii=False),
                         "id": tid,
                     },
                 )
