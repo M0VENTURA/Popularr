@@ -9,20 +9,7 @@ Key Responsibilities:
     - Weighted aggregation from multiple sources
     - Top-N genre selection based on source authority and cross-source agreement
     - Rank-decay voting to penalize low-frequency meme tags
-
-Voting contract: only online metadata sources (Last.fm, MusicBrainz, Discogs)
-are allowed to contribute vote weight. Navidrome's local tags are NEVER added
-to the vote total — they are only used as a tie-breaker between candidates
-that are otherwise equal on (number of agreeing sources, vote weight). This
-keeps "top genres" driven by what the online sources actually agree on,
-rather than letting a single locally-tagged genre outrank a genre that
-Last.fm, MusicBrainz, and Discogs all agree on.
-
-Ordering contract: every ranking function in this module returns genres in
-descending order of (source agreement, vote weight) — highest-confidence
-first. Callers that slice the result to a Top-N (e.g. ``cleaned[:max_genres]``)
-depend on this — re-sorting alphabetically anywhere in the pipeline would
-silently change which genres survive the cut.
+    - Native JSONB compatibility (handling pre-parsed lists/dicts from PostgreSQL)
 """
 
 from __future__ import annotations
@@ -40,15 +27,11 @@ from db.engine import db_session
 from helpers.config_helpers import get_genre_weights, get_genre_synonyms
 
 logger = structlog.get_logger(__name__)
-# Force this specific module to emit DEBUG logs regardless of global config
 logging.getLogger(__name__).setLevel(logging.DEBUG)
 
-# Load configuration at module initialization
 GENRE_WEIGHTS = get_genre_weights()
 GENRE_SYNONYMS = get_genre_synonyms()
 
-# Hardcoded fallback synonyms to natively handle common variations
-# before config-driven synonyms are evaluated.
 _BUILTIN_SYNONYMS: dict[str, str] = {
     "goth rock": "gothic rock",
     "goth metal": "gothic metal",
@@ -68,9 +51,6 @@ _CHRISTMAS_KEYWORDS = [
     "rudolph", "santa claus", "sleigh bells", "noel", "hanukkah",
 ]
 
-# Curated "specific implies suppress these generics" relationships that
-# are NOT simple substring/word-boundary matches of the generic label
-# itself (e.g. "post-punk" doesn't literally contain the word "rock").
 _SPECIFIC_TO_GENERIC: dict[str, list[str]] = {
     "metalcore": ["metal", "heavy metal", "hardcore"],
     "deathcore": ["metal", "heavy metal", "hardcore", "death metal"],
@@ -81,9 +61,6 @@ _SPECIFIC_TO_GENERIC: dict[str, list[str]] = {
     "alternative rock": ["rock", "alternative"],
 }
 
-# Generic "root" labels that should be dropped whenever a more specific
-# subgenre of the same family is present (e.g. "Thrash Metal" makes the
-# bare "Metal" label redundant). Matching is done on a word-boundary basis.
 _GENERIC_ROOTS: dict[str, frozenset[str]] = {
     "metal": frozenset({"metal", "heavy metal"}),
     "folk": frozenset({"folk", "traditional folk", "folk music"}),
@@ -199,18 +176,14 @@ def normalize_genre_for_vote(genre: Any) -> str:
 
 def _source_weight(source: str) -> float:
     try:
-        from helpers.config_helpers import get_genre_weights
         weights = get_genre_weights() or {}
     except Exception:
         weights = GENRE_WEIGHTS or {}
         
     if source in weights:
         return float(weights[source] or 0)
-        
-    # Hardcode fallback for essentia so it doesn't overpower primary online sources
     if source == "essentia":
         return 0.01
-        
     return 0.05
 
 
@@ -224,9 +197,6 @@ def _genre_min_weight() -> float:
 
 
 def _suppress_generic_parents(genres: list[str]) -> list[str]:
-    """Drop a bare generic label (e.g. "Metal", "Folk") when a more
-    specific subgenre of the same family is present (e.g. "Folk Metal").
-    """
     if not genres:
         return genres
     lowered = [g.lower() for g in genres]
@@ -239,12 +209,6 @@ def _suppress_generic_parents(genres: list[str]) -> list[str]:
             for g in lowered
         )
         if has_specific_subgenre:
-            logger.debug(
-                "Suppressing generic parent genres",
-                trigger_root=root,
-                dropped=list(generic_labels),
-                original_list=genres,
-            )
             to_drop.update(generic_labels)
 
     if not to_drop:
@@ -253,10 +217,6 @@ def _suppress_generic_parents(genres: list[str]) -> list[str]:
 
 
 def clean_conflicting_genres(genres: list[Any]) -> list[str]:
-    """Remove genres that conflict with a more specific sibling already
-    present, and fold bare generic labels into their more specific
-    subgenres via ``_suppress_generic_parents``.
-    """
     ordered_keys: list[str] = []
     seen: set[str] = set()
     for g in genres or []:
@@ -272,11 +232,9 @@ def clean_conflicting_genres(genres: list[Any]) -> list[str]:
         removed = False
         for specific, generics in _SPECIFIC_TO_GENERIC.items():
             if genre in generics and specific in lowered_set:
-                logger.debug("Genre conflict resolved", dropped=genre, kept_specific=specific)
                 removed = True
                 break
         if genre == "electronic" and ("punk" in lowered_set or "metal" in lowered_set):
-            logger.debug("Genre conflict resolved", dropped=genre, kept_specific="punk/metal")
             continue
         if not removed:
             cleaned.append(genre)
@@ -291,9 +249,7 @@ def _resolve_display_name(key: str, spellings: dict[str, list[tuple[float, str]]
     best = max(candidates, key=lambda s: s[0])
 
     def _top_weight(forms: list[str]) -> str:
-        form_weight = {
-            s[1]: s[0] for s in candidates if s[1] in forms
-        }
+        form_weight = {s[1]: s[0] for s in candidates if s[1] in forms}
         return sorted(forms, key=lambda f: (form_weight.get(f, 0.0), len(f)))[-1]
 
     spaced = [s[1] for s in candidates if " " in s[1]]
@@ -309,21 +265,25 @@ def _resolve_display_name(key: str, spellings: dict[str, list[tuple[float, str]]
 
 
 def _vote_genres(
-    source_map: dict[str, list[str]] | None,
+    source_map: dict[str, Any] | None,
     *,
     extra_votes: dict[str, tuple[float, str]] | None = None,
 ) -> tuple[dict[str, float], dict[str, list[tuple[float, str]]], dict[str, set[str]]]:
-    """Tally votes from online metadata sources only.
-
-    Uses a rank-decay discount based on the order of genres provided by the
-    upstream source, heavily penalizing tag-spam at the bottom of the list.
-    """
     votes: dict[str, float] = defaultdict(float)
     spellings: dict[str, list[tuple[float, str]]] = defaultdict(list)
     source_hits: dict[str, set[str]] = defaultdict(set)
 
     for source, genres in (source_map or {}).items():
         base_weight = _source_weight(source)
+        # JSONB safety: if genres is stored as a list/dict natively or string, normalize to iterable list
+        if isinstance(genres, str):
+            try:
+                genres = json.loads(genres)
+            except Exception:
+                genres = [genres]
+        elif isinstance(genres, dict):
+            genres = list(genres.values())
+
         for rank, genre in enumerate(genres or []):
             if is_junk_genre(genre) or is_admin_genre(genre):
                 continue
@@ -351,15 +311,19 @@ def _context_boost_votes(context_title: str, context_album: str) -> dict[str, tu
     boosts: dict[str, tuple[float, str]] = {}
     if any(kw in context_lower for kw in _CHRISTMAS_KEYWORDS):
         boosts["christmas"] = (2.0, "christmas")
-    # Live is intentionally excluded from consuming a core genre slot.
     return boosts
 
 
-def _normalize_nav_keys(nav_genres: list[str] | None) -> frozenset[str]:
+def _normalize_nav_keys(nav_genres: Any) -> frozenset[str]:
     if not nav_genres:
         return frozenset()
+    if isinstance(nav_genres, str):
+        try:
+            nav_genres = json.loads(nav_genres)
+        except Exception:
+            nav_genres = [nav_genres]
     keys = set()
-    for g in nav_genres:
+    for g in (nav_genres if isinstance(nav_genres, (list, tuple)) else []):
         if not g or is_junk_genre(g) or is_admin_genre(g):
             continue
         key = normalize_genre_for_vote(g)
@@ -390,25 +354,13 @@ def _rank_genres(
 
     display_names = [_resolve_display_name(k, spellings) for k in qualified]
     cleaned = clean_conflicting_genres(display_names)
-    final_list = cleaned[:max_genres]
-
-    logger.debug(
-        "Genre ranking complete",
-        final_genres=final_list,
-        all_votes={k: round(v, 2) for k, v in votes.items()},
-        source_agreement={k: sorted(v) for k, v in source_hits.items()},
-        nav_tiebreak_keys=sorted(nav_keys),
-    )
-
-    return final_list
+    return cleaned[:max_genres]
 
 
 def _append_extra_genres(genres: list[str], title: str, album: str) -> list[str]:
-    """Appends Cover and Live as extra admin genres without consuming a core slot."""
     title_lower = str(title or "").lower()
     context_lower = f"{title or ''} {album or ''}".lower()
     
-    # Strict suffix check on the TITLE itself for [live], (live), [acoustic], (unplugged) at the very end
     if bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", title_lower)) or \
        any(re.search(p, context_lower) for p in [r"\bconcert\b", r"\bat\s+\w+\s+(arena|stadium|hall|club|theatre|theater)"]):
         if not any(g.lower() == "live" for g in genres):
@@ -422,11 +374,11 @@ def _append_extra_genres(genres: list[str], title: str, album: str) -> list[str]
 
 
 def aggregate_genres(
-    source_map: dict[str, list[str]],
+    source_map: dict[str, Any],
     max_genres: int = 2,
     context_title: str = "",
     context_album: str = "",
-    nav_genres: list[str] | None = None,
+    nav_genres: Any = None,
 ) -> list[str]:
     votes, spellings, source_hits = _vote_genres(
         source_map,
@@ -438,8 +390,8 @@ def aggregate_genres(
 
 
 def get_top_genres_with_navidrome(
-    sources: dict[str, list[str]],
-    nav_genres: list[str],
+    sources: dict[str, Any],
+    nav_genres: Any,
     title: str = "",
     album: str = "",
 ) -> tuple[list[str], list[str]]:
@@ -451,17 +403,24 @@ def get_top_genres_with_navidrome(
     online_top = _rank_genres(votes, spellings, source_hits, max_genres=2, nav_keys=nav_keys)
     online_top = _append_extra_genres(online_top, title, album)
 
+    nav_list = nav_genres
+    if isinstance(nav_list, str):
+        try:
+            nav_list = json.loads(nav_list)
+        except Exception:
+            nav_list = [nav_list]
+
     nav_cleaned = sorted({
         normalize_genre(g).capitalize()
-        for g in (nav_genres or [])
+        for g in (nav_list if isinstance(nav_list, (list, tuple)) else [])
         if g and not is_junk_genre(g) and not is_admin_genre(g)
     })
     return online_top, nav_cleaned
 
 
 def rank_genres_with_local_tags(
-    sources: dict[str, list[str]],
-    nav_genres: list[str],
+    sources: dict[str, Any],
+    nav_genres: Any,
     title: str = "",
     album: str = "",
     *,
@@ -476,43 +435,11 @@ def rank_genres_with_local_tags(
     return _append_extra_genres(top_genres, title, album)
 
 
-def update_get_top_genres_with_navidrome(
-    sources: dict[str, list[str]],
-    nav_genres: list[str],
-    title: str = "",
-    album: str = "",
-) -> list[str]:
-    return rank_genres_with_local_tags(sources, nav_genres, title=title, album=album)
-
-
-def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
-    with db_session() as session:
-        result = session.execute(
-            text("""SELECT lastfm_tags, musicbrainz_genres, discogs_genres
-               FROM tracks WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist AND album = :album"""),
-            {"artist": artist, "album": album},
-        )
-        rows = result.fetchall()
-
-    source_map: dict[str, list[str]] = {}
-    for row in rows:
-        for idx, (src_key, col) in enumerate([
-            ("lastfm", "lastfm_tags"),
-            ("musicbrainz", "musicbrainz_genres"), ("discogs", "discogs_genres"),
-        ]):
-            val = row[idx]
-            if val:
-                source_map.setdefault(src_key, []).extend(val if isinstance(val, list) else [val])
-
-    recommended = aggregate_genres(source_map, max_genres=2)
-    return {"success": True, "artist": artist, "album": album, "genres": recommended}
-
-
 def sync_confident_genres(
     artist: str,
     album: str,
-    source_map: dict[str, list[str]],
-    nav_genres: list[str] | None = None,
+    source_map: dict[str, Any],
+    nav_genres: Any = None,
     max_genres: int = 2,
     context_title: str = "",
     context_album: str = "",
@@ -527,20 +454,13 @@ def sync_confident_genres(
 
     try:
         with db_session() as session:
-            result = session.execute(
+            session.execute(
                 text(
                     "UPDATE tracks SET genres = :genres_str "
                     "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist AND album = :album"
                 ),
                 {"genres_str": ", ".join(top), "artist": artist, "album": album},
             )
-        logger.info(
-            "Synced confident genres, cleared prior (incl. Navidrome) values",
-            artist=artist,
-            album=album,
-            updated_rows=getattr(result, "rowcount", None),
-            genres=top,
-        )
     except Exception as e:
         logger.debug("Failed to sync confident genres to DB", artist=artist, album=album, error=str(e))
 
@@ -578,88 +498,3 @@ def adjust_genres(genres: list[str], artist_is_metal: bool = False) -> list[str]
 
     adjusted = _suppress_generic_parents(adjusted)
     return list(dict.fromkeys(adjusted))
-
-
-def enrich_genres_aggressively(artist_name: str, conn: Any = None, verbose: bool = False) -> set[str]:
-    genres_collected: set[str] = set()
-
-    def _add_clean(raw_genres: list[str] | None, source: str) -> None:
-        if not raw_genres:
-            return
-        kept = []
-        for g in raw_genres:
-            if not g:
-                continue
-            if is_junk_genre(g) or is_admin_genre(g):
-                logger.debug("Filtered out junk/admin genre tag", source=source, genre=g)
-                continue
-            kept.append(g.lower())
-
-        if kept:
-            genres_collected.update(kept)
-            if verbose:
-                logger.info(f"{source} genres found", artist=artist_name, count=len(kept))
-
-    try:
-        from services.enrichment.discogs_service import get_discogs_genres
-        _add_clean(get_discogs_genres(artist_name, ""), "Discogs")
-    except Exception as e:
-        logger.debug("Discogs genre lookup failed", artist=artist_name, error=str(e))
-
-    try:
-        from api_clients.audiodb import get_audiodb_genres
-        _add_clean(get_audiodb_genres(artist_name), "AudioDB")
-    except Exception as e:
-        logger.debug("AudioDB genre lookup failed", artist=artist_name, error=str(e))
-
-    try:
-        from services.enrichment.musicbrainz_service import get_shared_mb_client
-        from api_clients.musicbrainz_http import escape_lucene_special_chars
-
-        client = get_shared_mb_client()
-        query = f'artist:"{escape_lucene_special_chars(artist_name)}"'
-        search_results = client.search_artists(query, limit=1)
-
-        if search_results and search_results[0].get("id"):
-            artist_mbid = search_results[0]["id"]
-            artist_data = client.get_artist(artist_mbid, inc="genres")
-            if artist_data and artist_data.get("genres"):
-                mb_genres = [str(g.get("name") or "").strip() for g in artist_data["genres"]]
-                _add_clean([g for g in mb_genres if g], "MusicBrainz")
-    except Exception as e:
-        logger.debug("MusicBrainz genre lookup failed", artist=artist_name, error=str(e))
-
-    try:
-        from helpers.config_helpers import get_config
-        lastfm_config = (get_config().get("api_integrations", {}) or {}).get("lastfm", {}) or {}
-        api_key = str(lastfm_config.get("api_key") or "")
-        if lastfm_config.get("enabled") and api_key not in {
-            "", "your_lastfm_api_key", "YOUR_API_KEY", "<your_api_key>"
-        }:
-            from api_clients.lastfm import LastFmClient
-            tags = LastFmClient(api_key).get_artist_top_tags(artist_name, limit=15) or []
-            lastfm_genres = [
-                str(tag.get("name") or "").strip()
-                for tag in tags
-                if isinstance(tag, dict)
-            ]
-            _add_clean([g for g in lastfm_genres if g], "Last.fm")
-    except Exception as e:
-        logger.debug("Last.fm genre lookup failed", artist=artist_name, error=str(e))
-
-    if genres_collected:
-        try:
-            with db_session() as session:
-                result = session.execute(
-                    text(
-                        "UPDATE tracks SET genres = :genres_str "
-                        "WHERE artist = :artist_name AND (genres IS NULL OR genres = '')"
-                    ),
-                    {"genres_str": ", ".join(sorted(genres_collected)), "artist_name": artist_name},
-                )
-            if verbose:
-                logger.info("Updated tracks with enriched genres", updated_rows=result.rowcount, artist=artist_name, genres_count=len(genres_collected))
-        except Exception as e:
-            logger.debug("Failed to update genres in DB", artist=artist_name, error=str(e))
-
-    return genres_collected
