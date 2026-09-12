@@ -1615,6 +1615,21 @@ def process_track(
 
     effective_track = _strip_album_type_columns(track, update_payload)
 
+    # Ensure all JSONB fields are safely string-encoded before persistence
+    # because SQLAlchemy auto-deserializes them into lists on load, and passing
+    # raw lists back into an UPDATE query causes Postgres TEXT[] type errors.
+    _jsonb_fields = [
+        "musicbrainz_genres", "discogs_genres", "lastfm_tags", 
+        "listenbrainz_genres", "spotify_genres", "essentia_genres", 
+        "manual_genres", "navidrome_genres", "single_sources", "writer"
+    ]
+    for _j_field in _jsonb_fields:
+        _val = effective_track.get(_j_field)
+        if isinstance(_val, (list, dict)):
+            effective_track[_j_field] = json.dumps(_val, ensure_ascii=False)
+        elif _val is None:
+            effective_track[_j_field] = "[]"
+
     _persist_sink = options.get("_deferred_persist")
     if _persist_sink is not None:
         try:
