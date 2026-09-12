@@ -600,16 +600,34 @@ def _resolve_track_mb_metadata(
             if recording_mbid and not _from_batch:
                 _existing_writer = _as_str(track.get("writer") or "")
                 if not _existing_writer or _existing_writer.strip().lower() in ("[]", "null", "none", ""):
-                    _batch_writer = _as_str((mb_data or {}).get("writer") or "")
-                    if _batch_writer:
-                        payload["writer"] = _batch_writer
-                    else:
+                    _batch_writer = (mb_data or {}).get("writer") or []
+                    if not _batch_writer:
                         try:
-                            writers = mb_service.get_composers_for_recording(recording_mbid)
-                            if writers:
-                                payload["writer"] = json.dumps(writers)
+                            _batch_writer = mb_service.get_composers_for_recording(recording_mbid) or []
                         except Exception as exc:
                             logger.debug("Composer fetch failed", track_id=track_id, error=str(exc))
+                    
+                    flat_writers = []
+                    if isinstance(_batch_writer, str):
+                        try:
+                            _batch_writer = json.loads(_batch_writer)
+                        except Exception:
+                            _batch_writer = [_batch_writer]
+                    
+                    if isinstance(_batch_writer, list):
+                        for w in _batch_writer:
+                            if isinstance(w, str):
+                                cleaned = w.strip("'\"")
+                                if cleaned and cleaned not in flat_writers:
+                                    flat_writers.append(cleaned)
+                            elif isinstance(w, (list, tuple)):
+                                for sub in w:
+                                    sub_str = str(sub).strip("'\"")
+                                    if sub_str and sub_str not in flat_writers:
+                                        flat_writers.append(sub_str)
+                    
+                    if flat_writers:
+                        payload["writer"] = json.dumps(flat_writers)
             
             if mb_data.get("title"):
                 payload["musicbrainz_title"] = mb_data["title"]
