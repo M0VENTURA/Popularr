@@ -309,6 +309,7 @@ _GENRE_SOURCE_COLUMNS = (
 
 
 def _has_real_genres(track: dict[str, Any]) -> bool:
+    """Returns True if the track has any valid genre arrays/dicts populated."""
     for column in _GENRE_SOURCE_COLUMNS:
         raw = track.get(column)
         if not raw:
@@ -334,6 +335,20 @@ def _has_real_genres(track: dict[str, Any]) -> bool:
             continue
         if raw:
             return True
+    return False
+
+
+def _track_needs_metadata_enrichment(track: dict[str, Any]) -> bool:
+    """Determines if a track is missing core MBIDs or Genres, overriding the cache."""
+    # 1. Missing MBID
+    mbid = _as_str(track.get("recording_mbid") or track.get("mbid") or track.get("musicbrainz_trackid")).strip()
+    if not mbid:
+        return True
+    
+    # 2. Missing any major genre source
+    if not _has_real_genres(track):
+        return True
+        
     return False
 
 
@@ -550,12 +565,15 @@ def _resolve_track_mb_metadata(
         _as_str(track.get("recording_mbid") or track.get("mbid") or track.get("musicbrainz_trackid"))
     )
     _has_genres = _has_real_genres(track)
-    _force_meta = bool(force_meta)
+    
+    # NEW: Force metadata lookup if the track is flagged as missing core components
+    _needs_enrichment = _track_needs_metadata_enrichment(track)
+    _force_meta = bool(force_meta) or _needs_enrichment
 
     mb_data = None
     if title and artist:
-        if frozen_track or (_has_mbid and not _force_meta):
-            logger.debug("Skipping MB metadata lookup", track_id=track_id, reason="frozen or resolved")
+        if frozen_track or (_has_mbid and _has_genres and not _force_meta):
+            logger.debug("Skipping MB metadata lookup", track_id=track_id, reason="frozen or fully resolved")
         else:
             _batch_mb = options.get("mb_batch_metadata") or {}
             mb_data = _batch_mb.get(f"{artist.lower()}::{title.lower()}")
@@ -779,7 +797,7 @@ def process_track(
                 track_title=_as_str(track.get("title")),
                 track_artist=_as_str(track.get("artist")),
                 frozen_track=frozen_track,
-                force_meta=bool(options.get("force")),
+                force_meta=bool(options.get("force")) or bool(options.get("force_metadata")),
                 options=options,
                 batch_artist=_as_str(track_context.get("artist") or track.get("artist")),
                 batch_title=_as_str(track_context.get("title") or track.get("title")),
