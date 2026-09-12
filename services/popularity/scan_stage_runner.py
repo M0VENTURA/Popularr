@@ -77,7 +77,7 @@ from services.popularity.scan_hooks import (
 )
 from services.popularity.stages.album_stage import enrich_album, enrich_album_extras, ensure_album_type
 from services.popularity.stages.finalise_stage import (
-    _create_essential_m3u,
+    _sync_essential_playlist,
     _create_genre_top_track_playlists,
     _essential_playlists_enabled,
     _essential_strip_guest_credit,
@@ -334,7 +334,7 @@ def _close_artist_essential_section(artist_name: str | None, options: dict[str, 
     try:
         if featured_rows is None:
             featured_rows = _fetch_essential_featured_rows()
-        _create_essential_m3u(artist_name, featured_rows=featured_rows)
+        _sync_essential_playlist(artist_name, featured_rows=featured_rows)
         done.add(key)
     except Exception as exc:
         logger.debug("Essential collection failed", artist=artist_name, error=str(exc))
