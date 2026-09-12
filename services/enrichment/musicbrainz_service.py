@@ -571,7 +571,7 @@ class MusicBrainzService:
             "title": pick(overrides.get("title"), mb.get("title"), base.get("title")),
             "artist": pick(overrides.get("artist"), mb.get("artist"), base.get("artist")),
             "album": pick(overrides.get("album"), mb.get("album"), base.get("album")),
-            "album_artist": pick(overrides.get("album_artist"), base.get("album_artist"), Mb.get("album_artist")),
+            "album_artist": pick(overrides.get("album_artist"), base.get("album_artist"), mb.get("album_artist")),
             "year": pick(overrides.get("year"), mb.get("original_release_year"), mb.get("year"), base.get("year")),
         }
 
@@ -610,8 +610,8 @@ def get_shared_mb_service() -> MusicBrainzService:
 def lookup_recording_metadata(title: str, artist: str) -> dict[str, Any]:
     return _get_service().lookup_recording_metadata(title, artist)
 
-def merge_metadata(Base: dict[str, Any], Mb: dict[str, Any], Overrides: dict[str, Any] | None = None) -> dict[str, Any]:
-    return _get_service().merge_metadata(Base, Mb, Overrides)
+def merge_metadata(base: dict[str, Any], mb: dict[str, Any], overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    return _get_service().merge_metadata(base, mb, overrides)
 
 def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None:
     return None
