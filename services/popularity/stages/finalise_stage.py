@@ -968,11 +968,11 @@ def _sync_essential_playlist(
     for group in grouped.values():
         group.sort(
             key=lambda r: (
-                int(r.get("is_live") or 0),
-                int(r.get("is_compilation") or 0),
-                -int(r.get("stars") or 0),
-                -float(r.get("popularity_score") or 0),
-                _track_year(r),
+                int(r.get("is_live") or 0),              # 1. Penalize live tracks
+                -int(r.get("stars") or 0),               # 2. Highest stars wins (5★ beats 4★)
+                -float(r.get("popularity_score") or 0),  # 3. Highest popularity breaks ties
+                int(r.get("is_compilation") or 0),       # 4. Compilation status moved down to a tie-breaker
+                _track_year(r),                          # 5. Earliest release year
                 str(r.get("title") or "").casefold(),
             ),
         )
@@ -988,9 +988,9 @@ def _sync_essential_playlist(
 
     winners.sort(
         key=lambda r: (
-            -int(r.get("stars") or 0),
-            -float(r.get("percentile") or 0),
-            str(r.get("title") or "").casefold(),
+            -int(r.get("stars") or 0),               # 1. All 5★ tracks first, then 4★
+            -float(r.get("popularity_score") or 0),  # 2. Ordered by popularity score within star tiers
+            str(r.get("title") or "").casefold(),    # 3. Alphabetical tie-breaker
         ),
     )
 
