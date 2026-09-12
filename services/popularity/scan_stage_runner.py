@@ -1329,6 +1329,15 @@ def run_scan(
             _run_album_cover_detection(artist=artist, album=album, tracks=tracks, options=options)
             record_scan(scan_type, "completed", message=f"{scan_type} scan: {artist} - {album}", artist=artist, album=album)
 
+            # --- ADD FILE TAG SYNC HERE ---
+            if not popularity_only and not singles_detection_only:
+                try:
+                    log_unified(f"[TAG_SYNC] Syncing cleaned metadata to audio files for '{album}'...")
+                    sync_album_file_tags(artist, album)
+                except Exception as exc:
+                    logger.warning("Failed to sync file tags", artist=artist, album=album, error=str(exc))
+            # ------------------------------
+
             _album_results_this = results[_album_start:]
             if _album_results_this:
                 _artist_scan_results.setdefault(artist, []).extend(_album_results_this)
