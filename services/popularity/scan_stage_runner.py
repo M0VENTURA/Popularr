@@ -6,7 +6,7 @@ import json
 import math
 import time
 import re
-import socket
+import inspect
 import threading
 import concurrent.futures
 from collections import Counter
@@ -16,9 +16,6 @@ from typing import Any, Callable, TypeVar
 
 import structlog
 from sqlalchemy import text
-
-# Enforce a global OS-level socket timeout for the entire worker process.
-socket.setdefaulttimeout(30.0)
 
 # Database
 from db.engine import db_session
@@ -104,7 +101,6 @@ logger = structlog.get_logger(__name__)
 T = TypeVar("T")
 
 
-
 def _bounded_call_report(
     func: Callable[..., T],
     *args: Any,
@@ -114,16 +110,19 @@ def _bounded_call_report(
 ) -> Any:
     """Execute a function with structured start/completion/failure logging.
 
-    Returns the function's result, or an empty dict if it raised.
+    Dynamically filters out any unexpected keyword arguments (like seconds or label)
+    to prevent TypeErrors, and returns an empty dict on failure.
     """
-    import inspect
     try:
         sig = inspect.signature(func)
-        has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-        if "seconds" in kwargs and "seconds" not in sig.parameters and not has_kwargs:
-            kwargs.pop("seconds")
+        parameters = sig.parameters
+        has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+        if not has_kwargs:
+            allowed_keys = set(parameters.keys())
+            kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
     except Exception:
         kwargs.pop("seconds", None)
+        kwargs.pop("label", None)
 
     context = dict(log_context or {})
     start_ts = time.monotonic()
@@ -138,7 +137,7 @@ def _bounded_call_report(
             error=f"{type(exc).__name__}: {exc}",
             **context,
         )
-        return {}  # Returns an empty dict so .get() calls never throw AttributeError
+        return {}  # Guard against downstream NoneType attribute errors
     else:
         logger.info(
             "[SCAN] section completed",
@@ -147,7 +146,6 @@ def _bounded_call_report(
             **context,
         )
         return result
-
 
 
 def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
