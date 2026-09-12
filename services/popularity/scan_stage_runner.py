@@ -104,6 +104,7 @@ logger = structlog.get_logger(__name__)
 T = TypeVar("T")
 
 
+
 def _bounded_call_report(
     func: Callable[..., T],
     *args: Any,
@@ -113,8 +114,17 @@ def _bounded_call_report(
 ) -> Any:
     """Execute a function with structured start/completion/failure logging.
 
-    Returns the function's result, or None if it raised.
+    Returns the function's result, or an empty dict if it raised.
     """
+    import inspect
+    try:
+        sig = inspect.signature(func)
+        has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        if "seconds" in kwargs and "seconds" not in sig.parameters and not has_kwargs:
+            kwargs.pop("seconds")
+    except Exception:
+        kwargs.pop("seconds", None)
+
     context = dict(log_context or {})
     start_ts = time.monotonic()
     logger.info("[SCAN] section started", section=section, **context)
@@ -128,7 +138,7 @@ def _bounded_call_report(
             error=f"{type(exc).__name__}: {exc}",
             **context,
         )
-        return None
+        return {}  # Returns an empty dict so .get() calls never throw AttributeError
     else:
         logger.info(
             "[SCAN] section completed",
@@ -137,6 +147,7 @@ def _bounded_call_report(
             **context,
         )
         return result
+
 
 
 def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
