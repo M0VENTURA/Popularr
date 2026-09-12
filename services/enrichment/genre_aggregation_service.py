@@ -30,6 +30,13 @@ from helpers.config_helpers import get_genre_weights, get_genre_synonyms
 logger = structlog.get_logger(__name__)
 logging.getLogger(__name__).setLevel(logging.DEBUG)
 
+# NOTE: these module-level snapshots are kept only as a last-resort fallback
+# for `_source_weight()` / `_genre_synonyms()` below, in case `get_config()`
+# itself throws (e.g. during early startup). They are NOT the source of
+# truth during normal operation - both weights and synonyms are re-read from
+# live config on every call so that a hot config reload (see
+# `_reload_config_before_scan()` in the scan pipeline entrypoint) takes
+# effect on the next scan without requiring a process restart.
 GENRE_WEIGHTS = get_genre_weights()
 GENRE_SYNONYMS = get_genre_synonyms()
 
@@ -76,10 +83,24 @@ _GENERIC_ROOT_PATTERNS: dict[str, re.Pattern[str]] = {
 }
 
 
+def _genre_synonyms() -> dict[str, str]:
+    """Live-reloaded genre synonym map.
+
+    Mirrors `_source_weight()`'s pattern below: re-read the config on every
+    call so a hot config reload takes effect immediately, falling back to
+    the module-level snapshot only if the live read fails (e.g. very early
+    at startup, before config is fully available).
+    """
+    try:
+        return get_genre_synonyms() or {}
+    except Exception:
+        return GENRE_SYNONYMS or {}
+
+
 def normalize_genre(genre: Any) -> str:
     value = str(genre or "").lower().strip()
     value = _BUILTIN_SYNONYMS.get(value, value)
-    return GENRE_SYNONYMS.get(value, value)
+    return _genre_synonyms().get(value, value)
 
 
 _ADMIN_GENRE_WORDS: frozenset[str] = frozenset({
@@ -171,7 +192,7 @@ def is_junk_genre(genre: Any) -> bool:
 def normalize_genre_for_vote(genre: Any) -> str:
     value = str(genre or "").lower().strip()
     value = _BUILTIN_SYNONYMS.get(value, value)
-    value = GENRE_SYNONYMS.get(value, value)
+    value = _genre_synonyms().get(value, value)
     return re.sub(r"[^a-z0-9]+", "", value)
 
 
@@ -294,10 +315,15 @@ def _resolve_display_name(key: str, spellings: dict[str, list[tuple[float, str]]
     best = max(candidates, key=lambda s: s[0])
 
     def _top_weight(forms: list[str]) -> str:
-        form_weight = {
-            s[1]: s[0] for s in candidates if s[1] in forms
-        }
-        return sorted(forms, key=lambda f: (form_weight.get(f, 0.0), len(f)))[-1]
+        # Sum weights per distinct spelling instead of keeping only the last
+        # occurrence's weight - two sources voting for the identical
+        # spelling should combine their support, not have one silently
+        # overwrite the other based on arbitrary iteration order.
+        form_weight: dict[str, float] = defaultdict(float)
+        for s in candidates:
+            if s[1] in forms:
+                form_weight[s[1]] += s[0]
+        return sorted(set(forms), key=lambda f: (form_weight.get(f, 0.0), len(f)))[-1]
 
     spaced = [s[1] for s in candidates if " " in s[1]]
     if spaced:
