@@ -687,6 +687,42 @@ def _execute_track_jobs_safely(
     return results
 
 
+def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
+    """Check if an album needs a rerun due to missing fields or unpopulated genres."""
+    if not tracks:
+        return True, "no tracks found"
+
+    required_single_fields = ("final_score", "musicbrainz_albumtype")
+    
+    for track in tracks:
+        # 1. Missing final genres or source genre buckets
+        genres = str(track.get("genres") or "").strip()
+        mb_genres = str(track.get("musicbrainz_genres") or "").strip()
+        discogs_genres = str(track.get("discogs_genres") or "").strip()
+        lastfm_tags = str(track.get("lastfm_tags") or "").strip()
+
+        has_any_source_genre = any(
+            g not in ("", "[]", "{}", "null", "none") 
+            for g in (mb_genres, discogs_genres, lastfm_tags)
+        )
+        
+        if not genres or not has_any_source_genre:
+            return True, f"track '{track.get('title')}' is missing genres/tags"
+
+        # 2. Missing popularity or core classification fields
+        for field in required_single_fields:
+            val = track.get(field)
+            if val is None or val == "" or (isinstance(val, (int, float)) and val <= 0):
+                return True, f"track '{track.get('title')}' missing {field}"
+
+        # 3. Missing identifier fields where recoverable
+        mbid = str(track.get("recording_mbid") or track.get("mbid") or "").strip()
+        if not mbid:
+            return True, f"track '{track.get('title')}' missing recording MBID"
+
+    return False, ""
+
+
 def run_scan(
     *,
     verbose: bool = False,
@@ -1113,6 +1149,7 @@ def run_scan(
         _mode_singles = bool(options.get("singles_only") or options.get("singles_with_missing_popularity"))
         _album_is_old = _album_release_is_old(tracks)
         skip_album = False
+        force_metadata_for_this_album = False
         
         if not force and not album_filter:
             try:
@@ -1149,7 +1186,15 @@ def run_scan(
                     if all_done:
                         skip_album = True
                         log_unified(f"Popularity Scan - Skipping album \"{str(album or '').strip()}\" (no changes detected)")
-                        
+            
+            # OVERRIDE SKIP: Verify album completeness before actually skipping
+            if skip_album:
+                incomplete, reason = is_album_incomplete(tracks)
+                if incomplete:
+                    skip_album = False
+                    force_metadata_for_this_album = True
+                    log_unified(f"Popularity Scan - Album recently scanned but incomplete — forcing rerun ({reason})")
+
         if skip_album:
             skipped_albums += 1
             continue
@@ -1473,6 +1518,9 @@ def run_scan(
                 _track_options["discogs_cached_promos"] = discogs_cached_promos
                 _track_options["prefetched_popularity"] = prefetched_popularity
                 
+                if force_metadata_for_this_album:
+                    _track_options["force_metadata"] = True
+                    
                 if _frozen:
                     _track_options["frozen_track"] = True
                     
