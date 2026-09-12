@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -38,9 +39,12 @@ NAVIDROME_SCORE_DEFAULTS: dict[str, Any] = {
     "age_score": 0,
     "spotify_genres": JSON_EMPTY_LIST,
     "lastfm_tags": JSON_EMPTY_LIST,
+    "listenbrainz_genres": JSON_EMPTY_LIST,
     "discogs_genres": JSON_EMPTY_LIST,
     "audiodb_genres": JSON_EMPTY_LIST,
     "musicbrainz_genres": JSON_EMPTY_LIST,
+    "essentia_genres": JSON_EMPTY_LIST,
+    "manual_genres": JSON_EMPTY_LIST,
     "spotify_album": "",
     "spotify_artist": "",
     "spotify_popularity": 0,
@@ -56,6 +60,7 @@ NAVIDROME_SCORE_DEFAULTS: dict[str, Any] = {
     "suggested_mbid_confidence": 0.0,
 }
 
+# String fields (Not JSONB)
 EXTRACTED_STRING_FIELDS = (
     "mbid", "musicbrainz_albumid", "musicbrainz_trackid", "musicbrainz_releasegroupid",
     "musicbrainz_releasetrackid", "musicbrainz_albumstatus", "musicbrainz_albumtype",
@@ -71,7 +76,19 @@ EXTRACTED_STRING_FIELDS = (
     "albumsort", "artistsort", "albumartistsort", "albumartistssort", "artistssort",
     "composersort", "lyricistsort", "artists", "albumartists", "encodedby", "encodersettings",
     "website", "license", "isrc", "comment",
-    "is_cover", "original_cover_artist", "musicbrainz_genres",
+    "is_cover", "original_cover_artist",
+)
+
+# Fields that MUST be valid JSON lists/arrays for Postgres JSONB columns
+EXTRACTED_JSONB_FIELDS = (
+    "musicbrainz_genres",
+    "discogs_genres",
+    "lastfm_tags",
+    "spotify_genres",
+    "listenbrainz_genres",
+    "essentia_genres",
+    "manual_genres",
+    "navidrome_genres",
 )
 
 EXTRACTED_DIRECT_FIELDS = (
@@ -86,6 +103,59 @@ def now_local_iso() -> str:
         return datetime.now(ZoneInfo(LOCAL_TZ)).isoformat()
     except Exception:
         return datetime.now().isoformat()
+
+
+def _ensure_json_string(value: Any) -> str:
+    """Safely convert any input into a valid JSON string array for Postgres JSONB."""
+    if not value:
+        return "[]"
+    if isinstance(value, (list, tuple)):
+        # Strip out None and ensure flat strings
+        clean_list = [str(v).strip() for v in value if v]
+        return json.dumps(clean_list, ensure_ascii=False)
+    if isinstance(value, dict):
+        clean_list = [str(v).strip() for v in value.values() if v]
+        return json.dumps(clean_list, ensure_ascii=False)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or stripped.lower() in ("[]", "{}", "null", "none"):
+            return "[]"
+        if stripped.startswith("[") or stripped.startswith("{"):
+            try:
+                parsed = json.loads(stripped)
+                # If it successfully parsed into a list, dump it securely
+                if isinstance(parsed, list):
+                    return json.dumps([str(v).strip() for v in parsed if v], ensure_ascii=False)
+                elif isinstance(parsed, dict):
+                    return json.dumps([str(v).strip() for v in parsed.values() if v], ensure_ascii=False)
+            except ValueError:
+                pass
+        
+        # It's a raw string (e.g. "Rock\Pop" or "Metal, Hardcore")
+        parts = [p.strip() for p in re.split(r"[,;/\\]+", stripped) if p.strip()]
+        return json.dumps(parts, ensure_ascii=False)
+    return "[]"
+
+
+def _ensure_csv_string(value: Any) -> str:
+    """Safely convert any input into a CSV text string (for legacy TEXT columns)."""
+    if not value:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v).strip() for v in value if v)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return ", ".join(str(v).strip() for v in parsed if v)
+            except ValueError:
+                pass
+        # Just normalize delimiters into standard comma separation
+        parts = [p.strip() for p in re.split(r"[,;/\\]+", stripped) if p.strip()]
+        return ", ".join(parts)
+    return str(value)
 
 
 def build_track_payload(
@@ -135,8 +205,7 @@ def build_track_payload(
         "artist": track_artist,
         "album_artist": album_artist_value,
         "last_scanned": now_local_iso(),
-        "genres": extracted.get("navidrome_genres", "") or "",
-        "navidrome_genres": extracted.get("navidrome_genres", "") or "",
+        "genres": _ensure_csv_string(extracted.get("navidrome_genres", "")),
         "navidrome_genre": extracted.get("navidrome_genre", "") or "",
         "file_path": extracted.get("file_path", "") or "",
         "spotify_release_date": extracted.get("year", "") or "",
@@ -147,7 +216,7 @@ def build_track_payload(
             or extracted.get("musicbrainz_artistid", "")
             or ""
         ),
-        "writer": writer_json,
+        "writer": _ensure_json_string(writer_json),
         "album_context_live": 1 if album_context.get("is_live") else 0,
         "album_context_unplugged": 1 if album_context.get("is_unplugged") else 0,
     }
@@ -159,6 +228,11 @@ def build_track_payload(
     if is_new_track:
         payload.update(NAVIDROME_SCORE_DEFAULTS)
 
+    # Attach JSONB mapped fields securely
+    for field in EXTRACTED_JSONB_FIELDS:
+        payload[field] = _ensure_json_string(extracted.get(field))
+
+    # Attach String mapped fields securely
     for field in EXTRACTED_STRING_FIELDS:
         payload[field] = extracted.get(field, "") or ""
 
