@@ -101,8 +101,24 @@ _SOURCE_LABELS = {
 }
 
 
+def _has_safe_live_recording_tag(payload: dict[str, Any]) -> bool:
+    """Checks for explicit 'live' tags only on MBID-bound metadata sources."""
+    import re
+    for col in ("musicbrainz_genres", "musicbrainz_tags", "listenbrainz_genres"):
+        val = str(payload.get(col) or "").lower()
+        if not val or "live" not in val:
+            continue
+        try:
+            tags = json.loads(val)
+            if any(str(t).strip() == "live" for t in tags):
+                return True
+        except Exception:
+            if re.search(r'\blive\b', val):
+                return True
+    return False
+
+
 def _single_chips(sources_raw: Any) -> str:
-    """Render the matched/unmatched single-detection sources as chips."""
     try:
         raw = sources_raw or ""
         if isinstance(raw, str):
@@ -309,7 +325,6 @@ _GENRE_SOURCE_COLUMNS = (
 
 
 def _has_real_genres(track: dict[str, Any]) -> bool:
-    """Returns True if the track has any valid genre arrays/dicts populated."""
     for column in _GENRE_SOURCE_COLUMNS:
         raw = track.get(column)
         if not raw:
@@ -339,16 +354,11 @@ def _has_real_genres(track: dict[str, Any]) -> bool:
 
 
 def _track_needs_metadata_enrichment(track: dict[str, Any]) -> bool:
-    """Determines if a track is missing core MBIDs or Genres, overriding the cache."""
-    # 1. Missing MBID
     mbid = _as_str(track.get("recording_mbid") or track.get("mbid") or track.get("musicbrainz_trackid")).strip()
     if not mbid:
         return True
-    
-    # 2. Missing any major genre source
     if not _has_real_genres(track):
         return True
-        
     return False
 
 
@@ -629,7 +639,6 @@ def _resolve_track_mb_metadata(
             if mb_data.get("artist") and not _existing_artist:
                 payload["artist"] = mb_data["artist"]
                 
-            # Take the earliest release year known from MusicBrainz
             _existing_year = _as_str(track.get("year") or "").strip()
             _mb_year = _as_str(mb_data.get("year") or "").strip()
             if _mb_year:
@@ -638,7 +647,6 @@ def _resolve_track_mb_metadata(
                     _should_update_year = True
                 else:
                     try:
-                        # Override local year if MB knows an older original year
                         if int(str(_mb_year)[:4]) < int(str(_existing_year)[:4]):
                             _should_update_year = True
                     except ValueError:
@@ -1069,6 +1077,7 @@ def process_track(
                     or effective_track.get("album_context_live")
                     or album_context.get("is_live_album")
                     or is_live_or_alternate_track_title(raw_title or title)
+                    or _has_safe_live_recording_tag(update_payload)
                 )
                 is_instrumental_flag = is_instrumental_track_title(raw_title or title)
                 is_featured_flag = bool(
@@ -1763,8 +1772,6 @@ def process_track(
     if not popularity_only and not singles_detection_only:
         try:
             _album_years = []
-            
-            # Gather all years currently stored on the album's tracks
             for _at in (album_tracks or []):
                 _y = _as_str(_at.get("year") or _at.get("release_year")).strip()
                 if _y:
@@ -1773,7 +1780,6 @@ def process_track(
                     except ValueError:
                         pass
             
-            # Also factor in the year we just resolved from MusicBrainz (if any)
             _pl_year = _as_str(update_payload.get("year")).strip()
             if _pl_year:
                 try:
@@ -1790,7 +1796,6 @@ def process_track(
                     _update_needed = True
                 else:
                     try:
-                        # Override if the current year is newer than the oldest known year
                         if int(str(_curr_year)[:4]) > _min_year:
                             _update_needed = True
                     except ValueError:
