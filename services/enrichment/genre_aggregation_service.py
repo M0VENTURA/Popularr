@@ -201,9 +201,18 @@ def normalize_genre_for_vote(genre: Any) -> str:
 def _source_weight(source: str) -> float:
     try:
         from helpers.config_helpers import get_genre_weights
-        return float(get_genre_weights().get(source, 0.05) or 0)
+        weights = get_genre_weights() or {}
     except Exception:
-        return float(GENRE_WEIGHTS.get(source, 0.05) or 0)
+        weights = GENRE_WEIGHTS or {}
+        
+    if source in weights:
+        return float(weights[source] or 0)
+        
+    # Hardcode fallback for essentia so it doesn't overpower primary online sources
+    if source == "essentia":
+        return 0.01
+        
+    return 0.05
 
 
 def _genre_min_weight() -> float:
@@ -347,8 +356,7 @@ def _context_boost_votes(context_title: str, context_album: str) -> dict[str, tu
     boosts: dict[str, tuple[float, str]] = {}
     if any(kw in context_lower for kw in _CHRISTMAS_KEYWORDS):
         boosts["christmas"] = (2.0, "christmas")
-    if any(re.search(p, context_lower) for p in _LIVE_PATTERNS):
-        boosts["live"] = (0.5, "live")
+    # Live is intentionally excluded from consuming a top-tier core genre slot.
     return boosts
 
 
@@ -408,9 +416,24 @@ def _rank_genres(
     return final_list
 
 
+def _append_extra_genres(genres: list[str], title: str, album: str) -> list[str]:
+    """Appends Cover and Live as extra admin genres without consuming a core slot."""
+    context_lower = f"{title or ''} {album or ''}".lower()
+    
+    if any(re.search(p, context_lower) for p in _LIVE_PATTERNS):
+        if not any(g.lower() == "live" for g in genres):
+            genres.append("Live")
+            
+    if re.search(r"\b(cover|tribute)\b", context_lower):
+        if not any(g.lower() == "cover" for g in genres):
+            genres.append("Cover")
+            
+    return genres
+
+
 def aggregate_genres(
     source_map: dict[str, list[str]],
-    max_genres: int = 5,
+    max_genres: int = 2,
     context_title: str = "",
     context_album: str = "",
     nav_genres: list[str] | None = None,
@@ -426,7 +449,8 @@ def aggregate_genres(
         extra_votes=_context_boost_votes(context_title, context_album),
     )
     nav_keys = _normalize_nav_keys(nav_genres)
-    return _rank_genres(votes, spellings, source_hits, max_genres=max_genres, nav_keys=nav_keys)
+    top_genres = _rank_genres(votes, spellings, source_hits, max_genres=max_genres, nav_keys=nav_keys)
+    return _append_extra_genres(top_genres, context_title, context_album)
 
 
 def get_top_genres_with_navidrome(
@@ -449,7 +473,8 @@ def get_top_genres_with_navidrome(
         extra_votes=_context_boost_votes(title, album),
     )
     nav_keys = _normalize_nav_keys(nav_genres)
-    online_top = _rank_genres(votes, spellings, source_hits, max_genres=3, nav_keys=nav_keys)
+    online_top = _rank_genres(votes, spellings, source_hits, max_genres=2, nav_keys=nav_keys)
+    online_top = _append_extra_genres(online_top, title, album)
 
     nav_cleaned = sorted({
         normalize_genre(g).capitalize()
@@ -465,7 +490,7 @@ def rank_genres_with_local_tags(
     title: str = "",
     album: str = "",
     *,
-    max_genres: int = 5,
+    max_genres: int = 2,
 ) -> list[str]:
     """Top genres from online sources only; Navidrome tags are used purely
     as a tie-breaker (they no longer add vote weight — previously this
@@ -478,7 +503,8 @@ def rank_genres_with_local_tags(
         extra_votes=_context_boost_votes(title, album),
     )
     nav_keys = _normalize_nav_keys(nav_genres)
-    return _rank_genres(votes, spellings, source_hits, max_genres=max_genres, nav_keys=nav_keys)
+    top_genres = _rank_genres(votes, spellings, source_hits, max_genres=max_genres, nav_keys=nav_keys)
+    return _append_extra_genres(top_genres, title, album)
 
 
 def update_get_top_genres_with_navidrome(
@@ -509,7 +535,7 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
             if val:
                 source_map.setdefault(src_key, []).extend(val if isinstance(val, list) else [val])
 
-    recommended = aggregate_genres(source_map)
+    recommended = aggregate_genres(source_map, max_genres=2)
     return {"success": True, "artist": artist, "album": album, "genres": recommended}
 
 
@@ -518,7 +544,7 @@ def sync_confident_genres(
     album: str,
     source_map: dict[str, list[str]],
     nav_genres: list[str] | None = None,
-    max_genres: int = 5,
+    max_genres: int = 2,
     context_title: str = "",
     context_album: str = "",
 ) -> list[str]:
