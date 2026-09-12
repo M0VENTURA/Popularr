@@ -68,7 +68,7 @@ except ImportError:
 
 from api_clients.musicbrainz_http import (
     MusicBrainzHttpClient,
-    Escape_lucene_special_chars,
+    escape_lucene_special_chars as Escape_lucene_special_chars,
 )
 from helpers.normalization_service import (
     Edition_annotations_compatible,
