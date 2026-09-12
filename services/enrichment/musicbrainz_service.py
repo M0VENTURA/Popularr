@@ -532,59 +532,59 @@ class MusicBrainzService:
     def _cache_key(title: str, artist: str) -> str:
         return f"{artist.casefold().strip()}::{title.casefold().strip()}"
 
-    def get_suggested_mbid(self, Title: str, Artist: str, Limit: int = 5) -> tuple[str, float]:
+    def get_suggested_mbid(self, title: str, artist: str, limit: int = 5, **kwargs: Any) -> tuple[str, float]:
         return "", 0.0
 
-    def lookup_recording_metadata(self, title: str, artist: str) -> dict[str, Any]:
+    def lookup_recording_metadata(self, title: str, artist: str, **kwargs: Any) -> dict[str, Any]:
         return {}
 
-    def lookup_recordings_by_mbid_bulk(self, Mbids: list[str], *, Album_name: str | None = None, Original_release_year: int | None = None) -> dict[str, dict[str, Any]]:
+    def lookup_recordings_by_mbid_bulk(self, mbids: list[str], *, album_name: str | None = None, original_release_year: int | None = None, **kwargs: Any) -> dict[str, dict[str, Any]]:
         return {}
 
-    def _recording_to_metadata(self, Recording: dict[str, Any], Mbid: str, Confidence: float, *, Album_name: str | None = None, Original_release_year: int | None = None) -> dict[str, Any]:
+    def _recording_to_metadata(self, recording: dict[str, Any], mbid: str, confidence: float, *, album_name: str | None = None, original_release_year: int | None = None, **kwargs: Any) -> dict[str, Any]:
         return {}
 
-    def lookup_original_album_year(self, artist: str, album: str) -> int | None:
+    def lookup_original_album_year(self, artist: str, album: str, **kwargs: Any) -> int | None:
         return None
 
-    def lookup_album_metadata(self, Entries: list[tuple[str, str]], Candidates_per_entry: int = 5, Album: str = "", Original_release_year: int | None = None) -> dict[str, dict[str, Any]]:
+    def lookup_album_metadata(self, entries: list[tuple[str, str]], candidates_per_entry: int = 5, album: str = "", original_release_year: int | None = None, **kwargs: Any) -> dict[str, dict[str, Any]]:
         return {}
 
-    def is_single(self, Title: str, Artist: str, Album_track_count: int | None = None) -> bool:
+    def is_single(self, title: str, artist: str, album_track_count: int | None = None, **kwargs: Any) -> bool:
         return False
 
-    def get_artist_country(self, artist: str) -> str:
+    def get_artist_country(self, artist: str, **kwargs: Any) -> str:
         return ""
 
-    def get_genres(self, title: str, artist: str) -> list[str]:
+    def get_genres(self, title: str, artist: str, **kwargs: Any) -> list[str]:
         return []
 
-    def search_releasegroup_matches(self, Artist_name: str, Album_name: str, Limit: int = 10) -> list[dict[str, Any]]:
+    def search_releasegroup_matches(self, artist_name: str, album_name: str, limit: int = 10, **kwargs: Any) -> list[dict[str, Any]]:
         return []
 
     @staticmethod
-    def merge_metadata(Base: dict[str, Any], Mb: dict[str, Any], Overrides: dict[str, Any] | None = None) -> dict[str, Any]:
-        Overrides = Overrides or {}
+    def merge_metadata(base: dict[str, Any], mb: dict[str, Any], overrides: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+        overrides = overrides or {}
         def pick(*values: Any) -> Any:
             return next((value for value in values if value not in (None, "")), None)
         return {
-            "title": pick(Overrides.get("title"), Mb.get("title"), Base.get("title")),
-            "artist": pick(Overrides.get("artist"), Mb.get("artist"), Base.get("artist")),
-            "album": pick(Overrides.get("album"), Base.get("album"), Mb.get("album")),
-            "album_artist": pick(Overrides.get("album_artist"), Base.get("album_artist"), Mb.get("album_artist")),
-            "year": pick(Overrides.get("year"), Mb.get("original_release_year"), Mb.get("year"), Base.get("year")),
+            "title": pick(overrides.get("title"), mb.get("title"), base.get("title")),
+            "artist": pick(overrides.get("artist"), mb.get("artist"), base.get("artist")),
+            "album": pick(overrides.get("album"), mb.get("album"), base.get("album")),
+            "album_artist": pick(overrides.get("album_artist"), base.get("album_artist"), Mb.get("album_artist")),
+            "year": pick(overrides.get("year"), mb.get("original_release_year"), mb.get("year"), base.get("year")),
         }
 
-    def get_artist_relationships(self, Artist_mbid: str, Relation_type: str = "artist") -> list[dict[str, Any]]:
+    def get_artist_relationships(self, artist_mbid: str, relation_type: str = "artist", **kwargs: Any) -> list[dict[str, Any]]:
         return []
 
-    def get_recording_relationships(self, recording_mbid: str) -> list[dict[str, Any]]:
+    def get_recording_relationships(self, recording_mbid: str, **kwargs: Any) -> list[dict[str, Any]]:
         return []
 
-    def get_composers_for_recording(self, recording_mbid: str) -> list[str]:
+    def get_composers_for_recording(self, recording_mbid: str, **kwargs: Any) -> list[str]:
         return []
 
-    def get_recording_genres(self, title: str, artist: str) -> list[str]:
+    def get_recording_genres(self, title: str, artist: str, **kwargs: Any) -> list[str]:
         return []
 
 def _get_service() -> MusicBrainzService:
