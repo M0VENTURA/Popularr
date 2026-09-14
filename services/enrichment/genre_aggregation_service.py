@@ -257,16 +257,21 @@ def _parse_genre_input(raw: Any) -> list[str]:
                     if isinstance(parsed, (list, dict)):
                         return _extract(parsed)
                 except Exception:
-                    pass
+                    # Strip exterior brackets/quotes if JSON decode fails on single quotes
+                    stripped = re.sub(r"^[\[{\'\"]+|[\]}\'\"]+$", "", stripped)
                     
-            # Forcefully split any string by common delimiters to kill the genre tumors
-            return [g.strip() for g in re.split(r"[,;/\\]+", stripped) if g.strip()]
+            # Split strings on delimiters and strip any leftover stray quotes/brackets
+            parts = []
+            for g in re.split(r"[,;/\\]+", stripped):
+                clean_g = re.sub(r"^[\[{\'\"]+|[\]}\'\"]+$", "", g.strip()).strip()
+                if clean_g:
+                    parts.append(clean_g)
+            return parts
             
         return []
 
     raw_list = _extract(raw)
     
-    # Deduplicate while preserving vote decay order
     seen = set()
     clean = []
     for g in raw_list:
