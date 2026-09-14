@@ -1012,7 +1012,7 @@ def run_scan(
         return list(db_scores)
 
     def _post_album_stars(artist: str, album_results: list[dict[str, Any]], is_compilation: bool = False, is_va_compilation: bool = False) -> bool:
-        if not album_results or metadata_only:
+        if not album_results or options.get("metadata_only"):
             return False
 
         try:
@@ -1091,7 +1091,7 @@ def run_scan(
 
     def _flush_artist_star_ratings(artist: str) -> None:
         pending = _artist_pending_albums.pop(artist, [])
-        if not pending or metadata_only:
+        if not pending or options.get("metadata_only"):
             return
 
         try:
@@ -1329,14 +1329,14 @@ def run_scan(
             _run_album_cover_detection(artist=artist, album=album, tracks=tracks, options=options)
             record_scan(scan_type, "completed", message=f"{scan_type} scan: {artist} - {album}", artist=artist, album=album)
 
-            # --- ADD FILE TAG SYNC HERE ---
-            if not popularity_only and not singles_detection_only:
+            # --- FILE TAG SYNC ---
+            if not options.get("popularity_only") and not options.get("singles_detection_only"):
                 try:
                     log_unified(f"[TAG_SYNC] Syncing cleaned metadata to audio files for '{album}'...")
                     sync_album_file_tags(artist, album)
                 except Exception as exc:
                     logger.warning("Failed to sync file tags", artist=artist, album=album, error=str(exc))
-            # ------------------------------
+            # ---------------------
 
             _album_results_this = results[_album_start:]
             if _album_results_this:
@@ -1358,7 +1358,7 @@ def run_scan(
 
     update(stage="finalising", progress=98, message="Finalising popularity scan...", processed=total_albums, total_items=total_albums)
 
-    if not metadata_only:
+    if not options.get("metadata_only"):
         try:
             finalise_scan(results=results, options=options)
         except Exception as _finalise_exc:
