@@ -977,6 +977,30 @@ def process_track(
             )
             isrc = _as_str(effective_track.get("isrc") or "").strip()
 
+            # Release-level liveness, resolved once up-front so it can gate
+            # the Last.fm aggregation calls below. A live release frequently
+            # ships plainly-titled tracks (e.g. every track on Metallica's
+            # "S&M" is titled exactly as its studio original), so Last.fm's
+            # title+artist matching would otherwise merge the STUDIO
+            # recording's catalogue-wide listener count into the live
+            # track's popularity data -- the count is real, it's just for
+            # the wrong recording. ListenBrainz is unaffected because it
+            # matches on recording MBID, not title.
+            #
+            # This mirrors the OR-of-conditions used later for
+            # ``is_live_flag`` (title-marker regex + explicit flags), minus
+            # the tag-based check, which depends on genre columns that are
+            # not populated in ``update_payload`` until the metadata section
+            # further down -- checking it here would never find anything,
+            # same as it effectively never did in the original later-computed
+            # flag before this fix.
+            is_live_release = bool(
+                effective_track.get("is_live")
+                or effective_track.get("album_context_live")
+                or album_context.get("is_live_album")
+                or bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", str(raw_title or title).lower()))
+            )
+
             if isrc.startswith("[") and isrc.endswith("]"):
                 from helpers.normalization_service import normalize_isrc
                 isrc = normalize_isrc(isrc)
@@ -1086,6 +1110,7 @@ def process_track(
                                     lastfm_client=lf,
                                     isrc=isrc or None,
                                     recording_mbid=recording_mbid or None,
+                                    is_live_release=is_live_release,
                                 )
                                 if agg and (agg.get("listeners") or 0) > 0:
                                     lastfm_listeners = _as_int(agg.get("listeners") or 0)
@@ -1106,22 +1131,31 @@ def process_track(
                                                 break
                                         if _agg_tags:
                                             update_payload["lastfm_tags"] = json.dumps(_agg_tags, ensure_ascii=False)
+                                elif is_live_release:
+                                    # A live release with no aggregated match must NOT
+                                    # fall through to the bare title+artist lookup below
+                                    # -- that lookup cannot distinguish the live
+                                    # performance from its studio namesake and would
+                                    # silently reintroduce the contamination this fix
+                                    # exists to prevent.
+                                    lastfm_listeners = 0
+                                    lastfm_playcount = 0
                                 else:
                                     lf_result = lf.get_track_info(artist, title)
                                     lastfm_listeners = _as_int(lf_result.get("listeners") if isinstance(lf_result, dict) else 0)
                                     lastfm_playcount = _as_int(lf_result.get("track_play") if isinstance(lf_result, dict) else 0)
 
+                                    toptags = lf_result.get("toptags", {}) if isinstance(lf_result, dict) else {}
+                                    tag_list = toptags.get("tag", []) if isinstance(toptags, dict) else []
+                                    if tag_list:
+                                        update_payload["lastfm_tags"] = json.dumps(
+                                            [t.get("name", "") for t in tag_list if isinstance(t, dict) and t.get("name")],
+                                            ensure_ascii=False
+                                        )
+
                                 update_payload["lastfm_listeners"] = lastfm_listeners
                                 update_payload["lastfm_playcount"] = lastfm_playcount
                                 update_payload["lastfm_last_updated"] = now_ts
-
-                                toptags = lf_result.get("toptags", {}) if isinstance(lf_result, dict) else {}
-                                tag_list = toptags.get("tag", []) if isinstance(toptags, dict) else []
-                                if tag_list:
-                                    update_payload["lastfm_tags"] = json.dumps(
-                                        [t.get("name", "") for t in tag_list if isinstance(t, dict) and t.get("name")],
-                                        ensure_ascii=False
-                                    )
                             else:
                                 lastfm_listeners = 0
                                 lastfm_playcount = 0
@@ -1142,6 +1176,7 @@ def process_track(
                             _lf2 = LastFmClient(_lf_key2)
                             _search_agg = get_search_aggregated_lastfm_popularity(
                                 artist, raw_title or title, lastfm_client=_lf2,
+                                is_live_release=is_live_release,
                             ) or {}
                             _search_listeners = _as_int(_search_agg.get("listeners") or 0)
                             if _search_listeners > lastfm_listeners:
@@ -1175,7 +1210,10 @@ def process_track(
                             try:
                                 if isrc:
                                     from services.popularity.popularity_sources import resolve_isrc_recording
-                                    _isrc_rec = resolve_isrc_recording(isrc, title=raw_title or title, artist=artist)
+                                    _isrc_rec = resolve_isrc_recording(
+                                        isrc, title=raw_title or title, artist=artist,
+                                        is_live_release=is_live_release,
+                                    )
                                     if _isrc_rec and _isrc_rec.get("recording_mbid"):
                                         recording_mbid = _isrc_rec["recording_mbid"]
                                         _lb_source = "isrc_resolved"
@@ -1210,11 +1248,14 @@ def process_track(
                     update_payload["listenbrainz_users"] = listenbrainz_users
                     update_payload["listenbrainz_last_updated"] = now_ts
 
+                # ``is_live_flag`` folds in the tag-based check (which needs
+                # ``update_payload`` as populated by the LF/LB fetches above)
+                # on top of the release-level ``is_live_release`` resolved
+                # up-front for the Last.fm calls. Recomputing the title/flag
+                # portion here would be redundant with ``is_live_release``,
+                # so it is reused directly.
                 is_live_flag = bool(
-                    effective_track.get("is_live")
-                    or effective_track.get("album_context_live")
-                    or album_context.get("is_live_album")
-                    or bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", str(raw_title or title).lower()))
+                    is_live_release
                     or _has_safe_live_recording_tag(update_payload)
                 )
                 is_instrumental_flag = is_instrumental_track(raw_title or title)
