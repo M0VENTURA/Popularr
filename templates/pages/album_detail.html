@@ -9,10 +9,10 @@
   [id$="-section"] { scroll-margin-top: 130px; }
   .album-hero-sub a:hover { text-decoration: underline !important; }
   
-  /* Fix Bootstrap nav-link default blue colors */
-  #albumPageTabs .nav-link { color: #adb5bd !important; border-color: transparent !important; }
-  #albumPageTabs .nav-link:hover { color: #ffffff !important; }
-  #albumPageTabs .nav-link.active { background-color: var(--spotify-green, #1db954) !important; color: #000 !important; }
+  /* Override Bootstrap Blue for inactive tabs */
+  .nav-pills .nav-link { color: #adb5bd !important; }
+  .nav-pills .nav-link:hover { color: #ffffff !important; }
+  .nav-pills .nav-link.active { background-color: var(--spotify-green, #1db954) !important; color: #000 !important; }
 </style>
 
 <div class="container-fluid mt-4">
@@ -423,38 +423,23 @@
               ('spotify_genres', 'Spotify', '1DB954', 'white', 'bi-spotify'),
               ('manual_genres', 'Manual Tags', '0dcaf0', 'black', 'bi-person-fill-gear')
             ] %}
-            
-            {# Pre-filter valid genres to avoid rendering empty tabs #}
-            {% set valid_genre_sources = {} %}
             {% set ns = namespace(has_any=False) %}
             {% for key, label, bgcolor, textcolor, icon in sources %}
-              {% if genre_sources and genre_sources.get(key) %}
-                {% set valid_items = [] %}
-                {% for genre in genre_sources[key] %}
-                  {% set g_name = genre.name|string|trim %}
-                  {% if g_name and g_name not in ['[]', '{}', 'null', 'None', 'none'] %}
-                    {% set _ = valid_items.append(genre) %}
-                  {% endif %}
-                {% endfor %}
-                {% if valid_items|length > 0 %}
-                  {% set _ = valid_genre_sources.update({key: valid_items}) %}
-                  {% set ns.has_any = True %}
-                {% endif %}
-              {% endif %}
+              {% if genre_sources and genre_sources.get(key) %}{% set ns.has_any = True %}{% endif %}
             {% endfor %}
 
             {% if ns.has_any %}
               {% set ns2 = namespace(first=True) %}
-              <ul class="nav nav-tabs border-secondary mb-3 flex-nowrap overflow-auto" role="tablist" style="white-space: nowrap; padding-bottom: 2px;">
+              <ul class="nav nav-tabs border-secondary mb-3" role="tablist">
                 {% for key, label, bgcolor, textcolor, icon in sources %}
-                  {% if valid_genre_sources.get(key) %}
+                  {% if genre_sources and genre_sources.get(key) %}
                     <li class="nav-item" role="presentation">
-                      <button class="nav-link {{ 'active text-white' if ns2.first else 'text-muted' }} px-2 py-1 small"
+                      <button class="nav-link {{ 'active text-white' if ns2.first else 'text-muted' }}"
                               id="albumGenreTab{{ key }}-tab" data-bs-toggle="tab"
                               data-bs-target="#albumGenreTab{{ key }}-content"
                               type="button" role="tab" style="color: #{{ bgcolor }}; border-color: transparent;">
                         <i class="bi {{ icon }}"></i> {{ label }}
-                        <span class="badge ms-1" style="background-color: #{{ bgcolor }}; color: {{ textcolor }};">{{ valid_genre_sources[key]|length }}</span>
+                        <span class="badge ms-1" style="background-color: #{{ bgcolor }}; color: {{ textcolor }};">{{ genre_sources[key]|length }}</span>
                       </button>
                     </li>
                     {% set ns2.first = False %}
@@ -465,10 +450,10 @@
               {% set ns3 = namespace(first=True) %}
               <div class="tab-content">
                 {% for key, label, bgcolor, textcolor, icon in sources %}
-                  {% if valid_genre_sources.get(key) %}
+                  {% if genre_sources and genre_sources.get(key) %}
                     <div class="tab-pane fade {{ 'active show' if ns3.first else '' }}" id="albumGenreTab{{ key }}-content" role="tabpanel">
                       <div class="d-flex flex-wrap gap-2 mb-3">
-                        {% for genre in valid_genre_sources[key]|sort(reverse=True, attribute='count') %}
+                        {% for genre in genre_sources[key]|sort(reverse=True, attribute='count') %}
                           <label class="badge genre-source-selectable" style="background-color: #{{ bgcolor }}; color: {{ textcolor }}; cursor:pointer; font-size:0.85rem;">
                             <input type="checkbox" class="album-source-tag-check me-1" value="{{ genre.name }}">
                             {{ genre.name }}{% if genre.count %} <small class="opacity-75">({{ genre.count }})</small>{% endif %}
