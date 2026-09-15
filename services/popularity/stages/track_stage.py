@@ -172,7 +172,7 @@ def _album_top_genres(
 ) -> list[str]:
     if not album_tracks:
         return []
-    from services.enrichment.genre_aggregation_service import aggregate_genres
+    from services.enrichment.genre_aggregation_service import aggregate_genres, _parse_genre_input
 
     album_source_map: dict[str, list[str]] = {}
     _source_cols = [
@@ -190,17 +190,10 @@ def _album_top_genres(
             raw = _at.get(_col)
             if not raw:
                 continue
-            if isinstance(raw, str):
-                try:
-                    _vals = json.loads(raw)
-                except Exception:
-                    import re as _re
-                    _vals = [g.strip() for g in _re.split(r"[,;/\\]+", raw) if g.strip()]
-            else:
-                _vals = raw
-            if not isinstance(_vals, list):
+            _parsed_list = _parse_genre_input(raw)
+            if not isinstance(_parsed_list, list):
                 continue
-            for _g in _vals:
+            for _g in _parsed_list:
                 if isinstance(_g, dict):
                     _g = _g.get("name") or ""
                 _name = str(_g or "").strip()
@@ -1210,7 +1203,7 @@ def process_track(
                     has_mb_meta=has_mb_meta,
                     is_featured_track=is_featured_flag,
                     is_live_track=is_live_flag,
-                    is_instrumental_track=is_instrumental_track,
+                    is_instrumental_track=is_instrumental_flag,
                     artist_lf_context=artist_lf_context,
                     track_duration=_safe_duration(effective_track.get("duration")),
                 )
