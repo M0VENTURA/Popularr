@@ -257,14 +257,13 @@ def _parse_genre_input(raw: Any) -> list[str]:
                     if isinstance(parsed, (list, dict)):
                         return _extract(parsed)
                 except Exception:
-                    # Strip exterior brackets/quotes if JSON decode fails on single quotes
-                    stripped = re.sub(r"^[\[{\'\"]+|[\]}\'\"]+$", "", stripped)
+                    pass
                     
-            # Split strings on delimiters and strip any leftover stray quotes/brackets
+            # Split strings on delimiters and ruthlessly strip ALL brackets/quotes
             parts = []
             for g in re.split(r"[,;/\\]+", stripped):
-                clean_g = re.sub(r"^[\[{\'\"]+|[\]}\'\"]+$", "", g.strip()).strip()
-                if clean_g:
+                clean_g = re.sub(r"[\[\]{}'\"“”]+", "", g).strip()
+                if clean_g and clean_g.lower() not in ("null", "none"):
                     parts.append(clean_g)
             return parts
             
