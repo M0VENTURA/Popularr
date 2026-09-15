@@ -36,7 +36,10 @@ from helpers.config_helpers import (
     get_track_timeout_seconds,
 )
 from helpers.logging_config import log_unified
-from helpers.normalization_service import strip_featured_artist
+from helpers.normalization_service import (
+    safe_album_rename,
+    strip_featured_artist,
+)
 
 # API Clients & Services
 from api_clients.discogs import DiscogsClient
@@ -1005,7 +1008,11 @@ def run_scan(
     _artist_pending_albums: dict[str, list[dict[str, Any]]] = {}
     _artist_db_rows_cache: dict[str, list[Any]] = {}
     _artist_db_listen_cache: dict[str, list[Any]] = {}
-    _deferred_album_renames: dict[str, list[dict[str, Any]]] = {}
+    # Keyed artist -> {casefolded source album -> rename entry}, NOT a list.
+    # A list allowed the same rename to be queued once per album_row (multi-disc
+    # sets, or the same album under differing album_artist casing) and then
+    # applied repeatedly, re-appending the edition annotation each time.
+    _deferred_album_renames: dict[str, dict[str, dict[str, Any]]] = {}
     _essential_featured_rows: list | None = None
     _essential_playlists_done: set[str] = set()
     _section_artist: str | None = None
@@ -1185,16 +1192,34 @@ def run_scan(
                 logger.debug("Deferred star-rating flush failed", artist=artist_name, error=str(exc))
 
             try:
-                _renames = _deferred_album_renames.pop(artist_name, []) or []
-                for _name_update in _renames:
+                _renames = _deferred_album_renames.pop(artist_name, {}) or {}
+                for _name_update in _renames.values():
                     try:
                         _old = str(_name_update.get("album") or "")
                         _new = str(_name_update.get("new_name") or "")
-                        _res = apply_album_name_update(artist=artist_name, album=_old, new_name=_new) or {}
+
+                        # Re-validate at apply time: an earlier rename in this
+                        # batch, or the album tag sync, may have moved the album
+                        # since this entry was queued.
+                        _resolved, _verdict = safe_album_rename(_old, _new)
+                        if not _resolved:
+                            logger.debug(
+                                "[ALBUM_NAME] Rename skipped at apply time",
+                                artist=artist_name, album=_old,
+                                proposed=_new, reason=_verdict,
+                            )
+                            continue
+
+                        _res = apply_album_name_update(artist=artist_name, album=_old, new_name=_resolved) or {}
                         if _res.get("changed"):
-                            log_unified(f"[ALBUM_NAME] '{artist_name} - {_old}' → '{_new}' (reason={_name_update.get('reason')}, db={_res.get('db_updated')}, files={_res.get('files_updated')})")
+                            log_unified(f"[ALBUM_NAME] '{artist_name} - {_old}' → '{_resolved}' (reason={_name_update.get('reason')}, db={_res.get('db_updated')}, files={_res.get('files_updated')})")
+                        else:
+                            logger.debug(
+                                "[ALBUM_NAME] Rename produced no change",
+                                artist=artist_name, album=_old, new_name=_resolved,
+                            )
                     except Exception as exc:
-                        logger.debug("[ALBUM_NAME] Deferred rename failed", artist=artist_name, album=_name_update.get("album"), error=str(exc))
+                        logger.warning("[ALBUM_NAME] Deferred rename failed", artist=artist_name, album=_name_update.get("album"), error=str(exc))
             except Exception as exc:
                 logger.debug("[ALBUM_NAME] Deferred rename batch failed", artist=artist_name, error=str(exc))
 
@@ -1801,11 +1826,35 @@ def run_scan(
                 try:
                     _new_name, _reason = resolve_album_name(artist=artist, album=album)
                     if _reason and _new_name and _new_name != album:
-                        _deferred_album_renames.setdefault(artist, []).append({
-                            "album": album,
-                            "new_name": _new_name,
-                            "reason": _reason,
-                        })
+                        # Validate BEFORE queueing: reject a proposal that only
+                        # repeats an annotation the album already carries (the
+                        # "(tour edition) (tour edition)" defect), or that would
+                        # drop the edition the library uses to keep pressings
+                        # distinct. A partly-duplicated proposal is salvaged to
+                        # its collapsed form.
+                        _resolved, _verdict = safe_album_rename(album, _new_name)
+                        if not _resolved:
+                            logger.debug(
+                                "[ALBUM_NAME] Rename rejected",
+                                artist=artist, album=album,
+                                proposed=_new_name, reason=_verdict,
+                            )
+                            if "duplicat" in _verdict:
+                                log_unified(
+                                    f"[ALBUM_NAME] Rejected duplicate-annotation rename for "
+                                    f"'{artist} - {album}' → '{_new_name}' ({_verdict})"
+                                )
+                        else:
+                            # Keyed on the casefolded source album so the same
+                            # rename cannot be queued twice for one artist.
+                            _rename_key = str(album).strip().casefold()
+                            _rename_bucket = _deferred_album_renames.setdefault(artist, {})
+                            if _rename_key not in _rename_bucket:
+                                _rename_bucket[_rename_key] = {
+                                    "album": album,
+                                    "new_name": _resolved,
+                                    "reason": f"{_reason}; {_verdict}",
+                                }
                 except Exception as exc:
                     logger.debug("[ALBUM_NAME] Cleaning skipped", artist=artist, album=album, error=str(exc))
 
