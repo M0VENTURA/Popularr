@@ -13,26 +13,21 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
   {% endif %}
-  
+
   <link rel="stylesheet" href="{{ versioned_static('css/popularr.css') }}">
-  
-  <style>
-    /* Tightened Desktop Navbar Layout */
-    .nav-brand-row { flex: 1 1 100%; order: 1; }
-    .nav-search-wrapper { flex: 1 1 100%; order: 3; margin-top: 0.5rem; }
-    .nav-links-wrapper { order: 4; width: 100%; }
-    
-    @media (min-width: 992px) {
-      .nav-brand-row { flex: 0 0 auto !important; width: auto; }
-      .nav-search-wrapper { flex: 0 1 320px; margin-top: 0; margin-left: 1rem; margin-right: 1rem; order: 2; }
-      .nav-links-wrapper { flex: 0 0 auto; width: auto; order: 3; }
-    }
-  </style>
+
+  {#
+    The navbar layout rules that used to live in an inline <style> block here
+    now sit in popularr.css under "Navbar Layout". They were tightly coupled
+    to --navbar-height (which popularr.css owns), so splitting them across two
+    files meant a change to one could silently invalidate the other.
+  #}
 </head>
 <body>
+
   <nav class="navbar navbar-expand-lg navbar-dark fixed-top shadow-sm" style="background-color: var(--primary-bg);">
     <div class="container-fluid flex-wrap flex-lg-nowrap align-items-center">
-      
+
       <!-- Brand & Mobile Toggles -->
       <div class="nav-brand-row d-flex align-items-center justify-content-between">
         <a class="navbar-brand fw-bold d-flex align-items-center gap-2" href="{{ url_for('ui.dashboard') }}">
@@ -52,7 +47,7 @@
       <div class="nav-search-wrapper" id="navSearchForm" title="Search library or MusicBrainz">
         <div class="input-group input-group-sm">
           <span class="input-group-text bg-dark border-secondary text-muted"><i class="bi bi-search"></i></span>
-          <input type="text" id="navSearchInput" class="form-control bg-dark text-light border-secondary shadow-none" 
+          <input type="text" id="navSearchInput" class="form-control bg-dark text-light border-secondary shadow-none"
                  placeholder="Search library or MusicBrainz…" autocomplete="off" aria-label="Search library or MusicBrainz"
                  onfocus="openUnifiedSearch();this.select();"
                  oninput="syncNavSearchQuery()"
@@ -94,7 +89,7 @@
             </ul>
           </li>
           <li class="nav-item"><a class="nav-link" href="/missing"><i class="bi bi-exclamation-circle text-warning"></i> <span class="d-lg-none d-xl-inline">Missing</span></a></li>
-          
+
           {% if custom_bookmark_links and custom_bookmark_links|length > 0 %}
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle" href="#" id="bookmarksDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
@@ -107,11 +102,11 @@
             </ul>
           </li>
           {% endif %}
-          
+
           <li class="nav-item d-none d-lg-block"><a class="nav-link px-2" href="{{ url_for('ui.logs') }}" title="Logs"><i class="bi bi-file-text"></i></a></li>
           <li class="nav-item d-none d-lg-block"><a class="nav-link px-2" href="{{ url_for('ui.help_page') }}" title="Help"><i class="bi bi-question-circle"></i></a></li>
           <li class="nav-item d-none d-lg-block"><a class="nav-link px-2" href="{{ url_for('ui.config_editor') }}" title="Config"><i class="bi bi-gear"></i></a></li>
-          
+
           {% if session.get('username') %}
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
@@ -131,11 +126,24 @@
     </div>
   </nav>
 
-  <main class="container-fluid" style="padding-top: 6rem;">
+  {#
+    No inline `style="padding-top: 6rem"` here any more.
+
+    6rem (96px) was a THIRD hard-coded navbar height, alongside the 68px
+    token in popularr.css and the 112px fallback in dashboard.css. Because an
+    inline style outranks any normal stylesheet rule, the 6rem always won and
+    the --navbar-height token had no effect at all — which is why content sat
+    too low on desktop and the search flyout did not line up with the navbar.
+
+    popularr.css now sets
+        padding-top: calc(var(--navbar-height) + 0.75rem)
+    and the script at the end of this file measures the real navbar and writes
+    that token, so the spacing is exact at every breakpoint.
+  #}
+  <main class="container-fluid">
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% include 'layouts/_flash_messages.html' ignore missing %}
     {% endwith %}
-
     {% block content %}{% endblock %}
   </main>
 
@@ -151,6 +159,23 @@
     </div>
   </div>
 
+  {#
+    GLOBAL SEARCH MODALS — included ONCE, here, for every page.
+
+    _musicbrainz_search_modal.html wraps
+    components/_musicbrainz_search_component.html, which renders fixed ids
+    (mbSearchArtist, mbSearchResults, mbSelectedRelease, ...).
+    `performMbSearch()` resolves those with document.getElementById(), which
+    returns the FIRST match in DOM order — i.e. the copy below.
+
+    Any page that includes the component again therefore ends up with the
+    search writing results into THIS hidden modal while the visible one shows
+    its empty placeholder. Do not include the component anywhere else; call
+    openGlobalMbSearch(artist, album, callback) instead.
+
+    These wrappers are `display: contents` in popularr.css so they do not
+    become empty flex items in the body's column layout.
+  #}
   <div id="global-mb-search-container">
       {% include 'components/_musicbrainz_search_modal.html' ignore missing %}
   </div>
@@ -159,9 +184,26 @@
       {% include 'components/_unified_search_modal.html' ignore missing %}
   </div>
 
-  <!-- Global Player Bar -->
-  <div id="globalPlayerBar" class="d-none" style="background:rgba(18,18,18,0.97); border-top:1px solid var(--border-color); backdrop-filter:blur(10px); padding:0.5rem 1rem; box-shadow:0 -4px 16px rgba(0,0,0,0.5); position: fixed; bottom: 0; left: 0; right: 0; z-index: 1030;">
+  {#
+    GLOBAL PLAYER BAR
+
+    This is a FLEX FOOTER ITEM of <body>, not an overlay. That is what makes
+        body.player-visible { --footer-stack-height: status + player }
+    correct, and it is why .sticky-save-bar sits above the player instead of
+    behind it.
+
+    The inline `position: fixed; bottom: 0; left: 0; right: 0; z-index: 1030`
+    that used to be here detached the bar from the flex column, so the footer
+    stack maths silently went wrong and the bar overlaid page content.
+
+    popularr.css sets `position: relative` — NOT `static`. #playerQueuePanel
+    below is `position: absolute; bottom: 100%`, so it needs the bar to remain
+    a positioning context; `static` would let the Up Next panel escape to the
+    viewport. Only the visual styling is kept inline here.
+  #}
+  <div id="globalPlayerBar" class="d-none" style="background:rgba(18,18,18,0.97); border-top:1px solid var(--border-color); backdrop-filter:blur(10px); padding:0.5rem 1rem; box-shadow:0 -4px 16px rgba(0,0,0,0.5);">
     <audio id="globalAudioEl" preload="none"></audio>
+
     <div id="playerQueuePanel" class="d-none">
       <div class="d-flex justify-content-between align-items-center px-1 mb-2 border-bottom border-secondary pb-2">
         <small class="text-muted fw-bold text-uppercase"><i class="bi bi-list-ul me-1"></i>Up Next <span id="playerQueueCount" class="badge bg-secondary ms-1">0</span></small>
@@ -169,21 +211,21 @@
       </div>
       <div id="playerQueueList" class="d-flex flex-column gap-1" style="max-height: 220px; overflow-y: auto; scrollbar-width: thin;"></div>
     </div>
-    
+
     <div class="d-flex align-items-center gap-2 gap-md-3" style="max-width:1400px; margin:0 auto;">
       <img id="playerArt" src="" alt="Album art" class="shadow-sm" style="width:48px;height:48px;object-fit:cover;border-radius:6px;flex-shrink:0;display:none;cursor:pointer;" title="Show queue" onclick="Player.toggleQueue()">
-      
+
       <div class="flex-grow-1 min-w-0" style="cursor:pointer;" title="Show queue" onclick="Player.toggleQueue()">
         <div id="playerTitle" class="text-truncate fw-bold text-light" style="font-size:0.9rem;line-height:1.2;"></div>
         <div id="playerArtist" class="text-truncate text-muted" style="font-size:0.8rem;"></div>
       </div>
-      
+
       <div class="d-flex align-items-center gap-2 flex-shrink-0 mx-auto">
         <button id="playerPrev" class="btn btn-sm btn-dark border-secondary rounded-circle d-flex align-items-center justify-content-center" title="Previous" style="width: 32px; height: 32px;"><i class="bi bi-skip-start-fill"></i></button>
         <button id="playerPlayPause" class="btn btn-sm btn-success rounded-circle d-flex align-items-center justify-content-center shadow-sm" title="Play" style="width: 40px; height: 40px;"><i class="bi bi-play-fill fs-5" style="margin-left: 2px;"></i></button>
         <button id="playerNext" class="btn btn-sm btn-dark border-secondary rounded-circle d-flex align-items-center justify-content-center" title="Next" style="width: 32px; height: 32px;"><i class="bi bi-skip-end-fill"></i></button>
       </div>
-      
+
       <div class="d-none d-md-flex flex-grow-1 align-items-center gap-2 ms-3">
         <small id="playerCurrentTime" class="text-muted font-monospace flex-shrink-0" style="font-size:0.75rem; width: 35px; text-align:right;">0:00</small>
         <div id="playerProgress" class="flex-grow-1" role="progressbar" style="height:6px;background:var(--tertiary-bg);border-radius:3px;cursor:pointer;overflow:hidden;">
@@ -191,10 +233,10 @@
         </div>
         <small id="playerTotalTime" class="text-muted font-monospace flex-shrink-0" style="font-size:0.75rem; width: 35px;">0:00</small>
       </div>
-      
+
       <div class="d-none d-lg-flex align-items-center gap-2 flex-shrink-0 border-start border-secondary ps-3">
         <i class="bi bi-volume-up text-muted" style="font-size:1rem;"></i>
-        <input id="playerVolume" type="range" min="0" max="1" step="0.05" value="1" style="width:80px;height:6px;accent-color:var(--spotify-green);" title="Volume">
+        <input id="playerVolume" type="range" min="0" max="1" step="0.05" value="1" style="width:80px;height:6px;accent-color:var(--spotify-green);" title="Volume" aria-label="Volume">
         <button id="playerQueueToggle" class="btn btn-sm btn-dark border-secondary ms-2" title="Show queue"><i class="bi bi-list-ul"></i></button>
         <button id="playerStop" class="btn btn-sm btn-outline-danger border-0" title="Stop &amp; close player"><i class="bi bi-x-lg"></i></button>
       </div>
@@ -206,8 +248,8 @@
   {% else %}
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
   {% endif %}
-  
-  <div id="scanStatusBar" role="button" tabindex="0" onclick="openUnifiedLogModal()" title="Open scanning log">
+
+  <div id="scanStatusBar" role="button" tabindex="0" onclick="openUnifiedLogModal()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openUnifiedLogModal();}" title="Open scanning log">
     <span id="scanStatusIcon" class="scan-status-idle"><i class="bi bi-circle"></i></span>
     <span id="scanQueueSummary" class="scan-queue-summary d-none"></span>
     <span id="scanStatusLine" class="text-truncate">Idle</span>
@@ -239,7 +281,7 @@
             <button type="button" class="btn btn-sm btn-dark border-secondary log-source-tab" data-source="system" onclick="switchLogSource('system')"><i class="bi bi-gear me-1"></i>System</button>
           </div>
         </div>
-        
+
         <div class="modal-body p-0 d-flex flex-column" style="background: #111;">
           <div class="d-flex align-items-center justify-content-between p-2" style="background: #1a1a1a; border-bottom: 1px solid #333;">
             <small class="text-muted fw-bold text-uppercase"><i class="bi bi-broadcast me-1"></i>Live stream</small>
@@ -254,11 +296,52 @@
     </div>
   </div>
 
+  {#
+    Keep --navbar-height honest.
+
+    The navbar is flex-wrap: its search row wraps below the lg breakpoint, so
+    its real height changes with the viewport AND with how many nav links are
+    rendered (custom bookmark links, the logged-in user menu). popularr.css
+    ships sensible per-breakpoint values, but measuring is exact.
+
+    Everything that consumes the token follows automatically: main's
+    padding-top, .search-flyout's top and max-height, .navbar-collapse.show,
+    and #dashboardRow.
+  #}
+  <script>
+    (function () {
+      var nav = document.querySelector('.navbar.fixed-top');
+      if (!nav) return;
+
+      function syncNavbarHeight() {
+        var h = nav.offsetHeight;
+        if (h > 0) {
+          document.documentElement.style.setProperty('--navbar-height', h + 'px');
+        }
+      }
+
+      syncNavbarHeight();
+      window.addEventListener('load', syncNavbarHeight);
+
+      if (typeof ResizeObserver !== 'undefined') {
+        new ResizeObserver(syncNavbarHeight).observe(nav);
+      } else {
+        window.addEventListener('resize', syncNavbarHeight);
+      }
+
+      // The mobile menu expands the navbar; Bootstrap fires these on collapse.
+      var collapseEl = document.getElementById('navbarNav');
+      if (collapseEl) {
+        collapseEl.addEventListener('shown.bs.collapse', syncNavbarHeight);
+        collapseEl.addEventListener('hidden.bs.collapse', syncNavbarHeight);
+      }
+    })();
+  </script>
+
   <script src="{{ versioned_static('js/player.js') }}"></script>
   <script src="{{ versioned_static('js/musicbrainz-folder-groups.js') }}"></script>
   <script src="{{ versioned_static('js/main.js') }}"></script>
   <script src="{{ versioned_static('js/unified_search.js') }}"></script>
-
   {% block scripts %}{% endblock %}
 </body>
 </html>
