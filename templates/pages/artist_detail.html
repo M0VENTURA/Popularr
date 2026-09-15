@@ -115,6 +115,22 @@
   {% endif %}
 {% endmacro %}
 
+<style>
+  #artistMainPageContainer.filter-hide-missing .missing-album-item { display: none !important; }
+  #artistMainPageContainer.filter-hide-library .library-album-item { display: none !important; }
+  .category-section.category-hide-missing .missing-album-item { display: none !important; }
+  .cursor-pointer { cursor: pointer; }
+
+  /* Fix Bootstrap nav-link default blue colors */
+  #artistPageTabs .nav-link {
+    --bs-nav-link-color: #adb5bd;
+    --bs-nav-link-hover-color: #ffffff;
+  }
+  #artistPageTabs .nav-link.active {
+    --bs-nav-pills-link-active-color: #ffffff;
+  }
+</style>
+
 <div class="container-fluid mt-3 artist-page" id="artistMainPageContainer">
 
   <nav aria-label="breadcrumb">
@@ -267,6 +283,11 @@
       </button>
     </li>
     <li class="nav-item" role="presentation">
+      <button class="nav-link fw-bold" id="tab-similar-btn" data-bs-toggle="tab" data-bs-target="#tab-similar" type="button" role="tab" aria-selected="false">
+        <i class="bi bi-people me-1"></i> Similar Artists
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
       <button class="nav-link fw-bold" id="tab-about-btn" data-bs-toggle="tab" data-bs-target="#tab-about" type="button" role="tab" aria-selected="false">
         <i class="bi bi-info-circle me-1"></i> About
       </button>
@@ -376,7 +397,23 @@
       </div>
     </div>
 
-    <!-- TAB 3: ABOUT -->
+    <!-- TAB 3: SIMILAR ARTISTS -->
+    <div class="tab-pane fade" id="tab-similar" role="tabpanel" aria-labelledby="tab-similar-btn">
+      <div class="card mb-4 shadow-sm bg-dark text-light border-secondary">
+        <div class="card-header border-secondary">
+          <h5 class="card-title mb-0 fw-bold"><i class="bi bi-person-heart text-danger me-2"></i>Similar Artists</h5>
+        </div>
+        <div class="card-body p-3">
+          <div id="artistSimilarArtistsContainer">
+            <div class="text-center py-4 text-muted">
+              <span class="spinner-border spinner-border-sm me-2"></span>Loading similar artists...
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 4: ABOUT -->
     <div class="tab-pane fade" id="tab-about" role="tabpanel" aria-labelledby="tab-about-btn">
       <div class="card mb-3 shadow-sm">
         <div class="card-body">
@@ -433,32 +470,9 @@
           </div>
         </div>
       </div>
-
-      <div class="card mb-3 shadow-sm" id="artist-similar-section">
-        <div class="card-body p-3">
-          <h6 class="fw-bold mb-2"><i class="bi bi-people me-2 text-danger"></i>Similar Artists</h6>
-          <div id="artistSimilarArtistsContainer">
-            {% set similar_list = (similar_artists.display if similar_artists else []) or [] %}
-            {% if similar_list %}
-              <div class="d-flex flex-wrap gap-2">
-                {% for sa in similar_list %}
-                  <a href="/artist/{{ sa.name|path_segment }}" class="badge artist-similar-card text-decoration-none" style="font-size: 0.95rem; padding: 0.45rem 0.6rem;">
-                    {{ sa.name }}
-                  </a>
-                {% endfor %}
-              </div>
-            {% else %}
-              <div class="text-muted small">
-                <span>No similar artists available yet.</span>
-                <br><small>Similar artists are collected during popularity scans from Last.fm and ListenBrainz.</small>
-              </div>
-            {% endif %}
-          </div>
-        </div>
-      </div>
     </div>
 
-    <!-- TAB 4: GENRES & MOODS -->
+    <!-- TAB 5: GENRES & MOODS -->
     <div class="tab-pane fade" id="tab-genres" role="tabpanel" aria-labelledby="tab-genres-btn">
       <div class="card mb-4 shadow-sm bg-dark text-light border-secondary">
         <div class="card-header border-secondary">
@@ -533,13 +547,6 @@
   </div>
 </div>
 
-<style>
-  #artistMainPageContainer.filter-hide-missing .missing-album-item { display: none !important; }
-  #artistMainPageContainer.filter-hide-library .library-album-item { display: none !important; }
-  .category-section.category-hide-missing .missing-album-item { display: none !important; }
-  .cursor-pointer { cursor: pointer; }
-</style>
-
 {% include 'components/modals/_track_edit.html' ignore missing %}
 {% include 'components/modals/_organize_group.html' ignore missing %}
 {% include 'components/modals/_slskd_results.html' ignore missing %}
@@ -563,13 +570,90 @@
 
 <script src="{{ versioned_static('js/genre-utils.js') }}"></script>
 <script src="{{ versioned_static('js/artist_detail.js') }}"></script>
-{% include 'components/_musicbrainz_search_functions.html' ignore missing %}
+<!-- Imported to allow the global MusicBrainz / Soulseek modal to open when a missing artist is clicked -->
+<script src="{{ versioned_static('js/downloads.js') }}"></script>
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
   if (typeof window.loadArtistCoveredBy === 'function') {
     window.loadArtistCoveredBy(window.artistName);
   }
+
+  // Fetch and render rich Similar Artists grid
+  const container = document.getElementById('artistSimilarArtistsContainer');
+  if (!container || !window.artistName) return;
+
+  fetch(`/api/artist/${encodeURIComponent(window.artistName)}/similar`)
+      .then(r => r.json())
+      .then(data => {
+          if (!data.similar_artists) {
+              container.innerHTML = '<div class="text-center py-3 text-muted small">No similar artists data available.</div>';
+              return;
+          }
+
+          let inCollection = data.similar_artists.in_collection || [];
+          let missing = data.similar_artists.missing || [];
+
+          if (!inCollection.length && !missing.length) {
+              // Fallback for older backend format
+              const merged = [...(data.similar_artists.lastfm || []), ...(data.similar_artists.listenbrainz || [])]
+                  .map(a => typeof a === 'string' ? {name: a} : a)
+                  .filter((v, i, a) => a.findIndex(t => t.name === v.name) === i);
+              missing = merged.slice(0, 12);
+          }
+
+          if (!inCollection.length && !missing.length) {
+              container.innerHTML = '<div class="text-center py-3 text-muted small">No similar artists data available.</div>';
+              return;
+          }
+
+          const renderGrid = (artists, inCol) => {
+              let html = '<div class="row g-2">';
+              artists.forEach(a => {
+                  const img = a.image_url || a.thumb || 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="200"%3E%3Crect fill="%232a2a2a" width="200" height="200"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%23666" font-size="24"%3E%3Ctspan x="50%25" dy="-10"%3E%26%23128100%3B%3C/tspan%3E%3C/text%3E%3C/svg%3E';
+                  
+                  const action = inCol 
+                      ? `window.location.href='/artist/${encodeURIComponent(a.name)}'` 
+                      : `if(typeof openGlobalMbSearch === 'function'){ openGlobalMbSearch('${escapeHtml(a.name).replace(/'/g, "\\'")}', ''); } else { alert('Search unavailable'); }`;
+
+                  html += `
+                      <div class="col-4 col-sm-3 col-md-4 col-lg-3 col-xl-2">
+                          <div class="card h-100 bg-dark border-secondary overflow-hidden shadow-sm" style="cursor:pointer; transition: transform 0.2s;" onclick="${action}" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
+                              <img src="${img}" class="card-img-top" style="aspect-ratio:1; object-fit:cover;" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'200\\' height=\\'200\\'%3E%3Crect fill=\\'%232a2a2a\\' width=\\'200\\' height=\\'200\\'/%3E%3Ctext x=\\'50%25\\' y=\\'50%25\\' text-anchor=\\'middle\\' dy=\\'.3em\\' fill=\\'%23666\\' font-size=\\'16\\'%3ENo Image%3C/text%3E%3C/svg%3E';">
+                              <div class="card-body p-2 text-center d-flex align-items-center justify-content-center" style="background: rgba(0,0,0,0.8); min-height: 40px;">
+                                  <div class="extra-small fw-bold text-light" style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; line-height: 1.2;" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</div>
+                              </div>
+                          </div>
+                      </div>
+                  `;
+              });
+              html += '</div>';
+              return html;
+            };
+
+            let finalHtml = '';
+            if (inCollection.length) {
+                finalHtml += '<h6 class="text-success small fw-bold text-uppercase mb-3"><i class="bi bi-collection-play me-1"></i> In Collection</h6>';
+                finalHtml += renderGrid(inCollection, true);
+                if (missing.length) finalHtml += '<hr class="border-secondary my-4">';
+            }
+
+            if (missing.length) {
+                finalHtml += '<h6 class="text-info small fw-bold text-uppercase mb-3"><i class="bi bi-cloud-download me-1"></i> Not In Collection</h6>';
+                finalHtml += renderGrid(missing, false);
+            }
+
+            container.innerHTML = finalHtml;
+      })
+      .catch(() => {
+          container.innerHTML = '<div class="text-danger small py-3 text-center">Failed to load similar artists.</div>';
+      });
 });
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.appendChild(document.createTextNode(String(text || '')));
+    return div.innerHTML;
+}
 </script>
 {% endblock %}
