@@ -22,6 +22,25 @@ Correctness controls added in this revision:
 - Per-row SAVEPOINTs in write loops, so one failed row cannot abort the whole
   PostgreSQL transaction and silently drop every remaining update.
 - Release MBID resolution is skipped when no track actually needs one.
+
+Correctness control added in THIS revision:
+- The corroboration guard above is deliberately conservative about what it
+  writes to track TITLES and to the persisted, user-facing album type: an
+  uncorroborated "+live"/"+acoustic" classification is downgraded to a plain
+  "album" so nothing gets destructively retitled. That downgrade previously
+  discarded the raw MusicBrainz classification entirely -- once corroboration
+  failed, no field anywhere retained the fact that MusicBrainz itself reported
+  the release as live, which meant a downstream consumer that only needs to
+  know "is this release live" for a NON-destructive purpose (e.g. gating
+  Last.fm's title-based version matching so it doesn't merge a live track's
+  listener count with its studio namesake) had no way to find that out for an
+  album whose local title/track-title heuristics happened not to corroborate
+  it. ``_resolve_album_type`` now also returns the raw, pre-corroboration
+  MusicBrainz type alongside the safe/corroborated one, and ``enrich_album``
+  surfaces it as ``musicbrainz_secondary_type_raw`` on its result so callers
+  that only need a read-only "is this live" signal are not limited by the
+  title-corroboration heuristic that (correctly) still guards retitling and
+  the persisted album type.
 """
 from __future__ import annotations
 
@@ -1049,7 +1068,26 @@ def _resolve_album_type(
     album_artist: str | None,
     spotify_type: str | None,
     tracks: list[dict[str, Any]],
-) -> tuple[str, str | None, str | None]:
+) -> tuple[str, str | None, str | None, str | None]:
+    """Resolve the album type used for persistence/retitling, PLUS the raw
+    MusicBrainz secondary type before the corroboration guard downgrades it.
+
+    Returns ``(detected, mb_type, release_group_mbid, mb_type_raw)``:
+
+    - ``detected`` / ``mb_type`` / ``release_group_mbid`` behave exactly as
+      before -- ``detected`` is the safe, corroborated type used for display,
+      persistence and (elsewhere) track retitling.
+    - ``mb_type_raw`` is NEW: it is MusicBrainz's own secondary-type
+      classification (e.g. ``"album+live"``), set whenever MusicBrainz
+      returned a match, REGARDLESS of whether the corroboration guard below
+      accepted or rejected it for the safe/destructive paths. Callers that
+      only need a read-only "is this release live" signal -- and are not
+      retitling tracks or writing the persisted album type -- should use
+      this field instead of ``detected``, since ``detected`` can be silently
+      downgraded to a plain "album" for releases MusicBrainz correctly
+      flagged as live but whose local title/track-title heuristics didn't
+      happen to corroborate.
+    """
     context = {"artist": artist, "album": album}
     detected = _detect_album_type(artist, album, album_artist, spotify_type)
     Logger.info("[ENRICH] local album type detected", detected_type=detected, **context)
@@ -1090,7 +1128,7 @@ def _resolve_album_type(
         release_group_mbid=release_group_mbid,
         **context,
     )
-    return detected, mb_type, release_group_mbid
+    return detected, mb_type, release_group_mbid, original_mb_type
 
 
 def _needs_release_mbid(artist: str, album: str) -> bool:
@@ -1352,7 +1390,7 @@ def ensure_album_type(album_row: dict[str, Any], options: dict[str, Any] | None 
 
     detected: str | None = None
     try:
-        detected, _, release_group_mbid = _resolve_album_type(
+        detected, _mb_type, release_group_mbid, _mb_type_raw = _resolve_album_type(
             artist,
             album,
             str(album_row.get("album_artist") or "") or None,
@@ -1778,6 +1816,12 @@ def enrich_album(
     similar: dict[str, list[Any]] = {"lastfm": [], "listenbrainz": []}
     detected_type = "album"
     is_heterogeneous = False
+    # Raw, pre-corroboration MusicBrainz secondary type (e.g. "album+live").
+    # Set whenever MusicBrainz returned a match, independent of whether the
+    # corroboration guard accepted it for the safe/persisted ``detected_type``
+    # below. See ``_resolve_album_type`` docstring for why this is tracked
+    # separately.
+    mb_type_raw: str | None = None
 
     def _result(detected: str, heterogeneous: bool) -> dict[str, Any]:
         extras: dict[str, Any] = {}
@@ -1787,11 +1831,19 @@ def enrich_album(
             extras["similar_artists_lastfm"] = similar["lastfm"]
         if similar.get("listenbrainz"):
             extras["similar_artists_listenbrainz"] = similar["listenbrainz"]
+        if mb_type_raw:
+            extras["musicbrainz_secondary_type_raw"] = mb_type_raw
         return {
             "album_row": album_row,
             "album_context": {**album_context, **extras},
             "stat_eligible_tracks": stat_eligible_tracks,
             "detected_album_type": detected,
+            # Top-level, in addition to the copy folded into "album_context"
+            # above: this is what a caller reads directly off the dict
+            # returned by ``enrich_album()`` (e.g. track_stage's
+            # ``album_result`` parameter), without needing to know it is
+            # also nested under "album_context".
+            "musicbrainz_secondary_type_raw": mb_type_raw,
             "is_heterogeneous": heterogeneous,
             "similar_artists": similar,
             "artist_metadata": metadata,
@@ -1806,7 +1858,7 @@ def enrich_album(
                 detected_type = _detect_album_type(artist, album, album_artist or None, spotify_type or None)
                 is_heterogeneous = any(marker in detected_type.casefold() for marker in _HETEROGENEOUS_MARKERS)
             else:
-                detected_type, mb_type, release_group_mbid = _resolve_album_type(
+                detected_type, mb_type, release_group_mbid, mb_type_raw = _resolve_album_type(
                     artist, album, album_artist or None, spotify_type or None, album_tracks
                 )
                 is_heterogeneous = any(marker in detected_type.casefold() for marker in _HETEROGENEOUS_MARKERS)
