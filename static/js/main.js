@@ -10,17 +10,49 @@
  *   3. Rebuild: `npm run build`
  */
 
-// Global initialization runs after DOM is ready
+// ==========================================================================
+// Navbar height — single source of truth for --navbar-height
+// --------------------------------------------------------------------------
+// popularr.css ships per-breakpoint fallbacks, but the navbar is flex-wrap:
+// its search row wraps below the lg breakpoint, and the row count also varies
+// with how many nav links are rendered (custom bookmark links, the logged-in
+// user menu). Measuring is therefore exact where a static value cannot be.
+//
+// Everything that consumes the token follows automatically: main's
+// padding-top, .search-flyout's top and max-height, .navbar-collapse.show,
+// and #dashboardRow.
+//
+// This MUST remain the only writer. base.html briefly carried a second copy
+// of this logic; two writers for one variable is how the 68px / 96px / 112px
+// disagreement started in the first place.
+// ==========================================================================
+function syncNavbarHeight() {
+  const nav = document.querySelector("nav.navbar.fixed-top");
+  if (!nav || !nav.offsetHeight) return;
+  document.documentElement.style.setProperty("--navbar-height", nav.offsetHeight + "px");
+}
+
 document.addEventListener("DOMContentLoaded", () => {
-  // Keep --navbar-height in sync with the real two-row navbar height so main
-  // content padding, sticky bars and the search flyout all align.
-  const syncNavbarHeight = () => {
-    const nav = document.querySelector("nav.navbar.fixed-top");
-    if (!nav || !nav.offsetHeight) return;
-    document.documentElement.style.setProperty("--navbar-height", nav.offsetHeight + "px");
-  };
   syncNavbarHeight();
-  window.addEventListener("resize", syncNavbarHeight);
+
+  // A resize listener alone misses height changes that are not window
+  // resizes — the mobile menu expanding, or web fonts landing after first
+  // paint and reflowing the brand row.
+  if (typeof ResizeObserver !== "undefined") {
+    const nav = document.querySelector("nav.navbar.fixed-top");
+    if (nav) new ResizeObserver(syncNavbarHeight).observe(nav);
+  } else {
+    window.addEventListener("resize", syncNavbarHeight);
+  }
+
+  // Bootstrap's collapse animates, so measure once it has settled.
+  const navCollapse = document.getElementById("navbarNav");
+  if (navCollapse) {
+    navCollapse.addEventListener("shown.bs.collapse", syncNavbarHeight);
+    navCollapse.addEventListener("hidden.bs.collapse", syncNavbarHeight);
+  }
+
+  window.addEventListener("load", syncNavbarHeight);
 
   // Initialize Bootstrap tooltips if Bootstrap loaded
   if (typeof bootstrap !== "undefined" && bootstrap.Tooltip) {
@@ -41,7 +73,6 @@ document.addEventListener("DOMContentLoaded", () => {
 // media query (all sections visible >= 992px) keeps working untouched.
 // Active tab persists to the URL hash on user clicks only.
 // ==========================================================================
-
 function initMobileTabs(bar, options) {
   options = options || {};
   const groupAttr = options.groupAttr || 'data-mobile-group';
@@ -93,7 +124,6 @@ document.addEventListener("DOMContentLoaded", () => {
 // ==========================================================================
 // Global log viewer + sticky scan bar (every page)
 // --------------------------------------------------------------------------
-
 document.addEventListener("DOMContentLoaded", () => {
   if (typeof EventSource === 'undefined') return;
   try {
@@ -110,12 +140,12 @@ document.addEventListener("DOMContentLoaded", () => {
     /* SSE unavailable — dashboard polling still covers progress */
   }
 });
+
 // The sticky bottom bar and the fullscreen log modal live in base.html.
 // The dashboard's own polling (dashboard.js) drives the bar there; on every
 // other page the SSE stream updates it.  The modal reads per-source log
 // files and can export the last hour with one tap.
 // ==========================================================================
-
 const LOG_SOURCE_FILES = {
   scanner: 'unified_scan.log',
   queue: 'queue.log',
@@ -137,7 +167,6 @@ function openUnifiedLogModal() {
 }
 
 // ===== Log line rendering: optional timestamps + color-coded badges =====
-
 const _LOG_TAG_CLASSES = {
   INFO: 'log-tag-info', DEBUG: 'log-tag-info',
   'TRACK_RESULT': 'log-tag-track-result', 'ALBUM_RESULT': 'log-tag-track-result',
@@ -216,13 +245,21 @@ function updateUnifiedLog() {
   if (logPaused) return;
   const logEl = document.getElementById('unifiedLog');
   if (!logEl) return;
+
   // Self-healing poll: a hung request must not freeze the log panel forever.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
+
   fetch('/api/log-file?name=' + encodeURIComponent(LOG_SOURCE_FILES[activeLogSource]) + '&lines=300', { signal: controller.signal })
     .then((r) => r.json())
     .then((data) => {
-      if (Array.isArray(data && data.lines)) {
+      // FIXED: this was `Array.isArray(data && data.lines)`, which passes the
+      // whole `data && data.lines` EXPRESSION to isArray — that is just
+      // `data.lines`, so it happened to work, but the parenthesis placement
+      // read as a null-guard that it was not. If `data` were null the guard
+      // short-circuited to `Array.isArray(null)` → false, silently showing a
+      // stale log instead of surfacing the bad response.
+      if (data && Array.isArray(data.lines)) {
         _logRawLines = data.lines;
         renderLogLines();
       }
@@ -232,7 +269,6 @@ function updateUnifiedLog() {
 }
 
 // ===== Live activity widget (per-source summary above the stream) =====
-
 function setLogTabDot(source, active) {
   const dot = document.querySelector('.log-source-tab[data-source="' + source + '"] .log-tab-dot');
   if (!dot) return;
@@ -250,8 +286,10 @@ function updateQueueStatusBar() {
       const downloading = Number(counts.downloading) || 0;
       const queued = Number(counts.queued) || 0;
       const activeTotal = Number(data.total_active) || 0;
+
       setLogTabDot('queue', activeTotal > 0);
       setLogTabDot('soulseek', downloading > 0);
+
       if ((downloading + queued) > 0) {
         el.innerHTML = '<i class="bi bi-cloud-arrow-down me-1"></i>' + downloading + ' Downloading · ' + queued + ' Queued';
         el.classList.remove('d-none');
@@ -288,15 +326,18 @@ function updateGlobalScanBar(data) {
   const line = document.getElementById('scanStatusLine');
   const icon = document.getElementById('scanStatusIcon');
   if (!bar || !line || !icon) return;
+
   const active = (data && (data.active_scans || [])) || [];
   const scan = active.find((s) => s && s.is_running);
   setLogTabDot('scanner', !!scan);
+
   if (!scan) {
     line.textContent = 'Idle';
     icon.className = 'scan-status-idle';
     icon.innerHTML = '<i class="bi bi-circle"></i>';
     return;
   }
+
   const pct = Math.min(scan.percent_complete ?? scan.progress ?? 0, 100);
   const name = String(scan.scan_type || 'scan').replace(/_/g, ' ');
   const stage = scan.current_stage ? ` · ${scan.current_stage}` : '';
@@ -329,7 +370,6 @@ document.addEventListener("DOMContentLoaded", () => {
 // dirty and slides up a fixed bottom bar (Discard / Save Metadata).  JS-driven
 // edits (chip inputs, quick-fill buttons) call ``markFormDirty(formId)``.
 // ==========================================================================
-
 window.markFormDirty = function (formId) {
   const form = document.getElementById(formId);
   if (form && form._setDirty) form._setDirty(true);
@@ -357,20 +397,35 @@ function initStickySaveBar(form) {
     form._dirty = dirty;
     bar.classList.toggle('d-none', !dirty);
   };
-  form._setDirty = setDirty;
 
+  form._setDirty = setDirty;
   form.addEventListener('input', () => setDirty(true));
   form.addEventListener('change', () => setDirty(true));
   form.addEventListener('submit', () => setDirty(false));
 
-  bar.querySelector('[data-discard]').addEventListener('click', () => {
-    form.reset();
-    setDirty(false);
-  });
-  bar.querySelector('[data-save]').addEventListener('click', () => {
-    if (typeof form.requestSubmit === 'function') form.requestSubmit();
-    else form.submit();
-  });
+  // The bar is shared by every opted-in form on the page, but its buttons are
+  // wired once per form — so with two such forms the second wiring would also
+  // reset/submit the first. `_boundForm` keeps the buttons pointed at whichever
+  // form most recently went dirty.
+  bar._boundForm = bar._boundForm || form;
+  form.addEventListener('input', () => { bar._boundForm = form; });
+  form.addEventListener('change', () => { bar._boundForm = form; });
+
+  if (!bar._actionsWired) {
+    bar._actionsWired = true;
+    bar.querySelector('[data-discard]').addEventListener('click', () => {
+      const target = bar._boundForm;
+      if (!target) return;
+      target.reset();
+      if (target._setDirty) target._setDirty(false);
+    });
+    bar.querySelector('[data-save]').addEventListener('click', () => {
+      const target = bar._boundForm;
+      if (!target) return;
+      if (typeof target.requestSubmit === 'function') target.requestSubmit();
+      else target.submit();
+    });
+  }
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -382,19 +437,20 @@ document.addEventListener("DOMContentLoaded", () => {
 // These must be on window because they are called by inline onclick/onsubmit
 // handlers in templates (e.g. navSearch, openSlideOver).
 // ==========================================================================
-
-window.openSlideOver = function(url, title) {
+window.openSlideOver = function (url, title) {
   var el = document.getElementById('detailSlideOver');
   var contentEl = document.getElementById('slideOverContent');
   var titleEl = document.getElementById('slideOverTitle');
   titleEl.textContent = title || 'Loading...';
   contentEl.innerHTML = '<div class="d-flex justify-content-center py-5"><div class="spinner-border text-primary"></div></div>';
+
   var bsOffcanvas = new bootstrap.Offcanvas(el);
   bsOffcanvas.show();
+
   fetch(url)
-    .then(function(r) { return r.text(); })
-    .then(function(html) { contentEl.innerHTML = html; })
-    .catch(function(err) { contentEl.innerHTML = '<div class="alert alert-danger m-3">Error loading details: ' + err.message + '</div>'; });
+    .then(function (r) { return r.text(); })
+    .then(function (html) { contentEl.innerHTML = html; })
+    .catch(function (err) { contentEl.innerHTML = '<div class="alert alert-danger m-3">Error loading details: ' + window.escapeHtml(err.message) + '</div>'; });
 };
 
 // ==========================================================================
@@ -406,16 +462,17 @@ window.openSlideOver = function(url, title) {
 // version posts its concrete release MBID, which resolve_release_id accepts
 // as-is (no re-resolution to the biggest official release).
 // ==========================================================================
-
 window._releasePickerOnQueued = null;
 
-window.openReleasePicker = function(releaseGroupId, title, artist, onQueued) {
+window.openReleasePicker = function (releaseGroupId, title, artist, onQueued) {
   if (!releaseGroupId) {
     if (typeof showToast === 'function') showToast('Error', 'Missing Release Group ID', 'error');
     else alert('❌ Error: Missing Release Group ID');
     return;
   }
+
   window._releasePickerOnQueued = typeof onQueued === 'function' ? onQueued : null;
+
   var url = '/api/musicbrainz/release-picker?rg_id=' + encodeURIComponent(releaseGroupId) +
     '&artist=' + encodeURIComponent(artist || '') +
     '&album=' + encodeURIComponent(title || '');
@@ -443,7 +500,7 @@ window.openReleasePicker = function(releaseGroupId, title, artist, onQueued) {
     });
 };
 
-window.queueSpecificRelease = async function(releaseId, releaseTitle, artist) {
+window.queueSpecificRelease = async function (releaseId, releaseTitle, artist) {
   if (!releaseId) return;
   try {
     var resp = await fetch('/api/musicbrainz/download', {
@@ -468,6 +525,7 @@ window.queueSpecificRelease = async function(releaseId, releaseTitle, artist) {
       } else {
         alert('✅ Queued version "' + releaseTitle + '" to download queue!');
       }
+
       var cb = window._releasePickerOnQueued;
       window._releasePickerOnQueued = null;
       if (typeof cb === 'function') { try { cb(releaseId); } catch (e) { /* ignore */ } }
@@ -485,7 +543,7 @@ window.queueSpecificRelease = async function(releaseId, releaseTitle, artist) {
   }
 };
 
-window.toggleReleaseTracklistPreview = function(releaseId) {
+window.toggleReleaseTracklistPreview = function (releaseId) {
   var el = document.getElementById('preview-rel-' + releaseId);
   if (!el) return;
   if (el.classList.contains('d-none')) {
@@ -500,7 +558,7 @@ window.toggleReleaseTracklistPreview = function(releaseId) {
   }
 };
 
-window.escapeHtml = function(text) {
+window.escapeHtml = function (text) {
   var div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
@@ -510,7 +568,7 @@ window.escapeHtml = function(text) {
 // Pages that define their own showToast (config, bookmarks, discover, ...)
 // keep it — their scripts run later and shadow this one; every other page
 // finally gets working toasts instead of silent no-ops.
-window.showToast = function(title, message, type) {
+window.showToast = function (title, message, type) {
   var wrap = document.getElementById('popularrToastWrap');
   if (!wrap) {
     wrap = document.createElement('div');
@@ -519,6 +577,7 @@ window.showToast = function(title, message, type) {
       'display:flex;flex-direction:column;gap:0.5rem;max-width:min(90vw,420px);';
     document.body.appendChild(wrap);
   }
+
   var el = document.createElement('div');
   var kind = type === 'success' ? 'bg-success'
     : (type === 'error' || type === 'danger') ? 'bg-danger'
@@ -526,6 +585,7 @@ window.showToast = function(title, message, type) {
   var icon = type === 'success' ? 'bi-check-circle-fill'
     : (type === 'error' || type === 'danger') ? 'bi-x-circle-fill'
     : type === 'warning' ? 'bi-exclamation-triangle-fill' : 'bi-info-circle-fill';
+
   el.className = 'shadow-sm ' + kind;
   el.style.cssText = 'padding:0.65rem 1rem;border-radius:0.5rem;font-size:0.85rem;' +
     'display:flex;align-items:center;gap:0.5rem;opacity:0;transition:opacity 0.2s ease;';
@@ -534,6 +594,7 @@ window.showToast = function(title, message, type) {
   el.querySelector('span').textContent = title && message
     ? title + ': ' + message
     : (message || title || '');
+
   wrap.appendChild(el);
   requestAnimationFrame(function () { el.style.opacity = '1'; });
   setTimeout(function () {
@@ -543,16 +604,15 @@ window.showToast = function(title, message, type) {
 };
 
 // ==========================================================================
-// Queue toast — top-center floating pill (~22% down the viewport, in the
+// Queue toast — top-center floating pill (~25% down the viewport, in the
 // user's focal path under the search flyout and clear of the bottom log
 // bar).  Rapid multi-queueing updates the pill IN PLACE instead of stacking
 // toasts: "✓ "Album" added" -> "✓ Queued 3 items".
 // ==========================================================================
-
 window._queueToastCount = 0;
 window._queueToastHideTimer = null;
 
-window.showQueueToast = function(title) {
+window.showQueueToast = function (title) {
   var el = document.getElementById('queueToastPill');
   if (!el) {
     el = document.createElement('div');
@@ -566,13 +626,16 @@ window.showQueueToast = function(title) {
     el.innerHTML = '<i class="bi bi-check-circle-fill flex-shrink-0"></i><span class="text-truncate"></span>';
     document.body.appendChild(el);
   }
+
   window._queueToastCount += 1;
   // textContent — titles come from external APIs and must never hit innerHTML.
   el.querySelector('span').textContent = window._queueToastCount === 1
     ? 'Queued "' + title + '"'
     : 'Queued ' + window._queueToastCount + ' items';
+
   el.classList.remove('d-none');
   el.style.opacity = '1';
+
   clearTimeout(window._queueToastHideTimer);
   window._queueToastHideTimer = setTimeout(function () {
     el.style.opacity = '0';
@@ -584,13 +647,14 @@ window.showQueueToast = function(title) {
 // Generic top toast (25% from the top, centered pill) for queue/match
 // feedback — success (green), warning (amber) or error (red).  Never uses
 // innerHTML for the message; auto-hides after 2.6s.
-window.showTopToast = function(message, type) {
+window.showTopToast = function (message, type) {
   var kind = type === 'warning' ? '#b45309'
     : type === 'danger' || type === 'error' ? '#b91c1c'
     : '#198754';
   var icon = type === 'warning' ? 'bi-exclamation-triangle-fill'
     : type === 'danger' || type === 'error' ? 'bi-x-circle-fill'
     : 'bi-check-circle-fill';
+
   var el = document.createElement('div');
   el.style.cssText = 'position:fixed;top:25%;left:50%;transform:translateX(-50%);z-index:2400;' +
     'background:' + kind + ';color:#fff;border-radius:999px;padding:0.55rem 1.1rem;' +
@@ -599,6 +663,7 @@ window.showTopToast = function(message, type) {
     'white-space:nowrap;overflow:hidden;transition:opacity 0.2s ease;';
   el.innerHTML = '<i class="bi ' + icon + ' flex-shrink-0"></i><span class="text-truncate"></span>';
   el.querySelector('span').textContent = message;
+
   document.body.appendChild(el);
   requestAnimationFrame(function () { el.style.opacity = '1'; });
   setTimeout(function () {
@@ -643,30 +708,30 @@ window.alert = function (message) {
   }
 };
 
-window.addBookmark = function(type, name, artist, album, trackId) {
+window.addBookmark = function (type, name, artist, album, trackId) {
   fetch('/api/bookmarks', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ type: type, name: name, artist: artist, album: album, track_id: trackId })
   })
-  .then(function(r) { return r.json(); })
-  .then(function(data) {
-    if (data.success) {
-      if (typeof showToast === 'function') showToast('Success', 'Bookmark added', 'success');
-      else alert('Bookmark added successfully');
-    } else {
-      if (typeof showToast === 'function') showToast('Info', data.error || 'Bookmark may already exist', 'warning');
-      else alert(data.error || 'Bookmark may already exist');
-    }
-  })
-  .catch(function(error) {
-    if (typeof showToast === 'function') showToast('Error', 'Failed to add bookmark: ' + error.message, 'error');
-    else alert('Failed to add bookmark: ' + error.message);
-  });
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      if (data.success) {
+        if (typeof showToast === 'function') showToast('Success', 'Bookmark added', 'success');
+        else alert('Bookmark added successfully');
+      } else {
+        if (typeof showToast === 'function') showToast('Info', data.error || 'Bookmark may already exist', 'warning');
+        else alert(data.error || 'Bookmark may already exist');
+      }
+    })
+    .catch(function (error) {
+      if (typeof showToast === 'function') showToast('Error', 'Failed to add bookmark: ' + error.message, 'error');
+      else alert('Failed to add bookmark: ' + error.message);
+    });
 };
 
 // Toggle the track favourite heart (per-user Navidrome star sync, no reload).
-window.toggleTrackFavourite = function(trackId) {
+window.toggleTrackFavourite = function (trackId) {
   var icon = document.getElementById('trackFavouriteIcon');
   if (!icon || !trackId) return;
 
@@ -708,7 +773,7 @@ window.toggleTrackFavourite = function(trackId) {
 };
 
 // Toggle the album favourite heart (bookmarks-backed, no page reload).
-window.toggleAlbumFavourite = function(artistName, albumName) {
+window.toggleAlbumFavourite = function (artistName, albumName) {
   var icon = document.getElementById('albumFavouriteIcon');
   if (!icon) return;
 
@@ -724,6 +789,7 @@ window.toggleAlbumFavourite = function(artistName, albumName) {
         return b.type === 'album' && b.name === albumName
           && (!b.artist_name || b.artist_name === artistName);
       })[0];
+
       if (existing) {
         return fetch('/api/bookmarks/' + existing.id, { method: 'DELETE' })
           .then(function () { setState(false); });
@@ -739,7 +805,7 @@ window.toggleAlbumFavourite = function(artistName, albumName) {
     });
 };
 
-window.navSearch = function(event) {
+window.navSearch = function (event) {
   event.preventDefault();
   var form = event && event.target ? event.target : null;
   var activeInput = form ? form.querySelector('input[type="text"], input[type="search"]') : null;
@@ -758,37 +824,50 @@ window.navSearch = function(event) {
 // and auto-runs the search. This is the single source of truth — pages that
 // once defined their own copy (base.html inline block, downloads.js) are
 // consolidated here.
+//
+// IMPORTANT: the component is included ONCE, by base.html. Every element id
+// it renders (mbSearchArtist, mbSearchResults, ...) is resolved below with
+// getElementById, which returns the FIRST match in DOM order. A page that
+// includes the component a second time will have its search results written
+// into the hidden global copy instead of the visible one.
+window.openGlobalMbSearch = function (artist, album, callback, track, year) {
+  const modalEl = document.getElementById('musicBrainzModal');
+  if (!modalEl) {
+    console.error("MusicBrainz modal not found in DOM.");
+    return;
+  }
 
-window.openGlobalMbSearch = function(artist, album, callback, track, year) {
-    const modalEl = document.getElementById('musicBrainzModal');
-    if (!modalEl) {
-        console.error("MusicBrainz modal not found in DOM.");
-        return;
-    }
+  // Auto-fill the 4 search fields.
+  //
+  // Each field is CLEARED when no value is supplied. Previously the guard was
+  // `if (el && value)`, so a stale value from a previous open survived: opening
+  // the modal for an artist-only search after an album search kept the old
+  // album in the form and silently narrowed the query.
+  const fields = [
+    ['mbSearchArtist', artist],
+    ['mbSearchAlbum', album],
+    ['mbSearchTrack', track],
+    ['mbSearchYear', year],
+  ];
+  fields.forEach(function (pair) {
+    const el = document.getElementById(pair[0]);
+    if (el) el.value = pair[1] || '';
+  });
 
-    // Auto-fill the 4 search fields
-    const artistEl = document.getElementById('mbSearchArtist');
-    const albumEl = document.getElementById('mbSearchAlbum');
-    const trackEl = document.getElementById('mbSearchTrack');
-    const yearEl = document.getElementById('mbSearchYear');
-    if (artistEl && artist) artistEl.value = artist;
-    if (albumEl && album) albumEl.value = album;
-    if (trackEl && track) trackEl.value = track;
-    if (yearEl && year) yearEl.value = year;
+  // Assign callback to global window object so the component can trigger it
+  window._mbSearchCallback = callback;
 
-    // Assign callback to global window object so the component can trigger it
-    window._mbSearchCallback = callback;
+  // Show Modal
+  const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+  modal.show();
 
-    // Show Modal
-    const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
-    modal.show();
-
-    // Auto-search after modal opens
-    setTimeout(function() {
-        if (typeof window.performMbSearch === 'function') {
-            window.performMbSearch();
-        }
-    }, 500);
+  // Auto-search once the modal is actually shown. A fixed setTimeout raced the
+  // Bootstrap transition: on a slow render the search fired before the fields
+  // were visible, and `once: true` avoids re-running on every subsequent open.
+  const runSearch = function () {
+    if (typeof window.performMbSearch === 'function') window.performMbSearch();
+  };
+  modalEl.addEventListener('shown.bs.modal', runSearch, { once: true });
 };
 
 // ==========================================================================
@@ -799,47 +878,50 @@ window.openGlobalMbSearch = function(artist, album, callback, track, year) {
 
 // Self-contained Soulseek download helper for pages that don't load
 // downloads.js (artist/album pages) — mirrors _addMbDownloadToSession.
-window.downloadReleaseViaSoulseek = function(releaseId, title, artist) {
-    if (!confirm(`Download "${title}" by ${artist} via Soulseek?`)) return;
-    fetch('/api/musicbrainz/download', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            release_id: releaseId,
-            release_title: title,
-            artist: artist,
-            method: 'slskd',
-            persistent_search: false,
-            max_retries: 3,
-            session_id: null,
-            queue_items_only: true
-        })
+window.downloadReleaseViaSoulseek = function (releaseId, title, artist) {
+  if (!confirm(`Download "${title}" by ${artist} via Soulseek?`)) return;
+  fetch('/api/musicbrainz/download', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      release_id: releaseId,
+      release_title: title,
+      artist: artist,
+      method: 'slskd',
+      persistent_search: false,
+      max_retries: 3,
+      session_id: null,
+      queue_items_only: true
     })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-        if (data.error) { alert('Error: ' + data.error); return; }
-        alert(`Download queued: ${title}\nTracking ID: ${data.tracking_id || 'N/A'}`);
+  })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      if (data.error) { alert('Error: ' + data.error); return; }
+      alert(`Download queued: ${title}\nTracking ID: ${data.tracking_id || 'N/A'}`);
     })
-    .catch(function(err) { alert('Network error: ' + err.message); });
+    .catch(function (err) { alert('Network error: ' + err.message); });
 };
 
-window.searchMusicBrainzReleaseFromEncoded = function(event, artistEnc, albumEnc) {
-    const decode = function(value, fallback) {
-        try {
-            const decoded = decodeURIComponent(value || '');
-            try { return JSON.parse(decoded); } catch (_e) { return decoded || fallback; }
-        } catch (_e) { return fallback; }
-    };
-    const artist = decode(artistEnc, '');
-    const album = decode(albumEnc, '');
-    if (event && event.preventDefault) event.preventDefault();
-    if (event && event.stopPropagation) event.stopPropagation();
-    window.openGlobalMbSearch(artist, album, function(selectedRelease) {
-        if (!selectedRelease) return;
-        if (typeof window.downloadMbRelease === 'function') {
-            window.downloadMbRelease(selectedRelease.id, selectedRelease.title, selectedRelease.artist, 'slskd');
-        } else if (typeof window.downloadReleaseViaSoulseek === 'function') {
-            window.downloadReleaseViaSoulseek(selectedRelease.id, selectedRelease.title, selectedRelease.artist);
-        }
-    });
+window.searchMusicBrainzReleaseFromEncoded = function (event, artistEnc, albumEnc) {
+  const decode = function (value, fallback) {
+    try {
+      const decoded = decodeURIComponent(value || '');
+      try { return JSON.parse(decoded); } catch (_e) { return decoded || fallback; }
+    } catch (_e) { return fallback; }
+  };
+
+  const artist = decode(artistEnc, '');
+  const album = decode(albumEnc, '');
+
+  if (event && event.preventDefault) event.preventDefault();
+  if (event && event.stopPropagation) event.stopPropagation();
+
+  window.openGlobalMbSearch(artist, album, function (selectedRelease) {
+    if (!selectedRelease) return;
+    if (typeof window.downloadMbRelease === 'function') {
+      window.downloadMbRelease(selectedRelease.id, selectedRelease.title, selectedRelease.artist, 'slskd');
+    } else if (typeof window.downloadReleaseViaSoulseek === 'function') {
+      window.downloadReleaseViaSoulseek(selectedRelease.id, selectedRelease.title, selectedRelease.artist);
+    }
+  });
 };
