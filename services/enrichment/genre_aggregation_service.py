@@ -397,8 +397,6 @@ def _vote_genres(
         "manual",
     }
 
-    has_primary_genres = any(bool(hits & primary_sources) for hits in source_hits.values())
-
     # --- Strict Primary Confirmation Guardrail ---
     # Navidrome and Essentia can ONLY confirm primary sources. They cannot
     # confirm each other, nor can they stand alone.
@@ -408,12 +406,7 @@ def _vote_genres(
         is_primary_backed = bool(hits & (primary_sources | {"context"}))
         
         if not is_primary_backed:
-            if has_primary_genres:
-                # Online data exists somewhere on this album. Purge strictly local/inferred tags.
-                keys_to_delete.append(k)
-            elif "navidrome" not in hits:
-                # No online data, but this is a pure Essentia hallucination. Purge it.
-                keys_to_delete.append(k)
+            keys_to_delete.append(k)
 
     for k in keys_to_delete:
         del votes[k]
