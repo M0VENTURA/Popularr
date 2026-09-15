@@ -1617,6 +1617,13 @@ def _create_genre_top_track_playlists(
     if not rows:
         return 0
 
+    # PRE-FETCH: Find out which playlists already exist in Navidrome
+    existing_playlists = set()
+    if create_enabled or delete_enabled:
+        for client in _navidrome_clients():
+            for pl in client.fetch_all_playlists() or []:
+                existing_playlists.add(str(pl.get("name") or "").strip().casefold())
+
     def _track_genres(row: dict[str, Any]) -> list[str]:
         return _genre_playlist_track_genres(
             row,
@@ -1688,13 +1695,20 @@ def _create_genre_top_track_playlists(
         winners = [min(group, key=_tiebreak) for group in grouped.values()]
         qualifying_count = len(winners)
         playlist_name = _genre_playlist_name(_display_genre(genre))
+        playlist_exists = playlist_name.casefold() in existing_playlists
 
         if qualifying_count >= delete_threshold:
             keep_playlist_names.add(playlist_name)
 
         if prune_only:
             continue
-        if not create_enabled or qualifying_count < create_threshold:
+            
+        # FIX: If it doesn't exist, we need 100 to create it. 
+        # If it DOES exist, we only need 80 to update it!
+        if not playlist_exists and qualifying_count < create_threshold:
+            continue
+            
+        if not create_enabled and not playlist_exists:
             continue
 
         winners.sort(key=_popularity_order)
@@ -1728,7 +1742,6 @@ def _create_genre_top_track_playlists(
                 logger.warning("Genre playlist sweep failed", error=str(exc))
 
     return written
-
 
 def prune_genre_playlists_for_deletion() -> None:
     """Delete genre playlists whose qualifying pool dropped below the delete threshold."""
