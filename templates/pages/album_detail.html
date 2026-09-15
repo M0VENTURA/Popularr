@@ -9,10 +9,10 @@
   [id$="-section"] { scroll-margin-top: 130px; }
   .album-hero-sub a:hover { text-decoration: underline !important; }
   
-  /* Override Bootstrap Blue for inactive tabs */
-  .nav-pills .nav-link { color: #adb5bd !important; }
-  .nav-pills .nav-link:hover { color: #ffffff !important; }
-  .nav-pills .nav-link.active { background-color: var(--spotify-green, #1db954) !important; color: #000 !important; }
+  /* Fix Bootstrap nav-link default blue colors */
+  #albumPageTabs .nav-link { color: #adb5bd !important; border-color: transparent !important; }
+  #albumPageTabs .nav-link:hover { color: #ffffff !important; }
+  #albumPageTabs .nav-link.active { background-color: var(--spotify-green, #1db954) !important; color: #000 !important; }
 </style>
 
 <div class="container-fluid mt-4">
