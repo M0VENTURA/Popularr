@@ -1,7 +1,7 @@
 """Popularity scan finalisation stage.
 
 Handles:
-- Star rating assignment (1–5★) using album/artist z-scores + z-score bands
+- Star rating assignment (1-5★) using album/artist z-scores + z-score bands
 - Live-album rating driven by ARTIST-z rather than album-z
 - Navidrome rating sync via Subsonic API
 - Essential Collection API sync (deduplicated 4★/5★ artist best-of)
@@ -33,7 +33,24 @@ Live-album policy:
   live album merely beats their own low median) and as a promotion path (a
   decisive standout within its own release that is also respectable
   catalogue-wide). It never lifts a rating on its own.
-- Per-release slot caps (1× 5★, 2× 4★ by default) apply after banding.
+- Per-release slot caps (1x 5★, 2x 4★ by default) apply after banding.
+
+Global 5-star catalogue-top pre-pass (scan_runner):
+- Before an artist's albums are finalised, scan_runner flags a top-percentage
+  of that artist's catalogue-top tracks as ``_global_5star_locked``.
+- FIXED: ``_assign_stars`` previously treated this flag as sufficient on its
+  own to award 5 stars, bypassing the album/artist z-score bounds entirely.
+  That let a track with an album_z well below the configured 5★ threshold
+  (e.g. +0.37 against a 5★ floor of ~0.44) still receive 5 stars purely from
+  catalogue-top membership, and it starved the 4★ tier because every track
+  the pre-pass selected got pulled straight to 5★ instead of landing on the
+  band ladder. The lock is now a gate, not a verdict: it only grants 5★ when
+  the track ALSO clears the normal album-z/artist-z 5★ bounds (matching the
+  documented rule "album z AND artist z above these bounds AND a top-X%
+  catalogue flag"). When it doesn't clear those bounds, the track is floored
+  to 4★ instead, so a confirmed catalogue-top single still gets recognised
+  without displacing genuine standouts from the 5★ tier or starving the 4★
+  tier.
 """
 
 from __future__ import annotations
@@ -211,12 +228,12 @@ def _detect_live_album(album_results: list[dict[str, Any]]) -> bool:
 # ---------------------------------------------------------------------------
 
 def _compute_album_z(score: float, scores: list[float]) -> tuple[float, float]:
-    """Robust album z (median + scaled-MAD) — and the spread used."""
+    """Robust album z (median + scaled-MAD) -- and the spread used."""
     return calculate_robust_zscore(score, scores, min_count=3)
 
 
 def _compute_artist_z(score: float, artist_scores: list[float]) -> tuple[float, float]:
-    """Robust artist-catalogue z (median + scaled-MAD) — and the spread used."""
+    """Robust artist-catalogue z (median + scaled-MAD) -- and the spread used."""
     return calculate_robust_zscore(score, artist_scores, min_count=5)
 
 
@@ -333,7 +350,7 @@ def _album_z_band_star(
             _requires_single = True
         if _requires_single and str(single_confidence or "low").strip().casefold() not in ("high", "medium", "user"):
             # FIXED: this previously set ``album_z = float("-inf")``, which fell
-            # through every band and returned 1 — so a live album's STRONGEST
+            # through every band and returned 1 -- so a live album's STRONGEST
             # non-single tracks rated LOWER than its mid-tier ones. Demote to
             # the 3★ band instead of cratering to 1★.
             return min(3, int(max_stars))
@@ -365,7 +382,7 @@ def _live_album_stars(
 
     valid_artist = [float(s) for s in (artist_scores or []) if float(s or 0) > 0]
     if len(valid_artist) < int(rules["min_catalogue"]):
-        # Not enough catalogue for artist-z — fall back to the album band,
+        # Not enough catalogue for artist-z -- fall back to the album band,
         # capped so a thin catalogue can't mint 4-5★ live tracks.
         band = _album_z_band_star(
             score,
@@ -414,7 +431,7 @@ def _assign_stars(
     generic_compilation_artist: bool = False,
     is_live_album: bool = False,
 ) -> int:
-    """Assign 1–5 star rating to a single track."""
+    """Assign 1-5 star rating to a single track."""
     score = float(track.get("popularity_score") or track.get("final_score") or 0)
     single_confidence = str(track.get("single_confidence") or "low").strip().casefold()
 
@@ -452,7 +469,7 @@ def _assign_stars(
         popularity_marked = False
 
     # -------------------------------------------------------------------
-    # LIVE ALBUM PATH — rated on artist-z, not album-z.
+    # LIVE ALBUM PATH -- rated on artist-z, not album-z.
     #
     # Taken before the global-5★ lock and the force-star percentile so that a
     # live release cannot inherit a 5★ from studio-oriented heuristics. The
@@ -474,8 +491,37 @@ def _assign_stars(
 
     if track.get("_global_5star_locked") and not popularity_only:
         if not is_live and organic:
-            track["_global_5star_locked"] = True
-            return 5
+            # FIXED: this branch previously returned 5 unconditionally the
+            # moment the scan_runner catalogue-top pre-pass flagged a track,
+            # with no check against the album_z/artist_z bounds computed just
+            # above. That let a track well below the configured 5★ thresholds
+            # (e.g. album_z=+0.37 against a ~0.44 effective floor) still be
+            # forced to 5★ purely from catalogue-top membership -- and because
+            # every catalogue-top track was pulled straight to 5★ this way,
+            # none of them ever reached the band ladder below, which is what
+            # emptied the 4★ tier on affected albums.
+            #
+            # The lock is now a GATE, not a verdict, matching the documented
+            # rule: "album z AND artist z above these bounds AND a top-X%
+            # catalogue flag -- popularity alone never grants 5★". A track
+            # that clears the 5★ bounds on its own merit keeps the lock and
+            # returns 5. A track that doesn't is floored to 4★ instead of
+            # being skipped over the tier entirely; ``_force_floor`` protects
+            # it from the 4★ percentage-cap and live-album slot-cap demotions
+            # further down the pipeline, the same way a verified single is
+            # protected.
+            _epsilon_alb = _star_epsilon_z(album_spread, th["epsilon"])
+            _epsilon_art = _star_epsilon_z(artist_spread, th["epsilon"])
+            _clears_5star_bounds = (
+                album_z >= th["star5_album_z"] - _epsilon_alb
+                and artist_z >= th["star5_artist_z"] - _epsilon_art
+            )
+            if _clears_5star_bounds:
+                track["_global_5star_locked"] = True
+                return 5
+            track["_global_5star_locked"] = False
+            track["_force_floor"] = 4
+            return 4
 
     z_standout_source = _has_z_standout_source(track)
     if z_standout_source:
