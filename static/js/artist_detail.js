@@ -411,3 +411,49 @@ window.lookupAndSaveArtistIds = function(button) {
       button.innerHTML = originalHtml;
     });
 };
+
+// ---------------------------------------------------------------------------
+// Import Release from Missing Grid
+// ---------------------------------------------------------------------------
+window.importReleaseFromEncoded = function(encArtist, encReleaseId, encAlbum) {
+    const artist = decodeURIComponent(encArtist);
+    const releaseId = decodeURIComponent(encReleaseId);
+    const album = decodeURIComponent(encAlbum);
+
+    const btn = event.currentTarget || event.target.closest('button');
+    const origHtml = btn.innerHTML;
+    
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
+
+    fetch('/api/queue/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            artist: artist,
+            album: album,
+            release_mbid: releaseId,
+            release_id: releaseId,
+            release_source: releaseId ? 'musicbrainz' : null,
+            source: 'soulseek'
+        })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            btn.innerHTML = '<i class="bi bi-check-lg"></i> <span class="d-none d-sm-inline ms-1">Queued</span>';
+            btn.classList.remove('btn-outline-success');
+            btn.classList.add('btn-success');
+            btn.title = 'Added to download queue';
+        } else {
+            btn.disabled = false;
+            btn.innerHTML = origHtml;
+            alert('Failed to queue album: ' + (data.error || 'Unknown error'));
+        }
+    })
+    .catch(err => {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+        alert('Network error: ' + err.message);
+    });
+};
