@@ -52,6 +52,9 @@ PROTECTED_FIELDS: frozenset[str] = frozenset({
     "musicbrainz_artistid",
     "musicbrainz_albumartistid",
     "musicbrainz_releasegroupid",
+    "musicbrainz_albumtype",    # ADDED: Protect album type
+    "spotify_album_type",       # ADDED: Protect extended album type
+    "releasetype",              # ADDED: Protect base release type
 })
 
 # Fields that are safe to auto-update without human review
