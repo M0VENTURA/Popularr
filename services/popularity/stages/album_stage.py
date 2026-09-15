@@ -297,7 +297,7 @@ def _detect_album_type(
         spotify_lower = spotify_type.casefold()
         if "compilation" in spotify_lower or "+compilation" in spotify_lower:
             return "album+compilation"
-        if "+live" in spotify_lower:
+        if "+live" in spotify_lower or "live" == spotify_lower:
             return "album+live"
         if "+acoustic" in spotify_lower:
             return "album+acoustic"
