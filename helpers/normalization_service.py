@@ -305,6 +305,58 @@ def dedupe_annotations(name: str) -> str:
     return re.sub(r"\s{2,}", " ", collapsed).strip()
 
 
+# Labels that describe a release FORM. Two annotations that both mention the
+# same form are semantically duplicate even when their text differs, e.g.
+# "(Recorded Live) (Live)" - which is exactly the damage the start-anchored
+# guard in `album_stage._apply_live_remix_album_tagging()` creates.
+_FORM_LABELS = (
+    "live", "acoustic", "unplugged", "remix",
+    "instrumental", "demo", "karaoke",
+)
+
+
+def collapse_redundant_form_labels(name: str) -> str:
+    """Drop later annotations whose form label an earlier annotation states.
+
+        "Song (Recorded Live) (Live)"    -> "Song (Recorded Live)"
+        "Song (Live) (Live at Wembley)"  -> "Song (Live)"
+        "Song (Live) (Acoustic)"         -> unchanged (different forms)
+
+    The FIRST annotation wins, because it is the more specific one - it is
+    the blindly-appended label we want to drop, not the descriptive one.
+    """
+    if not name:
+        return ""
+
+    seen: set[str] = set()
+
+    def _sub(match: re.Match[str]) -> str:
+        nonlocal seen
+        inner = str(match.group(2) or "").casefold()
+        forms = {
+            label for label in _FORM_LABELS
+            if re.search(rf"\b{label}\b", inner)
+        }
+        if not forms:
+            return match.group(0)
+        if forms & seen:
+            return ""
+        seen = seen | forms
+        return match.group(0)
+
+    collapsed = _ANNOTATION_RE.sub(_sub, str(name))
+    return re.sub(r"\s{2,}", " ", collapsed).strip()
+
+
+def repair_annotations(name: str) -> str:
+    """Full annotation repair: identical duplicates AND redundant form labels.
+
+    This is the function to use when repairing a STORED name. It preserves
+    one copy of every distinct annotation, so editions are never lost.
+    """
+    return collapse_redundant_form_labels(dedupe_annotations(name))
+
+
 def strip_album_edition_marker(value: str) -> str:
     """Return the album title with trailing edition marker(s) removed.
 
@@ -687,10 +739,14 @@ def clean_album_name_for_storage(value: str) -> str:
     "The Fall of Hearts (tour edition) (tour edition)" becomes
     "The Fall of Hearts (tour edition)" rather than losing the edition.
     Use this before writing an album name to the DB or to file tags.
+
+    Uses `repair_annotations()` rather than `dedupe_annotations()` so
+    semantically-duplicate annotations with differing text - "(Recorded
+    Live) (Live)" - are collapsed too, not just literal repeats.
     """
     if not value:
         return ""
-    return dedupe_annotations(" ".join(str(value).strip().split()))
+    return repair_annotations(" ".join(str(value).strip().split()))
 
 
 # alias
