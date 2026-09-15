@@ -17,7 +17,9 @@
 //     registrations fighting each other at runtime.
 //
 // Both are deleted here. Anything this page needs from them is loaded from
-// its real home — see the <script> tags in album_detail.html.
+// its real home — see the <script> tags in album_detail.html (downloads.js
+// is now loaded there too, for performMbSearch / handleGlobalMbSelect /
+// confirmReleaseSelection, which the MusicBrainz lookup modal depends on).
 
 // ---------------------------------------------------------------------------
 // Album favourite
@@ -299,7 +301,8 @@ window.openAlbumLookupModal = function () {
 // `#mbSelectedReleaseId` — an element that exists on no page in this app —
 // then fell back to `window._selectedMbReleaseId`, which nothing ever set.
 // It therefore always alerted "No release selected or MBID not found".
-// The value now arrives directly from the shared modal's selection callback.
+// The value now arrives directly from the shared modal's selection callback
+// (see downloads.js's handleGlobalMbSelect / confirmReleaseSelection).
 window.applyAlbumMbid = function (mbid) {
     if (!mbid) {
         alert('No release selected.');
@@ -323,6 +326,120 @@ window.applyAlbumMbid = function (mbid) {
     if (tabBtn && window.bootstrap) bootstrap.Tab.getOrCreateInstance(tabBtn).show();
 
     alert('MusicBrainz ID applied! Click "Save Metadata" to persist changes.');
+};
+
+// ---------------------------------------------------------------------------
+// Auto-Link MBIDs / Align Tracklist
+// ---------------------------------------------------------------------------
+// Both actions require a MusicBrainz release already linked to this album
+// (the "MusicBrainz Release Group ID" / "MusicBrainz Release ID" fields on
+// the Edit Album tab — populate these via "Lookup on MusicBrainz" then Save
+// Metadata first). Neither button performs a fresh MusicBrainz search:
+//   - Link finds the best-matching RELEASE within that already-linked
+//     release group for the CURRENT local tracklist (server-side, via
+//     get_musicbrainz_best_release's track-count scoring) and writes each
+//     matched track's recording MBID. It never touches title/track number.
+//   - Align rewrites local track titles/track numbers/disc numbers to match
+//     that release's tracklist. It never touches mbid.
+// Both call the same backend comparison engine, so "matched" and "needs
+// update" mean the same thing for both buttons.
+function _getLinkedReleaseMbid() {
+    const releaseGroupField = document.getElementById('album_release_group_mbid');
+    const releaseField = document.getElementById('album_mbid');
+    return (
+        (releaseGroupField && releaseGroupField.value.trim()) ||
+        (releaseField && releaseField.value.trim()) ||
+        ''
+    );
+}
+
+window.autoLinkAllMbids = function () {
+    const artist = window._pageData ? window._pageData.artistName : '';
+    const album = window._pageData ? window._pageData.albumName : '';
+    const releaseMbid = _getLinkedReleaseMbid();
+
+    if (!releaseMbid) {
+        alert('No MusicBrainz release linked yet. Use "Lookup on MusicBrainz" first, then Save Metadata.');
+        return;
+    }
+
+    const btn = document.getElementById('albumAutoLinkBtn');
+    const restore = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Linking...';
+    }
+
+    fetch('/api/album/link-mbids', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ artist: artist, album: album, release_mbid: releaseMbid })
+    })
+        .then(r => r.json())
+        .then(data => {
+            if (btn) { btn.disabled = false; btn.innerHTML = restore; }
+            if (!data.success) {
+                alert('Error: ' + (data.error || 'Failed to link MBIDs'));
+                return;
+            }
+            let msg = `Linked ${data.linked} track(s)`;
+            if (data.already_linked) msg += `, ${data.already_linked} already linked`;
+            if (data.unmatched) msg += `, ${data.unmatched} unmatched`;
+            if (data.extra_tracks && data.extra_tracks.length) {
+                msg += `\n\nNot in the MusicBrainz tracklist: ${data.extra_tracks.map(t => t.library_title).join(', ')}`;
+            }
+            alert(msg);
+            if (data.linked > 0) window.location.reload();
+        })
+        .catch(err => {
+            if (btn) { btn.disabled = false; btn.innerHTML = restore; }
+            alert('Network error: ' + err.message);
+        });
+};
+
+window.alignTracklist = function () {
+    const artist = window._pageData ? window._pageData.artistName : '';
+    const album = window._pageData ? window._pageData.albumName : '';
+    const releaseMbid = _getLinkedReleaseMbid();
+
+    if (!releaseMbid) {
+        alert('No MusicBrainz release linked yet. Use "Lookup on MusicBrainz" first, then Save Metadata.');
+        return;
+    }
+
+    if (!confirm('Rename/renumber tracks to match the linked MusicBrainz release\'s tracklist?')) return;
+
+    const btn = document.getElementById('albumAlignBtn');
+    const restore = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Aligning...';
+    }
+
+    fetch('/api/album/align-tracklist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ artist: artist, album: album, release_mbid: releaseMbid })
+    })
+        .then(r => r.json())
+        .then(data => {
+            if (btn) { btn.disabled = false; btn.innerHTML = restore; }
+            if (!data.success) {
+                alert('Error: ' + (data.error || 'Failed to align tracklist'));
+                return;
+            }
+            let msg = `Aligned ${data.aligned} track(s)`;
+            if (data.unmatched) msg += `, ${data.unmatched} unmatched`;
+            if (data.changes && data.changes.length) {
+                msg += '\n\n' + data.changes.map(c => `#${c.old_track_number} → #${c.new_track_number}: "${c.old_title}" → "${c.new_title}"`).join('\n');
+            }
+            alert(msg);
+            if (data.aligned > 0) window.location.reload();
+        })
+        .catch(err => {
+            if (btn) { btn.disabled = false; btn.innerHTML = restore; }
+            alert('Network error: ' + err.message);
+        });
 };
 
 // ---------------------------------------------------------------------------
