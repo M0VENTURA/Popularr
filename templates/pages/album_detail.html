@@ -9,9 +9,10 @@
   [id$="-section"] { scroll-margin-top: 130px; }
   .album-hero-sub a:hover { text-decoration: underline !important; }
   
-  /* Fix Bootstrap nav-link default blue colors */
+  /* Override Bootstrap Blue for inactive tabs */
   .nav-pills .nav-link { color: #adb5bd !important; }
   .nav-pills .nav-link:hover { color: #ffffff !important; }
+  .nav-pills .nav-link.active { background-color: var(--spotify-green, #1db954) !important; color: #000 !important; }
 </style>
 
 <div class="container-fluid mt-4">
@@ -436,7 +437,7 @@
                       <button class="nav-link {{ 'active text-white' if ns2.first else 'text-muted' }}"
                               id="albumGenreTab{{ key }}-tab" data-bs-toggle="tab"
                               data-bs-target="#albumGenreTab{{ key }}-content"
-                              type="button" role="tab" style="color: #{{ bgcolor }};">
+                              type="button" role="tab" style="color: #{{ bgcolor }}; border-color: transparent;">
                         <i class="bi {{ icon }}"></i> {{ label }}
                         <span class="badge ms-1" style="background-color: #{{ bgcolor }}; color: {{ textcolor }};">{{ genre_sources[key]|length }}</span>
                       </button>
@@ -496,7 +497,7 @@
   </div>
 </div>
 
-{# Modals #}
+{# Modals - Updated paths to properly point to components/modals folder #}
 {% include 'components/modals/_track_edit.html' ignore missing %}
 {% include 'components/modals/_organize_group.html' ignore missing %}
 {% include 'components/modals/_slskd_results.html' ignore missing %}
