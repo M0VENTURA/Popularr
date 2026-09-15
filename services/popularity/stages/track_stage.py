@@ -1158,7 +1158,25 @@ def process_track(
                     or lastfm_listeners == 0
                     or (lastfm_listeners < 25 and listenbrainz_listens < 25)
                 ):
-                    if _prefetch_entry and _prefetch_entry.get("lastfm_listeners"):
+                    # FIXED: ``_prefetch_entry`` is populated once per ARTIST by
+                    # prefetch_artist_popularity(), keyed only by normalised
+                    # title -- it cannot distinguish a live recording from its
+                    # studio namesake, so its ``lastfm_listeners`` is exactly
+                    # the catalogue-wide contaminated count this whole
+                    # is_live_release mechanism exists to avoid. The
+                    # ``_album_tracklist`` flag below marks the entry as
+                    # touched by the release-scoped ListenBrainz backfill, but
+                    # that flag lives on the SAME dict as the unrelated,
+                    # still-contaminated ``lastfm_listeners`` field, so it
+                    # does not make the LF value release-scoped -- only the LB
+                    # fields it was set for. On a live release, skip this
+                    # cached value entirely and fall through to the direct,
+                    # ``is_live_release``-aware aggregation call below instead.
+                    if (
+                        _prefetch_entry
+                        and _prefetch_entry.get("lastfm_listeners")
+                        and not is_live_release
+                    ):
                         lastfm_listeners = _as_int(_prefetch_entry.get("lastfm_listeners") or 0)
                         lastfm_playcount = _as_int(_prefetch_entry.get("lastfm_playcount") or 0)
                         update_payload["lastfm_listeners"] = lastfm_listeners
