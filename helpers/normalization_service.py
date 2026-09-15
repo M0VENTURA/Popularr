@@ -108,6 +108,22 @@ def normalize_filename(value: str) -> str:
     return normalize_string(value)
 
 
+def normalize_the_prefix(name: str) -> str:
+    """Transform artist or playlist names starting with 'The ' to 'Name, The'.
+
+    Example:
+        'The Offspring' -> 'Offspring, The'
+        'The Rasmus' -> 'Rasmus, The'
+        'A Perfect Circle' -> 'A Perfect Circle' (unchanged)
+    """
+    cleaned = str(name or "").strip()
+    if cleaned.lower().startswith("the "):
+        base_name = cleaned[4:].strip()
+        if base_name:
+            return f"{base_name}, The"
+    return cleaned
+
+
 # =============================================================================
 # GENERIC CLEANING HELPERS
 # =============================================================================
@@ -222,7 +238,7 @@ _ALBUM_EDITION_STRIP_RE = re.compile(
     r"mastered\s+for\s+(?:itunes|apple\s+digital\s+masters)|"
     r"(?:bmg\s+)?club\s+edition|"
     r"(?:\d[\d,]*\s*枚限定生産特装盤|限定生産|完全生産限定|初回限定|"
-    r"完全受注生産|数量限定|期間限定|予約限定|"
+    r"完全受注生産|數量限定|期間限定|予約限定|"
     r"limited\s+production(?:\s+edition)?|first\s+press(?:\s+edition)?|"
     r"premium\s+edition|special\s+price))"
     r"\s*[\)\]]\s*$",
