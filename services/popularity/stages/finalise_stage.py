@@ -349,10 +349,6 @@ def _album_z_band_star(
         except Exception:
             _requires_single = True
         if _requires_single and str(single_confidence or "low").strip().casefold() not in ("high", "medium", "user"):
-            # FIXED: this previously set ``album_z = float("-inf")``, which fell
-            # through every band and returned 1 -- so a live album's STRONGEST
-            # non-single tracks rated LOWER than its mid-tier ones. Demote to
-            # the 3★ band instead of cratering to 1★.
             return min(3, int(max_stars))
 
     if album_z >= th["star4_album_z"] - epsilon and artist_eligible_4star:
@@ -372,18 +368,12 @@ def _live_album_stars(
     single_confidence: str,
     organic: bool,
 ) -> tuple[int, str]:
-    """Star rating for a track on a LIVE album, driven by artist-z.
-
-    Falls back to the ordinary album-z band (capped at ``max_stars``) when the
-    artist catalogue is too small for artist-z to mean anything.
-    """
+    """Star rating for a track on a LIVE album, driven by artist-z."""
     rules = _live_album_rules()
     max_stars = int(rules["max_stars"])
 
     valid_artist = [float(s) for s in (artist_scores or []) if float(s or 0) > 0]
     if len(valid_artist) < int(rules["min_catalogue"]):
-        # Not enough catalogue for artist-z -- fall back to the album band,
-        # capped so a thin catalogue can't mint 4-5★ live tracks.
         band = _album_z_band_star(
             score,
             album_scores,
@@ -468,13 +458,6 @@ def _assign_stars(
     if is_instrumental_track_title(str(track.get("title") or "")):
         popularity_marked = False
 
-    # -------------------------------------------------------------------
-    # LIVE ALBUM PATH -- rated on artist-z, not album-z.
-    #
-    # Taken before the global-5★ lock and the force-star percentile so that a
-    # live release cannot inherit a 5★ from studio-oriented heuristics. The
-    # only exception is a user override, handled above.
-    # -------------------------------------------------------------------
     if is_live_album and not is_compilation:
         live_stars, live_reason = _live_album_stars(
             track,
@@ -491,25 +474,6 @@ def _assign_stars(
 
     if track.get("_global_5star_locked") and not popularity_only:
         if not is_live and organic:
-            # FIXED: this branch previously returned 5 unconditionally the
-            # moment the scan_runner catalogue-top pre-pass flagged a track,
-            # with no check against the album_z/artist_z bounds computed just
-            # above. That let a track well below the configured 5★ thresholds
-            # (e.g. album_z=+0.37 against a ~0.44 effective floor) still be
-            # forced to 5★ purely from catalogue-top membership -- and because
-            # every catalogue-top track was pulled straight to 5★ this way,
-            # none of them ever reached the band ladder below, which is what
-            # emptied the 4★ tier on affected albums.
-            #
-            # The lock is now a GATE, not a verdict, matching the documented
-            # rule: "album z AND artist z above these bounds AND a top-X%
-            # catalogue flag -- popularity alone never grants 5★". A track
-            # that clears the 5★ bounds on its own merit keeps the lock and
-            # returns 5. A track that doesn't is floored to 4★ instead of
-            # being skipped over the tier entirely; ``_force_floor`` protects
-            # it from the 4★ percentage-cap and live-album slot-cap demotions
-            # further down the pipeline, the same way a verified single is
-            # protected.
             _epsilon_alb = _star_epsilon_z(album_spread, th["epsilon"])
             _epsilon_art = _star_epsilon_z(artist_spread, th["epsilon"])
             _clears_5star_bounds = (
@@ -1489,43 +1453,28 @@ def _genre_playlist_track_genres(
     row: dict[str, Any],
     *,
     max_genres: int = 3,
-    json_sources: dict[str, str] | None = None,
-    delimited_sources: dict[str, str] | None = None,
 ) -> list[str]:
-    from services.enrichment.genre_aggregation_service import aggregate_genres
-    from services.enrichment.genre_tag_aggregator import parse_json_tags, parse_delimited_tags
-
-    _json_sources = json_sources or {
-        "lastfm_tags": "lastfm",
-        "listenbrainz_genres": "listenbrainz",
-        "discogs_genres": "discogs",
-        "musicbrainz_genres": "musicbrainz",
-        "spotify_genres": "spotify",
-    }
-    _delimited_sources = delimited_sources or {
-        "essentia_genres": "essentia",
-        "manual_genres": "manual",
-        "navidrome_genres": "navidrome",
-    }
-
-    source_map: dict[str, list[str]] = {}
-    for column, source in _json_sources.items():
-        raw = row.get(column)
-        if raw:
-            names = [t.get("name") for t in (parse_json_tags(raw) or []) if t.get("name")]
-            if names:
-                source_map[source] = names
-
-    for column, source in _delimited_sources.items():
-        raw = row.get(column)
-        if raw:
-            names = [t.get("name") for t in (parse_delimited_tags(raw) or []) if t.get("name")]
-            if names:
-                source_map[source] = names
-
-    if not source_map:
+    raw = row.get("genres")
+    if not raw:
         return []
-    return aggregate_genres(source_map, max_genres=max_genres)
+
+    if isinstance(raw, list):
+        return [str(g).strip() for g in raw if str(g).strip()][:max_genres]
+
+    raw_str = str(raw).strip()
+    if not raw_str or raw_str.lower() in ("null", "none", "[]", "{}"):
+        return []
+
+    if raw_str.startswith("["):
+        try:
+            parsed = json.loads(raw_str)
+            if isinstance(parsed, list):
+                return [str(g).strip() for g in parsed if str(g).strip()][:max_genres]
+        except Exception:
+            pass
+
+    genres = [g.strip() for g in re.split(r"[,;/\\]+", raw_str) if g.strip()]
+    return genres[:max_genres]
 
 
 # ---------------------------------------------------------------------------
@@ -1544,9 +1493,7 @@ _GENRE_ROWS_SQL = """
            COALESCE(popularity, final_score, 0) AS popularity_score,
            COALESCE(is_live, 0) AS is_live,
            COALESCE(is_compilation, 0) AS is_compilation,
-           lastfm_tags, listenbrainz_genres, discogs_genres,
-           musicbrainz_genres, spotify_genres,
-           essentia_genres, manual_genres, navidrome_genres
+           genres
     FROM tracks
     WHERE COALESCE(stars, star_rating) >= :min_stars
 """
@@ -1606,9 +1553,7 @@ def refresh_genre_playlists_for_album(artist: str, album: str) -> int:
                            COALESCE(popularity, final_score, 0) AS popularity_score,
                            COALESCE(is_live, 0) AS is_live,
                            COALESCE(is_compilation, 0) AS is_compilation,
-                           lastfm_tags, listenbrainz_genres, discogs_genres,
-                           musicbrainz_genres, spotify_genres,
-                           essentia_genres, manual_genres, navidrome_genres
+                           genres
                     FROM tracks
                     WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
                       AND album = :album
@@ -1666,25 +1611,10 @@ def _create_genre_top_track_playlists(
     if not rows:
         return 0
 
-    _json_sources = {
-        "lastfm_tags": "lastfm",
-        "listenbrainz_genres": "listenbrainz",
-        "discogs_genres": "discogs",
-        "musicbrainz_genres": "musicbrainz",
-        "spotify_genres": "spotify",
-    }
-    _delimited_sources = {
-        "essentia_genres": "essentia",
-        "manual_genres": "manual",
-        "navidrome_genres": "navidrome",
-    }
-
     def _track_genres(row: dict[str, Any]) -> list[str]:
         return _genre_playlist_track_genres(
             row,
             max_genres=max_genres,
-            json_sources=_json_sources,
-            delimited_sources=_delimited_sources,
         )
 
     pools: dict[str, list[dict[str, Any]]] = defaultdict(list)
