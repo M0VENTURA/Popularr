@@ -45,6 +45,7 @@ def get_matching_config() -> dict[str, Any]:
         ),
     }
 
+
 def _read_yaml(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -241,12 +242,12 @@ def get_config() -> dict[str, Any]:
     # Required so standard Docker environment variables map to the nested
     # structures expected by the pipeline APIs (Discogs and Last.fm)
     api_int = cfg.setdefault("api_integrations", {})
-    
+
     if cfg.get("lastfm_api_key") and not api_int.get("lastfm", {}).get("api_key"):
         api_int.setdefault("lastfm", {})["api_key"] = cfg["lastfm_api_key"]
     if cfg.get("lastfm_api_secret") and not api_int.get("lastfm", {}).get("api_secret"):
         api_int.setdefault("lastfm", {})["api_secret"] = cfg["lastfm_api_secret"]
-        
+
     if cfg.get("discogs_token") and not api_int.get("discogs", {}).get("token"):
         api_int.setdefault("discogs", {})["token"] = cfg["discogs_token"]
 
@@ -383,7 +384,11 @@ def save_config(config_data: dict) -> bool:
             yaml.safe_dump(config_data, f, default_flow_style=False, sort_keys=False)
         clear_config_cache()
         return True
-    except Exception:
+    except Exception as exc:
+        # Previously a bare `return False` — a failed save gave the caller no
+        # reason at all, so a permissions/disk error looked identical to a
+        # validation refusal and nothing appeared in the log.
+        _log_config_error("save_config failed", _CONFIG_PATH, exc)
         return False
 
 
@@ -409,8 +414,30 @@ def save_partial_config(partial_data: dict) -> bool:
             yaml.safe_dump(existing, f, default_flow_style=False, sort_keys=False)
         clear_config_cache()
         return True
-    except Exception:
+    except Exception as exc:
+        _log_config_error("save_partial_config failed", _CONFIG_PATH, exc)
         return False
+
+
+def _log_config_error(message: str, path: str, exc: Exception) -> None:
+    """Best-effort error logging for config writes.
+
+    Imported lazily and defensively: config helpers are imported very early
+    in startup, potentially before logging is configured, so a failure here
+    must never mask the original config error.
+    """
+    try:
+        import structlog
+        structlog.get_logger(__name__).warning(
+            message,
+            config_path=path,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    except Exception:
+        try:
+            print(f"[config_helpers] {message} ({path}): {type(exc).__name__}: {exc}")
+        except Exception:
+            pass
 
 
 # Minimum candidate score for a Soulseek result to be accepted as a valid match.
@@ -463,8 +490,6 @@ _SOULSEEK_UID_SUFFIX_RE = re.compile(
 )
 
 
-
-
 # Music-directory filesystem index cache (used by check_target_folder_exists)
 # so large libraries are not walked repeatedly during batch pre-scans.
 _MUSIC_DIR_FILES_CACHE_TTL_SECONDS = 60.0
@@ -512,7 +537,7 @@ def get_metadata_config():
 
 def get_queue_matching_config_legacy() -> dict:
     """Legacy queue matching config getter (deprecated).
-    
+
     Deprecated: Use get_queue_matching_config_v2() instead.
     """
     cfg = get_config()
@@ -591,13 +616,50 @@ def get_queue_matching_config_legacy() -> dict:
         ),
     }
 
+
 # -----------------------------------------------------------------------------
+# Standout / star rating configuration
+# -----------------------------------------------------------------------------
+
+# Live-album rating defaults.
+#
+# Live releases are rated against the ARTIST's catalogue (artist-z), not
+# against their own tracks.  Album-relative z is self-referential: it lets the
+# best cut on a mediocre live record score like the best cut on a landmark
+# studio album.  Most live tracks sit at negative artist-z and fall naturally
+# into the 1-3 bands; genuine singles rise on their own merit.
+#
+# Album-z acts ONLY as a gate (blocking 4-5★ when a weak-catalogue artist's
+# live album merely beats their own low median) and as a promotion path (a
+# decisive standout within its own release that is also respectable
+# catalogue-wide).  It never lifts a rating on its own.
+#
+# These are surfaced here so the whole block has sane values with NO config
+# file present.  finalise_stage applies its own identical fallbacks per key,
+# so a partial user block is merged rather than replacing the lot.
+_DEFAULT_LIVE_ALBUM_SCALING: dict[str, Any] = {
+    "enabled": True,
+    "mode": "artist_and_album",   # artist_and_album | artist_z
+    "max_stars": 3,               # ceiling for an ordinary live track
+    "artist_z_star5": 1.50,
+    "artist_z_star4": 1.00,
+    "artist_z_star3": -0.25,
+    "artist_z_star2": -1.20,
+    "album_z_gate": 2.00,         # gate AND promotion threshold
+    "promote_artist_z_min": 0.50,
+    "min_catalogue": 8,           # below this, artist-z is noise
+    "max_5star_slots": 1,
+    "max_4star_slots": 2,
+    "track_fraction": 0.60,       # share of live tracks that marks a release
+}
+
+
 def get_standout_config() -> dict[str, Any]:
     """Get standout track detection and star rating configuration.
-    
+
     Returns:
         Dict containing standout detection thresholds and star rating criteria.
-        
+
     Default Values:
         - album_zscore_threshold: 0.8 (minimum z-score for standout detection)
         - artist_zscore_threshold: 2.2 (minimum z-score for artist-level outliers)
@@ -608,10 +670,15 @@ def get_standout_config() -> dict[str, Any]:
         - star_3: {"album_z": -0.5}
         - star_2: {"album_z": -1.2}
         - star_1: {"album_z": -1.2, "default": True}
+
+    Nested blocks (merged with defaults, passed through to finalise_stage):
+        - album_scaling: era rules + era boundary ratios
+        - live_album_scaling: live-album artist-z bands, album-z gate,
+          promotion threshold, and per-release 5★/4★ slot caps
     """
     cfg = get_config()
     sd_config = cfg.get("single_detection", {})
-    
+
     defaults = {
         "album_zscore_threshold": 0.8,
         "artist_zscore_threshold": 2.2,
@@ -658,6 +725,24 @@ def get_standout_config() -> dict[str, Any]:
     # dropped and the scan always used the hardcoded defaults.
     if isinstance(sd_config.get("album_scaling"), dict):
         result["album_scaling"] = sd_config["album_scaling"]
+
+    # Live-album rating rules (artist-z bands, album-z gate, slot caps).
+    #
+    # Same passthrough requirement as album_scaling above: finalise_stage
+    # reads this via ``get_standout_config().get("live_album_scaling")``, so
+    # omitting it here means every saved live-album setting is discarded and
+    # the scan silently falls back to hardcoded defaults — with the LIVE
+    # ALBUM log banner still reporting "source: defaults".
+    #
+    # Unlike album_scaling, the defaults are merged in rather than the block
+    # being passed through raw, so the key is ALWAYS present and correctly
+    # populated even with no config file.  A partial user block overrides
+    # only the keys it names.
+    live_scaling = dict(_DEFAULT_LIVE_ALBUM_SCALING)
+    user_live_scaling = sd_config.get("live_album_scaling")
+    if isinstance(user_live_scaling, dict):
+        live_scaling.update(user_live_scaling)
+    result["live_album_scaling"] = live_scaling
 
     return result
 
@@ -724,6 +809,14 @@ _DEFAULT_METADATA_UPDATE_FIELDS = {
     "lyrics": False,
 }
 
+# Valid ``album_name_source`` values.  ``dedupe`` MUST be present: it is the
+# repair path that collapses duplicated annotations while PRESERVING the
+# edition.  It was previously absent from this allow-list, so a config
+# setting ``album_name_source: dedupe`` silently fell through to ``album``
+# and stripped the edition instead — the exact opposite of the request, with
+# nothing logged to explain it.
+_VALID_ALBUM_NAME_SOURCES = ("dedupe", "album", "release")
+
 
 def get_metadata_update_config() -> dict[str, Any]:
     """Get the "Updating Metadata" scan-behaviour config block.
@@ -734,7 +827,7 @@ def get_metadata_update_config() -> dict[str, Any]:
 
     ```yaml
     metadata_update:
-      album_name_source: album        # album | release
+      album_name_source: dedupe       # dedupe | album | release
       album_name_update_target: db    # db | files
       update_on_files:
         album_name: false
@@ -747,11 +840,17 @@ def get_metadata_update_config() -> dict[str, Any]:
 
     ``album_name_source`` decides what the album name is set to when the
     scan cleans it:
-      - ``album`` (default): the current album name, cleaned up — trailing
-        edition markers are stripped idempotently ("Doomsday Machine
-        (reissue) (reissue) (reissue)" → "Doomsday Machine").
+      - ``dedupe`` (default): collapse DUPLICATED annotations while
+        PRESERVING the edition ("The Fall of Hearts (tour edition) (tour
+        edition)" → "The Fall of Hearts (tour edition)").  This is the
+        repair path — it only ever removes an annotation that repeats an
+        earlier one, so no distinct annotation can be lost.
+      - ``album``: the current album name with trailing edition markers
+        stripped ENTIRELY ("Doomsday Machine (reissue) (reissue)" →
+        "Doomsday Machine").  Legacy behaviour — this DISCARDS the edition,
+        so two pressings of one release collapse to the same name.
       - ``release``: the MusicBrainz release title when a confident match
-        exists (falls back to the cleaned album name).
+        exists (falls back to ``dedupe``).
 
     ``album_name_update_target`` decides where the cleaned/renamed album
     name is written:
@@ -759,15 +858,20 @@ def get_metadata_update_config() -> dict[str, Any]:
       - ``files``: update the tracks table AND rewrite the ALBUM tag on the
         audio files (Navidrome reads file tags, so it then re-serves the new
         name too).
+
+    NOTE: for the ALBUM tag to reach disk BOTH
+    ``album_name_update_target: files`` AND ``update_on_files.album_name:
+    true`` are required.  With target ``db`` the rename stays in the
+    database and Navidrome keeps serving the old name from the file tags.
     """
     cfg = get_config() or {}
     block = cfg.get("metadata_update") or {}
     if not isinstance(block, dict):
         block = {}
 
-    source = str(block.get("album_name_source") or "album").strip().lower()
-    if source not in ("album", "release"):
-        source = "album"
+    source = str(block.get("album_name_source") or "dedupe").strip().lower()
+    if source not in _VALID_ALBUM_NAME_SOURCES:
+        source = "dedupe"
 
     target = str(block.get("album_name_update_target") or "db").strip().lower()
     if target not in ("db", "files"):
@@ -793,29 +897,98 @@ def get_metadata_update_config() -> dict[str, Any]:
 
 
 # -----------------------------------------------------------------------------
+# Playlist Configuration
+# -----------------------------------------------------------------------------
+
+def get_playlists_config() -> dict[str, Any]:
+    """Get playlist generation settings.
+
+    Config section: ``playlists`` in config.yaml
+
+    Returns:
+        Dict of playlist toggles, name templates and size limits.
+
+    Default Values:
+        - essential_playlists_enabled: True
+        - essential_max_tracks: 50
+        - essential_name_template: "{artist} - Essential Collection"
+        - essential_include_featured: True
+        - genre_playlists_enabled: True
+        - genre_playlists_delete_enabled: True
+        - genre_playlists_name_template: "{genre} - Top Tracks"
+        - genre_playlists_min_stars: 4
+        - genre_playlists_max_genres: 3
+        - genre_playlists_create_threshold: 100
+        - genre_playlists_delete_threshold: 80
+        - genre_playlists_max_tracks: 300
+        - new_music_playlist_enabled: True
+
+    NOTE: ``genre_playlists_max_tracks`` (300) is deliberately larger than
+    ``genre_playlists_create_threshold`` (100).  A genre with between 100 and
+    300 qualifying tracks therefore yields a playlist containing its ENTIRE
+    qualifying pool rather than a curated top slice.  Lower the max, or raise
+    the create threshold, if you want every genre playlist to be a selection.
+    """
+    cfg = get_config() or {}
+    p = cfg.get("playlists") or {}
+    if not isinstance(p, dict):
+        p = {}
+    return {
+        "essential_playlists_enabled": bool(p.get("essential_playlists_enabled", True)),
+        "essential_max_tracks": max(1, int(p.get("essential_max_tracks", 50) or 50)),
+        "essential_name_template": str(
+            p.get("essential_name_template") or "{artist} - Essential Collection"
+        ),
+        "essential_include_featured": bool(p.get("essential_include_featured", True)),
+        "genre_playlists_enabled": bool(p.get("genre_playlists_enabled", True)),
+        "genre_playlists_delete_enabled": bool(p.get("genre_playlists_delete_enabled", True)),
+        "genre_playlists_name_template": str(
+            p.get("genre_playlists_name_template") or "{genre} - Top Tracks"
+        ),
+        "genre_playlists_min_stars": max(1, int(p.get("genre_playlists_min_stars", 4) or 4)),
+        "genre_playlists_max_genres": max(1, int(p.get("genre_playlists_max_genres", 3) or 3)),
+        "genre_playlists_create_threshold": max(
+            1, int(p.get("genre_playlists_create_threshold", 100) or 100)
+        ),
+        "genre_playlists_delete_threshold": max(
+            1, int(p.get("genre_playlists_delete_threshold", 80) or 80)
+        ),
+        "genre_playlists_max_tracks": max(
+            1, int(p.get("genre_playlists_max_tracks", 300) or 300)
+        ),
+        "new_music_playlist_enabled": bool(p.get("new_music_playlist_enabled", True)),
+    }
+
+
+# -----------------------------------------------------------------------------
 # Genre Aggregation Configuration
 # -----------------------------------------------------------------------------
 
 def get_genre_weights() -> dict[str, float]:
     """Get genre source weighting for aggregation.
-    
+
     Returns:
         Dict mapping genre source names to their weights.
-        
+
     Default Values:
         - musicbrainz: 0.40 (40% weight - most authoritative)
         - discogs: 0.25 (25% weight)
         - audiodb: 0.20 (20% weight)
         - essentia: 0.20 (20% weight - audio analysis)
         - listenbrainz: 0.15 (15% weight - MB-tagged, community)
-        - navidrome: 0.30 (30% weight - local library tags, authoritative)
+        - navidrome: 0.30 (30% weight - local library tags)
         - manual: 0.30 (30% weight - explicit user edits)
         - lastfm: 0.10 (10% weight)
         - spotify: 0.05 (5% weight)
+
+    NOTE on ``navidrome``: the aggregation service treats Navidrome tags as a
+    TIE-BREAKER ONLY — they contribute no vote weight and can never introduce
+    a genre on their own.  This weight is therefore unused by the current
+    ranking path and is retained for compatibility.
     """
     cfg = get_config()
     genre_config = cfg.get("genres", {}).get("weights", {})
-    
+
     defaults = {
         "musicbrainz": 0.40,
         "discogs": 0.25,
@@ -827,7 +1000,7 @@ def get_genre_weights() -> dict[str, float]:
         "lastfm": 0.10,
         "spotify": 0.05,
     }
-    
+
     return {
         key: float(genre_config.get(key, default))
         for key, default in defaults.items()
@@ -836,10 +1009,10 @@ def get_genre_weights() -> dict[str, float]:
 
 def get_genre_synonyms() -> dict[str, str]:
     """Get genre synonym mappings for normalization.
-    
+
     Returns:
         Dict mapping variant genre names to canonical forms.
-        
+
     Default Mappings:
         - "hip hop" → "hip-hop"
         - "r&b" → "rnb"
@@ -847,15 +1020,47 @@ def get_genre_synonyms() -> dict[str, str]:
     """
     cfg = get_config()
     user_synonyms = cfg.get("genres", {}).get("synonyms", {})
-    
+
     defaults = {
         "hip hop": "hip-hop",
         "r&b": "rnb",
         "rhythm and blues": "rnb",
     }
-    
+
     # User synonyms override defaults
     return {**defaults, **user_synonyms}
+
+
+def get_genre_aggregation_config() -> dict[str, Any]:
+    """Get genre aggregation tuning (junk filter + minimum vote weight).
+
+    Config section: ``genres`` in config.yaml
+
+    Returns:
+        Dict with keys ``junk_filter`` (bool) and ``min_weight`` (float).
+
+    Default Values:
+        - junk_filter: True  (drop "seen live", years, mood words, etc.)
+        - min_weight: 0.25   (minimum decayed vote weight to qualify)
+
+    NOTE on ``min_weight``: the aggregation service applies a rank decay of
+    ``1 / log2(rank + 2)`` to every vote, so this threshold is compared
+    against DECAYED totals, not raw source weights.  A source weighted 0.30
+    clears 0.25 at rank 0 (0.30) but fails at rank 1 (0.19).  Lower this
+    value if genre lists come back shorter than expected.
+    """
+    cfg = get_config() or {}
+    genres = cfg.get("genres") or {}
+    if not isinstance(genres, dict):
+        genres = {}
+    try:
+        min_weight = max(0.0, float(genres.get("min_weight", 0.25) or 0.25))
+    except (TypeError, ValueError):
+        min_weight = 0.25
+    return {
+        "junk_filter": bool(genres.get("junk_filter", True)),
+        "min_weight": min_weight,
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -864,16 +1069,16 @@ def get_genre_synonyms() -> dict[str, str]:
 
 def get_queue_matching_config_v2() -> dict[str, Any]:
     """Get queue matching thresholds, variant tokens, and compilation settings.
-    
+
     Consolidates legacy ``get_queue_matching_config_legacy()`` into v2.
     The legacy function is deprecated and will be removed.
-    
+
     Config section: ``queue.matching`` in config.yaml
-    
+
     Returns:
         Dict containing matching thresholds, variant configurations,
         compilation detection settings, and track variant tokens.
-        
+
     Default Values:
         - threshold: 0.65
         - partial_match: 0.7
@@ -891,23 +1096,23 @@ def get_queue_matching_config_v2() -> dict[str, Any]:
     """
     cfg = get_config()
     queue_config = cfg.get("queue", {}).get("matching", {})
-    
+
     return {
         # Matching thresholds
         "threshold": float(queue_config.get("threshold", 0.65)),
         "partial_match": float(queue_config.get("partial_match", 0.7)),
         "strict_duration_sec": int(queue_config.get("strict_duration_sec", 2)),
         "tolerance_duration_sec": int(queue_config.get("tolerance_duration_sec", 5)),
-        
+
         # Variant tokens (used by matching + normalization)
         "soft_variants": set(queue_config.get("soft_variants", ["edit", "radio", "version", "mix"])),
         "hard_variants": set(queue_config.get("hard_variants", ["live", "acoustic", "remix", "demo", "instrumental"])),
-        
+
         # --- Merged from legacy ---
         "detect_live_tracks": bool(queue_config.get("detect_live_tracks", True)),
         "detect_remix_tracks": bool(queue_config.get("detect_remix_tracks", True)),
         "detect_compilations": bool(queue_config.get("detect_compilations", True)),
-        
+
         "title_variant_tokens": set(
             queue_config.get(
                 "title_variant_tokens",
@@ -918,14 +1123,14 @@ def get_queue_matching_config_v2() -> dict[str, Any]:
                 ],
             )
         ),
-        
+
         "soft_variant_tokens": set(
             queue_config.get(
                 "soft_variant_tokens",
                 ["version", "edit", "radio"],
             )
         ),
-        
+
         "compilation_artists": set(
             queue_config.get(
                 "compilation_artists",
@@ -941,10 +1146,10 @@ def get_queue_matching_config_v2() -> dict[str, Any]:
 
 def get_slskd_timeouts() -> dict[str, Any]:
     """Get slskd transfer timeout configuration.
-    
+
     Returns:
         Dict containing timeout values for various transfer states.
-        
+
     Default Values:
         - min_retry_delay_minutes: 60
         - long_retry_delay_minutes: 1440 (24 hours)
@@ -955,7 +1160,7 @@ def get_slskd_timeouts() -> dict[str, Any]:
     """
     cfg = get_config()
     slskd_config = cfg.get("slskd", {}).get("timeouts", {})
-    
+
     return {
         "min_retry_delay_minutes": int(slskd_config.get("min_retry_delay_minutes", 60)),
         "long_retry_delay_minutes": int(slskd_config.get("long_retry_delay_minutes", 1440)),
@@ -981,10 +1186,10 @@ def get_slskd_timeouts() -> dict[str, Any]:
 
 def get_lastfm_config() -> dict[str, Any]:
     """Get Last.fm service configuration.
-    
+
     Returns:
         Dict containing Last.fm API settings and cache configuration.
-        
+
     Default Values:
         - min_artist_plays: 20
         - min_similarity_score: 0.46
@@ -998,7 +1203,7 @@ def get_lastfm_config() -> dict[str, Any]:
     """
     cfg = get_config()
     lastfm_config = cfg.get("lastfm", {})
-    
+
     return {
         "min_artist_plays": int(lastfm_config.get("min_artist_plays", 20)),
         "min_similarity_score": float(lastfm_config.get("min_similarity_score", 0.46)),
@@ -1018,17 +1223,17 @@ def get_lastfm_config() -> dict[str, Any]:
 
 def get_download_matching_config() -> dict[str, Any]:
     """Get download matching engine configuration.
-    
+
     Returns:
         Dict containing download matching thresholds and settings.
-        
+
     Note:
         These settings control how downloaded files are matched to existing
         library tracks and releases.
     """
     cfg = get_config()
     download_config = cfg.get("downloads", {}).get("matching", {})
-    
+
     return {
         "min_accept_score": float(download_config.get("min_accept_score", 0.45)),
         "duration_tolerance_seconds": int(download_config.get("duration_tolerance_seconds", 5)),
@@ -1043,22 +1248,22 @@ def get_download_matching_config() -> dict[str, Any]:
 
 def get_supported_audio_formats() -> set[str]:
     """Get set of supported audio file extensions.
-    
+
     Returns:
         Set of lowercase file extensions (e.g., {'.mp3', '.flac'}).
-        
+
     Default Formats:
         .mp3, .flac, .m4a, .ogg, .wav, .aac, .wma
     """
     cfg = get_config()
     user_formats = cfg.get("filesystem", {}).get("audio_formats", [])
-    
+
     defaults = {".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac", ".wma"}
-    
+
     if user_formats:
         # User formats completely override defaults
         return {ext.lower() if ext.startswith('.') else f'.{ext.lower()}' for ext in user_formats}
-    
+
     return defaults
 
 
@@ -1068,17 +1273,17 @@ def get_supported_audio_formats() -> set[str]:
 
 def get_musician_terms() -> set[str]:
     """Get terms used to identify musician entities in Wikidata.
-    
+
     Returns:
         Set of occupation/description terms that indicate a musical artist.
-        
+
     Note:
         Used for entity disambiguation when multiple Wikidata results
         are returned for an artist name search.
     """
     cfg = get_config()
     user_terms = cfg.get("wikidata", {}).get("musician_terms", [])
-    
+
     defaults = {
         "singer", "musician", "band", "rapper", "composer", "songwriter",
         "guitarist", "drummer", "bassist", "pianist", "vocalist", "producer",
@@ -1086,10 +1291,10 @@ def get_musician_terms() -> set[str]:
         "pop group", "hip-hop", "hip hop", "jazz", "blues", "country artist",
         "folk singer", "opera", "conductor", "orchestra",
     }
-    
+
     if user_terms:
         return set(user_terms) | defaults
-    
+
     return defaults
 
 
@@ -1261,6 +1466,21 @@ def get_download_conversion_config() -> dict[str, Any]:
 # Generic feature flags (features.*)
 # ---------------------------------------------------------------------------
 
+# Feature flags whose default is True when absent from config.  ``get_feature``
+# already honours a caller-supplied default, so this only documents the
+# scan-behaviour flags that ship enabled.
+#
+# repair_album_annotations:
+#   Collapse duplicated bracketed annotations in album names and track titles
+#   inline during a metadata/full scan ("The Fall of Hearts (tour edition)
+#   (tour edition)" → "The Fall of Hearts (tour edition)").  One copy of every
+#   distinct annotation is preserved, so editions are never lost.  Set false to
+#   disable the inline repair without a code change.
+_DEFAULT_FEATURE_FLAGS: dict[str, Any] = {
+    "repair_album_annotations": True,
+}
+
+
 def get_features_config() -> dict[str, Any]:
     """Get all feature flags and toggles.
 
@@ -1268,10 +1488,17 @@ def get_features_config() -> dict[str, Any]:
 
     Returns:
         Dict of feature flags including sync, scheduler, daily-release,
-        and mature-track settings.
+        and mature-track settings.  Flags in ``_DEFAULT_FEATURE_FLAGS`` are
+        present even when absent from the config file, so a fresh install
+        gets the intended behaviour with no config edit.
     """
     cfg = get_config()
-    return cfg.get("features", {})
+    features = cfg.get("features", {})
+    if not isinstance(features, dict):
+        features = {}
+    merged = dict(_DEFAULT_FEATURE_FLAGS)
+    merged.update(features)
+    return merged
 
 
 def get_feature(key: str, default: Any = None) -> Any:
@@ -1441,6 +1668,9 @@ def get_navidrome_first_user() -> dict[str, str]:
 # MusicBrainz User-Agent
 # =============================================================================
 
+_DEFAULT_MUSICBRAINZ_USER_AGENT = "Popularr/1.0 +https://github.com/M0VENTURA/Popularr"
+
+
 def get_musicbrainz_user_agent() -> str:
     """Get the MusicBrainz API User-Agent string.
 
@@ -1454,7 +1684,7 @@ def get_musicbrainz_user_agent() -> str:
     cfg = get_config()
     return str(
         cfg.get("musicbrainz", {})
-        .get("user_agent", "Popularr/1.0 +https://github.com/M0VENTURA/Popularr")
+        .get("user_agent", _DEFAULT_MUSICBRAINZ_USER_AGENT)
     )
 
 
