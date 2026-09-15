@@ -35,6 +35,7 @@ def _title_match_key(title: str) -> str:
     if not title:
         return ""
     import unicodedata as _ud
+
     value = _ud.normalize("NFKC", str(title)).lower().strip()
     # Keep letters/digits across ALL scripts (incl. Hangul/CJK); drop
     # punctuation, brackets and whitespace.
@@ -48,6 +49,36 @@ def _album_key(album: str) -> str:
     # "2024 - 樂-STAR" → "樂-STAR"; "2024 樂-STAR" → "樂-STAR".
     value = re.sub(r"^(?:19|20)\d{2}\s*[-–—]?\s+", "", value).strip()
     return value.lower()
+
+
+def _row_value(row: Any, column: str, position: int | None = None) -> Any:
+    """Read ``column`` from a SQLAlchemy RowMapping / Row / dict.
+
+    Rows returned by ``.mappings().all()`` are RowMappings and MUST be indexed
+    by COLUMN NAME — ``row[0]`` raises "Could not locate column in row for
+    column '0'".  This helper makes that the default while still tolerating a
+    plain tuple row, so a caller can never reintroduce the positional-index
+    bug by accident.
+    """
+    if row is None:
+        return None
+    if hasattr(row, "get"):
+        try:
+            return row.get(column)
+        except Exception:
+            pass
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None:
+        try:
+            return mapping[column]
+        except Exception:
+            pass
+    if position is not None:
+        try:
+            return row[position]
+        except Exception:
+            return None
+    return None
 
 
 def get_library_tracks(artist: str, album: str) -> list[dict[str, Any]]:
@@ -66,6 +97,7 @@ def get_library_tracks(artist: str, album: str) -> list[dict[str, Any]]:
             ),
             {"artist": artist},
         ).mappings().all()
+
     return [
         dict(r)
         for r in rows
@@ -90,7 +122,7 @@ def get_missing_tracks(artist: str, album: str) -> dict[str, Any]:
                 if _album_key(str(r.get("album") or "")) == album_key
             ]
 
-        mb_row = session.execute(
+        mb_rows = session.execute(
             text(
                 "SELECT musicbrainz_album_mbid, album FROM tracks "
                 "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
@@ -98,11 +130,14 @@ def get_missing_tracks(artist: str, album: str) -> dict[str, Any]:
             ),
             {"artist": artist},
         ).mappings().all()
-        mb_row = next((r for r in mb_row if _album_key(str(r.get("album") or "")) == album_key), None)
+        mb_row = next(
+            (r for r in mb_rows if _album_key(str(r.get("album") or "")) == album_key),
+            None,
+        )
         # ``mb_row`` is a RowMapping — index by COLUMN NAME, never by integer
         # position (``mb_row[0]`` raised "Could not locate column in row for
         # column '0'").
-        mb_mbid = str(mb_row.get("musicbrainz_album_mbid") or "") if mb_row else None
+        mb_mbid = str(_row_value(mb_row, "musicbrainz_album_mbid") or "") if mb_row else None
 
         library_rows = session.execute(
             text(
@@ -132,7 +167,8 @@ def get_missing_tracks(artist: str, album: str) -> dict[str, Any]:
 
     try:
         mb_release = fetch_musicbrainz_release_metadata(mb_mbid)
-    except Exception:
+    except Exception as exc:
+        logger.debug("MB release metadata fetch failed", release_mbid=mb_mbid, error=str(exc))
         mb_release = None
 
     if not mb_release:
@@ -163,6 +199,7 @@ def get_missing_tracks(artist: str, album: str) -> dict[str, Any]:
     try:
         from db.engine import db_session as _q_session
         from sqlalchemy import text as _q_text
+
         _album_norm = _album_key(album)
         with _q_session() as session:
             q_rows = session.execute(
@@ -198,12 +235,13 @@ def get_missing_tracks(artist: str, album: str) -> dict[str, Any]:
         if not mb_title:
             continue
         norm = _title_match_key(mb_title)
-
         mb_disc = int(mt.get("disc_number") or 1)
         mb_num = str(mt.get("track_number") or "").strip()
+
         position_occupied = bool(mb_num and (mb_disc, mb_num) in lib_by_position)
         if position_occupied or norm in lib_norm:
             continue
+
         # Not missing when the track is queued/downloading/imported.
         if norm in queued_keys or (mb_num and (mb_disc, mb_num) in queued_by_position):
             continue
@@ -226,13 +264,16 @@ def get_missing_tracks(artist: str, album: str) -> dict[str, Any]:
     try:
         _persist_missing_tracks(artist, album, missing)
     except Exception as exc:
-        logger.debug("Failed to persist missing tracks", artist=artist, album=album, error=str(exc))
+        logger.warning(
+            "Failed to persist missing tracks",
+            artist=artist, album=album, error=str(exc),
+        )
 
     # Return only tracks that are still missing AND not rejected.
     rejected_titles = _rejected_missing_titles(artist, album)
     visible = [
         m for m in missing
-        if (m["track_number"], m["disc_number"], m["title"]) not in rejected_titles
+        if _missing_row_key(m) not in rejected_titles
     ]
 
     return {
@@ -241,6 +282,29 @@ def get_missing_tracks(artist: str, album: str) -> dict[str, Any]:
         "mb_total": mb_total,
         "library_count": library_count,
     }
+
+
+def _missing_row_key(row: Any) -> tuple[str, int, str]:
+    """Build the ``(track_number, disc_number, title_key)`` identity for a row.
+
+    The title component is normalised with ``_title_match_key`` rather than
+    compared raw.  Previously the rejected-set used the RAW title while the
+    computed set used the raw title too — consistent, but punctuation- and
+    case-sensitive, so a rejected "Don't Stop" stopped matching once
+    MusicBrainz returned "Don’t Stop" (curly apostrophe) and the track
+    reappeared on the missing list despite having been dismissed.
+    """
+    if hasattr(row, "get"):
+        tn = row.get("track_number")
+        disc = row.get("disc_number")
+        title = row.get("title")
+    else:
+        tn, disc, title = None, None, None
+    return (
+        str(tn or "").strip(),
+        int(disc or 1),
+        _title_match_key(str(title or "")),
+    )
 
 
 def _persist_missing_tracks(artist: str, album: str, missing: list[dict[str, Any]]) -> None:
@@ -262,29 +326,36 @@ def _persist_missing_tracks(artist: str, album: str, missing: list[dict[str, Any
             {"artist": artist, "album": album},
         ).mappings().all()
 
-        current_keys = {
-            (str(m.get("track_number") or ""), int(m.get("disc_number") or 1), str(m.get("title") or ""))
-            for m in missing
-        }
+        current_keys = {_missing_row_key(m) for m in missing}
 
         for row in existing:
-            row_key = (
-                str(row.get("track_number") or ""),
-                int(row.get("disc_number") or 1),
-                str(row.get("title") or ""),
-            )
-            if row_key not in current_keys and not row.get("ignored"):
+            if _missing_row_key(row) not in current_keys and not row.get("ignored"):
                 session.execute(
                     text("DELETE FROM missing_album_tracks WHERE id = :id"),
                     {"id": row.get("id")},
                 )
 
+        # Rows already persisted for this album — including rejected ones —
+        # must not be re-inserted.  ``ON CONFLICT DO NOTHING`` without a
+        # conflict target only suppresses a genuine constraint violation, so
+        # if ``missing_album_tracks`` has no unique index covering
+        # (artist, album, title, disc) every scan appended duplicates.
+        # Filtering here makes the insert correct regardless of whether that
+        # constraint exists.
+        existing_keys = {_missing_row_key(row) for row in existing}
+
+        inserted = 0
         for m in missing:
+            key = _missing_row_key(m)
+            if key in existing_keys:
+                continue
+
             tn = str(m.get("track_number") or "").strip()
             disc = int(m.get("disc_number") or 1)
             title = str(m.get("title") or "").strip()
             if not title:
                 continue
+
             session.execute(
                 text("""
                     INSERT INTO missing_album_tracks
@@ -308,11 +379,20 @@ def _persist_missing_tracks(artist: str, album: str, missing: list[dict[str, Any
                     "duration": m.get("duration"),
                 },
             )
+            existing_keys.add(key)
+            inserted += 1
+
         session.commit()
+
+    if inserted:
+        logger.debug(
+            "Persisted missing tracks",
+            artist=artist, album=album, inserted=inserted, total=len(missing),
+        )
 
 
 def _rejected_missing_titles(artist: str, album: str) -> set[tuple[str, int, str]]:
-    """Return the set of ``(track_number, disc_number, title)`` rejected rows."""
+    """Return the set of ``(track_number, disc_number, title_key)`` rejected rows."""
     try:
         with db_session() as session:
             rows = session.execute(
@@ -325,17 +405,19 @@ def _rejected_missing_titles(artist: str, album: str) -> set[tuple[str, int, str
                 """),
                 {"artist": artist, "album": album},
             ).mappings().all()
-        return {
-            (str(r.get("track_number") or ""), int(r.get("disc_number") or 1), str(r.get("title") or ""))
-            for r in rows
-        }
-    except Exception:
+        return {_missing_row_key(r) for r in rows}
+    except Exception as exc:
+        logger.debug(
+            "Rejected missing-title fetch failed",
+            artist=artist, album=album, error=str(exc),
+        )
         return set()
 
 
 def get_title_mismatches(artist: str, album: str) -> dict[str, Any]:
     """Compare library track titles against the full MusicBrainz release tracklist."""
     album_key = _album_key(album)
+
     with db_session() as session:
         mb_rows = session.execute(
             text(
@@ -346,7 +428,15 @@ def get_title_mismatches(artist: str, album: str) -> dict[str, Any]:
             {"artist": artist},
         ).mappings().all()
         mb_rows = [r for r in mb_rows if _album_key(str(r.get("album") or "")) == album_key]
-        mb_mbid = mb_rows[0][0] if mb_rows else None
+
+        # FIXED: this was ``mb_rows[0][0]``.  ``.mappings().all()`` returns
+        # RowMappings, which are keyed by COLUMN NAME — a positional index
+        # raises "Could not locate column in row for column '0'".
+        # ``get_missing_tracks`` above already carried a comment warning
+        # about exactly this; this function still had the bug, so the title
+        # comparison raised on every album that HAD an MBID (the only albums
+        # it can actually compare).
+        mb_mbid = str(_row_value(mb_rows[0], "musicbrainz_album_mbid") or "") if mb_rows else None
 
         library_rows = session.execute(
             text(
@@ -363,7 +453,15 @@ def get_title_mismatches(artist: str, album: str) -> dict[str, Any]:
     if not mb_mbid:
         return {"mismatches": [], "mismatch_count": 0, "library_count": len(library_rows)}
 
-    mb_release = fetch_musicbrainz_release_metadata(mb_mbid)
+    try:
+        mb_release = fetch_musicbrainz_release_metadata(mb_mbid)
+    except Exception as exc:
+        logger.debug(
+            "MB release metadata fetch failed",
+            release_mbid=mb_mbid, artist=artist, album=album, error=str(exc),
+        )
+        mb_release = None
+
     if not mb_release:
         return {"mismatches": [], "mismatch_count": 0, "library_count": len(library_rows)}
 
@@ -388,32 +486,51 @@ def get_title_mismatches(artist: str, album: str) -> dict[str, Any]:
         mb_num = mt.get("track_number")
         if not mb_title or mb_num is None:
             continue
+
         try:
             mb_tn = int(str(mb_num).split("/")[0].strip())
         except (ValueError, TypeError):
             continue
 
-        lib_entry = lib_by_tracknum.get((mb_disc, mb_tn))
-        if lib_entry:
-            lib_title = lib_entry.get("title", "")
-            if lib_title:
-                # Unicode-preserving comparison — Korean/CJK titles match
-                # precisely instead of being erased by an ASCII-only strip.
-                if _title_match_key(lib_title) != _title_match_key(mb_title):
-                    dur_tolerance = 5
-                    lib_dur = lib_entry.get("duration")
-                    mb_dur = mt.get("duration")
-                    if lib_dur and mb_dur and abs(float(lib_dur) - float(mb_dur)) > dur_tolerance:
-                        mismatch_type = "title_and_length"
-                    else:
-                        mismatch_type = "title"
-                    mismatches.append({
-                        "track_id": lib_entry["id"],
-                        "library_title": lib_title,
-                        "mb_title": mb_title,
-                        "track_number": mb_num,
-                        "disc_number": mb_disc,
-                        "mismatch_type": mismatch_type,
-                    })
+        # The library index is keyed on an INT disc number, so the MB disc
+        # must be coerced the same way — a string "1" from the release
+        # payload silently missed every lookup.
+        try:
+            mb_disc_key = int(str(mb_disc).split("/")[0].strip()) if mb_disc not in (None, "") else 1
+        except (ValueError, TypeError):
+            mb_disc_key = 1
+
+        lib_entry = lib_by_tracknum.get((mb_disc_key, mb_tn))
+        if not lib_entry:
+            continue
+
+        lib_title = lib_entry.get("title", "")
+        if not lib_title:
+            continue
+
+        # Unicode-preserving comparison — Korean/CJK titles match
+        # precisely instead of being erased by an ASCII-only strip.
+        if _title_match_key(lib_title) == _title_match_key(mb_title):
+            continue
+
+        dur_tolerance = 5
+        lib_dur = lib_entry.get("duration")
+        mb_dur = mt.get("duration")
+        mismatch_type = "title"
+        try:
+            if lib_dur and mb_dur and abs(float(lib_dur) - float(mb_dur)) > dur_tolerance:
+                mismatch_type = "title_and_length"
+        except (TypeError, ValueError):
+            # A non-numeric duration is a title-only mismatch, not a crash.
+            mismatch_type = "title"
+
+        mismatches.append({
+            "track_id": lib_entry["id"],
+            "library_title": lib_title,
+            "mb_title": mb_title,
+            "track_number": mb_num,
+            "disc_number": mb_disc,
+            "mismatch_type": mismatch_type,
+        })
 
     return {"mismatches": mismatches, "mismatch_count": len(mismatches), "library_count": len(library_rows)}
