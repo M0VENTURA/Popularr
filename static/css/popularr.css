@@ -83,17 +83,40 @@ body.player-visible {
     --footer-stack-height: calc(var(--status-bar-height) + var(--player-bar-height));
 }
 
-/* `!important` is deliberate: base.html sets `padding-top: 6rem` INLINE on
-   this element, and an inline style beats a stylesheet rule at every
-   specificity short of !important. Without this the 6rem wins and the var
-   above is ignored, so the navbar-height token has no effect at all. */
 main.container-fluid {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    padding-top: calc(var(--navbar-height, 68px) + 0.75rem) !important;
+    padding-top: calc(var(--navbar-height, 68px) + 0.75rem);
     padding-bottom: 1rem;
+}
+
+/* ── Navbar Layout ───────────────────────────────────────────────────────────
+   Moved out of the inline <style> block in base.html. These rules control
+   whether the navbar's search row wraps onto its own line, which is what
+   makes the navbar taller below the lg breakpoint — so they belong next to
+   the --navbar-height values above rather than in a separate file where a
+   change to one could silently invalidate the other.
+   ------------------------------------------------------------------------- */
+.nav-brand-row      { flex: 1 1 100%; order: 1; }
+.nav-search-wrapper { flex: 1 1 100%; order: 3; margin-top: 0.5rem; }
+.nav-links-wrapper  { order: 4; width: 100%; }
+
+@media (min-width: 992px) {
+    .nav-brand-row      { flex: 0 0 auto !important; width: auto; }
+    .nav-search-wrapper { flex: 0 1 320px; margin-top: 0; margin-left: 1rem; margin-right: 1rem; order: 2; }
+    .nav-links-wrapper  { flex: 0 0 auto; width: auto; order: 3; }
+}
+
+/* The global modal wrappers in base.html are direct children of <body>, which
+   is a flex column. Their contents are position:fixed modals, so the wrappers
+   themselves would sit in the flex flow as zero-height items. `display:
+   contents` removes them from the layout entirely while keeping their
+   children in the DOM. */
+#global-mb-search-container,
+#global-unified-search-container {
+    display: contents;
 }
 
 p, div, span, label, h1, h2, h3, h4, h5, h6, li, td, th { color: var(--text-primary); }
@@ -418,20 +441,18 @@ form .form-check-input[name="force"] + .form-check-label {
 
 /* The player bar is a FLEX FOOTER ITEM of <body>, not an overlay — that is
    what makes `body.player-visible { --footer-stack-height: ... }` correct
-   and keeps the bar from covering content.
+   and keeps the bar from covering content. base.html previously forced
+   `position: fixed` inline, which detached it from the flex column and made
+   the footer-stack maths wrong.
 
-   base.html sets `position: fixed; z-index: 1030` INLINE on this element.
-   An inline style outranks any normal stylesheet rule, so the previous
-   `position: static` here never applied: the bar detached from the flex
-   column, the footer-stack maths silently went wrong, and the bar overlaid
-   the bottom of every page. `!important` is the only thing that beats an
-   inline declaration, so it is required here until the inline style is
-   removed from base.html (see PATCHES.md). */
+   `relative`, NOT `static`: #playerQueuePanel below is
+   `position: absolute; bottom: 100%`, so it needs this element to remain a
+   positioning context. Under `static` the Up Next panel would resolve
+   against the initial containing block and fly to the top of the viewport. */
 #globalPlayerBar {
     flex-shrink: 0;
-    position: static !important;
-    z-index: var(--z-player-bar, 1029) !important;
-    inset: auto !important;
+    position: relative;
+    z-index: var(--z-player-bar, 1029);
 }
 
 #playerQueuePanel {
