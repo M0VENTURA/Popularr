@@ -353,6 +353,11 @@ window.clearMbSearch = function () {
     if (el) el.value = '';
   });
 
+  // A pending "Select Match" choice must not survive a cleared search — the
+  // confirmation panel below would otherwise keep showing a release that no
+  // longer matches whatever the user searches for next.
+  window._mbPendingRelease = null;
+
   const resultsEl = document.getElementById('mbSearchResults');
   if (resultsEl) {
     resultsEl.innerHTML = '<div class="col-12 text-center text-muted py-5">' +
@@ -367,12 +372,58 @@ window.clearMbSearch = function () {
   if (selectedEl) selectedEl.classList.add('d-none');
 };
 
+// Holds the release the user picked via "Select Match", awaiting confirmation
+// via the "Apply Match" button (#mbSelectedRelease / confirmReleaseSelection).
+window._mbPendingRelease = null;
+
+// Called when a result card's "Select Match" button is clicked (only rendered
+// when window._mbSearchCallback is set — i.e. a caller like
+// openAlbumLookupModal() wants a release chosen here, not downloaded).
+//
+// This used to invoke window._mbSearchCallback immediately, which skipped the
+// "Apply Match" confirmation panel entirely (#mbSelectedRelease, #mbSelectedTitle,
+// #mbSelectedArtist in _musicbrainz_search_component.html never got populated,
+// so the panel stayed hidden and confirmReleaseSelection() had nothing to do —
+// which is also why that function was never written). Now it stages the pick
+// and shows the summary panel; confirmReleaseSelection() below fires the
+// callback once the user reviews and clicks "Apply Match".
 window.handleGlobalMbSelect = function (releaseEnc) {
   const release = decodeInlineArg(releaseEnc);
-  if (window._mbSearchCallback && release) {
+  if (!release) return;
+
+  window._mbPendingRelease = release;
+
+  const resultArtist = release.artist || (release['artist-credit']?.[0]?.name) || 'Unknown Artist';
+  const titleEl = document.getElementById('mbSelectedTitle');
+  const artistEl = document.getElementById('mbSelectedArtist');
+  const panel = document.getElementById('mbSelectedRelease');
+
+  if (titleEl) titleEl.textContent = release.title || '';
+  if (artistEl) artistEl.textContent = resultArtist;
+  if (panel) {
+    panel.classList.remove('d-none');
+    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+};
+
+// Wired to #mbSelectedRelease's "Apply Match" button in
+// _musicbrainz_search_component.html. Fires the pending window._mbSearchCallback
+// (e.g. album_detail.js's openAlbumLookupModal() callback, which calls
+// applyAlbumMbid()) with the release staged by handleGlobalMbSelect(), then
+// closes the modal. Previously undefined — the button existed in the markup
+// but had no handler anywhere in the codebase.
+window.confirmReleaseSelection = function () {
+  const release = window._mbPendingRelease;
+  if (!release) return;
+
+  if (window._mbSearchCallback) {
     window._mbSearchCallback(release);
     window._mbSearchCallback = null;
   }
+  window._mbPendingRelease = null;
+
+  const panel = document.getElementById('mbSelectedRelease');
+  if (panel) panel.classList.add('d-none');
 
   const modalEl = document.getElementById('musicBrainzModal');
   if (modalEl) {
