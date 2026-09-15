@@ -10,7 +10,6 @@ This is the ONLY place that connects:
 Optimized for high-concurrency: heavy text-search fallbacks are gated to prevent
 rate-limit exhaustion and 300s+ timeout stalls on large albums.
 """
-
 from __future__ import annotations
 
 import json
@@ -90,7 +89,6 @@ from services.popularity.popularity_cache_policy import (
     should_use_cached_score,
 )
 
-
 logger = structlog.get_logger(__name__)
 
 _SOURCE_LABELS = {
@@ -132,6 +130,7 @@ def _single_chips(sources_raw: Any) -> str:
         sources = json.loads(sources_raw) if isinstance(sources_raw, str) else (sources_raw or [])
     except Exception:
         sources = []
+
     chips: list[str] = []
     for s in sources if isinstance(sources, list) else []:
         if not isinstance(s, dict):
@@ -172,6 +171,7 @@ def _album_top_genres(
 ) -> list[str]:
     if not album_tracks:
         return []
+
     album_source_map: dict[str, list[str]] = {}
     _source_cols = [
         ("musicbrainz", "musicbrainz_genres"),
@@ -181,6 +181,7 @@ def _album_top_genres(
         ("spotify", "spotify_genres"),
         ("navidrome", "navidrome_genres"),
     ]
+
     for _at in album_tracks:
         if not isinstance(_at, dict):
             continue
@@ -197,8 +198,10 @@ def _album_top_genres(
                 _name = str(_g or "").strip()
                 if _name:
                     album_source_map.setdefault(_src, []).append(_name)
+
     if not album_source_map:
         return []
+
     try:
         return aggregate_genres(album_source_map, max_genres=max_genres)
     except Exception:
@@ -237,8 +240,10 @@ def _artist_dominant_genres(
                 {"artist": artist},
             )
             rows = [dict(r._mapping) for r in result.fetchall() or []]
+
         if not rows:
             return []
+
         return _album_top_genres(rows, max_genres=max_genres)
     except Exception:
         return []
@@ -262,6 +267,7 @@ def _build_album_listener_distributions(
     album_lf_listeners: list[float] | None = None
     album_lb_listens: list[float] | None = None
     album_lf_lb_pairs: list[tuple[int, int]] = []
+
     try:
         _album_titles = {
             normalize_for_aggregation(str(t.get("title") or ""))
@@ -276,10 +282,12 @@ def _build_album_listener_distributions(
             or is_bonus_track_title(str(t.get("title") or ""))
             or _duration_below_floor(t)
         }
+
         _all_lf_vals: list[float] = []
         _all_lb_vals: list[float] = []
         _lf_vals: list[float] = []
         _lb_vals: list[float] = []
+
         for _k, _e in (prefetched_popularity or {}).items():
             _norm_k = normalize_for_aggregation(str(_k or ""))
             if _norm_k not in _album_titles:
@@ -297,10 +305,12 @@ def _build_album_listener_distributions(
                     _lb_vals.append(float(_lbv))
                 if _lfv > 0 and _lbv > 0:
                     album_lf_lb_pairs.append((_lfv, _lbv))
+
         if len(_lf_vals) < 3:
             _lf_vals = _all_lf_vals
         if len(_lb_vals) < 3:
             _lb_vals = _all_lb_vals
+
         if len(_lf_vals) >= 3:
             album_lf_listeners = _lf_vals
         if len(_lb_vals) >= 3:
@@ -308,6 +318,7 @@ def _build_album_listener_distributions(
     except Exception:
         album_lf_listeners = None
         album_lb_listens = None
+
     return album_lf_listeners, album_lb_listens, album_lf_lb_pairs
 
 
@@ -357,7 +368,6 @@ _MB_RECORDING_GENRE_CACHE: dict[str, tuple[list, list]] = {}
 _MB_RECORDING_GENRE_SEARCH_CACHE: dict[tuple[str, str], list] = {}
 _DISCOGS_GENRE_CACHE: dict[tuple[str, str], list] = {}
 _LB_RECORDING_TAGS_CACHE: dict[str, list] = {}
-
 _GENRE_CACHE_MAX = 4000
 
 
@@ -399,6 +409,7 @@ def _looks_like_json_fragment(value: str) -> bool:
 def _coerce_writer_list(raw: Any) -> list[str]:
     """Safely coerce a writer value into a clean list of plain strings."""
     value: Any = raw
+
     for _ in range(5):
         if isinstance(value, list):
             break
@@ -527,6 +538,7 @@ def _score_track_popularity(
                         _album_pairs.append((int(lastfm_listeners), int(listenbrainz_listens)))
                     continue
                 _album_pairs.append((_lfv, _lbv))
+
             _audit_verdict = evaluate_log_ratio_deviation(
                 lastfm_listeners=lastfm_listeners,
                 listenbrainz_listens=listenbrainz_listens,
@@ -558,7 +570,7 @@ def _score_track_popularity(
     except Exception as exc:
         logger.debug("Interlude LB outlier check failed", track_id=track_id, error=str(exc))
 
-    score_data, lb_percentile = calculate_combined_popularity_score(
+    _scored = calculate_combined_popularity_score(
         lastfm_listeners=lastfm_listeners,
         lastfm_artist_max_listeners=artist_max_lf_listeners,
         listenbrainz_listens=_score_lb,
@@ -578,6 +590,29 @@ def _score_track_popularity(
         live_weight_penalty=cfg_live_penalty,
         instrumental_weight_penalty=cfg_instrumental_penalty,
     )
+
+    # FIXED: ``calculate_combined_popularity_score`` previously returned exactly
+    # ``(score_data, lb_percentile)`` and was unpacked into two names here. The
+    # function now returns additional diagnostic values, which raised
+    # ``ValueError: too many values to unpack (expected 2)`` for EVERY track,
+    # was swallowed by the caller's except block, and left every track scoring
+    # 0.0 / 1★.
+    #
+    # Only the score dict is consumed here -- lb_percentile is recalculated
+    # immediately below -- so accept any return arity rather than hard-coding
+    # one. This stays correct if the signature changes again.
+    if isinstance(_scored, tuple):
+        score_data = _scored[0] if _scored else {}
+    else:
+        score_data = _scored
+
+    if not isinstance(score_data, dict):
+        logger.warning(
+            "Unexpected score payload type from calculate_combined_popularity_score",
+            track_id=track_id,
+            payload_type=type(score_data).__name__,
+        )
+        score_data = {}
 
     try:
         lb_percentile = calculate_listenbrainz_percentile(_score_lb, album_lb_listens) if album_lb_listens else 0.0
@@ -630,10 +665,10 @@ def _resolve_track_mb_metadata(
             mb_data = _batch_mb.get(f"{artist.lower()}::{title.lower()}")
             if not mb_data and batch_artist and batch_title:
                 mb_data = _batch_mb.get(f"{batch_artist.lower()}::{batch_title.lower()}")
-            
+
             mb_service = get_shared_mb_service()
             _from_batch = bool(mb_data)
-            
+
             if not mb_data:
                 mb_data = mb_service.lookup_recording_metadata(title, artist)
                 _from_batch = False
@@ -673,21 +708,20 @@ def _resolve_track_mb_metadata(
                     flat_writers = _coerce_writer_list(_batch_writer)
                     if flat_writers:
                         payload["writer"] = json.dumps(flat_writers, ensure_ascii=False)
-            
+
             if mb_data.get("title"):
                 payload["musicbrainz_title"] = mb_data["title"]
-            
+
             _artist_mbid = mb_data.get("artist_mbid")
             if _artist_mbid and not _as_str(track.get("musicbrainz_artistid") or track.get("musicbrainz_artist_id")):
                 payload["musicbrainz_artistid"] = _artist_mbid
-            
+
             _mb_isrc = _as_str(mb_data.get("isrc") or "").strip()
             if _mb_isrc and not _as_str(track.get("isrc") or "").strip():
                 payload["isrc"] = _mb_isrc
 
             _existing_album = _as_str(track.get("album") or "").strip()
             _mb_album = _as_str(mb_data.get("album") or "").strip()
-
             if _mb_album:
                 if not _existing_album:
                     payload["album"] = _mb_album
@@ -712,10 +746,9 @@ def _resolve_track_mb_metadata(
                             proposed=_mb_album,
                             reason=_album_reason,
                         )
-                
+
             _existing_artist = _as_str(track.get("artist") or "").strip()
             _mb_artist = _as_str(mb_data.get("artist") or "").strip()
-
             if _mb_artist:
                 if not _existing_artist:
                     payload["artist"] = _mb_artist
@@ -729,7 +762,7 @@ def _resolve_track_mb_metadata(
                             old=_existing_artist,
                             new=_mb_artist,
                         )
-                
+
             _existing_year = _as_str(track.get("year") or "").strip()
             _mb_year = _as_str(mb_data.get("year") or "").strip()
             if _mb_year:
@@ -742,7 +775,7 @@ def _resolve_track_mb_metadata(
                             _should_update_year = True
                     except ValueError:
                         pass
-                
+
                 if _should_update_year:
                     payload["year"] = _mb_year
 
@@ -772,7 +805,6 @@ def process_track(
     discogs_cached_promos: set | None = None,
     prefetched_popularity: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-
     raw_track_id = track.get("id")
     if not raw_track_id:
         return None
@@ -780,9 +812,8 @@ def process_track(
     track_id = _as_str(raw_track_id)
     track_title = _as_str(track.get("title"))
     track_artist = _as_str(track.get("artist"))
-    
-    from helpers.logging_config import log_unified
 
+    from helpers.logging_config import log_unified
     _track_started = time.monotonic()
     try:
         log_unified(
@@ -808,7 +839,7 @@ def process_track(
     refresh_popularity = bool(options.get("refresh_popularity_if_due"))
     singles_detection_only = bool(options.get("singles_detection_only"))
     singles_pass = bool(options.get("singles_only")) or bool(options.get("singles_with_missing_popularity"))
-    
+
     _has_stored_popularity = (
         float(track.get("final_score") or track.get("popularity") or 0) > 0
         or int(track.get("lastfm_listeners") or 0) >= 25
@@ -848,6 +879,7 @@ def process_track(
                     _lbv = int(_at.get("listenbrainz_listens") or 0)
                     if _lfv > 0 and _lbv > 0:
                         _album_pairs_stored.append((_lfv, _lbv))
+
                 _audit_verdict, _audit_score = apply_log_ratio_audit_to_stored_score(
                     lastfm_listeners=lastfm_listeners,
                     listenbrainz_listens=listenbrainz_listens,
@@ -880,6 +912,7 @@ def process_track(
                         _lbv = int(_at.get("listenbrainz_listens") or 0)
                         if _lfv > 0 and _lbv > 0:
                             _pairs_for_interlude.append((_lfv, _lbv))
+
                     if is_interlude_lb_outlier(
                         duration_seconds=_stored_duration,
                         lastfm_listeners=lastfm_listeners,
@@ -917,6 +950,7 @@ def process_track(
             )
         except Exception as exc:
             logger.debug("MB pre-resolution failed", track_id=track_id, error=str(exc))
+
         if _mb_meta:
             _genre_lookup_artist = _mb_meta.get("artist")
             _genre_lookup_title = _mb_meta.get("title")
@@ -925,7 +959,6 @@ def process_track(
     # -------------------------------------------------------------------------
     # 1. POPULARITY
     # -------------------------------------------------------------------------
-
     if (
         not metadata_only
         and not singles_detection_only
@@ -933,7 +966,6 @@ def process_track(
     ):
         try:
             effective_track = _build_effective_track(track, update_payload)
-
             artist = _as_str(track_context.get("artist") or effective_track.get("artist"))
             raw_title = _as_str(effective_track.get("title") or track.get("title"))
             title = _as_str(track_context.get("lastfm_title") or raw_title)
@@ -944,12 +976,13 @@ def process_track(
                 or effective_track.get("musicbrainz_trackid")
             )
             isrc = _as_str(effective_track.get("isrc") or "").strip()
-            
+
             if isrc.startswith("[") and isrc.endswith("]"):
                 from helpers.normalization_service import normalize_isrc
                 isrc = normalize_isrc(isrc)
                 if isrc:
                     update_payload["isrc"] = isrc
+
             if not isrc:
                 _batch_mb = options.get("mb_batch_metadata") or {}
                 _mb_entry = _batch_mb.get(f"{artist.lower()}::{str(raw_title or title).lower()}")
@@ -957,10 +990,12 @@ def process_track(
                 if _batch_isrc:
                     isrc = _batch_isrc
                     update_payload["isrc"] = _batch_isrc
+
             if isrc:
                 _isrc_found = isrc
 
             from datetime import datetime, timezone
+
             def _as_utc(value: Any) -> datetime | None:
                 if isinstance(value, datetime):
                     if value.tzinfo is None:
@@ -971,6 +1006,7 @@ def process_track(
             now_ts = datetime.now(timezone.utc)
             _track_year = effective_track.get("year") or effective_track.get("release_year")
             _cache_ttl = get_cache_duration_hours(_track_year)
+
             last_lf_ts = _as_utc(effective_track.get("lastfm_last_updated"))
             has_fresh_lf = (
                 last_lf_ts is not None
@@ -992,7 +1028,7 @@ def process_track(
             ) and bool(
                 effective_track.get("final_score") and _has_credible_data
             )
-            
+
             if _cached:
                 lastfm_listeners = _as_int(effective_track.get("lastfm_listeners") or 0)
                 lastfm_playcount = _as_int(effective_track.get("lastfm_playcount") or 0)
@@ -1015,13 +1051,13 @@ def process_track(
             else:
                 lastfm_listeners = _as_int(effective_track.get("lastfm_listeners") or 0)
                 lastfm_playcount = _as_int(effective_track.get("lastfm_playcount") or 0)
-                
+
                 _prefetch_entry = (prefetched_popularity or {}).get(
                     normalize_for_aggregation(raw_title or title or "")
                 )
                 if _force and _prefetch_entry and not _prefetch_entry.get("_album_tracklist"):
                     _prefetch_entry = None
-                    
+
                 if (
                     _force
                     or not has_fresh_lf
@@ -1074,9 +1110,11 @@ def process_track(
                                     lf_result = lf.get_track_info(artist, title)
                                     lastfm_listeners = _as_int(lf_result.get("listeners") if isinstance(lf_result, dict) else 0)
                                     lastfm_playcount = _as_int(lf_result.get("track_play") if isinstance(lf_result, dict) else 0)
+
                                 update_payload["lastfm_listeners"] = lastfm_listeners
                                 update_payload["lastfm_playcount"] = lastfm_playcount
                                 update_payload["lastfm_last_updated"] = now_ts
+
                                 toptags = lf_result.get("toptags", {}) if isinstance(lf_result, dict) else {}
                                 tag_list = toptags.get("tag", []) if isinstance(toptags, dict) else []
                                 if tag_list:
@@ -1118,10 +1156,11 @@ def process_track(
                 # --- ListenBrainz ---
                 listenbrainz_listens = _as_int(effective_track.get("listenbrainz_listens") or 0)
                 listenbrainz_users = _as_int(effective_track.get("listenbrainz_users") or 0)
-                
+
                 if _force or not has_fresh_lb or listenbrainz_listens == 0:
                     _lb_source = "none"
                     _album_tracklist_entry = bool(_prefetch_entry and _prefetch_entry.get("_album_tracklist"))
+
                     if _prefetch_entry and (_prefetch_entry.get("listenbrainz_listens") or _album_tracklist_entry):
                         _lb_source = "prefetch" if _prefetch_entry.get("listenbrainz_listens") else "album_tracklist"
                         listenbrainz_listens = _as_int(_prefetch_entry.get("listenbrainz_listens") or 0)
@@ -1140,6 +1179,7 @@ def process_track(
                                     if _isrc_rec and _isrc_rec.get("recording_mbid"):
                                         recording_mbid = _isrc_rec["recording_mbid"]
                                         _lb_source = "isrc_resolved"
+
                                 if not recording_mbid:
                                     _batch_mb = options.get("mb_batch_metadata") or {}
                                     _mb_entry = _batch_mb.get(f"{artist.lower()}::{str(raw_title or title).lower()}")
@@ -1147,12 +1187,14 @@ def process_track(
                                         recording_mbid = _mb_entry["recording_mbid"]
                                     else:
                                         recording_mbid, _conf = get_shared_mb_service().get_suggested_mbid(raw_title or title, artist)
+
                                 if recording_mbid:
                                     _lb_source = _lb_source or "mbid_resolved"
                                     update_payload["recording_mbid"] = recording_mbid
                                     update_payload["mbid"] = recording_mbid
                             except Exception:
                                 recording_mbid = None
+
                         if listenbrainz_listens == 0 and recording_mbid:
                             _lb_source = "single_lookup"
                             try:
@@ -1163,6 +1205,7 @@ def process_track(
                             except Exception:
                                 listenbrainz_listens = 0
                                 listenbrainz_users = 0
+
                     update_payload["listenbrainz_listens"] = listenbrainz_listens
                     update_payload["listenbrainz_users"] = listenbrainz_users
                     update_payload["listenbrainz_last_updated"] = now_ts
@@ -1208,10 +1251,8 @@ def process_track(
             combined = score_data.get("combined_score", 0.0)
             update_payload["final_score"] = combined
             update_payload["popularity"] = combined
-
             if not update_payload.get("_cached"):
                 update_payload["_raw_combined"] = float(score_data.get("combined_score") or 0)
-
         except Exception as e:
             logger.warning("Scoring failed", track_id=track_id, error=str(e), exc_info=True)
 
@@ -1227,7 +1268,6 @@ def process_track(
     # -------------------------------------------------------------------------
     # 2. SINGLES DETECTION
     # -------------------------------------------------------------------------
-
     _sd_fresh = False
     if not bool(options.get("force")):
         try:
@@ -1243,6 +1283,7 @@ def process_track(
                     track.get("year") or track.get("release_year")
                 )
                 _sd_age_ok = (_sd_dt.now(_sd_tz.utc) - _sd_ts).total_seconds() < _sd_ttl_hours * 3600
+
                 _sd_has_evidence = bool(track.get("is_single"))
                 if not _sd_has_evidence:
                     try:
@@ -1254,6 +1295,7 @@ def process_track(
                         )
                     except Exception:
                         _sd_has_evidence = True
+
                 _sd_fresh = _sd_age_ok and _sd_has_evidence
         except Exception:
             _sd_fresh = False
@@ -1269,6 +1311,7 @@ def process_track(
         try:
             from datetime import datetime as _dt, timezone as _tz
             sd_now = _dt.now(_tz.utc)
+
             effective_track = _build_effective_track(track, update_payload)
             sd_title = _as_str(effective_track.get("title") or "")
             sd_artist = _as_str(effective_track.get("artist") or "")
@@ -1281,7 +1324,6 @@ def process_track(
                 or effective_track.get("popularity_score")
                 or 0
             )
-
             album_track_count = len(album_context.get("tracks") or []) or 1
 
             _sd_album_lf, _sd_album_lb, _ = _build_album_listener_distributions(
@@ -1291,6 +1333,7 @@ def process_track(
             )
             if not _sd_album_lb and album_lb_listens:
                 _sd_album_lb = list(album_lb_listens)
+
             try:
                 if singles_pass and lastfm_listeners and _sd_album_lf:
                     _sd_album_lf = list(_sd_album_lf) + [float(lastfm_listeners)]
@@ -1310,7 +1353,7 @@ def process_track(
                     sd_discogs_token = ""
             except Exception:
                 sd_discogs_token = ""
-            
+
             sd_lastfm_client = None
             try:
                 from helpers.config_helpers import get_config as _get_cfg
@@ -1356,6 +1399,7 @@ def process_track(
                     )
                 except Exception:
                     pass
+
                 sd_result = detect_single_for_track(
                     title=sd_title,
                     artist=sd_artist,
@@ -1391,6 +1435,7 @@ def process_track(
                     artist_stats_override=(options.get("artist_stats_override") if isinstance(options, dict) else None),
                     artist_listen_override=(options.get("artist_listen_override") if isinstance(options, dict) else None),
                 )
+
                 _sd_elapsed = time.monotonic() - _sd_start
                 try:
                     _sd_conf_log = str(sd_result.get("confidence") or "low").upper() if sd_result else "SKIPPED"
@@ -1410,8 +1455,8 @@ def process_track(
 
             _sd_title_lower = str(sd_title or "").lower()
             _known_global_hits = [
-                "toxic", "oops", "baby one more time", "slave 4 u", "lucky", 
-                "everytime", "stronger", "sometimes", "overprotected", "prerogative", 
+                "toxic", "oops", "baby one more time", "slave 4 u", "lucky",
+                "everytime", "stronger", "sometimes", "overprotected", "prerogative",
                 "crazy", "boys", "outrageous", "girl, not yet a woman", "somethin", "me against the music"
             ]
             _is_known_hit = any(hit in _sd_title_lower for hit in _known_global_hits) or int(lastfm_listeners or 0) >= 300_000
@@ -1447,7 +1492,6 @@ def process_track(
                     update_payload["single_confidence_score"] = 0.0
                     update_payload["single_sources"] = json.dumps([], ensure_ascii=False)
                     _single_summary = "Single: LOW (below top-50% album popularity)"
-
         except Exception as e:
             logger.debug("Single detection failed", track_id=track_id, error=str(e))
             _single_summary = f"Single: ERROR ({e})"
@@ -1455,7 +1499,6 @@ def process_track(
     # -------------------------------------------------------------------------
     # 3. METADATA - MusicBrainz / Discogs / ListenBrainz
     # -------------------------------------------------------------------------
-
     if not popularity_only and not singles_detection_only:
         _meta_start = time.monotonic()
         try:
@@ -1482,6 +1525,7 @@ def process_track(
                 try:
                     mb_raw = get_shared_mb_client()
                     mb_genres: list[Any] = []
+
                     _rg_mbid = str(track.get("musicbrainz_releasegroupid") or "").strip()
                     if _rg_mbid:
                         if _rg_mbid not in _MB_RG_GENRE_CACHE:
@@ -1537,13 +1581,13 @@ def process_track(
                             update_payload["listenbrainz_genres"] = json.dumps([n for n in names if n], ensure_ascii=False)
                 except Exception as e:
                     logger.debug("ListenBrainz genre fetch failed", track_id=track_id, error=str(e))
+
         except Exception as e:
             logger.debug("Metadata fetch failed", track_id=track_id, error=str(e))
 
     # -------------------------------------------------------------------------
     # 4. COVER DETECTION
     # -------------------------------------------------------------------------
-
     if not popularity_only and not singles_detection_only:
         try:
             effective_track = _build_effective_track(track, update_payload)
@@ -1578,12 +1622,10 @@ def process_track(
     # -------------------------------------------------------------------------
     # 5. GENRE AGGREGATION
     # -------------------------------------------------------------------------
-
     if not popularity_only and not singles_detection_only:
         try:
             effective_track = _build_effective_track(track, update_payload)
             source_map = {}
-
             for key, source_name in [
                 ("musicbrainz_genres", "musicbrainz"),
                 ("discogs_genres", "discogs"),
@@ -1597,9 +1639,9 @@ def process_track(
                     source_map[source_name] = raw
 
             aggregated = aggregate_genres(
-                source_map, 
-                max_genres=2, 
-                context_title=_as_str(effective_track.get("title")), 
+                source_map,
+                max_genres=2,
+                context_title=_as_str(effective_track.get("title")),
                 context_album=_as_str(album_context.get("album"))
             )
             if aggregated:
@@ -1620,7 +1662,7 @@ def process_track(
                         _album_years.append(int(str(_y)[:4]))
                     except ValueError:
                         pass
-            
+
             _pl_year = _as_str(update_payload.get("year")).strip()
             if _pl_year:
                 try:
@@ -1631,7 +1673,7 @@ def process_track(
             if _album_years:
                 _min_year = min(_album_years)
                 _curr_year = _as_str(update_payload.get("year") or track.get("year") or track.get("release_year")).strip()
-                
+
                 _update_needed = False
                 if not _curr_year:
                     _update_needed = True
@@ -1641,7 +1683,7 @@ def process_track(
                             _update_needed = True
                     except ValueError:
                         _update_needed = True
-                        
+
                 if _update_needed:
                     update_payload["year"] = str(_min_year)
         except Exception as e:
@@ -1650,12 +1692,11 @@ def process_track(
     # -------------------------------------------------------------------------
     # 6. PERSISTENCE
     # -------------------------------------------------------------------------
-
     effective_track = _strip_album_type_columns(track, update_payload)
 
     _jsonb_fields = [
-        "musicbrainz_genres", "discogs_genres", "lastfm_tags", 
-        "listenbrainz_genres", "spotify_genres", "essentia_genres", 
+        "musicbrainz_genres", "discogs_genres", "lastfm_tags",
+        "listenbrainz_genres", "spotify_genres", "essentia_genres",
         "manual_genres", "navidrome_genres", "single_sources", "writer"
     ]
     for _j_field in _jsonb_fields:
@@ -1680,7 +1721,6 @@ def process_track(
     # -------------------------------------------------------------------------
     # 7. RETURN RESULT
     # -------------------------------------------------------------------------
-
     _result_final_score = float(update_payload.get("final_score") or score_data.get("combined_score") or 0)
     _album_artist = _as_str(
         track.get("album_artist")
@@ -1692,12 +1732,13 @@ def process_track(
     if not _single_summary:
         _stored_conf = str(update_payload.get("single_confidence") or track.get("single_confidence") or "low").upper()
         _single_summary = f"Single: {_stored_conf} (stored)"
+
     try:
         _stored_stars = int(track.get("stars") or track.get("star_rating") or 0)
     except (TypeError, ValueError):
         _stored_stars = 0
     _stars_part = f" | Stars: {'★' * _stored_stars}" if 1 <= _stored_stars <= 5 else ""
-    
+
     _src_names: list[str] = []
     try:
         _src_raw = update_payload.get("single_sources") or track.get("single_sources") or []
@@ -1709,9 +1750,10 @@ def process_track(
         ]
     except Exception:
         _src_names = []
-        
+
     _isrc_part = f" | ISRC: {_isrc_found}" if _isrc_found else ""
     _track_total_elapsed = time.monotonic() - _track_started
+
     _consolidated = (
         f"[TRACK] 🎵 \"{str(track_title or '').strip()}\""
         f" | {_pop_summary or 'Score: —'}"
@@ -1722,7 +1764,7 @@ def process_track(
     )
     if _src_names:
         _consolidated += f" | Matched: {', '.join(_src_names)}"
-        
+
     if metadata_only:
         logger.debug(_consolidated)
     else:
