@@ -297,46 +297,13 @@
   </div>
 
   {#
-    Keep --navbar-height honest.
+    --navbar-height is kept in sync by syncNavbarHeight() in static/js/main.js,
+    which measures the real navbar with a ResizeObserver and also re-measures
+    on shown/hidden.bs.collapse when the mobile menu expands.
 
-    The navbar is flex-wrap: its search row wraps below the lg breakpoint, so
-    its real height changes with the viewport AND with how many nav links are
-    rendered (custom bookmark links, the logged-in user menu). popularr.css
-    ships sensible per-breakpoint values, but measuring is exact.
-
-    Everything that consumes the token follows automatically: main's
-    padding-top, .search-flyout's top and max-height, .navbar-collapse.show,
-    and #dashboardRow.
+    Do NOT add a second copy of that logic here. Two writers for one CSS
+    variable is exactly how the 68px / 96px / 112px disagreement started.
   #}
-  <script>
-    (function () {
-      var nav = document.querySelector('.navbar.fixed-top');
-      if (!nav) return;
-
-      function syncNavbarHeight() {
-        var h = nav.offsetHeight;
-        if (h > 0) {
-          document.documentElement.style.setProperty('--navbar-height', h + 'px');
-        }
-      }
-
-      syncNavbarHeight();
-      window.addEventListener('load', syncNavbarHeight);
-
-      if (typeof ResizeObserver !== 'undefined') {
-        new ResizeObserver(syncNavbarHeight).observe(nav);
-      } else {
-        window.addEventListener('resize', syncNavbarHeight);
-      }
-
-      // The mobile menu expands the navbar; Bootstrap fires these on collapse.
-      var collapseEl = document.getElementById('navbarNav');
-      if (collapseEl) {
-        collapseEl.addEventListener('shown.bs.collapse', syncNavbarHeight);
-        collapseEl.addEventListener('hidden.bs.collapse', syncNavbarHeight);
-      }
-    })();
-  </script>
 
   <script src="{{ versioned_static('js/player.js') }}"></script>
   <script src="{{ versioned_static('js/musicbrainz-folder-groups.js') }}"></script>
