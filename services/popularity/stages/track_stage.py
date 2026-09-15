@@ -68,12 +68,12 @@ from services.enrichment.cover_detection_service import detect_cover_song
 # Track classification
 from services.catalog.album_classification_service import (
     is_bonus_track_title,
-    is_instrumental_track_title,
+    is_instrumental_track_title as is_instrumental_track,
     is_live_or_alternate_track_title,
 )
 
 # Genre aggregation
-from services.enrichment.genre_aggregation_service import aggregate_genres
+from services.enrichment.genre_aggregation_service import aggregate_genres, _parse_genre_input
 
 # DB & Normalization
 from db.repositories.tracks import insert_or_update_track
@@ -172,8 +172,6 @@ def _album_top_genres(
 ) -> list[str]:
     if not album_tracks:
         return []
-    from services.enrichment.genre_aggregation_service import aggregate_genres, _parse_genre_input
-
     album_source_map: dict[str, list[str]] = {}
     _source_cols = [
         ("musicbrainz", "musicbrainz_genres"),
@@ -839,7 +837,6 @@ def process_track(
         lastfm_listeners = _as_int(track.get("lastfm_listeners") or 0)
         listenbrainz_listens = _as_int(track.get("listenbrainz_listens") or 0)
         lb_percentile = float(track.get("lb_percentile") or 0)
-        # Ensure _raw_combined is never zeroed out when bypassing scoring
         update_payload["_raw_combined"] = float(score_data["combined_score"])
 
         try:
@@ -1010,7 +1007,6 @@ def process_track(
                     "age_score": float(effective_track.get("age_score", 0)),
                 }
                 update_payload["_cached"] = True
-                # Preserve raw combined score on cached tracks
                 update_payload["_raw_combined"] = _stored_score
                 try:
                     lb_percentile = calculate_listenbrainz_percentile(_score_lb, album_lb_listens) if album_lb_listens else 0.0
@@ -1171,7 +1167,6 @@ def process_track(
                     update_payload["listenbrainz_users"] = listenbrainz_users
                     update_payload["listenbrainz_last_updated"] = now_ts
 
-                # Strict backend-only live detection suffix check
                 is_live_flag = bool(
                     effective_track.get("is_live")
                     or effective_track.get("album_context_live")
@@ -1179,7 +1174,7 @@ def process_track(
                     or bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", str(raw_title or title).lower()))
                     or _has_safe_live_recording_tag(update_payload)
                 )
-                is_instrumental_flag = is_instrumental_track_title(raw_title or title)
+                is_instrumental_flag = is_instrumental_track(raw_title or title)
                 is_featured_flag = bool(
                     "feat" in str(artist or "").lower()
                     or "feat" in str(raw_title or title).lower()
@@ -1263,7 +1258,6 @@ def process_track(
         except Exception:
             _sd_fresh = False
 
-    # When singles detection is skipped because it is fresh, PRESERVE stored values
     if _sd_fresh:
         update_payload["is_single"] = bool(track.get("is_single", False))
         update_payload["single_confidence"] = str(track.get("single_confidence") or "low")
@@ -1738,7 +1732,6 @@ def process_track(
         except Exception:
             pass
 
-    # Ensure _raw_combined and singles confidence are never lost on frozen/cached tracks
     _ret_raw_combined = float(
         update_payload.get("_raw_combined")
         or track.get("_raw_combined")
