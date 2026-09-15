@@ -76,6 +76,32 @@ def _is_featured_artist(artist_name: str) -> bool:
     return bool(_FEATURED_ARTIST_RE.match(artist_name or ""))
 
 
+_ALTERNATE_PERFORMANCE_RE = re.compile(
+    r"\([^)]*\b(?:live|unplugged|acoustic|orchestral|symphonic|demo|instrumental|"
+    r"karaoke|remix|alternate|alt|take|session|rehearsal|jam[- ]along)\b[^)]*\)"
+    r"|\s+-\s*(?:live|unplugged|acoustic|orchestral|symphonic|demo|instrumental|"
+    r"karaoke|remix|alternate|alt|take|session|rehearsal|jam[- ]along)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_alternate_performance_title(rec_title: str) -> bool:
+    return bool(_ALTERNATE_PERFORMANCE_RE.search(rec_title or ""))
+
+
+def _alt_status_matches(target_title: str, candidate_title: str) -> bool:
+    """True only if target and candidate agree on being a live/remix/alternate
+    performance (or agree on *not* being one).
+
+    Without this check, popularity data for a plain studio release can get
+    inflated by summing in live/remix/alternate recordings, and conversely a
+    live/remix/alternate track can silently inherit the original studio
+    release's popularity numbers because a fuzzy/normalized title match
+    doesn't distinguish "Song" from "Song (Live)" / "Song (Remix)".
+    """
+    return _is_alternate_performance_title(target_title) == _is_alternate_performance_title(candidate_title)
+
+
 def resolve_isrc_recording(
     isrc: str,
     *,
@@ -118,7 +144,13 @@ def resolve_isrc_recording(
         best_score = 0.0
         
         for rec in recordings:
-            rec_title = normalize_for_aggregation(str(rec.get("title") or ""))
+            rec_title_raw = str(rec.get("title") or "")
+            # Don't let a live/remix/alternate recording win the match for a
+            # studio-title lookup, or vice versa.
+            if title and not _alt_status_matches(title, rec_title_raw):
+                continue
+
+            rec_title = normalize_for_aggregation(rec_title_raw)
             rec_artist = str(_first_credit_name(rec) or "").casefold().strip()
             score = _token_similarity(target_title, rec_title)
             
@@ -157,19 +189,6 @@ def _first_credit_name(recording: dict[str, Any]) -> str:
         elif credit:
             return str(credit)
     return ""
-
-
-_ALTERNATE_PERFORMANCE_RE = re.compile(
-    r"\([^)]*\b(?:live|unplugged|acoustic|orchestral|symphonic|demo|instrumental|"
-    r"karaoke|remix|alternate|alt|take|session|rehearsal|jam[- ]along)\b[^)]*\)"
-    r"|\s+-\s*(?:live|unplugged|acoustic|orchestral|symphonic|demo|instrumental|"
-    r"karaoke|remix|alternate|alt|take|session|rehearsal|jam[- ]along)\s*$",
-    re.IGNORECASE,
-)
-
-
-def _is_alternate_performance_title(rec_title: str) -> bool:
-    return bool(_ALTERNATE_PERFORMANCE_RE.search(rec_title or ""))
 
 
 def extract_recording_mbid(track: dict[str, Any]) -> str | None:
@@ -618,10 +637,16 @@ def get_aggregated_lastfm_popularity(
     
     for item in catalog or []:
         item_title = item.get("name") or item.get("title") or ""
-        if normalize_for_aggregation(item_title) == target:
-            matched.append(item)
-            listeners += int(item.get("listeners", 0) or 0)
-            playcount += int(item.get("playcount", item.get("track_play", 0)) or 0)
+        if normalize_for_aggregation(item_title) != target:
+            continue
+        # Same normalized title can still be a live/remix/alternate take
+        # (normalization strips punctuation, not performance-type markers) -
+        # don't let it merge with a differently-typed target.
+        if not _alt_status_matches(track_title, item_title):
+            continue
+        matched.append(item)
+        listeners += int(item.get("listeners", 0) or 0)
+        playcount += int(item.get("playcount", item.get("track_play", 0)) or 0)
 
     if not matched and ARTIST_JOIN_RE.search(artist or ""):
         collab_parts = [p.strip() for p in ARTIST_JOIN_RE.split(artist or "") if p.strip()]
@@ -652,10 +677,13 @@ def get_aggregated_lastfm_popularity(
                         
                     for item in _part_catalog or []:
                         item_title = item.get("name") or item.get("title") or ""
-                        if normalize_for_aggregation(item_title) == target:
-                            matched.append(item)
-                            listeners += int(item.get("listeners", 0) or 0)
-                            playcount += int(item.get("playcount", item.get("track_play", 0)) or 0)
+                        if normalize_for_aggregation(item_title) != target:
+                            continue
+                        if not _alt_status_matches(track_title, item_title):
+                            continue
+                        matched.append(item)
+                        listeners += int(item.get("listeners", 0) or 0)
+                        playcount += int(item.get("playcount", item.get("track_play", 0)) or 0)
                 except Exception:
                     continue
 
@@ -769,6 +797,12 @@ def get_search_aggregated_lastfm_popularity(
                 
             if not title_variants_compatible(track_title, item_title):
                 continue
+
+            # A "compatible" title (e.g. same base song, different
+            # bracketed suffix) can still be a live/remix/alternate take -
+            # reject it unless it agrees with the target on that.
+            if not _alt_status_matches(track_title, item_title):
+                continue
                 
             _item_key = normalize_for_aggregation(item_title)
             if _item_key != target and _token_similarity(_item_key, target) < 0.90:
@@ -868,8 +902,13 @@ def get_aggregated_listenbrainz_popularity(
                 rec_title = str(rec.get("title") or "")
                 if not rec_id or not rec_title:
                     continue
-                    
-                if _is_alternate_performance_title(rec_title):
+
+                # Only reject a candidate recording when it *disagrees* with
+                # the target on being a live/remix/alternate performance.
+                # A blanket exclusion of every alt-performance title would
+                # also exclude the correct match when the target track
+                # itself is a live/remix/alternate version.
+                if not _alt_status_matches(title, rec_title):
                     continue
                     
                 norm_rec = normalize_title_for_lookup(strip_single_release_suffix(rec_title) or rec_title)
@@ -1025,7 +1064,12 @@ def get_work_level_listenbrainz_popularity(
         
         if not rec_id or not rec_title:
             continue
-        if _is_alternate_performance_title(rec_title):
+        # Same reasoning as get_aggregated_listenbrainz_popularity above:
+        # only reject recordings that *disagree* with the target track on
+        # alt-performance status, so a live/remix/alternate target can still
+        # match its own recordings within the work, without pulling in a
+        # different studio release's counts (or vice versa).
+        if not _alt_status_matches(title, rec_title):
             continue
             
         rec_artist_mbids = _recording_artist_mbids(rec)
