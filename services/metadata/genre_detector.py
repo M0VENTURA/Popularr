@@ -33,9 +33,30 @@ class GenreDetector:
         "tribute", "covers", "tribute to", "covering", "in the style",
     })
 
+    # NOTE: a bare " live " (space-padded) was removed from this set. It is
+    # not a reliable live-performance signal mid-title — it matched ordinary
+    # sentences such as "I Live Alone" and "We Live In Hope". Every genuine
+    # form is still covered: bracketed "(live)"/"[live]", the "- Live"
+    # suffix, "Live at/from/in", "Live Version", and a trailing "… Live"
+    # (see ``_LIVE_TITLE_PATTERNS`` below).
     LIVE_KEYWORDS_TITLE = frozenset({
-        "(live)", "live at", "live from", "- live", " live ", "live version",
+        "(live)", "[live]", "live at", "live from", "live version",
+        "- live", "– live", "— live",
     })
+
+    # Title-level live patterns that need anchoring rather than a substring
+    # test. Kept separate from the keyword set so the boundaries are explicit.
+    _LIVE_TITLE_PATTERNS = (
+        r"[\(\[][^)\]]*\blive\b[^)\]]*[\)\]]",   # "(Live)", "(Recorded Live)"
+        r"[-–—]\s*live\b",                        # "Song - Live"
+        # "Live at/from/in …" only counts at the START of the title or right
+        # after a separator/bracket. Requiring that anchor is what separates
+        # "Live In Tokyo" from the ordinary sentence "We Live In Hope", which
+        # an unanchored \blive\s+in\b matched.
+        r"(?:^|[\(\[]|[-–—]\s*)live\s+(?:at|from|in)\b",
+        r"\blive\s+(?:version|session|tour)\b",
+        r"\blive\s*$",                            # "Song Live"
+    )
 
     LIVE_KEYWORDS_ALBUM = frozenset({
         "unplugged", "live at", "live from", "in concert",
@@ -58,6 +79,52 @@ class GenreDetector:
         "orchestral", "symphonic", "symphony", "philharmonic",
         "orchestra", "orchestrated",
     })
+
+    # ── False-positive guards ─────────────────────────────────────────────
+    #
+    # Several keywords above are substrings of ordinary words, and a bare
+    # ``in`` test matches them:
+    #
+    #   " live "   matched "I Live Alone", "We Live In Hope"
+    #   "covers"   matched "Undercovers", "Discovers"
+    #   "carol"    matched "Carolina", "Caroline"
+    #   "santa"    matched "Santana", "Santa Monica"
+    #   " remix"   matched nothing harmful, but "remixed" matched "unremixed"
+    #
+    # Keywords that are whole words (rather than bracketed or punctuated
+    # fragments) are therefore matched on WORD BOUNDARIES. Bracketed forms
+    # like "(live)" and punctuated forms like "- live" stay as substring
+    # tests, since they are already unambiguous.
+    _WORD_BOUNDARY_KEYWORDS = frozenset({
+        "carol", "santa", "sleigh", "jingle", "noel", "advent", "holiday",
+        "covers", "covering", "tribute",
+        "remix", "remixes", "remixed",
+        "orchestra", "orchestral", "symphony", "symphonic", "philharmonic",
+        "orchestrated",
+    })
+
+    @staticmethod
+    def _keyword_hit(haystack: str, keyword: str) -> bool:
+        """Case-insensitive keyword test with word-boundary guarding.
+
+        ``haystack`` is expected to already be lowercased.
+        """
+        if not haystack or not keyword:
+            return False
+        kw = keyword.strip().lower()
+        if not kw:
+            return False
+
+        if kw in GenreDetector._WORD_BOUNDARY_KEYWORDS:
+            return bool(re.search(rf"\b{re.escape(kw)}\b", haystack))
+
+        # A bare single word that is not bracketed/punctuated is still risky
+        # as a raw substring ("live" inside "alive"/"delivery"), so guard it
+        # too. Multi-word and punctuated keywords are matched literally.
+        if kw.isalpha():
+            return bool(re.search(rf"\b{re.escape(kw)}\b", haystack))
+
+        return kw in haystack
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -82,18 +149,23 @@ class GenreDetector:
             Set of detected special tags (e.g. ``{"Live", "Acoustic"}``).
         """
         tags: set[str] = set()
+
         track_lower = (track_name or "").lower()
         album_lower = (album_name or "").lower()
         genres_lower = [g.lower() for g in (artist_genres or [])]
 
         if self._detect_christmas(track_lower, album_lower, genres_lower):
             tags.add("Christmas")
+
         if self._detect_cover(track_lower, album_lower):
             tags.add("Cover")
+
         if self._detect_live(track_lower, album_lower, audio_features, album_type):
             tags.add("Live")
+
         if self._detect_acoustic(track_lower, audio_features):
             tags.add("Acoustic")
+
         if self._detect_remix(track_lower, album_lower, album_type):
             tags.add("Remix")
 
@@ -112,21 +184,25 @@ class GenreDetector:
     @staticmethod
     def _detect_christmas(track_lower: str, album_lower: str, genres_lower: list[str]) -> bool:
         for kw in GenreDetector.CHRISTMAS_KEYWORDS:
-            if kw in track_lower or kw in album_lower:
+            if GenreDetector._keyword_hit(track_lower, kw) or GenreDetector._keyword_hit(album_lower, kw):
                 return True
+
         for genre in genres_lower:
             if "christmas" in genre or "holiday" in genre:
                 return True
+
         return False
 
     @staticmethod
     def _detect_cover(track_lower: str, album_lower: str) -> bool:
         for kw in GenreDetector.COVER_KEYWORDS_TITLE:
-            if kw in track_lower:
+            if GenreDetector._keyword_hit(track_lower, kw):
                 return True
+
         for kw in GenreDetector.COVER_KEYWORDS_ALBUM:
-            if kw in album_lower:
+            if GenreDetector._keyword_hit(album_lower, kw):
                 return True
+
         return False
 
     @staticmethod
@@ -141,8 +217,12 @@ class GenreDetector:
             if "+live" in t or "(live)" in t:
                 return True
 
+        for pat in GenreDetector._LIVE_TITLE_PATTERNS:
+            if re.search(pat, track_lower):
+                return True
+
         for kw in GenreDetector.LIVE_KEYWORDS_TITLE:
-            if kw in track_lower:
+            if GenreDetector._keyword_hit(track_lower, kw):
                 return True
 
         live_patterns = [
@@ -154,21 +234,25 @@ class GenreDetector:
         for pat in live_patterns:
             if re.search(pat, album_lower):
                 return True
+
         for kw in GenreDetector.LIVE_KEYWORDS_ALBUM:
-            if kw in album_lower:
+            if GenreDetector._keyword_hit(album_lower, kw):
                 return True
 
         if audio_features and audio_features.get("liveness", 0) > 0.8:
             return True
+
         return False
 
     @staticmethod
     def _detect_acoustic(track_lower: str, audio_features: dict | None) -> bool:
         for kw in GenreDetector.ACOUSTIC_KEYWORDS:
-            if kw in track_lower:
+            if GenreDetector._keyword_hit(track_lower, kw):
                 return True
+
         if audio_features and audio_features.get("acousticness", 0) > 0.7:
             return True
+
         return False
 
     @staticmethod
@@ -179,12 +263,15 @@ class GenreDetector:
             t = album_type.lower()
             if "+remix" in t or "(remix)" in t:
                 return True
+
         for kw in GenreDetector.REMIX_KEYWORDS_TITLE:
-            if kw in track_lower:
+            if GenreDetector._keyword_hit(track_lower, kw):
                 return True
+
         for kw in GenreDetector.REMIX_KEYWORDS_ALBUM:
-            if kw in album_lower:
+            if GenreDetector._keyword_hit(album_lower, kw):
                 return True
+
         return False
 
     @staticmethod
@@ -195,7 +282,7 @@ class GenreDetector:
         is_instrumental = False
 
         for kw in GenreDetector.ORCHESTRAL_KEYWORDS:
-            if kw in track_lower:
+            if GenreDetector._keyword_hit(track_lower, kw):
                 is_orchestral = True
                 break
 
@@ -236,10 +323,156 @@ class GenreDetector:
             for broad, keywords in genre_map.items():
                 if any(kw in g for kw in keywords):
                     normalized.add(broad)
+
         return sorted(normalized)
 
 
-# Singleton for convenience
+# =============================================================================
+# GENRE / TITLE PROCESSING
+# =============================================================================
+
+# Release-form labels that may be appended to a title, in canonical display
+# casing. The stored casing matters: this module previously appended a
+# LOWERCASE "(live)" while album_stage appended "(Live)", so the same track
+# could end up with either depending on which path ran last.
+_TITLE_TAG_LABELS: dict[str, str] = {
+    "live": "Live",
+    "unplugged": "Unplugged",
+    "acoustic": "Acoustic",
+    "demo": "Demo",
+    "remix": "Remix",
+}
+
+# Labels that describe the SAME release form. A title already carrying any
+# member of a group must not gain another member of that group — e.g.
+# "(Unplugged)" already conveys "Acoustic", and "(Recorded Live)" already
+# conveys "Live".
+_EQUIVALENT_TAG_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"live", "unplugged"}),
+    frozenset({"acoustic", "unplugged"}),
+)
+
+
+def _has_parenthetical_tag(title: str, tag: str) -> bool:
+    """Check if *title* contains *tag* inside brackets (case-insensitive).
+
+    FIXED: the previous pattern was ``r"\\(" + tag + r"[^)]*\\)"``, which
+    anchored the tag to the START of the bracket. "(Recorded Live)" and
+    "(Stripped Acoustic)" therefore did not register as already-tagged, and
+    ``process_track_genres_and_title`` appended a SECOND suffix:
+
+        "Song (Recorded Live)"     -> "Song (Recorded Live) (live)"
+        "Song (Stripped Acoustic)" -> "Song (Stripped Acoustic) (acoustic)"
+
+    The tag is now matched on a word boundary ANYWHERE inside ANY bracketed
+    group, and square brackets are recognised as well as parentheses.
+    """
+    if not title or not tag:
+        return False
+    return bool(
+        re.search(
+            rf"[\(\[][^)\]]*\b{re.escape(tag)}\b[^)\]]*[\)\]]",
+            title,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _has_equivalent_tag(title: str, tag: str) -> bool:
+    """True when *title* already carries *tag* or an equivalent form label."""
+    tag = str(tag or "").strip().lower()
+    if not tag:
+        return False
+
+    if _has_parenthetical_tag(title, tag):
+        return True
+
+    for group in _EQUIVALENT_TAG_GROUPS:
+        if tag in group:
+            for sibling in group:
+                if sibling != tag and _has_parenthetical_tag(title, sibling):
+                    return True
+    return False
+
+
+def _genre_list_has(genres: list[str], tag: str) -> bool:
+    """True when *tag* already appears in the genre list (case-insensitive)."""
+    tag = str(tag or "").strip().lower()
+    if not tag:
+        return False
+    return any(tag == str(g or "").strip().lower() for g in genres)
+
+
+def process_track_genres_and_title(
+    track_title: str,
+    album_name: str,
+    genre_list: list[str],
+) -> tuple[str, list[str]]:
+    """Process track title and genres based on metadata hints.
+
+    Rules:
+    1. If the title carries ``(Live)`` / ``(Acoustic)`` / ``(Demo)`` /
+       ``(Remix)`` / ``(Unplugged)``, add them to the genre list.
+    2. If the album name indicates acoustic / unplugged / live, propagate
+       that to the genres and — when the title does not already convey it —
+       to the title.
+    3. If a genre indicates acoustic / live / unplugged, append it to the
+       title when the title does not already convey it.
+
+    A tag is only appended when neither it NOR AN EQUIVALENT FORM is already
+    present, so "Song (Recorded Live)" is left alone rather than becoming
+    "Song (Recorded Live) (live)", and "Song (Unplugged)" does not also gain
+    "(Acoustic)".
+
+    Returns:
+        Tuple of (updated_title, updated_genre_list).
+    """
+    updated_title = str(track_title or "")
+    updated_genres = list(genre_list or [])
+
+    # ── Step 1: Extract tags from the title and add them to the genres ────
+    for tag, label in _TITLE_TAG_LABELS.items():
+        if _has_parenthetical_tag(updated_title, tag):
+            if not _genre_list_has(updated_genres, label):
+                updated_genres.append(label)
+
+    # ── Step 2: Propagate album-level hints to genres and title ───────────
+    album_lower = (album_name or "").lower()
+    album_hints = (
+        ("acoustic", bool(re.search(r"\bacoustic\b", album_lower))),
+        ("unplugged", bool(re.search(r"\bunplugged\b", album_lower))),
+        # `live` was previously computed and then never used, so a live
+        # ALBUM never propagated its label to the track genres at all.
+        ("live", bool(re.search(r"\blive\b", album_lower))),
+    )
+
+    for tag_name, has_tag in album_hints:
+        if not has_tag:
+            continue
+
+        label = _TITLE_TAG_LABELS.get(tag_name, tag_name.capitalize())
+        if not _genre_list_has(updated_genres, label):
+            updated_genres.append(label)
+
+        if not _has_equivalent_tag(updated_title, tag_name):
+            updated_title = f"{updated_title} ({label})"
+
+    # ── Step 3: Append acoustic/live/unplugged to the title from genres ───
+    for tag in ("acoustic", "live", "unplugged"):
+        label = _TITLE_TAG_LABELS.get(tag, tag.capitalize())
+        has_genre = any(tag == str(g or "").strip().lower() for g in updated_genres)
+        if has_genre and not _has_equivalent_tag(updated_title, tag):
+            updated_title = f"{updated_title} ({label})"
+
+    return updated_title, updated_genres
+
+
+# Singleton for convenience.
+#
+# Defined ONCE. This module previously created `_detector` twice — at the
+# top of this section and again at the end of the file — so the module-level
+# singleton was silently replaced on import and any state attached to the
+# first instance was discarded.
 _detector = GenreDetector()
 
 
@@ -254,74 +487,3 @@ def detect_special_tags(
     return _detector.detect_special_tags(
         track_name, album_name, artist_genres, audio_features, album_type,
     )
-
-
-# =============================================================================
-# GENRE / TITLE PROCESSING
-# =============================================================================
-
-_PARENTHETICAL_TAG_RE = re.compile(r"\(([^)]+)\)")
-
-
-def _has_parenthetical_tag(title: str, tag: str) -> bool:
-    """Check if *title* contains *tag* inside parentheses (case-insensitive)."""
-    if not title or not tag:
-        return False
-    return bool(re.search(r"\(" + re.escape(tag) + r"[^)]*\)", title, re.IGNORECASE))
-
-
-def process_track_genres_and_title(
-    track_title: str,
-    album_name: str,
-    genre_list: list[str],
-) -> tuple[str, list[str]]:
-    """Process track title and genres based on metadata hints.
-
-    Rules:
-    1. If genre has ``acoustic`` / ``live``, append to title if not already present.
-    2. If title has ``(Live)`` / ``(Acoustic)`` / ``(Demo)`` / ``(Remix)`` / ``(Unplugged)``,
-       add them to genre list.
-    3. If album has ``acoustic`` / ``unplugged``, propagate to title and genres.
-
-    Returns:
-        Tuple of (updated_title, updated_genre_list).
-    """
-    updated_title = track_title
-    updated_genres = list(genre_list)
-
-    # ── Step 1: Extract tags from title and add to genres ────────────────
-    for tag in ("live", "unplugged", "acoustic", "demo", "remix"):
-        if _has_parenthetical_tag(track_title, tag):
-            capitalized = tag.capitalize()
-            if not any(capitalized.lower() in g.lower() for g in updated_genres):
-                updated_genres.append(capitalized)
-
-    # ── Step 2: Check album for acoustic/unplugged and propagate ──────────
-    album_lower = (album_name or "").lower()
-    album_has_acoustic = "acoustic" in album_lower
-    album_has_unplugged = "unplugged" in album_lower
-    album_has_live = bool(re.search(r"\blive\b", album_lower))
-
-    for tag_name, has_tag in (
-        ("acoustic", album_has_acoustic),
-        ("unplugged", album_has_unplugged),
-    ):
-        if has_tag:
-            tag_cap = tag_name.capitalize()
-            if not any(tag_name in g.lower() for g in updated_genres):
-                updated_genres.append(tag_cap)
-            if not _has_parenthetical_tag(updated_title, tag_name):
-                updated_title = f"{updated_title} ({tag_name})"
-
-    # ── Step 3: Append acoustic/live/unplugged to title from genre ───────
-    for tag in ("acoustic", "live", "unplugged"):
-        has_genre = any(tag in g.lower() for g in updated_genres)
-        already_in_title = _has_parenthetical_tag(updated_title, tag)
-        if has_genre and not already_in_title:
-            updated_title = f"{updated_title} ({tag})"
-
-    return updated_title, updated_genres
-
-
-# Singleton for convenience
-_detector = GenreDetector()
