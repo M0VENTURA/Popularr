@@ -140,27 +140,6 @@ def _bounded_call_report(
     label: str | None = None,
     **kwargs: Any,
 ) -> Any:
-    """Execute a function with structured start/completion/failure logging.
-
-    Dynamically filters out any keyword arguments `func` doesn't accept, to
-    prevent TypeErrors when wrapping bare-signature callables.
-
-    Two distinct contracts, selected by whether `seconds` is supplied:
-
-    - `seconds` omitted (the default): the call runs inline with no timeout,
-      and this returns whatever `func` returned on success, or `{}` on
-      exception. Callers such as `enrich_album` rely on getting the raw
-      return value back, not a wrapped report.
-
-    - `seconds` supplied: the call runs on a background thread with a hard
-      wall-clock budget, and this ALWAYS returns a report dict shaped like
-      `{"ok": bool, "result": Any, "abandoned": bool, "reason": str | None,
-      "budget_seconds": float | None}` - regardless of whether `func` raised,
-      timed out, or returned `None` on success. This is what protects the
-      full-scan artist loop from a hung artist, and from crashing on
-      `.get("ok")` when the wrapped call legitimately returns `None`
-      (e.g. a `-> None` wrapper function with no explicit return).
-    """
     try:
         sig = inspect.signature(func)
         parameters = sig.parameters
@@ -178,11 +157,6 @@ def _bounded_call_report(
     start_ts = time.monotonic()
     logger.info("[SCAN] section started", section=section, **context)
 
-    # ---------------------------------------------------------------------
-    # No timeout requested - preserve the original inline behaviour exactly,
-    # so existing callers that expect the raw return value (not a wrapped
-    # report dict) keep working unchanged.
-    # ---------------------------------------------------------------------
     if seconds is None:
         try:
             result = func(*args, **kwargs)
@@ -194,7 +168,7 @@ def _bounded_call_report(
                 error=f"{type(exc).__name__}: {exc}",
                 **context,
             )
-            return {}  # Guard against downstream NoneType attribute errors
+            return {}
         else:
             logger.info(
                 "[SCAN] section completed",
@@ -204,20 +178,13 @@ def _bounded_call_report(
             )
             return result
 
-    # ---------------------------------------------------------------------
-    # Timeout requested - run on a worker thread and abandon it (i.e. stop
-    # waiting; Python cannot forcibly kill a running thread) if it doesn't
-    # finish within `seconds`. Always returns a report dict with an "ok"
-    # key so callers can safely do `report.get("ok")` no matter what
-    # happened - success, exception, or abandonment.
-    # ---------------------------------------------------------------------
     _outcome: dict[str, Any] = {}
     _errors: list[BaseException] = []
 
     def _target() -> None:
         try:
             _outcome["result"] = func(*args, **kwargs)
-        except BaseException as exc:  # noqa: BLE001 - captured for the caller
+        except BaseException as exc: 
             _errors.append(exc)
 
     thread = threading.Thread(target=_target, name=f"bounded-call-{section}", daemon=True)
@@ -274,7 +241,6 @@ def _bounded_call_report(
 
 
 def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
-    """Check if an album needs a rerun due to missing fields or unpopulated genres."""
     if not tracks:
         return True, "no tracks found"
 
@@ -303,7 +269,6 @@ def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
 
 
 def _sanitize_release_name(album_name: str) -> str:
-    """Strips '(Topshelf Edition)', '[Deluxe Version]', etc. for exact API matches."""
     if not album_name:
         return ""
     cleaned = re.sub(
@@ -316,7 +281,6 @@ def _sanitize_release_name(album_name: str) -> str:
 
 
 def _is_comp_artist(artist_name: str) -> bool:
-    """Helper to detect compilation artists."""
     if not artist_name:
         return False
     return artist_name.strip().lower() in (
@@ -326,7 +290,6 @@ def _is_comp_artist(artist_name: str) -> bool:
 
 
 def _duration_seconds(value: Any) -> float | None:
-    """Best-effort track duration in seconds (None when unknown/zero)."""
     try:
         v = float(value or 0)
         return v if v > 0 else None
@@ -817,16 +780,25 @@ def _persist_popularity_marking(rows: list[dict[str, Any]]) -> None:
                 tid = str(tr.get("track_id") or "")
                 if not tid:
                     continue
+
+                conf = tr.get("single_confidence")
+                sources = tr.get("single_sources")
+
+                # Do not overwrite if confidence is missing or degraded on frozen tracks
+                if not conf and tr.get("popularity_frozen"):
+                    continue
+
                 session.execute(
                     text(
                         "UPDATE tracks SET popularity_marked = :marked, "
-                        "single_confidence = :conf, single_sources = :sources::jsonb "
+                        "single_confidence = COALESCE(:conf, single_confidence), "
+                        "single_sources = COALESCE(:sources::jsonb, single_sources) "
                         "WHERE id = :id"
                     ),
                     {
                         "marked": bool(tr.get("popularity_marked")),
-                        "conf": str(tr.get("single_confidence") or "low"),
-                        "sources": json.dumps(tr.get("single_sources") or [], ensure_ascii=False),
+                        "conf": str(conf) if conf else None,
+                        "sources": json.dumps(sources, ensure_ascii=False) if sources is not None else None,
                         "id": tid,
                     },
                 )
@@ -1083,7 +1055,8 @@ def run_scan(
             return False
 
         try:
-            _apply_album_relative_normalization(album_results, is_compilation=is_va_compilation)
+            # FIX: Ensure single-artist compilations bypass standard album stretching
+            _apply_album_relative_normalization(album_results, is_compilation=(is_compilation or is_va_compilation))
         except Exception as exc:
             logger.debug("Album-relative normalization failed", error=str(exc))
 
@@ -1759,8 +1732,13 @@ def run_scan(
 
                 if force_metadata_for_this_album:
                     _track_options["force_metadata"] = True
+                
                 if _frozen:
                     _track_options["frozen_track"] = True
+                    # Preserve existing singles metadata from DB
+                    prepared_track["is_single"] = bool(track_context.get("track", {}).get("is_single"))
+                    prepared_track["single_confidence"] = track_context.get("track", {}).get("single_confidence") or "low"
+                    prepared_track["single_sources"] = track_context.get("track", {}).get("single_sources") or []
 
                 _track_jobs.append((prepared_track, track_context, _track_options, _frozen))
 
@@ -1845,7 +1823,7 @@ def run_scan(
             _run_album_cover_detection(artist=artist, album=album, tracks=tracks, options=options)
 
             # --- FILE TAG SYNC ---
-            if _mode_meta or _full_pass:
+            if not options.get("popularity_only") and not options.get("singles_detection_only"):
                 try:
                     log_unified(f"[TAG_SYNC] Syncing cleaned metadata to audio files for '{album}'...")
                     _tag_sync = sync_album_file_tags(artist=artist, album=album)
