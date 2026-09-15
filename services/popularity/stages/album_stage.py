@@ -291,16 +291,33 @@ def _detect_album_type(
 
     if artist_lower in _COMPILATION_ARTISTS or album_artist_lower in _COMPILATION_ARTISTS:
         return "album+compilation"
+        
+    # Respect existing rich types from the DB (manual UI edits)
     if spotify_type:
         spotify_lower = spotify_type.casefold()
-        if spotify_lower == "compilation" or "+compilation" in spotify_lower or "(compilation)" in spotify_lower:
+        if "compilation" in spotify_lower or "+compilation" in spotify_lower:
             return "album+compilation"
+        if "+live" in spotify_lower:
+            return "album+live"
+        if "+acoustic" in spotify_lower:
+            return "album+acoustic"
+        if "+remix" in spotify_lower:
+            return "album+remix"
+        if "+soundtrack" in spotify_lower:
+            return "album+soundtrack"
+
     if "soundtrack" in album_lower:
         return "album+soundtrack"
     if any(re.search(pattern, album_lower) for pattern in _LIVE_ALBUM_PATTERNS):
         return "album+live"
     if "+remix" in album_lower or "(remix)" in album_lower:
         return "album+remix"
+        
+    if spotify_type:
+        spotify_lower = spotify_type.casefold()
+        if spotify_lower in {"single", "ep"}:
+            return spotify_lower
+            
     return "album"
 
 
@@ -1058,7 +1075,11 @@ def _resolve_album_type(
         if not _mb_type_is_corroborated(mb_type, album, tracks or [], context):
             mb_type = "album" if mb_type.startswith("album") else mb_type
 
-        if detected == "album" or mb_type in {"single", "ep"}:
+        # Only override if our local detection was a generic album, 
+        # or if it's downgrading to single/ep and local wasn't explicitly rich.
+        if detected == "album":
+            detected = mb_type
+        elif mb_type in {"single", "ep"} and "+" not in detected:
             detected = mb_type
 
     Logger.info(
