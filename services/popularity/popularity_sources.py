@@ -12,10 +12,10 @@ from typing import Any
 
 import structlog
 
-try:  # C-speed fuzzy matching — see _token_similarity
+try:  # C-speed fuzzy matching -- see _token_similarity
     from rapidfuzz import fuzz as _fuzz  # type: ignore[import-untyped]
     _HAVE_RAPIDFUZZ = True
-except ImportError:  # pragma: no cover — stdlib fallback keeps matching working
+except ImportError:  # pragma: no cover -- stdlib fallback keeps matching working
     from difflib import SequenceMatcher as _difflib_matcher
     _HAVE_RAPIDFUZZ = False
 
@@ -98,8 +98,33 @@ def _alt_status_matches(target_title: str, candidate_title: str) -> bool:
     live/remix/alternate track can silently inherit the original studio
     release's popularity numbers because a fuzzy/normalized title match
     doesn't distinguish "Song" from "Song (Live)" / "Song (Remix)".
+
+    IMPORTANT: this is a TITLE-ONLY test. Live releases routinely ship plainly
+    titled tracks -- every track on Metallica's "S&M" is titled exactly as its
+    studio original -- so on those releases this returns True for the studio
+    recording and lets its listener count merge in. Prefer
+    ``_alt_status_matches_ctx`` and pass the release-level liveness whenever
+    the caller knows it.
     """
     return _is_alternate_performance_title(target_title) == _is_alternate_performance_title(candidate_title)
+
+
+def _alt_status_matches_ctx(
+    target_title: str,
+    candidate_title: str,
+    *,
+    target_is_live: bool = False,
+) -> bool:
+    """Alt-performance agreement with RELEASE-level liveness folded in.
+
+    Liveness is a property of the RELEASE, not necessarily of the title. When
+    ``target_is_live`` is set, the target is treated as an alternate
+    performance regardless of how it is titled, so a plainly titled live track
+    no longer matches -- and no longer absorbs the listener count of -- the
+    identically titled studio recording.
+    """
+    target_alt = _is_alternate_performance_title(target_title) or bool(target_is_live)
+    return target_alt == _is_alternate_performance_title(candidate_title)
 
 
 def resolve_isrc_recording(
@@ -108,6 +133,7 @@ def resolve_isrc_recording(
     mb_client: Any = None,
     title: str = "",
     artist: str = "",
+    is_live_release: bool = False,
 ) -> dict[str, str | None] | None:
     """Resolve an ISRC to its MusicBrainz recording (MBID + title + artist)."""
     isrc = str(isrc or "").strip()
@@ -120,7 +146,7 @@ def resolve_isrc_recording(
         import re as _re
         if not _re.fullmatch(r"[A-Z]{2}[0-9A-Z]{3}[0-9]{7}", isrc):
             return None
-            
+
     try:
         if mb_client is None:
             from services.enrichment.musicbrainz_service import get_shared_mb_client
@@ -129,7 +155,7 @@ def resolve_isrc_recording(
         recordings = mb_client.lookup_by_isrc(isrc) or []
         if not recordings:
             return None
-            
+
         if not title and not artist:
             first = recordings[0]
             return {
@@ -142,32 +168,34 @@ def resolve_isrc_recording(
         target_artist = str(artist or "").casefold().strip()
         best = None
         best_score = 0.0
-        
+
         for rec in recordings:
             rec_title_raw = str(rec.get("title") or "")
             # Don't let a live/remix/alternate recording win the match for a
             # studio-title lookup, or vice versa.
-            if title and not _alt_status_matches(title, rec_title_raw):
+            if title and not _alt_status_matches_ctx(
+                title, rec_title_raw, target_is_live=is_live_release
+            ):
                 continue
 
             rec_title = normalize_for_aggregation(rec_title_raw)
             rec_artist = str(_first_credit_name(rec) or "").casefold().strip()
             score = _token_similarity(target_title, rec_title)
-            
+
             if target_artist and rec_artist:
                 artist_hit = (
                     target_artist == rec_artist
                     or target_artist == get_primary_artist_preserve_case(rec_artist).casefold()
                 )
                 score = score * 0.7 + (1.0 if artist_hit else 0.0) * 0.3
-                
+
             if score > best_score:
                 best_score = score
                 best = rec
-                
+
         if best is None:
             return None
-            
+
         return {
             "recording_mbid": str(best.get("id") or "").strip() or None,
             "title": str(best.get("title") or "").strip(),
@@ -199,7 +227,7 @@ def get_listenbrainz_batch_for_tracks(tracks: list[dict[str, Any]]) -> dict[str,
     mbids = [extract_recording_mbid(track) for track in tracks]
     mbids = [mbid for mbid in mbids if mbid]
     output: dict[str, dict[str, int | None]] = {}
-    
+
     for index in range(0, len(mbids), DEFAULT_LISTENBRAINZ_BATCH_SIZE):
         chunk = mbids[index:index + DEFAULT_LISTENBRAINZ_BATCH_SIZE]
         try:
@@ -227,31 +255,31 @@ def _resolve_release_mbid(artist: str, album: str, tracks: list[dict[str, Any]])
         artist_norm = _normalize_artist(artist)
         best_mbid = ""
         best_score = 0.0
-        
+
         for rel in releases:
             if not isinstance(rel, dict):
                 continue
             title = str(rel.get("title") or "").strip()
             credits = rel.get("artist-credit") or []
             names = []
-            
+
             for credit in credits:
                 if isinstance(credit, dict):
                     art = credit.get("artist") or {}
                     names.append(art.get("name") or credit.get("name") or "")
-                    
+
             if names and not any(_normalize_artist(n) == artist_norm for n in names):
                 continue
-                
+
             score = _token_similarity(title.lower(), album.lower())
             if score > best_score:
                 best_score = score
                 best_mbid = str(rel.get("id") or "").strip()
-                
+
         if best_mbid and best_score >= 0.8:
             logger.debug("Resolved release via MB search", artist=artist, album=album, release_mbid=best_mbid)
             return best_mbid
-            
+
     except Exception as exc:
         logger.debug("Release search failed", artist=artist, album=album, error=str(exc))
     return ""
@@ -271,18 +299,18 @@ def _index_release_tracklist(
         if not isinstance(medium, dict):
             continue
         disc = medium.get("position")
-        
+
         for trk in medium.get("tracks") or []:
             if not isinstance(trk, dict):
                 continue
             title = str(trk.get("title") or "").strip()
             if not title:
                 continue
-                
+
             rec = trk.get("recording") or {}
             rec_mbid = str(rec.get("id") or trk.get("recording_mbid") or "").strip()
             key = normalize_for_aggregation(title)
-            
+
             entry = titles_to_mbids.setdefault(key, {
                 "title": title,
                 "mbids": [],
@@ -290,21 +318,21 @@ def _index_release_tracklist(
                 "disc": disc,
                 "length_ms": trk.get("length"),
             })
-            
+
             if rec_mbid:
                 entry["mbids"].append(rec_mbid)
                 recording_mbids.append(rec_mbid)
-                
+
             try:
                 pos = int(trk.get("position") or trk.get("number") or 0)
             except (TypeError, ValueError):
                 pos = 0
-                
+
             try:
                 disc_i = int(disc) if disc not in (None, "") else 1
             except (TypeError, ValueError):
                 disc_i = 1
-                
+
             if pos > 0:
                 pos_key = (disc_i, pos)
                 pos_entry = position_index.setdefault(pos_key, {
@@ -323,7 +351,7 @@ def get_listenbrainz_album_tracklist_with_release(
 ) -> tuple[dict[str, dict[str, int | None]], str]:
     if not tracks:
         return {}, ""
-        
+
     release_mbid = _resolve_release_mbid(artist, album, tracks)
     if not release_mbid:
         return {}, ""
@@ -332,7 +360,7 @@ def get_listenbrainz_album_tracklist_with_release(
     recording_mbids: list[str] = []
     position_index: dict[tuple[int, int], dict[str, Any]] = {}
     _tracklist_source = ""
-    
+
     try:
         _lb_rel = lb_get_release_metadata_batch([release_mbid]) or {}
         if isinstance(_lb_rel, dict):
@@ -344,7 +372,7 @@ def get_listenbrainz_album_tracklist_with_release(
                 _tracklist_source = "listenbrainz"
     except Exception as exc:
         logger.debug("LB release metadata failed", release_mbid=release_mbid, error=str(exc))
-        
+
     if not recording_mbids:
         try:
             from services.enrichment.musicbrainz_service import get_shared_mb_client
@@ -389,31 +417,31 @@ def get_listenbrainz_album_tracklist_with_release(
         local_title = t.get("title")
         if not local_title:
             continue
-            
+
         local_key = normalize_for_aggregation(local_title)
         if not local_key:
             continue
-            
+
         if (out.get(local_key) or {}).get("listenbrainz_listens"):
             continue
-            
+
         try:
             local_pos = int(t.get("track_number") or 0)
         except (TypeError, ValueError):
             continue
-            
+
         if local_pos <= 0:
             continue
-            
+
         try:
             local_disc = int(t.get("disc_number") or 1)
         except (TypeError, ValueError):
             local_disc = 1
-            
+
         pos_key = (local_disc, local_pos)
         if pos_key in used_pos_keys:
             continue
-            
+
         pos_entry = position_index.get(pos_key)
         if not pos_entry or not pos_entry["mbids"]:
             continue
@@ -423,15 +451,15 @@ def get_listenbrainz_album_tracklist_with_release(
             local_dur = float(t.get("duration") or 0)
         except (TypeError, ValueError):
             local_dur = 0.0
-            
+
         if mb_len_ms and local_dur > 0:
             if abs(int(mb_len_ms) - local_dur * 1000) > 5000:
                 continue
-                
+
         total, users = _sum_counts(pos_entry["mbids"])
         if total <= 0:
             continue
-            
+
         out[local_key] = {
             "listenbrainz_listens": total,
             "listenbrainz_users": users,
@@ -447,7 +475,7 @@ def get_listenbrainz_album_tracklist_with_release(
             matched_key=pos_entry.get("key"),
             listens=total,
         )
-        
+
     if out:
         logger.info(
             "Preloaded ListenBrainz album tracklist",
@@ -459,7 +487,7 @@ def get_listenbrainz_album_tracklist_with_release(
         )
     else:
         logger.debug("No ListenBrainz data found for album", artist=artist, album=album)
-        
+
     return out, release_mbid
 
 
@@ -500,14 +528,14 @@ def get_lastfm_track_info(
 ) -> dict[str, Any]:
     if lastfm_client is None:
         return {"track_play": 0, "listeners": 0}
-        
+
     results = []
     for candidate in get_artist_lookup_candidates(artist, album_artist=album_artist):
         try:
             results.append(lastfm_client.get_track_info(candidate, title, track_mbid=track_mbid))
         except Exception:
             continue
-            
+
     return choose_best_provider_counts(results) if results else {"track_play": 0, "listeners": 0}
 
 
@@ -523,7 +551,7 @@ def get_lastfm_artist_max_listeners(
         return 0
 
     artist_key = artist.casefold().strip()
-    
+
     with _CACHE_LOCK:
         cached = _lastfm_artist_max_cache.get(artist_key)
     if cached is not None:
@@ -573,7 +601,7 @@ def get_lastfm_artist_max_listeners(
         with _CACHE_LOCK:
             _lastfm_artist_max_cache[artist_key] = max_listeners
         return max_listeners
-        
+
     except Exception as exc:
         logger.debug("Failed to get Last.fm top tracks", artist=artist, error=str(exc))
         with _CACHE_LOCK:
@@ -587,20 +615,28 @@ def get_aggregated_lastfm_popularity(
     lastfm_client: Any = None,
     isrc: str | None = None,
     recording_mbid: str | None = None,
+    is_live_release: bool = False,
 ) -> dict[str, Any]:
+    """Aggregate Last.fm listener counts for one track.
+
+    ``is_live_release`` must be set when the track belongs to a LIVE release.
+    Last.fm resolves by title+artist, so a plainly titled live track (e.g.
+    every track on "S&M") otherwise matches the studio recording of the same
+    name and absorbs its catalogue-wide listener count.
+    """
     if lastfm_client is None:
         return {"listeners": 0, "track_play": 0, "matched_tracks": []}
-        
+
     track_title = strip_cover_attribution(track_title) or track_title
     is_featured = (
         "feat" in str(artist or "").casefold()
         or "feat" in str(track_title or "").casefold()
     )
-    
+
     primary_artist = get_primary_artist_preserve_case(artist)
     artist_key = primary_artist.casefold().strip()
     catalog = []
-    
+
     try:
         from services.popularity.popularity_cache_service import get_artist_top_tracks_map
         _map = get_artist_top_tracks_map(lastfm_client, primary_artist) or {}
@@ -615,12 +651,12 @@ def get_aggregated_lastfm_popularity(
         ]
     except Exception:
         catalog = []
-        
+
     with _CACHE_LOCK:
         in_cache = artist_key in _lastfm_artist_catalog_cache
         if in_cache and not catalog:
             catalog = _lastfm_artist_catalog_cache[artist_key]
-            
+
     if not catalog and not in_cache and hasattr(lastfm_client, "get_artist_top_tracks"):
         try:
             fetched_catalog = lastfm_client.get_artist_top_tracks(primary_artist)
@@ -634,15 +670,17 @@ def get_aggregated_lastfm_popularity(
     matched = []
     listeners = 0
     playcount = 0
-    
+
     for item in catalog or []:
         item_title = item.get("name") or item.get("title") or ""
         if normalize_for_aggregation(item_title) != target:
             continue
         # Same normalized title can still be a live/remix/alternate take
         # (normalization strips punctuation, not performance-type markers) -
-        # don't let it merge with a differently-typed target.
-        if not _alt_status_matches(track_title, item_title):
+        # don't let it merge with a differently-typed target. Release-level
+        # liveness is folded in so a plainly titled live track does not match
+        # its studio namesake.
+        if not _alt_status_matches_ctx(track_title, item_title, target_is_live=is_live_release):
             continue
         matched.append(item)
         listeners += int(item.get("listeners", 0) or 0)
@@ -664,22 +702,24 @@ def get_aggregated_lastfm_popularity(
                         for key, e in _part_map.items()
                         if e.get("lastfm_listeners")
                     ]
-                    
+
                     _key = part.casefold().strip()
                     with _CACHE_LOCK:
                         part_in_cache = _key in _lastfm_artist_catalog_cache
-                        
+
                     if not _part_catalog and not part_in_cache and hasattr(lastfm_client, "get_artist_top_tracks"):
                         _fetched = lastfm_client.get_artist_top_tracks(part)
                         with _CACHE_LOCK:
                             _lastfm_artist_catalog_cache[_key] = _fetched
                         _part_catalog = _fetched
-                        
+
                     for item in _part_catalog or []:
                         item_title = item.get("name") or item.get("title") or ""
                         if normalize_for_aggregation(item_title) != target:
                             continue
-                        if not _alt_status_matches(track_title, item_title):
+                        if not _alt_status_matches_ctx(
+                            track_title, item_title, target_is_live=is_live_release
+                        ):
                             continue
                         matched.append(item)
                         listeners += int(item.get("listeners", 0) or 0)
@@ -688,7 +728,12 @@ def get_aggregated_lastfm_popularity(
                     continue
 
     if is_featured or not matched:
-        search = get_search_aggregated_lastfm_popularity(artist, track_title, lastfm_client=lastfm_client)
+        search = get_search_aggregated_lastfm_popularity(
+            artist,
+            track_title,
+            lastfm_client=lastfm_client,
+            is_live_release=is_live_release,
+        )
         search_listeners = int(search.get("listeners") or 0)
         if search_listeners > listeners:
             listeners = search_listeners
@@ -697,7 +742,18 @@ def get_aggregated_lastfm_popularity(
 
     if matched:
         return {"listeners": listeners, "track_play": playcount, "matched_tracks": matched}
-        
+
+    # Final fallback: a bare title+artist lookup. This CANNOT distinguish a
+    # live performance from its studio namesake, so it is skipped entirely on
+    # live releases rather than returning a known-contaminated count.
+    if is_live_release:
+        logger.debug(
+            "Skipping Last.fm title+artist fallback on live release",
+            artist=artist,
+            track=track_title,
+        )
+        return {"listeners": 0, "track_play": 0, "matched_tracks": []}
+
     try:
         info = lastfm_client.get_track_info(artist, track_title)
         primary = {
@@ -722,17 +778,22 @@ def get_aggregated_lastfm_popularity(
             best_key = arm
 
     need_fallback = (best["listeners"] == 0 and best["track_play"] == 0) or _is_featured_artist(artist)
-    
+
     if need_fallback:
         if isrc or recording_mbid:
             try:
                 _isrc_rec = None
                 if isrc:
-                    _isrc_rec = resolve_isrc_recording(isrc, title=track_title, artist=artist)
+                    _isrc_rec = resolve_isrc_recording(
+                        isrc,
+                        title=track_title,
+                        artist=artist,
+                        is_live_release=is_live_release,
+                    )
                 _arm_mbid = ((_isrc_rec or {}).get("recording_mbid") or recording_mbid)
                 _arm_artist = (_isrc_rec or {}).get("artist") or artist
                 _arm_title = (_isrc_rec or {}).get("title") or track_title
-                
+
                 if _arm_mbid:
                     _isrc_stats = lastfm_client.get_track_info(_arm_artist, _arm_title, track_mbid=_arm_mbid)
                     _consider("ISRC", _isrc_stats)
@@ -770,10 +831,18 @@ def get_search_aggregated_lastfm_popularity(
     artist: str,
     track_title: str,
     lastfm_client: Any = None,
+    is_live_release: bool = False,
 ) -> dict[str, Any]:
+    """Sum Last.fm listener counts across compatible title variants.
+
+    ``is_live_release`` gates the alt-performance check the same way it does in
+    ``get_aggregated_lastfm_popularity`` -- without it this function sums the
+    studio recording into a live track's total, which is the single largest
+    source of cross-version contamination.
+    """
     if lastfm_client is None:
         return {"listeners": 0, "track_play": 0, "matched_tracks": []}
-        
+
     track_title = strip_cover_attribution(track_title) or track_title
     target = normalize_for_aggregation(track_title)
     if not target:
@@ -787,33 +856,34 @@ def get_search_aggregated_lastfm_popularity(
             results = lastfm_client.search_track(candidate, track_title, limit=20)
         except Exception:
             results = []
-            
+
         for item in results or []:
             if not isinstance(item, dict):
                 continue
             item_title = str(item.get("name") or item.get("title") or "")
             if not item_title:
                 continue
-                
+
             if not title_variants_compatible(track_title, item_title):
                 continue
 
             # A "compatible" title (e.g. same base song, different
             # bracketed suffix) can still be a live/remix/alternate take -
-            # reject it unless it agrees with the target on that.
-            if not _alt_status_matches(track_title, item_title):
+            # reject it unless it agrees with the target on that, with
+            # release-level liveness folded in.
+            if not _alt_status_matches_ctx(track_title, item_title, target_is_live=is_live_release):
                 continue
-                
+
             _item_key = normalize_for_aggregation(item_title)
             if _item_key != target and _token_similarity(_item_key, target) < 0.90:
                 continue
-                
+
             url = str(item.get("url") or "").strip()
             key = url or f"{str(item.get('artist') or '').casefold()}::{item_title.casefold()}"
-            
+
             if key in seen:
                 continue
-                
+
             seen.add(key)
             matched.append(item)
 
@@ -822,13 +892,13 @@ def get_search_aggregated_lastfm_popularity(
         c for c in get_artist_lookup_candidates(artist)
         if c.casefold() != primary.casefold()
     ]
-    
+
     for candidate in ordered_candidates:
         _collect(candidate)
 
     listeners = sum(int(item.get("listeners") or 0) for item in matched)
     playcount = sum(int(item.get("playcount") or item.get("track_play") or 0) for item in matched)
-    
+
     if matched:
         logger.info(
             "Aggregated Last.fm versions",
@@ -837,8 +907,14 @@ def get_search_aggregated_lastfm_popularity(
             track=track_title,
             listeners=listeners,
             plays=playcount,
+            live_release=bool(is_live_release),
         )
         return {"listeners": listeners, "track_play": playcount, "matched_tracks": matched}
+
+    # As above: the bare lookup cannot tell a live take from its studio
+    # namesake, so it is not used on live releases.
+    if is_live_release:
+        return {"listeners": 0, "track_play": 0, "matched_tracks": []}
 
     try:
         info = lastfm_client.get_track_info(artist, track_title)
@@ -858,30 +934,33 @@ def get_aggregated_listenbrainz_popularity(
     isrc: str | None = None,
     lb_client: Any = None,
     mb_client: Any = None,
+    is_live_release: bool = False,
 ) -> dict[str, Any]:
     logger.debug("Fetching aggregated ListenBrainz popularity")
     mbids: set[str] = set()
-    
+
     if primary_mbid:
         mbids.add(primary_mbid)
-        
+
     if isrc and not primary_mbid:
         try:
-            _isrc_rec = resolve_isrc_recording(isrc, title=title, artist=artist)
+            _isrc_rec = resolve_isrc_recording(
+                isrc, title=title, artist=artist, is_live_release=is_live_release
+            )
             _isrc_mbid = (_isrc_rec or {}).get("recording_mbid")
             if _isrc_mbid:
                 mbids.add(_isrc_mbid)
                 logger.debug("LB aggregation resolved ISRC to recording", isrc=isrc, recording_mbid=_isrc_mbid)
         except Exception:
             pass
-            
+
     if mb_client is None:
         try:
             from services.enrichment.musicbrainz_service import get_shared_mb_client
             mb_client = get_shared_mb_client()
         except Exception:
             mb_client = None
-            
+
     if mb_client and hasattr(mb_client, "search_recordings"):
         try:
             from helpers.normalization_service import (
@@ -890,13 +969,13 @@ def get_aggregated_listenbrainz_popularity(
                 strip_single_release_suffix,
             )
             from api_clients.musicbrainz_http import escape_lucene_special_chars
-            
+
             query = (
                 f'recording:"{escape_lucene_special_chars(normalize_title_for_lucene_query(title))}" '
                 f'AND artist:"{escape_lucene_special_chars(artist)}"'
             )
             norm_target = normalize_title_for_lookup(strip_single_release_suffix(title) or title)
-            
+
             for rec in mb_client.search_recordings(query, limit=20):
                 rec_id = rec.get("id")
                 rec_title = str(rec.get("title") or "")
@@ -908,23 +987,23 @@ def get_aggregated_listenbrainz_popularity(
                 # A blanket exclusion of every alt-performance title would
                 # also exclude the correct match when the target track
                 # itself is a live/remix/alternate version.
-                if not _alt_status_matches(title, rec_title):
+                if not _alt_status_matches_ctx(title, rec_title, target_is_live=is_live_release):
                     continue
-                    
+
                 norm_rec = normalize_title_for_lookup(strip_single_release_suffix(rec_title) or rec_title)
                 if norm_rec == norm_target or _token_similarity(norm_rec, norm_target) >= 0.85:
                     mbids.add(rec_id)
         except Exception:
             pass
-            
+
     if not mbids:
         return {"total_listen_count": 0, "total_user_count": 0, "mbids": []}
-        
+
     try:
         batch = lb_get_recording_popularity_batch(list(mbids))
         listen_count = sum(int((batch.get(mbid) or {}).get("total_listen_count") or 0) for mbid in mbids)
         user_count = sum(int((batch.get(mbid) or {}).get("total_user_count") or 0) for mbid in mbids)
-        
+
         logger.debug(
             "Aggregated LB recordings",
             artist=artist,
@@ -994,17 +1073,22 @@ def get_work_level_listenbrainz_popularity(
     lb_client: Any = None,
     mb_client: Any = None,
     work_mbid_hint: str = "",
+    is_live_release: bool = False,
 ) -> dict[str, Any]:
     """Work-level aggregated ListenBrainz popularity.
 
     Division of labour (intentional): MusicBrainz supplies the WORK GRAPH
-    (which recording → which work, all recordings of the work) and
-    ListenBrainz supplies the LISTEN COUNTS — MusicBrainz has no listening
+    (which recording -> which work, all recordings of the work) and
+    ListenBrainz supplies the LISTEN COUNTS -- MusicBrainz has no listening
     data, so the play counts must always come from ListenBrainz.
 
     ``work_mbid_hint`` lets a caller that already resolved the work MBID
     (e.g. from the release metadata's embedded work-rels) skip the per-track
-    ``get_recording(work-rels)`` MusicBrainz request — the 1 req/s bottleneck.
+    ``get_recording(work-rels)`` MusicBrainz request -- the 1 req/s bottleneck.
+
+    ``is_live_release`` matters especially here: a work groups EVERY recording
+    of a song, studio and live alike, so without release-level liveness a live
+    track aggregates the whole work's listen counts.
     """
     logger.debug("Fetching Work-level aggregated ListenBrainz popularity")
     if mb_client is None:
@@ -1013,7 +1097,7 @@ def get_work_level_listenbrainz_popularity(
             mb_client = get_shared_mb_client()
         except Exception:
             mb_client = None
-            
+
     if mb_client is None:
         return _empty_work_lb_result()
 
@@ -1023,7 +1107,13 @@ def get_work_level_listenbrainz_popularity(
         seed_mbids.add(primary_mbid)
     elif isrc:
         try:
-            _isrc_rec = resolve_isrc_recording(isrc, title=title, artist=artist, mb_client=mb_client)
+            _isrc_rec = resolve_isrc_recording(
+                isrc,
+                title=title,
+                artist=artist,
+                mb_client=mb_client,
+                is_live_release=is_live_release,
+            )
             if _isrc_rec and _isrc_rec.get("recording_mbid"):
                 seed_mbids.add(_isrc_rec["recording_mbid"])
         except Exception:
@@ -1052,16 +1142,16 @@ def get_work_level_listenbrainz_popularity(
         logger.debug("Work recording browse failed", work_mbid=work_mbid, error=str(exc))
 
     mbids: set[str] = set(seed_mbids)
-    
+
     from helpers.normalization_service import strip_featured_artist
     target_artist = normalize_for_aggregation(strip_featured_artist(artist) or artist)
-    
+
     for rec in recordings:
         if not isinstance(rec, dict):
             continue
         rec_id = str(rec.get("id") or "").strip()
         rec_title = str(rec.get("title") or "")
-        
+
         if not rec_id or not rec_title:
             continue
         # Same reasoning as get_aggregated_listenbrainz_popularity above:
@@ -1069,9 +1159,9 @@ def get_work_level_listenbrainz_popularity(
         # alt-performance status, so a live/remix/alternate target can still
         # match its own recordings within the work, without pulling in a
         # different studio release's counts (or vice versa).
-        if not _alt_status_matches(title, rec_title):
+        if not _alt_status_matches_ctx(title, rec_title, target_is_live=is_live_release):
             continue
-            
+
         rec_artist_mbids = _recording_artist_mbids(rec)
         if artist_mbid:
             if artist_mbid not in rec_artist_mbids:
@@ -1080,7 +1170,7 @@ def get_work_level_listenbrainz_popularity(
             rec_artist = _recording_primary_artist(rec)
             if not rec_artist or normalize_for_aggregation(rec_artist) != target_artist:
                 continue
-                
+
         mbids.add(rec_id)
 
     if not mbids:
@@ -1090,7 +1180,7 @@ def get_work_level_listenbrainz_popularity(
         batch = lb_get_recording_popularity_batch(list(mbids))
         listen_count = sum(int((batch.get(mbid) or {}).get("total_listen_count") or 0) for mbid in mbids)
         user_count = sum(int((batch.get(mbid) or {}).get("total_user_count") or 0) for mbid in mbids)
-        
+
         logger.debug(
             "Aggregated Work-level LB",
             artist=artist,
