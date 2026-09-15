@@ -1,5 +1,14 @@
 // ===== Album Detail Page JS =====
 //
+// The MusicBrainz compare / apply-field / ignore-field / bulk-delete calls
+// below hit the api_v1 blueprint (see api_v1/albums.py, api_v1/tracks.py),
+// which is assumed to be registered under this prefix. VERIFY against
+// __init__.py's register_blueprint(..., url_prefix=...) call and update if
+// different — every other endpoint on this page (favourite, recommend-
+// genres, musicbrainz search, queue/add) uses unversioned "/api/..." paths
+// from a separate, older blueprint, so this page intentionally mixes both.
+const _API_V1_PREFIX = '/api/v1';
+//
 // SCOPE: this file contains ONLY album-detail behaviour.
 //
 // It was previously 2,917 lines, of which ~200 were album code. The rest was
@@ -384,10 +393,14 @@ window.compareWithMusicBrainz = function () {
         false
     );
 
-    fetch('/api/album/musicbrainz/compare', {
+    // Path-based, matching api_v1's /albums/<path:artist>/<path:album>/...
+    // convention (mirrors artists.py's <path:name>). If your api_v1
+    // blueprint is registered under a prefix other than /api/v1, update
+    // _API_V1_PREFIX below to match.
+    fetch(`${_API_V1_PREFIX}/albums/${encodeURIComponent(artist)}/${encodeURIComponent(album)}/musicbrainz-compare`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ artist: artist, album: album, release_mbid: releaseMbid })
+        body: JSON.stringify({ release_mbid: releaseMbid })
     })
         .then(r => r.json())
         .then(data => {
@@ -674,7 +687,7 @@ async function _applyOneMBField(updateRow) {
     if (value === null) { updateRow.remove(); return true; }
 
     try {
-        const resp = await fetch(`/api/track/${encodeURIComponent(trackId)}/apply-mb-field`, {
+        const resp = await fetch(`${_API_V1_PREFIX}/tracks/${encodeURIComponent(trackId)}/apply-mb-field`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ field, value })
@@ -727,7 +740,7 @@ window.ignoreMBField = async function (btn) {
         // Persists into the tracks.mb_ignored_fields column — the SAME column
         // compare_musicbrainz_release() already reads to suppress diff_fields,
         // so an ignored field stays ignored on future comparisons too.
-        const resp = await fetch(`/api/track/${encodeURIComponent(trackId)}/ignore-mb-field`, {
+        const resp = await fetch(`${_API_V1_PREFIX}/tracks/${encodeURIComponent(trackId)}/ignore-mb-field`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ field })
@@ -894,7 +907,7 @@ window.doAlbumMatchTrack = async function (trackId) {
     let failed = false;
     for (const [field, value] of fields) {
         try {
-            const resp = await fetch(`/api/track/${encodeURIComponent(trackId)}/apply-mb-field`, {
+            const resp = await fetch(`${_API_V1_PREFIX}/tracks/${encodeURIComponent(trackId)}/apply-mb-field`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ field, value })
@@ -987,10 +1000,10 @@ function _performBulkDelete(deleteFiles) {
     const artist = window._pageData ? window._pageData.artistName : '';
     const album = window._pageData ? window._pageData.albumName : '';
 
-    fetch('/api/album/bulk-delete', {
+    fetch(`${_API_V1_PREFIX}/albums/${encodeURIComponent(artist)}/${encodeURIComponent(album)}/bulk-delete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ track_ids: ids, artist: artist, album: album, delete_files: deleteFiles })
+        body: JSON.stringify({ track_ids: ids, delete_files: deleteFiles })
     })
         .then(r => r.json())
         .then(data => {
