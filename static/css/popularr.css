@@ -504,6 +504,9 @@ form .form-check-input[name="force"] + .form-check-label {
     z-index: 2040;
     background: rgba(0, 0, 0, 0.6);
 }
+/* `unified_search.js` appends the sheet and then adds `.show` on the next
+   animation frame, so the hidden->visible transition needs a starting state
+   here. Without the `.show` rule the sheet simply appeared with no motion. */
 .us-filter-sheet {
     position: fixed;
     left: 0;
@@ -517,6 +520,15 @@ form .form-check-input[name="force"] + .form-check-label {
     border-radius: 0.75rem 0.75rem 0 0;
     box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.6);
     padding-bottom: env(safe-area-inset-bottom, 0);
+    transform: translateY(100%);
+    transition: transform 0.22s ease;
+}
+.us-filter-sheet.show {
+    transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .us-filter-sheet { transition: none; }
 }
 .us-filter-sheet-header {
     border-bottom: 1px solid var(--border-color, #333);
@@ -543,16 +555,25 @@ form .form-check-input[name="force"] + .form-check-label {
 .us-filter-option.active .us-filter-check { display: inline-block; }
 .us-filter-btn.active { border-color: var(--spotify-green) !important; color: var(--spotify-green) !important; }
 
+/* Desktop: a centred dialog rather than a bottom sheet. The transform is used
+   for centring here, so the enter animation switches to opacity/scale — a
+   translateY start state would fight the -50%/-50% centring. */
 @media (min-width: 768px) {
     .us-filter-sheet {
         left: 50%;
         right: auto;
         bottom: auto;
         top: 50%;
-        transform: translate(-50%, -50%);
         width: min(92vw, 420px);
         border-radius: 0.75rem;
         border: 1px solid var(--border-color, #333);
+        transform: translate(-50%, -50%) scale(0.96);
+        opacity: 0;
+        transition: transform 0.18s ease, opacity 0.18s ease;
+    }
+    .us-filter-sheet.show {
+        transform: translate(-50%, -50%) scale(1);
+        opacity: 1;
     }
 }
 
