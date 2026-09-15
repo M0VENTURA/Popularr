@@ -765,7 +765,7 @@ class NavidromeClient:
             logger.error("Failed to update playlist songs", playlist_id=playlist_id, error=str(exc))
             return False
 
-    def create_playlist(self, name: str, song_ids: list[str]) -> dict[str, Any]:
+def create_playlist(self, name: str, song_ids: list[str], public: bool = True) -> dict[str, Any]:
         try:
             params: dict[str, Any] = {
                 "name": str(name or ""),
