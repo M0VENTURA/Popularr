@@ -213,73 +213,15 @@ def _fetch_artist_genres(artist: str) -> dict[str, int]:
     return scores
 
 
-def _consolidate_top_3_genres(track: dict[str, Any], artist_genres: dict[str, int]) -> str:
-    genre_scores: dict[str, int] = dict(artist_genres)
-    
-    def _add_single(g: str, score: int) -> None:
-        g = g.strip()
-        if not g or len(g) < 2: return
-        
-        g_lower = g.lower()
-        junk = {
-            "cover", "live", "seen live", "favorite", "favourites", 
-            "good music", "awesome", "loved", "favorite tracks", "tracks"
-        }
-        if g_lower in junk: 
-            return
-            
-        g_title = g.title()
-        genre_scores[g_title] = genre_scores.get(g_title, 0) + score
-        
-    def _parse_and_add(raw: Any, base_score: int) -> None:
-        if not raw: return
-        raw_str = str(raw).strip()
-        if raw_str.startswith("["):
-            try:
-                parsed = json.loads(raw_str)
-                for item in parsed:
-                    if isinstance(item, dict) and "name" in item:
-                        _add_single(item["name"], base_score + int(item.get("count", 1)))
-                    elif isinstance(item, str):
-                        _add_single(item, base_score)
-                return
-            except Exception:
-                pass
-        
-        parts = re.split(r"[,;\\]+", raw_str)
-        for i, p in enumerate(parts):
-            _add_single(p, base_score + max(0, 3 - i))
-            
-    _parse_and_add(track.get("genres"), 5)
-    _parse_and_add(track.get("musicbrainz_genres"), 4)
-    _parse_and_add(track.get("discogs_genres"), 4)
-    _parse_and_add(track.get("discogs_styles"), 3)
-    _parse_and_add(track.get("lastfm_tags"), 3)
-    _parse_and_add(track.get("listenbrainz_tags"), 2)
-    _parse_and_add(track.get("musicbrainz_tags"), 2)
-    
-    if not genre_scores:
-        return ""
-        
-    sorted_genres = sorted(genre_scores.items(), key=lambda x: x[1], reverse=True)
-    top_3 = [g[0] for g in sorted_genres[:3]]
-    return ", ".join(top_3)
-
-
 # ---------------------------------------------------------------------------
 # DB → file-tag mapping
 # ---------------------------------------------------------------------------
 
 def _resolve_album_year(tracks: list[dict[str, Any]]) -> str:
-    """Determine a single unified release year for the entire album group.
-    
-    Pulls the 4-digit year strings from all tracks, filters out blanks/zeros,
-    and returns the most frequent year. If tied, prefers the oldest year.
-    """
+    """Determine a single unified release year for the entire album group."""
     years = []
     for t in tracks:
         y = str(t.get("year") or "").strip()
-        # Extract 4-digit year if present
         match = re.search(r"(19|20)\d{2}", y)
         if match:
             years.append(match.group(0))
@@ -287,7 +229,6 @@ def _resolve_album_year(tracks: list[dict[str, Any]]) -> str:
     if not years:
         return ""
         
-    # Count frequency, then sort by frequency descending, then year ascending (oldest first)
     counts = Counter(years)
     best_year = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
     return best_year
@@ -307,10 +248,7 @@ def _db_tag_candidates(track: dict[str, Any], album_year: str, perfect: bool, in
     _put("album", track.get("album"))
     album_artist = str(track.get("album_artist") or "").strip() or str(track.get("artist") or "").strip()
     _put("album_artist", album_artist)
-    
-    # Use the unified album-level year across all tracks to prevent player splitting
     _put("year", album_year)
-    
     _put("track_number", track.get("track_number"))
     _put("disc_number", track.get("disc_number"))
     _put("isrc", track.get("isrc"))
@@ -328,17 +266,15 @@ def _db_tag_candidates(track: dict[str, Any], album_year: str, perfect: bool, in
         except Exception:
             _put("composer", writer)
 
-    _put("genres", _consolidate_top_3_genres(track, artist_genres))
+    # Output strictly relies on the active guardrail-cleared db value
+    _put("genres", track.get("genres"))
 
     if include_lyrics:
         _put("lyrics", track.get("lyrics"))
 
     if perfect:
         _put("musicbrainz_trackid", track.get("recording_mbid") or track.get("mbid"))
-        _put(
-            "musicbrainz_albumid",
-            track.get("musicbrainz_albumid") or track.get("musicbrainz_album_mbid"),
-        )
+        _put("musicbrainz_albumid", track.get("musicbrainz_albumid") or track.get("musicbrainz_album_mbid"))
         _put("musicbrainz_releasegroupid", track.get("musicbrainz_releasegroupid"))
         _put("musicbrainz_artistid", track.get("musicbrainz_artistid"))
         _put("musicbrainz_releasetrackid", track.get("musicbrainz_releasetrackid"))
@@ -461,9 +397,34 @@ def sync_album_file_tags(artist: str, album: str) -> dict[str, Any]:
     if not tracks:
         return {"skipped": "no_tracks", "files_updated": 0, "corrections_recorded": 0}
 
+    # -------------------------------------------------------------------------
+    # ACTIVE GENRE CLEANUP
+    # Generate perfect genres from the strict guardrail output. Force update
+    # the DB so that finalise_stage.py generates clean Navidrome playlists,
+    # and bind them to the track instances so the physical files are overwritten.
+    # -------------------------------------------------------------------------
+    try:
+        from services.enrichment.genre_aggregation_service import get_track_recommendations
+        from db.engine import db_session
+        from sqlalchemy import text
+        
+        rec_data = get_track_recommendations(artist, album)
+        if rec_data and rec_data.get("genres"):
+            clean_genres = ", ".join(rec_data["genres"])
+            
+            with db_session() as session:
+                session.execute(
+                    text("UPDATE tracks SET genres = :g WHERE COALESCE(NULLIF(album_artist, ''), artist) = :a AND album = :alb"),
+                    {"g": clean_genres, "a": artist, "alb": album}
+                )
+            
+            for t in tracks:
+                t["genres"] = clean_genres
+    except Exception as exc:
+        logger.warning("Active genre database cleanup failed", error=str(exc))
+    # -------------------------------------------------------------------------
+
     artist_genres = _fetch_artist_genres(artist)
-    
-    # Calculate a single unified year for the whole album group
     album_year = _resolve_album_year(tracks)
     
     release_mbid, mb_index, mb_count = _resolve_mb_release(tracks)
