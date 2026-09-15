@@ -5,16 +5,14 @@ MusicBrainz metadata has been persisted to the ``tracks`` table.  For every
 track of the album it:
 
   • Fills MISSING file tags from the freshly scanned DB values — title,
-    artist, album, album_artist, year, track/disc number, genres, ISRC,
-    composer/writer.  MusicBrainz IDs (recording / release / release-group /
+    artist, album, album_artist, year, track/disc number, ISRC,
+    composer/writer. MusicBrainz IDs (recording / release / release-group /
     artist / release-track / work) are ALSO filled, but only when the album's
-    local tracklist **perfectly matches** the MusicBrainz release (a 1:1
-    disc+position mapping with an equal track count) — a bad match can never
-    stamp wrong IDs into the files.
+    local tracklist **perfectly matches** the MusicBrainz release.
+  • OVERWRITES genre tags automatically with the freshly aggregated genre list.
   • Records a per-track correction (``metadata_conflicts``, provider
     ``"musicbrainz"``) whenever a file tag already holds a value that differs
-    from what the scan resolved — "could be wrong" candidates that the
-    corrections UI can review instead of silently overwriting them.
+    from what the scan resolved (excluding genres, which are auto-fixed).
 """
 
 from __future__ import annotations
@@ -477,13 +475,22 @@ def sync_album_file_tags(artist: str, album: str) -> dict[str, Any]:
         file_path = str(track.get("file_path") or "").strip()
         if not file_path or not os.path.exists(file_path):
             continue
+            
         file_values = _read_file_values(file_path)
         db_candidates = _db_tag_candidates(track, album_year, perfect, include_lyrics, artist_genres)
 
-        fill = {
-            k: v for k, v in db_candidates.items()
-            if not str(file_values.get(k) or "").strip()
-        }
+        fill: dict[str, str] = {}
+        for k, v in db_candidates.items():
+            file_val = str(file_values.get(k) or "").strip()
+            if k == "genres":
+                # Always force overwrite genres if the tag has structurally changed
+                if _norm(file_val) != _norm(v):
+                    fill[k] = v
+            else:
+                # Other metadata is strictly fill-if-missing
+                if not file_val:
+                    fill[k] = v
+
         if fill:
             try:
                 from services.metadata.tag_file_service import write_tags_to_file
@@ -491,6 +498,10 @@ def sync_album_file_tags(artist: str, album: str) -> dict[str, Any]:
                     files_updated += 1
             except Exception as exc:
                 logger.debug("Tag fill failed", track_id=track.get("id"), error=str(exc))
+
+        # We auto-overwrite genres, so explicitly remove it before recording manual corrections
+        if "genres" in fill:
+            db_candidates.pop("genres", None)
 
         corrections_recorded += _record_corrections(track, file_values, db_candidates)
 
