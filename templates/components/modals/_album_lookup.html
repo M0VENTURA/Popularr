@@ -1,18 +1,76 @@
-<!-- MusicBrainz Search Modal Wrapper -->
+{#
+Album Lookup Modal
+==================
+DEPRECATED — this wrapper no longer renders a search form of its own.
+
+It used to `{% include 'components/_musicbrainz_search_component.html' %}`
+inside its modal body. base.html ALSO includes that component on every page
+(via components/_musicbrainz_search_modal.html), so any page including this
+file shipped TWO elements with id="mbSearchArtist", id="mbSearchResults",
+id="mbSelectedRelease", and two copies of the component's <style> block.
+
+`performMbSearch()` resolves those ids with `document.getElementById(...)`,
+which returns the FIRST match in DOM order — base.html's hidden global
+modal. Results were written there while this visible modal kept showing
+"Enter a search term above to find releases on MusicBrainz", which is
+exactly the "the panel opens but never populates" symptom.
+
+downloads/monitor.html already documents the correct rule:
+    "The shared MusicBrainz search modal is included globally by base.html
+     — do not include it again here."
+
+The empty shell below is kept ONLY so that any page still doing
+`{% include 'components/modals/_album_lookup.html' %}` does not break, and
+so `document.getElementById('albumLookupModal')` still resolves. It has no
+duplicate ids.
+
+MIGRATION
+---------
+`openAlbumLookupModal()` in static/js/album_detail.js should open the shared
+modal instead of this one:
+
+    window.openAlbumLookupModal = function () {
+        const artist = window._pageData ? window._pageData.artistName : '';
+        const album  = window._pageData ? window._pageData.albumName  : '';
+        if (typeof window.openGlobalMbSearch === 'function') {
+            window.openGlobalMbSearch(artist, album, null);
+        }
+    };
+
+Once every caller uses `openGlobalMbSearch`, delete this file and remove its
+`{% include %}` from templates/pages/album_detail.html.
+#}
 <div class="modal fade" id="albumLookupModal" tabindex="-1" aria-labelledby="albumLookupModalLabel" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-scrollable">
     <div class="modal-content bg-dark text-light border-secondary">
-      
+
       <div class="modal-header border-secondary">
-        <h5 class="modal-title" id="albumLookupModalLabel"><i class="bi bi-search text-info me-2"></i>MusicBrainz Search</h5>
+        <h5 class="modal-title" id="albumLookupModalLabel">
+          <i class="bi bi-search text-info me-2"></i>MusicBrainz Search
+        </h5>
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
-      
+
       <div class="modal-body">
-        <!-- This dynamically pulls in your reusable search component right here -->
-        {% include 'components/_musicbrainz_search_component.html' ignore missing %}
+        {#
+          Intentionally does NOT include _musicbrainz_search_component.html.
+          Including it here duplicates every element id that base.html has
+          already rendered. Use openGlobalMbSearch() instead.
+        #}
+        <div class="text-center text-muted py-4">
+          <i class="bi bi-arrow-up-right-circle opacity-50" style="font-size: 2rem;"></i>
+          <p class="mt-3 mb-0 small">
+            This lookup now uses the shared MusicBrainz search.
+          </p>
+          <button type="button"
+                  class="btn btn-info btn-sm fw-bold mt-3"
+                  data-bs-dismiss="modal"
+                  onclick="if (typeof window.openGlobalMbSearch === 'function') { window.openGlobalMbSearch((window._pageData||{}).artistName || '', (window._pageData||{}).albumName || '', null); }">
+            <i class="bi bi-search me-1"></i> Open MusicBrainz Search
+          </button>
+        </div>
       </div>
-      
+
       <div class="modal-footer border-secondary">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
       </div>
