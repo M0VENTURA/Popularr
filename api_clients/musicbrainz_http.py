@@ -118,8 +118,8 @@ def _strict_throttle() -> None:
     with _THROTTLE_LOCK:
         now = time.monotonic()
         elapsed = now - _LAST_MB_REQUEST_TIME
-        if elapsed < 1.0:
-            sleep_time = 1.0 - elapsed
+        if elapsed < 1.2:
+            sleep_time = 1.2 - elapsed
             _LAST_MB_REQUEST_TIME = now + sleep_time
         else:
             _LAST_MB_REQUEST_TIME = now
@@ -157,47 +157,59 @@ class MusicBrainzHttpClient:
         url = f"{self.base_url}{endpoint.lstrip('/')}"
         query_params = params or {}
 
-        try:
-            _strict_throttle()
-            response = self.session.get(
-                url,
-                params=query_params,
-                headers=self.headers,
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            return payload if isinstance(payload, dict) else {}
-            
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code in (502, 503, 504):
-                with _CIRCUIT_LOCK:
-                    _CIRCUIT_OPEN_UNTIL = time.monotonic() + 60.0
-                logger.warning(
-                    "MusicBrainz overloaded (5xx). Circuit breaker open for 60s.",
-                    endpoint=endpoint,
-                    status_code=exc.response.status_code,
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                _strict_throttle()
+                response = self.session.get(
+                    url,
+                    params=query_params,
+                    headers=self.headers,
+                    timeout=timeout,
                 )
-                return {}
+                response.raise_for_status()
+                payload = response.json()
+                return payload if isinstance(payload, dict) else {}
                 
-            if exc.response.status_code in (400, 404):
-                logger.debug(
-                    "MusicBrainz request not found (permanent)",
-                    endpoint=endpoint,
-                    status_code=exc.response.status_code,
-                    error=str(exc),
-                )
-            else:
-                logger.warning(
-                    "MusicBrainz request failed permanently after retries",
-                    endpoint=endpoint,
-                    status_code=exc.response.status_code,
-                    error=str(exc),
-                )
-            return {}
-        except Exception as exc:
-            logger.warning("MusicBrainz request failed permanently after retries", endpoint=endpoint, error=str(exc))
-            return {}
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (502, 503, 504):
+                    if attempt < max_retries - 1:
+                        backoff = 2 ** (attempt + 1)
+                        logger.debug("MusicBrainz 5xx received, retrying...", endpoint=endpoint, backoff=backoff)
+                        time.sleep(backoff)
+                        continue
+                    else:
+                        with _CIRCUIT_LOCK:
+                            _CIRCUIT_OPEN_UNTIL = time.monotonic() + 60.0
+                        logger.warning(
+                            "MusicBrainz overloaded (5xx). Circuit breaker open for 60s.",
+                            endpoint=endpoint,
+                            status_code=exc.response.status_code,
+                        )
+                        return {}
+                    
+                if exc.response.status_code in (400, 404):
+                    logger.debug(
+                        "MusicBrainz request not found (permanent)",
+                        endpoint=endpoint,
+                        status_code=exc.response.status_code,
+                        error=str(exc),
+                    )
+                else:
+                    logger.warning(
+                        "MusicBrainz request failed permanently",
+                        endpoint=endpoint,
+                        status_code=exc.response.status_code,
+                        error=str(exc),
+                    )
+                return {}
+            except Exception as exc:
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** (attempt + 1))
+                    continue
+                logger.warning("MusicBrainz request failed permanently after retries", endpoint=endpoint, error=str(exc))
+                return {}
+        return {}
 
     def search_release_groups(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         payload = self.get("release-group/", params={"query": query, "fmt": "json", "limit": max(1, min(limit, 100))})
