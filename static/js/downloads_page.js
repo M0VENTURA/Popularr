@@ -1,6 +1,3 @@
-============================================================
-FILE: static/js/downloads_page.js
-============================================================
 // Downloads page logic — extracted from templates/pages/downloads/queue.html
 // (was previously an untagged inline script block that browsers treated as
 // inert text; loaded via versioned_static after downloads.js).
