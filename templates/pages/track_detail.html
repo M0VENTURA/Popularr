@@ -530,11 +530,22 @@
                                     ('manual_genres', 'Manual Tags', '0dcaf0', 'black', 'bi-person-fill-gear')
                                 ] %}
                                 
+                                {% set valid_track_sources = {} %}
                                 {% set ns = namespace(has_any=False) %}
                                 {% for key, label, bgcolor, textcolor, icon in sources %}
                                     {% set val = track[key] %}
-                                    {% if val and val != '[]' and val != '' and val != 'null' %}
-                                        {% set ns.has_any = True %}
+                                    {% if val and val|string|trim not in ['[]', '{}', 'null', 'None', 'none', ''] %}
+                                        {% set valid_genres = [] %}
+                                        {% for genre in val|split_genres %}
+                                            {% set g_name = genre|string|trim %}
+                                            {% if g_name and g_name not in ['[]', '{}', 'null', 'None', 'none'] %}
+                                                {% set _ = valid_genres.append(g_name) %}
+                                            {% endif %}
+                                        {% endfor %}
+                                        {% if valid_genres|length > 0 %}
+                                            {% set _ = valid_track_sources.update({key: valid_genres}) %}
+                                            {% set ns.has_any = True %}
+                                        {% endif %}
                                     {% endif %}
                                 {% endfor %}
 
@@ -542,8 +553,7 @@
                                     {% set ns2 = namespace(first=True) %}
                                     <ul class="nav nav-tabs border-secondary mb-3 flex-nowrap overflow-auto" role="tablist" style="white-space: nowrap; padding-bottom: 2px;">
                                         {% for key, label, bgcolor, textcolor, icon in sources %}
-                                            {% set val = track[key] %}
-                                            {% if val and val != '[]' and val != '' and val != 'null' %}
+                                            {% if valid_track_sources.get(key) %}
                                                 <li class="nav-item" role="presentation">
                                                     <button class="nav-link {{ 'active text-white' if ns2.first else 'text-muted' }} px-2 py-1 small"
                                                             id="trackGenreTab{{ key }}-tab" data-bs-toggle="tab"
@@ -560,11 +570,10 @@
                                     {% set ns3 = namespace(first=True) %}
                                     <div class="tab-content">
                                         {% for key, label, bgcolor, textcolor, icon in sources %}
-                                            {% set val = track[key] %}
-                                            {% if val and val != '[]' and val != '' and val != 'null' %}
+                                            {% if valid_track_sources.get(key) %}
                                                 <div class="tab-pane fade {{ 'active show' if ns3.first else '' }}" id="trackGenreTab{{ key }}-content" role="tabpanel">
                                                     <div class="d-flex flex-wrap gap-1">
-                                                        {% for genre in val|split_genres %}
+                                                        {% for genre in valid_track_sources[key] %}
                                                             <span class="badge border" style="background-color: #{{ bgcolor }}; color: {{ textcolor }}; font-size: 0.75rem; opacity: 0.9;">{{ genre }}</span>
                                                         {% endfor %}
                                                     </div>
@@ -632,9 +641,12 @@
 
                                 <h6 class="fw-semibold text-muted extra-small text-uppercase mb-2">Essentia Genres</h6>
                                 <div class="d-flex flex-wrap gap-1">
-                                    {% if track.essentia_genres %}
+                                    {% if track.essentia_genres and track.essentia_genres|string|trim not in ['[]', '{}', 'null', 'None', 'none', ''] %}
                                         {% for genre in track.essentia_genres|split_genres %}
-                                        <span class="badge bg-secondary fw-semibold">{{ genre }}</span>
+                                            {% set g_name = genre|string|trim %}
+                                            {% if g_name and g_name not in ['[]', '{}', 'null', 'None', 'none'] %}
+                                                <span class="badge bg-secondary fw-semibold">{{ g_name }}</span>
+                                            {% endif %}
                                         {% endfor %}
                                     {% else %}
                                         <span class="text-muted small">None detected</span>
