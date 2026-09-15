@@ -108,6 +108,15 @@ _ALBUM_LIVE_TYPE_FIELDS: tuple[str, ...] = (
     "musicbrainz_album_type",
     "album_type",
     "releasetype",
+    # Raw, pre-corroboration MusicBrainz secondary type (e.g. "album+live"),
+    # set by album_stage._resolve_album_type()/enrich_album() regardless of
+    # whether the corroboration guard accepted it for the persisted/display
+    # "detected_album_type". A release MusicBrainz confirms as live but whose
+    # local title/track-title heuristics don't corroborate gets its
+    # "detected_album_type" safely downgraded to a plain "album" -- so that
+    # field alone is NOT reliable evidence of liveness. This field is: it is
+    # never downgraded, only ever set from MusicBrainz's own classification.
+    "musicbrainz_secondary_type_raw",
 )
 
 
@@ -126,6 +135,15 @@ def _album_type_indicates_live(
     string signal on top of the substring scan: it is set by the scan
     runner's ``_refresh_album_live_context`` specifically to record a live
     classification, separate from ``detected_album_type``.
+
+    ``musicbrainz_secondary_type_raw`` (in ``_ALBUM_LIVE_TYPE_FIELDS`` above)
+    is the important one for a release where MusicBrainz says live but local
+    title heuristics disagree: ``detected_album_type``/``musicbrainz_albumtype``
+    get safely downgraded to a plain "album" in that case (by design, to avoid
+    destructively retitling studio tracks), so checking only those fields
+    would miss exactly the release this whole check exists for. The raw
+    field is never downgraded, so it still reads "album+live" even when every
+    other field in ``sources`` says "album".
     """
     for source in sources:
         if not isinstance(source, dict):
