@@ -509,7 +509,7 @@ def calculate_combined_popularity_score(
         )
     else:
         lastfm_score = lastfm_log
-        
+
     lb_score = lb_log
 
     if album_lb_listens:
@@ -528,7 +528,7 @@ def calculate_combined_popularity_score(
     _live_lf_w, _live_lb_w, _live_age_w = resolve_weights()
     _inst_penalty = max(0.0, min(1.0, instrumental_weight_penalty))
     effective_lf_weight = lastfm_weight_override
-    
+
     if effective_lf_weight is None:
         effective_lf_weight = _live_lf_w
         if is_live_track:
@@ -550,12 +550,12 @@ def calculate_combined_popularity_score(
             lf_weight, lb_weight = 0.0, 1.0
         elif _audit == "REJECT_LB":
             lf_weight, lb_weight = 1.0, 0.0
-            
+
         if is_live_track:
             lf_weight = lf_weight * max(0.0, min(1.0, live_weight_penalty))
         elif is_instrumental_track:
             lf_weight = lf_weight * _inst_penalty
-            
+
         if lastfm_score > 0 and lf_weight > 0:
             active_scores.append(lastfm_score)
             active_weights.append(lf_weight)
@@ -577,7 +577,7 @@ def calculate_combined_popularity_score(
     if active_scores and active_weights:
         total_weight = sum(active_weights)
         combined = sum(s * w for s, w in zip(active_scores, active_weights)) / total_weight
-        
+
         absolute_components = [s for s in (lastfm_log, lb_log, age_score) if s > 0]
         if len(absolute_components) >= 2:
             strongest = max(absolute_components)
@@ -615,9 +615,9 @@ def is_lastfm_unreliable(lastfm_listeners: int, lb_listens: int) -> bool:
 
 
 def adjust_weights(
-    lastfm_listeners: int, 
-    lb_listens: int, 
-    is_featured_track: bool = False, 
+    lastfm_listeners: int,
+    lb_listens: int,
+    is_featured_track: bool = False,
     metadata_confirmed: bool = False
 ) -> tuple[float, float]:
     """Adjust Last.fm / ListenBrainz weights when sources are mismatched."""
@@ -629,12 +629,12 @@ def adjust_weights(
         lf_weight = 0.4
     else:
         lf_weight = 0.6
-        
+
     if is_featured_track:
         lf_weight = min(lf_weight, 0.35)
     if metadata_confirmed:
         lf_weight = max(lf_weight, 0.25)
-        
+
     lb_weight = 1.0 - lf_weight
     return lf_weight, lb_weight
 
@@ -696,6 +696,162 @@ def is_interlude_lb_outlier(
 
     track_ratio = lb / lf
     return track_ratio > album_median_ratio * float(ratio_factor)
+
+
+# ── Live-album star rating (artist-z driven) ───────────────────────────────
+#
+# Album-relative z is self-referential: every album is z-scored against its OWN
+# tracks, so the strongest cut on a mediocre live record scores exactly like the
+# strongest cut on a landmark studio album. For live releases that is the wrong
+# question. What matters is "is this track notable within the artist's whole
+# catalogue", which is precisely what artist-z measures.
+#
+# Because live recordings genuinely draw fewer listeners than their studio
+# counterparts, most live tracks land at NEGATIVE artist-z and naturally fall
+# into the 1-3 bands with no artificial compression needed. Tracks that were
+# real singles (e.g. Metallica's "No Leaf Clover" from S&M) carry catalogue-
+# level listener counts and rise on their own merit.
+
+LIVE_MODE_ARTIST_Z = "artist_z"
+LIVE_MODE_ARTIST_AND_ALBUM = "artist_and_album"
+
+# Artist-z band boundaries used for tracks on a LIVE album. These are
+# deliberately stricter than the studio artist-z thresholds: a live track has
+# to be genuinely notable across the artist's catalogue to clear 4 stars.
+LIVE_ARTIST_Z_STAR5 = 1.50
+LIVE_ARTIST_Z_STAR4 = 1.00
+LIVE_ARTIST_Z_STAR3 = -0.25
+LIVE_ARTIST_Z_STAR2 = -1.20
+
+# In "artist_and_album" mode a track must also clear this album-z before it is
+# allowed to reach 4 or 5 stars. It is ALSO the promotion threshold: a track
+# at or above it that is respectable catalogue-wide is lifted to 4 stars.
+LIVE_ALBUM_Z_GATE = 2.00
+
+# Minimum artist-z required before the album-z promotion path may fire. Stops
+# a track that is merely the least-weak cut on a poor live album from being
+# promoted purely on album-relative standing.
+LIVE_PROMOTE_ARTIST_Z_MIN = 0.50
+
+# Minimum catalogue size before artist-z is trustworthy enough to band on.
+LIVE_ARTIST_Z_MIN_CATALOGUE = 8
+
+LIVE_ALBUM_MAX_STARS = 3            # ceiling for an ordinary live track
+LIVE_ALBUM_MAX_5STAR_SLOTS = 1
+LIVE_ALBUM_MAX_4STAR_SLOTS = 2
+LIVE_ALBUM_TRACK_FRACTION = 0.60    # share of live tracks that marks a release
+
+
+def live_album_star_from_artist_z(
+    artist_z: float,
+    album_z: float = 0.0,
+    *,
+    mode: str = LIVE_MODE_ARTIST_AND_ALBUM,
+    single_confidence: str = "low",
+    organic: bool = False,
+    star5_z: float = LIVE_ARTIST_Z_STAR5,
+    star4_z: float = LIVE_ARTIST_Z_STAR4,
+    star3_z: float = LIVE_ARTIST_Z_STAR3,
+    star2_z: float = LIVE_ARTIST_Z_STAR2,
+    album_z_gate: float = LIVE_ALBUM_Z_GATE,
+    promote_artist_z_min: float = LIVE_PROMOTE_ARTIST_Z_MIN,
+    default_max: int = LIVE_ALBUM_MAX_STARS,
+    epsilon_z: float = 0.0,
+) -> tuple[int, str]:
+    """Return ``(stars, reason)`` for one track on a LIVE album.
+
+    Banding is on ARTIST-z. Album-z is never used to lift a rating on its own
+    merit alone; it acts in two specific roles:
+
+    - as a GATE, when artist-z already wants 4-5 stars (``artist_and_album``
+      mode only), so a weak-catalogue artist cannot mint a full row of 5-star
+      tracks simply because the live album beats their own low median; and
+    - as a PROMOTION path, when a track is a decisive standout within its own
+      live release AND respectable catalogue-wide. This is the case pure
+      artist-z misses: a live single whose studio sibling dominates the
+      catalogue never clears the artist-z 4 threshold on its own, yet is
+      unmistakably the peak of the live record.
+
+    A user override always returns 5. A verified single (high/medium
+    confidence with organic support) is floored at 4 and reaches 5 when it
+    also clears the artist-z 5 band.
+    """
+    try:
+        a_z = float(artist_z or 0.0)
+        alb_z = float(album_z or 0.0)
+    except (TypeError, ValueError):
+        a_z = alb_z = 0.0
+
+    conf = str(single_confidence or "low").strip().casefold()
+    eps = max(0.0, float(epsilon_z or 0.0))
+    combined_mode = str(mode or "").strip().casefold() == LIVE_MODE_ARTIST_AND_ALBUM
+
+    if conf == "user":
+        return 5, "user_override"
+
+    verified_single = conf in ("high", "medium") and bool(organic)
+
+    # ---- 1. Raw artist-z band -------------------------------------------
+    if a_z >= float(star5_z) - eps:
+        band = 5
+    elif a_z >= float(star4_z) - eps:
+        band = 4
+    elif a_z >= float(star3_z) - eps:
+        band = 3
+    elif a_z >= float(star2_z) - eps:
+        band = 2
+    else:
+        band = 1
+
+    reason = f"artist_z_band({a_z:+.2f})"
+
+    # ---- 2. Album-z gate on an already-high artist-z ---------------------
+    if band > int(default_max) and not verified_single and combined_mode:
+        if alb_z < float(album_z_gate):
+            band = int(default_max)
+            reason = f"album_z_gate_failed(album_z={alb_z:+.2f} < {float(album_z_gate):.2f})"
+        else:
+            reason = f"artist_z+album_z({a_z:+.2f}/{alb_z:+.2f})"
+
+    # ---- 3. Album-z PROMOTION path ---------------------------------------
+    if band < 4 and alb_z >= float(album_z_gate) and a_z >= float(promote_artist_z_min):
+        band = 4
+        reason = f"album_z_promotion(album_z={alb_z:+.2f}, artist_z={a_z:+.2f})"
+
+    # ---- 4. Verified-single floor ----------------------------------------
+    if verified_single:
+        floor = 5 if a_z >= float(star5_z) - eps else 4
+        if band < floor:
+            band = floor
+            reason = f"verified_single_floor(artist_z={a_z:+.2f})"
+
+    return band, reason
+
+
+def is_live_album_context(
+    tracks: list[dict[str, Any]] | None,
+    album_type: str = "",
+    fraction: float = LIVE_ALBUM_TRACK_FRACTION,
+) -> bool:
+    """True when a RELEASE is a live album (not just one live track).
+
+    A studio album carrying a single bonus live cut must NOT be treated as a
+    live album, so this requires either an explicit live album type or a
+    supermajority of tracks carrying a live flag.
+    """
+    if "live" in str(album_type or "").strip().casefold():
+        return True
+
+    rows = list(tracks or [])
+    if len(rows) < 2:
+        return False
+
+    live_count = sum(
+        1 for t in rows
+        if bool(t.get("album_context_live")) or bool(t.get("is_live"))
+    )
+    threshold = max(2, math.ceil(len(rows) * max(0.0, min(1.0, float(fraction)))))
+    return live_count >= threshold
 
 
 # ── Percentile-based star ratings (artist / genre "top songs") ─────────────
