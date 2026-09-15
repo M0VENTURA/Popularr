@@ -844,10 +844,16 @@ def _essential_playlist_name(artist: str) -> str:
         )
     except Exception:
         template = "{artist} - Essential Collection"
-    name = str(template).replace("{artist}", artist).strip()
-    return name or f"{artist} - Essential Collection"
-
-
+        
+    try:
+        from helpers.normalization_service import normalize_the_prefix
+        artist_display = normalize_the_prefix(artist)
+    except Exception:
+        artist_display = artist
+        
+    name = str(template).replace("{artist}", artist_display).strip()
+    return name or f"{artist_display} - Essential Collection"
+  
 def _normalise_essential_title(title: str) -> str:
     t = str(title or "").strip().lower()
     t = _ESSENTIAL_TITLE_NOISE_RE.sub(" ", t)
