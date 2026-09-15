@@ -1,6 +1,6 @@
 /**
  * Unified hybrid search — All / In Library / MusicBrainz.
- * (Modified: Typing triggers input sync only; searches execute on Enter or filter change).
+ * (Typing triggers input sync only; searches execute on Enter or filter change.)
  */
 (function () {
   'use strict';
@@ -21,7 +21,12 @@
   var _lastScope = null;
   var _mbDone = false;
   var _mbResults = [];
-  var localResult = { artists: [], albums: [], compilations: [], live_albums: [], eps: [], singles: [], tracks: [] };
+
+  function emptyLocalResult() {
+    return { artists: [], albums: [], compilations: [], live_albums: [], eps: [], singles: [], tracks: [] };
+  }
+
+  var localResult = emptyLocalResult();
 
   function getModalEl() { return document.getElementById('unifiedSearchModal'); }
   function getInputEl() { return document.getElementById('unifiedSearchInput'); }
@@ -105,6 +110,22 @@
     };
   }
 
+  // Every key returned by getAdvancedFilters(). Deriving `hasAdvanced` and the
+  // fetchMb payload from ONE list stops them drifting apart: `hasAdvanced`
+  // previously tested only artist/album/track/year and `mbOpts` forwarded only
+  // those four, so the Year-To and Genre inputs were read, then silently
+  // dropped — fetchMb() supports opts.year_to and opts.genre, but never
+  // received them, and typing in either field alone did not even count as an
+  // advanced search.
+  var ADVANCED_FILTER_KEYS = ['artist', 'album', 'track', 'year', 'year_to', 'genre'];
+
+  function hasAnyAdvancedFilter(adv) {
+    for (var i = 0; i < ADVANCED_FILTER_KEYS.length; i++) {
+      if (adv[ADVANCED_FILTER_KEYS[i]]) return true;
+    }
+    return false;
+  }
+
   function fetchMb(query, limit, opts) {
     opts = opts || {};
     var hasAdvanced = opts.artist || opts.album || opts.track || opts.year || opts.year_to || opts.genre;
@@ -179,7 +200,7 @@
       '</div>';
   }
 
-  window.toggleUsSection = function(btn) {
+  window.toggleUsSection = function (btn) {
     var hiddenEl = btn.closest('.us-section').querySelector('.us-section-more');
     if (!hiddenEl) return;
     var expanded = !hiddenEl.classList.contains('d-none');
@@ -201,7 +222,7 @@
       remix: ['albums']
     };
     var keep = bucketMap[type] || [];
-    var out = { artists: [], albums: [], compilations: [], live_albums: [], eps: [], singles: [], tracks: [] };
+    var out = emptyLocalResult();
     keep.forEach(function (k) { out[k] = local[k] || []; });
     return out;
   }
@@ -284,6 +305,7 @@
       if (it.track_count) {
         trackLine = '<span class="us-row-sub d-block">' + it.track_count + ' track' + (it.track_count === 1 ? '' : 's') + (it.duration_total ? ' - ' + fmtDuration(it.duration_total) : '') + '</span>';
       }
+
       if (it.local || it.owned) {
         var yearPath = it.year ? '/' + it.year : '';
         var href = '/album/' + encodeURIComponent(it.artist) + '/' + encodeURIComponent(it.title) + yearPath;
@@ -335,6 +357,7 @@
   function buildBuckets(local, mbReleases) {
     var buckets = { albums: [], compilations: [], live_albums: [], eps: [], singles: [] };
     var owned = {};
+
     (local.albums || []).forEach(function (al) {
       var bucket = buckets[al.type] ? al.type : 'albums';
       buckets[bucket].push({
@@ -344,6 +367,7 @@
       });
       owned[_ownedKey(al.artist, al.album)] = true;
     });
+
     (mbReleases || []).forEach(function (r) {
       var artist = mbReleaseArtist(r);
       var bucket = classifyMbRelease(r);
@@ -354,6 +378,7 @@
         owned: !!owned[_ownedKey(artist, r.title)]
       });
     });
+
     Object.keys(buckets).forEach(function (k) {
       buckets[k].sort(function (a, b) {
         var ay = (a.year === '?' || a.year === null || a.year === undefined) ? 0 : Number(a.year) || 0;
@@ -364,6 +389,7 @@
         return String(a.title || '').toLowerCase() < String(b.title || '').toLowerCase() ? -1 : 1;
       });
     });
+
     return buckets;
   }
 
@@ -387,7 +413,6 @@
     var html = '';
     var artists = local.artists || [];
     if (artists.length) html += buildSection('Artists', artists, artistRows);
-
     html += renderReleaseSections(buildBuckets(local, mbReleases), opts.withQueue);
 
     if (opts.allMbButton && opts.mbPending) {
@@ -401,6 +426,7 @@
 
     var tracks = local.tracks || [];
     if (tracks.length) html += buildSection('Tracks', tracks, trackRows);
+
     if (!artists.length && !html) {
       html += '<div class="text-center text-muted py-4 small">No library matches for "' + esc(query) + '"</div>';
     }
@@ -422,7 +448,7 @@
 
     var query = input.value.trim();
     var adv = getAdvancedFilters();
-    var hasAdvanced = adv.artist || adv.album || adv.track || adv.year;
+    var hasAdvanced = hasAnyAdvancedFilter(adv);
     var seq = ++_runSeq;
 
     if (query.length < MIN_QUERY_LENGTH && !hasAdvanced) {
@@ -436,21 +462,26 @@
 
     resultsEl.innerHTML = '<div class="text-center py-5"><div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div></div>';
 
-    var mbOpts = {
-      type: getTypeFilter(),
-      artist: adv.artist,
-      album: adv.album,
-      track: adv.track,
-      year: adv.year
-    };
+    // Forward EVERY advanced filter. `year_to` and `genre` were previously
+    // omitted here, so the two inputs were read by getAdvancedFilters() and
+    // then thrown away before the request was built.
+    var mbOpts = { type: getTypeFilter() };
+    ADVANCED_FILTER_KEYS.forEach(function (key) { mbOpts[key] = adv[key]; });
 
     var localQuery = query;
     if (localQuery.length < MIN_QUERY_LENGTH && hasAdvanced) {
-      localQuery = adv.artist || adv.album || adv.track || adv.year || '';
+      localQuery = adv.artist || adv.album || adv.track || adv.year || adv.genre || '';
     }
+
+    // Reset the cached local result for THIS run. It is module-level state, so
+    // without this an in-flight MusicBrainz promise could call renderLocal()
+    // with the previous query's library hits and briefly show results from a
+    // search the user has already replaced.
+    localResult = emptyLocalResult();
+
     var localPromise = localQuery.length >= MIN_QUERY_LENGTH
       ? fetchLibrary(localQuery).catch(function (e) { return { error: e.message }; })
-      : Promise.resolve({ artists: [], albums: [], compilations: [], live_albums: [], eps: [], singles: [], tracks: [] });
+      : Promise.resolve(emptyLocalResult());
 
     var mbPromise;
     if (_scope === SCOPE_ALL) {
@@ -475,13 +506,13 @@
       _counts.library = countLibrary(local);
       _counts.all = _counts.library + (_counts.mb || 0);
       updateScopeCounts();
-
       if (_scope === SCOPE_MB) return;
 
       var displayQuery = localQuery || query;
       var releaseCount = ['albums', 'compilations', 'live_albums', 'eps', 'singles'].reduce(function (n, k) {
         return n + ((local[k] || []).length);
       }, 0);
+
       var counts = [
         (local.artists || []).length + ' artist' + ((local.artists || []).length === 1 ? '' : 's'),
         releaseCount + ' album' + (releaseCount === 1 ? '' : 's'),
@@ -489,9 +520,11 @@
       ];
       if (_scope === SCOPE_ALL) counts.push((_counts.mb || 0) + ' musicbrainz');
       if (getMetaEl()) getMetaEl().textContent = counts.join(' · ');
+
       var warnHtml = local.error
         ? '<div class="alert alert-warning py-2 small mb-2"><i class="bi bi-exclamation-triangle-fill"></i> Library search failed (' + esc(local.error) + ') — showing MusicBrainz only.</div>'
         : '';
+
       var mbReleases = _mbResults || [];
       resultsEl.innerHTML = warnHtml + renderBucketedResults(local, mbReleases, displayQuery, {
         withQueue: true,
@@ -503,6 +536,7 @@
 
     _mbDone = false;
     _mbResults = [];
+
     mbPromise.then(function (mbReleases) {
       if (seq !== _runSeq) return;
       _mbResults = mbReleases || [];
@@ -571,7 +605,6 @@
       .then(function (res) { return res.json().catch(function () { return {}; }).then(function (data) { return { ok: res.ok, data: data }; }); })
       .then(function (out) {
         if (!out.ok) throw new Error(out.data.error || 'Queue request failed');
-        var total = out.data.total_tracks || out.data.queued_tracks || 0;
         btn.classList.replace('btn-outline-primary', 'btn-success');
         btn.innerHTML = '<i class="bi bi-check2"></i> Queued';
         if (typeof window.showQueueToast === 'function') window.showQueueToast(rel.title || 'Release');
@@ -610,8 +643,11 @@
     setAdvancedFiltersVisible(false);
     if (getErrorEl()) getErrorEl().classList.add('d-none');
 
-    var nav = document.querySelector('nav.navbar.fixed-top') || document.querySelector('nav.navbar');
-    if (nav && nav.offsetHeight > 0) modalEl.style.top = nav.offsetHeight + 'px';
+    // The flyout's `top` comes from `--navbar-height` in popularr.css, which
+    // main.js keeps in sync with the real navbar. Setting an inline `top` here
+    // made this a SECOND source of truth that only updated when the flyout was
+    // opened — so a resize or a mobile-menu expand while the flyout was open
+    // left it detached from the navbar.
     var backdrop = document.getElementById('searchBackdrop');
     modalEl.classList.remove('d-none');
     if (backdrop) backdrop.classList.remove('d-none');
@@ -641,7 +677,7 @@
     if (getErrorEl()) getErrorEl().classList.add('d-none');
   };
 
-  window._renderMbReleaseTrackTable = function(tracks) {
+  window._renderMbReleaseTrackTable = function (tracks) {
     if (!tracks || !tracks.length) {
       return '<div class="text-muted small px-3 py-2">No tracklist available.</div>';
     }
@@ -651,25 +687,30 @@
       '<th>Title</th>' +
       '<th style="width:90px;">Duration</th>' +
       '</tr></thead><tbody>';
-    var hasDiscs = tracks.some(function(t) { return parseInt(t.disc_number || t.disc || 0, 10) > 1; });
-    tracks.forEach(function(t) {
+
+    var hasDiscs = tracks.some(function (t) { return parseInt(t.disc_number || t.disc || 0, 10) > 1; });
+
+    tracks.forEach(function (t) {
       var num = t.track_number != null ? t.track_number : (t.position != null ? t.position : '');
       var disc = parseInt(t.disc_number || t.disc || 0, 10);
       var numLabel = '';
       if (num !== '') numLabel = hasDiscs ? (disc || 1) + '-' + num : String(num);
       else if (disc > 1) numLabel = 'D' + disc;
+
       var durRaw = parseInt(t.duration_ms || t.duration || t.length || 0, 10);
       var dur = '';
       if (durRaw > 0) {
         var secs = durRaw >= 10000 ? Math.round(durRaw / 1000) : Math.round(durRaw);
         dur = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
       }
+
       html += '<tr>' +
         '<td class="text-center text-muted" data-label="#">' + esc(String(numLabel)) + '</td>' +
         '<td data-label="Title">' + esc(t.title || '?') + '</td>' +
         '<td class="text-muted" data-label="Duration">' + esc(dur) + '</td>' +
         '</tr>';
     });
+
     html += '</tbody></table>';
     return html;
   };
@@ -727,7 +768,17 @@
     if (filtersToggle) {
       filtersToggle.addEventListener('click', function () {
         var panel = document.getElementById('unifiedAdvancedFilters');
-        setAdvancedFiltersVisible(!panel || panel.classList.get ? !panel.classList.contains('d-none') : false);
+        // The panel is hidden while it HAS `d-none`, so "should it now be
+        // visible?" is simply "does it currently have d-none?".
+        //
+        // This was:
+        //   setAdvancedFiltersVisible(!panel || panel.classList.get ? !panel.classList.contains('d-none') : false);
+        // `||` binds tighter than `?:`, so the condition was
+        // `(!panel || panel.classList.get)`. DOMTokenList has no `.get`, so
+        // with a panel present that evaluated to `undefined` → falsy → the
+        // ternary ALWAYS returned `false`. Every click called
+        // setAdvancedFiltersVisible(false) and the panel could never open.
+        setAdvancedFiltersVisible(panel ? panel.classList.contains('d-none') : false);
       });
     }
 
@@ -770,20 +821,24 @@
       var sheet = document.createElement('div');
       sheet.className = 'us-filter-sheet';
       sheet.id = 'usFilterSheet';
+
       var html = '<div class="us-filter-sheet-header d-flex justify-content-between align-items-center px-3 py-2">' +
         '<strong><i class="bi bi-funnel me-1"></i>Release Type</strong>' +
         '<button type="button" class="btn-close" aria-label="Close" onclick="closeUnifiedFilterSheet()"></button></div>';
+
       Array.prototype.forEach.call(select.options, function (opt) {
         var value = opt.value || '';
         var active = select.value === value ? ' active' : '';
-        html += '<button type="button" class="us-filter-option' + active + '" data-type="' + value + '">' +
-          '<span>' + opt.text + '</span>' +
+        html += '<button type="button" class="us-filter-option' + active + '" data-type="' + esc(value) + '">' +
+          '<span>' + esc(opt.text) + '</span>' +
           (value === '' ? '' : '<i class="bi bi-check-lg us-filter-check"></i>') +
           '</button>';
       });
+
       sheet.innerHTML = html;
       document.body.appendChild(backdrop);
       document.body.appendChild(sheet);
+      // `.show` drives the slide-in transition defined in popularr.css.
       requestAnimationFrame(function () { sheet.classList.add('show'); });
 
       sheet.querySelectorAll('.us-filter-option').forEach(function (btn) {
@@ -796,6 +851,7 @@
       });
     }
     window.openUnifiedFilterSheet = openUnifiedFilterSheet;
+
     var filterBtn = document.getElementById('unifiedFilterBtn');
     if (filterBtn) filterBtn.addEventListener('click', openUnifiedFilterSheet);
     updateFilterButtonState();
