@@ -21,7 +21,7 @@ ALBUM_RELATIVE_MIN_SPREAD = 8.0
 ALBUM_RELATIVE_MIN_ALBUM_TRACKS = 3
 
 
-# ── Shared fuzzy string similarity ──────────────────────────────────────────
+# -- Shared fuzzy string similarity -----------------------------------------
 try:  # C-speed token-set matching; difflib fallback keeps CI working
     from rapidfuzz import fuzz as _fuzz  # type: ignore[import-untyped]
     _HAVE_RAPIDFUZZ = True
@@ -55,7 +55,7 @@ LOG_RATIO_REJECT_LB_MIN_LF = 100
 
 
 def fmt_count(count: Any) -> str:
-    """Format a listener/listen count compactly (14201 → '14.2k')."""
+    """Format a listener/listen count compactly (14201 -> '14.2k')."""
     try:
         value = float(count or 0)
     except (TypeError, ValueError):
@@ -133,8 +133,14 @@ def apply_track_artist_relative_popularity(raw_score: float, artist_scores: list
     return _remap_relative_popularity(raw_score, artist_scores)
 
 
-def reanchor_scores_to_album_relative(rows: list[tuple[str, str, float]]) -> list[float]:
-    """Re-anchor stored ``(album, score)`` rows onto the album-relative scale."""
+def reanchor_scores_to_album_relative(rows: list[tuple[str, float]]) -> list[float]:
+    """Re-anchor stored ``(album, score)`` rows onto the album-relative scale.
+
+    NOTE: the annotation previously read ``list[tuple[str, str, float]]`` while
+    the body unpacks two-tuples, matching what ``compute_artist_scores`` in the
+    finalise stage actually passes. The annotation is corrected here; behaviour
+    is unchanged.
+    """
     by_album: dict[str, list[float]] = {}
     for _album, _score in (rows or []):
         _s = float(_score or 0)
@@ -152,7 +158,7 @@ def reanchor_scores_to_album_relative(rows: list[tuple[str, str, float]]) -> lis
 
 
 # ---------------------------------------------------------------------------
-# 3-step album scaling model (M_peak → A_skew → R_eff)
+# 3-step album scaling model (M_peak -> A_skew -> R_eff)
 # ---------------------------------------------------------------------------
 
 def age_skew_multiplier(
@@ -175,7 +181,7 @@ def age_skew_multiplier(
 
 
 def effective_album_ratio(effective_median: float, m_peak: float) -> float:
-    """Return ``R_eff`` — where the album sits on the artist's career curve."""
+    """Return ``R_eff`` -- where the album sits on the artist's career curve."""
     if not m_peak or float(m_peak) <= 0:
         return 1.0
     return min(1.0, max(0.0, float(effective_median) / float(m_peak)))
@@ -340,7 +346,7 @@ def evaluate_listenbrainz_validity(
     return not reasons, reasons
 
 
-# ── Log-Ratio Median Deviation (Log-MAD) audit ──────────────────────────────
+# -- Log-Ratio Median Deviation (Log-MAD) audit ------------------------------
 
 def evaluate_log_ratio_deviation(
     *,
@@ -352,7 +358,15 @@ def evaluate_log_ratio_deviation(
     reject_lf_min_lb: int = LOG_RATIO_REJECT_LF_MIN_LB,
     reject_lb_min_lf: int = LOG_RATIO_REJECT_LB_MIN_LF,
 ) -> str:
-    """Return the Log-MAD verdict for one track against its album."""
+    """Return the Log-MAD verdict for one track against its album.
+
+    CAVEAT: this compares a track against its album's MEDIAN log-ratio, so it
+    assumes the majority of the album's provider data is accurate. When most
+    tracks on a release carry cross-version-contaminated Last.fm counts, the
+    median is itself contaminated and the CORRECTLY matched tracks become the
+    statistical outliers. Fix provider contamination at the source rather than
+    relying on this audit to catch it.
+    """
     pairs = [
         (int(a or 0), int(b or 0))
         for a, b in (album_lf_lb_pairs or [])
@@ -500,6 +514,11 @@ def calculate_combined_popularity_score(
     lastfm_log = calculate_lastfm_popularity_score(lastfm_listeners, 0)
     lb_log = calculate_listenbrainz_popularity_score(listenbrainz_listens)
 
+    # Album context is present when the caller supplied an album-level listener
+    # distribution to normalise against. This gates the absolute-floor override
+    # further down -- see the comment there.
+    has_album_context = bool(album_lf_listeners) or bool(album_lb_listens)
+
     if album_lf_listeners:
         lastfm_score = calculate_lastfm_zscore_popularity(
             lastfm_listeners,
@@ -578,11 +597,28 @@ def calculate_combined_popularity_score(
         total_weight = sum(active_weights)
         combined = sum(s * w for s, w in zip(active_scores, active_weights)) / total_weight
 
-        absolute_components = [s for s in (lastfm_log, lb_log, age_score) if s > 0]
-        if len(absolute_components) >= 2:
-            strongest = max(absolute_components)
-            if strongest > combined:
-                combined = strongest
+        # FIXED: this absolute-component floor previously ran unconditionally.
+        # ``lastfm_log``/``lb_log`` are RAW log-scale absolutes -- they carry no
+        # album context at all -- so taking max() of them and overwriting the
+        # weighted blend discarded every album-relative signal that had just
+        # been computed (the z-normalised LF score, the LB percentile, the
+        # configured LF/LB/Age weights, and any Log-MAD re-weighting).
+        #
+        # Because log10(n)*16 saturates hard (100k -> 80, 1M -> 96), an 11x
+        # listener range collapsed into ~6 score points, every track on an
+        # album landed in the low-to-mid 90s, and the downstream robust z had
+        # almost no dispersion left to work with.
+        #
+        # The floor is still useful when there is NO album context to normalise
+        # against -- a standalone track with no sibling distribution would
+        # otherwise be scored against nothing -- so it is retained for that
+        # case only.
+        if not has_album_context:
+            absolute_components = [s for s in (lastfm_log, lb_log, age_score) if s > 0]
+            if len(absolute_components) >= 2:
+                strongest = max(absolute_components)
+                if strongest > combined:
+                    combined = strongest
     else:
         combined = 0.0
 
@@ -639,7 +675,7 @@ def adjust_weights(
     return lf_weight, lb_weight
 
 
-# ── Short-interlude ListenBrainz outlier filter ────────────────────────────
+# -- Short-interlude ListenBrainz outlier filter -----------------------------
 
 INTERLUDE_LB_MAX_DURATION_S = 180.0
 INTERLUDE_LB_RATIO_FACTOR = 3.0
@@ -660,7 +696,7 @@ def is_interlude_lb_outlier(
 
     FIXED: a percentile-star-rating function had previously been pasted in
     the middle of this function's body, between the setup checks above and
-    the final ratio comparison below — orphaning the ``track_ratio``/
+    the final ratio comparison below -- orphaning the ``track_ratio``/
     ``return`` lines after that function's own ``return`` statements so this
     function fell off the end returning ``None`` (always falsy) whenever
     ``album_median_ratio > 0``, silently disabling interlude-outlier
@@ -698,7 +734,7 @@ def is_interlude_lb_outlier(
     return track_ratio > album_median_ratio * float(ratio_factor)
 
 
-# ── Live-album star rating (artist-z driven) ───────────────────────────────
+# -- Live-album star rating (artist-z driven) --------------------------------
 #
 # Album-relative z is self-referential: every album is z-scored against its OWN
 # tracks, so the strongest cut on a mediocre live record scores exactly like the
@@ -838,6 +874,13 @@ def is_live_album_context(
     A studio album carrying a single bonus live cut must NOT be treated as a
     live album, so this requires either an explicit live album type or a
     supermajority of tracks carrying a live flag.
+
+    NOTE: the per-track ``is_live``/``album_context_live`` flags are commonly
+    derived from TITLE markers, and a live release frequently ships plainly
+    titled tracks ("Enter Sandman" on S&M). In that case ``live_count`` is 0
+    and this falls back entirely on ``album_type`` -- so callers must pass a
+    trustworthy, release-level album type here rather than relying on the
+    track-fraction heuristic to notice.
     """
     if "live" in str(album_type or "").strip().casefold():
         return True
@@ -854,11 +897,11 @@ def is_live_album_context(
     return live_count >= threshold
 
 
-# ── Percentile-based star ratings (artist / genre "top songs") ─────────────
+# -- Percentile-based star ratings (artist / genre "top songs") --------------
 #
 # One generic function buckets a score into 1-5 stars AND returns the raw
 # percentile against whatever reference cohort you pass in. The percentile
-# is what "top songs" lists should actually sort/limit on — star is a coarse
+# is what "top songs" lists should actually sort/limit on -- star is a coarse
 # display bucket, and many tracks tie within the same star tier.
 
 def calculate_percentile_star_rating(
@@ -937,10 +980,10 @@ def top_songs_by_artist(
     Scored against the artist's OWN distribution, so a decent track on a
     weak album can still rank above a merely-good track on a stronger one.
 
-    Returns [] if the artist doesn't clear ``min_qualifying_tracks`` (>= —
+    Returns [] if the artist doesn't clear ``min_qualifying_tracks`` (>= --
     at least that many 4-star-or-better tracks, not strictly more). This is
     a pass/fail gate for "Essential Artist" eligibility, not a cutoff on how
-    many songs make the final list — use ``limit`` for that.
+    many songs make the final list -- use ``limit`` for that.
 
     ``tracks`` items need at least {"combined_score": float, ...}.
     """
@@ -965,7 +1008,7 @@ def top_songs_by_genre(
     """5-star tracks first, backfilled with 4-star, ranked within each tier.
 
     Scored against a GENRE-wide cohort (all artists tagged with that genre),
-    so this is naturally comparable across different artists — unlike an
+    so this is naturally comparable across different artists -- unlike an
     already album-relative-remapped score, which is only meaningful within
     one album's own distribution.
 
@@ -986,7 +1029,7 @@ def build_essential_artist_playlists(
     min_qualifying_tracks: int = MIN_ESSENTIAL_ARTIST_TRACKS,
     limit_per_artist: int | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Group by artist, gate, and order — one call for the whole library.
+    """Group by artist, gate, and order -- one call for the whole library.
 
     ``all_tracks`` items need at least {"artist": str, "combined_score": float}.
     Artists that don't meet the gate are simply absent from the result.
