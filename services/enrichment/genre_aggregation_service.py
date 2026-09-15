@@ -297,12 +297,6 @@ def _suppress_generic_parents(genres: list[str]) -> list[str]:
             for g in lowered
         )
         if has_specific_subgenre:
-            logger.debug(
-                "Suppressing generic parent genres",
-                trigger_root=root,
-                dropped=list(generic_labels),
-                original_list=genres,
-            )
             to_drop.update(generic_labels)
 
     if not to_drop:
@@ -326,11 +320,9 @@ def clean_conflicting_genres(genres: list[Any]) -> list[str]:
         removed = False
         for specific, generics in _SPECIFIC_TO_GENERIC.items():
             if genre in generics and specific in lowered_set:
-                logger.debug("Genre conflict resolved", dropped=genre, kept_specific=specific)
                 removed = True
                 break
         if genre == "electronic" and ("punk" in lowered_set or "metal" in lowered_set):
-            logger.debug("Genre conflict resolved", dropped=genre, kept_specific="punk/metal")
             continue
         if not removed:
             cleaned.append(genre)
@@ -345,10 +337,6 @@ def _resolve_display_name(key: str, spellings: dict[str, list[tuple[float, str]]
     best = max(candidates, key=lambda s: s[0])
 
     def _top_weight(forms: list[str]) -> str:
-        # Sum weights per distinct spelling instead of keeping only the last
-        # occurrence's weight - two sources voting for the identical
-        # spelling should combine their support, not have one silently
-        # overwrite the other based on arbitrary iteration order.
         form_weight: dict[str, float] = defaultdict(float)
         for s in candidates:
             if s[1] in forms:
@@ -399,6 +387,47 @@ def _vote_genres(
         spellings[key].append((weight, spelling))
         source_hits[key].add("context")
 
+    # Authoritative external / primary sources
+    primary_sources = {
+        "musicbrainz",
+        "discogs",
+        "lastfm",
+        "listenbrainz",
+        "spotify",
+        "manual",
+    }
+
+    # Check whether any external/primary source provided at least one valid genre
+    has_primary_genres = any(bool(hits & primary_sources) for hits in source_hits.values())
+
+    # --- Essentia Guardrail ---
+    # Essentia can NEVER stand on its own and can ONLY be used to confirm
+    # an external primary source (Discogs, Last.fm, MusicBrainz, etc.).
+    invalid_essentia_keys = [
+        k for k, hits in source_hits.items()
+        if "essentia" in hits and not (hits & primary_sources)
+    ]
+    for k in invalid_essentia_keys:
+        del votes[k]
+        del spellings[k]
+        del source_hits[k]
+
+    # --- Navidrome Guardrail ---
+    # If external sources found at least one genre:
+    # Navidrome can ONLY be used to confirm/vote on genres present in primary sources.
+    # Any genre only detected by Navidrome is purged (allowing a single external
+    # genre to overwrite multiple Navidrome genres).
+    # UNLESS there are NO genres from other sources, in which case Navidrome is kept.
+    if has_primary_genres:
+        invalid_nav_keys = [
+            k for k, hits in source_hits.items()
+            if not (hits & (primary_sources | {"context"}))
+        ]
+        for k in invalid_nav_keys:
+            del votes[k]
+            del spellings[k]
+            del source_hits[k]
+
     return votes, spellings, source_hits
 
 
@@ -447,13 +476,8 @@ def _rank_genres(
     cleaned = clean_conflicting_genres(display_names)
     final_list = cleaned[:max_genres]
 
-    logger.debug(
-        "Genre ranking complete",
-        final_genres=final_list,
-        all_votes={k: round(v, 2) for k, v in votes.items()},
-        source_agreement={k: sorted(v) for k, v in source_hits.items()},
-        nav_tiebreak_keys=sorted(nav_keys),
-    )
+    # Cleaned up log: avoids dumping massive mathematical vote maps to the log
+    logger.debug("Genre ranking complete", final_genres=final_list)
 
     return final_list
 
