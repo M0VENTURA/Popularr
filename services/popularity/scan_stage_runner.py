@@ -53,7 +53,11 @@ from services.catalog.album_classification_service import (
     is_instrumental_track_title,
     should_exclude_track_from_stats,
 )
-from services.metadata.album_name_update_service import apply_album_name_update, resolve_album_name
+from services.metadata.album_name_update_service import (
+    apply_album_name_update,
+    repair_album_annotations,
+    resolve_album_name,
+)
 from services.metadata.album_tag_sync_service import sync_album_file_tags
 from services.popularity.popularity_cache_policy import should_freeze_track
 from services.popularity.popularity_cache_service import prefetch_artist_popularity
@@ -1210,7 +1214,12 @@ def run_scan(
                             )
                             continue
 
-                        _res = apply_album_name_update(artist=artist_name, album=_old, new_name=_resolved) or {}
+                        _res = apply_album_name_update(
+                            artist=artist_name,
+                            album=_old,
+                            new_name=_resolved,
+                            reason=str(_name_update.get("reason") or ""),
+                        ) or {}
                         if _res.get("changed"):
                             log_unified(f"[ALBUM_NAME] '{artist_name} - {_old}' → '{_resolved}' (reason={_name_update.get('reason')}, db={_res.get('db_updated')}, files={_res.get('files_updated')})")
                         else:
@@ -1377,6 +1386,36 @@ def run_scan(
         if skip_album:
             skipped_albums += 1
             continue
+
+        # -------------------------------------------------------------
+        # Annotation repair.
+        #
+        # Collapses duplicated annotations in this album's name and track
+        # titles before anything else touches them, so the rest of the
+        # iteration - enrichment, track processing, and the
+        # sync_album_file_tags() call further down - all operate on the
+        # corrected values and propagate them out to the audio file tags
+        # on this same pass.
+        #
+        # Skipped for popularity-only and singles passes, which write no
+        # metadata. Disable with features.repair_album_annotations.
+        # -------------------------------------------------------------
+        if not _mode_pop and not _mode_singles:
+            try:
+                _repair = repair_album_annotations(artist, album, tracks)
+                if _repair.get("album_repaired"):
+                    # Adopt the corrected name for the remainder of this
+                    # album iteration. Every subsequent DB query in this
+                    # loop filters on `album`, so this MUST be reassigned
+                    # or those queries will look for the old, now
+                    # non-existent name.
+                    album = str(_repair.get("album") or album)
+                    album_row["album"] = album
+            except Exception as exc:
+                logger.warning(
+                    "Album annotation repair failed",
+                    artist=artist, album=album, error=str(exc),
+                )
 
         progress = 5 + int((album_index / total_albums) * 90)
         current_item = f"{artist} - {album}"
