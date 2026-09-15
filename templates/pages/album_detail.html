@@ -9,16 +9,16 @@
   [id$="-section"] { scroll-margin-top: 130px; }
   .album-hero-sub a:hover { text-decoration: underline !important; }
   /* Bootstrap's .nav-link pulls --bs-nav-link-color (default Bootstrap blue),
-   which the site's global theme never overrides — unlike plain <a> tags.
-   This is why the inactive album tabs showed blue instead of matching the
-   rest of the page's dark/green theme. */
-#albumPageTabs .nav-link {
-  --bs-nav-link-color: #adb5bd;
-  --bs-nav-link-hover-color: #ffffff;
-}
-#albumPageTabs .nav-link.active {
-  --bs-nav-pills-link-active-color: #ffffff;
-}
+     which the site's global theme never overrides — unlike plain <a> tags.
+     This is why the inactive album tabs showed blue instead of matching the
+     rest of the page's dark/green theme. */
+  #albumPageTabs .nav-link {
+    --bs-nav-link-color: #adb5bd;
+    --bs-nav-link-hover-color: #ffffff;
+  }
+  #albumPageTabs .nav-link.active {
+    --bs-nav-pills-link-active-color: #ffffff;
+  }
 </style>
 
 <div class="container-fluid mt-4">
@@ -525,6 +525,15 @@
     const _pd = JSON.parse(document.getElementById('page-data').textContent);
     window._pageData = _pd;
 </script>
+{# downloads.js defines performMbSearch / clearMbSearch / handleGlobalMbSelect /
+   confirmReleaseSelection — the shared MusicBrainz search + selection logic
+   that main.js's openGlobalMbSearch() calls into. The album page previously
+   did not load this file at all, so those functions were undefined here and
+   the Lookup on MusicBrainz modal's Search button silently threw. Loaded
+   once, as a shared script — same pattern as main.js — not copy-pasted, so
+   this does not reintroduce the duplicate-id/duplicate-logic problem the
+   comments at the top of this file warn about. #}
+<script src="{{ versioned_static('js/downloads.js') }}"></script>
 <script src="{{ versioned_static('js/album_detail.js') }}"></script>
 <script src="{{ versioned_static('js/genre-utils.js') }}"></script>
 {% include 'components/_musicbrainz_search_functions.html' ignore missing %}
