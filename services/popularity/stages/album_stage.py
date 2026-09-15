@@ -56,7 +56,10 @@ from services.enrichment.musicbrainz_service import (
     get_shared_mb_client,
     get_shared_mb_service,
 )
-
+from helpers.normalization_service import (
+    append_annotation_once,
+    strip_live_acoustic_suffix,
+)
 Logger = structlog.get_logger(__name__)
 T = TypeVar("T")
 
@@ -1387,10 +1390,10 @@ def _apply_live_remix_album_tagging(
                     if already_tagged:
                         continue
                     attempted += 1
-                    new_title = title
-                    has_suffix = bool(re.search(rf"[\(\[]{re.escape(label)}[^)\]]*[\)\]]\s*$", title, re.IGNORECASE))
-                    if not is_live_or_unplugged_track_title(title) and not has_suffix:
-                        new_title = f"{title} ({label})"
+                    if is_live_or_unplugged_track_title(title):
+                        new_title = title
+                    else:
+                        new_title = append_annotation_once(title, label)
                     try:
                         with _row_savepoint(session):
                             result = session.execute(
@@ -1453,13 +1456,6 @@ def _apply_live_remix_album_tagging(
                         failed += 1
                         Logger.warning("[ENRICH] remix track tagging failed", track_id=track_id, error=_safe_error(exc), **context)
         Logger.info("[ENRICH] remix tagging result", attempted=attempted, rows_updated=updated, failed=failed, **context)
-
-
-_LIVE_SUFFIX_RE = re.compile(r"\s*[\(\[](?:Live|Acoustic)[^)\]]*[\)\]]\s*$", re.IGNORECASE)
-
-
-def strip_live_acoustic_suffix(title: str) -> str:
-    return _LIVE_SUFFIX_RE.sub("", title or "").strip()
 
 
 def _drop_live_genres_from_json(raw: Any) -> str | None:
