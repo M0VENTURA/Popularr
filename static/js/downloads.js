@@ -4,24 +4,13 @@
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
-window.doLookup = window.doLookup || function(artist, album, track, year, callback) {
-    if (typeof window.openGlobalMbSearch === 'function') {
-        window.openGlobalMbSearch(artist, album, callback || function(selected) {
-            if (typeof window.downloadMbRelease === 'function') {
-                window.downloadMbRelease(selected.id, selected.title, selected.artist, 'slskd');
-            }
-        }, track, year);
-    } else {
-        console.warn('Global MB Search modal not yet initialized.');
-    }
-};
 
 async function fetchJsonOrThrow(url, options = {}, timeoutMs = 30000) {
   const controller = new AbortController();
   const externalSignal = options?.signal || null;
   const mergedOptions = { ...options };
-
   const onExternalAbort = () => controller.abort();
+
   if (externalSignal && typeof AbortSignal.any === 'function') {
     mergedOptions.signal = AbortSignal.any([controller.signal, externalSignal]);
   } else if (externalSignal) {
@@ -30,8 +19,8 @@ async function fetchJsonOrThrow(url, options = {}, timeoutMs = 30000) {
   } else {
     mergedOptions.signal = controller.signal;
   }
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   let raw;
   try {
@@ -69,7 +58,6 @@ async function fetchJsonOrThrow(url, options = {}, timeoutMs = 30000) {
     const serverMsg = data && data.error ? data.error : response.statusText;
     throw new Error(`HTTP ${response.status}: ${serverMsg || 'Request failed'}`);
   }
-
   return data;
 }
 
@@ -79,7 +67,36 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-window.mbDerivedCategory = function(release) {
+// Escapes a string for interpolation into an inline onclick="" attribute.
+//
+// This was previously defined ONLY in album_detail.js, while being CALLED from
+// searchMBForOrganize / searchDiscogsForOrganize here — so those two threw
+// ReferenceError on every page that loaded downloads.js without
+// album_detail.js (the dashboard and the downloads pages).
+//
+// It also now escapes backslashes. The old copy handled only ' and ", so an
+// album title containing a backslash still broke the generated handler.
+function escapeJsString(str) {
+  return String(str || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '\\"');
+}
+
+// confirmOrganizeGroup() calls this three times. It was defined NOWHERE in
+// either file, so a successful organize threw instead of reporting its result.
+// Delegates to the global toast helpers in main.js, with an alert() fallback.
+function showToastMsg(message, isError) {
+  if (typeof window.showTopToast === 'function') {
+    window.showTopToast(message, isError ? 'danger' : 'success');
+  } else if (typeof window.showToast === 'function') {
+    window.showToast(isError ? 'Error' : 'Success', message, isError ? 'error' : 'success');
+  } else {
+    alert(message);
+  }
+}
+
+window.mbDerivedCategory = function (release) {
   const secondary = (release.secondary_types || []).map(s => String(s).toLowerCase());
   const secondaryFirst = ['compilation', 'live', 'remix', 'soundtrack', 'dj-mix', 'mixtape', 'demo', 'spokenword', 'interview', 'audiobook'];
   for (let i = 0; i < secondaryFirst.length; i++) {
@@ -101,14 +118,12 @@ function formatDuration(rawValue) {
   if (rawValue == null || rawValue === '') return 'Unknown';
   const n = Number(rawValue);
   if (!Number.isFinite(n) || n <= 0) return 'Unknown';
-
   let seconds = n >= 100000000 ? n / 1000000 : (n > 10000 ? n / 1000 : n);
   seconds = Math.max(0, Math.floor(seconds));
-  
+
   const hours = Math.floor(seconds / 3600);
   const mins = Math.floor((seconds % 3600) / 60);
   const secs = seconds % 60;
-
   if (hours > 0) return `${hours}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
@@ -116,12 +131,12 @@ function formatDuration(rawValue) {
 function formatETA(seconds) {
   if (seconds === 8640000 || seconds < 0) return '∞';
   if (seconds === 0) return '–';
-  
+
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   const secs = seconds % 60;
-  
+
   if (days > 0) return `${days}d ${hours}h`;
   if (hours > 0) return `${hours}h ${minutes}m`;
   if (minutes > 0) return `${minutes}m ${secs}s`;
@@ -153,56 +168,65 @@ function normalizeSoulseekQuery(value) {
 // ============================================================================
 // LOOKUP FORM HELPERS
 // ============================================================================
-window.doLookup = function(artist, album, track, year, callback) {
-    if (!artist && !album && !track && !year) {
-        artist = document.getElementById('lookupArtist')?.value?.trim() || document.getElementById('mbSearchArtist')?.value?.trim() || '';
-        album  = document.getElementById('lookupAlbum')?.value?.trim() || document.getElementById('mbSearchAlbum')?.value?.trim() || '';
-        track  = document.getElementById('lookupTrack')?.value?.trim() || document.getElementById('mbSearchTrack')?.value?.trim() || '';
-        year   = document.getElementById('lookupYear')?.value?.trim() || document.getElementById('mbSearchYear')?.value?.trim() || '';
-    }
-    
-    if (!artist && !album && !track && !year) return;
 
-    if (typeof callback === 'function') {
-        window._mbSearchCallback = callback;
-    } else {
-        window._mbSearchCallback = function(selected) {
-            if (typeof window.downloadMbRelease === 'function') {
-                window.downloadMbRelease(selected.id, selected.title, selected.artist, 'slskd');
-            }
-        };
-    }
-    
-    if (typeof window.openGlobalMbSearch === 'function') {
-        window.openGlobalMbSearch(artist, album, window._mbSearchCallback, track, year);
-    }
+// NOTE: there is exactly ONE definition of window.doLookup.
+//
+// The file used to open with a guarded
+//     window.doLookup = window.doLookup || function (...)
+// and then define it again, unguarded, right here. The `||` guard was
+// meaningless — the second assignment always won — and the two bodies were
+// not equivalent: only this one falls back to reading the lookup form fields.
+window.doLookup = function (artist, album, track, year, callback) {
+  if (!artist && !album && !track && !year) {
+    artist = document.getElementById('lookupArtist')?.value?.trim() || document.getElementById('mbSearchArtist')?.value?.trim() || '';
+    album = document.getElementById('lookupAlbum')?.value?.trim() || document.getElementById('mbSearchAlbum')?.value?.trim() || '';
+    track = document.getElementById('lookupTrack')?.value?.trim() || document.getElementById('mbSearchTrack')?.value?.trim() || '';
+    year = document.getElementById('lookupYear')?.value?.trim() || document.getElementById('mbSearchYear')?.value?.trim() || '';
+  }
+
+  if (!artist && !album && !track && !year) return;
+
+  if (typeof callback === 'function') {
+    window._mbSearchCallback = callback;
+  } else {
+    window._mbSearchCallback = function (selected) {
+      if (typeof window.downloadMbRelease === 'function') {
+        window.downloadMbRelease(selected.id, selected.title, selected.artist, 'slskd');
+      }
+    };
+  }
+
+  if (typeof window.openGlobalMbSearch === 'function') {
+    window.openGlobalMbSearch(artist, album, window._mbSearchCallback, track, year);
+  } else {
+    console.warn('Global MB Search modal not yet initialized.');
+  }
 };
 
-window.clearLookup = function() {
-    ['lookupArtist','lookupAlbum','lookupTrack','lookupYear','mbSearchArtist','mbSearchAlbum','mbSearchTrack','mbSearchYear'].forEach(function(id) {
-        var el = document.getElementById(id);
-        if (el) el.value = '';
-    });
+window.clearLookup = function () {
+  ['lookupArtist', 'lookupAlbum', 'lookupTrack', 'lookupYear', 'mbSearchArtist', 'mbSearchAlbum', 'mbSearchTrack', 'mbSearchYear'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.value = '';
+  });
 };
 
 // ============================================================================
 // MUSICBRAINZ SEARCH & RESULTS CORE
 // ============================================================================
-window.performMbSearch = async function() {
+
+window.performMbSearch = async function () {
   let artist = document.getElementById('mbSearchArtist')?.value.trim() || '';
   const album = document.getElementById('mbSearchAlbum')?.value.trim() || '';
   const track = document.getElementById('mbSearchTrack')?.value.trim() || '';
   const year = document.getElementById('mbSearchYear')?.value.trim() || '';
-  
+
   let query = '';
-
   if (artist || album || track || year) {
-      query = [artist, album, track, year].filter(Boolean).join(' ');
+    query = [artist, album, track, year].filter(Boolean).join(' ');
   } else {
-      const singleInput = document.getElementById('mbSearchInput');
-      query = singleInput?.value.trim() || '';
+    const singleInput = document.getElementById('mbSearchInput');
+    query = singleInput?.value.trim() || '';
   }
-
   if (!query) return;
 
   let artistOnly = false;
@@ -220,7 +244,6 @@ window.performMbSearch = async function() {
   window._mbArtistOnlySearch = artistOnly;
 
   const resultsEl = document.getElementById('mbSearchResults') || document.getElementById('mbResults');
-  
   if (resultsEl) {
     resultsEl.innerHTML = '<div class="text-center mt-4"><div class="spinner-border text-info"></div><p class="mt-2 text-muted">Searching MusicBrainz...</p></div>';
   }
@@ -231,8 +254,10 @@ window.performMbSearch = async function() {
       payload.query = query;
     }
     if (artistOnly) payload.artist_only = true;
+
     const releaseTypeServer = document.getElementById('mbReleaseType')?.value || '';
     if (releaseTypeServer) payload.type = releaseTypeServer;
+
     if (window._mbSearchIncludeOwned === true) {
       payload.include_owned = true;
       window._mbSearchIncludeOwned = false;
@@ -247,7 +272,7 @@ window.performMbSearch = async function() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
-    
+
     if (data && data.error) {
       if (resultsEl) resultsEl.innerHTML = `<div class="alert alert-danger"><i class="bi bi-exclamation-triangle me-1"></i>MusicBrainz search failed: ${escapeHtml(data.error)}</div>`;
       return;
@@ -264,6 +289,11 @@ window.performMbSearch = async function() {
     const max = parseInt(limitEl ? limitEl.value : '25', 10) || 25;
     if (releases.length > max) releases = releases.slice(0, max);
 
+    // The component renders a #mbResultCount element that nothing ever
+    // populated, so the header count stayed blank on every search.
+    const countEl = document.getElementById('mbResultCount');
+    if (countEl) countEl.textContent = releases.length ? `${releases.length} result${releases.length === 1 ? '' : 's'}` : '';
+
     if (releases.length === 0) {
       if (resultsEl) resultsEl.innerHTML = `<div class="alert alert-info"><i class="bi bi-info-circle"></i> No releases found for "${escapeHtml(query)}"</div>`;
       return;
@@ -275,14 +305,17 @@ window.performMbSearch = async function() {
       const releaseDate = release.first_release_date || 'Unknown';
       const category = release.category || release.primary_type || 'Release';
       const resultArtist = release.artist || (release['artist-credit']?.[0]?.name) || 'Unknown Artist';
-      
+
       const imgHtml = coverArt
         ? `<img src="${escapeHtml(coverArt)}" class="rounded shadow-sm" style="width:80px;height:80px;object-fit:cover;" alt="">`
         : '<div class="rounded bg-secondary d-flex align-items-center justify-content-center shadow-sm" style="width:80px;height:80px;"><i class="bi bi-music-note-beamed text-white fs-4"></i></div>';
 
+      // escapeJsString for the inline-onclick arguments: escapeHtml escapes
+      // for an HTML text context, not a JS string literal, so a title
+      // containing an apostrophe (very common) broke the handler.
       const actionButtons = window._mbSearchCallback
         ? `<button class="btn btn-sm btn-success" onclick="handleGlobalMbSelect('${encodeInlineArg(release)}')"><i class="bi bi-check-circle"></i> Select Match</button>`
-        : `<button class="btn btn-sm btn-success" onclick="downloadMbRelease('${escapeHtml(release.id)}', '${escapeHtml(release.title)}', '${escapeHtml(resultArtist)}', 'slskd')" title="Download via Soulseek"><i class="bi bi-music-note-list"></i> Soulseek</button>`;
+        : `<button class="btn btn-sm btn-success" onclick="downloadMbRelease('${escapeJsString(release.id)}', '${escapeJsString(release.title)}', '${escapeJsString(resultArtist)}', 'slskd')" title="Download via Soulseek"><i class="bi bi-music-note-list"></i> Soulseek</button>`;
 
       html += `
         <div class="list-group-item bg-dark-subtle border-secondary mb-2 rounded">
@@ -304,26 +337,48 @@ window.performMbSearch = async function() {
         </div>`;
     });
     html += '</div>';
-    
-    if (resultsEl) resultsEl.innerHTML = html;
 
+    if (resultsEl) resultsEl.innerHTML = html;
   } catch (error) {
     if (resultsEl) resultsEl.innerHTML = `<div class="alert alert-danger"><i class="bi bi-exclamation-triangle"></i> Error: ${escapeHtml(error.message)}</div>`;
   }
 };
 
-window.handleGlobalMbSelect = function(releaseEnc) {
-    const release = decodeInlineArg(releaseEnc);
-    if (window._mbSearchCallback && release) {
-        window._mbSearchCallback(release);
-        window._mbSearchCallback = null;
-    }
-    
-    const modalEl = document.getElementById('musicBrainzModal');
-    if (modalEl) {
-        const modal = bootstrap.Modal.getInstance(modalEl);
-        if (modal) modal.hide();
-    }
+// Clears the shared MusicBrainz search form. The component's eraser button
+// calls this via onclick, but it was defined nowhere — clicking it threw
+// ReferenceError and the form never cleared.
+window.clearMbSearch = function () {
+  ['mbSearchArtist', 'mbSearchAlbum', 'mbSearchTrack', 'mbSearchYear', 'mbSearchInput'].forEach(function (id) {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+
+  const resultsEl = document.getElementById('mbSearchResults');
+  if (resultsEl) {
+    resultsEl.innerHTML = '<div class="col-12 text-center text-muted py-5">' +
+      '<i class="bi bi-hexagon-fill opacity-50" style="font-size: 3rem;"></i>' +
+      '<p class="mt-3 fw-semibold">Enter a search term above to find releases on MusicBrainz.</p></div>';
+  }
+
+  const countEl = document.getElementById('mbResultCount');
+  if (countEl) countEl.textContent = '';
+
+  const selectedEl = document.getElementById('mbSelectedRelease');
+  if (selectedEl) selectedEl.classList.add('d-none');
+};
+
+window.handleGlobalMbSelect = function (releaseEnc) {
+  const release = decodeInlineArg(releaseEnc);
+  if (window._mbSearchCallback && release) {
+    window._mbSearchCallback(release);
+    window._mbSearchCallback = null;
+  }
+
+  const modalEl = document.getElementById('musicBrainzModal');
+  if (modalEl) {
+    const modal = bootstrap.Modal.getInstance(modalEl);
+    if (modal) modal.hide();
+  }
 };
 
 window.performMbDownloadSearch = window.performMbSearch;
@@ -331,25 +386,32 @@ window.performMbDownloadSearch = window.performMbSearch;
 // ============================================================================
 // UPCOMING RELEASES
 // ============================================================================
+
 async function clearUpcomingReleases() {
   if (!confirm('Are you sure you want to clear all upcoming releases from the database? This cannot be undone.')) return;
   const statusEl = document.getElementById('upcomingStatus');
   const statusText = document.getElementById('upcomingStatusText');
   const errorEl = document.getElementById('upcomingError');
-  
-  statusEl.style.display = 'block'; errorEl.style.display = 'none';
+  if (!statusEl || !statusText || !errorEl) return;
+
+  statusEl.style.display = 'block';
+  errorEl.style.display = 'none';
   statusText.textContent = 'Clearing database...';
-  
+
   try {
     const data = await fetchJsonOrThrow('/api/upcoming-releases/clear', { method: 'POST' });
     statusText.textContent = `✓ ${data.message}`;
     setTimeout(() => {
       statusEl.style.display = 'none';
-      document.getElementById('upcomingReleases').innerHTML = `<div class="text-center py-5"><p class="text-muted">Database cleared. Click <strong>Check for Updates</strong> to search MusicBrainz for new release data.</p></div>`;
+      const container = document.getElementById('upcomingReleases');
+      if (container) {
+        container.innerHTML = '<div class="text-center py-5"><p class="text-muted">Database cleared. Click <strong>Check for Updates</strong> to search MusicBrainz for new release data.</p></div>';
+      }
     }, 2000);
   } catch (error) {
-    statusEl.style.display = 'none'; errorEl.style.display = 'block';
-    errorEl.innerHTML = `<i class="bi bi-exclamation-triangle"></i> <strong>Error clearing database:</strong> ${error.message}`;
+    statusEl.style.display = 'none';
+    errorEl.style.display = 'block';
+    errorEl.innerHTML = `<i class="bi bi-exclamation-triangle"></i> <strong>Error clearing database:</strong> ${escapeHtml(error.message)}`;
   }
 }
 
@@ -357,10 +419,12 @@ async function scrapeUpcomingReleases() {
   const statusEl = document.getElementById('upcomingStatus');
   const statusText = document.getElementById('upcomingStatusText');
   const errorEl = document.getElementById('upcomingError');
-  
-  statusEl.style.display = 'block'; errorEl.style.display = 'none';
+  if (!statusEl || !statusText || !errorEl) return;
+
+  statusEl.style.display = 'block';
+  errorEl.style.display = 'none';
   statusText.textContent = 'Scraping MusicBrainz for upcoming releases...';
-  
+
   try {
     const data = await fetchJsonOrThrow('/api/upcoming-releases/scrape', { method: 'POST' });
     statusText.textContent = `✓ ${data.message}`;
@@ -369,8 +433,9 @@ async function scrapeUpcomingReleases() {
       refreshUpcomingReleases();
     }, 2000);
   } catch (error) {
-    statusEl.style.display = 'none'; errorEl.style.display = 'block';
-    errorEl.innerHTML = `<i class="bi bi-exclamation-triangle"></i> <strong>Error updating releases:</strong> ${error.message}`;
+    statusEl.style.display = 'none';
+    errorEl.style.display = 'block';
+    errorEl.innerHTML = `<i class="bi bi-exclamation-triangle"></i> <strong>Error updating releases:</strong> ${escapeHtml(error.message)}`;
   }
 }
 
@@ -383,85 +448,94 @@ async function refreshUpcomingReleases() {
   const container = document.getElementById('upcomingReleases');
   if (!container) return;
   const filterCollection = document.getElementById('upcomingFilterCollection')?.checked || false;
-  
-  container.innerHTML = `<div class="text-center py-4"><div class="spinner-border text-primary spinner-border-sm"></div><p class="mt-2 small">Loading upcoming releases...</p></div>`;
-  
+
+  container.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-primary spinner-border-sm"></div><p class="mt-2 small">Loading upcoming releases...</p></div>';
+
   try {
     const data = await fetchJsonOrThrow(`/api/upcoming-releases?collection=${filterCollection}&include_queue=true`);
-    
+
     if (!data.releases || data.releases.length === 0) {
-      container.innerHTML = `<div class="alert alert-info"><i class="bi bi-info-circle"></i> No upcoming releases found. Click <strong>Check for Updates</strong> to scan MusicBrainz.</div>`;
+      container.innerHTML = '<div class="alert alert-info"><i class="bi bi-info-circle"></i> No upcoming releases found. Click <strong>Check for Updates</strong> to scan MusicBrainz.</div>';
       return;
     }
-    
+
     let releases = data.releases;
     if (filterCollection) {
       releases = releases.filter(r => !r.album_in_collection);
       if (releases.length === 0) {
-        container.innerHTML = `<div class="alert alert-info"><i class="bi bi-check-circle"></i> You have all upcoming releases from artists in your collection!</div>`;
+        container.innerHTML = '<div class="alert alert-info"><i class="bi bi-check-circle"></i> You have all upcoming releases from artists in your collection!</div>';
         return;
       }
     }
-    
+
     const grouped = {};
     releases.forEach(release => {
       const month = (release.release_date || 'Unknown Date').substring(0, 7);
       if (!grouped[month]) grouped[month] = [];
       grouped[month].push(release);
     });
-    
+
     const sortedMonths = Object.keys(grouped).sort();
     let html = '<div class="accordion" id="releaseAccordion">';
-    
+
     sortedMonths.forEach((month, idx) => {
       const monthReleases = grouped[month];
-      const monthLabel = new Date(month + '-01').toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
-      
+      // A month key of "Unknown" produces an Invalid Date, which rendered as
+      // the literal string "Invalid Date" in the accordion header.
+      const parsed = new Date(month + '-01');
+      const monthLabel = isNaN(parsed.getTime())
+        ? 'Unknown Date'
+        : parsed.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+
       html += `
         <div class="accordion-item">
           <h2 class="accordion-header" id="heading${idx}">
             <button class="accordion-button ${idx > 0 ? 'collapsed' : ''}" type="button" data-bs-toggle="collapse" data-bs-target="#collapse${idx}">
-              <strong>${monthLabel}</strong> <span class="badge bg-primary ms-2">${monthReleases.length}</span>
+              <strong>${escapeHtml(monthLabel)}</strong> <span class="badge bg-primary ms-2">${monthReleases.length}</span>
             </button>
           </h2>
           <div id="collapse${idx}" class="accordion-collapse collapse ${idx === 0 ? 'show' : ''}" data-bs-parent="#releaseAccordion">
             <div class="accordion-body p-0">
               <div class="table-responsive">
-                <table class="table table-dark table-hover table-sm mb-0">
+                <table class="table table-dark table-hover table-sm mb-0" data-mobile-cards>
                   <thead><tr><th>Artist</th><th>Album</th><th>Date</th><th style="width: 120px;">Action</th></tr></thead>
                   <tbody>
       `;
-      
+
       monthReleases.forEach(release => {
-        let albumStatus = release.album_in_collection ? ' <span class="badge bg-success ms-1">In Collection</span>' : (release.in_queue ? ' <span class="badge bg-warning text-dark ms-1">Downloading</span>' : '');
-        let artistStatus = release.artist_in_collection ? ' <span class="badge bg-success ms-1">Artist in Collection</span>' : '';
+        const albumStatus = release.album_in_collection ? ' <span class="badge bg-success ms-1">In Collection</span>' : (release.in_queue ? ' <span class="badge bg-warning text-dark ms-1">Downloading</span>' : '');
+        const artistStatus = release.artist_in_collection ? ' <span class="badge bg-success ms-1">Artist in Collection</span>' : '';
         const artistArg = JSON.stringify(String(release.artist_name || ''));
         const albumArg = JSON.stringify(String(release.album_name || ''));
-        
+
+        // data-label on every cell: popularr.css turns [data-mobile-cards]
+        // tables into stacked cards on mobile using `content: attr(data-label)`.
+        // Without it the mobile rows render unlabelled.
         html += `
           <tr>
-            <td>${escapeHtml(release.artist_name)}${artistStatus}</td>
-            <td>${escapeHtml(release.album_name)}${albumStatus}</td>
-            <td><small>${release.release_date || 'TBA'}</small></td>
-            <td>
+            <td data-label="Artist">${escapeHtml(release.artist_name)}${artistStatus}</td>
+            <td data-label="Album">${escapeHtml(release.album_name)}${albumStatus}</td>
+            <td data-label="Date"><small>${escapeHtml(release.release_date || 'TBA')}</small></td>
+            <td data-label="Action">
               <button type="button" class="btn btn-sm btn-outline-primary" title="Search on MusicBrainz" onclick='searchMusicBrainzRelease(event, ${artistArg}, ${albumArg})'>
                 <i class="bi bi-search"></i> Search
               </button>
             </td>
           </tr>`;
       });
-      html += `</tbody></table></div></div></div></div>`;
+
+      html += '</tbody></table></div></div></div></div>';
     });
+
     html += '</div>';
     container.innerHTML = html;
   } catch (error) {
-    container.innerHTML = `<div class="alert alert-danger"><i class="bi bi-exclamation-triangle"></i> <strong>Error:</strong> ${error.message}</div>`;
+    container.innerHTML = `<div class="alert alert-danger"><i class="bi bi-exclamation-triangle"></i> <strong>Error:</strong> ${escapeHtml(error.message)}</div>`;
   }
 }
 
 async function searchMusicBrainzRelease(event, artist, album, upcomingReleaseId = null) {
   if (event) { event.preventDefault(); event.stopPropagation(); }
-
   window.currentUpcomingReleaseContext = upcomingReleaseId ? { releaseId: upcomingReleaseId, artist, album } : null;
 
   const modalEl = document.getElementById('musicBrainzModal');
@@ -475,10 +549,14 @@ async function searchMusicBrainzRelease(event, artist, album, upcomingReleaseId 
     resultsEl.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-primary"></div><p class="mt-2 text-muted">Searching MusicBrainz...</p></div>';
   }
 
+  // Both fields are set unconditionally. The old `if (field && value)` guard
+  // left a stale value from a previous search in place, so an artist-only
+  // lookup after an album lookup silently kept the old album and narrowed
+  // the query.
   const artistField = document.getElementById('mbSearchArtist');
   const albumField = document.getElementById('mbSearchAlbum');
-  if (artistField && artist) artistField.value = artist;
-  if (albumField && album) albumField.value = album;
+  if (artistField) artistField.value = artist || '';
+  if (albumField) albumField.value = album || '';
 
   const hasBootstrapModal = !!(window.bootstrap && window.bootstrap.Modal);
   if (hasBootstrapModal) {
@@ -515,7 +593,6 @@ async function searchMusicBrainzRelease(event, artist, album, upcomingReleaseId 
       body: JSON.stringify({ artist, album })
     });
     const data = await parseJsonResponse(response, 'MusicBrainz');
-
     const isArtistOnlySearch = !album || !String(album).trim();
 
     if (data.success && data.results && data.results.length >= 1) {
@@ -562,7 +639,7 @@ async function searchMusicBrainzRelease(event, artist, album, upcomingReleaseId 
   }
 }
 
-document.addEventListener('mbReleaseSelected', function(evt) {
+document.addEventListener('mbReleaseSelected', function (evt) {
   var detail = evt.detail || {};
   var release = detail.release || window._selectedMusicBrainzRelease;
   if (!release) return;
@@ -590,7 +667,6 @@ function displayMusicBrainzResults(results) {
   results.forEach((release, index) => {
     const releaseId = `mbRelease${index}`;
     const dataKey = `release_${Date.now()}_${index}`;
-
     window.mbReleaseData[dataKey] = {
       artist: release.artist,
       album: release.title,
@@ -613,7 +689,6 @@ function displayMusicBrainzResults(results) {
       } else if (track.duration != null && track.duration !== '') {
         duration = track.duration;
       }
-
       return `
         <tr class="table-dark">
           <td style="width: 44px;" class="text-center">
@@ -621,7 +696,7 @@ function displayMusicBrainzResults(results) {
           </td>
           <td>${escapeHtml(track.position || '')}</td>
           <td>${escapeHtml(track.title || '')}</td>
-          <td>${duration}</td>
+          <td>${escapeHtml(String(duration))}</td>
           <td style="width: 120px;" class="text-center">
             <button class="btn btn-sm btn-outline-success mb-download-track" data-release-key="${dataKey}" data-track-index="${trackIndex}">
               <i class="bi bi-download"></i> Download
@@ -652,7 +727,7 @@ function displayMusicBrainzResults(results) {
             aria-expanded="${index === 0 ? 'true' : 'false'}" aria-controls="${releaseId}">
             <div class="w-100">
               <strong>${escapeHtml(release.title || '')}</strong>${sourceBadge}
-              <small class="text-muted ms-2">${releaseInfo.join(' · ')}</small>
+              <small class="text-muted ms-2">${escapeHtml(releaseInfo.join(' · '))}</small>
             </div>
           </button>
         </h2>
@@ -780,7 +855,6 @@ function displayMusicBrainzResults(results) {
         alert('No upcoming release is selected for matching');
         return;
       }
-
       try {
         const response = await fetch(`/api/upcoming-releases/${context.releaseId}/match`, {
           method: 'POST',
@@ -794,13 +868,11 @@ function displayMusicBrainzResults(results) {
         if (!response.ok || !data.success) {
           throw new Error(data.error || 'Failed to save upcoming release match');
         }
-
         const modalEl = document.getElementById('musicBrainzModal');
         const modal = modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
         if (modal) {
           modal.hide();
         }
-
         if (typeof refreshUpcomingReleases === 'function') {
           await refreshUpcomingReleases();
         }
@@ -838,11 +910,9 @@ function getSelectedTracksForRelease(dataKey) {
   if (!releaseData || !Array.isArray(releaseData.tracks)) {
     return [];
   }
-
   const selectedIndices = Array.from(document.querySelectorAll(`.mb-track-select[data-release-key="${dataKey}"]:checked`))
     .map(input => Number(input.dataset.trackIndex))
     .filter(index => Number.isInteger(index) && index >= 0 && index < releaseData.tracks.length);
-
   return selectedIndices.map(index => releaseData.tracks[index]);
 }
 
@@ -871,7 +941,6 @@ function markMBTrackQueued(container, dataKey, trackIndex) {
     rowCheckbox.checked = false;
     rowCheckbox.disabled = true;
   }
-
   const rowButton = container.querySelector(`.mb-download-track[data-release-key="${dataKey}"][data-track-index="${trackIndex}"]`);
   if (rowButton) {
     rowButton.disabled = true;
@@ -879,7 +948,6 @@ function markMBTrackQueued(container, dataKey, trackIndex) {
     rowButton.classList.add('btn-success');
     rowButton.innerHTML = '<i class="bi bi-check2"></i> Queued';
   }
-
   updateMBSelectionUI(container, dataKey);
 }
 
@@ -926,8 +994,8 @@ async function downloadMusicBrainzRelease(artist, album, tracks, year, release_i
         import_type: 'album'
       })
     });
-
     const data = await response.json();
+
     if (!data.success) {
       alert('❌ Error: ' + (data.error || 'Failed to add tracks to queue'));
       return false;
@@ -948,7 +1016,7 @@ async function downloadMusicBrainzRelease(artist, album, tracks, year, release_i
     }
     if ((data.added || 0) > 0 && import_group) {
       message += `\n\n📦 All ${data.import_type || 'album'} tracks are grouped as: "${album}"`;
-      message += `\nOnce downloads complete, use "Organize All" in the Completed section to move them to /music`;
+      message += '\nOnce downloads complete, use "Organize All" in the Completed section to move them to /music';
     }
     alert(message);
 
@@ -973,6 +1041,7 @@ window.searchMusicBrainzReleaseCanonical = searchMusicBrainzRelease;
 // ============================================================================
 // MANAGED DOWNLOADS (MusicBrainz/Queuing)
 // ============================================================================
+
 const MB_DEFAULT_MAX_RETRIES = 3;
 
 function getMbStatusBadge(status) {
@@ -1028,11 +1097,12 @@ async function _addMbDownloadToSession(releaseId, releaseTitle, artist, method, 
         queue_items_only: true
       })
     });
-    
+
     let msg = `Download queued: ${releaseTitle}\nTracking ID: ${data.tracking_id || 'N/A'}`;
     if (data.persistent_search) msg += '\n\n✓ Persistent search enabled - will retry automatically on failure';
     if (data.session_id) msg += `\n✓ Added to session ID: ${data.session_id}`;
     alert(msg);
+
     setTimeout(refreshMbDownloads, 1000);
     if (typeof window.loadFolderGroups === 'function') {
       setTimeout(function () { window.loadFolderGroups({ forceRender: true, keepVisibleOnEmpty: true }); }, 1500);
@@ -1069,8 +1139,8 @@ async function refreshMbDownloads() {
   const tableEl = document.getElementById('mbDownloadsTable');
   const tableBody = document.getElementById('mbDownloadsTableBody');
   const countBadge = document.getElementById('mbDownloadCount');
-
   if (!loadingEl) return;
+
   loadingEl.style.display = 'block';
   if (errorEl) errorEl.style.display = 'none';
   if (resultsEl) resultsEl.style.display = 'none';
@@ -1079,8 +1149,8 @@ async function refreshMbDownloads() {
     const data = await fetchJsonOrThrow('/api/musicbrainz/downloads');
     loadingEl.style.display = 'none';
     if (resultsEl) resultsEl.style.display = 'block';
-
     const downloads = data.downloads || [];
+
     if (downloads.length === 0) {
       if (emptyEl) emptyEl.style.display = 'block';
       if (tableEl) tableEl.style.display = 'none';
@@ -1100,7 +1170,10 @@ async function refreshMbDownloads() {
         const isAwaitingSelection = (dl.status || '').toLowerCase() === 'awaiting_selection' && dl.method === 'slskd';
         const persistentBadge = dl.persistent_search ? ' <span class="badge bg-secondary ms-1" title="Auto-retry enabled"><i class="bi bi-arrow-repeat"></i> Auto-retry</span>' : '';
         const retryInfo = (dl.persistent_search && dl.retry_count) ? `<div><small class="text-muted">(Retry ${dl.retry_count}/${dl.max_retries || MB_DEFAULT_MAX_RETRIES})</small></div>` : '';
-        
+        // Ids are interpolated into inline onclick handlers, so they go through
+        // escapeJsString rather than escapeHtml.
+        const safeId = escapeJsString(String(dl.id));
+
         return `<tr data-dl-id="${escapeHtml(String(dl.id))}">
           <td>
             <div><strong>${escapeHtml(dl.release_title)}</strong>${persistentBadge}</div>
@@ -1110,12 +1183,12 @@ async function refreshMbDownloads() {
           <td>${escapeHtml(dl.artist)}</td>
           <td class="text-center"><span class="badge bg-success">Soulseek</span></td>
           <td class="text-center">${statusBadge}</td>
-          <td class="text-center text-muted small">${new Date(dl.created_at).toLocaleString()}</td>
+          <td class="text-center text-muted small">${escapeHtml(new Date(dl.created_at).toLocaleString())}</td>
           <td class="text-center">
             <div class="btn-group btn-group-sm">
-              ${isAwaitingSelection ? `<button class="btn btn-primary" onclick="showSlskdResults('${dl.id}')"><i class="bi bi-hand-index"></i> Select</button>` : ''}
-              ${canRetry ? `<button class="btn btn-outline-warning" onclick="retryMbDownload('${dl.id}')"><i class="bi bi-arrow-clockwise"></i></button>` : ''}
-              ${canRemove ? `<button class="btn btn-outline-danger" onclick="removeMbDownload('${dl.id}')"><i class="bi bi-trash"></i></button>` : ''}
+              ${isAwaitingSelection ? `<button class="btn btn-primary" onclick="showSlskdResults('${safeId}')"><i class="bi bi-hand-index"></i> Select</button>` : ''}
+              ${canRetry ? `<button class="btn btn-outline-warning" onclick="retryMbDownload('${safeId}')"><i class="bi bi-arrow-clockwise"></i></button>` : ''}
+              ${canRemove ? `<button class="btn btn-outline-danger" onclick="removeMbDownload('${safeId}')"><i class="bi bi-trash"></i></button>` : ''}
             </div>
           </td>
         </tr>`;
@@ -1148,6 +1221,11 @@ async function removeMbDownload(downloadId) {
 // ============================================================================
 // SOULSEEK SEARCH FUNCTIONS
 // ============================================================================
+// NOTE: `currentSlskdSearchId` and `slskdPollInterval` are declared HERE and
+// deliberately reused (not redeclared) by downloads_page.js, which shares
+// script scope. Redeclaring them there throws
+// "Identifier has already been declared" and kills that whole file.
+
 let currentSlskdSearchId = null;
 let slskdPollInterval = null;
 let _slskdCompleteGraceCount = 0;
@@ -1165,8 +1243,12 @@ async function searchSoulseek(event) {
     resultsEl.style.display = 'block';
     resultsEl.innerHTML = '<div class="text-center p-3"><span class="spinner-border spinner-border-sm me-2"></span>Searching Soulseek…</div>';
   }
-
   if (slskdPollInterval) { clearInterval(slskdPollInterval); slskdPollInterval = null; }
+
+  // Reset the grace counter per search. It is module-level, so a previous
+  // exhausted search left it at its cap and the next search declared
+  // "no results" on its very first terminal poll.
+  _slskdCompleteGraceCount = 0;
 
   try {
     const data = await fetchJsonOrThrow('/api/slskd/search', {
@@ -1188,11 +1270,10 @@ async function searchSoulseek(event) {
       }, 2000);
       return;
     }
-    
+
     currentSlskdSearchId = data.searchId;
     slskdPollInterval = setInterval(pollSlskdSearchResults, 1500);
     pollSlskdSearchResults();
-
   } catch (error) {
     if (resultsEl) resultsEl.innerHTML = `<div class="alert alert-danger">Network error: ${escapeHtml(error.message)}</div>`;
   }
@@ -1204,7 +1285,7 @@ async function pollSlskdSearchResults() {
     const data = await fetchJsonOrThrow(`/api/slskd/search/${encodeURIComponent(currentSlskdSearchId)}`);
     const resultsEl = document.getElementById('slskdSearchResults');
     if (!resultsEl) return;
-    
+
     const results = data.results || [];
     const isComplete = data.isComplete || false;
     const state = data.state || 'Searching';
@@ -1215,7 +1296,7 @@ async function pollSlskdSearchResults() {
         _slskdCompleteGraceCount++;
         return;
       }
-      resultsEl.innerHTML = `<div class="alert alert-info"><i class="bi bi-info-circle"></i> Search complete (${state}). No results found.</div>`;
+      resultsEl.innerHTML = `<div class="alert alert-info"><i class="bi bi-info-circle"></i> Search complete (${escapeHtml(state)}). No results found.</div>`;
       if (slskdPollInterval) { clearInterval(slskdPollInterval); slskdPollInterval = null; }
       _slskdCompleteGraceCount = 0;
       return;
@@ -1227,15 +1308,15 @@ async function pollSlskdSearchResults() {
       return slots > 0;
     });
 
-    let html = '<div class="table-responsive"><table class="table table-hover"><thead><tr><th>File</th><th class="text-center">User</th><th class="text-center">Size</th><th class="text-center">Bitrate</th><th class="text-center">Action</th></tr></thead><tbody>';
+    let html = '<div class="table-responsive"><table class="table table-hover" data-mobile-cards><thead><tr><th>File</th><th class="text-center">User</th><th class="text-center">Size</th><th class="text-center">Bitrate</th><th class="text-center">Action</th></tr></thead><tbody>';
     validResults.forEach(r => {
       const sizeMB = r.size_mb || (r.size ? (r.size / (1024 * 1024)).toFixed(2) : 'N/A');
       html += `<tr>
-        <td><div class="small" style="max-width:500px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(r.filename || 'Unknown')}</div></td>
-        <td class="text-center"><small class="text-muted">${escapeHtml(r.username || 'N/A')}</small></td>
-        <td class="text-center">${sizeMB} MB</td>
-        <td class="text-center"><small class="text-muted">${r.bitrate || 'unknown'}</small></td>
-        <td class="text-center"><button class="btn btn-sm btn-success" onclick="downloadSlskdFile('${escapeHtml(r.username)}', '${escapeHtml(r.filename)}', ${parseInt(r.size) || 0})"><i class="bi bi-download"></i> Download</button></td>
+        <td data-label="File"><div class="small" style="max-width:500px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(r.filename || 'Unknown')}</div></td>
+        <td class="text-center" data-label="User"><small class="text-muted">${escapeHtml(r.username || 'N/A')}</small></td>
+        <td class="text-center" data-label="Size">${escapeHtml(String(sizeMB))} MB</td>
+        <td class="text-center" data-label="Bitrate"><small class="text-muted">${escapeHtml(String(r.bitrate || 'unknown'))}</small></td>
+        <td class="text-center" data-label="Action"><button class="btn btn-sm btn-success" onclick="downloadSlskdFile('${escapeJsString(r.username)}', '${escapeJsString(r.filename)}', ${parseInt(r.size) || 0})"><i class="bi bi-download"></i> Download</button></td>
       </tr>`;
     });
     html += `</tbody></table></div><div class="text-muted small mt-2">Found ${validResults.length} available result(s) (filtered zero slots) — State: ${escapeHtml(state)}${isComplete ? ' (complete)' : ''}</div>`;
@@ -1255,6 +1336,7 @@ async function pollSlskdSearchResults() {
 // ============================================================================
 // MANUAL SOULSEEK SEARCH MODAL
 // ============================================================================
+
 window.soulseekManualSearchState = window.soulseekManualSearchState || {
   activeSearchId: null,
   pollTimer: null,
@@ -1305,9 +1387,21 @@ function ensureSoulseekManualSearchModal() {
       </div>
     </div>
   `;
-
   document.body.insertAdjacentHTML('beforeend', modalHtml);
+
   const modalEl = document.getElementById('soulseekManualSearchModal');
+
+  // Enter submits the query. Without this the modal's only affordance was the
+  // button, which is inconsistent with every other search box in the app.
+  const queryInput = modalEl.querySelector('#soulseekManualQuery');
+  if (queryInput) {
+    queryInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        runSoulseekManualSearch();
+      }
+    });
+  }
 
   modalEl.addEventListener('hidden.bs.modal', () => {
     const state = window.soulseekManualSearchState;
@@ -1320,7 +1414,6 @@ function ensureSoulseekManualSearchModal() {
       queueId: null,
     };
   });
-
   return modalEl;
 }
 
@@ -1338,7 +1431,7 @@ function openSoulseekManualSearchModal(defaultQuery = '', queueId = null) {
   window.soulseekManualSearchState.queueId = queueId ? parseInt(queueId, 10) || null : null;
   window.soulseekManualSearchState.pollingStopped = false;
 
-  const modal = new bootstrap.Modal(modalEl);
+  const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
   modal.show();
 }
 
@@ -1347,8 +1440,8 @@ async function runSoulseekManualSearch() {
   const statusEl = document.getElementById('soulseekManualStatus');
   const resultsEl = document.getElementById('soulseekManualResults');
   const searchBtn = document.getElementById('soulseekManualSearchBtn');
-
   const query = normalizeSoulseekQuery(queryInput?.value || '');
+
   if (!query) {
     alert('Enter search terms first.');
     return;
@@ -1359,7 +1452,6 @@ async function runSoulseekManualSearch() {
     clearTimeout(window.soulseekManualSearchState.pollTimer);
     window.soulseekManualSearchState.pollTimer = null;
   }
-
   window.soulseekManualSearchState.activeSearchId = null;
   window.soulseekManualSearchState.pollingStopped = false;
   window.soulseekManualSearchState.waitingForSlot = false;
@@ -1386,7 +1478,6 @@ async function runSoulseekManualSearch() {
 
     const searchId = startData.searchId;
     if (!searchId) throw new Error('Search did not return a search ID.');
-
     window.soulseekManualSearchState.activeSearchId = searchId;
     await pollSoulseekManualSearchResults(searchId, 0);
   } catch (error) {
@@ -1426,7 +1517,6 @@ async function _pollForSlotFree(pendingQuery) {
 
   try {
     const data = await fetchJsonOrThrow('/api/slskd/search-slot');
-
     if (data.slotFree) {
       const statusEl = document.getElementById('soulseekManualStatus');
       if (statusEl) statusEl.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Slot free — starting search…';
@@ -1484,7 +1574,6 @@ async function pollSoulseekManualSearchResults(searchId, attempt, transientError
   const statusEl = document.getElementById('soulseekManualStatus');
   const resultsEl = document.getElementById('soulseekManualResults');
   const state = window.soulseekManualSearchState || {};
-
   if (state.pollingStopped || state.activeSearchId !== searchId) return;
 
   try {
@@ -1553,11 +1642,11 @@ function renderSoulseekManualSearchResults(results) {
     const sizeMb = row.size_mb || '-';
     const bitrate = row.bitrate || '-';
     const duration = row.duration || row.length || '-';
-    
-    // 🛡️ Ensure absolute safe integer parsing for bytes
+
+    // Ensure absolute safe integer parsing for bytes
     const rawSize = row.size !== undefined ? row.size : (row.size_mb ? Number(row.size_mb) * 1024 * 1024 : 0);
     const size = Number.isFinite(Number(rawSize)) ? Math.round(Number(rawSize)) : 0;
-    
+
     const rawLength = row.length_seconds !== undefined ? row.length_seconds : (row.length !== undefined ? row.length : 0);
     const length = Number.isFinite(Number(rawLength)) ? Math.round(Number(rawLength)) : 0;
 
@@ -1567,12 +1656,12 @@ function renderSoulseekManualSearchResults(results) {
 
     return `
       <tr>
-        <td>${escapeHtml(username)}</td>
-        <td style="word-break: break-word;">${escapeHtml(filename)}</td>
-        <td>${escapeHtml(String(sizeMb))} MB</td>
-        <td>${escapeHtml(String(bitrate))}</td>
-        <td>${escapeHtml(String(duration))}</td>
-        <td class="text-center">
+        <td data-label="User">${escapeHtml(username)}</td>
+        <td style="word-break: break-word;" data-label="Filename">${escapeHtml(filename)}</td>
+        <td data-label="Size">${escapeHtml(String(sizeMb))} MB</td>
+        <td data-label="Bitrate">${escapeHtml(String(bitrate))}</td>
+        <td data-label="Duration">${escapeHtml(String(duration))}</td>
+        <td class="text-center" data-label="Action">
           <button class="btn btn-sm btn-success fw-bold px-3" onclick="downloadSoulseekManualResult('${encUser}', '${encFile}', ${size}, ${length}, this)">
             Select
           </button>
@@ -1583,7 +1672,7 @@ function renderSoulseekManualSearchResults(results) {
 
   container.innerHTML = `
     <div class="table-responsive">
-      <table class="table table-sm table-dark table-striped align-middle mb-0">
+      <table class="table table-sm table-dark table-striped align-middle mb-0" data-mobile-cards>
         <thead>
           <tr>
             <th>User</th>
@@ -1610,9 +1699,6 @@ async function downloadSoulseekManualResult(usernameEnc, filenameEnc, size, leng
     return;
   }
 
-  // 🔍 Debug log to confirm what byte size is being sent to the backend
-  console.log("[SLSKD_DEBUG] Manual download triggered -> Username:", username, "| File:", filename, "| Size (bytes):", size);
-
   const btn = buttonEl && buttonEl.tagName ? buttonEl : null;
   if (btn) {
     btn.disabled = true;
@@ -1621,7 +1707,7 @@ async function downloadSoulseekManualResult(usernameEnc, filenameEnc, size, leng
 
   const queueId = window.soulseekManualSearchState?.queueId || null;
   const endpoint = queueId ? '/api/slskd/queue-download' : '/api/slskd/download';
-  
+
   // Ensure size is a valid integer, fallback to 0 if missing
   const parsedSize = Number.isFinite(Number(size)) ? Math.round(Number(size)) : 0;
   const parsedLength = Number.isFinite(Number(length)) ? Math.round(Number(length)) : null;
@@ -1632,7 +1718,6 @@ async function downloadSoulseekManualResult(usernameEnc, filenameEnc, size, leng
     size: parsedSize,
     length: parsedLength
   };
-
   if (queueId) {
     body.queue_id = queueId;
   }
@@ -1643,7 +1728,6 @@ async function downloadSoulseekManualResult(usernameEnc, filenameEnc, size, leng
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-
     if (!data.success) throw new Error(data.error || 'Failed to enqueue Soulseek download');
 
     if (statusEl) statusEl.innerHTML = `<span class="text-success">Queued: ${escapeHtml(filename)}</span>`;
@@ -1676,6 +1760,7 @@ document.addEventListener('DOMContentLoaded', function () {
 // ============================================================================
 // QUEUE MANAGEMENT FUNCTIONS
 // ============================================================================
+
 let queuePageOffset = 0;
 const QUEUE_PAGE_LIMIT = 500;
 
@@ -1695,7 +1780,7 @@ function updateQueuePageControls(totalCount, loadedCount) {
   const safeLoaded = Number(loadedCount || 0);
   const start = safeTotal === 0 ? 0 : queuePageOffset + 1;
   const end = safeTotal === 0 ? 0 : Math.min(queuePageOffset + safeLoaded, safeTotal);
-  
+
   if (summary) summary.textContent = safeTotal === 0 ? 'Showing 0 of 0' : `Showing ${start}-${end} of ${safeTotal}`;
   if (prevBtn) prevBtn.disabled = queuePageOffset <= 0;
   if (nextBtn) nextBtn.disabled = (queuePageOffset + safeLoaded) >= safeTotal;
@@ -1706,7 +1791,7 @@ function changeQueuePage(direction) {
   if (nextOffset === queuePageOffset) return;
   queuePageOffset = nextOffset;
   if (typeof window.loadFolderGroups === 'function') {
-      window.loadFolderGroups({ forceRender: true, keepVisibleOnEmpty: true });
+    window.loadFolderGroups({ forceRender: true, keepVisibleOnEmpty: true });
   }
 }
 
@@ -1717,32 +1802,32 @@ async function addToQueue(event) {
   const album = document.getElementById('queueAlbum').value.trim();
   const source = document.getElementById('queueSource')?.value || 'soulseek';
   const priority = parseInt(document.getElementById('queuePriority')?.value || 5);
-  
+
   if (!artist) { alert('Please enter an artist.'); return; }
   if (!title && !album) { alert('Please enter either a song title or an album name.'); return; }
-  
+
   if (!title && album) {
     if (confirm('No song title entered. Search MusicBrainz releases for this artist/album instead?')) {
-        searchMusicBrainzForQueue();
+      searchMusicBrainzForQueue();
     }
     return;
   }
-  
+
   try {
-    const data = await fetchJsonOrThrow('/api/queue/add', {
+    await fetchJsonOrThrow('/api/queue/add', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ artist, title, album, source, priority })
     });
-    
+
     alert(`✅ Added to queue: ${artist} - ${title}`);
     const form = document.getElementById('addToQueueForm');
     if (form) form.reset();
-    
+
     queuePageOffset = 0;
     await loadQueueStatus();
     if (typeof window.loadFolderGroups === 'function') {
-        await window.loadFolderGroups({ forceRender: true, keepVisibleOnEmpty: true });
+      await window.loadFolderGroups({ forceRender: true, keepVisibleOnEmpty: true });
     }
   } catch (error) {
     alert('❌ Network error: ' + error.message);
@@ -1753,14 +1838,20 @@ function searchMusicBrainzForQueue() {
   const artist = document.getElementById('queueArtist')?.value.trim() || '';
   const album = document.getElementById('queueAlbum')?.value.trim() || '';
   const track = document.getElementById('queueTitle')?.value.trim() || '';
-  
+
   if (!artist && !album && !track) {
     alert('Please enter at least one field before searching MusicBrainz.');
     return;
   }
-  
+
+  if (typeof window.openGlobalMbSearch !== 'function') {
+    console.error('openGlobalMbSearch is unavailable — is main.js loaded?');
+    alert('MusicBrainz search is unavailable on this page.');
+    return;
+  }
+
   window.openGlobalMbSearch(artist, album, (selectedRelease) => {
-      downloadMbRelease(selectedRelease.id, selectedRelease.title, selectedRelease.artist, 'slskd');
+    downloadMbRelease(selectedRelease.id, selectedRelease.title, selectedRelease.artist, 'slskd');
   }, track);
 }
 
@@ -1768,21 +1859,22 @@ async function loadQueueStatus() {
   try {
     const data = await fetchJsonOrThrow('/api/downloads/queue?limit=1&offset=0');
     if (!data || !data.queue) {
-      ['queueTotalCount','queueActiveCount','queueQueuedCount','queueCompletedCount','queueMovingCount','queueFailedCount'].forEach(id => {
+      ['queueTotalCount', 'queueActiveCount', 'queueQueuedCount', 'queueCompletedCount', 'queueMovingCount', 'queueFailedCount'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.textContent = '0';
       });
       return;
     }
+
     const statusCounts = data.status_counts || {};
     const countFor = (...s) => s.reduce((sum, st) => sum + Number(statusCounts[st] || 0), 0);
     const setNum = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = String(val); };
-    
-    setNum('queueTotalCount', countFor('queued','searching','processing','unmatched','pending_match','discovered','queried','matched','downloading','completed','moving','importing','failed','possible_duplicate','duplicate'));
-    setNum('queueQueuedCount', countFor('queued','searching','processing','unmatched','pending_match','discovered','queried','matched'));
+
+    setNum('queueTotalCount', countFor('queued', 'searching', 'processing', 'unmatched', 'pending_match', 'discovered', 'queried', 'matched', 'downloading', 'completed', 'moving', 'importing', 'failed', 'possible_duplicate', 'duplicate'));
+    setNum('queueQueuedCount', countFor('queued', 'searching', 'processing', 'unmatched', 'pending_match', 'discovered', 'queried', 'matched'));
     setNum('queueActiveCount', countFor('downloading'));
     setNum('queueCompletedCount', countFor('completed'));
-    setNum('queueMovingCount', countFor('moving','importing'));
+    setNum('queueMovingCount', countFor('moving', 'importing'));
     setNum('queueFailedCount', countFor('failed'));
 
     document.querySelectorAll('.stat-pill[data-pill-for]').forEach(pill => {
@@ -1793,6 +1885,7 @@ async function loadQueueStatus() {
   } catch (error) {
     console.error('Error loading queue status:', error);
   }
+
   await renderQueueSection();
   await renderQueueLog();
   await renderSearchLog();
@@ -1848,7 +1941,7 @@ async function loadQueueEvents() {
     const table = document.getElementById('queueEventsTable');
     const tbody = document.getElementById('queueEventsBody');
     if (!emptyDiv || !table || !tbody) return;
-    
+
     if (events.length === 0) {
       emptyDiv.style.display = 'block';
       table.style.display = 'none';
@@ -1856,10 +1949,11 @@ async function loadQueueEvents() {
     }
     emptyDiv.style.display = 'none';
     table.style.display = 'table';
+
     tbody.innerHTML = events.map(e => {
       const ts = new Date(e.created_at);
       const badgeClass = e.event_type === 'file_found' ? 'bg-info' : e.event_type === 'status_change' ? 'bg-primary' : e.event_type === 'error' ? 'bg-danger' : 'bg-success';
-      return `<tr><td class="small text-muted">${ts.toLocaleString()}</td><td><span class="badge ${badgeClass}">${escapeHtml((e.event_type || '').replace(/_/g, ' ').toUpperCase())}</span></td><td>${escapeHtml(e.message || '')}</td></tr>`;
+      return `<tr><td class="small text-muted">${escapeHtml(ts.toLocaleString())}</td><td><span class="badge ${badgeClass}">${escapeHtml((e.event_type || '').replace(/_/g, ' ').toUpperCase())}</span></td><td>${escapeHtml(e.message || '')}</td></tr>`;
     }).join('');
   } catch (error) { console.error('Error loading queue events:', error); }
 }
@@ -1885,7 +1979,7 @@ async function restartQueueProcessor() {
       if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
     }, 2000);
   } catch (e) {
-    if (btn) btn.innerHTML = '<i class="bi bi-exclamation-circle"></i> Error!'; 
+    if (btn) btn.innerHTML = '<i class="bi bi-exclamation-circle"></i> Error!';
     setTimeout(() => { if (btn) { btn.innerHTML = originalText; btn.disabled = false; } }, 3000);
   }
 }
@@ -1925,7 +2019,7 @@ async function organizeFile(queueId) {
     alert('✅ File organized successfully!');
     await loadQueueStatus();
     if (typeof window.loadFolderGroups === 'function') {
-        await window.loadFolderGroups({ forceRender: true });
+      await window.loadFolderGroups({ forceRender: true });
     }
   } catch (e) { alert('❌ Network error: ' + e.message); }
 }
@@ -1938,7 +2032,7 @@ async function runQueueCleanup() {
     alert('✅ Cleanup complete\n\nDuplicates removed: ' + (stats.deleted_duplicates || 0) + '\nCompleted albums: ' + (stats.completed_albums || 0));
     await loadQueueStatus();
     if (typeof window.loadFolderGroups === 'function') {
-        await window.loadFolderGroups({ forceRender: true });
+      await window.loadFolderGroups({ forceRender: true });
     }
   } catch (e) { alert('❌ Network error: ' + e.message); }
 }
@@ -1949,6 +2043,7 @@ async function batchOrganizeSelected() { alert('batchOrganizeSelected not yet im
 // ============================================================================
 // QUEUE RENDERING
 // ============================================================================
+
 async function renderQueueSection() {
   const section = document.getElementById('folderGroupsSection');
   const list = document.getElementById('folderGroupsList');
@@ -1969,7 +2064,7 @@ async function renderQueueSection() {
     html += '<h6 class="px-3 pt-3 mb-0 small text-muted text-uppercase">Queue Items</h6>';
     const queueGroups = buildQueueGroups(qItems);
     window.__queueGroupsArr = queueGroups;
-    html += '<div class="list-group list-group-flush">' + queueGroups.map(function(group, index) {
+    html += '<div class="list-group list-group-flush">' + queueGroups.map(function (group, index) {
       if (group.items.length === 1) {
         return renderQueueItemRow(group.items[0], 'active');
       }
@@ -1997,7 +2092,7 @@ async function renderQueueLog() {
   try {
     const data = await fetchJsonOrThrow('/api/queue/events?limit=100');
     const events = (data && data.events) || [];
-    const lines = events.slice().reverse().map(function(event) {
+    const lines = events.slice().reverse().map(function (event) {
       const ts = event.created_at || event.timestamp || null;
       const timeLabel = ts ? new Date(ts).toLocaleTimeString([], { hour12: false }) : '--:--:--';
       return '[' + timeLabel + '] ' + (event.event_type || 'info').toUpperCase() + ' ' + (event.message || '');
@@ -2016,7 +2111,7 @@ async function renderSearchLog() {
     const data = await fetchJsonOrThrow('/api/queue/search-events?limit=100');
     const events = (data && data.events) || [];
     const chunks = [];
-    events.slice().reverse().forEach(function(event) {
+    events.slice().reverse().forEach(function (event) {
       const ts = event.timestamp ? new Date(event.timestamp) : null;
       const timeLabel = ts ? ts.toLocaleTimeString([], { hour12: false }) : '--:--:--';
       const type = (event.search_type || 'unknown').toUpperCase();
@@ -2039,14 +2134,15 @@ async function renderQueuePage() {
     const countFor = (...s) => s.reduce((sum, st) => sum + Number(statusCounts[st] || 0), 0);
     const setNum = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = String(val); };
 
-    setNum('statQueuedNum', countFor('queued','searching','unmatched','pending_match','discovered','queried','matched'));
+    setNum('statQueuedNum', countFor('queued', 'searching', 'unmatched', 'pending_match', 'discovered', 'queried', 'matched'));
     setNum('statDownloadingNum', countFor('downloading'));
     setNum('statCompletedNum', countFor('completed'));
     setNum('statFailedNum', countFor('failed'));
-    setNum('statImportedNum', countFor('imported','moving'));
-    setNum('queueActiveCount', countFor('queued','searching','downloading','failed'));
+    setNum('statImportedNum', countFor('imported', 'moving'));
+    setNum('queueActiveCount', countFor('queued', 'searching', 'downloading', 'failed'));
     setNum('queueCompletedCount', countFor('completed'));
     setNum('queueFailedCount', countFor('failed'));
+
     const lastRefreshed = document.getElementById('queueLastRefreshed');
     if (lastRefreshed) lastRefreshed.textContent = 'Updated ' + new Date().toLocaleTimeString([], { hour12: false });
 
@@ -2069,25 +2165,27 @@ function renderQueueList(kind, items) {
   const emptyEl = document.getElementById(idPrefix + 'QueueEmpty');
   const badgeEl = document.getElementById(kind === 'active' ? 'queueActiveCount' : kind + 'Badge');
   if (!listEl || !emptyEl) return;
+
   if (!items.length) {
     listEl.style.display = 'none';
     emptyEl.style.display = 'block';
     if (badgeEl) badgeEl.style.display = 'none';
     return;
   }
+
   emptyEl.style.display = 'none';
   listEl.style.display = 'block';
   if (badgeEl) { badgeEl.textContent = items.length + ' item' + (items.length !== 1 ? 's' : ''); badgeEl.style.display = 'inline-block'; }
 
   const groups = buildQueueGroups(items);
   window.__queueGroupsArr = groups;
-
-  const rows = groups.map(function(group, index) {
+  const rows = groups.map(function (group, index) {
     if (group.items.length === 1) {
       return renderQueueItemRow(group.items[0], kind);
     }
     return renderQueueGroupRow(group, kind, index);
   });
+
   listEl.innerHTML = '<div class="list-group list-group-flush">' + rows.join('') + '</div>';
   attachQueueGroupToggles(listEl);
   restoreQueueGroupExpansion(listEl);
@@ -2096,14 +2194,13 @@ function renderQueueList(kind, items) {
 function buildQueueGroups(items) {
   var groups = [];
   var map = {};
-  (items || []).forEach(function(item) {
+  (items || []).forEach(function (item) {
     var album = (item.album || item.queue_folder || '').trim();
     var artist = (item.album_artist || item.artist || '').trim();
     var title = (item.title || '').trim();
-
     var key, label, sublabel;
-    
-    // ✅ FIX: Explicitly ignore "default" so legacy rows don't merge
+
+    // Explicitly ignore "default" so legacy rows don't merge
     if (item.import_group && item.import_group !== 'default' && item.import_group !== 'manual') {
       key = 'grp_' + String(item.import_group);
       label = album || String(item.import_group);
@@ -2130,11 +2227,13 @@ function buildQueueGroups(items) {
 function manualQueueSlskdSearch(encodedQuery, queueIdRaw) {
   const query = decodeURIComponent(encodedQuery || '');
   if (!query) return;
+
   if (typeof window.openSoulseekManualSearchModal === 'function') {
     const queueId = queueIdRaw ? parseInt(queueIdRaw, 10) || null : null;
     window.openSoulseekManualSearchModal(query, queueId);
     return;
   }
+
   const input = document.getElementById('slskdSearchQuery');
   if (input) input.value = query;
   const tabBtn = document.getElementById('soulseek-tab');
@@ -2150,12 +2249,12 @@ function manualQueueSlskdSearch(encodedQuery, queueIdRaw) {
 
 function renderQueueItemRow(item, kind) {
   const st = item.status || 'queued';
-
   const pillCls = st === 'failed' ? 'failed'
     : (st === 'downloading' || st === 'searching' || st === 'processing') ? 'downloading'
-    : (st === 'completed' || st === 'moving' || st === 'imported' || st === 'in_collection') ? 'complete'
-    : (st === 'pending_release' || st === 'unmatched') ? 'pending'
-    : 'queued';
+      : (st === 'completed' || st === 'moving' || st === 'imported' || st === 'in_collection') ? 'complete'
+        : (st === 'pending_release' || st === 'unmatched') ? 'pending'
+          : 'queued';
+
   let pillLabel = st.charAt(0).toUpperCase() + st.slice(1).replace(/_/g, ' ');
   if (st === 'downloading' && item.progress != null && Number(item.progress) > 0) {
     pillLabel = 'Downloading ' + Math.round(Math.max(0, Math.min(100, Number(item.progress)))) + '%';
@@ -2172,7 +2271,7 @@ function renderQueueItemRow(item, kind) {
     chips.push('<span class="meta-pill" title="' + escapeHtml(mbid) + '"><i class="bi bi-fingerprint"></i>' + escapeHtml(shortMbid) + '</span>');
   }
   if (item.duration) {
-    chips.push('<span class="meta-pill"><i class="bi bi-clock"></i>' + formatDuration(item.duration) + '</span>');
+    chips.push('<span class="meta-pill"><i class="bi bi-clock"></i>' + escapeHtml(formatDuration(item.duration)) + '</span>');
   }
   if (item.track_number) {
     chips.push('<span class="meta-pill"><i class="bi bi-music-note"></i>Track ' + escapeHtml(String(item.track_number)) + '</span>');
@@ -2187,34 +2286,36 @@ function renderQueueItemRow(item, kind) {
       '</div>';
   }
 
+  const itemId = parseInt(item.id, 10) || 0;
   let actions = '';
+
   if (kind !== 'completed') {
     const searchQuery = [item.artist, item.title, (item.album && item.album !== item.title) ? item.album : '']
       .filter(Boolean).join(' ');
     if (searchQuery) {
-      actions += '<button class="btn btn-sm btn-outline-info py-0 px-2 ms-1" title="Search Soulseek manually" onclick="manualQueueSlskdSearch(\'' + encodeURIComponent(searchQuery) + '\',' + (parseInt(item.id, 10) || 0) + ')"><i class="bi bi-search"></i></button>';
+      actions += '<button class="btn btn-sm btn-outline-info py-0 px-2 ms-1" title="Search Soulseek manually" onclick="manualQueueSlskdSearch(\'' + encodeURIComponent(searchQuery) + '\',' + itemId + ')"><i class="bi bi-search"></i></button>';
     }
   }
   if (kind === 'active') {
     if (st === 'downloading' || st === 'searching' || st === 'processing') {
-      actions += '<button class="btn btn-sm btn-outline-danger py-0 px-2 ms-1" title="Cancel download" onclick="cancelQueueItem(' + item.id + ')"><i class="bi bi-x-circle"></i></button>';
+      actions += '<button class="btn btn-sm btn-outline-danger py-0 px-2 ms-1" title="Cancel download" onclick="cancelQueueItem(' + itemId + ')"><i class="bi bi-x-circle"></i></button>';
     }
   }
   if (kind === 'failed' || st === 'failed') {
-    actions += '<button class="btn btn-sm btn-outline-warning py-0 px-2 ms-1" title="Retry" onclick="retryQueueItem(' + item.id + ')"><i class="bi bi-arrow-clockwise"></i></button>';
+    actions += '<button class="btn btn-sm btn-outline-warning py-0 px-2 ms-1" title="Retry" onclick="retryQueueItem(' + itemId + ')"><i class="bi bi-arrow-clockwise"></i></button>';
   }
   if (kind === 'completed') {
-    actions += '<button class="btn btn-sm btn-outline-success py-0 px-2 ms-1" title="Copy to library" onclick="organizeFile(' + item.id + ')"><i class="bi bi-folder-plus"></i></button>';
+    actions += '<button class="btn btn-sm btn-outline-success py-0 px-2 ms-1" title="Copy to library" onclick="organizeFile(' + itemId + ')"><i class="bi bi-folder-plus"></i></button>';
   }
-  actions += '<button class="btn btn-sm btn-outline-danger py-0 px-2 ms-1" title="Remove" onclick="deleteQueueItem(' + item.id + ', false)"><i class="bi bi-trash"></i></button>';
+  actions += '<button class="btn btn-sm btn-outline-danger py-0 px-2 ms-1" title="Remove" onclick="deleteQueueItem(' + itemId + ', false)"><i class="bi bi-trash"></i></button>';
 
   return '<div class="list-group-item"><div class="d-flex justify-content-between align-items-center gap-2">' +
     '<div style="min-width:0;">' +
-      '<div class="text-truncate"><strong>' + escapeHtml(item.title || item.album || 'Unknown') + '</strong>' +
-      (item.artist ? '<br><small class="text-muted">' + escapeHtml(item.artist) + (item.album && item.album !== item.title ? ' - ' + escapeHtml(item.album) : '') + '</small>' : '') +
-      '</div>' +
-      metaLine + progressHtml +
-      (kind === 'failed' && item.failure_reason ? '<div class="small text-danger mt-1"><i class="bi bi-exclamation-triangle"></i> ' + escapeHtml(item.failure_reason) + '</div>' : '') +
+    '<div class="text-truncate"><strong>' + escapeHtml(item.title || item.album || 'Unknown') + '</strong>' +
+    (item.artist ? '<br><small class="text-muted">' + escapeHtml(item.artist) + (item.album && item.album !== item.title ? ' - ' + escapeHtml(item.album) : '') + '</small>' : '') +
+    '</div>' +
+    metaLine + progressHtml +
+    (kind === 'failed' && item.failure_reason ? '<div class="small text-danger mt-1"><i class="bi bi-exclamation-triangle"></i> ' + escapeHtml(item.failure_reason) + '</div>' : '') +
     '</div>' +
     '<div class="d-flex align-items-center gap-1 flex-shrink-0">' + actions + '</div>' +
     '</div></div>';
@@ -2226,11 +2327,11 @@ function renderQueueGroupRow(group, kind, index) {
   const total = items.length;
 
   const counts = {};
-  items.forEach(function(item) {
+  items.forEach(function (item) {
     const st = item.status || 'queued';
     counts[st] = (counts[st] || 0) + 1;
   });
-  const summary = Object.keys(counts).map(function(st) {
+  const summary = Object.keys(counts).map(function (st) {
     return counts[st] + ' ' + st;
   }).join(' · ');
 
@@ -2240,7 +2341,7 @@ function renderQueueGroupRow(group, kind, index) {
 
   let actions = '';
   if (kind === 'active') {
-    const hasActive = items.some(function(i) {
+    const hasActive = items.some(function (i) {
       return i.status === 'downloading' || i.status === 'searching' || i.status === 'processing';
     });
     if (hasActive) {
@@ -2253,24 +2354,29 @@ function renderQueueGroupRow(group, kind, index) {
   if (kind === 'failed') {
     actions += '<button class="btn btn-sm btn-outline-warning py-0 px-2 ms-1" title="Retry all failed tracks" onclick="retryGroup(' + index + ')"><i class="bi bi-arrow-clockwise"></i></button>';
   }
-  // Add Organize Album action button for completed/active album groups
+
+  // Organize Album action for album groups.
+  // escapeJsString, not escapeHtml: these two values are interpolated into a
+  // JS string literal inside an onclick attribute, and an album label
+  // containing an apostrophe ("Livin' Thing") terminated the string early and
+  // broke the handler.
   if (group.key.startsWith('alb_') || group.key.startsWith('grp_')) {
-      actions += '<button class="btn btn-sm btn-outline-success py-0 px-2 ms-1" title="Organize and move album group" onclick="openOrganizeGroupModal(\'' + escapeHtml(group.key) + '\', \'' + escapeHtml(group.label) + '\', ' + total + ')"><i class="bi bi-folder-check"></i></button>';
+    actions += '<button class="btn btn-sm btn-outline-success py-0 px-2 ms-1" title="Organize and move album group" onclick="openOrganizeGroupModal(\'' + escapeJsString(group.key) + '\', \'' + escapeJsString(group.label) + '\', ' + total + ')"><i class="bi bi-folder-check"></i></button>';
   }
   actions += '<button class="btn btn-sm btn-outline-danger py-0 px-2 ms-1" title="Remove all tracks in this album" onclick="deleteGroup(' + index + ')"><i class="bi bi-trash"></i></button>';
 
-  const children = items.map(function(item) {
+  const children = items.map(function (item) {
     return renderQueueItemRow(item, kind);
   }).join('');
 
   return '<div class="list-group-item">' +
     '<div class="d-flex justify-content-between align-items-center gap-2">' +
     '<button type="button" class="btn btn-sm btn-link p-0 text-decoration-none queue-group-toggle flex-shrink-0" data-target="' + bodyId + '" title="Expand album" style="color:var(--text-secondary);">' +
-      '<i class="bi bi-chevron-down queue-group-chevron"></i>' +
+    '<i class="bi bi-chevron-down queue-group-chevron"></i>' +
     '</button>' +
     '<div class="text-truncate flex-grow-1" style="min-width:0;">' +
-      '<strong><i class="bi bi-folder2-open me-1"></i>' + escapeHtml(group.label) + '</strong>' + subline +
-      '<br><small class="text-muted">' + total + ' track' + (total !== 1 ? 's' : '') + ' · ' + escapeHtml(summary) + '</small>' +
+    '<strong><i class="bi bi-folder2-open me-1"></i>' + escapeHtml(group.label) + '</strong>' + subline +
+    '<br><small class="text-muted">' + total + ' track' + (total !== 1 ? 's' : '') + ' · ' + escapeHtml(summary) + '</small>' +
     '</div>' +
     '<div class="d-flex align-items-center gap-1 flex-shrink-0">' + actions + '</div>' +
     '</div>' +
@@ -2289,7 +2395,7 @@ function restoreQueueGroupExpansion(listEl) {
   if (!listEl) return;
   const expanded = window.__expandedQueueGroups;
   const found = new Set();
-  listEl.querySelectorAll('.queue-group-body').forEach(function(body) {
+  listEl.querySelectorAll('.queue-group-body').forEach(function (body) {
     found.add(body.id);
     if (!expanded.has(body.id)) return;
     body.style.display = 'block';
@@ -2298,14 +2404,14 @@ function restoreQueueGroupExpansion(listEl) {
     const chevron = btn && btn.querySelector('.queue-group-chevron');
     if (chevron) chevron.classList.add('rotated');
   });
-  expanded.forEach(function(id) { if (!found.has(id)) expanded.delete(id); });
+  expanded.forEach(function (id) { if (!found.has(id)) expanded.delete(id); });
 }
 window.__restoreQueueGroupExpansion = window.__restoreQueueGroupExpansion || restoreQueueGroupExpansion;
 
 function attachQueueGroupToggles(listEl) {
   if (!listEl) return;
-  listEl.querySelectorAll('.queue-group-toggle').forEach(function(btn) {
-    btn.addEventListener('click', function() {
+  listEl.querySelectorAll('.queue-group-toggle').forEach(function (btn) {
+    btn.addEventListener('click', function () {
       const body = document.getElementById(btn.getAttribute('data-target'));
       const chevron = btn.querySelector('.queue-group-chevron');
       if (!body) return;
@@ -2329,13 +2435,14 @@ function queueGroupByIndex(index) {
 async function organizeGroup(index) {
   const group = queueGroupByIndex(index);
   if (!group || !group.items.length) return;
-  const copyable = group.items.filter(function(i) {
+  const copyable = group.items.filter(function (i) {
     return i.status === 'completed' || i.status === 'moving';
   });
   if (!copyable.length) { alert('No completed tracks in this album to copy.'); return; }
   if (!confirm('Copy ' + copyable.length + ' completed track(s) in "' + (group.label || '') + '" to the music library?')) return;
+
   try {
-    const ig = group.items.find(function(i) { return i.import_group; });
+    const ig = group.items.find(function (i) { return i.import_group; });
     if (ig) {
       await fetchJsonOrThrow('/api/queue/organize-group', {
         method: 'POST',
@@ -2355,9 +2462,10 @@ async function organizeGroup(index) {
 async function retryGroup(index) {
   const group = queueGroupByIndex(index);
   if (!group || !group.items.length) return;
-  const failed = group.items.filter(function(i) { return i.status === 'failed'; });
+  const failed = group.items.filter(function (i) { return i.status === 'failed'; });
   if (!failed.length) { alert('No failed tracks in this album to retry.'); return; }
   if (!confirm('Re-queue ' + failed.length + ' failed track(s) in "' + (group.label || '') + '"?')) return;
+
   try {
     for (const item of failed) {
       await fetchJsonOrThrow('/api/queue/' + item.id + '/requeue', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
@@ -2370,11 +2478,12 @@ async function retryGroup(index) {
 async function cancelGroup(index) {
   const group = queueGroupByIndex(index);
   if (!group || !group.items.length) return;
-  const active = group.items.filter(function(i) {
+  const active = group.items.filter(function (i) {
     return i.status === 'downloading' || i.status === 'searching' || i.status === 'processing';
   });
   if (!active.length) { alert('No active downloads in this album.'); return; }
   if (!confirm('Cancel ' + active.length + ' active download(s) in "' + (group.label || '') + '"?')) return;
+
   try {
     for (const item of active) {
       await fetchJsonOrThrow('/api/queue/' + item.id + '/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
@@ -2388,6 +2497,7 @@ async function deleteGroup(index) {
   const group = queueGroupByIndex(index);
   if (!group || !group.items.length) return;
   if (!confirm('Remove all ' + group.items.length + ' track(s) in "' + (group.label || '') + '" from the queue?')) return;
+
   try {
     for (const item of group.items) {
       await fetchJsonOrThrow('/api/queue/' + item.id + '/delete', { method: 'DELETE' });
@@ -2400,251 +2510,299 @@ async function deleteGroup(index) {
 // ============================================================================
 // ORGANIZE GROUP MODAL CONTROLLERS
 // ============================================================================
+
 let currentOrganizeGroupKey = null;
 
 function openOrganizeGroupModal(groupKey, label, count) {
-    currentOrganizeGroupKey = groupKey;
-    
-    const infoText = document.getElementById('groupInfoText');
-    const itemCount = document.getElementById('groupItemCount');
-    if (infoText) infoText.textContent = label || 'Album Group';
-    if (itemCount) itemCount.textContent = count || '0';
+  currentOrganizeGroupKey = groupKey;
 
-    const orgAlbum = document.getElementById('orgAlbum');
-    if (orgAlbum && label) orgAlbum.value = label;
+  const infoText = document.getElementById('groupInfoText');
+  const itemCount = document.getElementById('groupItemCount');
+  if (infoText) infoText.textContent = label || 'Album Group';
+  if (itemCount) itemCount.textContent = count || '0';
 
-    updateFolderPreview();
+  const orgAlbum = document.getElementById('orgAlbum');
+  if (orgAlbum && label) orgAlbum.value = label;
 
-    const modalEl = document.getElementById('organizeGroupModal');
-    if (modalEl && window.bootstrap) {
-        const modal = new bootstrap.Modal(modalEl);
-        modal.show();
-    }
+  // The group's artist was never prefilled, so the Artist field opened blank
+  // and confirmOrganizeGroup() rejected the submit with "Artist and Album
+  // fields are required" until the user retyped a value the app already had.
+  const group = (window.__queueGroupsArr || []).find(function (g) { return g.key === groupKey; });
+  if (group) {
+    const orgArtist = document.getElementById('orgArtist');
+    const orgAlbumArtist = document.getElementById('orgAlbumArtist');
+    if (orgArtist && group.sublabel) orgArtist.value = group.sublabel;
+    if (orgAlbumArtist && group.sublabel) orgAlbumArtist.value = group.sublabel;
+
+    const firstYear = (group.items || []).map(function (i) { return i.year; }).find(Boolean);
+    const orgYear = document.getElementById('orgYear');
+    if (orgYear && firstYear) orgYear.value = String(firstYear).substring(0, 4);
+  }
+
+  updateFolderPreview();
+
+  const modalEl = document.getElementById('organizeGroupModal');
+  if (modalEl && window.bootstrap) {
+    bootstrap.Modal.getOrCreateInstance(modalEl).show();
+  }
 }
 
 function updateFolderPreview() {
-    const artist = document.getElementById('orgArtist')?.value.trim() || 'Artist Name';
-    const albumArtist = document.getElementById('orgAlbumArtist')?.value.trim() || artist;
-    const album = document.getElementById('orgAlbum')?.value.trim() || 'Album Name';
-    const year = document.getElementById('orgYear')?.value.trim() || '2026';
-    
-    let format = document.getElementById('orgFolderFormat')?.value || '{album_artist}/{year} - {album}';
-    if (format === 'custom') {
-        format = document.getElementById('orgCustomFormat')?.value.trim() || '{album_artist}/{year} - {album}';
-    }
+  const artist = document.getElementById('orgArtist')?.value.trim() || 'Artist Name';
+  const albumArtist = document.getElementById('orgAlbumArtist')?.value.trim() || artist;
+  const album = document.getElementById('orgAlbum')?.value.trim() || 'Album Name';
+  const year = document.getElementById('orgYear')?.value.trim() || String(new Date().getFullYear());
 
-    const previewPath = format
-        .replace(/{album_artist}/g, albumArtist)
-        .replace(/{artist}/g, artist)
-        .replace(/{album}/g, album)
-        .replace(/{year}/g, year);
+  let format = document.getElementById('orgFolderFormat')?.value || '{album_artist}/{year} - {album}';
+  if (format === 'custom') {
+    format = document.getElementById('orgCustomFormat')?.value.trim() || '{album_artist}/{year} - {album}';
+  }
 
-    const previewEl = document.getElementById('folderPreview');
-    if (previewEl) {
-        previewEl.textContent = `Music / ${previewPath} / 01. Track Title.mp3`;
-    }
+  const previewPath = format
+    .replace(/{album_artist}/g, albumArtist)
+    .replace(/{artist}/g, artist)
+    .replace(/{album}/g, album)
+    .replace(/{year}/g, year);
+
+  const previewEl = document.getElementById('folderPreview');
+  if (previewEl) {
+    previewEl.textContent = `Music / ${previewPath} / 01. Track Title.mp3`;
+  }
 }
 
-document.addEventListener('input', function(e) {
-    if (['orgArtist', 'orgAlbumArtist', 'orgAlbum', 'orgYear', 'orgCustomFormat', 'orgFolderFormat'].includes(e.target.id)) {
-        if (e.target.id === 'orgFolderFormat') {
-            const customDiv = document.getElementById('customFormatDiv');
-            if (customDiv) {
-                customDiv.style.display = e.target.value === 'custom' ? 'block' : 'none';
-            }
-        }
-        updateFolderPreview();
+document.addEventListener('input', function (e) {
+  if (['orgArtist', 'orgAlbumArtist', 'orgAlbum', 'orgYear', 'orgCustomFormat', 'orgFolderFormat'].includes(e.target.id)) {
+    if (e.target.id === 'orgFolderFormat') {
+      const customDiv = document.getElementById('customFormatDiv');
+      if (customDiv) {
+        customDiv.style.display = e.target.value === 'custom' ? 'block' : 'none';
+      }
     }
+    updateFolderPreview();
+  }
 });
 
+// `orgFolderFormat` is a <select>, which fires `change`, not `input`. Without
+// this the folder preview did not update when the directory format changed.
+document.addEventListener('change', function (e) {
+  if (e.target && e.target.id === 'orgFolderFormat') {
+    const customDiv = document.getElementById('customFormatDiv');
+    if (customDiv) {
+      customDiv.style.display = e.target.value === 'custom' ? 'block' : 'none';
+    }
+    updateFolderPreview();
+  }
+});
+
+// Show / hide the organize-lookup spinner.
+//
+// The template used to carry `style="display:none !important"` on this
+// element; an inline !important cannot be overridden by
+// `loadingDiv.style.display = 'flex'`, so the spinner never appeared. It is
+// now a `d-none` class toggle (see the template change in the notes).
+function _setOrganizeLookupLoading(loadingDiv, visible) {
+  if (!loadingDiv) return;
+  loadingDiv.classList.toggle('d-none', !visible);
+  loadingDiv.classList.toggle('d-flex', visible);
+}
+
 async function searchMBForOrganize() {
-    const artist = document.getElementById('orgArtist')?.value.trim() || '';
-    const album = document.getElementById('orgAlbum')?.value.trim() || '';
-    const resultsDiv = document.getElementById('mbSearchResults');
-    const loadingDiv = document.getElementById('mbSearchLoading');
+  const artist = document.getElementById('orgArtist')?.value.trim() || '';
+  const album = document.getElementById('orgAlbum')?.value.trim() || '';
 
-    if (!artist && !album) {
-        alert('Please enter at least an artist or album name.');
-        return;
+  // `org`-prefixed ids: the Organize Group modal deliberately namespaces its
+  // containers so they cannot collide with the global MusicBrainz modal that
+  // base.html renders on EVERY page.
+  //
+  // This used to target #mbSearchResults / #mbSearchLoading — the global
+  // modal's ids. getElementById returns the FIRST match in DOM order, which is
+  // base.html's hidden modal, so results were injected there while this modal
+  // showed nothing, and loadingDiv was null so the spinner never cleared.
+  const resultsDiv = document.getElementById('orgMbSearchResults');
+  const loadingDiv = document.getElementById('orgMbSearchLoading');
+
+  if (!artist && !album) {
+    alert('Please enter at least an artist or album name.');
+    return;
+  }
+  if (resultsDiv) resultsDiv.innerHTML = '';
+  _setOrganizeLookupLoading(loadingDiv, true);
+
+  try {
+    const data = await fetchJsonOrThrow('/api/musicbrainz/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ artist, album })
+    });
+    _setOrganizeLookupLoading(loadingDiv, false);
+
+    const releases = data.releases || [];
+    if (releases.length === 0) {
+      if (resultsDiv) resultsDiv.innerHTML = '<div class="alert alert-warning py-1 extra-small">No matches found on MusicBrainz.</div>';
+      return;
     }
 
-    if (resultsDiv) resultsDiv.innerHTML = '';
-    if (loadingDiv) loadingDiv.style.display = 'flex';
+    let html = '<div class="list-group list-group-flush" style="max-height: 200px; overflow-y: auto;">';
+    releases.slice(0, 10).forEach(r => {
+      const safeTitle = escapeHtml(r.title);
+      const safeArtist = escapeHtml(r.artist || artist);
+      const safeYear = escapeHtml((r.first_release_date || '').substring(0, 4));
 
-    try {
-        const data = await fetchJsonOrThrow('/api/musicbrainz/search', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ artist, album })
-        });
-
-        if (loadingDiv) loadingDiv.style.display = 'none';
-        const releases = data.releases || [];
-
-        if (releases.length === 0) {
-            if (resultsDiv) resultsDiv.innerHTML = '<div class="alert alert-warning py-1 extra-small">No matches found on MusicBrainz.</div>';
-            return;
-        }
-
-        let html = '<div class="list-group list-group-flush" style="max-height: 200px; overflow-y: auto;">';
-        releases.slice(0, 10).forEach(r => {
-            const safeTitle = escapeHtml(r.title);
-            const safeArtist = escapeHtml(r.artist || artist);
-            const safeYear = escapeHtml((r.first_release_date || '').substring(0, 4));
-            
-            html += `
-                <button type="button" class="list-group-item list-group-item-action bg-dark text-light border-secondary py-1 px-2 extra-small"
-                    onclick="applyMBMatchForOrganize('${escapeJsString(r.artist || artist)}', '${escapeJsString(r.title)}', '${safeYear}')">
-                    <strong>${safeTitle}</strong> — <span class="text-muted">${safeArtist} (${safeYear || 'TBA'})</span>
-                </button>`;
-        });
-        html += '</div>';
-        if (resultsDiv) resultsDiv.innerHTML = html;
-    } catch (err) {
-        if (loadingDiv) loadingDiv.style.display = 'none';
-        if (resultsDiv) resultsDiv.innerHTML = `<div class="alert alert-danger py-1 extra-small">Error: ${escapeHtml(err.message)}</div>`;
-    }
+      html += `
+        <button type="button" class="list-group-item list-group-item-action bg-dark text-light border-secondary py-1 px-2 extra-small"
+          onclick="applyMBMatchForOrganize('${escapeJsString(r.artist || artist)}', '${escapeJsString(r.title)}', '${escapeJsString((r.first_release_date || '').substring(0, 4))}')">
+          <strong>${safeTitle}</strong> — <span class="text-muted">${safeArtist} (${safeYear || 'TBA'})</span>
+        </button>`;
+    });
+    html += '</div>';
+    if (resultsDiv) resultsDiv.innerHTML = html;
+  } catch (err) {
+    _setOrganizeLookupLoading(loadingDiv, false);
+    if (resultsDiv) resultsDiv.innerHTML = `<div class="alert alert-danger py-1 extra-small">Error: ${escapeHtml(err.message)}</div>`;
+  }
 }
 
 async function searchDiscogsForOrganize() {
-    const artist = document.getElementById('orgArtist')?.value.trim() || '';
-    const album = document.getElementById('orgAlbum')?.value.trim() || '';
-    const resultsDiv = document.getElementById('mbSearchResults');
-    const loadingDiv = document.getElementById('mbSearchLoading');
+  const artist = document.getElementById('orgArtist')?.value.trim() || '';
+  const album = document.getElementById('orgAlbum')?.value.trim() || '';
+  // Same id correction as searchMBForOrganize above.
+  const resultsDiv = document.getElementById('orgMbSearchResults');
+  const loadingDiv = document.getElementById('orgMbSearchLoading');
 
-    if (!artist && !album) {
-        alert('Please enter at least an artist or album name.');
-        return;
+  if (!artist && !album) {
+    alert('Please enter at least an artist or album name.');
+    return;
+  }
+  if (resultsDiv) resultsDiv.innerHTML = '';
+  _setOrganizeLookupLoading(loadingDiv, true);
+
+  try {
+    const data = await fetchJsonOrThrow('/api/album/discogs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ artist, album })
+    });
+    _setOrganizeLookupLoading(loadingDiv, false);
+
+    const results = data.results || [];
+    if (results.length === 0) {
+      if (resultsDiv) resultsDiv.innerHTML = '<div class="alert alert-warning py-1 extra-small">No matches found on Discogs.</div>';
+      return;
     }
 
-    if (resultsDiv) resultsDiv.innerHTML = '';
-    if (loadingDiv) loadingDiv.style.display = 'flex';
+    let html = '<div class="list-group list-group-flush" style="max-height: 200px; overflow-y: auto;">';
+    results.slice(0, 10).forEach(r => {
+      const safeTitle = escapeHtml(r.title);
+      const safeYear = escapeHtml(String(r.year || ''));
 
-    try {
-        const data = await fetchJsonOrThrow('/api/album/discogs', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ artist, album })
-        });
-
-        if (loadingDiv) loadingDiv.style.display = 'none';
-        const results = data.results || [];
-
-        if (results.length === 0) {
-            if (resultsDiv) resultsDiv.innerHTML = '<div class="alert alert-warning py-1 extra-small">No matches found on Discogs.</div>';
-            return;
-        }
-
-        let html = '<div class="list-group list-group-flush" style="max-height: 200px; overflow-y: auto;">';
-        results.slice(0, 10).forEach(r => {
-            const safeTitle = escapeHtml(r.title);
-            const safeYear = escapeHtml(r.year || '');
-            
-            html += `
-                <button type="button" class="list-group-item list-group-item-action bg-dark text-light border-secondary py-1 px-2 extra-small"
-                    onclick="applyMBMatchForOrganize('${escapeJsString(artist)}', '${escapeJsString(r.title)}', '${safeYear}')">
-                    <strong>${safeTitle}</strong> — <span class="text-muted">${safeYear || 'TBA'}</span>
-                </button>`;
-        });
-        html += '</div>';
-        if (resultsDiv) resultsDiv.innerHTML = html;
-    } catch (err) {
-        if (loadingDiv) loadingDiv.style.display = 'none';
-        if (resultsDiv) resultsDiv.innerHTML = `<div class="alert alert-danger py-1 extra-small">Error: ${escapeHtml(err.message)}</div>`;
-    }
+      html += `
+        <button type="button" class="list-group-item list-group-item-action bg-dark text-light border-secondary py-1 px-2 extra-small"
+          onclick="applyMBMatchForOrganize('${escapeJsString(artist)}', '${escapeJsString(r.title)}', '${escapeJsString(String(r.year || ''))}')">
+          <strong>${safeTitle}</strong> — <span class="text-muted">${safeYear || 'TBA'}</span>
+        </button>`;
+    });
+    html += '</div>';
+    if (resultsDiv) resultsDiv.innerHTML = html;
+  } catch (err) {
+    _setOrganizeLookupLoading(loadingDiv, false);
+    if (resultsDiv) resultsDiv.innerHTML = `<div class="alert alert-danger py-1 extra-small">Error: ${escapeHtml(err.message)}</div>`;
+  }
 }
 
 function applyMBMatchForOrganize(artist, album, year) {
-    const orgArtist = document.getElementById('orgArtist');
-    const orgAlbum = document.getElementById('orgAlbum');
-    const orgYear = document.getElementById('orgYear');
+  const orgArtist = document.getElementById('orgArtist');
+  const orgAlbum = document.getElementById('orgAlbum');
+  const orgYear = document.getElementById('orgYear');
+  if (orgArtist) orgArtist.value = artist;
+  if (orgAlbum) orgAlbum.value = album;
+  if (orgYear && year && year !== 'TBA') orgYear.value = year;
 
-    if (orgArtist) orgArtist.value = artist;
-    if (orgAlbum) orgAlbum.value = album;
-    if (orgYear && year && year !== 'TBA') orgYear.value = year;
+  updateFolderPreview();
 
-    updateFolderPreview();
+  const matchInfo = document.getElementById('mbSelectedInfo');
+  const matchAlert = document.getElementById('mbSelectedMatch');
+  if (matchInfo) matchInfo.textContent = `${artist} - ${album} (${year || 'N/A'})`;
+  if (matchAlert) matchAlert.classList.remove('d-none');
 
-    const matchInfo = document.getElementById('mbSelectedInfo');
-    const matchAlert = document.getElementById('mbSelectedMatch');
-    if (matchInfo) matchInfo.textContent = `${artist} - ${album} (${year || 'N/A'})`;
-    if (matchAlert) matchAlert.classList.remove('d-none');
-
-    const metadataTabBtn = document.getElementById('metadataTab');
-    if (metadataTabBtn && window.bootstrap) {
-        const tab = new bootstrap.Tab(metadataTabBtn);
-        tab.show();
-    }
+  const metadataTabBtn = document.getElementById('metadataTab');
+  if (metadataTabBtn && window.bootstrap) {
+    bootstrap.Tab.getOrCreateInstance(metadataTabBtn).show();
+  }
 }
 
 function clearMBSelection() {
-    const matchAlert = document.getElementById('mbSelectedMatch');
-    if (matchAlert) matchAlert.classList.add('d-none');
+  const matchAlert = document.getElementById('mbSelectedMatch');
+  if (matchAlert) matchAlert.classList.add('d-none');
 }
 
 async function confirmOrganizeGroup() {
-    if (!currentOrganizeGroupKey) {
-        alert('No active album group selected.');
-        return;
+  if (!currentOrganizeGroupKey) {
+    alert('No active album group selected.');
+    return;
+  }
+
+  const artist = document.getElementById('orgArtist')?.value.trim();
+  const album = document.getElementById('orgAlbum')?.value.trim();
+
+  if (!artist || !album) {
+    alert('Artist and Album fields are required.');
+    return;
+  }
+
+  const payload = {
+    group_id: currentOrganizeGroupKey,
+    artist: artist,
+    album_artist: document.getElementById('orgAlbumArtist')?.value.trim() || null,
+    album: album,
+    year: document.getElementById('orgYear')?.value.trim() || null,
+    directory_format: document.getElementById('orgFolderFormat')?.value || null,
+    custom_format: document.getElementById('orgCustomFormat')?.value.trim() || null
+  };
+
+  try {
+    const modalEl = document.getElementById('organizeGroupModal');
+    const modal = modalEl && window.bootstrap ? bootstrap.Modal.getInstance(modalEl) : null;
+    if (modal) modal.hide();
+
+    const data = await fetchJsonOrThrow('/api/queue/organize-group', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }, 120000);
+
+    if (data.success) {
+      showToastMsg(`Successfully organized and moved ${data.moved_count || 'album'} tracks into library.`, false);
+      if (typeof window.loadFolderGroups === 'function') {
+        window.loadFolderGroups({ forceRender: true, keepVisibleOnEmpty: true });
+      }
+      if (typeof window.loadQueueStatus === 'function') {
+        window.loadQueueStatus();
+      }
+    } else {
+      showToastMsg(data.error || 'Failed to organize group.', true);
     }
-
-    const artist = document.getElementById('orgArtist')?.value.trim();
-    const album = document.getElementById('orgAlbum')?.value.trim();
-    
-    if (!artist || !album) {
-        alert('Artist and Album fields are required.');
-        return;
-    }
-
-    const payload = {
-        group_id: currentOrganizeGroupKey,
-        artist: artist,
-        album_artist: document.getElementById('orgAlbumArtist')?.value.trim() || null,
-        album: album,
-        year: document.getElementById('orgYear')?.value.trim() || null,
-        directory_format: document.getElementById('orgFolderFormat')?.value || null,
-        custom_format: document.getElementById('orgCustomFormat')?.value.trim() || null
-    };
-
-    try {
-        const modalEl = document.getElementById('organizeGroupModal');
-        const modal = modalEl && window.bootstrap ? bootstrap.Modal.getInstance(modalEl) : null;
-        if (modal) modal.hide();
-
-        const data = await fetchJsonOrThrow('/api/queue/organize-group', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        }, 120000);
-
-        if (data.success) {
-            showToastMsg(`Successfully organized and moved ${data.moved_count || 'album'} tracks into library.`, false);
-            if (typeof window.loadFolderGroups === 'function') {
-                window.loadFolderGroups({ forceRender: true, keepVisibleOnEmpty: true });
-            }
-            if (typeof window.loadQueueStatus === 'function') {
-                window.loadQueueStatus();
-            }
-        } else {
-            showToastMsg(data.error || 'Failed to organize group.', true);
-        }
-    } catch (err) {
-        showToastMsg('Network error during organization: ' + err.message, true);
-    }
+  } catch (err) {
+    showToastMsg('Network error during organization: ' + err.message, true);
+  }
 }
 
 // ============================================================================
 // INITIALIZATION
 // ============================================================================
-document.addEventListener('DOMContentLoaded', function() {
+
+document.addEventListener('DOMContentLoaded', function () {
+  // `refreshUpcomingReleases()` was called TWICE in this handler — once at the
+  // top and again at the bottom — so every page load fired two identical
+  // requests and rendered the accordion twice.
   if (document.getElementById('upcomingReleases')) {
     refreshUpcomingReleases();
   }
 
-  if (document.getElementById('mbSearchInput')) {
-    document.getElementById('mbSearchInput').addEventListener('keypress', function(e) {
+  const mbSearchInput = document.getElementById('mbSearchInput');
+  if (mbSearchInput) {
+    mbSearchInput.addEventListener('keypress', function (e) {
       if (e.key === 'Enter') {
-          if (typeof performMbSearch === 'function') performMbSearch();
+        if (typeof performMbSearch === 'function') performMbSearch();
       }
     });
     loadMbSessionSelector();
@@ -2667,10 +2825,7 @@ document.addEventListener('DOMContentLoaded', function() {
       try { await loadQueueStatus(); } finally { _queuePollInFlight = false; }
     }, 10000);
   }
-  
-  if (document.getElementById('upcomingReleases')) {
-    refreshUpcomingReleases();
-  }
+
   if (document.getElementById('queueEventsBody')) {
     loadQueueEvents();
   }
