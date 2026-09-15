@@ -1305,7 +1305,7 @@ def _inject_album_genre(
     mb_json, genres_csv = _genre_values(label, mb_genres_raw, genres_raw)
     params = {"mb": json.dumps(mb_json, ensure_ascii=False), "genres": genres_csv, "track_id": str(track_id)}
     statement = text(
-        "UPDATE tracks SET musicbrainz_genres = :mb::jsonb, genres = :genres WHERE id = :track_id"
+        "UPDATE tracks SET musicbrainz_genres = CAST(:mb AS JSONB), genres = :genres WHERE id = :track_id"
     )
     try:
         if session is not None:
@@ -1583,7 +1583,7 @@ def revert_track_live_state(track_id: str) -> bool:
                         is_live = 0,
                         is_acoustic = 0,
                         album_context_live = 0,
-                        musicbrainz_genres = COALESCE(:mb::jsonb, musicbrainz_genres),
+                        musicbrainz_genres = COALESCE(CAST(:mb AS JSONB), musicbrainz_genres),
                         genres = COALESCE(:genres, genres)
                     WHERE CAST(id AS TEXT) = :track_id
                 """),
