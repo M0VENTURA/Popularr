@@ -3,7 +3,7 @@
    Loaded from base.html on every page.
    ========================================================================== */
 
-/* ── Theme Tokens ─────────────────────────────────────────────────────── */
+/* ── Theme Tokens ────────────────────────────────────────────────────────── */
 :root {
     /* Surface colors */
     --primary-bg: #121212;
@@ -25,14 +25,45 @@
     --text-main: var(--text-primary);
     --text-muted: var(--text-secondary);
 
-    /* Layout metrics */
-    --navbar-height: 68px; /* Standardized fixed-top height */
+    /* Layout metrics
+       --------------------------------------------------------------------
+       --navbar-height is the SINGLE source of truth for how far the fixed
+       navbar pushes content down. It was previously declared 68px here,
+       defaulted to 112px in dashboard.css, and hard-coded as 6rem (96px)
+       inline in base.html — three different numbers for one measurement,
+       which is why the flyout floated and content sat under the navbar.
+
+       The navbar is `flex-wrap`, so its real height changes when the
+       search row wraps. The per-breakpoint values below track that.
+       For pixel-exact accuracy on custom navbars, add the 6-line
+       ResizeObserver from PATCHES.md — it overwrites this var at runtime
+       and every consumer follows automatically.
+       -------------------------------------------------------------------- */
+    --navbar-height: 68px;
     --player-bar-height: 64px;
     --status-bar-height: 2.4rem;
     --footer-stack-height: var(--status-bar-height);
+
+    /* Z-index scale — declared in one place so the stacking order is
+       auditable. Bootstrap's fixed-top navbar sits at 1030. */
+    --z-dropdown: 1040;
+    --z-search-flyout: 1035;
+    --z-navbar: 1030;
+    --z-player-bar: 1029;
+    --z-search-backdrop: 1028;
 }
 
-/* ── App Shell & Base Rules ───────────────────────────────────────────── */
+/* The navbar wraps its search row below the lg breakpoint, making it
+   taller. Without these, main content is pushed too far down on desktop
+   and not far enough on mobile. */
+@media (max-width: 991.98px) {
+    :root { --navbar-height: 112px; }
+}
+@media (max-width: 575.98px) {
+    :root { --navbar-height: 104px; }
+}
+
+/* ── App Shell & Base Rules ──────────────────────────────────────────────── */
 * { color-scheme: dark; }
 
 html, body {
@@ -52,12 +83,16 @@ body.player-visible {
     --footer-stack-height: calc(var(--status-bar-height) + var(--player-bar-height));
 }
 
+/* `!important` is deliberate: base.html sets `padding-top: 6rem` INLINE on
+   this element, and an inline style beats a stylesheet rule at every
+   specificity short of !important. Without this the 6rem wins and the var
+   above is ignored, so the navbar-height token has no effect at all. */
 main.container-fluid {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    padding-top: calc(var(--navbar-height, 68px) + 0.75rem);
+    padding-top: calc(var(--navbar-height, 68px) + 0.75rem) !important;
     padding-bottom: 1rem;
 }
 
@@ -66,38 +101,44 @@ a:not(.btn) { color: var(--spotify-green); }
 a:not(.btn):hover { color: var(--spotify-green-hover); }
 strong, b { color: var(--text-primary); }
 
-/* ── Global Header Search Flyout ──────────────────────────────────────── */
+/* Keep the fixed navbar on the documented rung of the z-scale. */
+.navbar.fixed-top { z-index: var(--z-navbar, 1030); }
+
+/* ── Global Header Search Flyout ─────────────────────────────────────────── */
 .search-flyout {
     position: fixed;
     left: 0;
     right: 0;
     top: var(--navbar-height, 68px);
-    z-index: 1035;
+    z-index: var(--z-search-flyout, 1035);
     background: var(--secondary-bg, #1c1c1c);
     border-bottom: 1px solid var(--border-color);
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
     max-height: calc(100vh - var(--navbar-height, 68px) - 8px);
+    max-height: calc(100dvh - var(--navbar-height, 68px) - 8px);
     overflow-y: auto;
 }
 
 .search-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 1030;
+    z-index: var(--z-search-backdrop, 1028);
     background: rgba(0, 0, 0, 0.55);
 }
 
-/* ── Cards, Tables & Components ───────────────────────────────────────── */
+/* ── Cards, Tables & Components ──────────────────────────────────────────── */
 .card, .card-body, .card-header, .table, .table th, .table td {
     background-color: var(--secondary-bg) !important;
     color: var(--text-primary);
     border-color: var(--border-color);
 }
+
 .card {
     border-radius: 0.75rem;
     box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
     border: 1px solid rgba(255, 255, 255, 0.05);
 }
+
 .card-header {
     background-color: var(--tertiary-bg);
     border-bottom: 1px solid var(--border-color);
@@ -132,7 +173,7 @@ strong, b { color: var(--text-primary); }
     .table-hover tbody tr:hover { background-color: rgba(255, 255, 255, 0.05) !important; }
 }
 
-/* ── Mobile: Tables → Stacked Cards (data-mobile-cards) ───────────────── */
+/* ── Mobile: Tables → Stacked Cards (data-mobile-cards) ──────────────────── */
 @media (max-width: 767.98px) {
     table[data-mobile-cards],
     table[data-mobile-cards] tbody,
@@ -141,14 +182,12 @@ strong, b { color: var(--text-primary); }
         display: block;
         width: 100%;
     }
-
     table[data-mobile-cards] thead {
         display: none !important;
         border: none !important;
         padding: 0 !important;
         margin: 0 !important;
     }
-
     table[data-mobile-cards] tr {
         background-color: var(--secondary-bg, #1e1e1e);
         border: 1px solid var(--border-color, #333);
@@ -156,7 +195,6 @@ strong, b { color: var(--text-primary); }
         margin-bottom: 1rem;
         padding: 0.5rem;
     }
-
     /* Target direct cells to prevent breaking nested tables inside Modals */
     table[data-mobile-cards] > tbody > tr > td {
         border: none !important;
@@ -166,11 +204,9 @@ strong, b { color: var(--text-primary); }
         justify-content: space-between;
         align-items: center;
     }
-
     table[data-mobile-cards] td.text-center {
         justify-content: flex-end;
     }
-
     table[data-mobile-cards] td::before {
         content: attr(data-label);
         font-weight: 600;
@@ -181,14 +217,21 @@ strong, b { color: var(--text-primary); }
     table[data-mobile-cards] td:empty::before {
         content: none;
     }
+    /* A cell with no data-label would otherwise render a stray gap where
+       the label pseudo-element should be. Collapsing it keeps rows tidy on
+       tables that have not had data-label added to every <td> yet. */
+    table[data-mobile-cards] > tbody > tr > td:not([data-label])::before {
+        content: none;
+    }
 }
 
-/* ── UI Elements & Badges ─────────────────────────────────────────────── */
+/* ── UI Elements & Badges ────────────────────────────────────────────────── */
 .extra-small { font-size: 0.72rem; }
 .min-w-0 { min-width: 0; }
 .hover-bg-dark:hover { background-color: var(--tertiary-bg, #282828); }
 
 ::placeholder { color: var(--text-secondary) !important; opacity: 1 !important; }
+
 input, select, textarea {
     color: var(--text-primary);
     background-color: var(--secondary-bg);
@@ -234,17 +277,27 @@ form .form-check-input[name="force"] + .form-check-label {
     user-select: none;
 }
 
-/* ── Custom Component Overrides ───────────────────────────────────────── */
-
+/* ── Custom Component Overrides ──────────────────────────────────────────── */
 /* Dropdowns & Modals */
 .modal-content { background-color: var(--secondary-bg); border: 1px solid var(--border-color); }
 .modal-header { border-bottom: 1px solid var(--border-color); background-color: var(--tertiary-bg); }
 .modal-footer { border-top: 1px solid var(--border-color); background-color: var(--tertiary-bg); }
 .btn-close { filter: invert(1); }
 
-.dropdown-menu { background-color: var(--secondary-bg) !important; border-color: var(--border-color) !important; z-index: 1020 !important; }
+/* Dropdown menus were pinned at 1020 — BELOW the fixed navbar (1030), the
+   player bar and the search backdrop — so any menu opening near the top or
+   bottom of the viewport rendered behind them and appeared to "not open".
+   1040 places them above the whole app-shell chrome. */
+.dropdown-menu {
+    background-color: var(--secondary-bg) !important;
+    border-color: var(--border-color) !important;
+    z-index: var(--z-dropdown, 1040) !important;
+}
 .dropdown-item { color: var(--text-primary) !important; background-color: var(--secondary-bg) !important; }
 .dropdown-item:hover { background-color: var(--tertiary-bg) !important; color: var(--spotify-green) !important; }
+
+/* A dropdown inside a Bootstrap modal must clear the modal itself (1055). */
+.modal .dropdown-menu { z-index: 1060 !important; }
 
 /* Prevent clipping on cards that host dropdowns */
 .card:has(.dropdown), .card:has(.dropdown-menu), .card-body:has(.dropdown) {
@@ -256,13 +309,11 @@ form .form-check-input[name="force"] + .form-check-label {
 .nav-tabs .nav-link { color: var(--text-secondary); border-color: transparent; }
 .nav-tabs .nav-link:hover { border-color: var(--border-color); color: var(--text-primary); }
 .nav-tabs .nav-link.active { background-color: var(--secondary-bg); border-color: var(--border-color) var(--border-color) var(--secondary-bg); color: var(--spotify-green); }
-
 .nav-pills .nav-link.active { background-color: var(--spotify-green, #1db954) !important; color: #000 !important; }
-
 .accordion-button { background-color: var(--secondary-bg) !important; color: var(--text-primary) !important; border-color: var(--border-color) !important; }
 .accordion-button:not(.collapsed) { background-color: var(--tertiary-bg) !important; color: var(--spotify-green) !important; }
 
-/* ── Artist/Album Details ─────────────────────────────────────────────── */
+/* ── Artist/Album Details ────────────────────────────────────────────────── */
 .hero-card {
     background-color: var(--secondary-bg, #1e1e1e);
     border: 1px solid var(--border-color, #282828);
@@ -277,7 +328,6 @@ form .form-check-input[name="force"] + .form-check-label {
 .hero-avatar-wrap { position: relative; display: inline-block; cursor: pointer; }
 .hero-avatar-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.55); opacity: 0; transition: opacity 0.2s; pointer-events: none; }
 .hero-avatar-wrap:hover .hero-avatar-overlay { opacity: 1; }
-
 .artist-similar-card { border: 1px solid var(--border-color); background-color: var(--secondary-bg); }
 .artist-similar-card:hover { border-color: var(--accent-color); }
 .artist-member-former { background-color: transparent; border: 1px solid var(--border-color); color: var(--text-secondary); opacity: 0.7; }
@@ -293,7 +343,26 @@ form .form-check-input[name="force"] + .form-check-label {
 .badge-source-musicbrainz { background-color: var(--brand-musicbrainz) !important; color: #fff !important; }
 .badge-source-discogs { background-color: var(--brand-discogs) !important; color: #fff !important; }
 
-/* ── Mobile Overrides & Media Queries ─────────────────────────────────── */
+/* ── Shared MusicBrainz Search Component ─────────────────────────────────── */
+/* Moved here out of components/_musicbrainz_search_component.html.  That
+   component is included by base.html AND (historically) again by
+   modals/_album_lookup.html, so its inline <style> block shipped twice on
+   album pages — duplicate rules, duplicate parse cost.  A stylesheet is
+   deduplicated by the browser; an inline block is not. */
+.mb-search-form { margin-bottom: 0.75rem; }
+.mb-search-form .form-control:focus,
+.mb-search-form .form-select:focus {
+    border-color: #22d3ee;
+    box-shadow: 0 0 0 0.2rem rgba(34, 211, 238, 0.12);
+}
+.mb-results-container { max-height: 60vh; overflow-y: auto; overflow-x: hidden; }
+.mb-results-container .card { transition: border-color 0.15s ease; }
+.mb-results-container .card:hover { border-color: #22d3ee; }
+.mb-select-btn { border-color: #6c757d; color: #adb5bd; }
+.mb-select-btn:hover,
+.mb-select-btn:focus { border-color: #22d3ee; color: #22d3ee; }
+
+/* ── Mobile Overrides & Media Queries ────────────────────────────────────── */
 @media (max-width: 576px) {
     main.container-fluid { padding-left: 0.75rem; padding-right: 0.75rem; padding-bottom: 0.75rem; }
     .card { margin-bottom: 0.75rem; }
@@ -303,8 +372,8 @@ form .form-check-input[name="force"] + .form-check-label {
 @media (max-width: 991.98px) {
     .navbar-nav { flex-direction: column !important; width: 100%; }
     .navbar-nav .nav-link { padding: 0.875rem 1.25rem !important; min-height: 48px; }
-    .navbar-collapse.show { max-height: calc(100dvh - var(--navbar-height, 68px) - 0.5rem); overflow-y: auto; -webkit-overflow-scrolling: touch; }
-    
+    .navbar-collapse.show { max-height: calc(100dvh - var(--navbar-height, 112px) - 0.5rem); overflow-y: auto; -webkit-overflow-scrolling: touch; }
+
     /* Mobile-only tab logic */
     [data-mobile-tab], [data-mobile-group], [data-album-group] { display: none !important; }
     [data-mobile-tab].mobile-tab-active, [data-mobile-group].mobile-tab-active, [data-album-group].album-mobile-active { display: block !important; }
@@ -314,7 +383,7 @@ form .form-check-input[name="force"] + .form-check-label {
     [data-mobile-tab], [data-mobile-group], [data-album-group] { display: block !important; }
 }
 
-/* ── Footer App Shell Stacks (Log bar / Player) ───────────────────────── */
+/* ── Footer App Shell Stacks (Log bar / Player) ──────────────────────────── */
 #scanStatusBar {
     flex-shrink: 0;
     display: flex;
@@ -342,17 +411,27 @@ form .form-check-input[name="force"] + .form-check-label {
     border-right: 1px solid var(--border-color);
 }
 .scan-queue-summary + #scanStatusLine { padding-left: 0.75rem; }
-
 #scanStatusBar .scan-status-idle { color: var(--text-tertiary); }
 #scanStatusBar .scan-status-active { color: var(--spotify-green); animation: scan-status-pulse 1.6s ease-in-out infinite; }
 #scanStatusBar .scan-status-open { margin-left: auto; display: inline-flex; align-items: center; gap: 0.3rem; color: var(--text-secondary); border: 1px solid var(--border-color); border-radius: 999px; padding: 0.1rem 0.6rem; font-size: 0.75rem; }
-
 @keyframes scan-status-pulse { 50% { opacity: 0.45; } }
 
+/* The player bar is a FLEX FOOTER ITEM of <body>, not an overlay — that is
+   what makes `body.player-visible { --footer-stack-height: ... }` correct
+   and keeps the bar from covering content.
+
+   base.html sets `position: fixed; z-index: 1030` INLINE on this element.
+   An inline style outranks any normal stylesheet rule, so the previous
+   `position: static` here never applied: the bar detached from the flex
+   column, the footer-stack maths silently went wrong, and the bar overlaid
+   the bottom of every page. `!important` is the only thing that beats an
+   inline declaration, so it is required here until the inline style is
+   removed from base.html (see PATCHES.md). */
 #globalPlayerBar {
     flex-shrink: 0;
-    position: static;
-    z-index: auto;
+    position: static !important;
+    z-index: var(--z-player-bar, 1029) !important;
+    inset: auto !important;
 }
 
 #playerQueuePanel {
@@ -373,7 +452,7 @@ form .form-check-input[name="force"] + .form-check-label {
 #playerQueueList .player-queue-row:hover { background: rgba(255, 255, 255, 0.05); }
 #playerQueueList .player-queue-row.active { background: rgba(34, 197, 94, 0.12); color: var(--spotify-green); }
 
-/* ── Unified Search Layout Overrides ──────────────────────────────────── */
+/* ── Unified Search Layout Overrides ─────────────────────────────────────── */
 .us-results { max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; }
 .us-section-title { font-size: 0.82rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.4px; border-bottom: 1px solid var(--border-color); padding-bottom: 0.35rem; margin: 0.9rem 0 0.45rem; }
 .us-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0.6rem; border-radius: 0.5rem; text-decoration: none !important; color: var(--text-primary) !important; }
@@ -394,6 +473,68 @@ form .form-check-input[name="force"] + .form-check-label {
 .search-flyout #unifiedScopeTabs .nav-link { background-color: #1e1e1e !important; border: 1px solid transparent !important; border-radius: 0.5rem !important; color: #a0a0a0 !important; min-height: 44px !important; display: inline-flex !important; align-items: center !important; gap: 0.4rem !important; padding: 0.5rem 0.9rem !important; }
 .search-flyout #unifiedScopeTabs .nav-link.active { background-color: #2a2a2a !important; border-color: rgba(255, 255, 255, 0.65) !important; color: #ffffff !important; }
 
+/* Advanced-filter bottom sheet (opened by #unifiedFiltersToggle).
+   These were referenced by unified_search.js but had no stylesheet rules at
+   all — the sheet was appended to <body> and rendered unstyled/invisible,
+   which read as "the filter button does nothing". */
+.us-filter-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 2040;
+    background: rgba(0, 0, 0, 0.6);
+}
+.us-filter-sheet {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 2045;
+    max-height: 70vh;
+    overflow-y: auto;
+    background: var(--secondary-bg, #1e1e1e);
+    border-top: 1px solid var(--border-color, #333);
+    border-radius: 0.75rem 0.75rem 0 0;
+    box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.6);
+    padding-bottom: env(safe-area-inset-bottom, 0);
+}
+.us-filter-sheet-header {
+    border-bottom: 1px solid var(--border-color, #333);
+    position: sticky;
+    top: 0;
+    background: var(--secondary-bg, #1e1e1e);
+}
+.us-filter-option {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-height: 48px;
+    padding: 0.6rem 1rem;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    color: var(--text-primary);
+    text-align: left;
+}
+.us-filter-option:hover { background: var(--tertiary-bg, #282828); }
+.us-filter-option.active { color: var(--spotify-green); }
+.us-filter-option .us-filter-check { display: none; }
+.us-filter-option.active .us-filter-check { display: inline-block; }
+.us-filter-btn.active { border-color: var(--spotify-green) !important; color: var(--spotify-green) !important; }
+
+@media (min-width: 768px) {
+    .us-filter-sheet {
+        left: 50%;
+        right: auto;
+        bottom: auto;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: min(92vw, 420px);
+        border-radius: 0.75rem;
+        border: 1px solid var(--border-color, #333);
+    }
+}
+
 /* Windows Phone style Metro jump grid overlay */
 .metro-jump-overlay { position: fixed; inset: 0; z-index: 2050; background: rgba(10, 10, 10, 0.88); backdrop-filter: blur(10px); display: flex; align-items: center; justify-content: center; padding: 1rem; }
 .metro-jump-content { width: min(92vw, 380px); background: var(--secondary-bg, #1e1e1e); border: 1px solid var(--border-color, #333); border-radius: 0.75rem; padding: 1.25rem; }
@@ -402,7 +543,7 @@ form .form-check-input[name="force"] + .form-check-label {
 .metro-tile:hover:not(:disabled) { transform: scale(1.06); background-color: var(--accent-hover, #1ed760); }
 .metro-tile:disabled, .metro-tile.disabled { background-color: rgba(255, 255, 255, 0.05) !important; color: rgba(255, 255, 255, 0.2) !important; cursor: not-allowed; transform: none !important; }
 
-/* ── Miscellaneous ────────────────────────────────────────────────────── */
+/* ── Miscellaneous ───────────────────────────────────────────────────────── */
 .category-empty { display: none !important; }
 .sticky-save-bar { position: fixed; bottom: var(--footer-stack-height, 2.4rem); left: 0; right: 0; z-index: 2020; background: rgba(18, 18, 18, 0.98); border-top: 1px solid rgba(34, 197, 94, 0.5); box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5); padding: 0.6rem 1rem; }
 .sticky-save-bar.d-none { display: none; }
