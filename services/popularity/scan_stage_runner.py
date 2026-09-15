@@ -892,6 +892,12 @@ def run_scan(
         **extra_kwargs,
     }
 
+    try:
+        _essentia_enabled = bool(get_feature("run_essentia", False))
+    except Exception:
+        _essentia_enabled = False
+    options["run_essentia"] = _essentia_enabled
+
     _deferred_persist = DeferredPersistSink()
 
     update(stage="loading", progress=3, message="Loading scan candidates...")
@@ -906,7 +912,12 @@ def run_scan(
             log_unified("Popularity Scan - No tracks found. All tracks may already have popularity data (run in Forced mode to rescan).")
         update(stage="complete", progress=100, message="No albums to scan.", processed=0, total_items=0)
         finish(success=True)
-        return {"success": True, "albums_processed": 0, "tracks_processed": 0}
+        return {
+            "success": True, 
+            "albums_processed": 0, 
+            "tracks_processed": 0,
+            "run_essentia": _essentia_enabled,
+        }
 
     _banner_artist = str(options.get("artist_filter") or "").strip()
     _banner_album = str(options.get("album_filter") or "").strip()
@@ -1795,7 +1806,7 @@ def run_scan(
             # -------------------------------------------------------------
             # Post-singles enrichment (covers, genres, artist metadata).
             # -------------------------------------------------------------
-            if _full_pass:
+            if _full_pass or _mode_meta:
                 def _post_singles_enrichment_work() -> None:
                     try:
                         _extra_ctx, _extra_similar, _extra_meta = enrich_album_extras(
@@ -1946,4 +1957,5 @@ def run_scan(
         "albums_processed": albums_processed,
         "albums_skipped": skipped_albums,
         "tracks_processed": tracks_processed,
+        "run_essentia": _essentia_enabled,
     }
