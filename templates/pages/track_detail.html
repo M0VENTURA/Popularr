@@ -9,11 +9,12 @@
 
     /* Track page: Mobile 4-tab grouping */
     @media (max-width: 991.98px) {
-        .track-mobile-group { display: none; }
-        .track-mobile-group.mobile-tab-active { display: block; }
+        .track-mobile-group { display: none !important; }
+        .track-mobile-group.mobile-tab-active { display: block !important; }
+        .right-col-section { display: block !important; } /* Defeat desktop d-none on mobile */
     }
     @media (min-width: 992px) {
-        .track-mobile-group { display: block !important; }
+        .track-mobile-group { display: block; }
     }
 
     .track-quick-bar {
@@ -25,6 +26,15 @@
         backdrop-filter: blur(10px);
         padding: 0.6rem 1rem;
         box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.5);
+    }
+
+    /* Fix Bootstrap nav-link default blue colors */
+    #trackPageTabs .nav-link {
+        --bs-nav-link-color: #adb5bd;
+        --bs-nav-link-hover-color: #ffffff;
+    }
+    #trackPageTabs .nav-link.active {
+        --bs-nav-pills-link-active-color: #ffffff;
     }
 
     [id$="-section"], [id$="-card"] { scroll-margin-top: 130px; }
@@ -166,11 +176,11 @@
     <!-- Navigation Tabs (Sticky) -->
     <div class="card mb-4 sticky-top shadow-sm" style="top: 0; z-index: 1000;">
         <div class="card-body py-2 px-3">
-            <ul class="nav nav-pills nav-fill gap-2 small d-none d-lg-flex bg-secondary p-1 rounded">
-                <li class="nav-item"><button class="nav-link active py-1" onclick="document.getElementById('trackEditAccordion').scrollIntoView();">Edit Metadata</button></li>
-                <li class="nav-item"><button class="nav-link py-1" onclick="document.getElementById('track-scoring-section').scrollIntoView();">Scoring & Stats</button></li>
-                <li class="nav-item"><button class="nav-link py-1" onclick="document.getElementById('track-genres-card').scrollIntoView();">Genres & Audio</button></li>
-                <li class="nav-item"><button class="nav-link py-1" onclick="document.getElementById('track-similar-section').scrollIntoView();">Similar Artists</button></li>
+            <ul class="nav nav-pills nav-fill gap-2 small d-none d-lg-flex bg-secondary p-1 rounded" id="trackPageTabs">
+                <li class="nav-item"><button class="nav-link active py-1 fw-bold" onclick="switchRightTab('section-scoring', this)"><i class="bi bi-graph-up me-1"></i> Scoring & Stats</button></li>
+                <li class="nav-item"><button class="nav-link py-1 fw-bold" onclick="switchRightTab('section-tech', this)"><i class="bi bi-tags me-1"></i> Genres & Audio</button></li>
+                <li class="nav-item"><button class="nav-link py-1 fw-bold" onclick="switchRightTab('section-lyrics', this)"><i class="bi bi-chat-quote me-1"></i> Lyrics</button></li>
+                <li class="nav-item"><button class="nav-link py-1 fw-bold" onclick="switchRightTab('section-similar', this)"><i class="bi bi-person-heart me-1"></i> Similar Artists</button></li>
             </ul>
             <div class="mobile-tab-bar d-lg-none" role="tablist" aria-label="Track sections" data-mobile-tabs data-group-attr="data-mobile-tab" data-active-class="mobile-tab-active">
                 <button type="button" class="tab-btn active" data-tab="details" role="tab" aria-selected="true"><i class="bi bi-pencil-square"></i> Edit</button>
@@ -185,7 +195,7 @@
     <form method="POST" action="{{ url_for('ui.track_detail', track_id=track.id) }}" id="trackMetadataForm" data-sticky-save>
         <div class="row g-3 mb-4">
 
-            <!-- LEFT COLUMN: Editable Metadata -->
+            <!-- LEFT COLUMN: Editable Metadata (Always visible on desktop) -->
             <div class="col-12 col-lg-6 track-mobile-group mobile-tab-active" data-mobile-tab="details">
                 <div class="accordion shadow-sm" id="trackEditAccordion">
                     <!-- Core Track Information -->
@@ -390,273 +400,284 @@
                 </div>
             </div>
 
-            <!-- RIGHT COLUMN: Scoring, Insight & Discovery -->
+            <!-- RIGHT COLUMN: Swapped via Tabs on Desktop -->
             <div class="col-12 col-lg-6 d-flex flex-column gap-3">
 
-                <!-- Track Scoring Card -->
-                <div class="card shadow-sm track-mobile-group mobile-tab-active" id="track-scoring-section" data-mobile-tab="scoring">
-                    <div class="card-header border-secondary d-flex justify-content-between align-items-center bg-transparent py-2">
-                        <h6 class="card-title mb-0 fw-bold"><i class="bi bi-graph-up-arrow text-warning me-1"></i> Track Scoring</h6>
-                        {% set final_score = track.final_score or track.popularity %}
-                        {% if final_score is not none and final_score != '' %}
-                            <span class="badge bg-success shadow-sm" style="font-size: 0.85rem;">{{ final_score|round(1) }} Score</span>
-                        {% endif %}
-                    </div>
-                    <div class="card-body p-3">
-                        {% set rating_basis = [] %}
-                        {% if track.single_confidence == 'user' %}{% set _ = rating_basis.append('Manual override') %}{% endif %}
-                        {% if track.single_confidence == 'high' %}{% set _ = rating_basis.append('High-confidence single') %}{% endif %}
-                        {% if track.popularity_marked %}{% set _ = rating_basis.append('Top 10% artist catalog') %}{% endif %}
-                        {% if track.stars == 5 and track.single_confidence != 'high' and not track.popularity_marked %}{% set _ = rating_basis.append('Standout (album + artist z)') %}{% endif %}
+                <!-- SECTION 1: SCORING & STATS -->
+                <div id="section-scoring" class="right-col-section track-mobile-group mobile-tab-active" data-mobile-tab="scoring">
+                    
+                    <!-- Track Scoring Card -->
+                    <div class="card shadow-sm mb-3">
+                        <div class="card-header border-secondary d-flex justify-content-between align-items-center bg-transparent py-2">
+                            <h6 class="card-title mb-0 fw-bold"><i class="bi bi-graph-up-arrow text-warning me-1"></i> Track Scoring</h6>
+                            {% set final_score = track.final_score or track.popularity %}
+                            {% if final_score is not none and final_score != '' %}
+                                <span class="badge bg-success shadow-sm" style="font-size: 0.85rem;">{{ final_score|round(1) }} Score</span>
+                            {% endif %}
+                        </div>
+                        <div class="card-body p-3">
+                            {% set rating_basis = [] %}
+                            {% if track.single_confidence == 'user' %}{% set _ = rating_basis.append('Manual override') %}{% endif %}
+                            {% if track.single_confidence == 'high' %}{% set _ = rating_basis.append('High-confidence single') %}{% endif %}
+                            {% if track.popularity_marked %}{% set _ = rating_basis.append('Top 10% artist catalog') %}{% endif %}
+                            {% if track.stars == 5 and track.single_confidence != 'high' and not track.popularity_marked %}{% set _ = rating_basis.append('Standout (album + artist z)') %}{% endif %}
 
-                        {% if rating_basis %}
-                        <div class="alert alert-secondary py-2 px-3 mb-3 border-secondary">
-                            <small class="text-muted text-uppercase fw-semibold d-block mb-2"><i class="bi bi-patch-check-fill text-success"></i> Rating Basis</small>
-                            <div class="d-flex flex-wrap gap-2">
-                                {% for basis in rating_basis %}
-                                <span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">{{ basis }}</span>
+                            {% if rating_basis %}
+                            <div class="alert alert-secondary py-2 px-3 mb-3 border-secondary">
+                                <small class="text-muted text-uppercase fw-semibold d-block mb-2"><i class="bi bi-patch-check-fill text-success"></i> Rating Basis</small>
+                                <div class="d-flex flex-wrap gap-2">
+                                    {% for basis in rating_basis %}
+                                    <span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">{{ basis }}</span>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            {% endif %}
+
+                            <h6 class="fw-bold text-muted small text-uppercase mb-2">Metrics Data</h6>
+                            <div class="row g-2 mb-3">
+                                <div class="col-6">
+                                    <div class="p-2 border border-secondary rounded h-100 bg-dark text-center">
+                                        <div class="text-danger small fw-bold mb-1"><i class="bi bi-stars"></i> Last.fm</div>
+                                        <div class="h5 fw-bold text-light mb-0">{% if track.lastfm_listeners %}{{ "{:,.0f}".format(track.lastfm_listeners) }}{% else %}—{% endif %}</div>
+                                        <div class="extra-small text-muted text-uppercase">Listeners</div>
+                                    </div>
+                                </div>
+                                <div class="col-6">
+                                    <div class="p-2 border border-secondary rounded h-100 bg-dark text-center">
+                                        <div class="text-info small fw-bold mb-1"><i class="bi bi-headphones"></i> ListenBrainz</div>
+                                        <div class="h5 fw-bold text-light mb-0">{% if track.listenbrainz_listens %}{{ "{:,.0f}".format(track.listenbrainz_listens) }}{% else %}—{% endif %}</div>
+                                        <div class="extra-small text-muted text-uppercase">Listens</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <hr class="my-3 border-secondary">
+                            <label for="stars" class="form-label small fw-semibold text-muted text-uppercase mb-1">Manual Star Rating Override</label>
+                            <select class="form-select form-select-sm" id="stars" name="stars" style="max-width: 260px;">
+                                <option value="0" {% if track.stars == 0 %}selected{% endif %}>☆☆☆☆☆ — Auto / 0 Stars</option>
+                                <option value="1" {% if track.stars == 1 %}selected{% endif %}>★☆☆☆☆ — 1 Star</option>
+                                <option value="2" {% if track.stars == 2 %}selected{% endif %}>★★☆☆☆ — 2 Stars</option>
+                                <option value="3" {% if track.stars == 3 %}selected{% endif %}>★★★☆☆ — 3 Stars</option>
+                                <option value="4" {% if track.stars == 4 %}selected{% endif %}>★★★★☆ — 4 Stars</option>
+                                <option value="5" {% if track.stars == 5 %}selected{% endif %}>★★★★★ — 5 Stars</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Single & Cover Detection -->
+                    <div class="card shadow-sm">
+                        <div class="card-header border-secondary bg-transparent py-2">
+                            <h6 class="card-title mb-0 fw-bold"><i class="bi bi-bullseye text-danger me-1"></i> Scan Flags</h6>
+                        </div>
+                        <div class="card-body p-3">
+                            <div class="row g-3">
+                                <div class="col-6">
+                                    <label for="is_single" class="form-label small text-muted fw-semibold mb-1">Is Single?</label>
+                                    <select class="form-select form-select-sm mb-2" id="is_single" name="is_single">
+                                        <option value="false" {% if not track.is_single %}selected{% endif %}>No</option>
+                                        <option value="true" {% if track.is_single %}selected{% endif %}>Yes</option>
+                                    </select>
+                                    <div class="form-check">
+                                        <input type="checkbox" class="form-check-input" id="single_manual_override" name="single_manual_override" {% if track.single_manual_override %}checked{% endif %}>
+                                        <label class="form-check-label extra-small text-muted" for="single_manual_override">Lock (prevent auto-overwrite)</label>
+                                    </div>
+                                </div>
+                                <div class="col-6 border-start border-secondary">
+                                    <label class="form-label small text-muted fw-semibold mb-1">Is Cover Song?</label>
+                                    <div class="d-flex align-items-center gap-2 mb-2">
+                                        {% if track.is_cover %}
+                                            <span class="badge bg-success">Yes</span>
+                                        {% else %}
+                                            <span class="badge bg-secondary">No</span>
+                                        {% endif %}
+                                        <button type="button" class="btn btn-outline-info btn-sm py-0 px-2" data-bs-toggle="modal" data-bs-target="#coverSearchModal"><i class="bi bi-search"></i> Detect</button>
+                                    </div>
+                                    <div class="form-check">
+                                        <input type="checkbox" class="form-check-input" id="cover_manual_override" name="cover_manual_override" {% if track.cover_manual_override %}checked{% endif %}>
+                                        <label class="form-check-label extra-small text-muted" for="cover_manual_override">Lock (prevent auto-overwrite)</label>
+                                    </div>
+                                    <input type="hidden" name="is_cover" value="{% if track.is_cover %}on{% endif %}">
+                                </div>
+                            </div>
+
+                            <hr class="my-3 border-secondary">
+                            <h6 class="fw-semibold text-muted extra-small text-uppercase mb-2">Detected By (For Singles)</h6>
+                            <div class="d-flex flex-wrap gap-1">
+                                {% set detection_sources = [
+                                    ('discogs', 'Discogs'), ('discogs_video', 'Discogs Video'), ('musicbrainz', 'MusicBrainz'), 
+                                    ('musicbrainz_video', 'MB Video'), ('musicbrainz_compilation', 'MB Comp'), ('lastfm', 'Last.fm'), 
+                                    ('isrc', 'ISRC'), ('listenbrainz_top10', 'LB Top 10%'), ('popularity_marked', 'Pop Standout'), 
+                                    ('radio_edit', 'Radio Edit'), ('release_date_match', 'Date Match')
+                                ] %}
+                                {% for src_key, src_label in detection_sources %}
+                                    {% if src_key in (track.single_sources_list or []) %}
+                                        <span class="badge bg-primary-subtle text-primary border border-primary-subtle fw-normal">{{ src_label }}</span>
+                                    {% endif %}
                                 {% endfor %}
                             </div>
                         </div>
-                        {% endif %}
-
-                        <h6 class="fw-bold text-muted small text-uppercase mb-2">Metrics Data</h6>
-                        <div class="row g-2 mb-3">
-                            <div class="col-6">
-                                <div class="p-2 border border-secondary rounded h-100 bg-dark text-center">
-                                    <div class="text-danger small fw-bold mb-1"><i class="bi bi-stars"></i> Last.fm</div>
-                                    <div class="h5 fw-bold text-light mb-0">{% if track.lastfm_listeners %}{{ "{:,.0f}".format(track.lastfm_listeners) }}{% else %}—{% endif %}</div>
-                                    <div class="extra-small text-muted text-uppercase">Listeners</div>
-                                </div>
-                            </div>
-                            <div class="col-6">
-                                <div class="p-2 border border-secondary rounded h-100 bg-dark text-center">
-                                    <div class="text-info small fw-bold mb-1"><i class="bi bi-headphones"></i> ListenBrainz</div>
-                                    <div class="h5 fw-bold text-light mb-0">{% if track.listenbrainz_listens %}{{ "{:,.0f}".format(track.listenbrainz_listens) }}{% else %}—{% endif %}</div>
-                                    <div class="extra-small text-muted text-uppercase">Listens</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <hr class="my-3 border-secondary">
-                        <label for="stars" class="form-label small fw-semibold text-muted text-uppercase mb-1">Manual Star Rating Override</label>
-                        <select class="form-select form-select-sm" id="stars" name="stars" style="max-width: 260px;">
-                            <option value="0" {% if track.stars == 0 %}selected{% endif %}>☆☆☆☆☆ — Auto / 0 Stars</option>
-                            <option value="1" {% if track.stars == 1 %}selected{% endif %}>★☆☆☆☆ — 1 Star</option>
-                            <option value="2" {% if track.stars == 2 %}selected{% endif %}>★★☆☆☆ — 2 Stars</option>
-                            <option value="3" {% if track.stars == 3 %}selected{% endif %}>★★★☆☆ — 3 Stars</option>
-                            <option value="4" {% if track.stars == 4 %}selected{% endif %}>★★★★☆ — 4 Stars</option>
-                            <option value="5" {% if track.stars == 5 %}selected{% endif %}>★★★★★ — 5 Stars</option>
-                        </select>
                     </div>
                 </div>
 
-                <!-- Single & Cover Detection -->
-                <div class="card shadow-sm track-mobile-group" data-mobile-tab="scoring">
-                    <div class="card-header border-secondary bg-transparent py-2">
-                        <h6 class="card-title mb-0 fw-bold"><i class="bi bi-bullseye text-danger me-1"></i> Scan Flags</h6>
-                    </div>
-                    <div class="card-body p-3">
-                        <div class="row g-3">
-                            <div class="col-6">
-                                <label for="is_single" class="form-label small text-muted fw-semibold mb-1">Is Single?</label>
-                                <select class="form-select form-select-sm mb-2" id="is_single" name="is_single">
-                                    <option value="false" {% if not track.is_single %}selected{% endif %}>No</option>
-                                    <option value="true" {% if track.is_single %}selected{% endif %}>Yes</option>
-                                </select>
-                                <div class="form-check">
-                                    <input type="checkbox" class="form-check-input" id="single_manual_override" name="single_manual_override" {% if track.single_manual_override %}checked{% endif %}>
-                                    <label class="form-check-label extra-small text-muted" for="single_manual_override">Lock (prevent auto-overwrite)</label>
-                                </div>
-                            </div>
-                            <div class="col-6 border-start border-secondary">
-                                <label class="form-label small text-muted fw-semibold mb-1">Is Cover Song?</label>
-                                <div class="d-flex align-items-center gap-2 mb-2">
-                                    {% if track.is_cover %}
-                                        <span class="badge bg-success">Yes</span>
-                                    {% else %}
-                                        <span class="badge bg-secondary">No</span>
-                                    {% endif %}
-                                    <button type="button" class="btn btn-outline-info btn-sm py-0 px-2" data-bs-toggle="modal" data-bs-target="#coverSearchModal"><i class="bi bi-search"></i> Detect</button>
-                                </div>
-                                <div class="form-check">
-                                    <input type="checkbox" class="form-check-input" id="cover_manual_override" name="cover_manual_override" {% if track.cover_manual_override %}checked{% endif %}>
-                                    <label class="form-check-label extra-small text-muted" for="cover_manual_override">Lock (prevent auto-overwrite)</label>
-                                </div>
-                                <input type="hidden" name="is_cover" value="{% if track.is_cover %}on{% endif %}">
-                            </div>
+                <!-- SECTION 2: GENRES & AUDIO -->
+                <div id="section-tech" class="right-col-section track-mobile-group d-none" data-mobile-tab="tech">
+                    <!-- Detected Genres & Tags Card -->
+                    <div class="card shadow-sm mb-3">
+                        <div class="card-header border-secondary bg-transparent py-2">
+                            <h6 class="card-title mb-0 fw-bold"><i class="bi bi-tags-fill text-warning me-1"></i> Detected Genres & Tags</h6>
                         </div>
-
-                        <hr class="my-3 border-secondary">
-                        <h6 class="fw-semibold text-muted extra-small text-uppercase mb-2">Detected By (For Singles)</h6>
-                        <div class="d-flex flex-wrap gap-1">
-                            {% set detection_sources = [
-                                ('discogs', 'Discogs'), ('discogs_video', 'Discogs Video'), ('musicbrainz', 'MusicBrainz'), 
-                                ('musicbrainz_video', 'MB Video'), ('musicbrainz_compilation', 'MB Comp'), ('lastfm', 'Last.fm'), 
-                                ('isrc', 'ISRC'), ('listenbrainz_top10', 'LB Top 10%'), ('popularity_marked', 'Pop Standout'), 
-                                ('radio_edit', 'Radio Edit'), ('release_date_match', 'Date Match')
+                        <div class="card-body p-3">
+                            <p class="text-muted extra-small mb-3">All genres detected from external providers for this specific track.</p>
+                            {% set sources = [
+                                ('lastfm_tags', 'Last.fm', 'D51007', 'white', 'bi-music-note-beamed'),
+                                ('listenbrainz_genres', 'ListenBrainz', '0066FF', 'white', 'bi-headphones'),
+                                ('discogs_genres', 'Discogs', '6c757d', 'white', 'bi-vinyl-fill'),
+                                ('musicbrainz_genres', 'MusicBrainz', 'EB743B', 'white', 'bi-hexagon-fill'),
+                                ('spotify_genres', 'Spotify', '1DB954', 'white', 'bi-spotify'),
+                                ('navidrome_genres', 'Navidrome', '17A589', 'white', 'bi-music-note-list'),
+                                ('manual_genres', 'Manual Tags', '0dcaf0', 'black', 'bi-person-fill-gear')
                             ] %}
-                            {% for src_key, src_label in detection_sources %}
-                                {% if src_key in (track.single_sources_list or []) %}
-                                    <span class="badge bg-primary-subtle text-primary border border-primary-subtle fw-normal">{{ src_label }}</span>
+                            
+                            {% set ns = namespace(has_any=False) %}
+                            {% for key, label, bgcolor, textcolor, icon in sources %}
+                                {% set val = track[key] %}
+                                {% if val and val != '[]' and val != '' and val != 'null' %}
+                                    {% set ns.has_any = True %}
                                 {% endif %}
                             {% endfor %}
-                        </div>
-                    </div>
-                </div>
 
-                <!-- Detected Genres & Tags Card -->
-                <div class="card shadow-sm track-mobile-group" id="track-genres-card" data-mobile-tab="tech">
-                    <div class="card-header border-secondary bg-transparent py-2">
-                        <h6 class="card-title mb-0 fw-bold"><i class="bi bi-tags-fill text-warning me-1"></i> Detected Genres & Tags</h6>
-                    </div>
-                    <div class="card-body p-3">
-                        <p class="text-muted extra-small mb-3">All genres detected from external providers for this specific track.</p>
-                        {% set sources = [
-                            ('lastfm_tags', 'Last.fm', 'D51007', 'white', 'bi-music-note-beamed'),
-                            ('listenbrainz_genres', 'ListenBrainz', '0066FF', 'white', 'bi-headphones'),
-                            ('discogs_genres', 'Discogs', '6c757d', 'white', 'bi-vinyl-fill'),
-                            ('musicbrainz_genres', 'MusicBrainz', 'EB743B', 'white', 'bi-hexagon-fill'),
-                            ('spotify_genres', 'Spotify', '1DB954', 'white', 'bi-spotify'),
-                            ('navidrome_genres', 'Navidrome', '17A589', 'white', 'bi-music-note-list'),
-                            ('manual_genres', 'Manual Tags', '0dcaf0', 'black', 'bi-person-fill-gear')
-                        ] %}
-                        
-                        {% set ns = namespace(has_any=False) %}
-                        {% for key, label, bgcolor, textcolor, icon in sources %}
-                            {% set val = track[key] %}
-                            {% if val and val != '[]' and val != '' and val != 'null' %}
-                                {% set ns.has_any = True %}
-                            {% endif %}
-                        {% endfor %}
+                            {% if ns.has_any %}
+                                {% set ns2 = namespace(first=True) %}
+                                <ul class="nav nav-tabs border-secondary mb-3 flex-nowrap overflow-auto" role="tablist" style="white-space: nowrap; padding-bottom: 2px;">
+                                    {% for key, label, bgcolor, textcolor, icon in sources %}
+                                        {% set val = track[key] %}
+                                        {% if val and val != '[]' and val != '' and val != 'null' %}
+                                            <li class="nav-item" role="presentation">
+                                                <button class="nav-link {{ 'active text-white' if ns2.first else 'text-muted' }} px-2 py-1 small"
+                                                        id="trackGenreTab{{ key }}-tab" data-bs-toggle="tab"
+                                                        data-bs-target="#trackGenreTab{{ key }}-content"
+                                                        type="button" role="tab" style="color: #{{ bgcolor }}; border-color: transparent;">
+                                                    <i class="bi {{ icon }}"></i> {{ label }}
+                                                </button>
+                                            </li>
+                                            {% set ns2.first = False %}
+                                        {% endif %}
+                                    {% endfor %}
+                                </ul>
 
-                        {% if ns.has_any %}
-                            {% set ns2 = namespace(first=True) %}
-                            <ul class="nav nav-tabs border-secondary mb-3 flex-nowrap overflow-auto" role="tablist" style="white-space: nowrap; padding-bottom: 2px;">
-                                {% for key, label, bgcolor, textcolor, icon in sources %}
-                                    {% set val = track[key] %}
-                                    {% if val and val != '[]' and val != '' and val != 'null' %}
-                                        <li class="nav-item" role="presentation">
-                                            <button class="nav-link {{ 'active text-white' if ns2.first else 'text-muted' }} px-2 py-1 small"
-                                                    id="trackGenreTab{{ key }}-tab" data-bs-toggle="tab"
-                                                    data-bs-target="#trackGenreTab{{ key }}-content"
-                                                    type="button" role="tab" style="color: #{{ bgcolor }}; border-color: transparent;">
-                                                <i class="bi {{ icon }}"></i> {{ label }}
-                                            </button>
-                                        </li>
-                                        {% set ns2.first = False %}
-                                    {% endif %}
-                                {% endfor %}
-                            </ul>
-
-                            {% set ns3 = namespace(first=True) %}
-                            <div class="tab-content">
-                                {% for key, label, bgcolor, textcolor, icon in sources %}
-                                    {% set val = track[key] %}
-                                    {% if val and val != '[]' and val != '' and val != 'null' %}
-                                        <div class="tab-pane fade {{ 'active show' if ns3.first else '' }}" id="trackGenreTab{{ key }}-content" role="tabpanel">
-                                            <div class="d-flex flex-wrap gap-1">
-                                                {% for genre in val|split_genres %}
-                                                    <span class="badge border" style="background-color: #{{ bgcolor }}; color: {{ textcolor }}; font-size: 0.75rem; opacity: 0.9;">{{ genre }}</span>
-                                                {% endfor %}
+                                {% set ns3 = namespace(first=True) %}
+                                <div class="tab-content">
+                                    {% for key, label, bgcolor, textcolor, icon in sources %}
+                                        {% set val = track[key] %}
+                                        {% if val and val != '[]' and val != '' and val != 'null' %}
+                                            <div class="tab-pane fade {{ 'active show' if ns3.first else '' }}" id="trackGenreTab{{ key }}-content" role="tabpanel">
+                                                <div class="d-flex flex-wrap gap-1">
+                                                    {% for genre in val|split_genres %}
+                                                        <span class="badge border" style="background-color: #{{ bgcolor }}; color: {{ textcolor }}; font-size: 0.75rem; opacity: 0.9;">{{ genre }}</span>
+                                                    {% endfor %}
+                                                </div>
                                             </div>
-                                        </div>
-                                        {% set ns3.first = False %}
-                                    {% endif %}
-                                {% endfor %}
-                            </div>
-                        {% else %}
-                            <div class="alert alert-secondary bg-dark border-secondary text-muted mb-0 small">
-                                <i class="bi bi-info-circle me-1"></i> No external genre tags detected.
-                            </div>
-                        {% endif %}
-                    </div>
-                </div>
-
-                <!-- Essentia Audio Analysis -->
-                <div class="card shadow-sm track-mobile-group" id="track-essentia-card" data-mobile-tab="tech">
-                    <div class="card-header border-secondary bg-transparent d-flex justify-content-between align-items-center py-2">
-                        <h6 class="card-title mb-0 fw-bold">
-                            <i class="bi bi-cpu text-info me-1"></i> Audio Analysis
-                        </h6>
-                        <button type="button" class="btn btn-sm btn-outline-secondary py-0" onclick="document.getElementById('essentiaScanForm').submit()"><i class="bi bi-lightning-charge"></i> Run Scan</button>
-                    </div>
-                    <div class="card-body p-3">
-                        {% set has_essentia = (track.bpm is not none and track.bpm != '') or track.mood_list or track.essentia_genres %}
-                        {% if not has_essentia %}
-                        <div class="text-center text-muted py-3 small">
-                            <i class="bi bi-info-circle fs-3 d-block mb-2"></i>
-                            No Essentia analysis yet. Run an ML scan to detect BPM, moods, and genres offline.
-                        </div>
-                        {% else %}
-
-                        <div class="row g-2 text-center mb-3">
-                            <div class="col-4">
-                                <div class="p-2 border border-secondary rounded bg-dark">
-                                    <div class="extra-small text-muted text-uppercase fw-semibold mb-1">BPM</div>
-                                    <div class="h5 fw-bold text-light mb-0">{{ track.bpm|round|int if track.bpm is defined and track.bpm is not none else '—' }}</div>
+                                            {% set ns3.first = False %}
+                                        {% endif %}
+                                    {% endfor %}
                                 </div>
-                            </div>
-                            <div class="col-4">
-                                <div class="p-2 border border-secondary rounded bg-dark">
-                                    <div class="extra-small text-muted text-uppercase fw-semibold mb-1">Key</div>
-                                    <div class="h5 fw-bold text-light mb-0">{{ track.key or '—' }}</div>
-                                </div>
-                            </div>
-                            <div class="col-4">
-                                <div class="p-2 border border-secondary rounded bg-dark">
-                                    <div class="extra-small text-muted text-uppercase fw-semibold mb-1">Gain</div>
-                                    <div class="h5 fw-bold text-light mb-0">{% if track.replaygain_track_gain %}{{ track.replaygain_track_gain }}dB{% else %}—{% endif %}</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <h6 class="fw-semibold text-muted extra-small text-uppercase mb-2">Detected Moods</h6>
-                        <div class="d-flex flex-wrap gap-1 mb-3">
-                            {% if track.mood_list %}
-                                {% for mood in track.mood_list %}
-                                <span class="badge text-dark fw-semibold" style="background-color: #F59C00;">{{ mood }}</span>
-                                {% endfor %}
                             {% else %}
-                                <span class="text-muted small">None detected</span>
+                                <div class="alert alert-secondary bg-dark border-secondary text-muted mb-0 small">
+                                    <i class="bi bi-info-circle me-1"></i> No external genre tags detected.
+                                </div>
                             {% endif %}
                         </div>
+                    </div>
 
-                        <h6 class="fw-semibold text-muted extra-small text-uppercase mb-2">Essentia Genres</h6>
-                        <div class="d-flex flex-wrap gap-1">
-                            {% if track.essentia_genres %}
-                                {% for genre in track.essentia_genres|split_genres %}
-                                <span class="badge bg-secondary fw-semibold">{{ genre }}</span>
-                                {% endfor %}
+                    <!-- Essentia Audio Analysis -->
+                    <div class="card shadow-sm">
+                        <div class="card-header border-secondary bg-transparent d-flex justify-content-between align-items-center py-2">
+                            <h6 class="card-title mb-0 fw-bold">
+                                <i class="bi bi-cpu text-info me-1"></i> Audio Analysis
+                            </h6>
+                            <button type="button" class="btn btn-sm btn-outline-secondary py-0" onclick="document.getElementById('essentiaScanForm').submit()"><i class="bi bi-lightning-charge"></i> Run Scan</button>
+                        </div>
+                        <div class="card-body p-3">
+                            {% set has_essentia = (track.bpm is not none and track.bpm != '') or track.mood_list or track.essentia_genres %}
+                            {% if not has_essentia %}
+                            <div class="text-center text-muted py-3 small">
+                                <i class="bi bi-info-circle fs-3 d-block mb-2"></i>
+                                No Essentia analysis yet. Run an ML scan to detect BPM, moods, and genres offline.
+                            </div>
                             {% else %}
-                                <span class="text-muted small">None detected</span>
+
+                            <div class="row g-2 text-center mb-3">
+                                <div class="col-4">
+                                    <div class="p-2 border border-secondary rounded bg-dark">
+                                        <div class="extra-small text-muted text-uppercase fw-semibold mb-1">BPM</div>
+                                        <div class="h5 fw-bold text-light mb-0">{{ track.bpm|round|int if track.bpm is defined and track.bpm is not none else '—' }}</div>
+                                    </div>
+                                </div>
+                                <div class="col-4">
+                                    <div class="p-2 border border-secondary rounded bg-dark">
+                                        <div class="extra-small text-muted text-uppercase fw-semibold mb-1">Key</div>
+                                        <div class="h5 fw-bold text-light mb-0">{{ track.key or '—' }}</div>
+                                    </div>
+                                </div>
+                                <div class="col-4">
+                                    <div class="p-2 border border-secondary rounded bg-dark">
+                                        <div class="extra-small text-muted text-uppercase fw-semibold mb-1">Gain</div>
+                                        <div class="h5 fw-bold text-light mb-0">{% if track.replaygain_track_gain %}{{ track.replaygain_track_gain }}dB{% else %}—{% endif %}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <h6 class="fw-semibold text-muted extra-small text-uppercase mb-2">Detected Moods</h6>
+                            <div class="d-flex flex-wrap gap-1 mb-3">
+                                {% if track.mood_list %}
+                                    {% for mood in track.mood_list %}
+                                    <span class="badge text-dark fw-semibold" style="background-color: #F59C00;">{{ mood }}</span>
+                                    {% endfor %}
+                                {% else %}
+                                    <span class="text-muted small">None detected</span>
+                                {% endif %}
+                            </div>
+
+                            <h6 class="fw-semibold text-muted extra-small text-uppercase mb-2">Essentia Genres</h6>
+                            <div class="d-flex flex-wrap gap-1">
+                                {% if track.essentia_genres %}
+                                    {% for genre in track.essentia_genres|split_genres %}
+                                    <span class="badge bg-secondary fw-semibold">{{ genre }}</span>
+                                    {% endfor %}
+                                {% else %}
+                                    <span class="text-muted small">None detected</span>
+                                {% endif %}
+                            </div>
                             {% endif %}
                         </div>
-                        {% endif %}
                     </div>
                 </div>
 
-                <!-- Lyrics Tab -->
-                <div class="card shadow-sm track-mobile-group" id="track-lyrics-section" data-mobile-tab="lyrics">
-                    <div class="card-header border-secondary bg-transparent d-flex justify-content-between align-items-center py-2">
-                        <h6 class="card-title mb-0 fw-bold"><i class="bi bi-chat-quote-fill text-primary me-1"></i> Lyrics</h6>
-                        <button type="button" class="btn btn-sm btn-outline-primary py-0" onclick="fetchLyricsFromLrclib('{{ track.id }}')"><i class="bi bi-cloud-download"></i> Fetch</button>
-                    </div>
-                    <div class="card-body p-3">
-                        <span id="lyricsFetchStatus" class="d-block small text-muted mb-2"></span>
-                        <textarea class="form-control bg-dark border-secondary font-monospace text-light" id="lyrics" name="lyrics" rows="8" placeholder="Paste full song lyrics here...">{{ track.lyrics or '' }}</textarea>
+                <!-- SECTION 3: LYRICS -->
+                <div id="section-lyrics" class="right-col-section track-mobile-group d-none" data-mobile-tab="lyrics">
+                    <div class="card shadow-sm">
+                        <div class="card-header border-secondary bg-transparent d-flex justify-content-between align-items-center py-2">
+                            <h6 class="card-title mb-0 fw-bold"><i class="bi bi-chat-quote-fill text-primary me-1"></i> Lyrics</h6>
+                            <button type="button" class="btn btn-sm btn-outline-primary py-0" onclick="fetchLyricsFromLrclib('{{ track.id }}')"><i class="bi bi-cloud-download"></i> Fetch</button>
+                        </div>
+                        <div class="card-body p-3">
+                            <span id="lyricsFetchStatus" class="d-block small text-muted mb-2"></span>
+                            <textarea class="form-control bg-dark border-secondary font-monospace text-light" id="lyrics" name="lyrics" rows="18" placeholder="Paste full song lyrics here...">{{ track.lyrics or '' }}</textarea>
+                        </div>
                     </div>
                 </div>
 
-                <!-- Similar Artists Card -->
-                <div class="card shadow-sm track-mobile-group" id="track-similar-section" data-mobile-tab="details">
-                    <div class="card-header border-secondary bg-transparent py-2">
-                        <h6 class="card-title mb-0 fw-bold"><i class="bi bi-person-heart text-danger me-1"></i> Similar Artists</h6>
-                    </div>
-                    <div class="card-body p-3">
-                        <div id="similarArtistsContainer">
-                            <div class="text-center py-3 text-muted small">
-                                <span class="spinner-border spinner-border-sm me-2"></span> Loading similar artists...
+                <!-- SECTION 4: SIMILAR ARTISTS -->
+                <div id="section-similar" class="right-col-section track-mobile-group d-none" data-mobile-tab="details">
+                    <div class="card shadow-sm">
+                        <div class="card-header border-secondary bg-transparent py-2">
+                            <h6 class="card-title mb-0 fw-bold"><i class="bi bi-person-heart text-danger me-1"></i> Similar Artists</h6>
+                        </div>
+                        <div class="card-body p-3">
+                            <div id="similarArtistsContainer">
+                                <div class="text-center py-3 text-muted small">
+                                    <span class="spinner-border spinner-border-sm me-2"></span> Loading similar artists...
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -705,9 +726,25 @@
     "discogsGenres": track.get("discogs_genres"),
     "musicbrainzGenres": track.get("musicbrainz_genres")
 } | tojson | safe }}</script>
+
 <script>
     var _pd = JSON.parse(document.getElementById('page-data').textContent);
     const CURRENT_TRACK_ID = _pd.trackId;
+
+    // Custom toggle logic for the desktop right-hand tabs to avoid fighting with mobile CSS classes
+    function switchRightTab(targetId, btnEl) {
+        document.querySelectorAll('#trackPageTabs .nav-link').forEach(b => b.classList.remove('active'));
+        btnEl.classList.add('active');
+        document.querySelectorAll('.right-col-section').forEach(el => {
+            el.classList.remove('d-block');
+            el.classList.add('d-none');
+        });
+        const target = document.getElementById(targetId);
+        if (target) {
+            target.classList.remove('d-none');
+            target.classList.add('d-block');
+        }
+    }
 
     function renameTrackFile(trackId) {
         fetch('/api/track/' + trackId + '/rename-file', { method: 'POST' })
@@ -839,6 +876,7 @@
         window.location.href = `/downloads/search?q=${encodeURIComponent(query)}`;
     }
 
+    // Rich Similar Artists Rendering
     document.addEventListener('DOMContentLoaded', function() {
         const artist = '{{ track.artist|escapejs }}'.trim();
         if (artist) {
@@ -846,23 +884,69 @@
                 .then(r => r.json())
                 .then(data => {
                     const container = document.getElementById('similarArtistsContainer');
-                    if (!data.similar_artists || (!data.similar_artists.lastfm?.length && !data.similar_artists.listenbrainz?.length)) {
+                    if (!data.similar_artists) {
                         container.innerHTML = '<div class="text-center py-3 text-muted small">No similar artists data available.</div>';
                         return;
                     }
-                    const merged = [...(data.similar_artists.lastfm || []), ...(data.similar_artists.listenbrainz || [])]
-                        .map(a => typeof a === 'string' ? a : a.name)
-                        .filter((v, i, a) => a.indexOf(v) === i)
-                        .slice(0, 10);
 
-                    let html = '<div class="d-flex flex-wrap gap-2">';
-                    merged.forEach(name => {
-                        html += `<a href="/artist/${encodeURIComponent(name)}" class="badge bg-secondary text-decoration-none text-light border border-secondary" style="font-size:0.8rem; padding: 0.4rem 0.6rem;">${escapeHtml(name)}</a>`;
-                    });
-                    container.innerHTML = html + '</div>';
+                    let inCollection = data.similar_artists.in_collection || [];
+                    let missing = data.similar_artists.missing || [];
+
+                    // Compatibility fallback if backend still returns old format
+                    if (!inCollection.length && !missing.length) {
+                        const merged = [...(data.similar_artists.lastfm || []), ...(data.similar_artists.listenbrainz || [])]
+                            .map(a => typeof a === 'string' ? {name: a} : a)
+                            .filter((v, i, a) => a.findIndex(t => t.name === v.name) === i);
+                        missing = merged.slice(0, 12);
+                    }
+
+                    if (!inCollection.length && !missing.length) {
+                        container.innerHTML = '<div class="text-center py-3 text-muted small">No similar artists data available.</div>';
+                        return;
+                    }
+
+                    const renderGrid = (artists, inCol) => {
+                        let html = '<div class="row g-2">';
+                        artists.forEach(a => {
+                            // High-quality fallback SVG if no image is available
+                            const img = a.image_url || a.thumb || 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="200"%3E%3Crect fill="%232a2a2a" width="200" height="200"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%23666" font-size="24"%3E%3Ctspan x="50%25" dy="-10"%3E%26%23128100%3B%3C/tspan%3E%3C/text%3E%3C/svg%3E';
+                            
+                            // In-collection opens artist page, missing opens the MusicBrainz/Soulseek search modal
+                            const action = inCol 
+                                ? `window.location.href='/artist/${encodeURIComponent(a.name)}'` 
+                                : `if(typeof openGlobalMbSearch === 'function'){ openGlobalMbSearch('${escapeHtml(a.name).replace(/'/g, "\\'")}', ''); } else { alert('Search unavailable'); }`;
+
+                            html += `
+                                <div class="col-4 col-sm-3 col-md-4 col-lg-3">
+                                    <div class="card h-100 bg-dark border-secondary overflow-hidden shadow-sm" style="cursor:pointer; transition: transform 0.2s;" onclick="${action}" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
+                                        <img src="${img}" class="card-img-top" style="aspect-ratio:1; object-fit:cover;" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'200\\' height=\\'200\\'%3E%3Crect fill=\\'%232a2a2a\\' width=\\'200\\' height=\\'200\\'/%3E%3Ctext x=\\'50%25\\' y=\\'50%25\\' text-anchor=\\'middle\\' dy=\\'.3em\\' fill=\\'%23666\\' font-size=\\'16\\'%3ENo Image%3C/text%3E%3C/svg%3E';">
+                                        <div class="card-body p-2 text-center d-flex align-items-center justify-content-center" style="background: rgba(0,0,0,0.8); min-height: 40px;">
+                                            <div class="extra-small fw-bold text-light" style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; line-height: 1.2;" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        });
+                        html += '</div>';
+                        return html;
+                    };
+
+                    let finalHtml = '';
+                    if (inCollection.length) {
+                        finalHtml += '<h6 class="text-success small fw-bold text-uppercase mb-3"><i class="bi bi-collection-play me-1"></i> In Collection</h6>';
+                        finalHtml += renderGrid(inCollection, true);
+                        if (missing.length) finalHtml += '<hr class="border-secondary my-4">';
+                    }
+
+                    if (missing.length) {
+                        finalHtml += '<h6 class="text-info small fw-bold text-uppercase mb-3"><i class="bi bi-cloud-download me-1"></i> Not In Collection</h6>';
+                        finalHtml += renderGrid(missing, false);
+                    }
+
+                    container.innerHTML = finalHtml;
                 })
                 .catch(() => {
-                    document.getElementById('similarArtistsContainer').innerHTML = '<div class="text-danger small">Failed to load.</div>';
+                    document.getElementById('similarArtistsContainer').innerHTML = '<div class="text-danger small py-3 text-center">Failed to load similar artists.</div>';
                 });
         }
     });
@@ -912,4 +996,6 @@
 
 {% include 'components/modals/_musicbrainz_release_match.html' %}
 <script src="{{ versioned_static('js/add_to_playlist.js') }}"></script>
+<!-- Imported to allow the global MusicBrainz / Soulseek modal to open when a missing artist is clicked -->
+<script src="{{ versioned_static('js/downloads.js') }}"></script>
 {% endblock %}
