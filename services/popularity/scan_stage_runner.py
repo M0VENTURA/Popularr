@@ -792,7 +792,7 @@ def _persist_popularity_marking(rows: list[dict[str, Any]]) -> None:
                     text(
                         "UPDATE tracks SET popularity_marked = :marked, "
                         "single_confidence = COALESCE(:conf, single_confidence), "
-                        "single_sources = COALESCE(:sources::jsonb, single_sources) "
+                        "single_sources = COALESCE(CAST(:sources AS JSONB), single_sources) "
                         "WHERE id = :id"
                     ),
                     {
