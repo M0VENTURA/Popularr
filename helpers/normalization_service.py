@@ -191,8 +191,30 @@ def strip_remaster_suffix(value: str) -> str:
     return REMASTER_SUFFIX_RE.sub("", value or "").strip()
 
 
+# ---------------------------------------------------------------------------
+# Edition annotations
+#
+# ONE keyword list drives every edition-annotation decision in this module.
+#
+# Previously `_ALBUM_EDITION_STRIP_RE` (used by `strip_album_edition_marker`)
+# and `_EDITION_ANNOTATION_KEYWORDS` (used by `extract_edition_annotation`)
+# carried DIFFERENT keyword sets. "tour" was present in the second and absent
+# from the first, so "(tour edition)" was recognised as an edition annotation
+# for compatibility checks but was invisible to the stripper - which is why
+# "The Fall of Hearts (tour edition)" never collapsed.
+# ---------------------------------------------------------------------------
+
+_EDITION_ANNOTATION_KEYWORDS = frozenset({
+    "anniversary", "bonus", "clean", "collector", "deluxe", "digital",
+    "edition", "epic", "explicit", "expanded", "extended", "limited",
+    "mastered for", "press", "production", "reissue", "remaster",
+    "remastered", "special", "standard", "tour", "ultimate", "version",
+})
+
 _ALBUM_EDITION_STRIP_RE = re.compile(
     r"\s*[\(\[]\s*(?:clean|explicit|deluxe(?:\s+edition)?|deluxe\s+version|"
+    r"tour\s+edition|bonus(?:\s+edition|\s+track(?:s)?)?|"
+    r"japanese\s+edition|uk\s+edition|us\s+edition|eu(?:ropean)?\s+edition|"
     r"special\s+edition|expanded\s+edition|extended\s+edition|"
     r"(?:\d+\s*(?:year\s*)?)?anniversary(?:\s+edition)?|"
     r"reissue|limited\s+edition|collector(?:'s)?\s+edition|super\s+deluxe|"
@@ -207,15 +229,80 @@ _ALBUM_EDITION_STRIP_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A trailing pair of IDENTICAL parenthetical markers, e.g. "(5,000枚限定生産
-# 特装盤) (5,000枚限定生産特装盤)" or "(mastered for iTunes) (mastered for
-# iTunes)".  Tag sources that duplicate an edition marker once per re-tag
-# produce this shape for markers NOT in the keyword list above — the generic
+# A trailing pair of IDENTICAL parenthetical markers, e.g.
+# "(tour edition) (tour edition)" or "(mastered for iTunes) (mastered for
+# iTunes)". Tag sources that duplicate an edition marker once per re-tag
+# produce this shape for markers NOT in the keyword list above - the generic
 # rule collapses them regardless of language/content.
+#
+# FIXED: the previous pattern was
+#     r"\s*(\([^()]*\))\s*\(\1\)\s*$"
+# where group 1 captured the parentheses THEMSELVES, so the backreference
+# `\(\1\)` demanded a literal "((tour edition))" - doubled parens. It could
+# never match real input, so this rule had never once fired and every
+# duplicated marker survived. The group now captures only the INNER text.
 _REPEATED_TRAILING_MARKER_RE = re.compile(
-    r"\s*(\([^()]*\))\s*\(\1\)\s*$",
+    r"\s*\(([^()]*)\)\s*\(\s*\1\s*\)\s*$",
     re.IGNORECASE,
 )
+
+# Any bracketed annotation, anywhere in the string.
+_ANNOTATION_RE = re.compile(r"\s*([\(\[])([^)\]]*)([\)\]])")
+
+
+def _annotation_key(text: str) -> str:
+    """Punctuation- and case-insensitive comparison key for annotation text."""
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").casefold()).strip()
+
+
+def annotation_keys(name: str) -> list[str]:
+    """Normalised keys for every bracketed annotation in ``name``."""
+    return [
+        key
+        for key in (
+            _annotation_key(m.group(2))
+            for m in _ANNOTATION_RE.finditer(str(name or ""))
+        )
+        if key
+    ]
+
+
+def has_edition_annotation(name: str) -> bool:
+    """True when ``name`` carries an edition/version style annotation."""
+    return any(
+        any(keyword in key for keyword in _EDITION_ANNOTATION_KEYWORDS)
+        for key in annotation_keys(name)
+    )
+
+
+def dedupe_annotations(name: str) -> str:
+    """Collapse repeated bracketed annotations, keeping the FIRST occurrence.
+
+        "The Fall of Hearts (tour edition) (tour edition)"
+            -> "The Fall of Hearts (tour edition)"
+
+    Unlike `strip_album_edition_marker`, this PRESERVES one copy of the
+    annotation - it is for repairing a stored/display album name, not for
+    building a bare lookup key. Comparison is punctuation- and
+    case-insensitive, so "(Tour Edition)" and "(tour edition)" collapse
+    together. Distinct annotations are all preserved, in original order.
+    """
+    if not name:
+        return ""
+
+    seen: set[str] = set()
+
+    def _sub(match: re.Match[str]) -> str:
+        key = _annotation_key(match.group(2))
+        if not key:
+            return match.group(0)
+        if key in seen:
+            return ""
+        seen.add(key)
+        return match.group(0)
+
+    collapsed = _ANNOTATION_RE.sub(_sub, str(name))
+    return re.sub(r"\s{2,}", " ", collapsed).strip()
 
 
 def strip_album_edition_marker(value: str) -> str:
@@ -223,16 +310,20 @@ def strip_album_edition_marker(value: str) -> str:
 
     Strips edition markers idempotently and REPEATEDLY so a mangled album
     name like "The General Strike (10 Year Anniversary) (10 Year
-    Anniversary) (10 Year Anniversary) (10 Year Anniversary)" or "Doomsday
-    Machine (reissue) (reissue) (reissue)" collapses to the clean release
-    title — some tag sources duplicate the marker once per re-tag.  A bare
-    "(reissue)" / "(anniversary)" is an edition marker too, so it is
-    stripped.  Also handles:
+    Anniversary)" or "Doomsday Machine (reissue) (reissue) (reissue)"
+    collapses to the clean release title — some tag sources duplicate the
+    marker once per re-tag. A bare "(reissue)" / "(anniversary)" is an
+    edition marker too, so it is stripped. Also handles:
       - "mastered for iTunes" / "(BMG club edition)" / "(deluxe version)"
+      - "(tour edition)" / "(bonus)" / regional "(Japanese edition)"
       - Japanese limited-edition markers: "(5,000枚限定生産特装盤)",
         "(完全生産限定盤)", "(初回限定盤)" ...
       - ANY repeated identical trailing marker (generic dedup — catches
         markers outside the keyword list regardless of language).
+
+    NOTE: this removes the marker entirely, for building lookup keys. To
+    repair a stored album name while KEEPING one copy of its edition, use
+    `dedupe_annotations()` instead.
     """
     cleaned = value or ""
     prev = None
@@ -245,6 +336,89 @@ def strip_album_edition_marker(value: str) -> str:
         prev = cleaned
         cleaned = stripped
     return cleaned or (value or "")
+
+
+def is_redundant_rename(old_name: str, new_name: str) -> bool:
+    """True when ``new_name`` adds nothing beyond duplicated annotations."""
+    return (
+        dedupe_annotations(old_name).casefold()
+        == dedupe_annotations(new_name).casefold()
+    )
+
+
+def safe_album_rename(old_name: str, new_name: str) -> tuple[str, str]:
+    """Validate a proposed album rename.
+
+    Returns ``(resolved_name, reason)``. ``resolved_name`` is empty when the
+    rename must NOT be applied; ``reason`` always explains the decision so
+    callers can log it.
+
+    Rejects, in order:
+      - an empty proposal or empty current name;
+      - a proposal that only repeats an annotation the album already has
+        (the "(tour edition) (tour edition)" defect);
+      - a proposal identical to the current name after normalisation;
+      - a proposal that would DROP an edition annotation the library name
+        carries — editions are how separate pressings stay distinct.
+
+    A proposal that partly duplicates is salvaged to its collapsed form
+    rather than rejected outright.
+    """
+    old_raw = str(old_name or "").strip()
+    new_raw = str(new_name or "").strip()
+
+    if not new_raw:
+        return "", "proposed name empty"
+    if not old_raw:
+        return "", "current name empty"
+
+    deduped = dedupe_annotations(new_raw)
+
+    if deduped != new_raw:
+        if deduped.casefold() == dedupe_annotations(old_raw).casefold():
+            return "", f"proposal only duplicated annotations: {new_raw!r}"
+        return deduped, f"collapsed duplicate annotations from {new_raw!r}"
+
+    if is_redundant_rename(old_raw, new_raw):
+        return "", "no change after annotation normalisation"
+
+    old_keys = set(annotation_keys(old_raw))
+    new_keys = set(annotation_keys(new_raw))
+    lost = {
+        key for key in (old_keys - new_keys)
+        if any(keyword in key for keyword in _EDITION_ANNOTATION_KEYWORDS)
+    }
+    if lost:
+        return "", f"would drop edition annotation(s): {sorted(lost)}"
+
+    return new_raw, "ok"
+
+
+def append_annotation_once(name: str, label: str) -> str:
+    """Append ``(label)`` to ``name`` only if not already annotated with it.
+
+    Matches the label ANYWHERE inside ANY bracketed group, so
+    "Song (Recorded Live)" is correctly recognised as already-live and does
+    NOT become "Song (Recorded Live) (Live)". The result is passed through
+    `dedupe_annotations()`, so this also repairs names already damaged by
+    the previous start-anchored check.
+    """
+    raw = str(name or "").strip()
+    label = str(label or "").strip()
+    if not raw or not label:
+        return dedupe_annotations(raw)
+
+    already = bool(
+        re.search(
+            rf"[\(\[][^)\]]*\b{re.escape(label)}\b[^)\]]*[\)\]]",
+            raw,
+            re.IGNORECASE,
+        )
+    )
+    if already:
+        return dedupe_annotations(raw)
+
+    return dedupe_annotations(f"{raw} ({label})")
 
 
 def strip_search_keywords(value: str) -> str:
@@ -342,11 +516,6 @@ def extract_version_info(title: str) -> tuple[str, set[str]]:
         found_versions,
     )
 
-
-_EDITION_ANNOTATION_KEYWORDS = frozenset({
-    "anniversary", "collector", "deluxe", "edition", "epic", "expanded",
-    "extended", "limited", "reissue", "special", "tour", "ultimate",
-})
 
 _EDITION_ANNOTATION_RE = re.compile(r"[\(\[]([^\)\]]+)[\)\]]\s*$", re.IGNORECASE)
 
@@ -511,6 +680,19 @@ def normalize_album(value: str) -> str:
     )
 
 
+def clean_album_name_for_storage(value: str) -> str:
+    """Canonicalization for the album / stored display name.
+
+    Collapses duplicated annotations while PRESERVING the edition, so
+    "The Fall of Hearts (tour edition) (tour edition)" becomes
+    "The Fall of Hearts (tour edition)" rather than losing the edition.
+    Use this before writing an album name to the DB or to file tags.
+    """
+    if not value:
+        return ""
+    return dedupe_annotations(" ".join(str(value).strip().split()))
+
+
 # alias
 normalize = normalize_title_for_lookup
 
@@ -583,6 +765,30 @@ def strip_cover_attribution(title: str) -> str:
         return ""
     result = _COVER_ATTRIBUTION_RE.sub("", title).strip()
     return result if result else title
+
+
+_LIVE_SUFFIX_RE = re.compile(
+    r"\s*[\(\[](?:[^)\]]*\b)?(?:Live|Acoustic|Unplugged)\b[^)\]]*[\)\]]\s*$",
+    re.IGNORECASE,
+)
+
+
+def strip_live_acoustic_suffix(title: str) -> str:
+    """Strip a trailing live/acoustic/unplugged annotation from a title.
+
+    Matches the label anywhere inside the trailing bracket, so
+    "Song (Recorded Live)" and "Song (Stripped Acoustic)" are handled, not
+    only "Song (Live)".
+    """
+    if not title:
+        return ""
+    result = title
+    for _ in range(4):
+        stripped = _LIVE_SUFFIX_RE.sub("", result).strip()
+        if stripped == result:
+            break
+        result = stripped
+    return result or title
 
 
 # =============================================================================
