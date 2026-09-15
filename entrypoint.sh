@@ -38,7 +38,7 @@ verify_scan_unwrap_fix() {
     local file="/app/services/popularity/scan_stage_runner.py"
     local src_hits=0
     if [ -f "$file" ]; then
-        src_hits=$(grep -c "$marker" "$file" 2>/dev/null || echo 0)
+        src_hits=$(grep -c "$marker" "$file" 2>/dev/null || true)
     fi
     local loaded
     loaded=$(python3 -c "
