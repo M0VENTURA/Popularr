@@ -998,6 +998,8 @@ def _match_mb_tracks_to_library(
                 Diff_fields.append("track_number")
             if Entry["mb_recording_mbid"] and Library_mbid != Entry["mb_recording_mbid"]:
                 Diff_fields.append("mbid")
+            if str(Library_disc_number or "1").strip() != str(Entry["mb_disc_number"]):
+                Diff_fields.append("disc_number")
             if Entry["mb_duration"] is not None:
                 try:
                     Lib_ms = int(float(Library_duration or 0))
