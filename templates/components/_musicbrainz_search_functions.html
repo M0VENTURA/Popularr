@@ -1,2 +1,28 @@
-{# Backward compatibility shim — delegates to the unified component #}
-{% include 'components/_musicbrainz_search_component.html' %}
+============================================================
+FILE: templates/components/_musicbrainz_search_functions.html
+============================================================
+{#
+DEPRECATED — backward-compatibility shim. Renders nothing.
+
+This file used to be:
+
+    {% include 'components/_musicbrainz_search_component.html' %}
+
+which made it a THIRD path to the same component (after base.html's
+_musicbrainz_search_modal.html and modals/_album_lookup.html). Any page
+including this alongside base.html therefore rendered duplicate
+id="mbSearchArtist" / id="mbSearchResults" elements, and
+`document.getElementById()` silently resolved to the wrong copy.
+
+Its name also implies it supplies JavaScript. It never did — the functions
+(performMbSearch, clearMbSearch, confirmReleaseSelection,
+openGlobalMbSearch, handleGlobalMbSelect) all live in static/js/main.js,
+which base.html loads on every page.
+
+Nothing is needed here. The file is retained purely so that an existing
+`{% include 'components/_musicbrainz_search_functions.html' %}` does not
+raise a TemplateNotFound; delete it once no template references it.
+
+Find remaining references with:
+    grep -rn "_musicbrainz_search_functions" templates/
+#}
