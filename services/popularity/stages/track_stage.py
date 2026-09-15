@@ -79,6 +79,7 @@ from services.enrichment.genre_aggregation_service import aggregate_genres
 from db.repositories.tracks import insert_or_update_track
 from helpers.normalization_service import (
     edition_annotations_compatible,
+    safe_album_rename,
     safe_int,
     safe_str,
 )
@@ -693,13 +694,67 @@ def _resolve_track_mb_metadata(
             if _mb_isrc and not _as_str(track.get("isrc") or "").strip():
                 payload["isrc"] = _mb_isrc
 
+            # --- ALBUM -------------------------------------------------
+            # The library album is authoritative for ordinary passes, but a
+            # forced/enrichment pass MUST be able to correct it. Previously
+            # this was gated on `not _existing_album`, so any track that
+            # already had an album could never have it corrected - the album
+            # field simply never updated.
+            #
+            # Corrections are routed through `safe_album_rename()`, which
+            # rejects a proposal that merely repeats an annotation the album
+            # already carries ("(tour edition) (tour edition)") and refuses
+            # one that would DROP the edition annotation the library relies
+            # on to keep separate pressings distinct.
             _existing_album = _as_str(track.get("album") or "").strip()
-            if mb_data.get("album") and not _existing_album:
-                payload["album"] = mb_data["album"]
+            _mb_album = _as_str(mb_data.get("album") or "").strip()
+
+            if _mb_album:
+                if not _existing_album:
+                    payload["album"] = _mb_album
+                elif _force_meta:
+                    _album_resolved, _album_reason = safe_album_rename(
+                        _existing_album, _mb_album,
+                    )
+                    if _album_resolved and _album_resolved != _existing_album:
+                        payload["album"] = _album_resolved
+                        logger.info(
+                            "Album corrected from MusicBrainz",
+                            track_id=track_id,
+                            old=_existing_album,
+                            new=_album_resolved,
+                            reason=_album_reason,
+                        )
+                    elif not _album_resolved:
+                        logger.debug(
+                            "Album correction rejected",
+                            track_id=track_id,
+                            existing=_existing_album,
+                            proposed=_mb_album,
+                            reason=_album_reason,
+                        )
                 
+            # --- ARTIST ------------------------------------------------
+            # Same defect as `album` above: gated on the field being empty,
+            # so a wrong artist could never be corrected. Allow a correction
+            # under force, but never replace a populated artist with a value
+            # that normalises to the same thing.
             _existing_artist = _as_str(track.get("artist") or "").strip()
-            if mb_data.get("artist") and not _existing_artist:
-                payload["artist"] = mb_data["artist"]
+            _mb_artist = _as_str(mb_data.get("artist") or "").strip()
+
+            if _mb_artist:
+                if not _existing_artist:
+                    payload["artist"] = _mb_artist
+                elif _force_meta and _mb_artist != _existing_artist:
+                    from helpers.normalization_service import normalize_artist
+                    if normalize_artist(_mb_artist) != normalize_artist(_existing_artist):
+                        payload["artist"] = _mb_artist
+                        logger.info(
+                            "Artist corrected from MusicBrainz",
+                            track_id=track_id,
+                            old=_existing_artist,
+                            new=_mb_artist,
+                        )
                 
             _existing_year = _as_str(track.get("year") or "").strip()
             _mb_year = _as_str(mb_data.get("year") or "").strip()
