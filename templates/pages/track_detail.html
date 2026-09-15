@@ -26,14 +26,14 @@
         padding: 0.6rem 1rem;
         box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.5);
     }
-    
+
     [id$="-section"], [id$="-card"] { scroll-margin-top: 130px; }
 </style>
 
 <div class="container-fluid mt-4">
     {% set artist_parts = track.artist|split_artist_collabs %}
     {% set hero_art_url = '/api/album/' ~ (track.artist|path_segment) ~ '/' ~ (track.album|path_segment) ~ '/art?s=160' %}
-    
+
     <nav aria-label="breadcrumb">
         <ol class="breadcrumb">
             <li class="breadcrumb-item"><a href="{{ url_for('ui.dashboard') }}">Dashboard</a></li>
@@ -47,7 +47,7 @@
             <li class="breadcrumb-item active" aria-current="page">{{ track.title }}</li>
         </ol>
     </nav>
-    
+
     <!-- Unified Hero: Art + Title + Metadata + Scan Toolbar + Play CTA -->
     <div class="card mb-4 position-relative shadow-sm" id="track-details-section">
         <div class="card-body p-3 p-md-4">
@@ -58,7 +58,7 @@
                     title="Favourite this track" aria-label="Favourite this track">
                 <i class="bi {{ 'bi-heart-fill' if is_track_favourite else 'bi-heart' }} fs-4" id="trackFavouriteIcon"></i>
             </button>
-            
+
             <!-- 1. Header: artwork + title + artist + rating -->
             <div class="d-flex align-items-start gap-3 mb-3">
                 <div class="flex-shrink-0">
@@ -86,6 +86,15 @@
                     {% endif %}
                     {% if track.stars %}
                     <span class="badge bg-warning-subtle text-warning border border-warning-subtle ms-1" style="font-size:0.75rem;">{{ track.stars }}★</span>
+                    {% endif %}
+                    {% if track.genres %}
+                    <div class="d-flex align-items-center gap-1 flex-wrap mt-2">
+                        {% for genre in track.genres.split(',') %}
+                            {% if genre.strip() %}
+                            <span class="badge bg-primary-subtle text-primary border border-primary-subtle" style="font-size:0.7rem;">{{ genre.strip() }}</span>
+                            {% endif %}
+                        {% endfor %}
+                    </div>
                     {% endif %}
                 </div>
             </div>
@@ -119,7 +128,7 @@
                 <input type="hidden" name="track_id" value="{{ track.id }}">
             </form>
 
-            <!-- 3. Streamlined Scan / Actions Toolbar (Placed above Play CTA for Uniformity) -->
+            <!-- 3. Streamlined Scan / Actions Toolbar -->
             <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 pt-1 mb-3 scan-toolbar">
                 <div class="d-flex align-items-center gap-2">
                     <button type="submit" form="rescanTrackForm" class="btn btn-warning btn-sm fw-bold">
@@ -160,13 +169,13 @@
             <ul class="nav nav-pills nav-fill gap-2 small d-none d-lg-flex bg-secondary p-1 rounded">
                 <li class="nav-item"><button class="nav-link active py-1" onclick="document.getElementById('trackEditAccordion').scrollIntoView();">Edit Metadata</button></li>
                 <li class="nav-item"><button class="nav-link py-1" onclick="document.getElementById('track-scoring-section').scrollIntoView();">Scoring & Stats</button></li>
-                <li class="nav-item"><button class="nav-link py-1" onclick="document.getElementById('track-essentia-card').scrollIntoView();">Audio Analysis</button></li>
+                <li class="nav-item"><button class="nav-link py-1" onclick="document.getElementById('track-genres-card').scrollIntoView();">Genres & Audio</button></li>
                 <li class="nav-item"><button class="nav-link py-1" onclick="document.getElementById('track-similar-section').scrollIntoView();">Similar Artists</button></li>
             </ul>
             <div class="mobile-tab-bar d-lg-none" role="tablist" aria-label="Track sections" data-mobile-tabs data-group-attr="data-mobile-tab" data-active-class="mobile-tab-active">
                 <button type="button" class="tab-btn active" data-tab="details" role="tab" aria-selected="true"><i class="bi bi-pencil-square"></i> Edit</button>
                 <button type="button" class="tab-btn" data-tab="scoring" role="tab" aria-selected="false"><i class="bi bi-graph-up"></i> Score</button>
-                <button type="button" class="tab-btn" data-tab="tech" role="tab" aria-selected="false"><i class="bi bi-cpu"></i> Audio</button>
+                <button type="button" class="tab-btn" data-tab="tech" role="tab" aria-selected="false"><i class="bi bi-tags"></i> Tags</button>
                 <button type="button" class="tab-btn" data-tab="lyrics" role="tab" aria-selected="false"><i class="bi bi-chat-quote"></i> Lyrics</button>
             </div>
         </div>
@@ -175,7 +184,7 @@
     <!-- Two-Column Grid: Left (Forms) / Right (Stats) -->
     <form method="POST" action="{{ url_for('ui.track_detail', track_id=track.id) }}" id="trackMetadataForm" data-sticky-save>
         <div class="row g-3 mb-4">
-            
+
             <!-- LEFT COLUMN: Editable Metadata -->
             <div class="col-12 col-lg-6 track-mobile-group mobile-tab-active" data-mobile-tab="details">
                 <div class="accordion shadow-sm" id="trackEditAccordion">
@@ -213,7 +222,16 @@
                                 </div>
 
                                 <hr class="my-3">
-                                
+
+                                <h6 class="text-muted fw-bold small text-uppercase mb-3">Track Genres</h6>
+                                <div class="mb-3">
+                                    <label for="genres" class="form-label small fw-semibold text-muted mb-1">Final Genres (Comma separated)</label>
+                                    <input type="text" class="form-control" id="genres" name="genres" value="{{ track.genres or '' }}" placeholder="e.g. Pop Rap, Hip Hop">
+                                    <div class="form-text text-muted" style="font-size:0.75rem;">These are the aggregated genres that are synced to the physical audio file metadata.</div>
+                                </div>
+
+                                <hr class="my-3">
+
                                 <h6 class="text-muted fw-bold small text-uppercase mb-3">Identifiers & Credits</h6>
                                 <div class="mb-3">
                                     <label for="mbid" class="form-label small fw-semibold text-muted mb-1">MusicBrainz Recording ID</label>
@@ -371,10 +389,10 @@
                     <button type="submit" class="btn btn-success fw-bold px-4 shadow-sm"><i class="bi bi-check-circle-fill me-1"></i> Save Changes</button>
                 </div>
             </div>
-            
+
             <!-- RIGHT COLUMN: Scoring, Insight & Discovery -->
             <div class="col-12 col-lg-6 d-flex flex-column gap-3">
-                
+
                 <!-- Track Scoring Card -->
                 <div class="card shadow-sm track-mobile-group mobile-tab-active" id="track-scoring-section" data-mobile-tab="scoring">
                     <div class="card-header border-secondary d-flex justify-content-between align-items-center bg-transparent py-2">
@@ -390,7 +408,7 @@
                         {% if track.single_confidence == 'high' %}{% set _ = rating_basis.append('High-confidence single') %}{% endif %}
                         {% if track.popularity_marked %}{% set _ = rating_basis.append('Top 10% artist catalog') %}{% endif %}
                         {% if track.stars == 5 and track.single_confidence != 'high' and not track.popularity_marked %}{% set _ = rating_basis.append('Standout (album + artist z)') %}{% endif %}
-                        
+
                         {% if rating_basis %}
                         <div class="alert alert-secondary py-2 px-3 mb-3 border-secondary">
                             <small class="text-muted text-uppercase fw-semibold d-block mb-2"><i class="bi bi-patch-check-fill text-success"></i> Rating Basis</small>
@@ -487,6 +505,74 @@
                     </div>
                 </div>
 
+                <!-- Detected Genres & Tags Card -->
+                <div class="card shadow-sm track-mobile-group" id="track-genres-card" data-mobile-tab="tech">
+                    <div class="card-header border-secondary bg-transparent py-2">
+                        <h6 class="card-title mb-0 fw-bold"><i class="bi bi-tags-fill text-warning me-1"></i> Detected Genres & Tags</h6>
+                    </div>
+                    <div class="card-body p-3">
+                        <p class="text-muted extra-small mb-3">All genres detected from external providers for this specific track.</p>
+                        {% set sources = [
+                            ('lastfm_tags', 'Last.fm', 'D51007', 'white', 'bi-music-note-beamed'),
+                            ('listenbrainz_genres', 'ListenBrainz', '0066FF', 'white', 'bi-headphones'),
+                            ('discogs_genres', 'Discogs', '6c757d', 'white', 'bi-vinyl-fill'),
+                            ('musicbrainz_genres', 'MusicBrainz', 'EB743B', 'white', 'bi-hexagon-fill'),
+                            ('spotify_genres', 'Spotify', '1DB954', 'white', 'bi-spotify'),
+                            ('navidrome_genres', 'Navidrome', '17A589', 'white', 'bi-music-note-list'),
+                            ('manual_genres', 'Manual Tags', '0dcaf0', 'black', 'bi-person-fill-gear')
+                        ] %}
+                        
+                        {% set ns = namespace(has_any=False) %}
+                        {% for key, label, bgcolor, textcolor, icon in sources %}
+                            {% set val = track[key] %}
+                            {% if val and val != '[]' and val != '' and val != 'null' %}
+                                {% set ns.has_any = True %}
+                            {% endif %}
+                        {% endfor %}
+
+                        {% if ns.has_any %}
+                            {% set ns2 = namespace(first=True) %}
+                            <ul class="nav nav-tabs border-secondary mb-3 flex-nowrap overflow-auto" role="tablist" style="white-space: nowrap; padding-bottom: 2px;">
+                                {% for key, label, bgcolor, textcolor, icon in sources %}
+                                    {% set val = track[key] %}
+                                    {% if val and val != '[]' and val != '' and val != 'null' %}
+                                        <li class="nav-item" role="presentation">
+                                            <button class="nav-link {{ 'active text-white' if ns2.first else 'text-muted' }} px-2 py-1 small"
+                                                    id="trackGenreTab{{ key }}-tab" data-bs-toggle="tab"
+                                                    data-bs-target="#trackGenreTab{{ key }}-content"
+                                                    type="button" role="tab" style="color: #{{ bgcolor }}; border-color: transparent;">
+                                                <i class="bi {{ icon }}"></i> {{ label }}
+                                            </button>
+                                        </li>
+                                        {% set ns2.first = False %}
+                                    {% endif %}
+                                {% endfor %}
+                            </ul>
+
+                            {% set ns3 = namespace(first=True) %}
+                            <div class="tab-content">
+                                {% for key, label, bgcolor, textcolor, icon in sources %}
+                                    {% set val = track[key] %}
+                                    {% if val and val != '[]' and val != '' and val != 'null' %}
+                                        <div class="tab-pane fade {{ 'active show' if ns3.first else '' }}" id="trackGenreTab{{ key }}-content" role="tabpanel">
+                                            <div class="d-flex flex-wrap gap-1">
+                                                {% for genre in val|split_genres %}
+                                                    <span class="badge border" style="background-color: #{{ bgcolor }}; color: {{ textcolor }}; font-size: 0.75rem; opacity: 0.9;">{{ genre }}</span>
+                                                {% endfor %}
+                                            </div>
+                                        </div>
+                                        {% set ns3.first = False %}
+                                    {% endif %}
+                                {% endfor %}
+                            </div>
+                        {% else %}
+                            <div class="alert alert-secondary bg-dark border-secondary text-muted mb-0 small">
+                                <i class="bi bi-info-circle me-1"></i> No external genre tags detected.
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+
                 <!-- Essentia Audio Analysis -->
                 <div class="card shadow-sm track-mobile-group" id="track-essentia-card" data-mobile-tab="tech">
                     <div class="card-header border-secondary bg-transparent d-flex justify-content-between align-items-center py-2">
@@ -503,7 +589,7 @@
                             No Essentia analysis yet. Run an ML scan to detect BPM, moods, and genres offline.
                         </div>
                         {% else %}
-                        
+
                         <div class="row g-2 text-center mb-3">
                             <div class="col-4">
                                 <div class="p-2 border border-secondary rounded bg-dark">
@@ -579,7 +665,7 @@
             </div>
         </div>
     </form>
-    
+
     <!-- Mobile sticky quick actions -->
     <div class="track-quick-bar d-lg-none">
         <div class="d-flex gap-2 align-items-center">
@@ -670,7 +756,7 @@
         const title = document.getElementById('title').value;
         const artist = document.getElementById('artist').value;
         if (!title || !artist) { alert('Please enter both title and artist'); return; }
-        
+
         let modal = document.getElementById('trackMBLookupModal');
         if (!modal) {
             const modalHTML = `
@@ -691,12 +777,12 @@
             document.body.insertAdjacentHTML('beforeend', modalHTML);
             modal = document.getElementById('trackMBLookupModal');
         }
-        
+
         const resultsDiv = document.getElementById('trackMBLookupResults');
         resultsDiv.innerHTML = '<div class="text-center py-4"><span class="spinner-border text-primary me-2"></span> Searching MusicBrainz...</div>';
         const bsModal = new bootstrap.Modal(modal);
         bsModal.show();
-        
+
         fetch('/api/track/musicbrainz', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -706,7 +792,7 @@
         .then(data => {
             if (data.error) { resultsDiv.innerHTML = '<div class="alert alert-danger">Error: ' + data.error + '</div>'; return; }
             if (!data.results || data.results.length === 0) { resultsDiv.innerHTML = '<div class="alert alert-info">No results found</div>'; return; }
-            
+
             let html = '<div class="list-group">';
             data.results.forEach(result => {
                 const confClass = result.confidence > 0.8 ? 'success' : result.confidence > 0.5 ? 'warning' : 'secondary';
@@ -768,7 +854,7 @@
                         .map(a => typeof a === 'string' ? a : a.name)
                         .filter((v, i, a) => a.indexOf(v) === i)
                         .slice(0, 10);
-                    
+
                     let html = '<div class="d-flex flex-wrap gap-2">';
                     merged.forEach(name => {
                         html += `<a href="/artist/${encodeURIComponent(name)}" class="badge bg-secondary text-decoration-none text-light border border-secondary" style="font-size:0.8rem; padding: 0.4rem 0.6rem;">${escapeHtml(name)}</a>`;
