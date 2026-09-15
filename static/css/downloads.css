@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Downloads & Queue Styles 
+   Downloads & Queue Styles
    ========================================================================== */
 
 .processing-log {
@@ -12,7 +12,6 @@
 .status-badge-pending {
     background-color: var(--brand-spotify, #1db954) !important;
 }
-
 .status-badge-incomplete {
     background-color: var(--brand-lastfm, #d51007) !important;
 }
@@ -20,11 +19,11 @@
 /* ==========================================================================
    Folder Groups & Unmatched Folders
    ========================================================================== */
+
 #folderGroupsSection, #unmatchedFoldersSection {
     background-color: var(--secondary-bg, #1e1e1e) !important;
     border: 1px solid var(--border-color, #282828);
 }
-
 #folderGroupsSection .card-header, #unmatchedFoldersSection .card-header {
     background-color: var(--tertiary-bg, #282828) !important;
     border-bottom: 1px solid var(--border-color, #333) !important;
@@ -40,21 +39,17 @@
 .queue-group-toggle .queue-group-chevron {
     transition: transform 0.15s ease;
 }
-
 .queue-group-toggle .queue-group-chevron.rotated {
     transform: rotate(180deg);
 }
-
 .queue-group-body {
     background-color: rgba(0, 0, 0, 0.15);
     border-left: 2px solid var(--spotify-green, #1db954) !important;
 }
-
 .queue-group-body .list-group-item {
     border: none;
     border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.08)) !important;
 }
-
 .queue-group-body .list-group-item:last-child {
     border-bottom: none !important;
 }
@@ -98,8 +93,7 @@
     color: #a0a0a0 !important;
 }
 
-/* ─── Mobile Layout Fixes ─────────────────────────────────────────────── */
-
+/* ── Mobile Layout Fixes ─────────────────────────────────────────────────── */
 /* File-manager tabs & Stat pills stay on ONE swipable row */
 #downloadManagerTabs,
 .stat-pills-row {
@@ -109,12 +103,10 @@
     scrollbar-width: none; /* Firefox */
     -ms-overflow-style: none; /* IE 10+ */
 }
-
 #downloadManagerTabs::-webkit-scrollbar,
 .stat-pills-row::-webkit-scrollbar {
     display: none; /* Safari and Chrome */
 }
-
 #downloadManagerTabs .nav-link {
     white-space: nowrap;
     flex: 1 0 auto;
@@ -154,18 +146,15 @@
     .upcoming-table .col-mbid {
         display: none;
     }
-
     .queue-item .d-flex.justify-content-between {
         flex-direction: column;
         align-items: flex-start !important;
         gap: 0.5rem;
     }
-    
     .queue-item .d-flex.justify-content-between > .d-flex:last-child {
         width: 100%;
         justify-content: flex-end;
     }
-
     #fm-upcoming .d-flex.flex-wrap {
         gap: 0.35rem !important;
     }
