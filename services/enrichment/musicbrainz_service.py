@@ -1,15 +1,17 @@
 """MusicBrainz enrichment and lookup service.
 
 Owns MusicBrainz interpretation and matching rules. This module performs no
-Track mutation. Database access is limited to read-only library comparison
-Helpers.
+Track mutation except through the explicit Link/Align write helpers below,
+which only ever write the fields their name promises (mbid for Link;
+title/track_number/disc_number for Align) so the two album-page actions stay
+independently safe to run.
 
 Album identity rules:
 -	The album name supplied by the caller (the library album) is authoritative.
-  A recording’s specific release title never replaces it.
--	The album year comes from the matched release group’s ``first-release-date``
+  A recording's specific release title never replaces it.
+-	The album year comes from the matched release group's ``first-release-date``
   (the original release year), not from the edition/version held in the
-  Collection and not from each recording’s first linked release.
+  Collection and not from each recording's first linked release.
 
 Operational behaviour:
 -	Re-entrant singleton lock so shared-service creation can request the shared
@@ -28,20 +30,26 @@ Request-volume controls:
   Scoring does not re-browse the same group for each candidate.
 -	Availability of the HTTP client is checked before firing broad fallback
   Queries, so a MusicBrainz outage does not amplify into heavier requests.
+-	``compare_musicbrainz_release`` only browses a release-group when a direct
+  release lookup fails. Browsing unconditionally before checking the direct
+  lookup wasted a full release-group round trip on every compare where the
+  caller already knew the concrete release MBID — the ~2.7s slow-compare
+  regression this module's tests guard against.
 
 Web-service correctness notes:
--	``recording-level-rels`` is a RELEASE-level subquery (“include relationships
-  For the recordings on this release”). It is not a valid ``inc`` value on the
+-	``recording-level-rels`` is a RELEASE-level subquery ("include relationships
+  For the recordings on this release"). It is not a valid ``inc`` value on the
   Recording resource and makes MusicBrainz answer 400, so recording
   Relationship lookups must not request it.
--	An artist’s ``begin-area`` is frequently a city, so it cannot be used as a
+-	An artist's ``begin-area`` is frequently a city, so it cannot be used as a
   Country without checking the area type.
 
 Public exports required by other modules:
     Get_shared_mb_client, get_shared_mb_service, lookup_recording_metadata,
     Merge_metadata, fetch_musicbrainz_release_metadata, fetch_release_metadata,
     Resolve_release_id, lookup_musicbrainz_album, get_release_group_releases,
-    Get_musicbrainz_best_release, compare_musicbrainz_release
+    Get_musicbrainz_best_release, compare_musicbrainz_release,
+    Link_album_mbids, align_album_tracklist
 """
 from __future__ import annotations
 
@@ -87,6 +95,7 @@ T = TypeVar("T")
 
 __all__ = [
     "MusicBrainzService",
+    "align_album_tracklist",
     "build_artist_credit_string",
     "calculate_match_score",
     "compare_musicbrainz_release",
@@ -96,6 +105,7 @@ __all__ = [
     "get_release_group_releases",
     "get_shared_mb_client",
     "get_shared_mb_service",
+    "link_album_mbids",
     "lookup_musicbrainz_album",
     "lookup_recording_metadata",
     "merge_metadata",
@@ -135,6 +145,12 @@ _RELEASE_GROUP_MATCH_FLOOR = 0.6
 _TRACK_COUNT_REFINE_LIMIT = 3
 _RECORDING_RELATIONSHIP_INC = "artist-rels+work-rels+work-level-rels"
 
+# Fields the Align auto-fix is allowed to overwrite on a track row. Kept as a
+# fixed whitelist (never derived from request input) so _update_track_fields
+# can safely interpolate column names into an UPDATE statement.
+_ALIGN_WRITABLE_FIELDS = ("title", "track_number", "disc_number")
+_LINK_WRITABLE_FIELDS = ("mbid",)
+
 _COMPARE_LIBRARY_TRACKS_SQL = """
     SELECT id, title, track_number, disc_number, artist, year,
            Mbid, file_path, duration, mb_ignored_fields
@@ -144,6 +160,11 @@ _COMPARE_LIBRARY_TRACKS_SQL = """
     ORDER BY COALESCE(disc_number, '1'), COALESCE(track_number, '999')
 """
 
+_LIBRARY_TRACK_COLUMNS = (
+    "id", "title", "track_number", "disc_number", "artist", "year",
+    "mbid", "file_path", "duration", "mb_ignored_fields",
+)
+
 # ---------------------------------------------------------------------------
 # Diagnostics helpers
 # ---------------------------------------------------------------------------
@@ -152,8 +173,8 @@ def _error(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 def _year_of(value: Any) -> int | None:
-    text = str(value or "").strip()
-    return int(text[:4]) if len(text) >= 4 and text[:4].isdigit() else None
+    text_value = str(value or "").strip()
+    return int(text_value[:4]) if len(text_value) >= 4 and text_value[:4].isdigit() else None
 
 def _as_int(value: Any, default: int = 0) -> int:
     try:
@@ -223,10 +244,16 @@ def _ensure_monitor() -> None:
         return
     with _INIT_LOCK:
         if _MONITOR_THREAD is None or not _MONITOR_THREAD.is_alive():
+            # threading.Thread is stdlib — its kwargs are lowercase
+            # (target/name/daemon). The previous Target=/Name=/Daemon= call
+            # raised TypeError on the very first MusicBrainz request made
+            # through _call_with_heartbeat (i.e. almost every call this
+            # service makes), which the broad except-Exception callers
+            # silently turned into a generic "success: False" error.
             _MONITOR_THREAD = threading.Thread(
-                Target=_monitor_loop,
-                Name="mb-heartbeat-monitor",
-                Daemon=True,
+                target=_monitor_loop,
+                name="mb-heartbeat-monitor",
+                daemon=True,
             )
             _MONITOR_THREAD.start()
 
@@ -613,8 +640,97 @@ def lookup_recording_metadata(title: str, artist: str) -> dict[str, Any]:
 def merge_metadata(base: dict[str, Any], mb: dict[str, Any], overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     return _get_service().merge_metadata(base, mb, overrides)
 
+# ---------------------------------------------------------------------------
+# Release metadata fetch (real implementation — this used to unconditionally
+# return None, which meant every compare_musicbrainz_release() call fell
+# through to "Could not fetch MusicBrainz release data" regardless of input.)
+# ---------------------------------------------------------------------------
+
 def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None:
-    return None
+    """Fetch and flatten a MusicBrainz release for comparison/Link/Align.
+
+    Returns None on any failure so callers can surface a clean error instead
+    of raising. On success, returns the release's identity fields plus a
+    flat ``tracks`` list (one entry per medium/track) shaped for
+    ``_match_mb_tracks_to_library``.
+    """
+    if not release_id:
+        return None
+    try:
+        Client = get_shared_mb_client()
+        Release = _call_with_heartbeat(
+            "release.fetch_metadata",
+            Client.get_release,
+            release_id,
+            inc="recordings+artist-credits+release-groups+media",
+            Log_context={"release_id": release_id},
+        )
+    except Exception as exc:
+        Logger.warning(
+            "[MB] release metadata fetch failed",
+            release_id=release_id,
+            error=_error(exc),
+        )
+        return None
+
+    if not isinstance(Release, dict) or not Release.get("id"):
+        return None
+
+    Artist_credit = Release.get("artist-credit") or []
+    Release_group = Release.get("release-group") or {}
+    if not isinstance(Release_group, dict):
+        Release_group = {}
+
+    First_release_date = str(Release_group.get("first-release-date") or "")
+    Original_release_year = _year_of(First_release_date) or _year_of(Release.get("date"))
+    Version_release_year = _year_of(Release.get("date"))
+
+    Secondary_types = _parse_secondary_types(
+        Release_group.get("secondary-types") or Release_group.get("secondary_types")
+    )
+    Album_type = _compose_album_type(_release_group_primary_type(Release_group), Secondary_types)
+
+    First_artist = Artist_credit[0] if Artist_credit and isinstance(Artist_credit[0], dict) else {}
+    Artist_ref = First_artist.get("artist") if isinstance(First_artist, dict) else None
+    Album_artist_mbid = str(Artist_ref.get("id") or "") if isinstance(Artist_ref, dict) else ""
+
+    Tracks: list[dict[str, Any]] = []
+    Media = Release.get("media") or []
+    for disc_index, medium in enumerate(Media, start=1):
+        if not isinstance(medium, dict):
+            continue
+        Disc_number = _as_int(medium.get("position"), disc_index) or disc_index
+        for track in medium.get("tracks") or []:
+            if not isinstance(track, dict):
+                continue
+            Recording = track.get("recording") or {}
+            if not isinstance(Recording, dict):
+                Recording = {}
+            Position = track.get("position") if track.get("position") is not None else track.get("number")
+            Length = track.get("length") if track.get("length") is not None else Recording.get("length")
+            Tracks.append({
+                "mb_disc_number": Disc_number,
+                "mb_track_number": _as_int(Position, 0),
+                "mb_title": str(track.get("title") or Recording.get("title") or ""),
+                "mb_recording_mbid": str(Recording.get("id") or ""),
+                "mb_duration": Length,
+            })
+
+    return {
+        "release_mbid": str(Release.get("id") or release_id),
+        "release_group_mbid": str(Release_group.get("id") or ""),
+        "release_title": str(Release.get("title") or ""),
+        "specific_release_title": str(Release.get("title") or ""),
+        "original_release_year": Original_release_year,
+        "release_year": Version_release_year or Original_release_year,
+        "version_release_year": Version_release_year,
+        "artist": build_artist_credit_string(Artist_credit) or _mb_artist_credit_name(Artist_credit),
+        "album_artist_mbid": Album_artist_mbid,
+        "album_type": Album_type,
+        "disc_count": len(Media),
+        "artist_credit": build_artist_credit_string(Artist_credit),
+        "tracks": Tracks,
+    }
 
 def fetch_release_metadata(release_id: str) -> dict[str, Any] | None:
     return fetch_musicbrainz_release_metadata(release_id)
@@ -664,30 +780,51 @@ def _browse_group_releases(release_group_mbid: str, section: str) -> list[dict[s
 def get_release_group_releases(Release_group_mbid: str, Include_track_counts: bool = False) -> dict[str, Any]:
     return {}
 
-def _get_local_track_stats(artist: str, album: str) -> tuple[int, int]:
+# ---------------------------------------------------------------------------
+# Local library reads
+# ---------------------------------------------------------------------------
+
+def _get_local_track_count(artist: str, album: str) -> int:
+    """Count of library tracks for (artist, album), case-insensitively.
+
+    NOTE: this is the exact name/signature get_musicbrainz_best_release()
+    depends on and that this module's tests monkeypatch directly. It replaces
+    the previous ``_get_local_track_stats`` tuple helper, which returned a
+    ``(count, max_track_number)`` pair under a different name — a shape and
+    name the tests never actually exercised, so the "expected track count"
+    used for confidence scoring was not the value the tests assumed it was.
+    """
+    try:
+        from db.engine import db_session
+        from sqlalchemy import text
+        with db_session() as session:
+            Row = session.execute(
+                text(
+                    "SELECT COUNT(*) FROM tracks "
+                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                    "AND LOWER(COALESCE(album, '')) = LOWER(:album)"
+                ),
+                {"artist": artist, "album": album},
+            ).fetchone()
+            return int(Row[0]) if Row and Row[0] is not None else 0
+    except Exception as exc:
+        Logger.warning("[MB] local track count query failed", artist=artist, album=album, error=_error(exc))
+        return 0
+
+def _fetch_library_tracks(artist: str, album: str) -> list[dict[str, Any]]:
+    """Read the full library tracklist for (artist, album) for comparison."""
     try:
         from db.engine import db_session
         from sqlalchemy import text
         with db_session() as session:
             Rows = session.execute(
-                text(
-                    "SELECT track_number FROM tracks "
-                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
-                    "AND LOWER(COALESCE(album, '')) = LOWER(:album)"
-                ),
+                text(_COMPARE_LIBRARY_TRACKS_SQL),
                 {"artist": artist, "album": album},
             ).fetchall()
-
-            Count = len(Rows)
-            Max_track = 0
-            for row in Rows:
-                tn_raw = str(row[0] or "").split('/')[0].strip()
-                if tn_raw.isdigit():
-                    Max_track = max(Max_track, int(tn_raw))
-
-            return Count, Max_track
     except Exception as exc:
-        return 0, 0
+        Logger.warning("[MB] library track fetch failed", artist=artist, album=album, error=_error(exc))
+        return []
+    return [dict(zip(_LIBRARY_TRACK_COLUMNS, row)) for row in Rows]
 
 def get_musicbrainz_best_release(
     Artist: str,
@@ -733,8 +870,8 @@ def get_musicbrainz_best_release(
             _best_release_cache_set(Result_key, Empty)
             return Empty
 
-        Local_count, Max_track = _get_local_track_stats(Artist, Album)
-        Expected_count = max(Local_count, Max_track) if Local_count > 0 else None
+        Expected_count = _get_local_track_count(Artist, Album)
+        Expected_count = Expected_count if Expected_count > 0 else None
 
         def score(item: dict[str, Any]) -> float:
             Value = 0.0
@@ -769,6 +906,145 @@ def get_musicbrainz_best_release(
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
+# ---------------------------------------------------------------------------
+# Track matching engine — shared by compare_musicbrainz_release, Link and
+# Align, so all three agree on what "matched" and "needs update" mean.
+# ---------------------------------------------------------------------------
+
+def _match_mb_tracks_to_library(
+    mb_tracks: list[dict[str, Any]],
+    library_tracks: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Pair MB tracklist entries with library rows.
+
+    Primary key: exact (disc_number, track_number) match.
+    Fallback: best fuzzy title match among still-unmatched library rows on
+    the same disc (core-title similarity, floor 0.55) — this is what lets a
+    library track like "Song Three (Radio Edit)" still match MB's "Song
+    Three" and get flagged for a title fix, instead of being reported as
+    unrelated extra + missing.
+
+    Returns ``(comparison, extra_tracks)``:
+      - ``comparison`` has exactly one entry per MB track (so
+        ``len(comparison) == total MB track count``), each carrying
+        ``matched``/``needs_update``/``diff_fields`` plus both sides' data.
+      - ``extra_tracks`` lists library rows that were not claimed by any MB
+        track (out-of-tracklist bonus tracks, mispressed rips, etc).
+    """
+    Remaining = list(library_tracks)
+    Comparison: list[dict[str, Any]] = []
+
+    def _disc_of(row: dict[str, Any]) -> str:
+        return str(row.get("disc_number") or "1").strip() or "1"
+
+    def _track_num_of(row: dict[str, Any]) -> str:
+        return str(row.get("track_number") or "").split("/")[0].strip()
+
+    for mb_track in mb_tracks:
+        Mb_disc = str(mb_track.get("mb_disc_number") or 1)
+        Mb_number = str(mb_track.get("mb_track_number") or "")
+        Mb_title = str(mb_track.get("mb_title") or "")
+
+        Match = next(
+            (
+                row for row in Remaining
+                if _disc_of(row) == Mb_disc and _track_num_of(row) == Mb_number
+            ),
+            None,
+        )
+
+        if Match is None:
+            Same_disc = [row for row in Remaining if _disc_of(row) == Mb_disc] or Remaining
+            Best_row: dict[str, Any] | None = None
+            Best_score = 0.0
+            for row in Same_disc:
+                Score = _similarity(
+                    Normalize_title_for_lookup(str(row.get("title") or "")),
+                    Normalize_title_for_lookup(Mb_title),
+                )
+                if Score > Best_score:
+                    Best_row, Best_score = row, Score
+            if Best_row is not None and Best_score >= 0.55:
+                Match = Best_row
+
+        if Match is not None:
+            Remaining.remove(Match)
+
+        Entry: dict[str, Any] = {
+            "mb_track_number": _as_int(mb_track.get("mb_track_number"), 0),
+            "mb_disc_number": _as_int(mb_track.get("mb_disc_number"), 1),
+            "mb_title": Mb_title,
+            "mb_recording_mbid": str(mb_track.get("mb_recording_mbid") or ""),
+            "mb_duration": mb_track.get("mb_duration"),
+            "matched": Match is not None,
+        }
+
+        if Match is not None:
+            try:
+                Ignored = set(json.loads(Match.get("mb_ignored_fields") or "[]") or [])
+            except (TypeError, ValueError):
+                Ignored = set()
+
+            Library_title = str(Match.get("title") or "")
+            Library_track_number = Match.get("track_number")
+            Library_disc_number = Match.get("disc_number")
+            Library_mbid = str(Match.get("mbid") or "")
+            Library_duration = Match.get("duration")
+
+            Diff_fields: list[str] = []
+            if Library_title.strip().casefold() != Mb_title.strip().casefold():
+                Diff_fields.append("title")
+            if str(Library_track_number or "").split("/")[0].strip() != str(Entry["mb_track_number"]):
+                Diff_fields.append("track_number")
+            if Entry["mb_recording_mbid"] and Library_mbid != Entry["mb_recording_mbid"]:
+                Diff_fields.append("mbid")
+            if Entry["mb_duration"] is not None:
+                try:
+                    Lib_ms = int(float(Library_duration or 0))
+                    Mb_ms = int(Entry["mb_duration"])
+                    if abs(Lib_ms - Mb_ms) > 2000:
+                        Diff_fields.append("duration")
+                except (TypeError, ValueError):
+                    pass
+
+            Diff_fields = [field for field in Diff_fields if field not in Ignored]
+
+            Entry.update({
+                "library_track_id": str(Match.get("id") or ""),
+                "library_title": Library_title,
+                "library_track_number": Library_track_number,
+                "library_disc_number": Library_disc_number,
+                "library_mbid": Library_mbid,
+                "library_duration": Library_duration,
+                "diff_fields": Diff_fields,
+                "needs_update": bool(Diff_fields),
+            })
+        else:
+            Entry.update({
+                "library_track_id": "",
+                "library_title": "",
+                "library_track_number": None,
+                "library_disc_number": None,
+                "library_mbid": "",
+                "library_duration": None,
+                "diff_fields": [],
+                "needs_update": False,
+            })
+
+        Comparison.append(Entry)
+
+    Extra_tracks = [
+        {
+            "library_track_id": str(row.get("id") or ""),
+            "library_title": str(row.get("title") or ""),
+            "library_track_number": row.get("track_number"),
+            "library_disc_number": row.get("disc_number"),
+        }
+        for row in Remaining
+    ]
+
+    return Comparison, Extra_tracks
+
 def compare_musicbrainz_release(
     Artist: str,
     Album: str,
@@ -793,10 +1069,17 @@ def compare_musicbrainz_release(
         except Exception:
             Direct = None
 
-        best_result = get_musicbrainz_best_release(Artist, Album, Release_group_mbid)
+        # Only browse the release-group when the direct lookup did not
+        # already resolve a concrete release. Calling get_musicbrainz_best_release
+        # (which browses) unconditionally here — even when Direct already
+        # succeeded — was the ~2.7s slow-compare regression: every compare
+        # against an already-known release MBID paid for a full
+        # release-group browse it never used the result of.
+        best_result: dict[str, Any] = {}
         if Direct and Direct.get("id"):
             Release_id = Release_group_mbid
         else:
+            best_result = get_musicbrainz_best_release(Artist, Album, Release_group_mbid)
             Release_id = str(
                 ((best_result or {}).get("best_release") or {}).get("id") or ""
             )
@@ -811,6 +1094,18 @@ def compare_musicbrainz_release(
                 "success": False,
                 "error": "Could not fetch MusicBrainz release data",
             }
+
+        Library_tracks = _fetch_library_tracks(Artist, Album)
+        if not Library_tracks:
+            return {
+                "success": False,
+                "error": "No library tracks found for this album",
+            }
+
+        Comparison, Extra_tracks = _match_mb_tracks_to_library(
+            Mb_release.get("tracks") or [], Library_tracks
+        )
+        Tracks_needing_update = sum(1 for entry in Comparison if entry.get("needs_update"))
 
         Mb_year = str(Mb_release.get("original_release_year") or Mb_release.get("release_year") or "")
 
@@ -830,12 +1125,148 @@ def compare_musicbrainz_release(
             "mb_albumtype": str(Mb_release.get("album_type") or ""),
             "mb_disc_count": int(Mb_release.get("disc_count") or 0),
             "mb_artist_credit": str(Mb_release.get("artist_credit") or ""),
-            "comparison": [],
-            "extra_tracks": [],
-            "tracks_needing_update": 0,
-            "total_tracks": 0,
+            "comparison": Comparison,
+            "extra_tracks": Extra_tracks,
+            "tracks_needing_update": Tracks_needing_update,
+            "total_tracks": len(Comparison),
             "mb_original_track_count": original_track_count,
         }
         return Result
     except Exception as exc:
+        Logger.exception(
+            "[MB] compare_musicbrainz_release failed",
+            Elapsed_s=round(time.monotonic() - Started, 3),
+            Error=_error(exc),
+            **Context,
+        )
         return {"success": False, "error": "Could not fetch MusicBrainz release data"}
+
+# ---------------------------------------------------------------------------
+# Track write helper — the ONLY place this module writes to the tracks table.
+# Column names are always drawn from the fixed whitelists above, never from
+# caller-supplied keys, so this cannot be used to inject arbitrary columns.
+# ---------------------------------------------------------------------------
+
+def _update_track_fields(track_id: str, fields: dict[str, Any]) -> None:
+    if not track_id or not fields:
+        return
+    from db.engine import db_session
+    from sqlalchemy import text
+    Set_clause = ", ".join(f"{column} = :{column}" for column in fields)
+    Params = dict(fields)
+    Params["id"] = track_id
+    with db_session() as session:
+        session.execute(text(f"UPDATE tracks SET {Set_clause} WHERE id = :id"), Params)
+        session.commit()
+
+def link_album_mbids(Artist: str, Album: str, Release_mbid: str) -> dict[str, Any]:
+    """Auto-Link: find the best-matching MusicBrainz release for the CURRENT
+    local tracklist (compare_musicbrainz_release resolves this via
+    get_musicbrainz_best_release, which scores candidate releases against the
+    library's own track count) and write each matched recording's MBID onto
+    its library track.
+
+    Only ever writes ``mbid``. Title, track_number and disc_number are
+    Align's responsibility (see align_album_tracklist) — Link never
+    reorders or renames a track.
+    """
+    if not Release_mbid:
+        return {
+            "success": False,
+            "error": 'No MusicBrainz release linked yet. Use "Lookup on MusicBrainz" first, then save.',
+        }
+
+    Result = compare_musicbrainz_release(Artist, Album, Release_mbid)
+    if not Result.get("success"):
+        return Result
+
+    Linked = 0
+    Already_linked = 0
+    for Entry in Result.get("comparison") or []:
+        if not Entry.get("matched"):
+            continue
+        New_mbid = Entry.get("mb_recording_mbid")
+        if not New_mbid:
+            continue
+        if Entry.get("library_mbid") == New_mbid:
+            Already_linked += 1
+            continue
+        _update_track_fields(Entry["library_track_id"], {"mbid": New_mbid})
+        Linked += 1
+
+    Unmatched = sum(1 for entry in Result.get("comparison") or [] if not entry.get("matched"))
+
+    return {
+        "success": True,
+        "linked": Linked,
+        "already_linked": Already_linked,
+        "unmatched": Unmatched,
+        "extra_tracks": Result.get("extra_tracks") or [],
+        "total_tracks": Result.get("total_tracks") or 0,
+        "release_mbid": Result.get("release_mbid"),
+    }
+
+def align_album_tracklist(Artist: str, Album: str, Release_mbid: str) -> dict[str, Any]:
+    """Align: rename/renumber library tracks to match the tracklist of the
+    release already linked to this album (the release_mbid supplied here —
+    NOT a fresh search; Align trusts whatever MusicBrainz release the album
+    is already pointed at).
+
+    Only ever writes ``title`` / ``track_number`` / ``disc_number``. Never
+    touches ``mbid`` — see link_album_mbids for that. A track already
+    matching MB (``needs_update`` False) is left untouched.
+    """
+    if not Release_mbid:
+        return {
+            "success": False,
+            "error": 'No MusicBrainz release linked yet. Use "Lookup on MusicBrainz" first, then save.',
+        }
+
+    Result = compare_musicbrainz_release(Artist, Album, Release_mbid)
+    if not Result.get("success"):
+        return Result
+
+    Changes: list[dict[str, Any]] = []
+    Aligned = 0
+    for Entry in Result.get("comparison") or []:
+        if not Entry.get("matched") or not Entry.get("needs_update"):
+            continue
+
+        Diff_fields = Entry.get("diff_fields") or []
+        Fields: dict[str, Any] = {}
+        if "title" in Diff_fields:
+            Fields["title"] = Entry["mb_title"]
+        if "track_number" in Diff_fields:
+            Fields["track_number"] = str(Entry["mb_track_number"])
+
+        if not Fields:
+            # needs_update was true only for a field Align doesn't own
+            # (e.g. "mbid" or "duration") — nothing for Align to do here.
+            continue
+
+        # Keep disc_number in step with the tracklist whenever the row is
+        # being touched at all, even if disc_number itself wasn't the field
+        # that triggered needs_update.
+        Fields["disc_number"] = str(Entry.get("mb_disc_number") or 1)
+
+        _update_track_fields(Entry["library_track_id"], Fields)
+        Changes.append({
+            "library_track_id": Entry["library_track_id"],
+            "old_title": Entry.get("library_title"),
+            "new_title": Fields.get("title", Entry.get("library_title")),
+            "old_track_number": Entry.get("library_track_number"),
+            "new_track_number": Fields.get("track_number", Entry.get("library_track_number")),
+        })
+        Aligned += 1
+
+    Unmatched = sum(1 for entry in Result.get("comparison") or [] if not entry.get("matched"))
+
+    return {
+        "success": True,
+        "aligned": Aligned,
+        "unmatched": Unmatched,
+        "changes": Changes,
+        "extra_tracks": Result.get("extra_tracks") or [],
+        "total_tracks": Result.get("total_tracks") or 0,
+        "release_mbid": Result.get("release_mbid"),
+    }
