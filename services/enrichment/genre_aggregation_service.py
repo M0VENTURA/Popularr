@@ -397,36 +397,28 @@ def _vote_genres(
         "manual",
     }
 
-    # Check whether any external/primary source provided at least one valid genre
     has_primary_genres = any(bool(hits & primary_sources) for hits in source_hits.values())
 
-    # --- Essentia Guardrail ---
-    # Essentia can NEVER stand on its own and can ONLY be used to confirm
-    # an external primary source (Discogs, Last.fm, MusicBrainz, etc.).
-    invalid_essentia_keys = [
-        k for k, hits in source_hits.items()
-        if "essentia" in hits and not (hits & primary_sources)
-    ]
-    for k in invalid_essentia_keys:
+    # --- Strict Primary Confirmation Guardrail ---
+    # Navidrome and Essentia can ONLY confirm primary sources. They cannot
+    # confirm each other, nor can they stand alone.
+    keys_to_delete = []
+    
+    for k, hits in source_hits.items():
+        is_primary_backed = bool(hits & (primary_sources | {"context"}))
+        
+        if not is_primary_backed:
+            if has_primary_genres:
+                # Online data exists somewhere on this album. Purge strictly local/inferred tags.
+                keys_to_delete.append(k)
+            elif "navidrome" not in hits:
+                # No online data, but this is a pure Essentia hallucination. Purge it.
+                keys_to_delete.append(k)
+
+    for k in keys_to_delete:
         del votes[k]
         del spellings[k]
         del source_hits[k]
-
-    # --- Navidrome Guardrail ---
-    # If external sources found at least one genre:
-    # Navidrome can ONLY be used to confirm/vote on genres present in primary sources.
-    # Any genre only detected by Navidrome is purged (allowing a single external
-    # genre to overwrite multiple Navidrome genres).
-    # UNLESS there are NO genres from other sources, in which case Navidrome is kept.
-    if has_primary_genres:
-        invalid_nav_keys = [
-            k for k, hits in source_hits.items()
-            if not (hits & (primary_sources | {"context"}))
-        ]
-        for k in invalid_nav_keys:
-            del votes[k]
-            del spellings[k]
-            del source_hits[k]
 
     return votes, spellings, source_hits
 
