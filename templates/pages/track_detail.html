@@ -8,8 +8,9 @@
     .hero-cover { width: 80px; height: 80px; }
 
     /* Override Bootstrap Blue for inactive tabs */
-    .nav-pills .nav-link { color: #adb5bd !important; }
-    .nav-pills .nav-link:hover { color: #ffffff !important; }
+    #trackPageTabs .nav-link { color: #adb5bd !important; border-color: transparent !important; }
+    #trackPageTabs .nav-link:hover { color: #ffffff !important; }
+    #trackPageTabs .nav-link.active { background-color: var(--spotify-green, #1db954) !important; color: #000 !important; }
 
     /* Track page: Mobile 4-tab grouping bridge */
     @media (max-width: 991.98px) {
