@@ -101,6 +101,45 @@ _SOURCE_LABELS = {
 }
 
 
+_ALBUM_LIVE_TYPE_FIELDS: tuple[str, ...] = (
+    "musicbrainz_albumtype",
+    "musicbrainz_type",
+    "detected_album_type",
+    "musicbrainz_album_type",
+    "album_type",
+    "releasetype",
+)
+
+
+def _album_type_indicates_live(
+    *sources: dict[str, Any] | None,
+) -> bool:
+    """True if any known album-type field across the given dicts reads as live.
+
+    MusicBrainz secondary types compose as e.g. ``"album+live"``, so this is a
+    substring match rather than an exact one. Checked across every dict the
+    caller has on hand (track row, effective track, album_context,
+    album_result) because which one actually carries the type varies by scan
+    mode and by whether the album stage has already run this pass.
+
+    ``album_context.get("live_album_type")`` is included as a direct boolean/
+    string signal on top of the substring scan: it is set by the scan
+    runner's ``_refresh_album_live_context`` specifically to record a live
+    classification, separate from ``detected_album_type``.
+    """
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        _lat = source.get("live_album_type")
+        if _lat:
+            return True
+        for field in _ALBUM_LIVE_TYPE_FIELDS:
+            raw = source.get(field)
+            if raw and "live" in str(raw).strip().lower():
+                return True
+    return False
+
+
 def _has_safe_live_recording_tag(payload: dict[str, Any]) -> bool:
     """Checks for explicit 'live' tags only on MBID-bound metadata sources."""
     for col in ("musicbrainz_genres", "musicbrainz_tags", "listenbrainz_genres"):
@@ -994,10 +1033,23 @@ def process_track(
             # further down -- checking it here would never find anything,
             # same as it effectively never did in the original later-computed
             # flag before this fix.
+            #
+            # ``album_context.get("is_live_album")`` alone is NOT sufficient:
+            # the album stage can reject a MusicBrainz "album+live" secondary
+            # type when track titles don't corroborate it (e.g. every track
+            # on Metallica's "S&M" is titled exactly as its studio original),
+            # which leaves ``is_live_album`` False even though MusicBrainz
+            # classified the release as live. ``_album_type_indicates_live``
+            # checks the raw album-type fields directly -- across the track
+            # row, the effective (post-metadata-merge) track, album_context,
+            # and album_result -- so a "album+live" classification is honoured
+            # here regardless of whether that title-corroboration heuristic
+            # accepted or rejected it.
             is_live_release = bool(
                 effective_track.get("is_live")
                 or effective_track.get("album_context_live")
                 or album_context.get("is_live_album")
+                or _album_type_indicates_live(track, effective_track, album_context, album_result)
                 or bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", str(raw_title or title).lower()))
             )
 
