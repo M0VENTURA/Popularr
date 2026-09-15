@@ -1,24 +1,37 @@
-{# 
+{#
 Unified MusicBrainz Release Search Component
 =============================================
-Can be used inline (search form + results render directly in the page) 
-or placed inside any Bootstrap modal for overlay behavior.
-#}
+Renders the 4-field search form and the results container.
 
-<style>
-.mb-search-form { margin-bottom: 0.75rem; }
-.mb-search-form .form-control:focus,
-.mb-search-form .form-select:focus {
-  border-color: #22d3ee;
-  box-shadow: 0 0 0 0.2rem rgba(34, 211, 238, 0.12);
-}
-.mb-results-container { max-height: 60vh; overflow-y: auto; overflow-x: hidden; }
-.mb-results-container .card { transition: border-color 0.15s ease; }
-.mb-results-container .card:hover { border-color: #22d3ee; }
-.mb-select-btn { border-color: #6c757d; color: #adb5bd; }
-.mb-select-btn:hover,
-.mb-select-btn:focus { border-color: #22d3ee; color: #22d3ee; }
-</style>
+INCLUDE THIS ONCE PER PAGE.
+--------------------------------------------
+Every element below has a FIXED id (mbSearchArtist, mbSearchResults,
+mbSelectedRelease, ...). `performMbSearch()` in static/js/main.js resolves
+them with `document.getElementById(...)`, which returns the FIRST match in
+DOM order. Including this component twice therefore produces duplicate ids,
+and the search writes its results into whichever copy happens to come first
+in the document — usually the hidden global modal in base.html — while the
+copy the user is actually looking at keeps showing the empty placeholder.
+That is the "the modal opens but nothing ever appears" symptom.
+
+base.html already includes this component (via
+components/_musicbrainz_search_modal.html) on EVERY page, so:
+
+  * To open the shared modal, call `openGlobalMbSearch(artist, album, cb)`
+    — do NOT include this file again.
+  * Only include this file directly on a page that wants the search form
+    rendered INLINE, and only if that page does not also rely on the
+    global modal.
+
+The component's CSS (.mb-search-form, .mb-results-container, .mb-select-btn)
+now lives in static/css/popularr.css rather than in an inline <style> here,
+so it is parsed once by the browser instead of once per include.
+
+The JavaScript lives in static/js/main.js. This file previously ended with
+a placeholder <script> block containing only the comment
+"... (Keep your existing JS exactly as is)" — it defined nothing, but read
+as though the functions were present. It has been removed.
+#}
 
 <!-- Search Controls -->
 <div class="mb-search-form bg-dark p-2 rounded border border-secondary">
@@ -26,28 +39,30 @@ or placed inside any Bootstrap modal for overlay behavior.
     <div class="row g-2 align-items-end">
       <!-- Row 1 on Mobile: Artist & Album -->
       <div class="col-6 col-md-3">
-        <label class="form-label form-label-sm mb-1 text-muted extra-small fw-semibold text-uppercase">Artist</label>
+        <label for="mbSearchArtist" class="form-label form-label-sm mb-1 text-muted extra-small fw-semibold text-uppercase">Artist</label>
         <input type="text" class="form-control form-control-sm" id="mbSearchArtist" placeholder="Artist name">
       </div>
       <div class="col-6 col-md-3">
-        <label class="form-label form-label-sm mb-1 text-muted extra-small fw-semibold text-uppercase">Album</label>
+        <label for="mbSearchAlbum" class="form-label form-label-sm mb-1 text-muted extra-small fw-semibold text-uppercase">Album</label>
         <input type="text" class="form-control form-control-sm" id="mbSearchAlbum" placeholder="Album name">
       </div>
+
       <!-- Row 2 on Mobile: Track & Year -->
       <div class="col-8 col-md-3">
-        <label class="form-label form-label-sm mb-1 text-muted extra-small fw-semibold text-uppercase">Track</label>
+        <label for="mbSearchTrack" class="form-label form-label-sm mb-1 text-muted extra-small fw-semibold text-uppercase">Track</label>
         <input type="text" class="form-control form-control-sm" id="mbSearchTrack" placeholder="Track title">
       </div>
       <div class="col-4 col-md-1">
-        <label class="form-label form-label-sm mb-1 text-muted extra-small fw-semibold text-uppercase">Year</label>
-        <input type="text" class="form-control form-control-sm" id="mbSearchYear" placeholder="YYYY" maxlength="4">
+        <label for="mbSearchYear" class="form-label form-label-sm mb-1 text-muted extra-small fw-semibold text-uppercase">Year</label>
+        <input type="text" class="form-control form-control-sm" id="mbSearchYear" placeholder="YYYY" maxlength="4" inputmode="numeric" pattern="[0-9]*">
       </div>
+
       <!-- Row 3 on Mobile: Buttons -->
       <div class="col-12 col-md-2 d-flex gap-2 mt-2 mt-md-0">
         <button type="submit" class="btn btn-info btn-sm flex-grow-1 fw-bold" id="mbSearchBtn">
           <i class="bi bi-search"></i> Search
         </button>
-        <button type="button" class="btn btn-outline-secondary btn-sm" onclick="clearMbSearch()" title="Clear Form">
+        <button type="button" class="btn btn-outline-secondary btn-sm" onclick="clearMbSearch()" title="Clear Form" aria-label="Clear search form">
           <i class="bi bi-eraser-fill"></i>
         </button>
       </div>
@@ -58,6 +73,7 @@ or placed inside any Bootstrap modal for overlay behavior.
 <!-- Filter Bar -->
 <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3 px-1">
   <div class="d-flex align-items-center gap-2">
+    <label for="mbReleaseType" class="visually-hidden">Filter by release type</label>
     <select id="mbReleaseType" class="form-select form-select-sm" style="width:auto;" onchange="performMbSearch()" title="Filter by release type">
       <option value="">All Release Types</option>
       <option value="album">Studio Album</option>
@@ -68,6 +84,7 @@ or placed inside any Bootstrap modal for overlay behavior.
       <option value="live">Live</option>
       <option value="remix">Remix</option>
     </select>
+    <label for="mbResultLimit" class="visually-hidden">Results per page</label>
     <select id="mbResultLimit" class="form-select form-select-sm" style="width:auto;" onchange="performMbSearch()" title="Results per page">
       <option value="12">12</option>
       <option value="25" selected>25</option>
@@ -78,7 +95,7 @@ or placed inside any Bootstrap modal for overlay behavior.
 </div>
 
 <!-- Results -->
-<div id="mbSearchResults" class="row g-2 mb-results-container px-1">
+<div id="mbSearchResults" class="row g-2 mb-results-container px-1" aria-live="polite">
   <div class="col-12 text-center text-muted py-5">
     <i class="bi bi-hexagon-fill opacity-50" style="font-size: 3rem;"></i>
     <p class="mt-3 fw-semibold">Enter a search term above to find releases on MusicBrainz.</p>
@@ -92,14 +109,8 @@ or placed inside any Bootstrap modal for overlay behavior.
       <h6 id="mbSelectedTitle" class="mb-1 text-truncate fw-bold text-success"></h6>
       <small id="mbSelectedArtist" class="text-muted d-block text-truncate"></small>
     </div>
-    <button class="btn btn-success btn-sm fw-bold flex-shrink-0" onclick="confirmReleaseSelection()">
+    <button type="button" class="btn btn-success btn-sm fw-bold flex-shrink-0" onclick="confirmReleaseSelection()">
       <i class="bi bi-check-circle-fill me-1"></i> Apply Match
     </button>
   </div>
 </div>
-
-<!-- The giant inline JavaScript block remains unchanged below this point -->
-<script>
-// ===== Shared MusicBrainz Search Functions =====
-// ... (Keep your existing JS exactly as is)
-</script>
