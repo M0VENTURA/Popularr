@@ -567,7 +567,7 @@ def _score_track_popularity(
     except Exception as exc:
         logger.debug("Interlude LB outlier check failed", track_id=track_id, error=str(exc))
 
-    score_data = calculate_combined_popularity_score(
+    score_data, lb_percentile = calculate_combined_popularity_score(
         lastfm_listeners=lastfm_listeners,
         lastfm_artist_max_listeners=artist_max_lf_listeners,
         listenbrainz_listens=_score_lb,
@@ -694,18 +694,6 @@ def _resolve_track_mb_metadata(
             if _mb_isrc and not _as_str(track.get("isrc") or "").strip():
                 payload["isrc"] = _mb_isrc
 
-            # --- ALBUM -------------------------------------------------
-            # The library album is authoritative for ordinary passes, but a
-            # forced/enrichment pass MUST be able to correct it. Previously
-            # this was gated on `not _existing_album`, so any track that
-            # already had an album could never have it corrected - the album
-            # field simply never updated.
-            #
-            # Corrections are routed through `safe_album_rename()`, which
-            # rejects a proposal that merely repeats an annotation the album
-            # already carries ("(tour edition) (tour edition)") and refuses
-            # one that would DROP the edition annotation the library relies
-            # on to keep separate pressings distinct.
             _existing_album = _as_str(track.get("album") or "").strip()
             _mb_album = _as_str(mb_data.get("album") or "").strip()
 
@@ -734,11 +722,6 @@ def _resolve_track_mb_metadata(
                             reason=_album_reason,
                         )
                 
-            # --- ARTIST ------------------------------------------------
-            # Same defect as `album` above: gated on the field being empty,
-            # so a wrong artist could never be corrected. Allow a correction
-            # under force, but never replace a populated artist with a value
-            # that normalises to the same thing.
             _existing_artist = _as_str(track.get("artist") or "").strip()
             _mb_artist = _as_str(mb_data.get("artist") or "").strip()
 
@@ -863,6 +846,8 @@ def process_track(
         lastfm_listeners = _as_int(track.get("lastfm_listeners") or 0)
         listenbrainz_listens = _as_int(track.get("listenbrainz_listens") or 0)
         lb_percentile = float(track.get("lb_percentile") or 0)
+        # Ensure _raw_combined is never zeroed out when bypassing scoring
+        update_payload["_raw_combined"] = float(score_data["combined_score"])
 
         try:
             _lr_cfg = get_log_ratio_config()
@@ -1024,13 +1009,16 @@ def process_track(
                 listenbrainz_listens = _as_int(effective_track.get("listenbrainz_listens") or 0)
                 listenbrainz_users = _as_int(effective_track.get("listenbrainz_users") or 0)
                 _score_lb = listenbrainz_listens
+                _stored_score = float(effective_track.get("final_score") or effective_track.get("popularity") or 0)
                 score_data = {
-                    "combined_score": float(effective_track.get("final_score", 0)),
+                    "combined_score": _stored_score,
                     "lastfm_score": float(effective_track.get("lastfm_score", 0)),
                     "listenbrainz_score": float(effective_track.get("listenbrainz_score", 0)),
                     "age_score": float(effective_track.get("age_score", 0)),
                 }
                 update_payload["_cached"] = True
+                # Preserve raw combined score on cached tracks
+                update_payload["_raw_combined"] = _stored_score
                 try:
                     lb_percentile = calculate_listenbrainz_percentile(_score_lb, album_lb_listens) if album_lb_listens else 0.0
                 except Exception:
@@ -1222,7 +1210,7 @@ def process_track(
                     has_mb_meta=has_mb_meta,
                     is_featured_track=is_featured_flag,
                     is_live_track=is_live_flag,
-                    is_instrumental_track=is_instrumental_flag,
+                    is_instrumental_track=is_instrumental_track,
                     artist_lf_context=artist_lf_context,
                     track_duration=_safe_duration(effective_track.get("duration")),
                 )
@@ -1281,6 +1269,14 @@ def process_track(
                 _sd_fresh = _sd_age_ok and _sd_has_evidence
         except Exception:
             _sd_fresh = False
+
+    # When singles detection is skipped because it is fresh, PRESERVE stored values
+    if _sd_fresh:
+        update_payload["is_single"] = bool(track.get("is_single", False))
+        update_payload["single_confidence"] = str(track.get("single_confidence") or "low")
+        update_payload["single_status"] = str(track.get("single_status") or "none")
+        update_payload["single_sources"] = track.get("single_sources") or "[]"
+        _single_summary = f"Single: {str(update_payload['single_confidence']).upper()} (cached)"
 
     if not metadata_only and not popularity_only and not _sd_fresh:
         try:
@@ -1670,9 +1666,6 @@ def process_track(
 
     effective_track = _strip_album_type_columns(track, update_payload)
 
-    # Ensure all JSONB fields are safely string-encoded before persistence
-    # because SQLAlchemy auto-deserializes them into lists on load, and passing
-    # raw lists back into an UPDATE query causes Postgres TEXT[] type errors.
     _jsonb_fields = [
         "musicbrainz_genres", "discogs_genres", "lastfm_tags", 
         "listenbrainz_genres", "spotify_genres", "essentia_genres", 
@@ -1752,6 +1745,17 @@ def process_track(
         except Exception:
             pass
 
+    # Ensure _raw_combined and singles confidence are never lost on frozen/cached tracks
+    _ret_raw_combined = float(
+        update_payload.get("_raw_combined")
+        or track.get("_raw_combined")
+        or _result_final_score
+        or 0.0
+    )
+    _ret_is_single = bool(update_payload.get("is_single", track.get("is_single", False)))
+    _ret_single_conf = str(update_payload.get("single_confidence") or track.get("single_confidence") or "low")
+    _ret_single_srcs = update_payload.get("single_sources") or track.get("single_sources") or "[]"
+
     return {
         "track_id": track_id,
         "artist": track_artist,
@@ -1763,12 +1767,12 @@ def process_track(
         "lb_percentile": float(lb_percentile or 0.0),
         "popularity_score": _result_final_score,
         "final_score": _result_final_score,
-        "_raw_combined": float(update_payload.get("_raw_combined") or 0),
+        "_raw_combined": _ret_raw_combined,
         "lastfm_score": float(score_data.get("lastfm_score", 0)),
         "listenbrainz_score": float(score_data.get("listenbrainz_score", 0)),
-        "is_single": bool(update_payload.get("is_single", track.get("is_single", False))),
-        "single_confidence": str(update_payload.get("single_confidence", track.get("single_confidence", "low"))),
-        "single_sources": update_payload.get("single_sources", track.get("single_sources", "")),
+        "is_single": _ret_is_single,
+        "single_confidence": _ret_single_conf,
+        "single_sources": _ret_single_srcs,
         "popularity_marked": bool(track.get("popularity_marked", False)),
         "is_live": bool(
             track.get("is_live")
