@@ -767,7 +767,10 @@ class NavidromeClient:
 
     def create_playlist(self, name: str, song_ids: list[str]) -> dict[str, Any]:
         try:
-            params: dict[str, Any] = {"name": str(name or "")}
+            params: dict[str, Any] = {
+                "name": str(name or ""),
+                "public": "true" if public else "false",
+            }
             _ids = [str(s) for s in (song_ids or []) if str(s or "").strip()]
             if _ids:
                 params["songId"] = _ids
