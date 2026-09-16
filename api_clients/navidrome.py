@@ -409,8 +409,8 @@ class NavidromeClient:
                         result = _parse_non_json_envelope(response.text or "") or {"status": "ok"}
                     if result.get("status") == "failed":
                         _log_subsonic_status(result, endpoint)
-                else:
-                    _log_subsonic_status(result, endpoint)
+            else:
+                _log_subsonic_status(result, endpoint)
             return result
         except Exception as exc:
             _log_throttled_error(endpoint, exc, prefix=f"Navidrome {endpoint} POST failed")
@@ -765,7 +765,7 @@ class NavidromeClient:
             logger.error("Failed to update playlist songs", playlist_id=playlist_id, error=str(exc))
             return False
 
-def create_playlist(self, name: str, song_ids: list[str], public: bool = True) -> dict[str, Any]:
+    def create_playlist(self, name: str, song_ids: list[str], public: bool = True) -> dict[str, Any]:
         try:
             params: dict[str, Any] = {
                 "name": str(name or ""),
