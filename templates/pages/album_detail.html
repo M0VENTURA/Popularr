@@ -463,14 +463,16 @@
               </ul>
 
               {% set ns3 = namespace(first=True) %}
-              <div class="tab-content">
+              <div class="tab-content mt-3">
                 {% for key, label, bgcolor, textcolor, icon in sources %}
                   {% if valid_genre_sources.get(key) %}
-                    <div class="tab-pane fade {{ 'active show' if ns3.first else '' }}" id="albumGenreTab{{ key }}-content" role="tabpanel">
+                    <div class="tab-pane fade {{ 'active show' if ns3.first else '' }}"
+                         id="albumGenreTab{{ key }}-content" role="tabpanel">
+                      <p class="text-muted small mb-2">Tags/moods from {{ label }} · sorted by frequency</p>
                       <div class="d-flex flex-wrap gap-2 mb-3">
                         {% for genre in valid_genre_sources[key]|sort(reverse=True, attribute='count') %}
-                          <label class="badge genre-source-selectable" style="background-color: #{{ bgcolor }}; color: {{ textcolor }}; cursor:pointer; font-size:0.85rem;">
-                            <input type="checkbox" class="album-source-tag-check me-1" value="{{ genre.name }}">
+                          <label class="badge genre-source-selectable" style="background-color: #{{ bgcolor }}; color: {{ textcolor }}; cursor:pointer; user-select:none; font-size:0.85rem;" title="Click to select">
+                            <input type="checkbox" class="album-source-tag-check" value="{{ genre.name }}" style="margin-right:0.3rem;cursor:pointer;">
                             {{ genre.name }}{% if genre.count %} <small class="opacity-75">({{ genre.count }})</small>{% endif %}
                           </label>
                         {% endfor %}
