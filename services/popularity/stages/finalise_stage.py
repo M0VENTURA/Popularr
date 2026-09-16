@@ -1591,6 +1591,7 @@ def _create_genre_top_track_playlists(
     only_genres: set[str] | None = None,
 ) -> int:
     from collections import defaultdict
+    import re
 
     try:
         from helpers.config_helpers import get_config
@@ -1635,11 +1636,26 @@ def _create_genre_top_track_playlists(
     genre_display: dict[str, str] = {}
 
     for row in rows:
-        for genre in _track_genres(row):
+        track_genres = _track_genres(row)
+        norm_track_genres = [re.sub(r"[^\w\s-]", "", g.lower()).strip() for g in track_genres]
+        
+        # Check if this track is flagged as a Christmas track
+        is_christmas = "christmas" in norm_track_genres
+
+        for genre in track_genres:
             norm_key = re.sub(r"[^\w\s-]", "", genre.lower()).strip()
             if not norm_key:
                 continue
-            pools[norm_key].append({
+
+            # INTERCEPT: Isolate Christmas tracks from standard genres.
+            if is_christmas and norm_key != "christmas":
+                target_norm_key = f"christmas {norm_key}"
+                target_display = f"Christmas {genre.title()}"
+            else:
+                target_norm_key = norm_key
+                target_display = genre
+
+            pools[target_norm_key].append({
                 "id": str(row.get("id") or ""),
                 "title": str(row.get("title") or "Unknown"),
                 "file_path": str(row.get("file_path") or ""),
@@ -1650,10 +1666,10 @@ def _create_genre_top_track_playlists(
                 "is_live": int(row.get("is_live") or 0),
                 "is_compilation": int(row.get("is_compilation") or 0),
             })
-            genre_freq[genre] += 1
-            current_top = genre_display.get(norm_key)
-            if not current_top or genre_freq[genre] > genre_freq[current_top]:
-                genre_display[norm_key] = genre
+            genre_freq[target_display] += 1
+            current_top = genre_display.get(target_norm_key)
+            if not current_top or genre_freq[target_display] > genre_freq[current_top]:
+                genre_display[target_norm_key] = target_display
 
     def _tiebreak(item: dict[str, Any]) -> tuple:
         return (
@@ -1742,6 +1758,7 @@ def _create_genre_top_track_playlists(
                 logger.warning("Genre playlist sweep failed", error=str(exc))
 
     return written
+
 
 def prune_genre_playlists_for_deletion() -> None:
     """Delete genre playlists whose qualifying pool dropped below the delete threshold."""
