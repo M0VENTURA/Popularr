@@ -38,7 +38,7 @@ window.escapeHtml = function(text) {
   return div.innerHTML;
 };
 
-// Fixed Filtering Logic
+// Fixed Filtering Logic with Exact Visual States
 window.setArtistFilter = function(filter) {
     document.querySelectorAll('.artist-filter-btn').forEach(btn => {
         if (btn.dataset.filter === filter) {
@@ -84,11 +84,9 @@ window.toggleMissingReleasesForCategory = function(btn, catId) {
     if (isCurrentlyHidden) {
         section.classList.remove('category-hide-missing');
         btn.setAttribute('data-hidden', 'false');
-        btn.innerHTML = '<i class="bi bi-eye-slash me-1"></i><span>Hide Missing</span>';
     } else {
         section.classList.add('category-hide-missing');
         btn.setAttribute('data-hidden', 'true');
-        btn.innerHTML = '<i class="bi bi-eye me-1"></i><span>Show Missing</span>';
     }
 };
 
