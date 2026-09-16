@@ -415,12 +415,11 @@ window.lookupAndSaveArtistIds = function(button) {
 // ---------------------------------------------------------------------------
 // Import Release from Missing Grid
 // ---------------------------------------------------------------------------
-window.importReleaseFromEncoded = function(encArtist, encReleaseId, encAlbum) {
+window.importReleaseFromEncoded = function(btn, encArtist, encReleaseId, encAlbum) {
     const artist = decodeURIComponent(encArtist);
     const releaseId = decodeURIComponent(encReleaseId);
     const album = decodeURIComponent(encAlbum);
 
-    const btn = event.currentTarget || event.target.closest('button');
     const origHtml = btn.innerHTML;
     
     btn.disabled = true;
@@ -432,10 +431,12 @@ window.importReleaseFromEncoded = function(encArtist, encReleaseId, encAlbum) {
         body: JSON.stringify({
             artist: artist,
             album: album,
+            title: album,
             release_mbid: releaseId,
             release_id: releaseId,
             release_source: releaseId ? 'musicbrainz' : null,
-            source: 'soulseek'
+            source: 'musicbrainz',
+            type: 'album'
         })
     })
     .then(r => r.json())
