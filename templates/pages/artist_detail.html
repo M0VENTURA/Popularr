@@ -95,7 +95,7 @@
               <div class="btn-group btn-group-sm flex-shrink-0">
                 {% if is_missing %}
                   <button class="btn btn-outline-success btn-sm fw-bold"
-                          onclick="importReleaseFromEncoded('{{ (artist_name|urlencode|replace('+', '%20')) }}', '{{ (release_id|urlencode|replace('+', '%20')) }}', '{{ (album_title|urlencode|replace('+', '%20')) }}')"
+                          onclick="importReleaseFromEncoded(this, '{{ (artist_name|urlencode|replace('+', '%20')) }}', '{{ (release_id|urlencode|replace('+', '%20')) }}', '{{ (album_title|urlencode|replace('+', '%20')) }}')"
                           title="Import Release">
                     <i class="bi bi-download"></i> <span class="d-none d-sm-inline ms-1">Import</span>
                   </button>
