@@ -86,13 +86,25 @@ class AudioDbClient:
             return None
         return album.get("strAlbumThumb") or album.get("strAlbumCDart") or None
 
-    def get_artist_genres(self, artist_name: str, timeout: float = 10.0) -> list[str]:
-        """Return primary artist genre as a list for compatibility."""
+def get_artist_genres(self, artist_name: str, timeout: float = 10.0) -> list[str]:
+        """Return primary artist genre and style as a list for compatibility."""
         artist = self.search_artist(artist_name, timeout=timeout)
         if not artist:
             return []
-        genre = artist.get("strGenre")
-        return [genre] if genre else []
+            
+        genres = []
+        
+        # Grab the broad genre (e.g., "Metal")
+        primary_genre = artist.get("strGenre")
+        if primary_genre and primary_genre.strip():
+            genres.append(primary_genre.strip())
+            
+        # Grab the granular style (e.g., "Metalcore")
+        style = artist.get("strStyle")
+        if style and style.strip():
+            genres.append(style.strip())
+            
+        return list(dict.fromkeys(genres)) # Deduplicate just in case
 
 
 _audiodb_client: AudioDbClient | None = None
