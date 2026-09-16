@@ -11,7 +11,7 @@ from api_clients import session
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_API_KEY = "195003"
+DEFAULT_API_KEY = "123"
 
 
 class AudioDbClient:
