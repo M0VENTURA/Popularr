@@ -127,6 +127,7 @@ class WikidataHttpClient:
         return resp
 
     def search_entities(self, name: str, limit: int = 5) -> list[dict]:
+        """Fuzzy text search for Wikidata entities."""
         if not name:
             return []
 
@@ -155,6 +156,36 @@ class WikidataHttpClient:
 
         _ENTITY_SEARCH_CACHE.set(cache_key, results)
         return results
+
+    def get_qid_by_musicbrainz_id(self, mbid: str) -> str | None:
+        """Exact reverse-lookup of a Wikidata QID using a MusicBrainz Artist ID."""
+        if not mbid:
+            return None
+            
+        cache_key = f"mbid::{mbid}"
+        cached = _ENTITY_SEARCH_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+            
+        try:
+            resp = self._get(
+                WIKIDATA_API,
+                params={
+                    "action": "query",
+                    "list": "search",
+                    # P434 is the MusicBrainz Artist ID property
+                    "srsearch": f"haswbstatement:P434={mbid}", 
+                    "format": "json",
+                    "maxlag": DEFAULT_MAXLAG,
+                }
+            )
+            results = resp.json().get("query", {}).get("search", [])
+            qid = results[0]["title"] if results else None
+            _ENTITY_SEARCH_CACHE.set(cache_key, qid)
+            return qid
+        except Exception as exc:
+            logger.warning("Wikidata MBID search failed", mbid=mbid, error=str(exc))
+            return None
 
     def get_entity(self, entity_id: str) -> dict:
         if not _is_valid_qid(entity_id):
@@ -213,7 +244,8 @@ class WikidataHttpClient:
                 params={
                     "action": "wbgetentities",
                     "ids": "|".join(entity_ids),
-                    "props": "sitelinks|descriptions",
+                    # Appended claims and labels so genres are actually returned
+                    "props": "sitelinks|descriptions|claims|labels",
                     "sitefilter": "enwiki",
                     "languages": "en",
                     "format": "json",
@@ -239,16 +271,17 @@ class WikidataHttpClient:
 
         url = WIKIPEDIA_SUMMARY_API.format(title=quote(normalized_title, safe=""))
         try:
-            with _CONCURRENCY_SEMAPHORE:
-                resp = self.session.get(url, timeout=6)
-            if resp.status_code == 404:
+            # Replaced raw session.get with self._get to inherit @retry logic
+            resp = self._get(url)
+            extract = (resp.json().get("extract") or "").strip()
+            _WIKIPEDIA_SUMMARY_CACHE.set(normalized_title, extract)
+            return extract or None
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
                 _WIKIPEDIA_SUMMARY_CACHE.set(normalized_title, "")
                 return None
-            resp.raise_for_status()
+            logger.warning("Wikipedia summary lookup failed", title=title, error=str(exc))
+            return None
         except Exception as exc:
             logger.warning("Wikipedia summary lookup failed", title=title, error=str(exc))
             return None
-
-        extract = (resp.json().get("extract") or "").strip()
-        _WIKIPEDIA_SUMMARY_CACHE.set(normalized_title, extract)
-        return extract or None
