@@ -3,6 +3,44 @@
 {% block title %}{{ artist_name }} · Popularr{% endblock %}
 
 {% block content %}
+<style>
+  #artistMainPageContainer.filter-hide-missing .missing-album-item { display: none !important; }
+  #artistMainPageContainer.filter-hide-library .library-album-item { display: none !important; }
+  .category-section.category-hide-missing .missing-album-item { display: none !important; }
+  .cursor-pointer { cursor: pointer; }
+
+  /* Override Bootstrap Blue for inactive tabs */
+  #artistPageTabs .nav-link { color: #adb5bd !important; border-color: transparent !important; }
+  #artistPageTabs .nav-link:hover { color: #ffffff !important; }
+  #artistPageTabs .nav-link.active { background-color: var(--spotify-green, #1db954) !important; color: #000 !important; }
+
+  /* Global Filter Button Styling */
+  .filter-group-custom .btn {
+      margin-right: 0;
+      opacity: 0.65;
+      transition: all 0.2s;
+  }
+  .filter-group-custom .btn.active {
+      opacity: 1;
+  }
+  .filter-btn-all { border: 1px solid #6c757d; color: #adb5bd; }
+  .filter-btn-all.active { background-color: #343a40; color: #fff; }
+  .filter-btn-lib { border: 1px solid #198754; color: #198754; border-left: none; border-right: none;}
+  .filter-btn-lib.active { background-color: rgba(25, 135, 84, 0.2); }
+  .filter-btn-mis { border: 1px solid #ffc107; background-color: transparent; color: #ffc107; font-weight: 600; }
+  .filter-btn-mis.active { background-color: #ffc107; color: #000; }
+
+  /* Missing Category Toggle Button */
+  .missing-toggle-btn {
+      transition: opacity 0.2s, filter 0.2s;
+  }
+  .missing-toggle-btn[data-hidden="true"] {
+      opacity: 0.5;
+      filter: grayscale(100%);
+      text-decoration: line-through;
+  }
+</style>
+
 {# ========================================================================= #}
 {# REUSABLE RELEASE CATEGORY ACCORDION MACRO                                 #}
 {# ========================================================================= #}
@@ -14,33 +52,32 @@
 
     <div class="card mb-3 category-section shadow-sm" id="{{ cat_id }}-section" data-category-key="{{ cat_id }}">
       
-      <!-- FIXED HEADER: Separated toggle area from button area -->
+      <!-- FIXED HEADER: Contains toggleable missing badge -->
       <div class="card-header p-0 d-flex align-items-center justify-content-between" style="background-color: var(--tertiary-bg, #282828);">
         
         <!-- Clickable Area for Accordion Collapse -->
-        <a class="text-decoration-none text-white p-3 flex-grow-1 d-flex align-items-center gap-2 cursor-pointer"
-           data-bs-toggle="collapse" href="#collapse-{{ cat_id }}" role="button" aria-expanded="true" aria-controls="collapse-{{ cat_id }}">
-          <i class="bi {{ cat_icon }} text-success fs-5"></i>
-          <h5 class="h6 fw-bold mb-0 me-2">{{ cat_title }}</h5>
-          <span class="badge bg-primary text-dark fw-bold">{{ in_library_count }} / {{ total_catalogue }} in Library</span>
+        <div class="p-3 flex-grow-1 d-flex align-items-center gap-2">
+          <a class="text-decoration-none text-white d-flex align-items-center gap-2 cursor-pointer me-2"
+             data-bs-toggle="collapse" href="#collapse-{{ cat_id }}" role="button" aria-expanded="true" aria-controls="collapse-{{ cat_id }}">
+            <i class="bi {{ cat_icon }} text-success fs-5"></i>
+            <h5 class="h6 fw-bold mb-0 me-2">{{ cat_title }}</h5>
+          </a>
+          <span class="badge text-light fw-bold" style="background-color: #3b82f6; font-size: 0.8rem; padding: 0.4rem 0.6rem; border-radius: 0.4rem;">
+            {{ in_library_count }} / {{ total_catalogue }} in Library
+          </span>
           {% if missing_count > 0 %}
-            <span class="badge bg-warning text-dark extra-small">🟡 {{ missing_count }} Missing</span>
-          {% endif %}
-        </a>
-        
-        <!-- Isolated Action Buttons (No data-bs-toggle here) -->
-        <div class="p-3 ps-0 d-flex align-items-center gap-3 flex-shrink-0">
-          {% if missing_count > 0 %}
-            <button type="button" 
-                    class="btn btn-xs btn-outline-secondary py-0 px-2 toggle-missing-btn extra-small" 
-                    data-target-category="{{ cat_id }}" 
-                    onclick="toggleMissingReleasesForCategory(this, '{{ cat_id }}')" 
-                    title="Toggle visibility of missing items in this section"
-                    data-hidden="false">
-              <i class="bi bi-eye-slash me-1"></i><span>Hide Missing</span>
+            <button type="button" class="btn btn-warning btn-sm text-dark fw-bold missing-toggle-btn border-0"
+                    style="font-size: 0.8rem; padding: 0.25rem 0.6rem; border-radius: 0.4rem; line-height: 1.2;"
+                    data-target-category="{{ cat_id }}"
+                    onclick="toggleMissingReleasesForCategory(this, '{{ cat_id }}'); event.preventDefault(); event.stopPropagation();"
+                    data-hidden="false" title="Toggle missing releases">
+              🟡 {{ missing_count }} Missing
             </button>
           {% endif %}
-          <i class="bi bi-chevron-down text-muted accordion-chevron cursor-pointer" data-bs-toggle="collapse" data-bs-target="#collapse-{{ cat_id }}"></i>
+        </div>
+        
+        <div class="p-3 ps-0 d-flex align-items-center flex-shrink-0 cursor-pointer" data-bs-toggle="collapse" data-bs-target="#collapse-{{ cat_id }}">
+          <i class="bi bi-chevron-down text-muted accordion-chevron"></i>
         </div>
       </div>
 
@@ -114,18 +151,6 @@
     </div>
   {% endif %}
 {% endmacro %}
-
-<style>
-  #artistMainPageContainer.filter-hide-missing .missing-album-item { display: none !important; }
-  #artistMainPageContainer.filter-hide-library .library-album-item { display: none !important; }
-  .category-section.category-hide-missing .missing-album-item { display: none !important; }
-  .cursor-pointer { cursor: pointer; }
-
-  /* Override Bootstrap Blue for inactive tabs */
-  #artistPageTabs .nav-link { color: #adb5bd !important; border-color: transparent !important; }
-  #artistPageTabs .nav-link:hover { color: #ffffff !important; }
-  #artistPageTabs .nav-link.active { background-color: var(--spotify-green, #1db954) !important; color: #000 !important; }
-</style>
 
 <div class="container-fluid mt-3 artist-page" id="artistMainPageContainer">
 
@@ -301,10 +326,12 @@
     <!-- TAB 1: ALBUMS -->
     <div class="tab-pane fade show active" id="tab-albums" role="tabpanel" aria-labelledby="tab-albums-btn">
       <div class="d-flex align-items-center justify-content-between gap-2 mb-3 p-2 rounded border border-secondary shadow-sm" style="background-color: var(--tertiary-bg, #282828);">
-        <div class="btn-group btn-group-sm" role="group" aria-label="Album status filter">
-          <button type="button" class="btn btn-outline-secondary artist-filter-btn active" data-filter="all" onclick="setArtistFilter('all')">All ({{ ns_totals.all }})</button>
-          <button type="button" class="btn btn-outline-success artist-filter-btn" data-filter="library" onclick="setArtistFilter('library')">In Library ({{ ns_totals.library }})</button>
-          <button type="button" class="btn btn-outline-warning artist-filter-btn" data-filter="missing" onclick="setArtistFilter('missing')">🟡 Missing ({{ ns_totals.missing }})</button>
+        
+        <!-- Updated Global Filter Button Group -->
+        <div class="btn-group btn-group-sm filter-group-custom" role="group" aria-label="Album status filter">
+          <button type="button" class="btn filter-btn-all artist-filter-btn active" data-filter="all" onclick="setArtistFilter('all')">All ({{ ns_totals.all }})</button>
+          <button type="button" class="btn filter-btn-lib artist-filter-btn" data-filter="library" onclick="setArtistFilter('library')">In Library ({{ ns_totals.library }})</button>
+          <button type="button" class="btn filter-btn-mis artist-filter-btn" data-filter="missing" onclick="setArtistFilter('missing')">🟡 Missing ({{ ns_totals.missing }})</button>
         </div>
 
         <button class="btn btn-sm btn-outline-info fw-bold" onclick='checkMissingReleases({{ artist_name|tojson }})'>
