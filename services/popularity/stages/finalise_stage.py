@@ -408,6 +408,100 @@ def _live_album_stars(
     )
 
 
+def _album_top_genres(
+    album_tracks: list[dict[str, Any]] | None,
+    *,
+    max_genres: int = 3,
+) -> list[str]:
+    """Aggregates all genres for an album, prioritizing accurate tags."""
+    if not album_tracks:
+        return []
+
+    from services.enrichment.genre_aggregation_service import aggregate_genres, _parse_genre_input
+    
+    album_source_map: dict[str, list[str]] = {}
+    _source_cols = [
+        ("musicbrainz", "musicbrainz_genres"),
+        ("discogs", "discogs_genres"),
+        ("lastfm", "lastfm_tags"),
+        ("listenbrainz", "listenbrainz_genres"),
+        ("spotify", "spotify_genres"),
+        ("navidrome", "navidrome_genres"),
+        ("audiodb", "audiodb_genres"),
+        ("wikidata", "wikidata_genres"),
+    ]
+
+    for _at in album_tracks:
+        if not isinstance(_at, dict):
+            continue
+        for _src, _col in _source_cols:
+            raw = _at.get(_col)
+            if not raw:
+                continue
+            _parsed_list = _parse_genre_input(raw)
+            if not isinstance(_parsed_list, list):
+                continue
+            for _g in _parsed_list:
+                if isinstance(_g, dict):
+                    _g = _g.get("name") or ""
+                _name = str(_g or "").strip()
+                if _name:
+                    album_source_map.setdefault(_src, []).append(_name)
+
+    if not album_source_map:
+        return []
+
+    try:
+        return aggregate_genres(album_source_map, max_genres=max_genres)
+    except Exception:
+        return []
+
+
+def _artist_dominant_genres(
+    artist: str,
+    *,
+    max_genres: int = 3,
+) -> list[str]:
+    """Fetches and aggregates genres across the artist's entire catalog."""
+    if not artist:
+        return []
+    try:
+        from db.engine import db_session as _db_session
+        from sqlalchemy import text as _text
+
+        rows: list[dict[str, Any]] = []
+        with _db_session() as session:
+            result = session.execute(
+                _text("""
+                    SELECT musicbrainz_genres, discogs_genres, lastfm_tags,
+                           listenbrainz_genres, spotify_genres, navidrome_genres,
+                           audiodb_genres, wikidata_genres
+                    FROM tracks
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                      AND (
+                        COALESCE(musicbrainz_genres::text, '') <> ''
+                        OR COALESCE(discogs_genres::text, '') <> ''
+                        OR COALESCE(lastfm_tags::text, '') <> ''
+                        OR COALESCE(listenbrainz_genres::text, '') <> ''
+                        OR COALESCE(spotify_genres::text, '') <> ''
+                        OR COALESCE(navidrome_genres::text, '') <> ''
+                        OR COALESCE(audiodb_genres::text, '') <> ''
+                        OR COALESCE(wikidata_genres::text, '') <> ''
+                      )
+                    LIMIT 500
+                """),
+                {"artist": artist},
+            )
+            rows = [dict(r._mapping) for r in result.fetchall() or []]
+
+        if not rows:
+            return []
+
+        return _album_top_genres(rows, max_genres=max_genres)
+    except Exception:
+        return []
+
+
 def _assign_stars(
     track: dict[str, Any],
     album_scores: list[float],
