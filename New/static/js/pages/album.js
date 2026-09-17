@@ -143,6 +143,83 @@
    * ("Edit track metadata") matches that modal's scope, not the
    * single-field one.
    */
+
+  // ── Simple single-field track edit ──────────────────────────────────────
+  //
+  // IMPLEMENTED 2026-09-18 — this was the missing half of the track edit.
+  //
+  // components/modals/_track_edit.html renders #simpleEditTrackModal with a
+  // Save button calling saveEditedTrack(), and this file's own header
+  // documented the modal as live — but saveEditedTrack() was defined NOWHERE
+  // in any tree (New/static/js, static/js or old_system/static). The quick
+  // edit had therefore never worked since the inline JS was split into
+  // modules: the button threw ReferenceError and the modal sat there doing
+  // nothing.
+  //
+  // services/genres.js::editTrackArtist() is the caller that surfaces this
+  // most visibly (it opens this modal to rename a track's artist).
+  //
+  // The payload mirrors pages/artist.js::saveEditedTrackFromArtistPage, which
+  // performs the identical operation and already worked — the artist page has
+  // its own inline copy of this modal, so it never hit the missing function.
+  //
+  // NOTE the id split: the SIMPLE modal's hidden track id is
+  // #simpleEditTrackId, while the COMPREHENSIVE modal's is #editTrackId. They
+  // used to share the name `editTrackId`, which meant the quick edit read the
+  // wrong track when both modals were on the page. Both are read here (simple
+  // first) so this also serves the artist page, whose inline modal still uses
+  // the old #editTrackId + #editTrackCurrentField pairing.
+
+  async function saveEditedTrack(btn) {
+    const idEl = document.getElementById('simpleEditTrackId')
+      || document.getElementById('editTrackId');
+    const fieldEl = document.getElementById('editTrackCurrentField');
+    const valueEl = document.getElementById('editTrackValue');
+
+    const trackId = idEl ? String(idEl.value || '').trim() : '';
+    const field = fieldEl ? String(fieldEl.value || '').trim() : '';
+    const value = valueEl ? String(valueEl.value || '').trim() : '';
+
+    if (!trackId || !field) {
+      notifyError('No track or field selected for quick edit.');
+      return;
+    }
+
+    // The field name is used directly as the payload key, so it must be one
+    // the API accepts. Callers are genres.js ('artist') and the modal's own
+    // title edit ('title').
+    const payload = { track_id: trackId, sync_to_file: true };
+    payload[field] = value;
+
+    return global.buttonState.withBusy(btn, 'Saving…', async () => {
+      try {
+        const data = await global.api.postJson('/api/track/update-metadata', payload);
+        if (!data.success) {
+          notifyError(data.error || 'Failed to update');
+          return;
+        }
+
+        if (data.file_synced === false) {
+          global.toast.warning(
+            'Saved to database, but file tags were not updated. Check file permissions and the logs.'
+          );
+        } else {
+          notifySuccess('Track metadata updated (database + file tags)');
+        }
+
+        // Hide whichever modal was actually open: genres.js shows
+        // #simpleEditTrackModal, the artist page shows #editTrackModal.
+        ['simpleEditTrackModal', 'editTrackModal'].forEach((id) => {
+          const el = document.getElementById(id);
+          if (el && el.classList.contains('show') && global.modal) global.modal.hide(id);
+        });
+        setTimeout(() => global.location.reload(), 1000);
+      } catch (error) {
+        notifyError('Error: ' + error.message);
+      }
+    });
+  }
+
   async function openEditTrackFromAlbum(trackId) {
     const modalEl = document.getElementById('editTrackModal');
     if (!modalEl) {
@@ -1653,6 +1730,9 @@
   global.deleteWithFiles = deleteWithFiles;
   global.saveComprehensiveEditedTrack = saveComprehensiveEditedTrack;
   global.addEditTrackGenre = addEditTrackGenre;
+  // Wired to #simpleEditTrackModal's Save button in
+  // components/modals/_track_edit.html. Was undefined until 2026-09-18.
+  global.saveEditedTrack = saveEditedTrack;
 
   // NOTE: window.toggleAlbumFavourite is deliberately NOT defined here —
   // favourites are being removed. Delete the heart button from the template.

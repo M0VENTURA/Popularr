@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Albums Missing Tracks{% endblock %}
+
+{% block content %}
+{#
+  Missing Tracks & Albums.
+
+  CHANGED FROM templates/pages/missing_releases.html:
+    * the 472-line inline <script> moved to static/js/pages/missing-releases.js
+    * the page's local escHtml is gone (utils/dom.js provides it)
+    * the inline onclick on Refresh became data-action, and the anchors nested
+      inside accordion headers now carry `data-stop-propagation` instead of
+      `onclick="event.stopPropagation()"` — handled by the module's one
+      delegated listener
+    * everything below is unchanged: two sections, each an accordion the module
+      fills in, plus the loading spinner and error alert it drives.
+
+  The ids the script needs are unchanged: #loadingSpinner, #errorAlert,
+  #section1, #section2, #gapArtistAccordion, #noGapAlbums, #gapAlbumCount,
+  #missingArtistAccordion, #noMissingAlbums, #missingArtistCount.
+#}
+<div class="container-fluid py-3">
+
+  <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+    <h4 class="mb-0"><i class="bi bi-exclamation-circle text-warning"></i> Missing Tracks &amp; Albums</h4>
+    <button type="button" class="btn btn-outline-secondary btn-sm" data-action="mr-reload">
+      <i class="bi bi-arrow-clockwise"></i> Refresh
+    </button>
+  </div>
+
+  <!-- Loading spinner -->
+  <div id="loadingSpinner" class="text-center py-5">
+    <div class="spinner-border text-primary" role="status"></div>
+    <p class="mt-2 text-muted">Loading missing content…</p>
+  </div>
+
+  <!-- Error alert -->
+  <div id="errorAlert" class="alert alert-danger d-none" role="alert"></div>
+
+  <!-- ── Section 1: Albums with Missing Tracks ─────────────────────────── -->
+  <div id="section1" class="d-none">
+    <h4 class="mb-3"><i class="bi bi-music-note-list text-warning"></i> Albums with Missing Tracks
+      <span id="gapAlbumCount" class="badge bg-warning text-dark ms-2"></span>
+    </h4>
+
+    <div id="gapArtistAccordion" class="accordion mb-4"></div>
+
+    <div id="noGapAlbums" class="alert alert-success d-none">
+      <i class="bi bi-check-circle"></i> No albums with detected missing tracks found.
+    </div>
+  </div>
+
+  <!-- ── Section 2: Missing Albums & EPs ───────────────────────────────── -->
+  <div id="section2" class="d-none">
+    <h4 class="mb-3"><i class="bi bi-vinyl text-info"></i> Missing Albums &amp; EPs
+      <span id="missingArtistCount" class="badge bg-info ms-2"></span>
+    </h4>
+
+    <div id="missingArtistAccordion" class="accordion mb-4"></div>
+
+    <div id="noMissingAlbums" class="alert alert-success d-none">
+      <i class="bi bi-check-circle"></i> No cached missing albums or EPs found. Run the Missing Releases scan first.
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/*, ui/toast.js, ui/modal.js, ui/confirm.js and
+  ui/button-state.js. This page adds only its controller.
+
+    js/pages/missing-releases.js   both accordions, the merged library+missing
+                                   tracklist, per-track and whole-album queueing
+
+  NOTE: the MusicBrainz picker and the Soulseek download helper this page uses
+  for "Download" on a cached missing release are globals from
+  services/musicbrainz-picker.js (already global via base.html) and
+  pages/download-queue.js (NOT loaded here) respectively — the module guards both
+  and falls back to a toast, exactly as the original did.
+#}
+<script src="{{ versioned_static('js/pages/missing-releases.js') }}"></script>
+{% endblock %}

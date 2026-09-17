@@ -2056,8 +2056,17 @@
     }
   }
 
-  async function syncListenBrainzRssPlaylists() {
-    const btn = document.querySelector('button[onclick="syncListenBrainzRssPlaylists()"]');
+  async function syncListenBrainzRssPlaylists(button) {
+    // The button used to be located BY ITS OWN INLINE ATTRIBUTE:
+    //     document.querySelector('button[onclick="syncListenBrainzRssPlaylists()"]')
+    // That only works while the markup keeps that exact attribute string, so
+    // it breaks the moment the template moves to data-action — which is the
+    // point of this refactor. The caller passes the element when it has one;
+    // the [data-action] lookup is the new contract and the onclick lookup is
+    // kept last so the not-yet-ported create.html keeps working.
+    const btn = button
+      || document.querySelector('[data-action="playlist-lb-rss-sync"]')
+      || document.querySelector('button[onclick="syncListenBrainzRssPlaylists()"]');
     const usernameInput = document.getElementById('lbRssUsername');
     const lbUsername = usernameInput ? usernameInput.value.trim() : '';
     if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Syncing...'; }

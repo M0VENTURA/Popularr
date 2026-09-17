@@ -1,0 +1,96 @@
+<!-- Soulseek search panel (reusable component) -->
+{#
+  Soulseek search + results + bulk download.
+
+  ── THIS PARTIAL WAS REBUILT, NOT COPIED ──────────────────────────────────
+  The original rendered a completely different control set
+  (slskdSearchForm / slskdSearchQuery / slskdSearchLimit / slskdSearchEmpty /
+  slskdSearchResults) and called `searchSoulseek(event)`. Neither of the two
+  controllers in the refactored tree can drive that markup:
+
+    * static/js/pages/search.js reads #slskdSearchQuery and calls
+      global.searchSoulseek. `searchSoulseek` is published ONLY by the legacy
+      static/js/downloads.js — services/slskd.js does not define it — so that
+      call is guarded by a `typeof` check and silently no-ops.
+    * static/js/pages/soulseek-search.js (the downloads_page.js port) expects
+      slskdSearchInput / slskdSearchBtn / slskdDownloadSelected / slskdStatus /
+      slskdStatusText / slskdResponseCount / slskdResultCount / slskdResults.
+
+  The markup below satisfies soulseek-search.js, which is the module that
+  actually owns the search lifecycle now: it holds the session, the poll loop,
+  the terminal-state grace window and the busy-slot retry, all inside
+  services/slskd.js's `search()`.
+
+  ── WHY THIS IS THE RIGHT SHAPE, AND THE ONE LOADING CONSEQUENCE ──────────
+  One partial is shared by three pages (downloads/search.html, downloads/queue.html
+  and downloads/monitor.html). In the old tree all three loaded downloads.js, so
+  a single shared `searchSoulseek` served them all. To keep that "one component,
+  one controller" design with the refactored module, every page that includes
+  this partial must load:
+
+      css/downloads.css
+      js/services/slskd.js          (global.slskd.*)
+      js/pages/soulseek-search.js   (this panel's controller)
+
+  pages/downloads/search.html already does. queue.html and monitor.html need
+  soulseek-search.js added to their {% block scripts %} — noted in those
+  templates.
+
+  ── WHAT WAS DROPPED ──────────────────────────────────────────────────────
+  * The "Results Limit" number input. No controller has ever read it:
+    soulseek-search.js calls global.slskd.search(query, {context, filterBusy,
+    onUpdate, onComplete, onError}) with no limit, and the legacy searchSoulseek
+    ignored it too. It was a control that did nothing.
+  * The `searchSoulseek` call site in pages/search.js should be deleted — it
+    cannot ever fire. That file is on the migration list.
+
+  The results markup (slskd-user-group / slskd-album / slskd-file-row and the
+  slskd-* classes inside them) is generated entirely by soulseek-search.js and
+  styled in css/downloads.css. Nothing needs to be declared here for it.
+#}
+{% if slskd_config.enabled %}
+<div class="card mb-4">
+  <div class="card-header">
+    <h5 class="card-title mb-0">
+      <i class="bi bi-music-note-beamed"></i> Soulseek Search
+    </h5>
+  </div>
+  <div class="card-body">
+    <div class="row g-2 align-items-end mb-3">
+      <div class="col-md-6">
+        <label for="slskdSearchInput" class="form-label">Search Query</label>
+        <input type="text" id="slskdSearchInput" class="form-control"
+               placeholder="e.g., Daft Punk - Get Lucky" autocomplete="off" required>
+      </div>
+      <div class="col-md-3">
+        <button type="button" id="slskdSearchBtn" class="btn btn-primary w-100">
+          <i class="bi bi-search"></i> Search
+        </button>
+      </div>
+      <div class="col-md-3">
+        <button type="button" id="slskdDownloadSelected" class="btn btn-success w-100" disabled>
+          Download selected
+        </button>
+      </div>
+    </div>
+
+    <!-- Status / progress strip. #slskdStatus is the whole strip (toggled by
+         showError), and the three inner ids are written individually. -->
+    <div id="slskdStatus" class="d-flex flex-wrap align-items-center gap-3 mb-2" style="display:none;">
+      <div class="spinner-border spinner-border-sm text-primary" role="status">
+        <span class="visually-hidden">Searching…</span>
+      </div>
+      <span id="slskdStatusText" class="text-muted small">Searching…</span>
+      <span id="slskdResponseCount" class="badge bg-secondary">0 responses</span>
+      <span id="slskdResultCount" class="badge bg-info text-dark">0 files</span>
+    </div>
+
+    <div id="slskdResults"></div>
+  </div>
+</div>
+{% else %}
+<div class="alert alert-warning mb-0">
+  <i class="bi bi-exclamation-triangle"></i> Soulseek (slskd) integration is not enabled.
+  <a href="{{ url_for('ui.config_editor') }}">Configure it</a> in config.yaml.
+</div>
+{% endif %}

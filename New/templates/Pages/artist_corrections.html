@@ -1,0 +1,571 @@
+{% extends "base.html" %}
+
+{% block title %}Corrections - {{ artist_name }} - Popularr{% endblock %}
+
+{% block content %}
+{#
+  Per-artist corrections console.
+
+  CHANGED FROM templates/pages/artist_corrections.html:
+    * the 602-line inline <script> moved to static/js/pages/artist-corrections.js
+    * every inline onclick became a data-action handled by one delegated
+      listener. Two of them previously assembled JavaScript source into the
+      attribute — showMergeDialog with hand-rolled quote escaping around a JSON
+      array, and mergeAlbums with `| tojson | safe`. Both now pass a key or a
+      `|e`-escaped JSON string in a data attribute instead. See that file's
+      header for the full list of fixes.
+    * the <script id="page-data"> block below is unchanged in shape; the module
+      reads {artistName, mbAlbums} from it exactly as the inline script did.
+
+  Everything the server renders — the badges, the duplicate-track accordion,
+  missing-metadata rows, MBID conflicts, disc inconsistencies, album splits —
+  is unchanged markup.
+#}
+<div class="container-fluid mt-4">
+    <nav aria-label="breadcrumb">
+        <ol class="breadcrumb mb-3">
+            <li class="breadcrumb-item"><a href="{{ url_for('ui.dashboard') }}">Dashboard</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('ui.artists') }}">Artists</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('ui.artist_detail', name=artist_name) }}">{{ artist_name }}</a></li>
+            <li class="breadcrumb-item active" aria-current="page">Corrections</li>
+        </ol>
+    </nav>
+
+    <div class="d-flex flex-column flex-xl-row justify-content-between align-items-start align-items-xl-center mb-4 gap-3">
+        <h1 class="h3 mb-0 fw-bold">
+            <i class="bi bi-tools text-info me-2"></i> Corrections for {{ artist_name }}
+        </h1>
+        <div class="d-flex gap-2 flex-wrap">
+            <span class="badge bg-info shadow-sm py-2" id="duplicate-artists-badge" style="display: none;">0 duplicate artists</span>
+            {% if duplicate_count > 0 %}
+            <span class="badge bg-danger shadow-sm py-2">{{ duplicate_count }} duplicate rows</span>
+            {% endif %}
+            {% if missing_count > 0 %}
+            <span class="badge bg-warning text-dark shadow-sm py-2">{{ missing_count }} missing metadata</span>
+            {% endif %}
+            {% if mbid_inconsistent_count %}
+            <span class="badge bg-danger shadow-sm py-2">{{ mbid_inconsistent_count }} album MBID conflicts</span>
+            {% endif %}
+            {% if disc_inconsistent_count %}
+            <span class="badge shadow-sm py-2" style="background-color:#fd7e14!important; color:#000;">{{ disc_inconsistent_count }} disc # inconsistency</span>
+            {% endif %}
+            {% if duplicate_album_count %}
+            <span class="badge bg-warning text-dark shadow-sm py-2">{{ duplicate_album_count }} duplicate album split{{ 's' if duplicate_album_count != 1 else '' }}</span>
+            {% endif %}
+            <span class="badge bg-secondary shadow-sm py-2" id="title-mismatches-badge" style="display:none;"></span>
+            <span class="badge bg-secondary shadow-sm py-2" id="missing-tracks-badge" style="display: none;">checking MB tracks…</span>
+        </div>
+    </div>
+
+    <!-- Duplicate Artists by MBID Section (Async) -->
+    <div class="card mb-4 shadow-sm" id="duplicate-artists-section" style="display: none;">
+        <div class="card-header border-secondary py-2">
+            <h5 class="mb-0 fw-bold"><i class="bi bi-people-fill text-info me-2"></i> Duplicate Artists <small class="text-muted fw-normal ms-2 d-none d-md-inline">(Same MBID, Different Names)</small></h5>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0" data-mobile-cards>
+                    <thead>
+                        <tr class="d-none d-md-table-row text-muted small text-uppercase">
+                            <th>MusicBrainz ID</th>
+                            <th>Current Variations</th>
+                            <th>Recommended Name</th>
+                            <th class="text-center">Total Tracks</th>
+                            <th class="text-end">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="duplicate-artists-tbody">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Duplicate Tracks Section -->
+    <div class="card mb-4 shadow-sm">
+        <div class="card-header border-secondary py-2">
+            <h5 class="mb-0 fw-bold"><i class="bi bi-files text-danger me-2"></i> Duplicate Tracks</h5>
+        </div>
+        <div class="card-body p-0">
+            {% if duplicates %}
+            <div class="accordion accordion-flush" id="duplicateTracksAccordion">
+                {% for row in duplicates %}
+                <div class="accordion-item border-bottom border-secondary" style="background: transparent;">
+                    <h2 class="accordion-header" id="heading-dup-{{ loop.index }}">
+                        <button class="accordion-button collapsed py-2 px-3 bg-transparent shadow-none" type="button" data-bs-toggle="collapse" data-bs-target="#collapse-dup-{{ loop.index }}">
+                            <div class="d-flex align-items-center gap-3 w-100 pe-3">
+                                <span class="badge bg-danger rounded-pill">{{ row.duplicate_count }}</span>
+                                <div class="min-w-0 flex-grow-1">
+                                    <div class="fw-bold text-truncate">{{ row.title or '—' }}</div>
+                                    <div class="small text-muted text-truncate">{{ row.album or '—' }} <span class="mx-1">•</span> Track {{ row.track_number or '?' }}</div>
+                                </div>
+                            </div>
+                        </button>
+                    </h2>
+                    <div id="collapse-dup-{{ loop.index }}" class="accordion-collapse collapse" data-bs-parent="#duplicateTracksAccordion">
+                        <div class="accordion-body pt-0 pb-3 px-3">
+                            <div class="alert alert-warning py-2 px-3 mb-3 small d-flex align-items-center gap-2">
+                                <i class="bi bi-lightbulb-fill fs-5"></i>
+                                <div>
+                                    <strong>Recommendation:</strong> {{ row.recommendation_basis }}<br>
+                                    <span class="text-dark opacity-75">Suggested deletion: Track ID {{ row.recommended_delete_id or '—' }}</span>
+                                </div>
+                            </div>
+
+                            <div class="list-group list-group-flush border border-secondary rounded">
+                                {% for track in row.tracks %}
+                                <div class="list-group-item d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3 p-3 {% if track.recommend_delete %}bg-danger bg-opacity-10 border-danger border-opacity-50{% else %}bg-transparent border-secondary{% endif %}">
+                                    <div class="min-w-0 flex-grow-1">
+                                        <div class="d-flex align-items-center gap-2 mb-1">
+                                            <span class="badge bg-secondary">ID: {{ track.id }}</span>
+                                            <span class="badge bg-dark border border-secondary text-muted"><i class="bi bi-clock me-1"></i>{{ track.duration_display or '—' }}</span>
+                                            {% if track.mbid %}<span class="badge bg-info text-dark"><i class="bi bi-hexagon-fill me-1"></i>MBID Linked</span>{% endif %}
+                                            {% if track.recommend_delete %}<span class="badge bg-danger"><i class="bi bi-exclamation-triangle-fill me-1"></i>Target</span>{% endif %}
+                                        </div>
+                                        <div class="small text-break mb-1" style="font-family: monospace; color: #a0a0a0;">{{ track.file_path or 'No file path' }}</div>
+                                        {% if track.expected_filename %}
+                                        <div class="extra-small text-info"><i class="bi bi-folder-symlink me-1"></i>Expected: {{ track.expected_filename }}</div>
+                                        {% endif %}
+                                    </div>
+                                    <div class="d-flex flex-column gap-2 flex-shrink-0 align-items-end">
+                                        <div class="extra-small text-muted">File similarity: {{ (track.filename_similarity * 100) | round(1) }}%</div>
+                                        {# Deletes the DB row AND the file — see the module header. #}
+                                        <button type="button"
+                                                class="btn btn-sm {% if track.recommend_delete %}btn-danger{% else %}btn-outline-danger{% endif %} fw-bold"
+                                                data-action="ac-delete-track"
+                                                data-track-id="{{ track.id }}"
+                                                data-recommended="{{ 'true' if track.recommend_delete else 'false' }}"
+                                                title="Delete this duplicate track (and its file, if present)">
+                                            <i class="bi bi-trash-fill me-1"></i> Delete
+                                        </button>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="text-center text-muted py-4"><i class="bi bi-check-circle-fill text-success fs-4 d-block mb-2"></i>No duplicate tracks found.</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Missing Core Metadata Section -->
+    <div class="card mb-4 shadow-sm">
+        <div class="card-header border-secondary py-2">
+            <h5 class="mb-0 fw-bold"><i class="bi bi-exclamation-triangle-fill text-warning me-2"></i> Tracks Missing Core Metadata</h5>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0" data-mobile-cards>
+                    <thead>
+                        <tr class="d-none d-md-table-row text-muted small text-uppercase">
+                            <th style="width: 80px;">ID</th>
+                            <th>Title</th>
+                            <th>Album</th>
+                            <th class="text-center" style="width: 80px;">Track #</th>
+                            <th class="text-center" style="width: 80px;">Disc #</th>
+                            <th>Issue</th>
+                            <th class="text-end">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% if missing_tracks %}
+                            {% for row in missing_tracks %}
+                            <tr>
+                                <td class="small text-muted" data-label="ID">{{ row.id }}</td>
+                                <td class="fw-semibold" data-label="Title">{{ row.title or '—' }}</td>
+                                <td data-label="Album">{{ row.album or '—' }}</td>
+                                <td class="text-center" data-label="Track #">{{ row.track_number or '—' }}</td>
+                                <td class="text-center" data-label="Disc #">{{ row.disc_number or '—' }}</td>
+                                <td data-label="Issue">
+                                    <span class="badge bg-warning text-dark mb-1">{{ row.metadata_issue_reason or 'Needs review' }}</span>
+                                    {% if row.metadata_missing_fields %}
+                                    <div class="extra-small text-muted">{{ row.metadata_missing_fields }}</div>
+                                    {% endif %}
+                                </td>
+                                <td class="text-end" data-label="Action">
+                                    <a class="btn btn-sm btn-primary" href="{{ url_for('ui.track_detail', track_id=row.id) }}">
+                                        <i class="bi bi-pencil-square me-1"></i> Fix
+                                    </a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr>
+                                <td colspan="7" class="text-center text-muted py-4"><i class="bi bi-check-circle-fill text-success fs-4 d-block mb-2"></i>No missing core metadata found.</td>
+                            </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- MBID Conflicts Section -->
+    {% if mbid_inconsistent_albums %}
+    <div class="card mb-4 shadow-sm" id="mbid-inconsistent-section">
+        <div class="card-header border-secondary py-2">
+            <h5 class="mb-0 fw-bold">
+                <i class="bi bi-diagram-3-fill text-danger me-2"></i> Album MBID Conflicts
+                <small class="text-muted ms-2 fw-normal d-none d-md-inline">Choose one canonical release MBID for the album.</small>
+            </h5>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0" data-mobile-cards>
+                    <thead>
+                        <tr class="d-none d-md-table-row text-muted small text-uppercase">
+                            <th>Album</th>
+                            <th class="text-center" style="width: 80px;">Tracks</th>
+                            <th class="text-center" style="width: 100px;">MBIDs</th>
+                            <th>Current MBIDs Found</th>
+                            <th class="text-end" style="width: 250px;">Resolution</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in mbid_inconsistent_albums %}
+                        <tr id="mbid-row-{{ loop.index }}">
+                            <td class="fw-semibold" data-label="Album">
+                                <a href="/album/{{ artist_name|path_segment }}/{{ row.album|path_segment }}" class="text-decoration-none">{{ row.album }}</a>
+                            </td>
+                            <td class="text-center" data-label="Tracks">{{ row.track_count }}</td>
+                            <td class="text-center" data-label="Conflicts"><span class="badge bg-danger">{{ row.mbid_count }}</span></td>
+                            <td data-label="Current MBIDs">
+                                <div class="d-flex flex-wrap gap-1">
+                                    {% for mbid in row.mbids %}
+                                    <code class="badge bg-dark border border-secondary text-light">{{ mbid }}</code>
+                                    {% endfor %}
+                                </div>
+                            </td>
+                            <td class="text-end" data-label="Resolution">
+                                <div class="input-group input-group-sm mb-2">
+                                    <input type="text" class="form-control" id="mbid-input-{{ loop.index }}" placeholder="Paste correct MBID">
+                                    <button type="button" class="btn btn-success"
+                                            data-action="ac-apply-mbid"
+                                            data-album="{{ row.album|e }}"
+                                            data-row-index="{{ loop.index }}">
+                                        <i class="bi bi-check-lg"></i>
+                                    </button>
+                                </div>
+                                <button type="button" class="btn btn-sm btn-outline-info w-100"
+                                        data-action="ac-find-mbid"
+                                        data-album="{{ row.album|e }}"
+                                        data-row-index="{{ loop.index }}">
+                                    <i class="bi bi-search"></i> Find MBID
+                                </button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Disc Number Inconsistency Section -->
+    {% if disc_inconsistent_albums %}
+    <div class="card mb-4 shadow-sm">
+        <div class="card-header border-secondary py-2">
+            <h5 class="mb-0 fw-bold">
+                <i class="bi bi-disc-fill text-warning me-2" style="color:#fd7e14!important;"></i> Disc Number Inconsistency
+                <small class="text-muted ms-2 fw-normal d-none d-md-inline">Causes split albums in Navidrome.</small>
+            </h5>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0" data-mobile-cards>
+                    <thead>
+                        <tr class="d-none d-md-table-row text-muted small text-uppercase">
+                            <th>Album</th>
+                            <th class="text-center" style="width: 80px;">Total</th>
+                            <th class="text-center" style="width: 100px;">With Disc #</th>
+                            <th class="text-center" style="width: 100px;">Without</th>
+                            <th class="text-center" style="width: 100px;">Disc Val</th>
+                            <th class="text-end" style="width: 150px;">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in disc_inconsistent_albums %}
+                        <tr id="disc-row-{{ loop.index }}">
+                            <td class="fw-semibold" data-label="Album">
+                                <a href="/album/{{ artist_name|path_segment }}/{{ row.album|path_segment }}" class="text-decoration-none">{{ row.album }}</a>
+                            </td>
+                            <td class="text-center" data-label="Total Tracks">{{ row.track_count }}</td>
+                            <td class="text-center" data-label="With Disc #">
+                                <span class="badge bg-warning text-dark">{{ row.tracks_with_disc }}</span>
+                            </td>
+                            <td class="text-center" data-label="Without Disc #">{{ row.tracks_without_disc }}</td>
+                            <td class="text-center text-muted small" data-label="Disc Value">{{ row.disc_value or '—' }}</td>
+                            <td class="text-end" data-label="Action">
+                                {#
+                                  A genuine multi-disc release must not have its disc numbers
+                                  cleared, so the button is disabled in that case (the backend
+                                  refuses it too — the module surfaces that as a warning).
+                                #}
+                                {% set looks_multi_disc = (row.distinct_disc_values|default(0)|int > 1) or (row.disc_value|string|int > 1) %}
+                                <button type="button" class="btn btn-sm btn-outline-warning w-100 fw-bold"
+                                        data-action="ac-clear-disc"
+                                        data-album="{{ row.album|e }}"
+                                        {% if looks_multi_disc %}disabled{% endif %}
+                                        title="{% if looks_multi_disc %}Likely multi-disc release: review manually instead of clearing all disc numbers{% else %}Remove the disc number from {{ row.tracks_with_disc }} track(s) so all tracks are consistent{% endif %}">
+                                    <i class="bi bi-eraser-fill"></i> Clear Disc #
+                                </button>
+                                {% if looks_multi_disc %}
+                                <div class="extra-small text-danger mt-1 text-center lh-sm">Manual review required (multi-disc)</div>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Duplicate Album Splits Section -->
+    {% if duplicate_albums %}
+    <div class="card mb-4 shadow-sm" id="duplicate-albums-section">
+        <div class="card-header border-secondary py-2">
+            <h5 class="mb-0 fw-bold">
+                <i class="bi bi-vinyl-fill text-warning me-2"></i> Duplicate Album Splits
+                <small class="text-muted ms-2 fw-normal d-none d-md-inline">Merge identically-named albums.</small>
+            </h5>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0" data-mobile-cards>
+                    <thead>
+                        <tr class="d-none d-md-table-row text-muted small text-uppercase">
+                            <th>Detected Names</th>
+                            <th class="text-center">Signal</th>
+                            <th>Canonical Name</th>
+                            <th class="text-end">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for grp in duplicate_albums %}
+                        <tr id="dup-album-row-{{ loop.index }}">
+                            <td data-label="Detected Names">
+                                <div class="d-flex flex-column gap-1">
+                                {% for alb in grp.albums %}
+                                    <div class="d-flex align-items-center flex-wrap gap-2">
+                                        <a href="/album/{{ artist_name|path_segment }}/{{ alb.album|path_segment }}" class="fw-semibold text-decoration-none">{{ alb.album }}</a>
+                                        <span class="badge bg-dark border border-secondary text-muted">{{ alb.track_count }} track{{ 's' if alb.track_count != 1 else '' }}</span>
+                                        {% if alb.album_year %}<span class="badge bg-secondary">{{ alb.album_year }}</span>{% endif %}
+                                        {% if alb.mb_mbid %}<code class="badge bg-info-subtle text-info-emphasis border border-info-subtle">{{ alb.mb_mbid[:8] }}…</code>{% endif %}
+                                    </div>
+                                {% endfor %}
+                                </div>
+                            </td>
+                            <td class="text-center" data-label="Signal">
+                                {% if grp.signal == 'mbid' %}
+                                <span class="badge bg-danger" title="Both entries share the same MusicBrainz album ID">Same MBID</span>
+                                {% else %}
+                                <span class="badge bg-warning text-dark" title="Names normalise to the same string after stripping edition suffixes">Similar Name</span>
+                                {% endif %}
+                            </td>
+                            <td data-label="Canonical Name">
+                                <input type="text" class="form-control form-control-sm" id="dup-album-canonical-{{ loop.index }}" value="{{ grp.canonical_name | e }}" placeholder="Canonical album name">
+                            </td>
+                            <td class="text-end" data-label="Action">
+                                {#
+                                  The album list is JSON in a data attribute, escaped by
+                                  `|e` so quotes and angle brackets in album names are inert.
+                                  The original injected `| tojson | safe` straight into an
+                                  onclick, which an album name could break out of.
+                                #}
+                                <button type="button" class="btn btn-sm btn-primary fw-bold"
+                                        id="dup-album-btn-{{ loop.index }}"
+                                        data-action="ac-merge-albums"
+                                        data-row-index="{{ loop.index }}"
+                                        data-source-albums="{{ grp.albums | map(attribute='album') | list | tojson | e }}">
+                                    <i class="bi bi-union me-1"></i> Merge
+                                </button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Track Title Mismatches Section (loaded async) -->
+    {% if mb_albums %}
+    <div class="card mb-4 shadow-sm" id="title-mismatches-section">
+        <div class="card-header border-secondary py-2">
+            <h5 class="mb-0 fw-bold"><i class="bi bi-pencil-square text-info me-2"></i> Title Mismatches vs MusicBrainz</h5>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0" data-mobile-cards>
+                    <thead>
+                        <tr class="d-none d-md-table-row text-muted small text-uppercase">
+                            <th style="width: 15%">Album</th>
+                            <th class="text-center" style="width: 80px;">Track #</th>
+                            <th style="width: 25%">Library Title</th>
+                            <th style="width: 25%">MusicBrainz Title</th>
+                            <th class="text-center" style="width: 80px;">Local Len</th>
+                            <th class="text-center" style="width: 80px;">MB Len</th>
+                            <th class="text-end" style="width: 150px;">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="title-mismatches-tbody">
+                        <tr id="title-mismatches-loading-row">
+                            <td colspan="7" class="text-center text-muted py-4">
+                                <span class="spinner-border spinner-border-sm me-2" role="status"></span> Checking MusicBrainz titles…
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Albums with Missing MB Tracks Section (loaded async) -->
+    {% if mb_albums %}
+    <div class="card mb-4 shadow-sm" id="mb-missing-tracks-section">
+        <div class="card-header border-secondary py-2 d-flex justify-content-between align-items-center">
+            <h5 class="mb-0 fw-bold"><i class="bi bi-music-note-list text-success me-2"></i> Missing MusicBrainz Tracks</h5>
+            <button type="button" class="btn btn-sm btn-outline-info fw-bold" id="checkAllMbTracksBtn" data-action="ac-check-tracks">
+                <i class="bi bi-search me-1"></i> Check All
+            </button>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0" data-mobile-cards>
+                    <thead>
+                        <tr class="d-none d-md-table-row text-muted small text-uppercase">
+                            <th style="width: 25%">Album</th>
+                            <th class="text-center" style="width: 12%">Local Tracks</th>
+                            <th class="text-center" style="width: 12%">MB Total</th>
+                            <th class="text-center" style="width: 12%">Missing</th>
+                            <th>Missing Track Details</th>
+                        </tr>
+                    </thead>
+                    <tbody id="mb-missing-tracks-tbody">
+                        {% for alb in mb_albums %}
+                        <tr id="mb-album-row-{{ loop.index }}">
+                            <td class="fw-semibold" data-label="Album">
+                                <a href="/album/{{ artist_name|path_segment }}/{{ alb.album|path_segment }}" class="text-decoration-none">{{ alb.album }}</a>
+                            </td>
+                            <td class="text-center" data-label="Local Tracks">{{ alb.track_count }}</td>
+                            <td class="text-center text-muted" data-label="MB Total" id="mb-total-{{ loop.index }}">Wait...</td>
+                            <td class="text-center" data-label="Missing" id="mb-missing-count-{{ loop.index }}">
+                                <span class="spinner-border spinner-border-sm text-secondary" role="status" style="display:none;" id="mb-spinner-{{ loop.index }}"></span>
+                                <span id="mb-missing-badge-{{ loop.index }}">—</span>
+                            </td>
+                            <td data-label="Missing Track Details" id="mb-missing-detail-{{ loop.index }}"></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Match to Existing Track Modal -->
+<div class="modal fade" id="matchTrackModal" tabindex="-1" aria-labelledby="matchTrackModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title fw-bold" id="matchTrackModalLabel"><i class="bi bi-link-45deg text-info me-1"></i> Match Missing Track to Existing Song</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body p-0">
+                <div class="p-3 bg-dark border-bottom border-secondary">
+                    <p class="text-muted mb-0 small">
+                        <strong><i class="bi bi-music-note me-1"></i><span id="matchMbTitle"></span></strong> (Track <span id="matchMbTrackNum"></span>)<br>
+                        Select an existing track in your library below to sync this MusicBrainz metadata to it.
+                    </p>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle table-sm mb-0" id="matchCandidatesTable" data-mobile-cards>
+                        <thead>
+                            <tr class="d-none d-md-table-row text-muted extra-small text-uppercase">
+                                <th style="width: 50px;" class="text-center">#</th>
+                                <th>Current Title</th>
+                                <th>File</th>
+                                <th class="text-end" style="width: 100px;">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="matchCandidatesTbody">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Merge Modal -->
+<div class="modal fade" id="mergeModal" tabindex="-1" aria-labelledby="mergeModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title fw-bold" id="mergeModalLabel"><i class="bi bi-exclamation-triangle-fill text-warning me-2"></i> Confirm Artist Merge</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="small text-muted mb-3">This will merge duplicate artist entries by updating ALL track records, MP3 file tags, and file folder organization in the music directory.</p>
+                <div class="alert alert-info py-2 px-3 shadow-sm d-flex align-items-center justify-content-between mb-3">
+                    <strong id="mergeOldArtist" class="text-truncate" style="max-width: 40%;"></strong>
+                    <i class="bi bi-arrow-right fs-5 opacity-50"></i>
+                    <strong id="mergeNewArtist" class="text-truncate text-success" style="max-width: 40%;"></strong>
+                </div>
+                <p class="mb-0 fw-semibold text-center"><span id="mergeTotalTracks" class="text-warning"></span> tracks will be updated.</p>
+            </div>
+            <div class="modal-footer border-secondary">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                {#
+                  The key is written onto this button by showMergeDialog(), then read
+                  back by the handler. Previously the merge parameters were captured by
+                  a top-level addEventListener that ran at parse time — an exception
+                  there would have killed every function below it in the same script.
+                #}
+                <button type="button" class="btn btn-primary fw-bold px-4" id="confirmMergeBtn" data-action="ac-merge-artist-confirm"><i class="bi bi-union me-1"></i> Proceed</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Merge Progress Modal -->
+<div class="modal fade" id="mergeProgressModal" tabindex="-1" aria-labelledby="mergeProgressLabel" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+        <div class="modal-content text-center p-4">
+            <h5 class="modal-title fw-bold mb-3" id="mergeProgressLabel">Merging Artists</h5>
+            <div class="spinner-border text-primary mb-3" role="status" style="width: 3rem; height: 3rem;"></div>
+            <p id="mergeProgressText" class="text-muted small mb-0">Processing database and rewriting audio files... Please wait.</p>
+        </div>
+    </div>
+</div>
+
+{# Page data, read once by static/js/pages/artist-corrections.js. #}
+<script id="page-data" type="application/json">{{ {"artistName": artist_name, "mbAlbums": mb_albums} | tojson | safe }}</script>
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/*, ui/toast.js, ui/modal.js, ui/confirm.js and
+  ui/button-state.js.
+
+    js/pages/artist-corrections.js   all 19 handlers: duplicate artists,
+                                     duplicate tracks, album MBID conflicts,
+                                     disc-number cleanup, album-split merges,
+                                     title mismatches, missing MB tracks.
+
+  WARNING: this page rewrites database rows and audio file tags, and the artist
+  merge moves files on disk. Test on a scratch artist before trusting it.
+#}
+<script src="{{ versioned_static('js/pages/artist-corrections.js') }}"></script>
+{% endblock %}

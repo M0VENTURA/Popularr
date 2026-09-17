@@ -1,0 +1,358 @@
+{% extends "base.html" %}
+
+{% block title %}Tag Corrections - Popularr{% endblock %}
+
+{% block content %}
+{#
+  TAG CORRECTIONS — the single page for tag/metadata correction work.
+
+  Two halves, both fed by this one route:
+
+    A. Pending Metadata Conflicts  (/api/conflicts/*)
+       Fields blocked from auto-overwrite during scans because they differ from
+       curated local values. Accept = take the provider value; Keep = drop it.
+
+    B. Tag Inconsistencies         (/api/correcting/*)
+       Albums whose album-level tags disagree across their own tracks — the
+       cause of Navidrome splitting one album into several entries. Per field:
+       apply a specific value, apply the majority for the whole album, pull
+       MusicBrainz's authoritative values, or ignore the field.
+
+  LAYOUT CHANGES FROM templates/pages/corrections.html
+    * The two sections are now peers. Previously the conflicts card was rendered
+      conditionally at the top and a bare <hr> separated it from the
+      inconsistencies list, so when the conflicts card was absent the page opened
+      with a stray rule and no context. Each half now has its own header with a
+      count, and the divider only appears between them when both are present.
+    * The "N albums need correction" / "All tags consistent" badge moved next to
+      the page title, with the conflict count, so the page states its own status
+      in one place instead of two badges that overlapped in meaning.
+    * The inline <style> moved to static/css/corrections.css and the inline
+      <script> to static/js/pages/corrections.js.
+
+  All ids the script needs are unchanged except the conflict pending badge, which
+  gained id="conflicts-pending-badge" — the original found it with
+  `document.querySelector('.badge.bg-danger.fs-6')`, which matches any badge with
+  those classes.
+#}
+<div class="container-fluid mt-4">
+    <nav aria-label="breadcrumb">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('ui.dashboard') }}">Dashboard</a></li>
+            <li class="breadcrumb-item active" aria-current="page">Tag Corrections</li>
+        </ol>
+    </nav>
+
+    <div class="d-flex flex-column flex-md-row justify-content-between align-items-start align-items-md-center mb-3 gap-2">
+        <div>
+            <h1 class="h3 mb-1">
+                <i class="bi bi-tools"></i> Tag Corrections
+            </h1>
+            <p class="text-secondary mb-0 small">
+                Fix album-level tag inconsistencies that cause Navidrome to split albums into multiple entries
+            </p>
+        </div>
+        <div class="d-flex gap-2 align-items-center flex-wrap">
+            {% if conflict_stats and conflict_stats.total_pending > 0 %}
+            <span class="badge bg-danger fs-6" id="conflicts-pending-badge">
+                <i class="bi bi-shield-exclamation me-1"></i>
+                {{ conflict_stats.total_pending }} metadata conflict{% if conflict_stats.total_pending != 1 %}s{% endif %} pending
+            </span>
+            {% endif %}
+            {% if total > 0 %}
+            <span class="badge bg-warning text-dark fs-6">{{ total }} album{% if total != 1 %}s{% endif %} need correction</span>
+            {% else %}
+            <span class="badge bg-success fs-6">All tags consistent</span>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if error is defined and error %}
+    <div class="alert alert-danger">
+        <i class="bi bi-exclamation-triangle-fill me-2"></i>
+        Database error: {{ error }}
+    </div>
+    {% endif %}
+
+    {# ── A. Pending metadata conflicts ───────────────────────────────────── #}
+    {% if conflict_stats and conflict_stats.total_pending > 0 %}
+    <div class="card mb-4 border-danger" id="conflicts-section">
+        <div class="card-header bg-danger text-white d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-shield-exclamation me-2"></i>Pending Metadata Conflicts</span>
+            <span class="badge bg-light text-danger fs-6">{{ conflict_stats.total_pending }} total</span>
+        </div>
+        <div class="card-body">
+            <p class="mb-3 small">
+                These metadata fields were blocked from auto-overwrite during scans because they differ
+                from your curated local values. Review each conflict below and choose <strong>Accept</strong>
+                to apply the provider's value, or <strong>Keep</strong> to preserve your local value.
+            </p>
+
+            <div id="conflicts-loading" class="text-center py-3">
+                <span class="spinner-border spinner-border-sm me-2" role="status"></span>
+                Loading conflicts…
+            </div>
+            <div id="conflicts-error" class="alert alert-warning py-2 small d-none"></div>
+            <div id="conflicts-empty" class="text-secondary text-center py-3 small d-none">
+                <i class="bi bi-check-circle me-1"></i> No pending conflicts found.
+            </div>
+            <div id="conflicts-list" class="d-none">
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover mb-0 correcting-table" id="conflicts-table">
+                        <thead>
+                            <tr>
+                                <th style="width:28%;">Track</th>
+                                <th style="width:14%;">Field</th>
+                                <th style="width:20%;">Current Value</th>
+                                <th style="width:20%;">Provider Value</th>
+                                <th class="text-end" style="width:18%;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="conflicts-tbody"></tbody>
+                    </table>
+                </div>
+                <div class="d-flex justify-content-between align-items-center mt-2">
+                    <button type="button" class="btn btn-sm btn-outline-danger" id="conflicts-refresh-btn" data-action="corr-conflicts-refresh">
+                        <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+                    </button>
+                    <span id="conflicts-count" class="small text-secondary"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {# ── B. Tag inconsistencies ─────────────────────────────────────────────
+       The divider is only meaningful between the two halves, so it is emitted
+       only when the conflicts card is actually on the page. #}
+    {% if conflict_stats and conflict_stats.total_pending > 0 %}
+    <hr class="my-4 border-secondary opacity-25">
+    {% endif %}
+
+    {% if not inconsistencies %}
+    <div class="card">
+        <div class="card-body text-center py-5">
+            <i class="bi bi-check-circle-fill text-success" style="font-size: 3rem;"></i>
+            <h4 class="mt-3">No tag inconsistencies</h4>
+            <p class="text-secondary">All album-level tags are consistent across tracks.</p>
+        </div>
+    </div>
+    {% else %}
+
+    <!-- Pagination top -->
+    {% if total_pages > 1 %}
+    <nav aria-label="Page navigation" class="mb-3">
+        <ul class="pagination pagination-sm mb-0">
+            <li class="page-item {% if page == 1 %}disabled{% endif %}">
+                <a class="page-link" href="?page={{ page - 1 }}">‹ Prev</a>
+            </li>
+            {% for p in range(1, total_pages + 1) %}
+            <li class="page-item {% if p == page %}active{% endif %}">
+                <a class="page-link" href="?page={{ p }}">{{ p }}</a>
+            </li>
+            {% endfor %}
+            <li class="page-item {% if page == total_pages %}disabled{% endif %}">
+                <a class="page-link" href="?page={{ page + 1 }}">Next ›</a>
+            </li>
+        </ul>
+    </nav>
+    {% endif %}
+
+    {% for item in inconsistencies %}
+    <div class="card mb-4" id="album-{{ loop.index }}">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div>
+                <strong>
+                    <a href="{{ url_for('ui.artist_detail', name=item.album_artist) }}">{{ item.album_artist or '—' }}</a>
+                </strong>
+                <span class="text-secondary mx-2">—</span>
+                <span>{{ item.album }}</span>
+                <span class="badge bg-secondary ms-2">{{ item.track_count }} tracks</span>
+                <span class="badge bg-warning text-dark ms-1">{{ item.inconsistencies | length }} field{% if item.inconsistencies | length != 1 %}s{% endif %}</span>
+            </div>
+            <div class="d-flex gap-2">
+                <button type="button" class="btn btn-sm btn-outline-warning fix-all-btn"
+                        data-action="corr-fix-all"
+                        data-album-artist="{{ item.album_artist | e }}"
+                        data-album="{{ item.album | e }}"
+                        data-index="{{ loop.index }}"
+                        title="Apply the most common value for each inconsistent field">
+                    <i class="bi bi-magic"></i> Fix All (majority)
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-info mb-lookup-btn"
+                        data-action="corr-mb-lookup"
+                        data-album-artist="{{ item.album_artist | e }}"
+                        data-album="{{ item.album | e }}"
+                        data-index="{{ loop.index }}"
+                        title="Look up authoritative values from MusicBrainz">
+                    <i class="bi bi-search"></i> Lookup MusicBrainz
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-secondary show-ignores-btn"
+                        data-action="corr-show-ignores"
+                        data-album-artist="{{ item.album_artist | e }}"
+                        data-album="{{ item.album | e }}"
+                        data-index="{{ loop.index }}"
+                        title="View and restore ignored fields for this album">
+                    <i class="bi bi-eye-slash"></i> Ignored
+                </button>
+            </div>
+        </div>
+        <div class="card-body p-0">
+            <!-- MusicBrainz suggestions panel (hidden until loaded) -->
+            <div class="mb-suggestions-panel px-3 pt-3 pb-1 d-none border-bottom"
+                 id="mb-panel-{{ loop.index }}"
+                 style="background:var(--tertiary-bg);">
+                <div class="mb-suggestions-loading text-secondary small d-none">
+                    <span class="spinner-border spinner-border-sm me-2" role="status"></span>
+                    Querying MusicBrainz…
+                </div>
+                <div class="mb-suggestions-error alert alert-warning py-2 small d-none"></div>
+                <div class="mb-suggestions-content d-none">
+                    <p class="small fw-semibold mb-2">
+                        <i class="bi bi-database-check text-info me-1"></i>
+                        MusicBrainz authoritative values
+                        <span class="text-secondary fw-normal mb-mbid-label"></span>
+                    </p>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-hover mb-0 correcting-table">
+                            <thead>
+                                <tr>
+                                    <th style="width:160px;">Field</th>
+                                    <th>MB Value</th>
+                                    <th class="text-end" style="width:180px;">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody class="mb-suggestions-rows"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <!-- Ignored fields panel (hidden until user clicks "Ignored") -->
+            <div class="ignores-panel px-3 pt-3 pb-2 d-none border-bottom"
+                 id="ignores-panel-{{ loop.index }}"
+                 style="background:var(--tertiary-bg);">
+                <p class="small fw-semibold mb-2 text-secondary">
+                    <i class="bi bi-eye-slash me-1"></i> Ignored fields for this album
+                    <span class="text-muted fw-normal"> — these won't appear as corrections</span>
+                </p>
+                <div class="ignores-loading text-secondary small d-none">
+                    <span class="spinner-border spinner-border-sm me-1" role="status"></span> Loading…
+                </div>
+                <div class="ignores-empty text-secondary small d-none">No ignored fields for this album.</div>
+                <div class="ignores-rows d-flex flex-wrap gap-2"></div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-hover mb-0 correcting-table">
+                    <thead>
+                        <tr>
+                            <th style="width:160px;">Field</th>
+                            <th>Values Found</th>
+                            <th class="text-end" style="width:220px;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for inc in item.inconsistencies %}
+                        <tr>
+                            <td class="fw-semibold align-middle">{{ inc.field_label }}</td>
+                            <td>
+                                <div class="d-flex flex-wrap gap-2 align-items-center">
+                                    {% for v in inc['values'] %}
+                                    <span class="badge bg-secondary value-badge"
+                                          title="{{ v.track_ids | length }} track{% if v.track_ids | length != 1 %}s{% endif %}">
+                                        {{ v.value if v.value else '(empty)' }}
+                                        <span class="ms-1 opacity-75">×{{ v.count }}</span>
+                                    </span>
+                                    {% endfor %}
+                                </div>
+                            </td>
+                            <td class="text-end align-middle">
+                                <div class="d-flex flex-wrap gap-1 justify-content-end">
+                                    {#
+                                      Values are rendered highest-count-first, so the FIRST
+                                      button in this row is the majority value that
+                                      "Fix All" picks up.
+                                    #}
+                                    {% for v in inc['values'] %}
+                                    <button type="button" class="btn btn-sm btn-outline-primary fix-btn apply-field-btn"
+                                            data-action="corr-apply-field"
+                                            data-album-artist="{{ item.album_artist | e }}"
+                                            data-album="{{ item.album | e }}"
+                                            data-field="{{ inc.field }}"
+                                            data-value="{{ v.value | e }}"
+                                            title="Apply &quot;{{ v.value }}&quot; to all {{ item.track_count }} tracks">
+                                        Apply "{{ (v.value[:20] + '…') if v.value | length > 20 else (v.value if v.value else '(empty)') }}"
+                                        <span class="text-muted">({{ v.count }})</span>
+                                    </button>
+                                    {% endfor %}
+                                    <button type="button" class="btn btn-sm btn-outline-secondary fix-btn ignore-field-btn"
+                                            data-action="corr-ignore-field"
+                                            data-album-artist="{{ item.album_artist | e }}"
+                                            data-album="{{ item.album | e }}"
+                                            data-field="{{ inc.field }}"
+                                            data-field-label="{{ inc.field_label | e }}"
+                                            title="Ignore this field — it won't appear as a correction for this album again">
+                                        <i class="bi bi-eye-slash"></i> Ignore
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+
+    <!-- Pagination bottom -->
+    {% if total_pages > 1 %}
+    <nav aria-label="Page navigation" class="mt-3">
+        <ul class="pagination pagination-sm mb-0">
+            <li class="page-item {% if page == 1 %}disabled{% endif %}">
+                <a class="page-link" href="?page={{ page - 1 }}">‹ Prev</a>
+            </li>
+            {% for p in range(1, total_pages + 1) %}
+            <li class="page-item {% if p == page %}active{% endif %}">
+                <a class="page-link" href="?page={{ p }}">{{ p }}</a>
+            </li>
+            {% endfor %}
+            <li class="page-item {% if page == total_pages %}disabled{% endif %}">
+                <a class="page-link" href="?page={{ page + 1 }}">Next ›</a>
+            </li>
+        </ul>
+    </nav>
+    {% endif %}
+
+    {% endif %}
+</div>
+
+<div class="modal fade" id="fixProgressModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+        <div class="modal-content" style="background:var(--secondary-bg);">
+            <div class="modal-body text-center py-4">
+                <div class="spinner-border text-warning mb-3" role="status"></div>
+                <div id="fixProgressText">Applying fix…</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/*, ui/toast.js, ui/modal.js, ui/confirm.js and
+  ui/button-state.js.
+
+    css/corrections.css        the .correcting-table overrides, moved out of the
+                               template's inline <style>
+    js/pages/corrections.js    both halves: conflict accept/keep, per-field
+                               apply, Fix All (majority), ignore/restore,
+                               MusicBrainz suggestions
+
+  ORDER: the stylesheet first so the table does not flash with Bootstrap's light
+  backgrounds. The script only binds a delegated listener at load, so it can load
+  last.
+#}
+<link rel="stylesheet" href="{{ versioned_static('css/corrections.css') }}">
+<script src="{{ versioned_static('js/pages/corrections.js') }}"></script>
+{% endblock %}

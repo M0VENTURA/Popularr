@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}Similar Artists · Popularr{% endblock %}
+
+{% block content %}
+{#
+  Downloads ▸ Similar Artists.
+
+  CHANGED FROM templates/pages/downloads/similar_artists.html:
+    * the 90-line inline <script> moved to static/js/pages/similar-artists.js
+    * the page's local escapeHtml is gone — it did not escape quotes and was
+      being used in `title`, `alt` and `data-artist-name` attributes, so an
+      artist name containing a quote broke the card markup
+    * js/downloads.js is no longer loaded. The page used nothing from it; it
+      became pages/download-queue.js, which is a whole page's worth of queue
+      rendering. What the page actually needed was musicbrainz-queue.js (for
+      global.searchMusicBrainzRelease) — which the OLD page never loaded, so its
+      Search button did nothing behind its `typeof` guard.
+    * the Search button already carried data-action / data-artist-name in the
+      source; it is now handled by one delegated listener instead of being bound
+      per render
+
+  The container id #similarArtistsDiscoverContainer is unchanged — the module
+  fills it, including the loading spinner, the empty states and the error alert.
+#}
+<div class="container-fluid mt-4">
+  <div class="mb-4">
+    {% set subtitle = 'Discover and download music from similar artists' %}
+    {% include 'components/_downloads_header.html' %}
+  </div>
+
+  <div class="alert alert-info shadow-sm mb-4">
+    <i class="bi bi-info-circle me-1"></i>
+    Similar artists that appear in your collection's recommendations but are <strong>not yet in your library</strong>, sorted by how many of your artists recommend them.
+  </div>
+
+  <div id="similarArtistsDiscoverContainer">
+    <div class="text-center py-5">
+      <div class="spinner-border text-primary" role="status">
+        <span class="visually-hidden">Loading similar artists...</span>
+      </div>
+      <p class="text-muted mt-3 fw-semibold">Loading similar artists from your collection...</p>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/*, ui/toast.js and ui/button-state.js.
+
+    js/services/musicbrainz-queue.js   publishes global.searchMusicBrainzRelease,
+                                      which each card's Search button calls.
+                                      NOT global: only the pages that offer the
+                                      MusicBrainz picker load it.
+    js/pages/similar-artists.js        the grid, empty states and error alert
+#}
+<script src="{{ versioned_static('js/services/musicbrainz-queue.js') }}"></script>
+<script src="{{ versioned_static('js/pages/similar-artists.js') }}"></script>
+{% endblock %}

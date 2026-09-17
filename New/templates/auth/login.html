@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+{#
+  Sign-in page — STANDALONE, deliberately not extending base.html.
+
+  It is rendered before a session exists and must not pull in the app shell
+  (navbar, global search modals, player bar, the unified log modal). That is why
+  it carries its own <head>, its own Bootstrap <link>s and its own stylesheet
+  rather than the base layout.
+
+  Because it does not extend base.html it also does not get popularr.css, so
+  css/login.css declares the theme tokens locally — see the note in that file.
+
+  The stylesheet is linked with url_for('static', …) rather than
+  versioned_static('css/…'): this template sits OUTSIDE base.html, so it does not
+  rely on the base layout's conventions, and — more importantly — the
+  `versioned_static` helper and the `dist` paths below must keep working when
+  `features.use_local_assets` is on, exactly as the original did.
+
+  CHANGED FROM templates/auth/login.html:
+    * the ~33-line inline <style> block moved to css/login.css
+    * nothing else — no JavaScript is involved on this page beyond Bootstrap's
+      bundle, and the form posts a normal HTML submit to ui.login.
+#}
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login · Popularr</title>
+    {% set dist = url_for('static', filename='dist') %}
+    {% if config.get('features', {}).get('use_local_assets', False) %}
+    <link href="{{ dist }}/vendor/bootstrap.min.css" rel="stylesheet">
+    <link href="{{ dist }}/vendor/bootstrap-icons.css" rel="stylesheet">
+    {% else %}
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+    {% endif %}
+    <link rel="stylesheet" href="{{ versioned_static('css/login.css') }}">
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-card">
+            <div class="login-header">
+                <div class="brand-icon"><i class="bi bi-music-note-beamed"></i></div>
+                <h1>Popularr</h1>
+                <p>Music Rating &amp; Library Manager</p>
+            </div>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% include 'layouts/_flash_messages.html' %}
+            {% endwith %}
+            <form method="post" action="{{ url_for('ui.login') }}">
+                <div class="form-floating">
+                    <input type="text" class="form-control" id="username" name="username" placeholder="Username" required autofocus>
+                    <label for="username"><i class="bi bi-person"></i> Username</label>
+                </div>
+                <div class="form-floating">
+                    <input type="password" class="form-control" id="password" name="password" placeholder="Password" required>
+                    <label for="password"><i class="bi bi-lock"></i> Password</label>
+                </div>
+                <button class="btn btn-login w-100" type="submit"><i class="bi bi-box-arrow-in-right"></i> Sign In</button>
+            </form>
+            <div class="login-footer"><i class="bi bi-info-circle"></i> Use your Navidrome credentials to login</div>
+        </div>
+    </div>
+    {% if config.get('features', {}).get('use_local_assets', False) %}
+    <script src="{{ url_for('static', filename='dist/vendor/bootstrap.bundle.min.js') }}"></script>
+    {% else %}
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    {% endif %}
+</body>
+</html>

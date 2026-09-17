@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+
+{% block title %}Logs - Popularr{% endblock %}
+
+{% block content %}
+{#
+  Application log viewer.
+
+  CHANGED FROM templates/pages/logs.html:
+    * the 251-line inline IIFE moved to static/js/pages/logs.js
+    * ADDED css/logs.css. The script wraps output in .log-line / .log-ts /
+      .log-level / .log-tag and NOTHING defined those classes — they are absent
+      from popularr.css and every other stylesheet — so the level colour-coding
+      the markup was written for had never appeared. See that file's header.
+    * a stray `<script>` that had been left open before the container div was
+      closed has been moved into {% block scripts %}
+    * the markup itself is unchanged; the ids below are what the module binds
+#}
+<!-- Use h-100 flex-column so the card fills the entire 'main' scrollport -->
+<div class="container-fluid mt-3 h-100 d-flex flex-column" style="min-height: 0;">
+
+    <!-- Header Row -->
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3 flex-shrink-0">
+        <h4 class="mb-0 fw-bold"><i class="bi bi-journal-text text-info me-2"></i> Application Logs</h4>
+        <small class="text-muted d-none d-md-block">Directory: <code>{{ log_dir }}</code></small>
+    </div>
+
+    <!-- Controls Row -->
+    <div class="mb-3 d-flex flex-wrap align-items-center justify-content-between gap-2 flex-shrink-0">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+            <select id="logSelector" class="form-select form-select-sm" style="min-width: 180px; max-width: 300px; font-weight: 600;">
+                {% for f in log_files %}
+                <option value="{{ f.name }}" data-path="{{ f.path }}">{{ f.name }} ({{ '{:.1f}'.format(f.size / 1024) }} KB)</option>
+                {% endfor %}
+            </select>
+            <button type="button" id="streamLogBtn" class="btn btn-success btn-sm text-nowrap fw-bold" title="Stream new log lines live (SSE)">
+                <i class="bi bi-broadcast me-1"></i> <span id="streamLogLabel">Live Stream</span>
+            </button>
+        </div>
+
+        <!-- Action Toolbar -->
+        <div class="d-flex align-items-center gap-2">
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="refreshLogBtn" title="Refresh">
+                <i class="bi bi-arrow-clockwise"></i> <span class="d-none d-sm-inline ms-1">Refresh</span>
+            </button>
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="downloadLogBtn" title="Download log file">
+                <i class="bi bi-download"></i>
+            </button>
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="copyLogBtn" title="Copy to clipboard">
+                <i class="bi bi-clipboard"></i>
+            </button>
+            <button type="button" class="btn btn-outline-danger btn-sm" id="clearLogBtn" title="Clear console buffer">
+                <i class="bi bi-trash"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- Filter Row -->
+    <div class="p-2 mb-3 rounded border border-secondary d-flex flex-wrap gap-3 align-items-center flex-shrink-0" id="logFilterRow" style="background: var(--tertiary-bg);">
+        <div class="input-group input-group-sm" style="max-width: 320px;">
+            <span class="input-group-text bg-dark border-secondary"><i class="bi bi-search text-muted"></i></span>
+            <input type="text" id="logFilterInput" class="form-control bg-dark text-light border-secondary" placeholder="Filter output (e.g., 'Error')..." autocomplete="off">
+        </div>
+        <div class="btn-group btn-group-sm" role="group" aria-label="Log level filter" id="logLevelFilters">
+            <button type="button" class="btn btn-outline-secondary active fw-bold" data-level="all">All</button>
+            <button type="button" class="btn btn-outline-danger" data-level="error" title="ERROR / CRITICAL"><i class="bi bi-x-octagon d-none d-md-inline"></i> Errors</button>
+            <button type="button" class="btn btn-outline-warning" data-level="warning" title="WARNING"><i class="bi bi-exclamation-triangle d-none d-md-inline"></i> Warnings</button>
+            <button type="button" class="btn btn-outline-info" data-level="info" title="INFO"><i class="bi bi-info-circle d-none d-md-inline"></i> Info</button>
+            <button type="button" class="btn btn-outline-secondary" data-level="debug" title="DEBUG"><i class="bi bi-bug d-none d-md-inline"></i> Debug</button>
+        </div>
+        <div class="form-check form-switch ms-auto mb-0 me-2" title="Wrap long lines">
+            <input class="form-check-input" type="checkbox" id="wrapLinesCheck" role="switch">
+            <label class="form-check-label small text-muted fw-semibold" for="wrapLinesCheck">Wrap</label>
+        </div>
+    </div>
+
+    <!-- Log Viewer Card (Flex-grow to push to bottom of screen) -->
+    <div class="card flex-grow-1 d-flex flex-column shadow-sm overflow-hidden" style="min-height: 0;">
+        <div class="card-header bg-dark border-bottom border-secondary py-1 px-3 d-flex justify-content-between align-items-center flex-shrink-0">
+            <span id="tailBannerText" class="small text-warning fw-semibold d-none"></span>
+            <button type="button" id="loadFullLogBtn" class="btn btn-sm btn-link text-info text-decoration-none py-0 ms-auto d-none" title="Load the entire log file">Load Full Log</button>
+        </div>
+
+        <!-- The PRE tag scrolls natively -->
+        <pre id="logOutput" class="card-body bg-dark text-light p-3 mb-0 flex-grow-1" style="overflow-y: auto; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; line-height: 1.5; white-space: pre; word-wrap: normal; scrollbar-width: thin;"></pre>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/* and ui/toast.js.
+
+    css/logs.css        the .log-* level colours — NEW, because nothing defined
+                        them and the viewer rendered monochrome
+    js/pages/logs.js    tail load, filters, SSE streaming, copy / download / clear
+
+  Only the first 500 lines are fetched; "Load Full Log" appears when the server
+  reports the file was truncated. The live stream caps its buffer at 5000 lines.
+#}
+<link rel="stylesheet" href="{{ versioned_static('css/logs.css') }}">
+<script src="{{ versioned_static('js/pages/logs.js') }}"></script>
+{% endblock %}

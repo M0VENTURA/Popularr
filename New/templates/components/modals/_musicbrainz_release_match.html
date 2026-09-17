@@ -1,0 +1,44 @@
+{#
+  ⚠️ DEAD FILE — DELETE ME. Kept only so the finding is not lost.
+
+  This modal is unreferenced in BOTH trees. Verified:
+    * `openReleaseMatchModal()` — the trigger named in this file's original
+      header comment — does not exist. `git grep openReleaseMatchModal` across
+      the whole of origin/develop returns nothing.
+    * Nothing writes its ids (mbReleaseMatchStatus / mbReleaseMatchError /
+      mbReleaseMatchResults): grepping New/static/js returns no matches.
+    * The only include of this file was in pages/album_detail.html, and that
+      include has now been removed.
+
+  The release-matching flow that IS live is global.openReleasePicker()
+  (static/js/main.js) rendering into components/modals/_release_picker.html.
+
+  DO NOT confuse this with the track page's old id="mbReleaseModal" markup
+  (mbReleaseModalStatus / …), which was also dead and was removed during the
+  track-page port.
+#}
+<div class="modal fade" id="musicbrainzReleaseMatchModal" tabindex="-1" aria-labelledby="musicbrainzReleaseMatchModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-xl">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="musicbrainzReleaseMatchModalLabel">
+          <i class="bi bi-disc"></i> MusicBrainz Release Match
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="mbReleaseMatchStatus" class="text-center py-4" style="display:none;">
+          <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">Loading...</span>
+          </div>
+          <div class="mt-2">Searching MusicBrainz...</div>
+        </div>
+        <div id="mbReleaseMatchError" class="alert alert-danger" style="display:none;"></div>
+        <div id="mbReleaseMatchResults"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>

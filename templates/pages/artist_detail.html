@@ -539,7 +539,22 @@
   </div>
 
   <!-- Import Macro -->
-  {% from "_album_category_section.html" import render_album_row %}
+  {#
+    IMPORT PATH FIXED.
+
+    This was `{% from "_album_category_section.html" %}` — a template-ROOT name.
+    That resolved while the macro lived at templates/_album_category_section.html,
+    but commit 1a33be0b ("removed orphaned files", 2026-07-12) deleted that copy
+    after a75ce08c had already added templates/components/_album_category_section.html.
+    No Jinja loader search path is configured anywhere in the app, so the
+    root-relative name then resolved to nothing and this template raised
+    TemplateNotFound on every render.
+
+    That is almost certainly why routes/ui_routes.py routes the artist page to
+    artist_detail_v2.html (switched in 80e0f7fd, 2026-08-12, "Corrected the
+    artist layout") — one month after this import broke.
+  #}
+  {% from "components/_album_category_section.html" import render_album_row %}
 
   <!-- Albums Section -->
   {% set total_discovered_albums = albums_by_category.album|selectattr('is_missing', 'equalto', False)|list|length %}

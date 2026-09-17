@@ -1,0 +1,37 @@
+{#
+  Release Picker Modal — shown when the automatic MusicBrainz match is not
+  confident enough.
+
+  Opened by global.openReleasePicker(releaseGroupId, title, artist, onQueued)
+  in js/main.js, which renders into #releasePickerResults.
+
+  Included by: pages/album_detail.html (release matching), and by
+  downloads/monitor.html + downloads/upcoming.html via the upcoming-releases
+  Queue button — UpcomingReleasesService.queueFromRow() calls openReleasePicker
+  when the release is linked to a release-group.
+
+  No JavaScript and no handlers; all three status/error/results ids are
+  rendered by main.js. Like-for-like port.
+#}
+<div class="modal fade" id="releasePickerModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-list-ul me-2"></i>Select Specific Release</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small mb-3">
+                    The automatic match was not confident enough. Please select the release that best matches your local tracks.
+                    Expand a release to view its track list.
+                </p>
+                <div id="releasePickerStatus" class="text-center py-4">
+                    <div class="spinner-border text-primary" role="status"></div>
+                    <p class="mt-2 text-muted">Fetching releases…</p>
+                </div>
+                <div id="releasePickerError" class="alert alert-danger" style="display:none;"></div>
+                <div id="releasePickerResults"></div>
+            </div>
+        </div>
+    </div>
+</div>

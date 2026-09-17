@@ -828,6 +828,7 @@
   });
 
   document.addEventListener('DOMContentLoaded', function () {
+    bindActions();
     loadPlaylists();
 
     const exportModal = document.getElementById('exportPlaylistModal');
@@ -843,8 +844,62 @@
     formatDuration,
   };
 
-  // Globals for the inline handlers in playlists.html.
-  global.loadPlaylists = loadPlaylists;
+  // ── Markup binding ──────────────────────────────────────────────────────
+  //
+  // templates/Playlists/index.html carries no inline JavaScript: its controls
+  // are `data-action` buttons (plus one data-playlist-filter input and the
+  // #csvImportForm submit) resolved through the single listener below.
+  //
+  // These were 13 separate window globals — loadPlaylists, showPlaylistList,
+  // copyPath, openRenameModal, submitRename, openDeleteModal, submitDelete,
+  // openGeneratorModal, submitGenerator, openExportModal, openCsvImportModal,
+  // submitCsvImport, createPlaylistFromImport — each existing only so an
+  // onclick attribute could reach it. They are still exported at the bottom of
+  // this file for any external caller, but nothing in the template needs them.
+
+  const ACTIONS = {
+    'playlists-refresh': () => loadPlaylists(),
+    'playlists-back': () => showPlaylistList(),
+    'playlists-copy-path': () => copyPath(),
+    'playlists-rename': () => openRenameModal(),
+    'playlists-submit-rename': () => submitRename(),
+    'playlists-delete': () => openDeleteModal(),
+    'playlists-submit-delete': () => submitDelete(),
+    'playlists-export': () => openExportModal(),
+    'playlists-generate': () => openGeneratorModal(),
+    'playlists-submit-generate': () => submitGenerator(),
+    'playlists-import-csv': () => openCsvImportModal(),
+    'playlists-create-from-import': () => createPlaylistFromImport(),
+  };
+
+  function bindActions() {
+    document.addEventListener('click', (event) => {
+      const el = event.target.closest ? event.target.closest('[data-action]') : null;
+      if (!el) return;
+      const handler = ACTIONS[el.getAttribute('data-action')];
+      if (!handler) return;
+      event.preventDefault();
+      handler(el);
+    });
+
+    // The playlist filter was oninput="applyPlaylistFilter(this.value)".
+    document.addEventListener('input', (event) => {
+      if (event.target && event.target.matches && event.target.matches('[data-playlist-filter]')) {
+        applyPlaylistFilter(event.target.value);
+      }
+    });
+
+    // The CSV import form was onsubmit="submitCsvImport(event)" — and it is
+    // the only form on the page, so keying on the id is safe and explicit.
+    const csvForm = document.getElementById('csvImportForm');
+    if (csvForm) {
+      csvForm.addEventListener('submit', (event) => submitCsvImport(event));
+    }
+  }
+
+  // Legacy compatibility exports. This template no longer uses them (it is
+  // data-action driven), but other modules and the older /playlists markup
+  // reach for these names, so they stay.
   global.applyPlaylistFilter = applyPlaylistFilter;
   global.showPlaylistList = showPlaylistList;
   global.copyPath = copyPath;

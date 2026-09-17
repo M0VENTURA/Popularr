@@ -1,0 +1,84 @@
+/* ==========================================================================
+   static/css/logs.css
+   Application log viewer (templates/Pages/logs.html).
+
+   ── WHY THIS FILE EXISTS AT ALL ───────────────────────────────────────────
+   The viewer's script has always wrapped log output in these classes:
+
+       .log-line            .log-line.log-level-<level>
+       .log-ts              .log-level.log-level-<level>
+       .log-tag
+
+   ...and NOTHING defined them. Grepping popularr.css and every other
+   stylesheet in the project returns zero matches. So the level colour-coding
+   the markup was written for has never appeared — the viewer rendered flat
+   monochrome text.
+
+   These are new definitions, not a move. Colours use the theme's semantic
+   tones (danger / warning / info / secondary) so they follow the palette
+   rather than hard-coding hex values.
+
+   The tag badge styling stays inline in the markup (it uses Bootstrap utility
+   classes: bg-secondary-subtle, text-secondary-emphasis, border-secondary-subtle).
+   ========================================================================== */
+
+/* One row per log line. The wrapper carries the level so a line's whole row
+   can be tinted without touching every span inside it. */
+.log-line {
+  display: block;
+  padding: 0 0.25rem;
+  border-radius: 2px;
+}
+
+.log-ts {
+  font-variant-numeric: tabular-nums;
+}
+
+.log-level {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+/* ── Level colours ───────────────────────────────────────────────────────
+   Applied to both the line and its level token, so a filtered view stays
+   scannable — the level is the thing the user is looking for. */
+
+.log-level-debug {
+  color: var(--text-secondary, #b0b0b0);
+}
+
+.log-line.log-level-debug {
+  opacity: 0.75;
+}
+
+.log-level-info {
+  color: var(--text-primary, #e0e0e0);
+}
+
+.log-line.log-level-info {
+  color: var(--text-primary, #e0e0e0);
+}
+
+.log-level-warning {
+  color: #ffc107;
+}
+
+.log-line.log-level-warning {
+  color: #ffd75e;
+}
+
+.log-level-error,
+.log-level-critical {
+  color: #f86b6b;
+}
+
+.log-line.log-level-error,
+.log-line.log-level-critical {
+  color: #ffb3b3;
+  background-color: rgba(220, 53, 69, 0.12);
+}
+
+.log-level-critical {
+  font-weight: 800;
+}

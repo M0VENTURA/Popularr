@@ -1,0 +1,150 @@
+{#
+  Modal: Organize Album Download.
+
+  Opened by pages/download-queue.js::openOrganizeGroupModal(group), which sets
+  organizeGroupKey. The state lives in that module, not in the DOM.
+
+  Every handler below is a one-line call to a global published by
+  pages/download-queue.js:
+
+      global.searchMBForOrganize        line 1710
+      global.searchDiscogsForOrganize   line 1711
+      global.clearMBSelection           line 1712
+      global.confirmOrganizeGroup       line 1713
+
+  They stay inline rather than becoming data-action attributes for the same
+  reason as the search components: they are the module's published API and
+  contain no logic. Convert them together with download-queue.js if wanted.
+
+  `nav-segmented` (popularr.css) replaces `bg-secondary p-1 rounded` on the tab
+  strip — the same fix applied across the app, since Bootstrap's bg-secondary
+  is lighter than every surface token in this theme.
+#}
+<div class="modal fade" id="organizeGroupModal" tabindex="-1" aria-labelledby="organizeGroupModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary shadow">
+            <div class="modal-header border-secondary py-2">
+                <h5 class="modal-title fs-6 fw-bold" id="organizeGroupModalLabel">
+                    <i class="bi bi-folder-check text-success me-1"></i> Organize Album Download
+                </h5>
+                <button type="button" class="btn-close btn-close-white shadow-none" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body p-3">
+                <!-- Group Info -->
+                <div class="alert alert-info shadow-sm mb-3 p-2 d-flex align-items-center justify-content-between small">
+                    <div>
+                        <strong id="groupInfoText" class="d-block mb-1">Album Group</strong>
+                        <span class="opacity-75"><span id="groupItemCount">Loading...</span> tracks to organize</span>
+                    </div>
+                    <i class="bi bi-collection-play fs-4 opacity-50"></i>
+                </div>
+
+                <!-- Tabs for Metadata and Folder Structure -->
+                <ul class="nav nav-pills nav-segmented nav-fill mb-3 small" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active py-1" id="metadataTab" data-bs-toggle="tab" data-bs-target="#metadataContent" type="button" role="tab">
+                            <i class="bi bi-file-earmark-music me-1"></i> Metadata
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link py-1" id="folderTab" data-bs-toggle="tab" data-bs-target="#folderContent" type="button" role="tab">
+                            <i class="bi bi-folder me-1"></i> Folders
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link py-1" id="mbTab" data-bs-toggle="tab" data-bs-target="#mbContent" type="button" role="tab">
+                            <i class="bi bi-disc me-1"></i> Auto-Fill
+                        </button>
+                    </li>
+                </ul>
+
+                <div class="tab-content">
+                    <!-- Metadata Tab -->
+                    <div class="tab-pane fade show active" id="metadataContent" role="tabpanel">
+                        <div class="row g-2">
+                            <div class="col-12 col-md-6">
+                                <label for="orgArtist" class="form-label extra-small fw-semibold text-muted mb-1">Artist *</label>
+                                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="orgArtist" placeholder="e.g., The Beatles">
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <label for="orgAlbumArtist" class="form-label extra-small fw-semibold text-muted mb-1">Album Artist</label>
+                                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="orgAlbumArtist" placeholder="Leave blank if same">
+                            </div>
+                            <div class="col-8 col-md-9">
+                                <label for="orgAlbum" class="form-label extra-small fw-semibold text-muted mb-1">Album *</label>
+                                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="orgAlbum" placeholder="e.g., Abbey Road">
+                            </div>
+                            <div class="col-4 col-md-3">
+                                <label for="orgYear" class="form-label extra-small fw-semibold text-muted mb-1">Year</label>
+                                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="orgYear" placeholder="YYYY" maxlength="4">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Folder Structure Tab -->
+                    <div class="tab-pane fade" id="folderContent" role="tabpanel">
+                        <div class="mb-3">
+                            <label for="orgFolderFormat" class="form-label extra-small fw-semibold text-muted mb-1">Directory Format</label>
+                            <select class="form-select form-select-sm bg-dark text-light border-secondary" id="orgFolderFormat">
+                                <option value="{album_artist}/{year} - {album}">Album Artist / Year - Album (Recommended)</option>
+                                <option value="{artist}/{album}">Artist / Album</option>
+                                <option value="{artist}/{year} - {album}">Artist / Year - Album</option>
+                                <option value="{album_artist}/{album}">Album Artist / Album</option>
+                                <option value="{year}/{album_artist} - {album}">Year / Album Artist - Album</option>
+                                <option value="custom">Custom...</option>
+                            </select>
+                            <div id="customFormatDiv" style="display:none" class="mt-2">
+                                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="orgCustomFormat" placeholder="e.g., {album_artist}/{year} - {album}">
+                                <small class="text-muted extra-small d-block mt-1">Variables: {album_artist}, {artist}, {album}, {year}</small>
+                            </div>
+                        </div>
+                        <div class="alert alert-secondary bg-dark border-secondary mb-0 p-2 small">
+                            <strong class="d-block mb-1 extra-small text-uppercase text-muted">Preview:</strong>
+                            <code id="folderPreview" class="d-block text-light text-break" style="font-size: 0.75rem;">
+                                Music / Album Artist / 2025 - Album Name / 01. Artist - Track Title.mp3
+                            </code>
+                        </div>
+                    </div>
+
+                    <!-- Lookup Tab -->
+                    <div class="tab-pane fade" id="mbContent" role="tabpanel">
+                        <div class="alert alert-secondary bg-dark border-secondary p-2 small mb-3">
+                            <i class="bi bi-info-circle me-1"></i> Uses <strong>Artist</strong> &amp; <strong>Album</strong> fields.
+                        </div>
+                        <div class="d-flex gap-2 mb-3">
+                            <button class="btn btn-sm btn-primary flex-grow-1" onclick="searchMBForOrganize()">
+                                <i class="bi bi-hexagon-fill me-1"></i> MusicBrainz
+                            </button>
+                            <button class="btn btn-sm btn-outline-primary flex-grow-1" onclick="searchDiscogsForOrganize()">
+                                <i class="bi bi-vinyl-fill me-1"></i> Discogs
+                            </button>
+                        </div>
+
+                        <!-- FIXED IDs HERE to prevent collisions -->
+                        <div id="orgMbSearchResults" class="mb-2"></div>
+                        <div id="orgMbSearchLoading" class="d-flex align-items-center justify-content-center gap-2 py-3" style="display:none !important;">
+                            <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+                            <span class="text-muted extra-small fw-semibold" id="searchStatusText">Searching...</span>
+                        </div>
+
+                        <div id="mbSelectedMatch" class="alert alert-success bg-success-subtle text-success border-success-subtle small d-none mt-2 p-2">
+                            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                                <div>
+                                    <strong class="d-block mb-1 extra-small"><i class="bi bi-check-circle-fill me-1"></i> Match Applied:</strong>
+                                    <div id="mbSelectedInfo" class="extra-small"></div>
+                                </div>
+                                <button class="btn btn-xs btn-outline-success py-0" onclick="clearMBSelection()">Undo</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-header border-secondary py-2 justify-content-end gap-2 bg-transparent">
+                <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-sm btn-success fw-bold px-3" onclick="confirmOrganizeGroup()">
+                    <i class="bi bi-folder-symlink-fill me-1"></i> Organize &amp; Move
+                </button>
+            </div>
+        </div>
+    </div>
+</div>

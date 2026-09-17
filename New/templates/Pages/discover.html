@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+
+{% block title %}Discover – Popularr{% endblock %}
+
+{% block content %}
+{#
+  Discover — personalised playlist suggestions in four sections.
+
+  CHANGED FROM templates/pages/discover.html:
+    * the 233-line inline <script> moved to static/js/pages/discover.js
+    * `onclick="loadRecommendations(true)"` on Refresh → data-action
+    * the `#discoverToastContainer` markup is REMOVED along with the page's own
+      showToast(): it was a fourth toast implementation, and ui/toast.js already
+      provides the stack, auto-dismiss and dismiss button
+    * the section/card ids below are unchanged — the module drives them
+
+  No new stylesheet: the script applies only Bootstrap utility classes.
+#}
+<div class="container-fluid mt-4">
+
+  <!-- Page header -->
+  <div class="mb-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div>
+      <h4 class="mb-1">
+        <i class="bi bi-compass"></i> Discover
+      </h4>
+      <p class="text-muted small mb-0">Personalised playlist suggestions based on your library and listening history</p>
+    </div>
+    <div class="d-flex gap-2">
+      <button type="button" class="btn btn-outline-secondary btn-sm" id="refreshBtn" data-action="discover-refresh">
+        <i class="bi bi-arrow-clockwise"></i> Refresh
+      </button>
+      <a href="/playlists/browse" class="btn btn-outline-primary btn-sm">
+        <i class="bi bi-collection-play"></i> My Playlists
+      </a>
+    </div>
+  </div>
+
+  <!-- Loading spinner -->
+  <div id="discoverLoading" class="text-center py-5">
+    <div class="spinner-border text-primary" role="status" style="width: 3rem; height: 3rem;">
+      <span class="visually-hidden">Loading recommendations…</span>
+    </div>
+    <p class="text-muted mt-3">Generating recommendations from your library…</p>
+  </div>
+
+  <!-- Error state -->
+  <div id="discoverError" style="display: none;">
+    <div class="alert alert-warning">
+      <i class="bi bi-exclamation-triangle me-2"></i>
+      Unable to load recommendations. Please check your Last.fm and ListenBrainz configuration, then try refreshing.
+    </div>
+  </div>
+
+  <!-- Empty state -->
+  <div id="discoverEmpty" style="display: none;">
+    <div class="alert alert-info">
+      <i class="bi bi-info-circle me-2"></i>
+      No recommendations yet. Make sure your library is scanned and Last.fm / ListenBrainz is configured, then click
+      <strong>Refresh</strong>.
+    </div>
+  </div>
+
+  <!-- Recommendation sections -->
+  <div id="discoverContent" style="display: none;">
+
+    <!-- Similar Artists -->
+    <section id="section-similar-artists" class="mb-5" style="display: none;">
+      <h4 class="mb-3">
+        <span class="me-2">👥</span>Similar Artists
+        <small class="text-muted fs-6 ms-2">Playlists featuring artists similar to your favourites</small>
+      </h4>
+      <div id="cards-similar-artists" class="row g-3"></div>
+    </section>
+
+    <!-- Top Genres -->
+    <section id="section-top-genres" class="mb-5" style="display: none;">
+      <h4 class="mb-3">
+        <span class="me-2">🎵</span>Top Genres
+        <small class="text-muted fs-6 ms-2">Playlists organised by your most-listened genres</small>
+      </h4>
+      <div id="cards-top-genres" class="row g-3"></div>
+    </section>
+
+    <!-- Mood Playlists -->
+    <section id="section-mood-playlists" class="mb-5" style="display: none;">
+      <h4 class="mb-3">
+        <span class="me-2">✨</span>Mood Playlists
+        <small class="text-muted fs-6 ms-2">Playlists based on ratings and moods</small>
+      </h4>
+      <div id="cards-mood-playlists" class="row g-3"></div>
+    </section>
+
+    <!-- Discovery -->
+    <section id="section-discovery" class="mb-5" style="display: none;">
+      <h4 class="mb-3">
+        <span class="me-2">🔍</span>Discovery
+        <small class="text-muted fs-6 ms-2">Hidden gems and recently added tracks</small>
+      </h4>
+      <div id="cards-discovery" class="row g-3"></div>
+    </section>
+
+  </div>
+
+  {# REMOVED: #discoverToastContainer. ui/toast.js is global and owns the stack. #}
+
+</div><!-- /.container-fluid -->
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/*, ui/toast.js, ui/modal.js, ui/confirm.js and
+  ui/button-state.js.
+
+    js/pages/discover.js   loads the four recommendation sections, renders the
+                           cards, and saves a card as a real playlist.
+
+  The section list and the section-key → create-type mapping both live in that
+  module — note they differ (mood_playlists → "mood").
+#}
+<script src="{{ versioned_static('js/pages/discover.js') }}"></script>
+{% endblock %}

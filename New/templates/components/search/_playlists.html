@@ -1,0 +1,185 @@
+<!-- Playlist import panel (reusable component) -->
+{#
+  CSV / Exportify playlist import panel.
+
+  Used by pages/downloads/search.html (the Unified Search tabs) and by the
+  downloads hub. Its ids are consumed by static/js/features/csv-import.js —
+  every one of these matches that module:
+
+      csvFile, csvPlaylistName, csvPlaylistDescription, csvTargetUser,
+      csvImportStatus, resultsSection, errorSection, errorMessage,
+      matchedCount, missingCount, totalCount, coverage, coverageCard,
+      matchedTracksContainer, missingTracksContainer
+
+  and the form submit calls global.importPlaylistFromCSV, which that module
+  publishes (features/csv-import.js line 191).
+
+  Load order: state/import-state.js MUST come before features/csv-import.js —
+  both that file and pages/playlist.js used to declare `currentImportData` and
+  `missingTracksForSearch` with `let` at top level, which made the second file
+  loaded throw "Identifier has already been declared" at PARSE time and define
+  nothing at all. state/import-state.js now owns both names.
+
+  The remaining inline one-liners (openAddTrackModal / createPlaylist /
+  searchMissingTracks) are calls to published globals, kept inline for the same
+  reason as the search components.
+#}
+<!-- Step 1: Get CSV -->
+<div class="card mb-4 border-success">
+  <div class="card-body d-flex flex-column flex-md-row align-items-md-center gap-3">
+    <div class="flex-grow-1">
+      <h5 class="mb-1"><i class="bi bi-cloud-download text-success"></i> Step 1 — Get your playlist CSV</h5>
+      <p class="mb-0 text-muted">
+        Visit <strong>exportify.net</strong>, log in with Spotify, and click <em>Export</em> next to any playlist.
+        Save the <code>.csv</code> file, then upload it below — no Spotify credentials are needed.
+      </p>
+    </div>
+    <a href="https://exportify.net" target="_blank" rel="noopener" class="btn btn-success btn-lg text-nowrap">
+      <i class="bi bi-box-arrow-up-right"></i> Open exportify.net
+    </a>
+  </div>
+</div>
+
+<!-- Step 2: Upload Form -->
+<div class="card mb-4">
+  <div class="card-header">
+    <h5 class="mb-0"><i class="bi bi-upload"></i> Step 2 — Upload your CSV</h5>
+  </div>
+  <div class="card-body">
+    <form id="csvForm" onsubmit="importPlaylistFromCSV(event)">
+      <div class="row g-3">
+        <div class="col-12">
+          <label for="csvFile" class="form-label">CSV File</label>
+          <input type="file" id="csvFile" class="form-control" accept=".csv" required />
+          <small class="text-muted">
+            <i class="bi bi-info-circle"></i>
+            Only Exportify-exported CSVs are supported. The file must contain at least
+            <code>Track Name</code> and <code>Artist Name(s)</code> columns.
+          </small>
+        </div>
+        <div class="col-12 col-md-6">
+          <label for="csvPlaylistName" class="form-label">Playlist Name</label>
+          <input type="text" id="csvPlaylistName" class="form-control" placeholder="e.g., My Exported Playlist" required />
+        </div>
+        <div class="col-12 col-md-6">
+          <label for="csvPlaylistDescription" class="form-label">Description (optional)</label>
+          <input type="text" id="csvPlaylistDescription" class="form-control" placeholder="e.g., Imported from Exportify CSV" />
+        </div>
+        <div class="col-12 col-md-6">
+          <label for="csvTargetUser" class="form-label">Assign to User</label>
+          <select id="csvTargetUser" class="form-select">
+            {% if navidrome_users %}
+              {% for user in navidrome_users %}
+              <option value="{{ user.user }}">{{ user.user }}</option>
+              {% endfor %}
+            {% else %}
+              <option value="">Default Navidrome User</option>
+            {% endif %}
+          </select>
+        </div>
+        <div class="col-12">
+          <button type="submit" class="btn btn-primary">
+            <i class="bi bi-upload"></i> Import Playlist
+          </button>
+          <span id="csvImportStatus" class="ms-2 text-muted"></span>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Results Section -->
+<div id="resultsSection" style="display: none;">
+  <div class="row mb-4">
+    <div class="col-12 col-md-3">
+      <div class="card text-center bg-success bg-opacity-10 border-success">
+        <div class="card-body">
+          <h5 class="card-title text-success">Matched</h5>
+          <h2 id="matchedCount" class="text-success">0</h2>
+          <small class="text-muted">songs found in library</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-12 col-md-3">
+      <div class="card text-center bg-warning bg-opacity-10 border-warning">
+        <div class="card-body">
+          <h5 class="card-title text-warning">Missing</h5>
+          <h2 id="missingCount" class="text-warning">0</h2>
+          <small class="text-muted">songs not in library</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-12 col-md-3">
+      <div class="card text-center bg-info bg-opacity-10 border-info">
+        <div class="card-body">
+          <h5 class="card-title text-info">Total</h5>
+          <h2 id="totalCount" class="text-info">0</h2>
+          <small class="text-muted">tracks in playlist</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-12 col-md-3">
+      <div class="card text-center bg-secondary bg-opacity-10 border-secondary" id="coverageCard">
+        <div class="card-body">
+          <h5 class="card-title text-secondary">Coverage</h5>
+          <h2 id="coverage" class="text-secondary">0%</h2>
+          <small class="text-muted">of playlist matched</small>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Matched Tracks -->
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="mb-0"><i class="bi bi-check-circle-fill text-success"></i> Matched Tracks</h5>
+      <div class="btn-group btn-group-sm" role="group">
+        {#
+          REMOVED: <button onclick="openAddTrackModal()">Add Track</button>
+
+          `openAddTrackModal` is defined NOWHERE in the repository — it appears
+          only in template files (this partial, templates/playlists/importer.html,
+          and two old_system templates) and `git grep` finds no definition in
+          static/js/, New/static/js/ or old_system/static/. The button has always
+          thrown ReferenceError.
+        #}
+        <button class="btn btn-success" onclick="createPlaylist()" id="createPlaylistBtn">
+          <i class="bi bi-music-note-list"></i> Create Playlist
+        </button>
+      </div>
+    </div>
+    <div class="card-body">
+      <p class="text-muted small mb-3">Create Playlist uses the Navidrome API and includes only the tracks shown below.</p>
+      <div id="matchedTracksContainer" style="max-height: 500px; overflow-y: auto;"></div>
+    </div>
+  </div>
+
+  <!-- Missing Tracks -->
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <div>
+        <h5 class="mb-0"><i class="bi bi-exclamation-circle-fill text-warning"></i> Missing Tracks</h5>
+        <small class="text-muted d-block mt-2">Tracks not found in your library</small>
+      </div>
+      {#
+        REMOVED: <button onclick="searchMissingTracks()">Search Missing Tracks</button>
+
+        Same story as openAddTrackModal above — `searchMissingTracks` is not
+        defined in any JS file in either tree, so the button could never do
+        anything. It was also permanently `display: none` because the only code
+        that would have revealed it was the function that does not exist.
+      #}
+    </div>
+    <div class="card-body">
+      <div id="missingTracksContainer" style="max-height: 500px; overflow-y: auto;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Error Section -->
+<div id="errorSection" style="display: none;">
+  <div class="alert alert-danger" role="alert">
+    <h5 class="alert-heading"><i class="bi bi-exclamation-triangle"></i> Error</h5>
+    <p id="errorMessage"></p>
+  </div>
+</div>

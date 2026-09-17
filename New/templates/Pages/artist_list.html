@@ -1,0 +1,240 @@
+{% extends "base.html" %}
+
+{% block title %}Artists - Popularr{% endblock %}
+
+{% block content %}
+{#
+  Letter-grouped artist list with a Metro "jump to letter" picker.
+
+  Artists are rendered SERVER-SIDE (the artist_groups loop below); the only
+  JavaScript this page needs is the jump picker and the per-letter scan
+  triggers, and all of it already lives in static/js/pages/artists.js:
+
+      global.openJumpPicker     line 100
+      global.closeJumpPicker    line 101
+      global.jumpToLetter       line 102
+      global.scanLetterArtists  line 103
+
+  ── WHAT CHANGED FROM templates/pages/artist_list.html ─────────────────────
+  * The ~75-line inline <style> block moved to static/css/artists.css.
+  * The script tag pointed at js/artist_list.js, which does not exist in the
+    refactored tree — the module is js/pages/artists.js (named for the PAGE, per
+    the New convention: album.js, dashboard.js, playlists.js …). Loading the old
+    name would have meant no jump picker and no letter scans.
+  * Everything else is a faithful port.
+
+  ── INLINE HANDLERS KEPT DELIBERATELY ──────────────────────────────────────
+  The five handlers below are one-line calls to the globals listed above, which
+  is the same call made for components/_musicbrainz_search_component.html and
+  components/modals/_organize_group.html: converting them to data-action would
+  mean editing a module that every page loads, for handlers that contain no
+  logic.
+
+  * closeJumpPicker(event) — wired to the overlay's own click, so clicking the
+    backdrop closes it. artists.js tolerates both the with-event and the no-arg
+    form (the ✕ button passes none).
+  * event.stopPropagation() on the content div — presentational, so a click
+    inside the picker does not reach the overlay's close handler. Same pattern
+    as components/_album_category_section.html's action cluster.
+  * scanLetterArtists('{{ group.letter }}', …) — the letter is one character
+    (A-Z or '#'), so there is no quoting hazard in the attribute; the same cannot
+    be said for the artist names, and none are passed this way.
+
+  ── NOT PORTED ─────────────────────────────────────────────────────────────
+  `url_for('artist.api_artist_image', …)` is kept exactly as-is. That is the
+  `artist` blueprint, NOT `ui`, and it is easy to "correct" by mistake.
+#}
+<div class="container-fluid mt-4">
+    {% if total_stats %}
+        <!-- Unified Library Overview Stats Grid -->
+        <div class="card mb-4 shadow-sm" id="libraryStatsCard">
+            <div class="card-header bg-transparent py-2 d-flex justify-content-between align-items-center border-secondary">
+                <h6 class="mb-0 fw-bold"><i class="bi bi-collection-fill text-info me-2"></i> Library Overview</h6>
+            </div>
+            <div class="card-body p-2 p-md-3">
+                <div class="row g-2 text-center rounded py-2 border border-secondary" style="background: var(--tertiary-bg, #282828);">
+                    <div class="col-6 col-md-3 border-md-end border-secondary pb-2 pb-md-0 mb-2 mb-md-0">
+                        <div class="extra-small text-muted text-uppercase fw-semibold mb-1">Artists</div>
+                        <div class="h4 fw-bold mb-0 text-success">{{ total_artists or artists|length }}</div>
+                    </div>
+                    <div class="col-6 col-md-3 border-md-end border-secondary pb-2 pb-md-0 mb-2 mb-md-0">
+                        <div class="extra-small text-muted text-uppercase fw-semibold mb-1">Albums</div>
+                        <div class="h4 fw-bold mb-0 text-info">{{ total_stats.album_count or 0 }}</div>
+                    </div>
+                    <div class="col-6 col-md-3 border-md-end border-secondary">
+                        <div class="extra-small text-muted text-uppercase fw-semibold mb-1">Tracks</div>
+                        <div class="h4 fw-bold mb-0 text-light">{{ total_stats.track_count or 0 }}</div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="extra-small text-muted text-uppercase fw-semibold mb-1">5★ Songs</div>
+                        <div class="h4 fw-bold mb-0 text-warning">{{ total_stats.five_star_count or 0 }}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% endif %}
+
+    {% if artists|length == 0 %}
+        <div class="alert alert-secondary shadow-sm">
+            <i class="bi bi-info-circle me-1"></i> No artists found. Run a scan to populate the database.
+        </div>
+    {% else %}
+        {#
+          Data-quality indicators.
+
+          #correctionsSummary and #correctionsOnlyToggle are populated/filtered by
+          pages/artists.js from GET /api/artists/corrections — the same numbers
+          that endpoint has always computed (duplicate tracks, missing disc
+          numbers, missing MusicBrainz IDs, missing files) but which nothing
+          surfaced until now. The per-row badge is injected into
+          .artist-needs-fixing below.
+
+          `data-artist-key` is what the annotation matches on. It is duplicated by
+          data-artist-link-key because the API groups by ALBUM artist and
+          display_name / link_artist are not always identical.
+        #}
+        <div class="card mb-3 shadow-sm" id="artistDataQualityCard">
+            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                <div class="d-flex align-items-center gap-2">
+                    <i class="bi bi-tools text-warning"></i>
+                    <strong class="small text-uppercase text-muted">Data quality</strong>
+                    <span id="correctionsSummary" class="badge bg-secondary">Checking…</span>
+                </div>
+                <div class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="correctionsOnlyToggle" role="switch" aria-controls="artistDataQualityCard">
+                    <label class="form-check-label small" for="correctionsOnlyToggle">Show only artists needing fixes</label>
+                </div>
+            </div>
+            <div id="correctionsFilterEmpty" class="alert alert-success mx-3 mb-3 py-2 small d-none">
+                <i class="bi bi-check-circle me-1"></i> No artists flagged — nothing to fix.
+            </div>
+        </div>
+
+        <!-- Letter-grouped artist sections -->
+        {% for group in artist_groups %}
+        <div id="section-{{ 'num' if group.letter == '#' else group.letter }}" class="artist-letter-section mb-4">
+
+            <!-- Sticky Section Header -->
+            <div class="metro-section-header d-flex align-items-center justify-content-between py-2 px-3 border border-secondary rounded shadow-sm mb-2">
+                <button type="button"
+                        class="btn btn-success fw-bold metro-jump-trigger d-flex align-items-center justify-content-center shadow-sm"
+                        onclick="openJumpPicker()"
+                        title="Tap to jump to letter">
+                    {{ group.letter }}
+                </button>
+                <div class="dropdown">
+                    <button class="btn btn-sm btn-outline-success dropdown-toggle d-flex align-items-center gap-1 fw-bold" data-bs-toggle="dropdown" aria-expanded="false" title="Scan options for letter {{ group.letter }}">
+                        <i class="bi bi-lightning-charge-fill"></i> <span class="d-none d-sm-inline">Scan Group</span>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow">
+                        <li>
+                            <button class="dropdown-item" type="button" onclick="scanLetterArtists('{{ group.letter }}', 'changes')">
+                                <i class="bi bi-arrow-repeat me-2 text-info"></i> Scan (Changes Only)
+                            </button>
+                        </li>
+                        <li>
+                            <button class="dropdown-item" type="button" onclick="scanLetterArtists('{{ group.letter }}', 'forced')">
+                                <i class="bi bi-lightning-charge-fill me-2 text-warning"></i> Force Re-scan
+                            </button>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Artist List -->
+            <div class="list-group list-group-flush border border-secondary rounded shadow-sm">
+                {% for artist in group.artists %}
+                {#
+                  data-artist-key / data-artist-link-key: matched by
+                  pages/artists.js against /api/artists/corrections, which keys
+                  on the lowercased album artist.
+                  .artist-needs-fixing is the badge the script fills in (and
+                  removes when there is nothing wrong).
+                #}
+                <div class="list-group-item bg-transparent border-secondary p-3 d-flex align-items-center justify-content-between gap-3 hover-bg-dark"
+                     data-artist-key="{{ artist.display_name|lower }}"
+                     data-artist-link-key="{{ artist.link_artist|lower }}">
+
+                    <div class="d-flex align-items-center gap-3 min-w-0">
+                        <!-- Avatar Placeholder -->
+                        <div class="artist-row-avatar rounded-circle border border-secondary overflow-hidden d-flex align-items-center justify-content-center flex-shrink-0" style="width: 48px; height: 48px;">
+                            <img src="{{ url_for('artist.api_artist_image', name=artist.display_name) }}"
+                                 alt="{{ artist.display_name }}"
+                                 style="width: 100%; height: 100%; object-fit: cover;"
+                                 onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                            <i class="bi bi-person-fill fs-4 text-muted" style="display: none;"></i>
+                        </div>
+                        <div class="overflow-hidden min-w-0">
+                            <a href="{{ url_for('ui.artist_detail', name=artist.link_artist) }}" class="fw-bold text-light text-decoration-none fs-6 d-block text-truncate mb-1">
+                                {{ artist.display_name }}
+                            </a>
+                            <div class="extra-small text-muted d-flex align-items-center gap-2 flex-wrap">
+                                <span class="badge bg-dark border border-secondary fw-normal">{{ artist.album_count or 0 }} album{{ 's' if artist.album_count != 1 else '' }}</span>
+                                <span class="badge bg-dark border border-secondary fw-normal">{{ artist.track_count or 0 }} track{{ 's' if artist.track_count != 1 else '' }}</span>
+                                {% if artist.five_star_count and artist.five_star_count > 0 %}
+                                <span class="badge bg-warning-subtle text-warning border border-warning-subtle fw-bold">★ {{ artist.five_star_count }}</span>
+                                {% endif %}
+                                {# Filled in (or removed) by pages/artists.js. #}
+                                <span class="badge bg-danger-subtle text-danger border border-danger-subtle artist-needs-fixing fw-semibold"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="d-flex align-items-center gap-1 flex-shrink-0">
+                        <a href="{{ url_for('ui.artist_corrections', name=artist.link_artist) }}" class="btn btn-sm btn-outline-secondary py-1 px-2 border-0" title="Corrections &amp; Edit IDs">
+                            <i class="bi bi-tools"></i>
+                        </a>
+                        <a href="{{ url_for('ui.artist_detail', name=artist.link_artist) }}" class="btn btn-sm btn-outline-success py-1 px-2 fw-bold" title="View Artist">
+                            View <i class="bi bi-arrow-right ms-1"></i>
+                        </a>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endfor %}
+
+        <!-- Windows Phone style Metro jump grid overlay -->
+        <div id="metroJumpOverlay" class="metro-jump-overlay d-none" onclick="closeJumpPicker(event)">
+            <div class="metro-jump-content shadow-lg" onclick="event.stopPropagation()">
+                <div class="d-flex align-items-center justify-content-between mb-3 border-bottom border-secondary pb-2">
+                    <h6 class="fw-bold text-light m-0 d-flex align-items-center gap-2">
+                        <i class="bi bi-grid-3x3-gap-fill text-success"></i>
+                        <span>Jump to Letter</span>
+                    </h6>
+                    <button type="button" class="btn-close btn-close-white extra-small" onclick="closeJumpPicker()" aria-label="Close"></button>
+                </div>
+
+                <!-- 4x7 tile grid: # + A-Z -->
+                <div class="metro-grid">
+                    <button type="button" class="metro-tile" onclick="jumpToLetter('#')">#</button>
+                    {% for char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" %}
+                    {% set has_artists = char in existing_group_letters %}
+                    <button type="button"
+                            class="metro-tile {{ 'disabled' if not has_artists else '' }}"
+                            {% if has_artists %}onclick="jumpToLetter('{{ char }}')"{% else %}disabled{% endif %}>
+                        {{ char|lower }}
+                    </button>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/*, ui/* and main.js. This page adds only:
+
+    css/artists.css      the Metro picker + letter-section styles, moved out of
+                         the template's inline <style>
+    js/pages/artists.js  the jump picker (openJumpPicker / closeJumpPicker /
+                         jumpToLetter) and scanLetterArtists()
+
+  ORDER matters: artists.js binds nothing on load — the handlers above resolve
+  it by global name at click time — so it can load last.
+#}
+<link rel="stylesheet" href="{{ versioned_static('css/artists.css') }}">
+<script src="{{ versioned_static('js/pages/artists.js') }}"></script>
+{% endblock %}

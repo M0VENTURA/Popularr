@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+
+{% block title %}Algorithm Sandbox - Popularr{% endblock %}
+
+{% block content %}
+{#
+  Algorithm Sandbox — simulate popularity weight changes against live data.
+  Nothing is written to the database.
+
+  CHANGED FROM templates/pages/sandbox.html:
+    * the 233-line inline IIFE moved to static/js/pages/sandbox.js
+    * ADDED css/sandbox.css. The script toggles `.upgrade` / `.downgrade` on
+      every row and styles `.sandbox-delta` / `.score-old` / `.score-new` /
+      `.score-arrow` — and NONE of those six classes was defined anywhere
+      (grepped popularr.css and every other stylesheet: zero matches). Since
+      highlighting the rows a weight change would affect is the whole point of
+      this page, every row looked identical until now.
+    * the markup is unchanged; the ids below are what the module binds
+
+  The maths in the module is a deliberate transcription of
+  services/popularity/popularity_math.py — see that file's header before
+  changing any constant.
+#}
+<div class="container-fluid mt-3" style="max-width: 1100px;">
+  <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+    <div>
+      <h4 class="mb-0"><i class="bi bi-sliders2"></i> Algorithm Sandbox</h4>
+      <small class="text-muted">Simulate weight changes on existing data — nothing is written to the database</small>
+    </div>
+    <a href="/config" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left"></i> Back to Config</a>
+  </div>
+
+  <div class="alert alert-secondary py-2 small mb-3">
+    <i class="bi bi-info-circle me-1"></i>
+    Approximate preview: mirrors the <strong>album-relative re-map</strong> (median + scaled-MAD, logistic above the
+    midpoint), the <strong>single boost</strong> (×1.15) and the standard rating bands. Excludes artist-z standout
+    marking and the era 5★ caps — real scans may differ slightly.
+  </div>
+
+  <!-- Sticky control panel -->
+  <div class="card shadow-sm mb-3" style="position: sticky; top: 0; z-index: 50; background: var(--secondary-bg, #1e1e1e);">
+    <div class="card-body py-3">
+      <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <label class="form-label form-label-sm mb-0" for="sandboxScope">Scope</label>
+          <select id="sandboxScope" class="form-select form-select-sm" style="min-width: 150px;">
+            <option value="global">Global Library</option>
+            <option value="recent">Recently Scanned (14 days)</option>
+            <option value="artist">Specific Artist…</option>
+          </select>
+          <input type="text" id="sandboxArtist" class="form-control form-control-sm d-none" style="min-width: 180px;" placeholder="Artist name" autocomplete="off">
+          <button type="button" id="sandboxLoadBtn" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-clockwise"></i> Load</button>
+        </div>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="sandboxOnlyChanges" role="switch">
+          <label class="form-check-label small" for="sandboxOnlyChanges">Show only changes</label>
+        </div>
+      </div>
+
+      <!-- Weight sliders (auto-balanced to sum 1.0) -->
+      <div class="d-flex flex-column gap-2">
+        <div class="row align-items-center g-2">
+          <div class="col-4 col-sm-3"><label class="form-label form-label-sm mb-0 text-success" for="wLf">Last.fm</label></div>
+          <div class="col-5 col-sm-7"><input type="range" id="wLf" class="form-range" min="0" max="1" step="0.01" value="0.55"></div>
+          <div class="col-3 col-sm-2 text-end"><span class="badge bg-secondary" id="wLfPct">55%</span></div>
+        </div>
+        <div class="row align-items-center g-2">
+          <div class="col-4 col-sm-3"><label class="form-label form-label-sm mb-0 text-info" for="wLb">ListenBrainz</label></div>
+          <div class="col-5 col-sm-7"><input type="range" id="wLb" class="form-range" min="0" max="1" step="0.01" value="0.35"></div>
+          <div class="col-3 col-sm-2 text-end"><span class="badge bg-secondary" id="wLbPct">35%</span></div>
+        </div>
+        <div class="row align-items-center g-2">
+          <div class="col-4 col-sm-3"><label class="form-label form-label-sm mb-0 text-warning" for="wAge">Age</label></div>
+          <div class="col-5 col-sm-7"><input type="range" id="wAge" class="form-range" min="0" max="1" step="0.01" value="0.10"></div>
+          <div class="col-3 col-sm-2 text-end"><span class="badge bg-secondary" id="wAgePct">10%</span></div>
+        </div>
+      </div>
+
+      <!-- Impact summary -->
+      <div class="row g-2 mt-2" id="sandboxSummary">
+        <div class="col-6 col-sm-3"><div class="border rounded p-2 small"><div class="text-muted">Live 5★</div><strong id="sumLive5">–</strong> <span class="text-muted" id="sumDelta5"></span></div></div>
+        <div class="col-6 col-sm-3"><div class="border rounded p-2 small"><div class="text-muted">Live 4★</div><strong id="sumLive4">–</strong> <span class="text-muted" id="sumDelta4"></span></div></div>
+        <div class="col-6 col-sm-3"><div class="border rounded p-2 small"><div class="text-muted">Live 3★</div><strong id="sumLive3">–</strong> <span class="text-muted" id="sumDelta3"></span></div></div>
+        <div class="col-6 col-sm-3"><div class="border rounded p-2 small"><div class="text-muted">Live 2★/1★</div><strong id="sumLive21">–</strong> <span class="text-muted" id="sumDelta21"></span></div></div>
+      </div>
+      <div class="small text-muted mt-1" id="sandboxStatus"></div>
+    </div>
+  </div>
+
+  <!-- Delta list: stacked flex cards -->
+  <div id="sandboxTrackList" class="d-flex flex-column gap-2">
+    <div class="text-center text-muted py-5"><i class="bi bi-hourglass-split d-block mb-2 fs-4"></i>Loading track metrics…</div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/* and ui/toast.js.
+
+    css/sandbox.css      the row + upgrade/downgrade tinting — NEW, because
+                         nothing defined those classes and every row looked
+                         identical
+    js/pages/sandbox.js  metrics load, the recalc engine, slider auto-balance
+
+  The engine mirrors services/popularity/popularity_math.py's constants
+  (Z_MID / Z_SCALE / MIN_SPREAD / SINGLE_BOOST). If the Python changes, this
+  module must change in the same commit or the preview starts lying.
+#}
+<link rel="stylesheet" href="{{ versioned_static('css/sandbox.css') }}">
+<script src="{{ versioned_static('js/pages/sandbox.js') }}"></script>
+{% endblock %}

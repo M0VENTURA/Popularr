@@ -1,0 +1,103 @@
+/* ==========================================================================
+   static/css/artists.css
+   /artists — the letter-grouped artist list and its Metro jump picker.
+
+   Extracted from the inline <style> block in templates/pages/artist_list.html.
+   Page-scoped (every rule is [id^="section-"], .metro-*, or .artist-row-avatar),
+   so it does not belong in popularr.css — same reasoning as track.css.
+
+   Note `[id^="section-"]`: the sections are rendered with ids like section-A and
+   section-num (for "#"), and the rule exists so the sticky header does not sit
+   over the jump target when the browser scrolls to an anchor.
+   ========================================================================== */
+
+/* Letter sections: keep jump targets clear of the fixed navbar. */
+[id^="section-"] {
+  scroll-margin-top: 1.5rem;
+}
+
+/* Metro section headers stick to the top of main's scrollport. */
+.metro-section-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--tertiary-bg, #282828);
+}
+
+.artist-row-avatar {
+  width: 48px;
+  height: 48px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+  transition: color 0.2s ease, background 0.2s ease;
+}
+
+.list-group-item:hover .artist-row-avatar {
+  background: rgba(29, 185, 84, 0.15);
+  color: var(--spotify-green);
+  border-color: rgba(29, 185, 84, 0.3) !important;
+}
+
+/* ── Metro jump grid overlay ───────────────────────────────────────────── */
+
+.metro-jump-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.8);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+/* `d-none` must win over the `display: flex` above — Bootstrap's utility is
+   normally enough, but both are single-class selectors so order decided it and
+   the overlay could stay visible on load. */
+.metro-jump-overlay.d-none {
+  display: none !important;
+}
+
+.metro-jump-content {
+  background: var(--secondary-bg, #1e1e1e);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 0.5rem;
+  width: 100%;
+  max-width: 400px;
+  padding: 1.25rem;
+}
+
+.metro-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.5rem;
+}
+
+.metro-tile {
+  background: var(--tertiary-bg, #282828);
+  color: var(--text-primary, #fff);
+  border: 1px solid var(--border-color, #444);
+  border-radius: 0.25rem;
+  font-weight: bold;
+  font-size: 1.15rem;
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-transform: uppercase;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.metro-tile:hover:not(.disabled) {
+  background: var(--spotify-green, #1db954);
+  color: #fff;
+  border-color: var(--spotify-green, #1db954);
+}
+
+.metro-tile.disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}

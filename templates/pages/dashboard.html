@@ -4,6 +4,24 @@
 
 {% block content %}
 <div class="container-fluid mt-4">
+    {#
+      TEMPORARY — "New UI" preview entry point.
+
+      Links to /new, which renders the rebuilt templates under New/ (assets from
+      New/static) without touching any live route, so the ported pages can be
+      clicked through before the cutover.
+
+      Delete this block — and routes/preview_routes.py, its blueprint
+      registration in helpers/app_bootstrap.py, and New/templates/_preview_index.html
+      — once the New tree replaces static/ + templates/. See New/MIGRATION.md.
+    #}
+    <div class="d-flex justify-content-end mb-2">
+        <a href="/new" class="btn btn-sm btn-outline-warning" target="_blank" rel="noopener"
+           title="Preview the rebuilt UI before it replaces these pages">
+            <i class="bi bi-cone-striped me-1"></i> New UI preview
+        </a>
+    </div>
+
     <div id="dashboardFlags"
          data-launch-on-startup="{{ 'true' if launch_on_startup else 'false' }}"
          data-first-full-scan-done="{{ 'true' if first_full_scan_done else 'false' }}"

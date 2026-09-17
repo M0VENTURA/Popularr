@@ -1,0 +1,81 @@
+/* ==========================================================================
+   static/css/analytics.css
+   Genres & Moods analytics — the horizontal bar lists.
+
+   Extracted from the inline <style> block in templates/pages/analytics.html.
+   Page-scoped (.bar-list / .metric-* / .empty-state are used only there), so
+   it does not belong in popularr.css.
+
+   NOTE ON THE FILL COLOURS: the three gradients are hard-coded hex rather than
+   theme tokens, unlike the rest of the app. They are deliberately distinct
+   per column (genre blue / mood purple / combo green) and are not derived from
+   --spotify-green, so they were kept exactly as they were when this moved.
+   ========================================================================== */
+
+.bar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.metric-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 28%) 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.metric-label {
+  font-size: 0.87rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metric-track {
+  background: rgba(120, 120, 120, 0.15);
+  border-radius: 999px;
+  height: 12px;
+  overflow: hidden;
+}
+
+.metric-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 200ms ease;
+}
+
+.metric-fill.genre {
+  background: linear-gradient(90deg, #1f6feb, #46b3ff);
+}
+
+.metric-fill.mood {
+  background: linear-gradient(90deg, #6f42c1, #a371f7);
+}
+
+.metric-fill.combo {
+  background: linear-gradient(90deg, #1a7f37, #56d364);
+}
+
+.metric-value {
+  font-size: 0.82rem;
+  color: #8b949e;
+  min-width: 36px;
+  text-align: right;
+}
+
+/* Used for both the "no data" message and the loading/error states written by
+   static/js/pages/analytics.js. */
+.empty-state {
+  color: #8b949e;
+  font-style: italic;
+}
+
+@media (max-width: 640px) {
+  .metric-row {
+    grid-template-columns: minmax(90px, 36%) 1fr auto;
+  }
+}

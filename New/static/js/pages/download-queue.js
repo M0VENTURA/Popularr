@@ -177,47 +177,38 @@
   }
 
   function sanitizeGroupKey(key) {
-    return String(key || 'x').replace(/[^a-zA-Z0-9_-]/g, '_');
+    return global.itemGroups.sanitizeId(key);
   }
 
   // ── Expansion state ─────────────────────────────────────────────────────
+  //
+  // The set, the toggle wiring and the restore-after-render logic now live in
+  // services/item-groups.js, so the folder list on the monitor page can share
+  // them instead of growing a second copy. The local wrappers below are kept
+  // so the call sites in this file read unchanged.
+  //
+  // The contextKey matters: without it a queue album and a download folder
+  // with the same id would collapse each other.
 
-  const expandedGroups = new Set();
+  const GROUP_CONTEXT = 'queue';
+  const TOGGLE_CLASS = 'queue-group-toggle';
+  const CHEVRON_CLASS = 'queue-group-chevron';
+  const BODY_CLASS = 'queue-group-body';
 
   function restoreGroupExpansion(listEl) {
-    if (!listEl) return;
-    const seen = new Set();
-
-    listEl.querySelectorAll('.queue-group-body').forEach((body) => {
-      seen.add(body.id);
-      if (!expandedGroups.has(body.id)) return;
-      body.style.display = 'block';
-      const item = body.closest('.list-group-item');
-      const chevron = item && item.querySelector('.queue-group-chevron');
-      if (chevron) chevron.classList.add('rotated');
-    });
-
-    // Drop ids that no longer exist so the set cannot grow without bound.
-    Array.from(expandedGroups).forEach((id) => {
-      if (!seen.has(id)) expandedGroups.delete(id);
+    global.itemGroups.restoreExpansion(listEl, {
+      contextKey: GROUP_CONTEXT,
+      bodyClass: BODY_CLASS,
+      chevronClass: CHEVRON_CLASS,
     });
   }
 
   function attachGroupToggles(listEl) {
-    if (!listEl) return;
-    listEl.querySelectorAll('.queue-group-toggle').forEach((btn) => {
-      btn.addEventListener('click', function () {
-        const body = document.getElementById(this.getAttribute('data-target'));
-        const chevron = this.querySelector('.queue-group-chevron');
-        if (!body) return;
-
-        const show = body.style.display === 'none' || body.style.display === '';
-        body.style.display = show ? 'block' : 'none';
-        if (chevron) chevron.classList.toggle('rotated', show);
-
-        if (show) expandedGroups.add(body.id);
-        else expandedGroups.delete(body.id);
-      });
+    global.itemGroups.attachToggles(listEl, {
+      contextKey: GROUP_CONTEXT,
+      toggleClass: TOGGLE_CLASS,
+      bodyClass: BODY_CLASS,
+      chevronClass: CHEVRON_CLASS,
     });
   }
 
@@ -276,7 +267,7 @@
       </div>`;
   }
 
-  function itemActions(item, kind) {
+  function itemActions(item, kind, standalone) {
     const status = item.status || 'queued';
     const id = parseInt(item.id, 10) || 0;
     let html = '';
@@ -302,18 +293,28 @@
                        data-queue-id="${id}" title="Retry"><i class="bi bi-arrow-clockwise"></i></button>`;
     }
 
-    if (kind === 'completed') {
+    // COMPLETED items get their actions from the ALBUM ROW, not from each
+    // track row — see the note on renderGroupedList. `standalone` is set only
+    // for an album that rendered as a single ungrouped row, which has no
+    // album row above it to carry the actions.
+    if (kind === 'completed' && standalone) {
       html += `<button class="btn btn-sm btn-outline-success py-0 px-2 ms-1 queue-organize"
                        data-queue-id="${id}" title="Copy to library"><i class="bi bi-folder-plus"></i></button>`;
     }
 
-    html += `<button class="btn btn-sm btn-outline-danger py-0 px-2 ms-1 queue-delete"
-                     data-queue-id="${id}" title="Remove"><i class="bi bi-trash"></i></button>`;
+    // A completed track has no individual Delete either: removing one track of
+    // an organised album is what the album row's Delete is for, and having it
+    // on every row made it easy to delete one file while meaning to clear the
+    // album. Every other kind keeps its per-item Delete.
+    if (kind !== 'completed' || standalone) {
+      html += `<button class="btn btn-sm btn-outline-danger py-0 px-2 ms-1 queue-delete"
+                       data-queue-id="${id}" title="Remove"><i class="bi bi-trash"></i></button>`;
+    }
 
     return html;
   }
 
-  function renderItemRow(item, kind) {
+  function renderItemRow(item, kind, standalone) {
     const status = item.status || 'queued';
     const subtitle = item.artist
       ? `<br><small class="text-muted">${esc(item.artist)}` +
@@ -336,7 +337,7 @@
             ${progressBar(item)}
             ${failure}
           </div>
-          <div class="d-flex align-items-center gap-1 flex-shrink-0">${itemActions(item, kind)}</div>
+          <div class="d-flex align-items-center gap-1 flex-shrink-0">${itemActions(item, kind, standalone)}</div>
         </div>
       </div>`;
   }
@@ -358,51 +359,64 @@
       : '';
 
     // Every group action carries the group KEY, not an index — see bug 1.
-    const keyAttr = `data-group-key="${esc(group.key)}" data-group-kind="${esc(kind)}"`;
-    let actions = '';
+    const keyData = { 'group-key': group.key, 'group-kind': kind };
+    const buttons = [];
 
     if (kind === 'active') {
       const hasActive = items.some((i) =>
         ['downloading', 'searching', 'processing'].includes(i.status));
       if (hasActive) {
-        actions += `<button class="btn btn-sm btn-outline-danger py-0 px-2 ms-1 group-cancel" ${keyAttr}
-                            title="Cancel all active downloads"><i class="bi bi-x-circle"></i></button>`;
+        buttons.push(global.itemGroups.actionButton({
+          className: 'btn-outline-danger group-cancel', icon: 'bi-x-circle', data: keyData,
+          title: 'Cancel all active downloads',
+        }));
       }
     }
     if (kind === 'completed') {
-      actions += `<button class="btn btn-sm btn-outline-success py-0 px-2 ms-1 group-organize" ${keyAttr}
-                          title="Copy all tracks to music library"><i class="bi bi-folder-check"></i></button>`;
+      // The album row owns the completed actions — see renderGroupedList.
+      buttons.push(global.itemGroups.actionButton({
+        className: 'btn-outline-success group-organize', icon: 'bi-folder-plus', data: keyData,
+        title: 'Copy all tracks to the music library',
+      }));
     }
     if (kind === 'failed') {
-      actions += `<button class="btn btn-sm btn-outline-warning py-0 px-2 ms-1 group-retry" ${keyAttr}
-                          title="Retry all failed tracks"><i class="bi bi-arrow-clockwise"></i></button>`;
+      buttons.push(global.itemGroups.actionButton({
+        className: 'btn-outline-warning group-retry', icon: 'bi-arrow-clockwise', data: keyData,
+        title: 'Retry all failed tracks',
+      }));
     }
     if (group.key.startsWith('alb_') || group.key.startsWith('grp_')) {
-      actions += `<button class="btn btn-sm btn-outline-success py-0 px-2 ms-1 group-organize-modal" ${keyAttr}
-                          title="Organize and move album group"><i class="bi bi-folder-check"></i></button>`;
+      buttons.push(global.itemGroups.actionButton({
+        className: 'btn-outline-success group-organize-modal', icon: 'bi-folder-check', data: keyData,
+        title: 'Organize and move this album (folder format and metadata)',
+      }));
     }
-    actions += `<button class="btn btn-sm btn-outline-danger py-0 px-2 ms-1 group-delete" ${keyAttr}
-                        title="Remove all tracks in this album"><i class="bi bi-trash"></i></button>`;
+    buttons.push(global.itemGroups.actionButton({
+      className: 'btn-outline-danger group-delete', icon: 'bi-trash', data: keyData,
+      title: 'Remove all tracks in this album',
+    }));
 
+    // The action classes above (group-cancel, group-organize, …) are the FIRST
+    // token so attachRowHandlers' selectors keep matching after the shared
+    // builder prepends the btn/btn-sm/btn-outline-* utilities.
     const children = items.map((item) => renderItemRow(item, kind)).join('');
 
-    return `
-      <div class="list-group-item">
-        <div class="d-flex justify-content-between align-items-center gap-2">
-          <button type="button" class="btn btn-sm btn-link p-0 text-decoration-none queue-group-toggle flex-shrink-0"
-                  data-target="${bodyId}" title="Expand album" style="color:var(--text-secondary);">
-            <i class="bi bi-chevron-down queue-group-chevron"></i>
-          </button>
-          <div class="text-truncate flex-grow-1" style="min-width:0;">
-            <strong><i class="bi bi-folder2-open me-1"></i>${esc(group.label)}</strong>${subline}
-            <br><small class="text-muted">${total} track${total === 1 ? '' : 's'} · ${esc(summary)}</small>
-          </div>
-          <div class="d-flex align-items-center gap-1 flex-shrink-0">${actions}</div>
-        </div>
-        <div id="${bodyId}" class="queue-group-body ps-3 border-start ms-2 mt-2" style="display:none;">
-          ${children}
-        </div>
-      </div>`;
+    return global.itemGroups.rowShell({
+      align: 'center',
+      collapsible: {
+        toggleClass: TOGGLE_CLASS,
+        chevronClass: CHEVRON_CLASS,
+        bodyClass: BODY_CLASS,
+        bodyId,
+        toggleTitle: 'Expand album',
+        expanded: false,
+      },
+      titleHtml:
+        `<strong><i class="bi bi-folder2-open me-1"></i>${esc(group.label)}</strong>${subline}`,
+      metaHtml: `<br><small class="text-muted">${total} track${total === 1 ? '' : 's'} · ${esc(summary)}</small>`,
+      actionsHtml: buttons.join(''),
+      bodyHtml: children,
+    });
   }
 
   // ── Event wiring for rendered rows ──────────────────────────────────────
@@ -410,47 +424,45 @@
   function attachRowHandlers(listEl) {
     if (!listEl) return;
 
-    listEl.querySelectorAll('.queue-manual-search').forEach((btn) => {
-      btn.addEventListener('click', function () {
-        const queueId = parseInt(this.dataset.queueId, 10) || null;
-        manualQueueSearch(this.dataset.query, queueId);
-      });
-    });
-
-    const single = [
-      ['.queue-cancel', cancelQueueItem],
-      ['.queue-retry', retryQueueItem],
-      ['.queue-organize', organizeFile],
-      ['.queue-delete', (id, btn) => deleteQueueItem(id, false, btn)],
-    ];
-    single.forEach(([selector, handler]) => {
-      listEl.querySelectorAll(selector).forEach((btn) => {
-        btn.addEventListener('click', function () {
-          handler(parseInt(this.dataset.queueId, 10), this);
-        });
-      });
-    });
-
-    const grouped = [
-      ['.group-cancel', cancelGroup],
-      ['.group-retry', retryGroup],
-      ['.group-organize', organizeGroup],
-      ['.group-delete', deleteGroup],
-    ];
-    grouped.forEach(([selector, handler]) => {
-      listEl.querySelectorAll(selector).forEach((btn) => {
-        btn.addEventListener('click', function () {
-          handler(this.dataset.groupKind, this.dataset.groupKey, this);
-        });
-      });
-    });
-
-    listEl.querySelectorAll('.group-organize-modal').forEach((btn) => {
-      btn.addEventListener('click', function () {
+    // One selector -> handler table instead of four copy-pasted
+    // querySelectorAll/addEventListener loops. The binding itself lives in
+    // services/item-groups.js so the monitor page's folder rows use the same
+    // path.
+    const handlers = {
+      '.queue-manual-search': function () {
+        manualQueueSearch(this.dataset.query, parseInt(this.dataset.queueId, 10) || null);
+      },
+      '.queue-cancel': function () {
+        cancelQueueItem(parseInt(this.dataset.queueId, 10), this);
+      },
+      '.queue-retry': function () {
+        retryQueueItem(parseInt(this.dataset.queueId, 10), this);
+      },
+      '.queue-organize': function () {
+        organizeFile(parseInt(this.dataset.queueId, 10), this);
+      },
+      '.queue-delete': function () {
+        deleteQueueItem(parseInt(this.dataset.queueId, 10), false, this);
+      },
+      '.group-cancel': function () {
+        cancelGroup(this.dataset.groupKind, this.dataset.groupKey, this);
+      },
+      '.group-retry': function () {
+        retryGroup(this.dataset.groupKind, this.dataset.groupKey, this);
+      },
+      '.group-organize': function () {
+        organizeGroup(this.dataset.groupKind, this.dataset.groupKey, this);
+      },
+      '.group-delete': function () {
+        deleteGroup(this.dataset.groupKind, this.dataset.groupKey, this);
+      },
+      '.group-organize-modal': function () {
         const group = lookupGroup(this.dataset.groupKind, this.dataset.groupKey);
         if (group) openOrganizeGroupModal(group);
-      });
-    });
+      },
+    };
+
+    global.itemGroups.bindActions(listEl, handlers);
 
     attachGroupToggles(listEl);
     restoreGroupExpansion(listEl);
@@ -460,9 +472,20 @@
     const groups = buildQueueGroups(items);
     registerGroups(kind, groups);
 
+    // DE-DUPLICATED 2026-09-18 — the completed list used to repeat the album's
+    // actions on every track row underneath it: the album row carried
+    // Organize / Organize & Move / Delete and then each track carried Organize
+    // / Delete again. Two ways to do the same thing, with the row the user is
+    // most likely to click not being the one that acts on the album.
+    //
+    // This now follows the Matched & Unmatched Folders pattern in
+    // pages/monitor.js: one action cluster per FOLDER (album), and the tracks
+    // inside are a plain list. `standalone` is the one exception — an album
+    // that is a single track renders as a bare row with no album header above
+    // it, so that row has to carry the actions itself.
     const rows = groups.map((group) =>
       group.items.length === 1
-        ? renderItemRow(group.items[0], kind)
+        ? renderItemRow(group.items[0], kind, true)
         : renderGroupRow(group, kind)
     );
 

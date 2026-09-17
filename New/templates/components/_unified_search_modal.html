@@ -1,0 +1,124 @@
+{#
+Unified Hybrid Search Flyout — All / In Library / MusicBrainz
+=============================================================
+Header-anchored overlay panel (slides down from the fixed navbar), included
+from base.html and available on every page.
+
+INCLUDED ONCE, GLOBALLY, BY base.html (into #global-unified-search-container).
+Do not include it from a page as well — the ids below are fixed and the flyout
+resolves them with getElementById, which returns the first match in DOM order.
+
+The JavaScript is NOT in this file. It lives in static/js/ui/search-flyout.js
+(loaded globally by base.html), which publishes the three entry points this
+markup calls:
+
+    global.openUnifiedSearch     line 985   (navbar input focus/click/Enter)
+    global.closeUnifiedSearch    line 986   (close button, backdrop click)
+    global.syncNavSearchQuery    line 987   (navbar input handler)
+
+The two `onclick="closeUnifiedSearch()"` attributes below are one-line calls to
+that published global — no logic — so they stay as inline handlers rather than
+data-action attributes, consistent with components/_musicbrainz_search_component.html.
+#}
+
+<div id="unifiedSearchModal" class="search-flyout d-none shadow-lg" role="dialog" aria-modal="true" aria-label="Global search">
+  <div class="p-3">
+    <div class="d-flex align-items-center justify-content-between mb-3 border-bottom border-secondary pb-2">
+      <h6 class="mb-0 fw-bold text-info"><i class="bi bi-search me-1"></i> Unified Search</h6>
+      <button type="button" class="btn-close btn-close-white" aria-label="Close" onclick="closeUnifiedSearch()"></button>
+    </div>
+
+    <!-- Hidden input mirroring the navbar search -->
+    <div class="input-group mb-2 d-none" aria-hidden="true">
+      <span class="input-group-text" id="unifiedSearchIcon"><i class="bi bi-search"></i></span>
+      <input type="text" id="unifiedSearchInput" class="form-control" placeholder="Search library or MusicBrainz…" autocomplete="off" tabindex="-1">
+    </div>
+
+    <!-- Advanced filters — collapsible -->
+    <div class="d-flex align-items-center mb-2">
+      <button type="button" class="btn btn-sm btn-dark text-decoration-none us-filter-toggle border border-secondary" id="unifiedFiltersToggle" aria-expanded="false">
+        <i class="bi bi-sliders me-1 text-info" id="unifiedFiltersToggleIcon"></i> <span id="unifiedFiltersToggleLabel" class="fw-semibold">Advanced Filters</span>
+      </button>
+    </div>
+
+    <div class="border border-secondary rounded p-3 mb-3 d-none shadow-sm" id="unifiedAdvancedFilters" style="background: var(--tertiary-bg, #222);">
+      <div class="d-flex align-items-center gap-2 mb-3">
+        <small class="text-muted lh-sm" style="font-size: 0.75rem;"><i class="bi bi-info-circle-fill text-info me-1"></i> These filters apply to both your local Library and MusicBrainz discovery.</small>
+      </div>
+      <div class="row g-3 align-items-end">
+        <div class="col-6 col-md-3">
+          <label class="form-label extra-small fw-semibold text-muted text-uppercase mb-1">Artist</label>
+          <input type="text" class="form-control form-control-sm" id="unifiedFilterArtist" placeholder="Artist name" autocomplete="off">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label extra-small fw-semibold text-muted text-uppercase mb-1">Album</label>
+          <input type="text" class="form-control form-control-sm" id="unifiedFilterAlbum" placeholder="Album title" autocomplete="off">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label extra-small fw-semibold text-muted text-uppercase mb-1">Track</label>
+          <input type="text" class="form-control form-control-sm" id="unifiedFilterTrack" placeholder="Track title" autocomplete="off">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label extra-small fw-semibold text-muted text-uppercase mb-1">Genre</label>
+          <input type="text" class="form-control form-control-sm" id="unifiedFilterGenre" placeholder="rock, metal..." autocomplete="off">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label extra-small fw-semibold text-muted text-uppercase mb-1">Year (From)</label>
+          <input type="text" class="form-control form-control-sm" id="unifiedFilterYear" placeholder="YYYY" maxlength="4" autocomplete="off">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label extra-small fw-semibold text-muted text-uppercase mb-1">Year (To)</label>
+          <input type="text" class="form-control form-control-sm" id="unifiedFilterYearTo" placeholder="YYYY" maxlength="4" autocomplete="off">
+        </div>
+      </div>
+    </div>
+
+    <!-- Scope Tabs -->
+    <div class="d-flex align-items-center gap-2 mb-3 bg-secondary p-1 rounded">
+      <ul class="nav nav-pills gap-1 us-scope-chips flex-grow-1" id="unifiedScopeTabs" role="tablist">
+        <li class="nav-item flex-grow-1 text-center" role="presentation">
+          <button type="button" class="nav-link active w-100 py-1" data-scope="all" role="tab" aria-selected="true">
+            All <span class="us-scope-count badge bg-dark border border-secondary ms-1 d-none">0</span>
+          </button>
+        </li>
+        <li class="nav-item flex-grow-1 text-center" role="presentation">
+          <button type="button" class="nav-link w-100 py-1" data-scope="library" role="tab" aria-selected="false">
+            Library <span class="us-scope-count badge bg-dark border border-secondary ms-1 d-none">0</span>
+          </button>
+        </li>
+        <li class="nav-item flex-grow-1 text-center" role="presentation">
+          <button type="button" class="nav-link w-100 py-1" data-scope="mb" role="tab" aria-selected="false">
+            External <span class="us-scope-count badge bg-dark border border-secondary ms-1 d-none">0</span>
+          </button>
+        </li>
+      </ul>
+      <button type="button" class="btn btn-sm btn-dark border-secondary us-filter-btn flex-shrink-0" id="unifiedFilterBtn" title="Release type filter" aria-label="Release type filter">
+        <i class="bi bi-funnel-fill"></i><span class="badge bg-info d-none ms-1" id="unifiedFilterBadge"></span>
+      </button>
+    </div>
+
+    <!-- Hidden type select -->
+    <select id="unifiedSearchType" class="d-none" aria-hidden="true" tabindex="-1">
+      <option value="">All types</option>
+      <option value="album">Album</option>
+      <option value="single">Single</option>
+      <option value="ep">EP</option>
+      <option value="compilation">Compilation</option>
+      <option value="soundtrack">Soundtrack</option>
+      <option value="live">Live</option>
+      <option value="remix">Remix</option>
+    </select>
+
+    <div id="unifiedSearchError" class="alert alert-danger py-2 px-3 small d-none shadow-sm" role="alert"></div>
+
+    <div id="unifiedSearchResults" class="us-results pe-2" style="max-height: 60vh; overflow-y: auto; overflow-x: hidden;"></div>
+
+    <div class="d-flex align-items-center justify-content-between mt-3 pt-2 border-top border-secondary">
+      <small class="text-info fw-bold" id="usResultMeta"></small>
+      <small class="text-muted d-none d-md-inline"><kbd class="bg-dark text-light border-secondary">Enter</kbd> to search · <kbd class="bg-dark text-light border-secondary">Esc</kbd> to close</small>
+    </div>
+  </div>
+</div>
+
+<!-- Dark backdrop: tap anywhere outside the flyout to close -->
+<div id="searchBackdrop" class="search-backdrop d-none" onclick="closeUnifiedSearch()" title="Close search"></div>

@@ -1,0 +1,275 @@
+{#
+  Track editing modals — simple (single-field quick edit) and comprehensive
+  (full form).
+
+  Included by pages/album_detail.html and pages/downloads/queue.html.
+  (The ARTIST page does NOT include this file: its own track-edit modal is
+  rendered inline in pages/artist_detail.html and uses the editArtistTrack*
+  ids, saved via global.saveEditedTrackFromArtistPage. Do not merge the two.)
+
+  Handlers used below, and where they live:
+
+      saveComprehensiveEditedTrack()  pages/album.js:1654
+      addEditTrackGenre()             pages/album.js:1655
+
+  ── WHAT CHANGED ──────────────────────────────────────────────────────────
+  Nothing structural — this is a faithful port, including the duplicate-id fix
+  that is already in place: the SIMPLE modal's hidden field is
+  #simpleEditTrackId while the COMPREHENSIVE modal's is #editTrackId. Those two
+  used to share the name `editTrackId`, so the simple modal's save read the
+  comprehensive modal's track id. Keep them distinct.
+
+  ── TWO BUGS THAT WERE HERE, NOW FIXED (2026-09-18) ────────────────────────
+
+  1. `saveEditedTrack()` USED TO BE UNDEFINED — the simple modal's Save button
+     had always thrown ReferenceError, because the function existed nowhere in
+     any tree. It is now implemented in pages/album.js and exported as
+     `global.saveEditedTrack`. The quick edit works.
+
+  2. `services/genres.js::editTrackArtist()` USED TO OPEN THE WRONG MODAL. It
+     checked for and showed #editTrackModal (the comprehensive form) while
+     populating #editTrackCurrentField / #editTrackLabel / #editTrackValue,
+     which belong to the SIMPLE modal. It looked like it worked only because
+     both modals ship together in this partial and getElementById found the
+     fields regardless — so the user saw the ~30-field form with none of the
+     quick-edit values in it. It now prefers #simpleEditTrackModal (with its
+     #simpleEditTrackId field) and falls back to the artist page's
+     #editTrackModal + #editTrackId pairing.
+
+  Keep the two track-id fields distinct: #simpleEditTrackId here, #editTrackId
+  in the comprehensive modal. They used to share the name `editTrackId`, and
+  the simple modal's save then read the comprehensive modal's track id.
+
+  The remaining onclick attributes are one-line calls to three published
+  globals: saveEditedTrack, saveComprehensiveEditedTrack, addEditTrackGenre.
+#}
+
+<!-- Simple Track Edit Modal (single-field quick edit) -->
+<div class="modal fade" id="simpleEditTrackModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Edit Track</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="simpleEditTrackId">
+                <input type="hidden" id="editTrackCurrentField">
+                <div class="mb-3">
+                    <label for="editTrackValue" class="form-label" id="editTrackLabel"></label>
+                    <input type="text" class="form-control" id="editTrackValue" placeholder="Enter value">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                {# saveEditedTrack() — implemented in pages/album.js (see header). #}
+                <button type="button" class="btn btn-primary" onclick="saveEditedTrack()">
+                    <i class="bi bi-check-circle"></i> Save
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Comprehensive Track Edit Modal -->
+<div class="modal fade" id="editTrackModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-pencil-square"></i> Edit Track: <span id="editTrackTitle"></span>
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <form id="editTrackForm">
+                    <input type="hidden" id="editTrackId" name="track_id">
+
+                    <!-- Basic Info -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-12">
+                            <label for="editTrackTitleField" class="form-label">Title</label>
+                            <input type="text" class="form-control" id="editTrackTitleField" name="title" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="editTrackArtistField" class="form-label">Artist</label>
+                            <input type="text" class="form-control" id="editTrackArtistField" name="artist">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="editTrackAlbumField" class="form-label">Album</label>
+                            <input type="text" class="form-control" id="editTrackAlbumField" name="album">
+                        </div>
+                    </div>
+
+                    <!-- Metadata -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-3">
+                            <label for="editTrackYearField" class="form-label">Year</label>
+                            <input type="number" class="form-control" id="editTrackYearField" name="year" placeholder="YYYY">
+                        </div>
+                        <div class="col-md-3">
+                            <label for="editTrackStarsField" class="form-label">Rating</label>
+                            <select class="form-select" id="editTrackStarsField" name="stars">
+                                <option value="0">☆☆☆☆☆ (0)</option>
+                                <option value="1">★☆☆☆☆ (1)</option>
+                                <option value="2">★★☆☆☆ (2)</option>
+                                <option value="3">★★★☆☆ (3)</option>
+                                <option value="4">★★★★☆ (4)</option>
+                                <option value="5">★★★★★ (5)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label for="editTrackSingleField" class="form-label">Is Single</label>
+                            <select class="form-select" id="editTrackSingleField" name="is_single">
+                                <option value="0">No</option>
+                                <option value="1">Yes</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label for="editTrackConfidenceField" class="form-label">Confidence</label>
+                            <select class="form-select" id="editTrackConfidenceField" name="single_confidence">
+                                <option value="low">Low</option>
+                                <option value="medium">Medium</option>
+                                <option value="high">High</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Recommended Genres Section -->
+                    <div class="mb-4" id="recommendedGenresSection" style="display: none;">
+                        <div class="alert alert-info" style="padding: 0.75rem; margin-bottom: 1rem;">
+                            <h6 class="mb-2"><i class="bi bi-stars"></i> Recommended Genres from Last.fm &amp; Discogs</h6>
+                            <div id="recommendedGenresDisplay" class="d-flex flex-wrap gap-2">
+                                <span class="text-muted small">Loading...</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Genres -->
+                    <div class="mb-4">
+                        <label for="editTrackGenresField" class="form-label">Genres</label>
+                        <div id="editTrackGenresDisplay" class="mb-2">
+                            <!-- Genres badges will be inserted here -->
+                        </div>
+                        <div class="input-group mb-2">
+                            <input type="text" class="form-control" id="editTrackGenreInput" placeholder="Add genre (e.g., Rock, Jazz)" list="editGenreDatalist">
+                            <button class="btn btn-outline-success" type="button" onclick="addEditTrackGenre()">
+                                <i class="bi bi-plus-circle"></i> Add
+                            </button>
+                        </div>
+                        <datalist id="editGenreDatalist">
+                            <option value="Rock"><option value="Pop"><option value="Jazz"><option value="Classical">
+                            <option value="Hip-Hop"><option value="Electronic"><option value="Blues"><option value="Country">
+                            <option value="R&B"><option value="Soul"><option value="Funk"><option value="Metal">
+                            <option value="Punk"><option value="Alternative"><option value="Indie">
+                        </datalist>
+                        <input type="hidden" id="editTrackGenresField" name="genres">
+                    </div>
+
+                    <!-- Additional Fields -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-6">
+                            <label for="editTrackAlbumArtistField" class="form-label">Album Artist</label>
+                            <input type="text" class="form-control" id="editTrackAlbumArtistField" name="album_artist">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="editTrackWriterField" class="form-label">Writer/Lyricist</label>
+                            <input type="text" class="form-control" id="editTrackWriterField" name="writer">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="editTrackComposerField" class="form-label">Composer</label>
+                            <input type="text" class="form-control" id="editTrackComposerField" name="composer">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="editTrackWorkField" class="form-label">Work/Composition</label>
+                            <input type="text" class="form-control" id="editTrackWorkField" name="work">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="editTrackCommentField" class="form-label">Comment</label>
+                            <input type="text" class="form-control" id="editTrackCommentField" name="comment">
+                        </div>
+                        <div class="col-md-3">
+                            <label for="editTrackTrackNumberField" class="form-label">Track Number</label>
+                            <input type="text" class="form-control" id="editTrackTrackNumberField" name="track_number" placeholder="e.g., 1 or 1/12">
+                        </div>
+                        <div class="col-md-3">
+                            <label for="editTrackDiscNumberField" class="form-label">Disc Number</label>
+                            <input type="number" class="form-control" id="editTrackDiscNumberField" name="disc_number">
+                        </div>
+                        <div class="col-md-3">
+                            <label for="editTrackISRCField" class="form-label">ISRC</label>
+                            <input type="text" class="form-control" id="editTrackISRCField" name="isrc" placeholder="e.g., USRC17607839">
+                        </div>
+                        <div class="col-md-3">
+                            <label for="editTrackMBIDField" class="form-label">Recording MBID</label>
+                            <input type="text" class="form-control" id="editTrackMBIDField" name="mbid" placeholder="e.g., 579fc21e-40d4-4d72-835c-659e2a4108e4">
+                        </div>
+                    </div>
+
+                    <!-- MusicBrainz IDs (integrated into the main form) -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-4">
+                            <label for="editTrackMBAlbumIdField" class="form-label">MB Album ID</label>
+                            <input type="text" class="form-control" id="editTrackMBAlbumIdField" name="musicbrainz_albumid">
+                        </div>
+                        <div class="col-md-4">
+                            <label for="editTrackMBArtistIdField" class="form-label">MB Artist ID</label>
+                            <input type="text" class="form-control" id="editTrackMBArtistIdField" name="musicbrainz_artistid">
+                        </div>
+                        <div class="col-md-4">
+                            <label for="editTrackMBAlbumArtistIdField" class="form-label">MB Album Artist ID</label>
+                            <input type="text" class="form-control" id="editTrackMBAlbumArtistIdField" name="musicbrainz_albumartistid">
+                        </div>
+                        <div class="col-md-4">
+                            <label for="editTrackMBReleaseGroupIdField" class="form-label">MB Release Group ID</label>
+                            <input type="text" class="form-control" id="editTrackMBReleaseGroupIdField" name="musicbrainz_releasegroupid">
+                        </div>
+                        <div class="col-md-4">
+                            <label for="editTrackMBReleaseTrackIdField" class="form-label">MB Release Track ID</label>
+                            <input type="text" class="form-control" id="editTrackMBReleaseTrackIdField" name="musicbrainz_releasetrackid">
+                        </div>
+                        <div class="col-md-4">
+                            <label for="editTrackMBWorkIdField" class="form-label">MB Work ID</label>
+                            <input type="text" class="form-control" id="editTrackMBWorkIdField" name="musicbrainz_workid">
+                        </div>
+                    </div>
+
+                    <!-- Flags -->
+                    <div class="mb-4">
+                        <label class="form-label">Track Type Flags</label>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="editTrackIsCoverField" name="is_cover">
+                            <label class="form-check-label" for="editTrackIsCoverField">Is Cover</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="editTrackAlternateTakeField" name="alternate_take">
+                            <label class="form-check-label" for="editTrackAlternateTakeField">Is Alternate Take</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="editTrackIsCompilationField" name="is_compilation">
+                            <label class="form-check-label" for="editTrackIsCompilationField">Is Compilation Track</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="editTrackIsLiveField" name="is_live">
+                            <label class="form-check-label" for="editTrackIsLiveField">Is Live</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="editTrackIsAcousticField" name="is_acoustic">
+                            <label class="form-check-label" for="editTrackIsAcousticField">Is Acoustic</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="editTrackIsRemixField" name="is_remix">
+                            <label class="form-check-label" for="editTrackIsRemixField">Is Remix</label>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="saveComprehensiveEditedTrack()">
+                    <i class="bi bi-check-circle"></i> Save Changes
+                </button>
+            </div>
+        </div>
+    </div>
+</div>

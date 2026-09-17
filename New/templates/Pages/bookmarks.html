@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+{% block title %}{% if filter_type %}Favourite {{ filter_type.capitalize() }}s{% else %}Favourites{% endif %} · Popularr{% endblock %}
+{% block content %}
+<div class="container-fluid py-3 py-md-4">
+  <div class="row mb-3">
+    <div class="col-12 col-md-auto">
+      {# Was <h4 ...> closed by </h1> — invalid nesting, fixed here. #}
+      <h4 class="mb-1">
+        <i class="bi bi-star-fill"></i>
+        {% if filter_type == 'artist' %}
+          Favourite Artists
+        {% elif filter_type == 'album' %}
+          Favourite Albums
+        {% elif filter_type == 'track' %}
+          Favourite Tracks
+        {% else %}
+          Favourites
+        {% endif %}
+      </h4>
+      <p class="text-muted mb-0">Quick access to your favorite artists, albums, and tracks</p>
+    </div>
+    {% if filter_type %}
+    <div class="col-12 col-md-auto ms-auto">
+      <a href="{{ url_for('ui.bookmarks') }}" class="btn btn-outline-secondary">
+        <i class="bi bi-star"></i> View All Favourites
+      </a>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-body py-2">
+      <div class="d-flex flex-wrap gap-2 align-items-center">
+        <span class="text-muted small">Filter:</span>
+        <a href="{{ url_for('ui.bookmarks') }}" class="btn btn-sm {% if not filter_type %}btn-primary{% else %}btn-outline-primary{% endif %}">All</a>
+        <a href="{{ url_for('ui.bookmarks', filter='artist') }}" class="btn btn-sm {% if filter_type == 'artist' %}btn-primary{% else %}btn-outline-primary{% endif %}">Artists</a>
+        <a href="{{ url_for('ui.bookmarks', filter='album') }}" class="btn btn-sm {% if filter_type == 'album' %}btn-primary{% else %}btn-outline-primary{% endif %}">Albums</a>
+        <a href="{{ url_for('ui.bookmarks', filter='track') }}" class="btn btn-sm {% if filter_type == 'track' %}btn-primary{% else %}btn-outline-primary{% endif %}">Tracks</a>
+      </div>
+    </div>
+  </div>
+
+  {% if bookmarks and bookmarks|length > 0 %}
+    <!-- Artists Bookmarks -->
+    {% set artist_bookmarks = bookmarks | selectattr('type', 'equalto', 'artist') | list %}
+    {% if artist_bookmarks %}
+    <div class="card shadow-sm mb-3">
+      <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+        <h5 class="mb-0"><i class="bi bi-people"></i> Artists</h5>
+      </div>
+      <div class="card-body">
+        <div class="row g-2">
+          {% for bookmark in artist_bookmarks %}
+          <div class="col-12 col-sm-6 col-md-4 col-lg-3">
+            <div class="card h-100">
+              <div class="card-body p-2">
+                <div class="d-flex justify-content-between align-items-center">
+                  <a href="{{ url_for('ui.artist_detail', name=bookmark.artist) }}" class="text-decoration-none flex-grow-1">
+                    <i class="bi bi-person-circle"></i> {{ bookmark.artist }}
+                  </a>
+                  {# data-* rather than an inline onclick carrying the id — see the
+                     header of static/js/pages/bookmarks.js. #}
+                  <button type="button" class="btn btn-sm btn-outline-danger"
+                          data-action="bookmark-remove"
+                          data-bookmark-id="{{ bookmark.id }}"
+                          data-bookmark-label="{{ bookmark.artist }}"
+                          title="Remove bookmark">
+                    <i class="bi bi-x"></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Albums Bookmarks -->
+    {% set album_bookmarks = bookmarks | selectattr('type', 'equalto', 'album') | list %}
+    {% if album_bookmarks %}
+    <div class="card shadow-sm mb-3">
+      <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+        <h5 class="mb-0"><i class="bi bi-album"></i> Albums</h5>
+      </div>
+      <div class="card-body">
+        <div class="row g-2">
+          {% for bookmark in album_bookmarks %}
+          <div class="col-12 col-sm-6 col-md-4 col-lg-3">
+            <div class="card h-100">
+              <div class="card-body p-2">
+                <div class="d-flex justify-content-between align-items-start">
+                  <div class="flex-grow-1">
+                    {# Raw path + path_segment filter, exactly as the source did —
+                       NOT url_for('ui.album_detail'), which takes different args. #}
+                    <a href="/album/{{ bookmark.artist|path_segment }}/{{ bookmark.album|path_segment }}" class="text-decoration-none">
+                      <div class="fw-bold text-truncate">{{ bookmark.album }}</div>
+                      <div class="text-muted small">{{ bookmark.artist }}</div>
+                    </a>
+                  </div>
+                  <button type="button" class="btn btn-sm btn-outline-danger"
+                          data-action="bookmark-remove"
+                          data-bookmark-id="{{ bookmark.id }}"
+                          data-bookmark-label="{{ bookmark.album }}"
+                          title="Remove bookmark">
+                    <i class="bi bi-x"></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Tracks Bookmarks -->
+    {% set track_bookmarks = bookmarks | selectattr('type', 'equalto', 'track') | list %}
+    {% if track_bookmarks %}
+    <div class="card shadow-sm mb-3">
+      <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+        <h5 class="mb-0"><i class="bi bi-music-note"></i> Tracks</h5>
+      </div>
+      <div class="card-body">
+        <div class="table-responsive">
+          <table class="table table-hover mb-0">
+            <thead>
+              <tr>
+                <th>Track</th>
+                <th>Artist</th>
+                <th>Album</th>
+                <th class="text-center" style="width: 100px;">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for bookmark in track_bookmarks %}
+              <tr>
+                <td>
+                  <a href="{{ url_for('ui.track_detail', track_id=bookmark.track_id) }}" class="text-decoration-none">
+                    {{ bookmark.name }}
+                  </a>
+                </td>
+                <td>{{ bookmark.artist }}</td>
+                <td>{{ bookmark.album }}</td>
+                <td class="text-center">
+                  <button type="button" class="btn btn-sm btn-outline-danger"
+                          data-action="bookmark-remove"
+                          data-bookmark-id="{{ bookmark.id }}"
+                          data-bookmark-label="{{ bookmark.name }}"
+                          title="Remove bookmark">
+                    <i class="bi bi-trash"></i>
+                  </button>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  {% else %}
+    <div class="alert alert-info">
+      <i class="bi bi-info-circle"></i> You don't have any bookmarks yet.
+      Add bookmarks from artist, album, or track pages using the <i class="bi bi-bookmark"></i> button.
+    </div>
+  {% endif %}
+</div>
+
+{#
+  The #bookmarkToast markup is REMOVED. It was a third toast implementation
+  (a hand-built .toast with bg-success/bg-danger classes toggled by the page's
+  own showToast). ui/toast.js is loaded by base.html on every page and provides
+  the same {title, message, type} API plus a managed stack, so the page-local
+  copy and its markup were both dead weight.
+#}
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/*, ui/toast.js, ui/modal.js, ui/confirm.js and
+  ui/button-state.js. This page adds only its own controller.
+
+    js/pages/bookmarks.js   removeBookmark() — the delegated
+                           [data-action="bookmark-remove"] handler
+#}
+<script src="{{ versioned_static('js/pages/bookmarks.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,160 @@
+/* ==========================================================================
+   ⛔ SUPERSEDED — DELETE THIS FILE. DO NOT LOAD IT.
+
+   Styles for the standalone /search page's own result rendering, which is
+   superseded: ui/search-flyout.js owns search now and brings its own styles in
+   popularr.css. templates/Pages/search.html no longer links this file.
+
+   ==========================================================================
+   (Original header follows, for reference only.)
+
+   static/css/search.css
+   Library search page (templates/Pages/search.html).
+
+   Extracted from the inline <style> block in templates/pages/search.html.
+
+   ⚠️ WORTH CHECKING BEFORE TRUSTING THIS FILE
+   The `.table`, `.table thead`, `.table tbody`, `.table-hover` and
+   `.table-responsive` rules near the bottom are NOT search-specific — they are a
+   page-local dark-theme override of Bootstrap's tables, using the same tokens
+   popularr.css already defines. If popularr.css's table rules cover them, this
+   block is a competing definition and should be deleted rather than moved. It
+   was moved rather than deleted because the difference is not verifiable
+   without rendering the page: the results table would be unreadable if
+   popularr.css does NOT already handle it.
+
+   Everything above them (.search-result-card, .result-*, .results-*) is
+   genuinely page-scoped.
+   ========================================================================== */
+
+.search-result-card {
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.search-result-card:hover {
+  background-color: var(--tertiary-bg);
+  border-color: var(--spotify-green);
+}
+
+.result-type-badge {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 0.5rem;
+}
+
+.result-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--spotify-green);
+  margin-bottom: 0.25rem;
+}
+
+.result-subtitle {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+
+.result-meta {
+  color: var(--text-tertiary);
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+}
+
+.result-rating {
+  font-size: 0.9rem;
+  color: #ffc107;
+}
+
+.search-loading {
+  text-align: center;
+  padding: 2rem;
+}
+
+.search-error {
+  padding: 1rem;
+}
+
+.results-section {
+  margin-bottom: 2rem;
+}
+
+.results-section-title {
+  color: var(--spotify-green);
+  border-bottom: 2px solid var(--border-color);
+  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.results-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+@media (max-width: 768px) {
+  .results-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Dark-theme table styling (see the warning at the top) ─────────────── */
+
+.table {
+  color: var(--text-primary) !important;
+  background-color: transparent !important;
+}
+
+.table thead {
+  background-color: var(--primary-bg) !important;
+  color: var(--text-primary) !important;
+}
+
+.table thead th {
+  background-color: var(--primary-bg) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-color) !important;
+}
+
+.table tbody {
+  background-color: transparent !important;
+}
+
+.table tbody tr {
+  background-color: transparent !important;
+  border-color: var(--border-color) !important;
+}
+
+.table tbody td {
+  background-color: transparent !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-color) !important;
+}
+
+.table tbody td a {
+  color: var(--spotify-green) !important;
+}
+
+.table tbody td a:hover {
+  color: var(--text-primary) !important;
+}
+
+.table tbody td strong {
+  color: var(--text-primary) !important;
+}
+
+.table-hover tbody tr:hover {
+  background-color: var(--primary-bg) !important;
+  color: var(--text-primary) !important;
+}
+
+.table-hover tbody tr:hover td {
+  background-color: var(--primary-bg) !important;
+}
+
+.table-responsive {
+  background-color: var(--secondary-bg) !important;
+}

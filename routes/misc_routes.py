@@ -32,7 +32,7 @@ from helpers.config_helpers import (
 from services.catalog.album_classification_service import classify_album_type
 from services.enrichment.musicbrainz_service import get_shared_mb_client
 from services.infrastructure.api_rate_limiter import get_rate_limiter
-from services.metadata.correction_service import fix_album_field
+from services.metadata.correction_service import fix_album_field, get_album_tag_inconsistencies
 from services.metadata.tag_file_service import sync_track_tags_to_file, update_file_metadata
 
 logger = structlog.get_logger(__name__)
@@ -1517,6 +1517,56 @@ async def api_correcting_fix_album_field() -> Any:
         return jsonify({"success": True, "updated_count": updated, "files_updated": files})
     except Exception as exc:
         logger.error("Fix album field failed", error=str(exc))
+        return jsonify({"error": str(exc)}), 500
+
+
+@misc_api_bp.route("/correcting/albums")
+def api_correcting_albums() -> Any:
+    """Albums whose album-level tags disagree across their own tracks.
+
+    The JSON twin of the /correcting page. get_album_tag_inconsistencies()
+    already powered that page server-side, but nothing exposed the same data in
+    a machine-readable form — so the results could be listed on that one page and
+    nowhere else, and every other surface had to re-derive them (or, more
+    usually, didn't).
+
+    These are the albums Navidrome shows as several separate entries: 21
+    album-level fields (album_artist, MBIDs, release type/status/country,
+    compilation, genres, mood, year, label, track/disc totals, grouping, media,
+    album version, disc subtitle, script, ReplayGain album gain/peak) must agree
+    across every track of an album.
+
+    Per album+field ignores from the correction_ignores table are already
+    honoured by the service, so ignored conflicts do not appear here either.
+
+    Query params:
+        artist  optional — scope to one album artist (case-sensitive, matching
+                COALESCE(NULLIF(album_artist, ''), artist))
+
+    Returns the compact "albums" map the client annotates rows with, keyed
+    "<album_artist>::<album>" lowercased, plus a total. The full per-field value
+    breakdown stays server-side: only the /correcting page edits values.
+    """
+    artist_filter = (request.args.get("artist") or "").strip() or None
+    try:
+        albums = get_album_tag_inconsistencies(artist_filter=artist_filter)
+
+        compact: dict[str, dict[str, Any]] = {}
+        for entry in albums:
+            album_artist = str(entry.get("album_artist") or "").strip()
+            album = str(entry.get("album") or "").strip()
+            inconsistencies = entry.get("inconsistencies") or []
+            key = f"{album_artist.lower()}::{album.lower()}"
+            compact[key] = {
+                "album_artist": album_artist,
+                "album": album,
+                "track_count": int(entry.get("track_count") or 0),
+                "field_labels": [i.get("field_label") for i in inconsistencies if i.get("field_label")],
+            }
+
+        return jsonify({"success": True, "total": len(compact), "albums": compact})
+    except Exception as exc:
+        logger.error("Fetch album inconsistencies failed", error=str(exc))
         return jsonify({"error": str(exc)}), 500
 
 

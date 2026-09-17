@@ -471,9 +471,14 @@
         const result = results[parseInt(this.dataset.resultIndex, 10)];
         if (!result) return;
         return global.buttonState.withBusy(this, '', async () => {
+          // opts.queueId is forwarded so the manual-search modal can attach the
+          // chosen file to the queue row it was opened from (that routes the
+          // request to /api/slskd/queue-download instead of /api/slskd/download
+          // — see download()). Without it the modal's Download button queued a
+          // brand-new item and orphaned the row the user was fixing.
           const ok = await download(
             [{ username: result.username, filename: result.filename, size: result.size || 0 }],
-            { label: result.filename, confirm: opts.confirm !== false }
+            { label: result.filename, confirm: opts.confirm !== false, queueId: opts.queueId }
           );
           if (ok) global.buttonState.flashDone(this);
         });
@@ -605,6 +610,125 @@
     };
   }
 
+  // ── Manual search modal ──────────────────────────────────────────────
+  //
+  // IMPLEMENTED 2026-09-18 — this was an un-migrated flow, not a broken one.
+  //
+  // Two callers have been waiting for it, both behind a `typeof` guard so they
+  // silently did nothing:
+  //     pages/download-queue.js  manualQueueSearch(query, queueId)   line 755
+  //     pages/search.js          the search tab's per-track search   line 53
+  //
+  // The legacy implementation lived in static/js/downloads.js
+  // (ensureSoulseekManualSearchModal / openSoulseekManualSearchModal /
+  // runSoulseekManualSearch) and was never carried across. Its modal markup is
+  // now a proper partial — components/modals/_soulseek_manual_search.html — so
+  // there is no ensure*() function here: the template owns the markup, this
+  // module only drives it.
+  //
+  // The `queueId` is the whole point of the modal. Opened from a queue row, it
+  // lets the user pick a DIFFERENT file for an item that failed to match, and
+  // /api/slskd/queue-download then attaches that file to the existing row
+  // rather than creating a second one.
+
+  const MANUAL_CONTEXT = 'manual-search';
+  const manualState = { queueId: null };
+
+  function openManualSearchModal(defaultQuery, queueId) {
+    const modalEl = document.getElementById('soulseekManualSearchModal');
+    if (!modalEl) {
+      notifyError('The manual search modal is not loaded on this page.');
+      return;
+    }
+
+    manualState.queueId = queueId ? (parseInt(queueId, 10) || null) : null;
+
+    const input = document.getElementById('soulseekManualQuery');
+    if (input) input.value = normalizeQuery(defaultQuery || '');
+
+    const status = document.getElementById('soulseekManualStatus');
+    if (status) {
+      status.textContent = manualState.queueId
+        ? 'Linked to a queue item — the file you pick replaces its download.'
+        : 'Edit the query if needed, then click Search.';
+    }
+
+    const results = document.getElementById('soulseekManualResults');
+    if (results) results.innerHTML = '';
+
+    if (global.modal) global.modal.show(modalEl);
+    if (input) input.focus();
+  }
+
+  async function runManualSearch() {
+    const input = document.getElementById('soulseekManualQuery');
+    const status = document.getElementById('soulseekManualStatus');
+    const results = document.getElementById('soulseekManualResults');
+    const btn = document.getElementById('soulseekManualSearchBtn');
+
+    const query = normalizeQuery(input ? input.value : '');
+    if (!query) {
+      notifyError('Enter search terms first.');
+      return;
+    }
+    if (input) input.value = query;
+    if (results) results.innerHTML = '';
+
+    const setStatus = (html) => { if (status) status.innerHTML = html; };
+    setStatus('<span class="spinner-border spinner-border-sm me-1"></span>Starting search…');
+
+    // search() owns the poll loop, the terminal-state grace window and the
+    // busy-slot retry — the legacy version hand-rolled all three, including a
+    // `waitingForSlot` flag and a poll timer on window.soulseekManualSearchState.
+    return global.buttonState.withBusy(btn, '', () => search(query, {
+      context: MANUAL_CONTEXT,
+      onUpdate: (session) => {
+        setStatus(
+          `<span class="spinner-border spinner-border-sm me-1"></span>Searching… ` +
+          `(${session.results.length} file${session.results.length === 1 ? '' : 's'})`
+        );
+      },
+      onComplete: (session) => {
+        setStatus(manualState.queueId
+          ? 'Pick a file to attach to the queue item.'
+          : 'Pick a file to download.');
+        renderTable(results, session, { queueId: manualState.queueId, confirm: true });
+      },
+      onError: (error) => {
+        setStatus(`<span class="text-danger">Search failed: ${esc(error.message)}</span>`);
+      },
+    }));
+  }
+
+  /** Enter submits, matching every other search box in the app. */
+  function initManualSearch() {
+    const modalEl = document.getElementById('soulseekManualSearchModal');
+    if (!modalEl) return;
+
+    const input = document.getElementById('soulseekManualQuery');
+    if (input) {
+      input.addEventListener('keydown', function (event) {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        runManualSearch();
+      });
+    }
+
+    const btn = document.getElementById('soulseekManualSearchBtn');
+    if (btn) btn.addEventListener('click', () => runManualSearch());
+
+    // Drop the queue link when the modal closes, so the NEXT open (from a
+    // different row, or from the search page where queueId is null) cannot
+    // attach a file to a row the user has moved on from. The legacy version
+    // reset its window state here for the same reason.
+    modalEl.addEventListener('hidden.bs.modal', () => {
+      manualState.queueId = null;
+      cancel(MANUAL_CONTEXT);
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', initManualSearch);
+
   global.slskd = {
     search,
     cancel,
@@ -620,7 +744,16 @@
     getSession: sessionFor,
     POLL_INTERVAL_MS,
     TERMINAL_GRACE_POLLS,
+    openManualSearchModal,
+    runManualSearch,
   };
+
+  // The two call sites were written against these names before the modal
+  // existed, so keep them:
+  //   manualQueueSearch() in pages/download-queue.js
+  //   the per-track search in pages/search.js
+  global.openSoulseekManualSearchModal = openManualSearchModal;
+  global.runSoulseekManualSearch = runManualSearch;
 
   // ── Legacy aliases ────────────────────────────────────────────────────
   // downloadSlskdFile reconciled from the TWO conflicting definitions in

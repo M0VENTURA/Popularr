@@ -199,58 +199,72 @@
   /** Empty folders from the last render, for the "Prune All" action. */
   let emptyFolders = [];
 
+  // ── Folder rows ────────────────────────────────────────────────────────
+  //
+  // Built through services/item-groups.js. That module was extracted FROM
+  // this section and pages/download-queue.js's group rows, which had drifted
+  // into two implementations of the same pattern — the completed queue list
+  // had even ended up repeating its album actions on every track row. The
+  // markup produced here is unchanged; only the source moved, so the
+  // .unmatched-*-btn selectors that attachFolderActions binds still match.
+
   function buildFolderActions(folder) {
-    const path = esc(folder.name);
-    const artist = esc(folder.artist || '');
-    const album = esc(folder.album || '');
+    const pathData = {
+      path: folder.name,
+      artist: folder.artist || '',
+      album: folder.album || '',
+    };
     const isAssociated = !!(folder.match || folder.release_mbid);
+    const buttons = [];
 
-    let html = isAssociated
-      ? `<button class="btn btn-sm btn-outline-warning py-0 unmatched-change-match-btn"
-                 data-path="${path}" data-artist="${artist}" data-album="${album}">
-           <i class="bi bi-arrow-repeat"></i> Change Match
-         </button>
-         <button class="btn btn-sm btn-success py-0 unmatched-confirm-btn"
-                 data-path="${path}" data-mbid="${esc(folder.release_mbid || '')}">
-           <i class="bi bi-check-lg"></i> Confirm Match
-         </button>`
-      : `<button class="btn btn-sm btn-outline-primary py-0 unmatched-match-btn"
-                 data-path="${path}" data-artist="${artist}" data-album="${album}">
-           <i class="bi bi-search"></i> Match
-         </button>`;
+    if (isAssociated) {
+      buttons.push(global.itemGroups.actionButton({
+        className: 'btn-outline-warning unmatched-change-match-btn',
+        icon: 'bi-arrow-repeat', label: 'Change Match', data: pathData,
+      }));
+      buttons.push(global.itemGroups.actionButton({
+        className: 'btn-success unmatched-confirm-btn',
+        icon: 'bi-check-lg', label: 'Confirm Match',
+        data: { path: folder.name, mbid: folder.release_mbid || '' },
+      }));
+    } else {
+      buttons.push(global.itemGroups.actionButton({
+        className: 'btn-outline-primary unmatched-match-btn',
+        icon: 'bi-search', label: 'Match', data: pathData,
+      }));
+    }
 
-    html += `<button class="btn btn-sm btn-outline-danger py-0 unmatched-delete-btn"
-                     data-path="${path}">
-               <i class="bi bi-trash3"></i> Delete
-             </button>`;
-    return html;
+    buttons.push(global.itemGroups.actionButton({
+      className: 'btn-outline-danger unmatched-delete-btn',
+      icon: 'bi-trash3', label: 'Delete', data: { path: folder.name },
+    }));
+
+    return buttons.join('');
   }
 
   function buildFolderRow(folder) {
     const badge = folder.status === 'matched'
-      ? global.statusBadge.pill('complete', { label: 'Matched' })
-      : global.statusBadge.pill('queued', { label: `${folder.audio_count || 0} audio` });
+      ? global.itemGroups.statusBadge('complete', { label: 'Matched' })
+      : global.itemGroups.statusBadge('queued', { label: `${folder.audio_count || 0} audio` });
 
     const subtitle = folder.artist && folder.album
       ? `<div class="text-muted small mt-1">${esc(folder.artist)} — ${esc(folder.album)}</div>`
       : '';
 
-    return `
-      <div class="list-group-item">
-        <div class="d-flex justify-content-between align-items-start gap-2">
-          <div class="flex-grow-1" style="min-width:0;">
-            <div class="text-truncate">
-              <i class="bi bi-folder2 me-1 text-muted"></i>
-              <strong>${esc(folder.display_name || folder.name)}</strong>
-              <span class="ms-2">${badge}</span>
-            </div>
-            ${subtitle}
-          </div>
-          <div class="d-flex flex-shrink-0 gap-1 flex-wrap justify-content-end">
-            ${buildFolderActions(folder)}
-          </div>
-        </div>
-      </div>`;
+    return global.itemGroups.rowShell({
+      align: 'start',
+      // The action cluster wraps on this page because the labels are long
+      // ("Change Match" / "Confirm Match") — hence the explicit class.
+      actionsClass: 'd-flex flex-shrink-0 gap-1 flex-wrap justify-content-end',
+      titleHtml:
+        '<div class="text-truncate">' +
+        '<i class="bi bi-folder2 me-1 text-muted"></i>' +
+        `<strong>${esc(folder.display_name || folder.name)}</strong>` +
+        `<span class="ms-2">${badge}</span>` +
+        '</div>',
+      subtitleHtml: subtitle,
+      actionsHtml: buildFolderActions(folder),
+    });
   }
 
   async function renderUnmatchedFolders() {
@@ -351,20 +365,21 @@
   function attachFolderActions(listEl) {
     if (!listEl) return;
 
-    listEl.querySelectorAll('.unmatched-match-btn, .unmatched-change-match-btn')
-      .forEach((btn) => {
-        btn.addEventListener('click', () => {
-          openFolderMbSearch(
-            btn.dataset.path,
-            btn.classList.contains('unmatched-change-match-btn'),
-            btn.dataset.artist,
-            btn.dataset.album
-          );
-        });
-      });
-
-    listEl.querySelectorAll('.unmatched-confirm-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
+    // Same selector -> handler table shape as download-queue.js, bound through
+    // services/item-groups.js. The confirm and delete handlers keep their
+    // button-busy wrapper, which restores the button in a `finally` — the
+    // hand-rolled version used to leave it disabled when a request threw.
+    global.itemGroups.bindActions(listEl, {
+      '.unmatched-match-btn, .unmatched-change-match-btn': function () {
+        openFolderMbSearch(
+          this.dataset.path,
+          this.classList.contains('unmatched-change-match-btn'),
+          this.dataset.artist,
+          this.dataset.album
+        );
+      },
+      '.unmatched-confirm-btn': function () {
+        const btn = this;
         return global.buttonState.withBusy(btn, '', async () => {
           try {
             await global.api.postJson('/api/downloads/confirm-match', {
@@ -377,29 +392,29 @@
             global.toast.error(error.message);
           }
         });
-      });
-    });
+      },
+      '.unmatched-delete-btn': function () {
+        const btn = this;
+        return (async () => {
+          const accepted = await global.ui.confirm({
+            title: 'Delete folder',
+            message: 'Delete this folder?',
+            detail: btn.dataset.path,
+            tone: 'danger',
+            confirmLabel: 'Delete',
+          });
+          if (!accepted) return;
 
-    listEl.querySelectorAll('.unmatched-delete-btn').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const accepted = await global.ui.confirm({
-          title: 'Delete folder',
-          message: 'Delete this folder?',
-          detail: btn.dataset.path,
-          tone: 'danger',
-          confirmLabel: 'Delete',
-        });
-        if (!accepted) return;
-
-        return global.buttonState.withBusy(btn, '', async () => {
-          try {
-            await deleteFolder(btn.dataset.path);
-            await renderUnmatchedFolders();
-          } catch (error) {
-            global.toast.error(error.message);
-          }
-        });
-      });
+          return global.buttonState.withBusy(btn, '', async () => {
+            try {
+              await deleteFolder(btn.dataset.path);
+              await renderUnmatchedFolders();
+            } catch (error) {
+              global.toast.error(error.message);
+            }
+          });
+        })();
+      },
     });
 
     const pruneBtn = listEl.querySelector('#pruneEmptyFoldersBtn');
@@ -539,9 +554,47 @@
     await refreshUpcomingReleases();
   }
 
+  // ── Page chrome ─────────────────────────────────────────────────────────
+
+  /**
+   * "Upcoming Releases" button in the page header.
+   *
+   * This was `onclick="jumpToUpcomingReleases()"` in the template, with the
+   * function defined in that template's own inline <script>. Moving it here
+   * means templates/Pages/downloads/monitor.html ships with no JavaScript at
+   * all, and the scroll-then-navigate fallback has one definition instead of
+   * being duplicated in the queue template (which referenced the function
+   * without defining it — a ReferenceError on every click until it was
+   * reduced to a plain link).
+   */
+  function jumpToUpcomingReleases() {
+    const section = document.getElementById('upcomingReleasesSection');
+    if (section) {
+      section.scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+    global.location.href = '/downloads/discover/upcoming';
+  }
+
+  const ACTIONS = {
+    'jump-to-upcoming': jumpToUpcomingReleases,
+  };
+
+  function bindActions() {
+    document.addEventListener('click', function (event) {
+      const el = event.target.closest ? event.target.closest('[data-action]') : null;
+      if (!el) return;
+      const handler = ACTIONS[el.getAttribute('data-action')];
+      if (!handler) return;
+      event.preventDefault();
+      handler(el);
+    });
+  }
+
   // ── Init ────────────────────────────────────────────────────────────────
 
   document.addEventListener('DOMContentLoaded', function () {
+    bindActions();
     renderUnmatchedFolders();
     if (document.getElementById('upcomingReleasesMonitor')) {
       refreshUpcomingReleases();

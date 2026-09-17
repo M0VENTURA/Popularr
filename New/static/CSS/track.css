@@ -1,0 +1,116 @@
+/* ==========================================================================
+   static/css/track.css
+   Track detail page.
+
+   These rules came out of the 26-line inline <style> block at the top of
+   templates/pages/track_detail.html, plus the two style="" attributes that
+   the similar-artists renderer in pages/track.js was emitting per card.
+
+   WHY THEY ARE HERE AND NOT IN popularr.css
+   popularr.css owns tokens (--navbar-height, --spotify-green, the surface
+   palette) and the shell. Everything below is scoped to #trackPageTabs,
+   .track-quick-bar or .similar-artist-*, i.e. it is only ever meaningful on
+   this one page. Putting it in the shell stylesheet would mean every other
+   page parses it.
+   ========================================================================== */
+
+/* ── Hero artwork ─────────────────────────────────────────────────────────
+   The full-bleed album art container in the hero card. 80px so the hero
+   stays compact on mobile. */
+
+.hero-cover {
+  width: 80px;
+  height: 80px;
+}
+
+/* ── Section tabs (desktop) ───────────────────────────────────────────────
+   Bootstrap's default .nav-pills active colour is the theme's primary blue,
+   which is not the accent this app uses anywhere else. The inactive state
+   also needed to be dialled back: the default white-on-transparent read as
+   brighter than the active tab.
+
+   The strip itself uses `nav-segmented` (popularr.css) in the markup instead
+   of `bg-secondary p-1 rounded` — same fix applied to dashboard.html,
+   album_detail.html, artist_detail.html and the downloads tab strips. */
+
+#trackPageTabs .nav-link {
+  color: #adb5bd !important;
+  border-color: transparent !important;
+}
+
+#trackPageTabs .nav-link:hover {
+  color: #ffffff !important;
+}
+
+#trackPageTabs .nav-link.active {
+  background-color: var(--spotify-green, #1db954) !important;
+  color: #000 !important;
+}
+
+/* ── Mobile 4-tab grouping bridge ─────────────────────────────────────────
+   Below lg the right-hand column's Bootstrap tab panes are driven by
+   main.js's mobile tab engine (data-mobile-tabs) instead of Bootstrap, which
+   toggles `.mobile-tab-active` from the bar's data-tab values. Bootstrap's
+   own .tab-pane rules have to be neutralised or the pane that Bootstrap
+   considers "active" wins over the one the tab bar selected. */
+
+@media (max-width: 991.98px) {
+  .tab-content > .tab-pane {
+    display: none !important;
+    opacity: 1 !important;
+  }
+
+  .tab-content > .tab-pane.mobile-tab-active {
+    display: block !important;
+  }
+}
+
+/* ── Mobile sticky quick actions ──────────────────────────────────────────
+   Bottom action bar shown below lg.
+
+   `position: fixed` with no offset accounting is intentional: base.html's
+   player bar and status bar are flex footer items, and this sits above them
+   via z-index rather than by measuring. The template follows the bar with a
+   `d-lg-none` 68px spacer so the last card is not hidden behind it. */
+
+.track-quick-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 1990;
+  background: rgba(18, 18, 18, 0.97);
+  border-top: 1px solid var(--border-color);
+  backdrop-filter: blur(10px);
+  padding: 0.6rem 1rem;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.5);
+}
+
+/* ── Similar-artist cards ─────────────────────────────────────────────────
+   These two rules replace inline styles that pages/track.js used to emit on
+   every card (aspect-ratio on the <img>, and the 2-line clamp on the name).
+   Inline styles were also re-created on every re-render. */
+
+.similar-artist-card {
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.similar-artist-card:hover,
+.similar-artist-card:focus-visible {
+  transform: scale(1.05);
+}
+
+.similar-artist-img {
+  aspect-ratio: 1;
+  object-fit: cover;
+}
+
+.similar-artist-name {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.2;
+}

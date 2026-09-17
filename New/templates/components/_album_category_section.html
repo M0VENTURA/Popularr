@@ -1,0 +1,244 @@
+{#
+  Album row renderer — imported as a MACRO, not included.
+
+      {% from "components/_album_category_section.html" import render_album_row %}
+      {{ render_album_row(album, artist_name, album.is_missing) }}
+
+  ⚠️ THE IMPORT PATH MATTERS. The live templates still say
+
+      {% from "_album_category_section.html" import render_album_row %}
+
+  with the name at the TEMPLATE ROOT. That resolved in old_system, where the
+  file sat at templates/_album_category_section.html. In the current tree the
+  file lives under components/, and there is NO Jinja loader configuration
+  anywhere in the app (no ChoiceLoader / FileSystemLoader / jinja_loader — I
+  grepped app.py, helpers/, routes/, db/ and services/), so Quart's loader
+  searches templates/ only and the root-relative name cannot be found. Both
+  importers — pages/album_detail.html and pages/artist_detail.html — therefore
+  raise TemplateNotFound when they render.
+
+  Fix in the live tree: either move the file back to templates/ or update the
+  two imports to components/_album_category_section.html (what this copy does).
+
+  ⚠️ KNOWN BROKEN HANDLER: the "Quick Queue" button below calls
+  quickQueueRelease(...). That function is defined NOWHERE in the repository —
+  not in static/js/, not in templates/, not in old_system/ (verified with
+  git grep across the whole of origin/develop). It is the only reference to the
+  name in the entire codebase, so the button has always thrown ReferenceError.
+  pages/album.js needs to own it; until then the button cannot work.
+  searchMusicBrainzReleaseFromEncoded(), used on the next button, DOES exist
+  (services/musicbrainz-queue.js).
+#}
+{% macro render_album_row(album, artist_name, is_missing=False, parent_id='accordion-albums') %}
+{% set safe_artist = artist_name|safe_id %}
+{% set safe_album = (album.get('album') or album.get('title') or '')|safe_id %}
+{% set album_release_year = album.get('album_year') or (album.get('first_release_date') or '')[:4] or 0 %}
+{# Include the year in the accordion id so self-titled albums (three
+   "Weezer" albums, one per year) don't collide on the same collapse id. #}
+{% set album_id = safe_artist + '_' + safe_album + '_' + album_release_year %}
+{% set album_is_downloading = album.get('is_downloading') %}
+{% set is_upcoming = album.get('is_upcoming') %}
+<div class="accordion-item album-row" data-year="{{ album_release_year }}" data-status="{% if album_is_downloading %}downloading{% elif is_missing %}missing{% else %}discovered{% endif %}" data-album="{{ album.get('album') or album.get('title') }}" {% if not is_missing and album.get('musicbrainz_album_mbid') %}data-mb-mbid="{{ album.get('musicbrainz_album_mbid') }}" data-artist="{{ artist_name|e }}" data-album-name="{{ (album.get('album') or album.get('title'))|e }}"{% endif %} style="{% if album_is_downloading %}border-color: rgba(34,211,238,0.5);{% elif is_missing %}border-style: dashed; border-color: rgba(245,158,11,0.4);{% endif %}">
+  <h2 class="accordion-header" id="heading-{{ album_id }}">
+    <div class="accordion-header-row d-flex align-items-center gap-3 w-100 flex-wrap py-2 px-3">
+      <button type="button" class="accordion-chevron-btn flex-shrink-0 p-0 border-0 bg-transparent"
+              data-bs-toggle="collapse" data-bs-target="#collapse-{{ album_id }}"
+              aria-expanded="false" aria-controls="collapse-{{ album_id }}"
+              title="Expand / collapse tracklist"
+              {% if is_missing and album.get('release_id') %}
+              data-missing-release-id="{{ album.get('release_id') }}"
+              data-missing-artist="{{ artist_name }}"
+              data-missing-title="{{ (album.get('title') or '')|e }}"
+              data-missing-target="#collapse-{{ album_id }}"
+              {% endif %}>
+        <i class="bi bi-chevron-right album-chevron-icon"></i>
+      </button>
+      <div class="d-flex align-items-center gap-3 w-100 flex-wrap" style="min-width:0;">
+        <!-- Album Art -->
+        <div class="album-art-wrapper flex-shrink-0" style="width: 48px; height: 48px;">
+          {% if is_missing %}
+            {% set missing_art = album.get('cover_art_url', '') %}
+            {% if missing_art %}
+            <img src="{{ missing_art }}"
+                 alt="{{ album.get('title') }}"
+                 style="width: 48px; height: 48px; object-fit: cover; border-radius: 4px; background: var(--tertiary-bg);"
+                 loading="lazy"
+                 onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+            {% else %}
+            <div class="album-art-placeholder" style="display:flex; width:48px; height:48px; background:var(--tertiary-bg); border-radius:4px; align-items:center; justify-content:center; color:var(--text-secondary); font-size:1.2rem;">
+              <i class="bi bi-music-note"></i>
+            </div>
+            {% endif %}
+          {% else %}
+            <img src="/api/album/{{ artist_name|path_segment }}/{{ (album.get('album') or album.get('title') or '')|path_segment }}/art?s=48"
+                 alt="{{ album.get('album') or album.get('title') }}"
+                 style="width: 48px; height: 48px; object-fit: cover; border-radius: 4px; background: var(--tertiary-bg);"
+                 loading="lazy"
+                 onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+            <div class="album-art-placeholder" style="display:none; width:48px; height:48px; background:var(--tertiary-bg); border-radius:4px; align-items:center; justify-content:center; color:var(--text-secondary); font-size:1.2rem;">
+              <i class="bi bi-music-note"></i>
+            </div>
+          {% endif %}
+        </div>
+        <!-- Album Name -->
+        <div class="flex-grow-1" style="min-width: 120px;">
+          {% if is_missing %}
+            <span class="fw-semibold">{{ album.get('title', '') }}</span>
+          {% else %}
+            <a href="/album/{{ artist_name|path_segment }}/{{ (album.get('album') or album.get('title') or '')|path_segment }}{% if album.get('album_year') %}/{{ album.get('album_year') }}{% endif %}" class="fw-semibold text-decoration-none">
+              {{ album.get('album') or album.get('title') }}
+            </a>
+          {% endif %}
+          {% if album_is_downloading %}
+            <span class="badge ms-2" style="background-color: rgba(34,211,238,0.15); color: #22d3ee; border: 1px solid rgba(34,211,238,0.5);" title="This release is currently in the download queue">
+              🔵 Queued
+            </span>
+          {% elif is_missing and is_upcoming %}
+            <span class="badge ms-2" style="background-color: rgba(100,116,139,0.2); color: #cbd5e1; border: 1px solid var(--border-color);" title="Release is not out yet">
+              📅 {{ album_release_year }}
+            </span>
+          {% elif is_missing %}
+            <span class="badge ms-2" style="background-color: rgba(245,158,11,0.12); color: #f59e0b; border: 1px dashed rgba(245,158,11,0.4);" title="Release exists on MusicBrainz but is not in your library">
+              🟡 Missing
+            </span>
+          {% else %}
+            <span class="badge ms-2" style="background-color: rgba(34,197,94,0.12); color: #22c55e; border: 1px solid rgba(34,197,94,0.35);" title="Release is in your library">
+              🟢 In Library
+            </span>
+          {% endif %}
+        </div>
+        <!-- Year -->
+        <span class="text-muted small flex-shrink-0" style="white-space: nowrap; min-width: 4ch; text-align: center;">
+          {{ album.get('album_year') or (album.get('first_release_date') or '')[:4] or '-' }}
+        </span>
+        <!-- Track Count -->
+        <span class="badge bg-secondary flex-shrink-0">
+          {{ album.get('track_count') or album.get('total_tracks') or '-' }}
+        </span>
+        {% if not is_missing and album.get('musicbrainz_album_mbid') %}
+        <span class="badge bg-warning text-dark album-missing-tracks-badge flex-shrink-0" style="display:none;" title="This album has tracks in MusicBrainz that are not in your library"></span>
+        {% endif %}
+        {#
+          Tag-conflict badge. Filled by pages/artist.js from
+          GET /api/correcting/albums — albums whose album-level tags disagree
+          across their own tracks, which is what makes Navidrome show one album
+          as several entries. Only discovered albums can have tracks to disagree,
+          so this sits under the same `not is_missing` guard.
+        #}
+        {% if not is_missing %}
+        <span class="badge bg-danger text-light album-tag-conflicts-badge flex-shrink-0" style="display:none;" title="Album-level tags disagree across this album's tracks"></span>
+        {% endif %}
+        <!-- Stars -->
+        <span class="flex-shrink-0" style="min-width: 90px;">
+          {% if album.get('avg_stars') is not none %}
+            {% set avg = album.get('avg_stars') %}
+            {% for i in range(5) %}
+              {% if avg >= (i + 0.75) %}
+                <i class="bi bi-star-fill" style="color: #ffc107; font-size: 0.85rem;"></i>
+              {% elif avg >= (i + 0.25) %}
+                <i class="bi bi-star-half" style="color: #ffc107; font-size: 0.85rem;"></i>
+              {% else %}
+                <i class="bi bi-star" style="color: #444; font-size: 0.85rem;"></i>
+              {% endif %}
+            {% endfor %}
+          {% else %}
+            <span class="text-muted small">-</span>
+          {% endif %}
+        </span>
+        {#
+          Actions. The container keeps `onclick="event.stopPropagation();"` so a
+          click on any action does not also toggle the accordion — that is a
+          presentational concern rather than a handler, and it is the only inline
+          script left in this file.
+        #}
+        <div class="d-flex gap-1 flex-shrink-0" onclick="event.stopPropagation();">
+          <a href="/album/{{ artist_name|path_segment }}/{{ (album.get('album') or album.get('title') or '')|path_segment }}{% if album.get('album_year') %}/{{ album.get('album_year') }}{% endif %}" class="btn btn-outline-secondary btn-sm" title="Open album page">
+            <i class="bi bi-box-arrow-up-right"></i>
+          </a>
+          {% if not is_missing and album.get('musicbrainz_album_mbid') %}
+          <a href="/album/{{ artist_name|path_segment }}/{{ (album.get('album') or album.get('title') or '')|path_segment }}{% if album.get('album_year') %}/{{ album.get('album_year') }}{% endif %}#missing-tracks" class="btn btn-outline-warning btn-sm album-search-missing-btn" style="display:none;" title="Search missing tracks on album page">
+            <i class="bi bi-search"></i>
+          </a>
+          {% endif %}
+          {% if is_missing %}
+            <button type="button" class="btn btn-success btn-sm btn-quick-queue" title="Send straight to the download queue (default quality)"
+                    onclick="quickQueueRelease('{{ album.get('release_id', '') }}', '{{ (album.get('title') or '')|escapejs }}', '{{ artist_name|escapejs }}'); event.stopPropagation();">
+              <i class="bi bi-download"></i> <span class="d-none d-lg-inline">Quick Queue</span>
+            </button>
+            <button type="button" class="btn btn-outline-warning btn-sm" title="Search / Download via Soulseek"
+                    onclick="searchMusicBrainzReleaseFromEncoded(event, '{{ (artist_name|urlencode|replace('+', '%20')) }}', '{{ ((album.get('title') or '')|urlencode|replace('+', '%20')) }}')">
+              <i class="bi bi-search"></i>
+            </button>
+            <form method="POST" action="/downloads/albums/use-existing" class="d-inline">
+              <input type="hidden" name="album" value="{{ album.get('title', '') }}">
+              <input type="hidden" name="artist" value="{{ artist_name }}">
+              <button type="submit" class="btn btn-outline-primary btn-sm" title="I already have this album">
+                <i class="bi bi-check-lg"></i>
+              </button>
+            </form>
+          {% endif %}
+          <form method="POST" action="{{ url_for('scans.scan_essentia_mood') }}" class="d-inline">
+            <input type="hidden" name="artist" value="{{ artist_name }}">
+            <input type="hidden" name="album" value="{{ album.get('album') or album.get('title') or '' }}">
+            <button type="submit" class="btn btn-outline-info btn-sm" title="Run Essentia mood/genre analysis">
+              <i class="bi bi-music-note-list"></i>
+            </button>
+          </form>
+          <form method="POST" action="{{ url_for('scans.scan_album_custom') }}" class="d-inline">
+            <input type="hidden" name="artist" value="{{ artist_name }}">
+            <input type="hidden" name="album" value="{{ album.get('album') or album.get('title') or '' }}">
+            <input type="hidden" name="scan_type" value="popularity">
+            <button type="submit" class="btn btn-outline-success btn-sm" title="Scan popularity">
+              <i class="bi bi-graph-up"></i>
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </h2>
+  <div id="collapse-{{ album_id }}" class="accordion-collapse collapse" aria-labelledby="heading-{{ album_id }}" data-bs-parent="#{{ parent_id }}">
+    <div class="accordion-body py-2 px-3 text-muted small">
+      {% set album_tracks = album.get('tracks') or [] %}
+      {% if album_tracks %}
+      <div class="table-responsive">
+        <table class="table table-sm table-dark table-striped mb-0">
+          <thead>
+            <tr>
+              <th style="width: 40px;">#</th>
+              <th>Track</th>
+              <th style="width: 80px;" class="text-center">Duration</th>
+              <th style="width: 70px;" class="text-center">Stars</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in album_tracks %}
+            <tr>
+              <td class="text-center text-muted">{{ t.get('track_number') or loop.index }}</td>
+              <td>
+                <a href="{{ url_for('ui.track_detail', artist=artist_name, album=album.get('album') or album.get('title') or '', track_id=t.get('id') or 0) }}" class="text-reset text-decoration-none">
+                  {{ t.get('title') or '—' }}
+                </a>
+                {% if t.get('artist') and t.get('artist') != artist_name %}
+                <small class="text-muted"> — {{ t.get('artist') }}</small>
+                {% endif %}
+              </td>
+              <td class="text-center">
+                {% if t.get('duration') %}
+                  {{ (t.get('duration') / 60)|int }}:{{ '%02d' % (t.get('duration') % 60) }}
+                {% else %}—{% endif %}
+              </td>
+              <td class="text-center">{{ t.get('stars') or '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="text-center py-2 text-muted">
+        <i class="bi bi-info-circle me-1"></i>No track details available.
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endmacro %}

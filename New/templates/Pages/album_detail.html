@@ -551,7 +551,19 @@
 {% include 'components/modals/_manual_match.html' ignore missing %}
 {% include 'components/modals/_soulseek_manual_search.html' ignore missing %}
 {% include 'components/modals/_release_picker.html' ignore missing %}
-{% include 'components/modals/_musicbrainz_release_match.html' ignore missing %}
+{#
+  REMOVED: {% include 'components/modals/_musicbrainz_release_match.html' %}
+
+  That modal (id="musicbrainzReleaseMatchModal", ids mbReleaseMatchStatus /
+  mbReleaseMatchError / mbReleaseMatchResults) is DEAD in both trees:
+    * its only documented trigger, openReleaseMatchModal(), does not exist —
+      `git grep openReleaseMatchModal` finds nothing in static/js/ or in the
+      New tree;
+    * nothing writes mbReleaseMatchResults either (grepped New/static/js).
+  It was included "just in case" and rendered nothing but unused markup. The
+  release-matching flow that IS live uses global.openReleasePicker()
+  (js/main.js) plus components/modals/_release_picker.html above.
+#}
 {% endblock %}
 
 {% block scripts %}

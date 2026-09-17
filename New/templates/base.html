@@ -307,8 +307,8 @@
 
   {#
     SHARED FRAMEWORK — every file below is a dependency of at least one
-    script that ALSO loads on every page (ui/player.js, pages/folder-groups.js,
-    main.js, ui/search-flyout.js, and the global MusicBrainz modal driven by
+    script that ALSO loads on every page (ui/player.js, main.js,
+    ui/search-flyout.js, and the global MusicBrainz modal driven by
     services/musicbrainz-picker.js). Order matters and mirrors each file's
     own "Load order" header comment:
 
@@ -322,16 +322,21 @@
                      from album_detail.html, missing_releases.html and
                      track_detail.html (NOT from navSearchInput's own
                      onfocus — that calls openUnifiedSearch(), a different
-                     flow driven by ui/search-flyout.js). Confirmed by grep:
-                     main.js no longer defines openGlobalMbSearch at all (it
-                     moved here) — before this fix, nothing on any page
-                     defined that global, so every one of those three pages'
-                     "Lookup on MusicBrainz" buttons threw ReferenceError.
+                     flow driven by ui/search-flyout.js).
 
-    Verified against the actual call sites (not assumed): main.js and
-    pages/folder-groups.js both call global.ui.confirm(...), which only
-    exists once ui/confirm.js has loaded; pages/folder-groups.js also calls
-    global.buttonState / global.modal / global.poller / global.toast, and
+    pages/folder-groups.js WAS in this list and has been REMOVED.
+    It was the legacy "green folders" view for MusicBrainz releases, and it
+    could never do anything: it rendered into #folderGroupsList, the same
+    element pages/download-queue.js::renderQueueSection() now owns, and it
+    stood down whenever global.loadQueueStatus existed. Worse, on every page
+    that does NOT load download-queue.js (dashboard, album, artists, config,
+    …) nothing made it stand down, so its DOMContentLoaded handler started a
+    5-second poller that ticked a no-op load() forever. Its only useful
+    export, the /api/downloads/folder-groups view, is superseded by
+    pages/monitor.js's Matched & Unmatched Folders. File deleted too.
+
+    Verified against the actual call sites (not assumed): main.js calls
+    global.ui.confirm(...), which only exists once ui/confirm.js has loaded;
     ui/search-flyout.js calls global.api / global.buttonState / global.toast.
 
     ui/status-badge.js is DELIBERATELY NOT in this list — grepped every file
@@ -358,7 +363,6 @@
   <script src="{{ versioned_static('js/services/musicbrainz-picker.js') }}"></script>
 
   <script src="{{ versioned_static('js/ui/player.js') }}"></script>
-  <script src="{{ versioned_static('js/pages/folder-groups.js') }}"></script>
   <script src="{{ versioned_static('js/main.js') }}"></script>
   <script src="{{ versioned_static('js/ui/search-flyout.js') }}"></script>
   {% block scripts %}{% endblock %}

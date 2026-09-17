@@ -1762,6 +1762,80 @@
     }
   }
 
+  // ── Album tag conflicts ─────────────────────────────────────────────────
+  //
+  // GET /api/correcting/albums is the JSON twin of the /correcting page. Until
+  // it existed, album-level tag conflicts (the thing that makes Navidrome show
+  // one album as several entries) could only be seen by leaving this page for
+  // Tag Corrections — the per-album "N tracks missing" check right above has a
+  // badge, this had nothing.
+  //
+  // ONE request for the whole artist page, not one per album row: the endpoint
+  // returns every conflicting album for the artist at once. The missing-tracks
+  // check next door still does a request per row because its API is per-album,
+  // which is worth revisiting if this page ever gets slow.
+  //
+  // The match key is "album_artist::album", lowercased, matching how the API
+  // keys its map. The rows already carry data-artist and data-album-name from
+  // components/_album_category_section.html's render_album_row.
+
+  /** The API's map key for one album. */
+  function albumConflictKey(albumArtist, album) {
+    return `${String(albumArtist || '').trim().toLowerCase()}::` +
+      `${String(album || '').trim().toLowerCase()}`;
+  }
+
+  /**
+   * Badge the album rows whose album-level tags disagree.
+   * @param {string} artist  the page's artist, used to scope the request
+   * @returns {Promise<number>} how many albums were flagged
+   */
+  async function annotateAlbumTagConflicts(artist) {
+    if (!artist) return 0;
+
+    const rows = Array.from(document.querySelectorAll('tr.album-row'))
+      .filter((row) => row.dataset.albumName);
+    if (!rows.length) return 0;
+
+    let byAlbum = {};
+    try {
+      const data = await global.api.getJson(
+        `/api/correcting/albums?artist=${encodeURIComponent(artist)}`
+      );
+      byAlbum = data.albums || {};
+    } catch (error) {
+      // An indicator only — never let it affect the rest of the page.
+      console.warn('[artist] album tag conflicts unavailable:', error.message);
+      return 0;
+    }
+
+    let flagged = 0;
+    rows.forEach((row) => {
+      const badge = row.querySelector('.album-tag-conflicts-badge');
+      if (!badge) return;
+
+      const key = albumConflictKey(row.dataset.artist || artist, row.dataset.albumName);
+      const entry = byAlbum[key];
+      const labels = entry && Array.isArray(entry.field_labels) ? entry.field_labels : [];
+
+      if (!labels.length) {
+        // Hidden rather than removed, so this is safe to re-run.
+        badge.style.display = 'none';
+        badge.textContent = '';
+        return;
+      }
+
+      flagged += 1;
+      badge.textContent = labels.length === 1 ? labels[0] : `${labels.length} conflicts`;
+      badge.title =
+        "Album-level tags disagree across this album's tracks: " +
+        `${labels.join(', ')}. Fix on the Tag Corrections page.`;
+      badge.style.display = 'inline-block';
+    });
+
+    return flagged;
+  }
+
   // ── Simple track title edit ─────────────────────────────────────────────
 
   function editTrackTitle(trackId, currentTitle) {
@@ -2304,6 +2378,9 @@
     loadArtistFavouriteState(artist);
     loadArtistCoveredBy(artist);
 
+    // Album rows whose album-level tags disagree — see annotateAlbumTagConflicts.
+    annotateAlbumTagConflicts(artist);
+
     // Background refresh so the album sections are current without a click.
     checkMissingReleases(artist, { silent: true, background: true });
 
@@ -2342,6 +2419,7 @@
     toggleTracklist,
     toggleMissing,
     loadSimilarArtists,
+    annotateAlbumTagConflicts,
     openEditTrackFromArtistModal,
   };
 

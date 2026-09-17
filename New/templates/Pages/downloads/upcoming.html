@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+
+{% block title %}Upcoming Releases · Popularr{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+  <div class="mb-4 d-flex align-items-center justify-content-between flex-wrap gap-2">
+    <div>
+      {% set subtitle = 'Discover and download upcoming releases' %}
+      {% include 'components/_downloads_header.html' %}
+    </div>
+  </div>
+
+  <div class="card shadow-sm">
+    <div class="card-header bg-transparent py-3 d-flex justify-content-between align-items-center flex-wrap gap-2 border-secondary">
+      <h5 class="card-title mb-0 fw-bold">
+        <i class="bi bi-calendar-event text-info me-1"></i> Upcoming Albums
+        <span id="upcomingTotalBadge" class="badge bg-secondary ms-1 d-none"></span>
+      </h5>
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <span id="upcomingProgressBadge"></span>
+        <button class="btn btn-sm btn-outline-secondary" type="button" data-action="upcoming-refresh" title="Refresh list">
+          <i class="bi bi-arrow-clockwise"></i>
+        </button>
+        <div class="dropdown">
+          <button class="btn btn-sm btn-info dropdown-toggle d-flex align-items-center gap-1" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+            <i class="bi bi-gear-fill"></i> <span class="d-none d-sm-inline">Sync &amp; Tools</span>
+          </button>
+          {#
+            These were `href="javascript:void(0)" onclick="scrapeWikipedia()"` —
+            four inline handlers that only worked because the page's inline
+            <script> assigned five functions onto window. They are now
+            data-action buttons; pages/upcoming.js holds the single delegated
+            listener and exports nothing onto window.
+          #}
+          <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow">
+            <li>
+              <button type="button" class="dropdown-item" data-action="upcoming-scrape">
+                <i class="bi bi-wikipedia me-2 text-success"></i>Update from Wikipedia
+              </button>
+            </li>
+            <li>
+              <button type="button" class="dropdown-item" data-action="upcoming-check">
+                <i class="bi bi-bell me-2 text-info"></i>Check for Updates
+              </button>
+            </li>
+            <li>
+              <button type="button" class="dropdown-item" data-action="upcoming-auto-match">
+                <i class="bi bi-magic me-2 text-primary"></i>Auto-Match All to MusicBrainz
+              </button>
+            </li>
+            <li><hr class="dropdown-divider"></li>
+            <li>
+              <button type="button" class="dropdown-item text-danger" data-action="upcoming-clear">
+                <i class="bi bi-trash me-2"></i>Clear Database
+              </button>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="card-body p-3">
+      <!-- Filter Controls -->
+      <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap mb-4">
+        {#
+          `nav-segmented` (popularr.css) replaces `bg-secondary p-1 rounded`
+          — the same fix already applied to dashboard.html, album_detail.html,
+          artist_detail.html and the downloads tab strips. Bootstrap's
+          bg-secondary (#6c757d) is lighter than every surface token in this
+          theme, so the strip read as a pale band instead of a recessed track.
+        #}
+        <ul class="nav nav-pills nav-segmented nav-fill" id="upcomingTabs" role="tablist">
+          <li class="nav-item" role="presentation">
+            <button class="nav-link active py-1" type="button" role="tab"
+                    data-filter="all" aria-selected="true">All</button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link py-1" type="button" role="tab"
+                    data-filter="collection" aria-selected="false">In Collection</button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link py-1" type="button" role="tab"
+                    data-filter="discovered" aria-selected="false">Discovered</button>
+          </li>
+        </ul>
+        <select id="upcomingSourceFilter" class="form-select form-select-sm"
+                style="width:auto; min-width:150px; max-width:100%;"
+                title="Filter by scraper rule" aria-label="Filter by scraper source">
+          <option value="all">All Sources</option>
+        </select>
+      </div>
+
+      <div id="upcomingStatus" class="alert alert-info shadow-sm" style="display:none;" role="status" aria-live="polite">
+        <div class="d-flex align-items-center">
+          <div class="spinner-border spinner-border-sm me-3" role="status"></div>
+          <span id="upcomingStatusText">Loading upcoming releases…</span>
+        </div>
+      </div>
+
+      <div id="upcomingError" class="alert alert-danger shadow-sm" style="display:none;" role="alert"></div>
+
+      <div id="upcomingReleases">
+        <div class="text-center py-5">
+          <i class="bi bi-cloud-download text-muted d-block mb-3" style="font-size: 2rem;"></i>
+          <p class="text-muted">Use <strong>Sync &amp; Tools &rsaquo; Check for Updates</strong> to search MusicBrainz for new releases.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# `openReleasePicker()` (main.js) queues through this modal, so the page that
+   offers a Queue button must render it. #}
+{% include 'components/modals/_release_picker.html' ignore missing %}
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/*, ui/toast.js, ui/modal.js, ui/confirm.js,
+  ui/button-state.js, services/musicbrainz-picker.js, main.js and the global
+  MusicBrainz search modal. Only the page-specific pieces are listed here.
+
+    services/musicbrainz-queue.js
+        publishes global.searchMusicBrainzRelease, which the release table's
+        per-row Search buttons call (via UpcomingReleasesService.search) and
+        which "Auto-Match All" feedback links into. NOT global in base.html.
+    services/upcoming-releases.js
+        UpcomingReleasesService — fetching, matching, queueing, rendering.
+    pages/upcoming.js
+        page chrome: tabs, source filter, status strip, Sync & Tools actions,
+        managed scrape-progress poll.
+#}
+<link rel="stylesheet" href="{{ versioned_static('css/downloads.css') }}">
+<script src="{{ versioned_static('js/services/musicbrainz-queue.js') }}"></script>
+<script src="{{ versioned_static('js/services/upcoming-releases.js') }}"></script>
+<script src="{{ versioned_static('js/pages/upcoming.js') }}"></script>
+{% endblock %}

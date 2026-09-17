@@ -1,0 +1,59 @@
+<!-- Manual Soulseek Search modal (reusable component) -->
+{#
+  Opened by global.openSoulseekManualSearchModal(query, queueId) —
+  services/slskd.js. Two callers, both previously dead behind `typeof` guards:
+
+      pages/download-queue.js  manualQueueSearch(query, queueId)  → from a
+                               queue row's manual-search icon
+      pages/search.js          the per-track search on the unified search page
+                               (queueId is null there)
+
+  ── WHAT WAS WRONG BEFORE ─────────────────────────────────────────────────
+  This partial called `runSoulseekManualSearch()`, which existed only in the
+  legacy static/js/downloads.js and was never migrated. Its opener,
+  `openSoulseekManualSearchModal()`, was likewise missing from the New tree
+  even though two refactored files already called it. So the modal could not be
+  opened AND its Search button would have thrown if it had been.
+
+  services/slskd.js now implements both, and drives this markup:
+
+      #soulseekManualQuery       the search box (Enter submits)
+      #soulseekManualSearchBtn   Search
+      #soulseekManualStatus      one-line status / progress text
+      #soulseekManualResults     the result table (rendered by slskd.renderTable)
+
+  The Search button no longer carries an inline onclick — skld.js binds it on
+  DOMContentLoaded, the same pattern as components/search/_soulseek.html.
+
+  ── WHY `queueId` MATTERS ─────────────────────────────────────────────────
+  Opened from a queue row, this modal lets the user choose a DIFFERENT file for
+  an item that failed to match. The chosen file is posted to
+  /api/slskd/queue-download, which attaches it to the EXISTING queue row. Opened
+  with no queueId (the search page) it posts to /api/slskd/download and creates a
+  new item. skld.js tracks which mode the modal is in and resets it on close, so
+  a later open can't attach a file to a row the user has moved on from.
+
+  REQUIRES: services/slskd.js (global.slskd) + ui/button-state.js + ui/modal.js
+  from base.html. Included by downloads/queue.html and downloads/monitor.html.
+#}
+<div class="modal fade" id="soulseekManualSearchModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl">
+    <div class="modal-content bg-dark text-light">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="bi bi-search"></i> Manual Soulseek Search</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="input-group mb-3">
+          <input type="text" id="soulseekManualQuery" class="form-control"
+                 placeholder="Artist - Title" autocomplete="off">
+          <button class="btn btn-success" id="soulseekManualSearchBtn" type="button">
+            <i class="bi bi-search"></i> Search
+          </button>
+        </div>
+        <div id="soulseekManualStatus" class="small text-muted mb-2">Enter a query and search.</div>
+        <div id="soulseekManualResults"></div>
+      </div>
+    </div>
+  </div>
+</div>

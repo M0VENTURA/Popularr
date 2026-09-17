@@ -1,0 +1,24 @@
+/* ==========================================================================
+   static/css/playlist-import.css
+   Playlist CSV import modal (templates/Playlists/importer_csv.html).
+
+   The template's inline <style> block also declared a five-token :root —
+   --border-color, --text-secondary, --text-tertiary and --spotify-green —
+   which popularr.css ALREADY defines (all five verified present). That block was
+   dropped rather than moved: a page-local copy of theme tokens is exactly how
+   the palette drifts, and the page does not use these tokens in any way the
+   global ones do not cover.
+
+   What is left is genuinely page-scoped.
+   ========================================================================== */
+
+/* One row per track in the "Added to queue" list after an import. */
+.missing-row {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 0.9rem;
+}
+
+.missing-row:last-child {
+  border-bottom: none;
+}

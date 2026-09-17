@@ -1,9 +1,13 @@
 /* ==========================================================================
-   static/js//features/csv_import.js
+   static/js/features/csv-import.js
    Playlist / CSV import for the unified search page.
 
+   (The original header said `static/js//features/csv_import.js` — a doubled
+   slash and an underscore instead of the kebab-case the rest of the tree
+   uses. The file has always been csv-import.js.)
+
    Requires: utils/dom.js, utils/api.js, state/import-state.js
-   Load AFTER state/import-state.js.
+   Load AFTER state/import-state.js and AFTER components/search/_playlists.html
 
    ── CHANGES FROM THE PREVIOUS VERSION ─────────────────────────────────────
    1. THE `let` COLLISION — FIXED BUG. This file opened with

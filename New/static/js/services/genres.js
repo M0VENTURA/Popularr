@@ -590,18 +590,47 @@
   /**
    * Edit a track's artist — via the album page's modal when present,
    * otherwise a prompt.
+   *
+   * FIXED 2026-09-18: this used to check for and SHOW #editTrackModal (the
+   * COMPREHENSIVE ~30-field form) while populating #editTrackCurrentField,
+   * #editTrackLabel and #editTrackValue — all three of which belong to
+   * #simpleEditTrackModal, the single-field quick edit. Because
+   * components/modals/_track_edit.html ships BOTH modals together on the album
+   * page, getElementById found those fields anyway, so the bug was invisible:
+   * the values were written into the hidden simple modal and the user was shown
+   * the full form with none of them in it. Save on that form then posted the
+   * comprehensive payload, whose title/artist came from the (empty) full-form
+   * inputs.
+   *
+   * The two modals also use DIFFERENT hidden id fields for the track id —
+   * #simpleEditTrackId versus #editTrackId — so the field name has to be
+   * chosen alongside the modal.
+   *
+   * The artist page does NOT include _track_edit.html; its own inline modal
+   * still uses #editTrackModal with the #editTrackId pairing, so that shape is
+   * kept as the second preference rather than removed.
    */
   async function editTrackArtist(trackId, currentValue) {
-    const modalEl = document.getElementById('editTrackModal');
+    const simpleModal = document.getElementById('simpleEditTrackModal');
+    const artistModal = document.getElementById('editTrackModal');
+    const modalEl = simpleModal || artistModal;
 
     if (modalEl) {
-      document.getElementById('editTrackId').value = trackId;
-      document.getElementById('editTrackCurrentField').value = 'artist';
-      document.getElementById('editTrackLabel').textContent = 'Track Artist';
-      const field = document.getElementById('editTrackValue');
-      field.value = currentValue && currentValue !== '—' ? currentValue : '';
+      const idInput = document.getElementById(
+        simpleModal ? 'simpleEditTrackId' : 'editTrackId'
+      );
+      const fieldInput = document.getElementById('editTrackCurrentField');
+      const labelEl = document.getElementById('editTrackLabel');
+      const valueInput = document.getElementById('editTrackValue');
+
+      if (idInput) idInput.value = trackId;
+      if (fieldInput) fieldInput.value = 'artist';
+      if (labelEl) labelEl.textContent = 'Track Artist';
+      if (valueInput) {
+        valueInput.value = currentValue && currentValue !== '—' ? currentValue : '';
+      }
       if (global.modal) global.modal.show(modalEl);
-      field.focus();
+      if (valueInput) valueInput.focus();
       return true;
     }
 

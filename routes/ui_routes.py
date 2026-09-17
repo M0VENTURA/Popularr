@@ -2873,13 +2873,30 @@ async def downloads_search_playlists() -> Any:
     return redirect(url_for("ui.downloads_search") + "#playlists")
 
 
-@ui_bp.route("/downloads/manager")
-async def downloads_manager() -> Any:
-    cfg = get_config()
-    return await render_template(
-        "pages/downloads/manager.html",
-        slskd_config=cfg.get("slskd", {}),
-    )
+# REMOVED 2026-09-18: @ui_bp.route("/downloads/manager") -> downloads_manager()
+#
+# It rendered "pages/downloads/manager.html", which no longer exists. The file
+# was added in a75ce08c and deleted in 9454d21b ("updated page layouts") while
+# this route was left behind, so the endpoint raised TemplateNotFound.
+#
+# Dropped rather than restored, because the template was a shell: all seven
+# handlers its buttons called — scanDownloads, processAllDownloads,
+# scanRetryQueue, openDownloadsFolder, processRetryQueue, processOneFile,
+# removeQueueItem — are defined nowhere in static/js or New/static/js, and it
+# hardcoded a Windows path (\\downloads\\Soulseek\\Incomplete) in user-facing
+# copy for an app that runs in Linux containers.
+#
+# Nothing referenced this route: no url_for('ui.downloads_manager') anywhere,
+# and no template linked to /downloads/manager. The downloads hub
+# (@ui_bp.route("/downloads") -> downloads_page -> pages/downloads/queue.html)
+# is the current equivalent.
+#
+# If an existing bookmark matters, the sibling routes above show how the
+# codebase keeps a dead URL alive — this instead of a 404:
+#
+#     @ui_bp.route("/downloads/manager")
+#     async def downloads_manager() -> Any:
+#         return redirect(url_for("ui.downloads_page"))
 
 
 @ui_bp.route("/downloads/discover/similar-artists")
@@ -3198,9 +3215,18 @@ async def metadata_compare_accept_navidrome() -> Any:
         return jsonify({"error": str(exc)}), 500
 
 
-@ui_bp.route("/smart-playlists")
-async def smart_playlists() -> Any:
-    return await render_template("pages/smart_playlists.html")
+# REMOVED 2026-09-18: @ui_bp.route("/smart-playlists") -> smart_playlists()
+#
+# It rendered "pages/smart_playlists.html" — a SECOND smart-playlist builder
+# (its own addFilter / buildJSON / updateJsonPreview, ~454 lines of inline JS)
+# living alongside the one in static/js/pages/playlist.js (SPB_FIELDS /
+# SPB_OPERATORS / spbBuildJson), which is the builder wired into the /playlists
+# hub and the one the backend's .nsp schema is transcribed against.
+#
+# Nothing linked to it: no url_for('ui.smart_playlists'), no href, no entry in
+# the navbar or any page. It was reachable only by typing the URL.
+#
+# The template pages/smart_playlists.html should be deleted with it.
 
 
 @ui_bp.route("/analytics/genres-moods")

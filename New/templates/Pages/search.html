@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}Search - Popularr{% endblock %}
+
+{% block content %}
+{#
+  /search — ENTRY POINT ONLY. See static/js/pages/search-entry.js.
+
+  This page WAS a full library search UI. That implementation now lives in
+  ui/search-flyout.js (the navbar search), which base.html loads globally and
+  which does more: same /api/search endpoint, same release buckets, plus
+  release-type filters, MusicBrainz merging and queue buttons this page never had.
+
+  Nothing links here any more — the only remaining references to ui.search are in
+  templates/pages/downloads/search_playlists.html, which is itself dead (its
+  route redirects to /downloads/search).
+
+  SUPERSEDED FILES FROM AN EARLIER PASS — DELETE THESE:
+      static/js/pages/library-search.js   a full second implementation
+      static/css/search.css               styles only that implementation used
+
+  They were written before this page was identified as superseded. Keeping them
+  would mean three search implementations, which would drift exactly the way the
+  two smart-playlist builders did.
+
+  ALTERNATIVE: if /search is not wanted at all, remove the route
+  (routes/ui_routes.py -> search()) and delete this template too — the same
+  treatment /smart-playlists and /downloads/manager got.
+#}
+<div class="row mb-3">
+  <div class="col-12">
+    <h4 class="mb-1"><i class="bi bi-search"></i> Search</h4>
+    <p class="text-secondary small mb-0">
+      Searching happens in the navbar search box, which is available on every page.
+    </p>
+  </div>
+</div>
+
+<div class="row">
+  <div class="col-12 col-lg-8">
+    <div class="card">
+      <div class="card-body text-center py-5">
+        <i class="bi bi-search" style="font-size: 3rem; color: var(--text-secondary); margin-bottom: 1rem; display: block;"></i>
+        <h5 class="text-secondary">Use the unified search</h5>
+        <p class="text-tertiary mb-4">
+          It searches your library and MusicBrainz together, with release-type filters and
+          queue buttons that this page never had.
+        </p>
+        <button type="button" class="btn btn-success" id="openSearchBtn">
+          <i class="bi bi-search"></i> Open search
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# Server-supplied ?q=, read by pages/search-entry.js. #}
+<script id="page-data" type="application/json">{{ {"initialQuery": initial_query} | tojson | safe }}</script>
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads ui/search-flyout.js, which publishes
+  global.openUnifiedSearch(scope, prefill) — the ONE search implementation.
+
+    js/pages/search-entry.js   opens that flyout, pre-filled from ?q=
+
+  NOT loaded: js/pages/library-search.js (superseded — see the header) and
+  css/search.css (its styles). Delete both.
+#}
+<script src="{{ versioned_static('js/pages/search-entry.js') }}"></script>
+{% endblock %}

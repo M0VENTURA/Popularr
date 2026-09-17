@@ -1,0 +1,64 @@
+/* ==========================================================================
+   static/css/sandbox.css
+   Algorithm Sandbox (templates/Pages/sandbox.html).
+
+   ── WHY THIS FILE EXISTS ──────────────────────────────────────────────────
+   The page's own script builds each row via JavaScript and gives it these
+   classes:
+
+       .sandbox-delta
+       .score-old        .score-new        .score-arrow
+       .upgrade          .downgrade
+
+   NOTHING defined them — not popularr.css, not any other stylesheet (grepped:
+   zero matches for all six). The `.upgrade` / `.downgrade` tinting is the
+   whole point of this page: the user drags a weight slider and looks for the
+   rows that changed. Without it every row looked identical.
+
+   These are new definitions, not a move. Colours use theme tokens where one
+   fits and the semantic tones otherwise, matching the summary arrows the
+   script already sets (text-success / text-danger).
+   ========================================================================== */
+
+/* One row per simulated track. */
+.sandbox-delta {
+  border-color: var(--border-color, #333);
+  background-color: var(--secondary-bg, #1e1e1e);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+/* A track whose star rating would go UP under the current weights. */
+.sandbox-delta.upgrade {
+  border-color: rgba(25, 135, 84, 0.55);
+  background-color: rgba(25, 135, 84, 0.10);
+}
+
+/* A track whose star rating would go DOWN. */
+.sandbox-delta.downgrade {
+  border-color: rgba(220, 53, 69, 0.55);
+  background-color: rgba(220, 53, 69, 0.10);
+}
+
+/* Live vs simulated score pair. */
+.score-old {
+  color: var(--text-secondary, #b0b0b0);
+}
+
+.score-new {
+  color: var(--text-primary, #e0e0e0);
+  font-weight: 600;
+}
+
+/* Tinted to match the row, so the direction reads even at a glance. */
+.sandbox-delta.upgrade .score-new {
+  color: #5fd38a;
+}
+
+.sandbox-delta.downgrade .score-new {
+  color: #f88b8b;
+}
+
+.score-arrow {
+  color: var(--text-secondary, #b0b0b0);
+  opacity: 0.6;
+}

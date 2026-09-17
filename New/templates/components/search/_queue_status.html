@@ -1,0 +1,282 @@
+<!-- Queue Processor Status -->
+{#
+  Download queue monitor panel — processor status, stats bar, add-to-queue
+  form, status/source filters, the active/completed/failed lists and the events
+  log.
+
+  Used by pages/downloads/queue.html and pages/downloads/monitor.html (the
+  "Active Queue" / "Active Queue & Monitor" tab).
+
+  Its ids are consumed by pages/download-queue.js. Everything it calls is
+  published by that module:
+
+      global.restartQueueProcessor       line 1706
+      global.loadQueueStatus             line 1692
+      global.addToQueue                  line 1694
+      global.clearEntireQueue            line 1700
+      global.purgeAllQueueAndDownloads   line 1702
+      global.retryAllFailed              line 1703
+      global.cleanupCopiedSources        line 1704
+      global.loadQueueEvents             line 1707
+      global.clearQueueEventsLog         line 1708
+
+  The two filter groups (#queueStatusFilter, #queueSourceFilter) are radio
+  inputs with no handlers — the module binds change listeners to the group ids.
+
+  ── WHAT CHANGED ──────────────────────────────────────────────────────────
+  REMOVED: "Organize Selected" (#groupBtn / organizeSelected) and
+  "Batch Group & Organize" (#batchGroupBtn / batchOrganizeSelected).
+
+  pages/download-queue.js records why, at the bottom of that file:
+
+      `organizeSelected` / `batchOrganizeSelected` are also gone: both were
+      stubs whose entire body was alert('… not yet implemented'). Remove their
+      buttons from the template, or implement them.
+
+  Both were `disabled` in this markup and would have thrown ReferenceError if
+  anything had enabled them. The per-row Organize action and the Organize Group
+  modal (components/modals/_organize_group.html) are the working equivalents,
+  so removing these two loses no functionality. #selectedCount is kept — it is
+  a passive label and other code may populate it.
+
+  The remaining onclick attributes are one-line calls to the globals listed
+  above, kept inline for the same reason as the other partials in this tree.
+#}
+<div class="card mb-3 border-primary" id="queueProcessorStatusCard">
+  <div class="card-header bg-primary bg-opacity-10 border-primary d-flex justify-content-between align-items-center py-2">
+    <h6 class="card-title mb-0">
+      <i class="bi bi-hourglass-split"></i> Download Queue Processor
+    </h6>
+    <div id="processorStatusBadge" class="badge bg-secondary">
+      <i class="bi bi-circle-fill me-1" style="font-size:0.6em"></i> Loading...
+    </div>
+  </div>
+  <div class="card-body py-2">
+    <div class="row align-items-center">
+      <div class="col-md-9">
+        <div id="processorStatusContent" class="small">
+          <span class="text-muted">Checking processor status...</span>
+        </div>
+      </div>
+      <div class="col-md-3 text-end">
+        <button id="restartProcessorBtn" class="btn btn-sm btn-primary" onclick="restartQueueProcessor()" disabled>
+          <i class="bi bi-arrow-clockwise"></i> Restart Processor
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Queue Stats Bar -->
+<div class="card mb-3 border-0 bg-body-tertiary" id="queueStatsBar">
+  <div class="card-body py-2">
+    <div class="d-flex flex-wrap align-items-center gap-3">
+      <span class="text-muted small fw-semibold me-1"><i class="bi bi-speedometer2"></i> Queue</span>
+      <span class="badge bg-primary px-3 py-2" id="statQueued" title="Waiting to be searched/downloaded">
+        <i class="bi bi-hourglass-split me-1"></i><span id="statQueuedNum">0</span> Queued
+      </span>
+      <span class="badge bg-warning text-dark px-3 py-2" id="statDownloading" title="Currently searching or downloading">
+        <i class="bi bi-arrow-down-circle me-1"></i><span id="statDownloadingNum">0</span> Active
+      </span>
+      <span class="badge bg-success px-3 py-2" id="statCompleted" title="Downloaded – ready to organise">
+        <i class="bi bi-check-circle me-1"></i><span id="statCompletedNum">0</span> Ready
+      </span>
+      <span class="badge bg-danger px-3 py-2" id="statFailed" title="Failed downloads">
+        <i class="bi bi-x-circle me-1"></i><span id="statFailedNum">0</span> Failed
+      </span>
+      <span class="badge bg-info text-dark px-3 py-2" id="statImported" title="Moved to library">
+        <i class="bi bi-music-note-list me-1"></i><span id="statImportedNum">0</span> Imported
+      </span>
+      <div class="ms-auto d-flex align-items-center gap-2">
+        <span id="queueLastRefreshed" class="text-muted" style="font-size:0.75rem"></span>
+        <button class="btn btn-sm btn-outline-secondary" onclick="loadQueueStatus()" title="Refresh now">
+          <i class="bi bi-arrow-clockwise" id="queueRefreshIcon"></i>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add to Queue Form -->
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <h5 class="card-title mb-0">
+      <i class="bi bi-plus-circle"></i> Add to Queue
+    </h5>
+  </div>
+  <div class="card-body">
+    <form id="addToQueueForm" onsubmit="addToQueue(event)">
+      <div class="row g-2">
+        <div class="col-md-3">
+          <input type="text" class="form-control" id="queueArtist" placeholder="Artist *" required>
+        </div>
+        <div class="col-md-3">
+          <input type="text" class="form-control" id="queueTitle" placeholder="Song Title *" required>
+        </div>
+        <div class="col-md-3">
+          <input type="text" class="form-control" id="queueAlbum" placeholder="Album (optional)">
+        </div>
+        <div class="col-md-1">
+          <select class="form-select" id="queueSource">
+            <option value="soulseek">Soulseek</option>
+          </select>
+        </div>
+        <div class="col-md-1">
+          <input type="number" class="form-control" id="queuePriority" value="5" min="1" max="10" title="Priority (1=highest)">
+        </div>
+        <div class="col-md-1">
+          <button type="submit" class="btn btn-primary w-100">
+            <i class="bi bi-plus"></i> Add
+          </button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Filter Bar -->
+<div class="card mb-3 border-0">
+  <div class="card-body py-2 px-3">
+    <div class="d-flex flex-wrap align-items-center gap-2">
+      <span class="text-muted small fw-semibold"><i class="bi bi-funnel"></i> Filter:</span>
+      <div class="btn-group btn-group-sm" role="group" aria-label="Filter by status" id="queueStatusFilter">
+        <input type="radio" class="btn-check" name="queueFilter" id="filterAll" value="all" checked>
+        <label class="btn btn-outline-secondary" for="filterAll">All</label>
+        <input type="radio" class="btn-check" name="queueFilter" id="filterActive" value="active">
+        <label class="btn btn-outline-primary" for="filterActive">Active</label>
+        <input type="radio" class="btn-check" name="queueFilter" id="filterCompleted" value="completed">
+        <label class="btn btn-outline-success" for="filterCompleted">Ready</label>
+        <input type="radio" class="btn-check" name="queueFilter" id="filterFailed" value="failed">
+        <label class="btn btn-outline-danger" for="filterFailed">Failed</label>
+      </div>
+      <div class="btn-group btn-group-sm ms-2" role="group" aria-label="Filter by source" id="queueSourceFilter">
+        <input type="radio" class="btn-check" name="queueSourceF" id="srcAll" value="" checked>
+        <label class="btn btn-outline-secondary" for="srcAll">All Sources</label>
+        <input type="radio" class="btn-check" name="queueSourceF" id="srcSlskd" value="soulseek">
+        <label class="btn btn-outline-secondary" for="srcSlskd">Soulseek</label>
+      </div>
+      <div class="ms-auto d-flex gap-2">
+        <button class="btn btn-sm btn-outline-warning" onclick="retryAllFailed()" id="retryAllBtn" title="Re-queue all failed items" style="display:none">
+          <i class="bi bi-arrow-counterclockwise"></i> Retry All Failed
+        </button>
+        <button class="btn btn-sm btn-outline-danger" onclick="clearEntireQueue()" title="Clear entire queue (keep imported)">
+          <i class="bi bi-trash3"></i> Clear Queue
+        </button>
+        <button class="btn btn-sm btn-danger" onclick="purgeAllQueueAndDownloads()" title="Delete all queue rows and all files in the configured downloads folder">
+          <i class="bi bi-trash-fill"></i> Purge All
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Active Queue -->
+<div class="card mb-4" id="activeQueueCard">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <h5 class="card-title mb-0">
+      <i class="bi bi-arrow-down-circle"></i> Active Queue
+      <span id="queueActiveCount" class="badge bg-primary ms-2" style="display:none"></span>
+    </h5>
+  </div>
+  <div class="card-body p-0">
+    <div id="activeQueueEmpty" class="text-center py-4 text-muted">
+      <i class="bi bi-inbox fs-3 d-block mb-2"></i>
+      Queue is empty. Use the form above or a search tab to add downloads.
+    </div>
+    <div id="activeQueueList" style="display:none"></div>
+  </div>
+</div>
+
+<!-- Completed & Ready to Organize -->
+<div class="card mb-4" id="completedQueueCard">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <h5 class="card-title mb-0">
+      <i class="bi bi-check-circle"></i> Completed &amp; Ready to Organize
+      <span id="completedBadge" class="badge bg-success ms-2" style="display:none"></span>
+      <span id="queueCompletedCount" style="display:none"></span>
+    </h5>
+    <div class="d-flex gap-2 align-items-center">
+      <button class="btn btn-sm btn-outline-danger" onclick="cleanupCopiedSources()" title="Delete copied source files from /downloads">
+        <i class="bi bi-trash3"></i> Cleanup Copied Sources
+      </button>
+      <span class="badge bg-warning text-dark">
+        <i class="bi bi-exclamation-triangle"></i> Unmatched files are shown with a warning badge
+      </span>
+    </div>
+  </div>
+  <div class="card-body p-0">
+    <div id="completedQueueEmpty" class="text-center py-4 text-muted">
+      <i class="bi bi-folder2-open fs-3 d-block mb-2"></i>
+      No completed downloads yet.
+    </div>
+    <div id="completedQueueList" style="display:none"></div>
+    {#
+      The #completedQueueActions footer used to hold a "0 selected" label plus
+      the "Organize Selected" / "Batch Group & Organize" buttons. The buttons
+      are gone (download-queue.js documents them as never-implemented stubs)
+      and the label was the only thing left of the checkbox-selection model
+      they belonged to — nothing writes #selectedCount any more, so the whole
+      footer is removed rather than left as an empty bar that still reserves
+      .card-footer spacing.
+
+      Completed albums are now acted on from the album row itself, matching
+      the Matched & Unmatched Folders pattern in pages/monitor.js.
+    #}
+  </div>
+</div>
+
+<!-- Failed Queue -->
+<div class="card mb-4" id="failedQueueCard">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <h5 class="card-title mb-0">
+      <i class="bi bi-x-circle"></i> Failed Downloads
+      <span id="failedBadge" class="badge bg-danger ms-2" style="display:none"></span>
+      <span id="queueFailedCount" style="display:none"></span>
+    </h5>
+    <button class="btn btn-sm btn-outline-warning" onclick="retryAllFailed()" id="retryAllFailedBtn" style="display:none">
+      <i class="bi bi-arrow-counterclockwise"></i> Retry All
+    </button>
+  </div>
+  <div class="card-body p-0">
+    <div id="failedQueueEmpty" class="text-center py-4 text-muted">
+      <i class="bi bi-check-all fs-3 d-block mb-2"></i>
+      No failed downloads.
+    </div>
+    <div id="failedQueueList" style="display:none"></div>
+  </div>
+</div>
+
+<!-- Queue Events Log -->
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <h5 class="card-title mb-0">
+      <i class="bi bi-list-ul"></i> Download Queue Events Log
+      <small class="text-muted ms-2">(Last 50 events)</small>
+    </h5>
+    <div class="btn-group btn-group-sm" role="group">
+      <button class="btn btn-outline-primary" onclick="loadQueueEvents()">
+        <i class="bi bi-arrow-clockwise"></i> Refresh
+      </button>
+      <button class="btn btn-outline-secondary" onclick="clearQueueEventsLog()">
+        <i class="bi bi-trash3"></i> Clear
+      </button>
+    </div>
+  </div>
+  <div class="card-body p-0" style="max-height: 400px; overflow-y: auto;">
+    <div id="queueEventsEmpty" class="text-center py-4 text-muted">
+      <i class="bi bi-bell fs-3 d-block mb-2"></i>
+      No queue events yet. Events will appear as you interact with the download queue.
+    </div>
+    <table id="queueEventsTable" class="table table-sm table-hover m-0" style="display:none;">
+      <thead class="table-dark sticky-top">
+        <tr>
+          <th style="width: 160px;">Timestamp</th>
+          <th style="width: 120px;">Type</th>
+          <th>Message</th>
+        </tr>
+      </thead>
+      <tbody id="queueEventsBody">
+      </tbody>
+    </table>
+  </div>
+</div>

@@ -1,0 +1,328 @@
+{% extends "base.html" %}
+
+{% block title %}Playlists – Popularr{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+  <!-- Header -->
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+      <h4 class="mb-1">
+        <i class="bi bi-collection-play"></i> Playlists
+        <a href="/help/FEATURES_PLAYLISTS" class="btn btn-sm btn-outline-success ms-2 py-0" title="Help">
+          <i class="bi bi-question-circle"></i>
+        </a>
+      </h4>
+      <p class="text-muted small mb-0">All smart and regular playlists in the system — view, rename and import</p>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+      {#
+        Every onclick in this template became a data-action button. The
+        handlers are the same functions — pages/playlists.js binds them
+        through one delegated listener instead of requiring the template to
+        reach thirteen window globals.
+      #}
+      <button type="button" class="btn btn-sm btn-outline-primary" data-action="playlists-import-csv" title="Import a playlist from an Exportify CSV export">
+        <i class="bi bi-upload"></i> Import CSV
+      </button>
+      <button type="button" class="btn btn-sm btn-outline-secondary" data-action="playlists-refresh" title="Refresh">
+        <i class="bi bi-arrow-clockwise"></i> Refresh
+      </button>
+    </div>
+  </div>
+
+  <div id="playlistsAlert"></div>
+
+  <div class="row g-3">
+    <!-- ======================= LEFT: PLAYLIST LIST ======================= -->
+    <div class="col-12 col-lg-4" id="playlistListPanel">
+      <div class="card shadow-sm">
+        <div class="card-header py-2">
+          <div class="d-flex justify-content-between align-items-center gap-2">
+            <div>
+              <span class="fw-semibold"><i class="bi bi-stars text-warning"></i> Smart Playlists</span>
+              <span class="badge bg-warning text-dark ms-1" id="smartCount">0</span>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+              <span class="fw-semibold"><i class="bi bi-collection-play text-primary"></i> Regular</span>
+              <span class="badge bg-primary ms-1" id="regularCount">0</span>
+            </div>
+          </div>
+          <div class="mt-2">
+            <button type="button" class="btn btn-sm btn-outline-success w-100" data-action="playlists-generate" title="Generate a recommended-tracks playlist from Last.fm / ListenBrainz; missing tracks are queued to Soulseek">
+              <i class="bi bi-magic"></i> Generate Recommended Playlist
+            </button>
+          </div>
+        </div>
+        <div class="card-body p-2">
+          <div class="input-group input-group-sm mb-2">
+            <span class="input-group-text bg-dark border-secondary text-muted"><i class="bi bi-search"></i></span>
+            {# oninput → the delegated `input` listener in pages/playlists.js (data-filter-target names the input id). #}
+            <input type="text" id="playlistFilterInput" class="form-control form-control-sm bg-dark text-light border-secondary shadow-none"
+                   placeholder="Filter playlists…" autocomplete="off" data-playlist-filter>
+          </div>
+          <div id="playlistList" class="d-flex flex-column gap-2" style="max-height: calc(100vh - 320px); overflow-y: auto;">
+            <p class="text-center text-muted py-4 small">Loading playlists…</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ======================= RIGHT: PLAYLIST DETAIL ======================= -->
+    <div class="col-12 col-lg-8" id="playlistDetailPanel">
+      <div class="card shadow-sm h-100">
+        <div class="card-header py-2 d-none" id="detailHeader">
+          <div class="d-flex justify-content-between align-items-center gap-2">
+            <div class="d-flex align-items-center gap-2" style="min-width:0">
+              <button type="button" class="btn btn-sm btn-outline-secondary d-lg-none" data-action="playlists-back" title="Back to playlists">
+                <i class="bi bi-arrow-left"></i> Back
+              </button>
+              <span id="detailIcon" class="fs-5"></span>
+              <div style="min-width:0">
+                <h6 class="mb-0 text-truncate" id="detailName"></h6>
+                <small class="text-muted" id="detailMeta"></small>
+                <div class="d-none align-items-center gap-1 mt-1" id="detailPathRow">
+                  <code class="small text-truncate" id="detailPath" style="max-width: 100%;" title=""></code>
+                  <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1" data-action="playlists-copy-path" title="Copy path">
+                    <i class="bi bi-clipboard"></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+              <button type="button" class="btn btn-sm btn-outline-success text-nowrap" data-action="playlists-export" title="Download all playlist tracks as a ZIP file">
+                <i class="bi bi-download"></i> Export
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-primary text-nowrap" data-action="playlists-rename">
+                <i class="bi bi-pencil"></i> Rename
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-danger text-nowrap" data-action="playlists-delete">
+                <i class="bi bi-trash"></i> Delete
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="card-body" id="detailBody">
+          <div class="text-center text-muted py-5" id="detailEmpty">
+            <i class="bi bi-music-note-list display-6 d-block mb-2"></i>
+            Select a playlist to view its tracks
+          </div>
+          <div class="d-none" id="detailTracksWrap">
+            <div class="mb-2 small text-muted" id="detailComment"></div>
+            <div class="table-responsive" id="detailTableWrap" style="max-height: calc(100vh - 340px); overflow-y: auto;">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead class="table-light sticky-top">
+                  <tr>
+                    <th>#</th>
+                    <th>Title</th>
+                    <th>Artist</th>
+                    <th>Album</th>
+                    <th class="text-end">Duration</th>
+                    <th class="text-center">Rating</th>
+                  </tr>
+                </thead>
+                <tbody id="detailTracks"></tbody>
+              </table>
+            </div>
+            <!-- Mobile: stacked compact cards instead of the table.
+                 The breakpoint is matchMedia('(max-width: 767.98px)') in
+                 pages/playlists.js — renderTracks() picks the wrapper. -->
+            <div class="d-none" id="detailStackedWrap" style="max-height: calc(100vh - 340px); overflow-y: auto;">
+              <div id="detailStacked" class="d-flex flex-column gap-2"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= EXPORT PLAYLIST MODAL ======================= -->
+<div class="modal fade" id="exportPlaylistModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title"><i class="bi bi-file-earmark-zip"></i> Export Playlist</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-muted mb-2" id="exportInfo"></p>
+        <div class="d-none" id="exportProgressWrap">
+          <div class="progress" style="height: 18px;">
+            <div class="progress-bar progress-bar-striped progress-bar-animated" id="exportProgressBar" role="progressbar" style="width: 0%">0%</div>
+          </div>
+          <div class="small text-muted mt-2" id="exportProgressText">Preparing…</div>
+        </div>
+        <div class="alert alert-danger py-2 small d-none mt-2" id="exportError"></div>
+        <div class="d-none text-center mt-3" id="exportDoneWrap">
+          <a class="btn btn-success" id="exportDownloadLink">
+            <i class="bi bi-download"></i> Download ZIP
+          </a>
+          <div class="small text-muted mt-2" id="exportSkippedNote"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= CSV IMPORT MODAL ======================= -->
+<div class="modal fade" id="csvImportModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title"><i class="bi bi-filetype-csv"></i> Import Playlist from CSV</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-secondary py-2 small">
+          <i class="bi bi-info-circle me-1"></i>
+          Export an <strong>Exportify</strong> CSV (exportify.net → Export), upload it below. Tracks found in
+          your library are saved into a new playlist; missing tracks can be queued for download from the
+          Downloads page afterwards.
+        </div>
+        {# onsubmit="submitCsvImport(event)" → delegated `submit` listener keyed on this form's id. #}
+        <form id="csvImportForm">
+          <div class="mb-3">
+            <label for="csvImportFile" class="form-label small fw-semibold">CSV File <span class="text-danger">*</span></label>
+            <input type="file" id="csvImportFile" class="form-control" accept=".csv" required>
+            <div class="form-text">Exportify CSV — must contain at least <code>Track Name</code> and <code>Artist Name(s)</code> columns.</div>
+          </div>
+          <div class="mb-3">
+            <label for="csvImportName" class="form-label small fw-semibold">Playlist Name <span class="text-danger">*</span></label>
+            <input type="text" id="csvImportName" class="form-control" placeholder="e.g., My Imported Playlist" maxlength="200" required>
+          </div>
+          <div id="csvImportStatus" class="mb-2 small"></div>
+          <div id="csvImportResult" class="d-none">
+            <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
+              <span class="badge bg-success" id="csvImportMatched">0 matched</span>
+              <span class="badge bg-warning text-dark" id="csvImportMissing">0 missing</span>
+              <span class="text-muted small" id="csvImportCoverage"></span>
+            </div>
+            <div class="d-flex gap-2 flex-wrap">
+              <button type="button" class="btn btn-sm btn-success" id="csvImportCreateBtn" data-action="playlists-create-from-import">
+                <i class="bi bi-plus-circle"></i> Create Playlist from Matched Tracks
+              </button>
+              <a href="/downloads" class="btn btn-sm btn-outline-warning">
+                <i class="bi bi-download"></i> Queue Missing on Downloads
+              </a>
+            </div>
+          </div>
+          <div class="modal-footer px-0 pb-0">
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+            <button type="submit" class="btn btn-sm btn-primary" id="csvImportSubmitBtn">
+              <i class="bi bi-upload"></i> Import
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= RENAME MODAL ======================= -->
+<div class="modal fade" id="renameModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title"><i class="bi bi-pencil-square"></i> Rename Playlist</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label for="renameName" class="form-label small fw-semibold">Playlist Name</label>
+          <input type="text" id="renameName" class="form-control" maxlength="200">
+        </div>
+        <div class="mb-2" id="renameFileGroup">
+          <label for="renameFileName" class="form-label small fw-semibold">File Name <span class="text-muted">(without .nsp)</span></label>
+          <input type="text" id="renameFileName" class="form-control" maxlength="200">
+          <small class="text-muted" id="renameFilePath"></small>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-sm btn-primary" data-action="playlists-submit-rename">
+          <i class="bi bi-check-lg"></i> Save
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= DELETE MODAL ======================= -->
+<div class="modal fade" id="deleteModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title text-danger"><i class="bi bi-trash"></i> Delete Playlist</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-1">Delete "<strong id="deleteName"></strong>"?</p>
+        <p class="text-muted small mb-0" id="deleteHint"></p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-sm btn-danger" data-action="playlists-submit-delete">
+          <i class="bi bi-trash"></i> Delete
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= GENERATOR MODAL ======================= -->
+<div class="modal fade" id="generatorModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title"><i class="bi bi-magic"></i> Generate Recommended Playlist</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small mb-3">
+          Top tracks from your library's most-listened artists are pulled from
+          Last.fm / ListenBrainz. Tracks already in the library go into an
+          <code>.m3u</code> playlist; missing tracks are queued to Soulseek automatically.
+        </p>
+        <div class="mb-3">
+          <label for="genSource" class="form-label small fw-semibold">Source</label>
+          <select id="genSource" class="form-select">
+            <option value="both" selected>Last.fm + ListenBrainz</option>
+            <option value="lastfm">Last.fm only</option>
+            <option value="listenbrainz">ListenBrainz only</option>
+          </select>
+        </div>
+        <div class="mb-3">
+          <label for="genName" class="form-label small fw-semibold">Playlist Name</label>
+          <input type="text" id="genName" class="form-control" value="Recommended Mix" maxlength="100">
+        </div>
+        <div class="mb-2">
+          <label for="genLimit" class="form-label small fw-semibold">Track Limit</label>
+          <input type="number" id="genLimit" class="form-control" value="12" min="1" max="25">
+          <small class="text-muted">API rate limits apply — larger limits take longer.</small>
+        </div>
+        <div id="genResult" class="d-none"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-sm btn-success" id="genSubmitBtn" data-action="playlists-submit-generate">
+          <i class="bi bi-magic"></i> Generate
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/*, ui/toast.js, ui/modal.js, ui/confirm.js and
+  ui/button-state.js. This page needs only its controller.
+
+    js/pages/playlists.js
+        list / detail / rename / delete / export / CSV import / generator.
+        It documents the same load order, and it owns the delegated listener
+        for every data-action in this template.
+#}
+<script src="{{ versioned_static('js/pages/playlists.js') }}"></script>
+{% endblock %}

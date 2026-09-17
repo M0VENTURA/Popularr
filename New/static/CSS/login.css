@@ -1,0 +1,135 @@
+/* ==========================================================================
+   static/css/login.css
+   Standalone sign-in page (templates/auth/login.html).
+
+   Extracted from that template's inline <style> block.
+
+   ── WHY THE :root BLOCK IS DUPLICATED HERE ────────────────────────────────
+   This page is the one template that does NOT extend base.html — it ships its
+   own <head> because it is rendered before a session exists and must not pull
+   in the app shell (navbar, player bar, global modals). It therefore does not
+   load popularr.css, which is where the theme tokens normally live, so the five
+   custom properties below are declared locally.
+
+   They are intentionally kept in sync with popularr.css's palette. If the theme
+   changes, change both — or give the login page a link to popularr.css and
+   delete this block, accepting that the shell's body/nav rules come with it.
+   ========================================================================== */
+
+:root {
+  --primary-bg: #121212;
+  --secondary-bg: #1e1e1e;
+  --text-primary: #e0e0e0;
+  --text-secondary: #b0b0b0;
+  --border-color: #333;
+  --spotify-green: #1db954;
+}
+
+body {
+  background: linear-gradient(135deg, var(--primary-bg) 0%, #1a1a2e 100%);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+}
+
+.login-container {
+  width: 100%;
+  max-width: 420px;
+  padding: 15px;
+}
+
+.login-card {
+  background-color: var(--secondary-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 2.5rem;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+
+.login-header {
+  text-align: center;
+  margin-bottom: 2rem;
+}
+
+.login-header h1 {
+  font-size: 2rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  background: linear-gradient(135deg, var(--spotify-green) 0%, #1ed760 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.login-header p {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+
+.form-floating > label {
+  color: var(--text-secondary);
+}
+
+.form-control {
+  background-color: var(--primary-bg);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 1rem 0.75rem;
+  height: 58px;
+}
+
+.form-control:focus {
+  background-color: var(--primary-bg);
+  border-color: var(--spotify-green);
+  color: var(--text-primary);
+  box-shadow: 0 0 0 0.2rem rgba(29, 185, 84, 0.25);
+}
+
+.btn-login {
+  background: linear-gradient(135deg, var(--spotify-green) 0%, #1ed760 100%);
+  border: none;
+  color: white;
+  font-weight: 600;
+  padding: 0.875rem;
+  font-size: 1rem;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.btn-login:hover {
+  background: linear-gradient(135deg, #1ed760 0%, var(--spotify-green) 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 5px 15px rgba(29, 185, 84, 0.4);
+}
+
+.btn-login:active {
+  transform: translateY(0);
+}
+
+.alert {
+  border-radius: 8px;
+  border: none;
+}
+
+.brand-icon {
+  font-size: 3rem;
+  margin-bottom: 1rem;
+  background: linear-gradient(135deg, var(--spotify-green) 0%, #1ed760 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.login-footer {
+  text-align: center;
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.form-floating {
+  margin-bottom: 1rem;
+}

@@ -1,0 +1,46 @@
+/* ==========================================================================
+   static/css/corrections.css
+   Tag Corrections page (templates/Pages/corrections.html).
+
+   Extracted from the inline <style> block in templates/pages/corrections.html.
+   All three rules are scoped to this page's tables and buttons, so they do not
+   belong in popularr.css.
+
+   WHY `.correcting-table` EXISTS: Bootstrap's `.table` sets `--bs-table-bg` and
+   friends from its own variables, so a dark theme that overrides the surface
+   tokens still gets Bootstrap's light table backgrounds. This class re-points
+   those variables at the theme tokens. It uses `!important` on the cell rules
+   because Bootstrap's own selectors are equally specific and load later.
+   ========================================================================== */
+
+.correcting-table {
+  --bs-table-bg: var(--secondary-bg);
+  --bs-table-color: var(--text-primary);
+  --bs-table-border-color: var(--border-color);
+  --bs-table-hover-bg: var(--tertiary-bg);
+}
+
+.correcting-table > :not(caption) > * > * {
+  background-color: var(--secondary-bg) !important;
+  color: var(--text-primary) !important;
+}
+
+.correcting-table thead th {
+  background-color: var(--tertiary-bg) !important;
+}
+
+.correcting-table tbody tr:hover > * {
+  background-color: var(--tertiary-bg) !important;
+}
+
+/* A value chip. Clickable in the source markup (it had `cursor: pointer`), but
+   note there is no click handler attached to it — the Apply buttons do the
+   work. Kept for the tooltip affordance; see the note in corrections.js. */
+.value-badge {
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.fix-btn {
+  font-size: 0.75rem;
+}

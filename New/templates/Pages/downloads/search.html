@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+
+{% block title %}Unified Search · Popularr{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+  <div class="mb-4">
+    {% set subtitle = 'Search across Soulseek and import playlists from CSV' %}
+    {% include 'components/_downloads_header.html' %}
+  </div>
+
+  {#
+    `nav-segmented` (popularr.css) replaces the bare `nav-tabs` strip — the same
+    treatment the other downloads tabs already had. This page was the last one
+    still using default Bootstrap tabs next to the rest of the app's pills.
+  #}
+  <ul class="nav nav-pills nav-segmented nav-fill mb-4 shadow-sm" id="searchTabs" role="tablist">
+    <li class="nav-item" role="presentation">
+      <button class="nav-link active py-2" id="soulseek-tab" data-bs-toggle="tab" data-bs-target="#soulseek" type="button" role="tab" aria-controls="soulseek" aria-selected="true">
+        <i class="bi bi-music-note-beamed me-1"></i> Soulseek
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link py-2" id="playlists-tab" data-bs-toggle="tab" data-bs-target="#playlists" type="button" role="tab" aria-controls="playlists" aria-selected="false">
+        <i class="bi bi-collection-play me-1"></i> Playlists
+      </button>
+    </li>
+  </ul>
+
+  <div class="tab-content" id="searchTabsContent">
+
+    <!-- ===== Soulseek Tab ===== -->
+    <div class="tab-pane fade show active" id="soulseek" role="tabpanel" aria-labelledby="soulseek-tab">
+      {#
+        components/search/_soulseek.html renders its own card (heading included)
+        and its own #slskdSearchInput / #slskdSearchBtn / #slskdResults, which
+        pages/soulseek-search.js drives. Do NOT wrap it in another card — the old
+        markup here added a second "Soulseek Search" header around it.
+      #}
+      {% include 'components/search/_soulseek.html' %}
+    </div>
+
+    <!-- ===== Playlists Tab ===== -->
+    <div class="tab-pane fade" id="playlists" role="tabpanel" aria-labelledby="playlists-tab">
+      {% include 'components/search/_playlists.html' %}
+    </div>
+
+  </div>
+</div>
+
+{# The shared MusicBrainz search modal is included globally by base.html — do not include it again here. #}
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/*, ui/toast.js, ui/modal.js, ui/confirm.js and
+  ui/button-state.js.
+
+  THE OLD SCRIPT LIST WAS:
+      js/downloads.js  js/playlist_import.js  js/search_init.js
+  All three are gone from the refactored tree. Replacements, by tab:
+
+    SOULSEEK TAB
+      services/slskd.js        global.slskd.* — provides search(), download(),
+                               normalizeQuery(), bestMatch(), groupByUser()
+      pages/soulseek-search.js drives components/search/_soulseek.html and owns
+                               the search session + poll loop. Exposes
+                               global.downloadsPage.search().
+
+    PLAYLISTS TAB (CSV / Exportify import)
+      state/import-state.js    MUST come before csv-import.js. Both that file and
+                               pages/playlist.js used to declare
+                               `currentImportData` / `missingTracksForSearch`
+                               with `let` at top level, so the second one loaded
+                               threw "Identifier has already been declared" at
+                               PARSE time and defined nothing at all.
+      features/csv-import.js   global.importPlaylistFromCSV + the
+                               _trackPayloads store the delegated row actions read
+      pages/playlist.js        global.createPlaylist — the "Create Playlist"
+                               button in _playlists.html. This is the whole
+                               playlist manager (2,000+ lines) pulled in for one
+                               function; splitting createPlaylist out is worth
+                               doing, see MIGRATION.md.
+
+    ROW ACTIONS + ?q= AUTO-SEARCH
+      pages/search.js          the successor to search_init.js. Delegates
+                               .js-add-track-btn / .js-slskd-search-btn /
+                               .js-replace-btn through _trackPayloads, and reads
+                               the ?q= parameter to prefill and run a Soulseek
+                               search. Every "Search Soulseek" link in the app
+                               (album / artist / track pages) lands here with
+                               ?q=…, so this file is what makes those work.
+                               It now calls global.downloadsPage.search() rather
+                               than the removed global.searchSoulseek.
+
+  js/downloads.js is deliberately NOT loaded: it became pages/download-queue.js,
+  which owns the downloads page's queue rendering and would pull in a whole
+  page's worth of code this page never calls.
+#}
+<link rel="stylesheet" href="{{ versioned_static('css/downloads.css') }}">
+<script src="{{ versioned_static('js/services/slskd.js') }}"></script>
+<script src="{{ versioned_static('js/pages/soulseek-search.js') }}"></script>
+<script src="{{ versioned_static('js/state/import-state.js') }}"></script>
+<script src="{{ versioned_static('js/features/csv-import.js') }}"></script>
+<script src="{{ versioned_static('js/pages/playlist.js') }}"></script>
+<script src="{{ versioned_static('js/pages/search.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,29 @@
+{#
+  Reusable scan-type dropdown + Restart checkbox.
+
+  Usage:
+      {% include 'components/_scan_selector.html' %}
+
+  The PARENT form must supply the hidden identity fields (artist, album, …) and
+  the "Force" checkbox separately — those vary per page (artist page forces a
+  whole artist, album page forces one album), so they are deliberately not part
+  of this partial.
+
+  `scan_type` and `restart` are the field names the scan routes read; renaming
+  either here silently changes what every including page does.
+
+  Callers: pages/album_detail.html, pages/artist_detail_v2.html,
+  components/_hero.html.
+#}
+<select name="scan_type" class="form-select form-select-sm" style="min-width: 140px; width: auto;" title="Select scan type">
+    <option value="full">Full</option>
+    <option value="navidrome">Navidrome</option>
+    <option value="popularity">Popularity</option>
+    <option value="metadata">Metadata</option>
+    <option value="singles">Singles</option>
+    <option value="essentia">Essentia</option>
+</select>
+<label class="form-check form-check-inline mb-0 ms-1" title="Restart from the beginning (a plain restart skips recently-scanned items; with Force it re-scans everything)">
+  <input class="form-check-input" type="checkbox" name="restart" value="1">
+  <span class="form-check-label small">Restart</span>
+</label>

@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{#
+  Preview index — rendered by routes/preview_routes.py at /new.
+
+  Lives at the ROOT of New/templates (not in Pages/) because it belongs to the
+  preview blueprint rather than to any application route, and it is the one file
+  in this tree that will be deleted at cutover along with the blueprint.
+
+  It extends the NEW base.html — the blueprint's template_folder is
+  New/templates, so "base.html" resolves to the rebuilt shell. That is
+  deliberate: it is the fastest way to check the new shell renders at all.
+#}
+
+{% block title %}New UI Preview{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4" style="max-width: 1100px;">
+
+  <div class="alert alert-warning shadow-sm">
+    <h5 class="mb-2"><i class="bi bi-cone-striped me-2"></i>Preview of the rebuilt UI — not the live app</h5>
+    <p class="mb-2 small">
+      These pages come from <code>New/templates</code>, with assets served from
+      <code>New/static</code>. The live routes and templates are untouched, so the
+      normal app keeps working while you compare.
+    </p>
+    <p class="mb-0 small text-muted">
+      Templates: <code>{{ preview_templates_dir }}</code>
+    </p>
+  </div>
+
+  {# ── Previewable now ─────────────────────────────────────────────────── #}
+  <div class="card mb-4 shadow-sm">
+    <div class="card-header bg-transparent py-2">
+      <h5 class="mb-0 fw-bold">
+        <i class="bi bi-play-circle text-success me-2"></i>Previewable now
+        <span class="badge bg-success ms-2">{{ previewable|length }}</span>
+      </h5>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead>
+            <tr class="text-muted small text-uppercase">
+              <th>Page</th>
+              <th>Replaces</th>
+              <th>Why it works standalone</th>
+              <th class="text-end" style="width: 120px;">Open</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for slug, info in previewable.items() %}
+            <tr>
+              <td class="fw-semibold">{{ slug }}</td>
+              <td><code class="small">{{ info[0] }}</code></td>
+              <td class="small text-muted">{{ info[1] }}</td>
+              <td class="text-end">
+                <a href="{{ url_for('preview.preview_page', slug=slug) }}"
+                   class="btn btn-sm btn-outline-success" target="_blank" rel="noopener">
+                  <i class="bi bi-box-arrow-up-right"></i> Open
+                </a>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {# ── Needs its route's context ───────────────────────────────────────── #}
+  <div class="card mb-4 shadow-sm">
+    <div class="card-header bg-transparent py-2">
+      <h5 class="mb-0 fw-bold">
+        <i class="bi bi-hourglass-split text-warning me-2"></i>Needs its live route's context
+        <span class="badge bg-warning text-dark ms-2">{{ needs_context|length }}</span>
+      </h5>
+    </div>
+    <div class="card-body">
+      <p class="small text-muted mb-3">
+        These render from data the live route assembles. Rendering them here with
+        empty context would fail on the first unguarded expression and prove
+        nothing, so they are verified after the cutover — or by adding a context
+        shim to <code>_preview_context()</code> in <code>routes/preview_routes.py</code>.
+      </p>
+      <ul class="mb-0 small">
+        {% for slug, reason in needs_context.items() %}
+        <li><strong>{{ slug }}</strong> — {{ reason }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+
+  {# ── Drift check ─────────────────────────────────────────────────────── #}
+  {% if unknown %}
+  <div class="card mb-4 border-danger shadow-sm">
+    <div class="card-header bg-transparent py-2">
+      <h5 class="mb-0 fw-bold text-danger">
+        <i class="bi bi-exclamation-triangle me-2"></i>Unclassified pages in the New tree
+      </h5>
+    </div>
+    <div class="card-body">
+      <p class="small mb-2">
+        These files exist under <code>New/templates/Pages/</code> but are in neither
+        list above — either newly ported and not yet classified, or leftovers.
+        Add them to <code>PREVIEWABLE</code> or <code>NEEDS_CONTEXT</code> in
+        <code>routes/preview_routes.py</code>.
+      </p>
+      <ul class="mb-0 small">
+        {% for slug in unknown %}<li><code>{{ slug }}</code></li>{% endfor %}
+      </ul>
+    </div>
+  </div>
+  {% endif %}
+
+  <p class="small text-muted">
+    {{ discovered|length }} page file(s) found under <code>New/templates/Pages/</code>.
+    This index and the <code>/new</code> blueprint are temporary — delete both at
+    cutover (see <code>New/MIGRATION.md</code>).
+  </p>
+</div>
+{% endblock %}

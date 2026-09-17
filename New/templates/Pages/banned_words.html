@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Banned Search Words{% endblock %}
+{% block content %}
+{#
+  Banned Soulseek search words.
+
+  CHANGED FROM templates/pages/banned_words.html:
+    * the 79-line inline <script> moved to static/js/pages/banned-words.js
+    * the page's local escapeHtml is gone (utils/dom.js provides it)
+    * inline handlers → data-action, handled by ONE delegated listener on
+      document. The original bound a fresh listener to #bannedWordsList /
+      #suggestedWordsList inside loadWords(), which is called after every
+      action — so listeners accumulated on the same container and a single
+      click fired the handler once per reload. See that file's header.
+
+  The ids the script needs are unchanged: #newWordInput, #bannedWordsList,
+  #suggestedWordsList, #bannedCount, #suggestedCount.
+#}
+<div class="container mt-4">
+    <div class="d-flex align-items-center mb-3 gap-3">
+        <h4 class="mb-0"><i class="bi bi-slash-circle me-2"></i>Banned Search Words</h4>
+        <a href="/downloads/monitor" class="btn btn-sm btn-outline-secondary">
+            <i class="bi bi-arrow-left me-1"></i>Downloads Monitor
+        </a>
+    </div>
+    <p class="text-muted">
+        Words in this list are automatically removed from Soulseek search queries.
+        When a search returns 0 results, the words in that query are tracked as candidates.
+        You can manually ban or unban words below.
+    </p>
+
+    <!-- Add word manually -->
+    <div class="card mb-4">
+        <div class="card-header"><i class="bi bi-plus-circle me-1"></i>Add Word Manually</div>
+        <div class="card-body">
+            <div class="input-group" style="max-width: 400px;">
+                <input type="text" id="newWordInput" class="form-control" placeholder="Enter word to ban…">
+                <button type="button" class="btn btn-danger" data-action="banned-add">
+                    <i class="bi bi-slash-circle me-1"></i>Ban Word
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-slash-circle-fill me-1 text-danger"></i>Banned Words</span>
+            <span class="badge bg-danger" id="bannedCount">0</span>
+        </div>
+        <div class="card-body p-0">
+            <div id="bannedWordsList" class="p-3"><div class="text-muted text-center py-3">Loading…</div></div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-exclamation-triangle me-1 text-warning"></i>Suggested Words to Ban</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-warning text-dark" id="suggestedCount">0</span>
+                <button type="button" class="btn btn-sm btn-secondary" data-action="banned-dismiss-all">Dismiss All</button>
+            </div>
+        </div>
+        <div class="card-body p-0">
+            <div id="suggestedWordsList" class="p-3"><div class="text-muted text-center py-3">Loading…</div></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/*, ui/toast.js, ui/modal.js, ui/confirm.js and
+  ui/button-state.js. This page adds only its controller.
+
+    js/pages/banned-words.js   loadWords(), ban/unban/dismiss, and the
+                               delegated [data-action] handler
+#}
+<script src="{{ versioned_static('js/pages/banned-words.js') }}"></script>
+{% endblock %}
