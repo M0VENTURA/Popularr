@@ -237,6 +237,8 @@ def _album_top_genres(
         ("listenbrainz", "listenbrainz_genres"),
         ("spotify", "spotify_genres"),
         ("navidrome", "navidrome_genres"),
+        ("audiodb", "audiodb_genres"),
+        ("wikidata", "wikidata_genres"),
     ]
 
     for _at in album_tracks:
@@ -281,7 +283,8 @@ def _artist_dominant_genres(
             result = session.execute(
                 _text("""
                     SELECT musicbrainz_genres, discogs_genres, lastfm_tags,
-                           listenbrainz_genres, spotify_genres, navidrome_genres
+                           listenbrainz_genres, spotify_genres, navidrome_genres,
+                           audiodb_genres, wikidata_genres
                     FROM tracks
                     WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
                       AND (
@@ -291,6 +294,8 @@ def _artist_dominant_genres(
                         OR COALESCE(listenbrainz_genres::text, '') <> ''
                         OR COALESCE(spotify_genres::text, '') <> ''
                         OR COALESCE(navidrome_genres::text, '') <> ''
+                        OR COALESCE(audiodb_genres::text, '') <> ''
+                        OR COALESCE(wikidata_genres::text, '') <> ''
                       )
                     LIMIT 500
                 """),
@@ -385,6 +390,8 @@ _GENRE_SOURCE_COLUMNS = (
     "listenbrainz_genres",
     "spotify_genres",
     "lastfm_tags",
+    "audiodb_genres",
+    "wikidata_genres",
 )
 
 
@@ -1012,6 +1019,12 @@ def process_track(
             _genre_lookup_artist = _mb_meta.get("artist")
             _genre_lookup_title = _mb_meta.get("title")
             update_payload.update(_mb_meta.get("payload") or {})
+            
+        # Inherit new external genres from the album-level fetch
+        if album_context.get("audiodb_genres"):
+            update_payload["audiodb_genres"] = album_context["audiodb_genres"]
+        if album_context.get("wikidata_genres"):
+            update_payload["wikidata_genres"] = album_context["wikidata_genres"]
 
     # -------------------------------------------------------------------------
     # 1. POPULARITY
@@ -1244,9 +1257,6 @@ def process_track(
                                 update_payload["lastfm_listeners"] = lastfm_listeners
                                 update_payload["lastfm_playcount"] = lastfm_playcount
                                 update_payload["lastfm_last_updated"] = now_ts
-                            else:
-                                lastfm_listeners = 0
-                                lastfm_playcount = 0
                         except Exception:
                             lastfm_listeners = 0
                             lastfm_playcount = 0
@@ -1762,6 +1772,8 @@ def process_track(
                 ("listenbrainz_genres", "listenbrainz"),
                 ("spotify_genres", "spotify"),
                 ("navidrome_genres", "navidrome"),
+                ("audiodb_genres", "audiodb"),
+                ("wikidata_genres", "wikidata"),
             ]:
                 raw = effective_track.get(key) or track.get(key)
                 if raw:
@@ -1826,7 +1838,8 @@ def process_track(
     _jsonb_fields = [
         "musicbrainz_genres", "discogs_genres", "lastfm_tags",
         "listenbrainz_genres", "spotify_genres", "essentia_genres",
-        "manual_genres", "navidrome_genres", "single_sources", "writer"
+        "manual_genres", "navidrome_genres", "single_sources", "writer",
+        "audiodb_genres", "wikidata_genres"
     ]
     for _j_field in _jsonb_fields:
         _val = effective_track.get(_j_field)
