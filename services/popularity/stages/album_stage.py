@@ -995,6 +995,96 @@ def _fetch_musicbrainz_artist_id(artist: str) -> None:
         Logger.exception("[ENRICH] MusicBrainz artist ID lookup failed", error=_safe_error(exc), **context)
 
 
+def _fetch_external_genres(artist: str) -> dict[str, list[str]]:
+    """Retrieve robust genre data from TheAudioDB and Wikidata."""
+    context = {"artist": artist}
+    results: dict[str, list[str]] = {}
+
+    # 1. Fetch AudioDB Genres
+    try:
+        from api_clients.audiodb import get_audiodb_genres
+        adb_genres = _call_with_heartbeat(
+            "external_genres.audiodb",
+            get_audiodb_genres,
+            artist,
+            log_context=context,
+        )
+        if adb_genres:
+            results["audiodb_genres"] = adb_genres
+    except Exception as exc:
+        Logger.warning("[ENRICH] AudioDB genres failed", error=_safe_error(exc), **context)
+
+    # 2. Fetch Wikidata Genres
+    try:
+        artist_mbid: str | None = None
+        with _log_section("external_genres.wikidata.mbid_read", **context):
+            with db_session() as session:
+                row = session.execute(
+                    text(
+                        "SELECT NULLIF(TRIM(musicbrainz_artistid), '') AS mbid "
+                        "FROM tracks "
+                        "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
+                        "AND COALESCE(NULLIF(TRIM(musicbrainz_artistid), ''), '') <> '' "
+                        "LIMIT 1"
+                    ),
+                    {"artist": artist},
+                ).mappings().first()
+            if row:
+                artist_mbid = row_get(row, "mbid")
+
+        if artist_mbid:
+            from api_clients.wikidata import WikidataHttpClient
+            wd_client = WikidataHttpClient()
+            qid = _call_with_heartbeat(
+                "external_genres.wikidata.qid_lookup",
+                wd_client.get_qid_by_musicbrainz_id,
+                str(artist_mbid),
+                log_context=context,
+            )
+            if qid:
+                entity_data = _call_with_heartbeat(
+                    "external_genres.wikidata.entity_fetch",
+                    wd_client.get_entity,
+                    str(qid),
+                    log_context=context,
+                )
+                
+                genre_qids = []
+                claims = entity_data.get("claims", {})
+                if "P136" in claims:
+                    for statement in claims["P136"]:
+                        datavalue = statement.get("mainsnak", {}).get("datavalue", {})
+                        if datavalue.get("type") == "wikibase-entityid":
+                            genre_qids.append(datavalue.get("value", {}).get("id"))
+                
+                if genre_qids:
+                    genre_qids = [g for g in genre_qids if g]
+                    resolved_entities = _call_with_heartbeat(
+                        "external_genres.wikidata.label_resolve",
+                        wd_client.get_entities,
+                        genre_qids,
+                        log_context=context,
+                    )
+                    
+                    wikidata_genres = []
+                    for g_qid in genre_qids:
+                        g_ent = resolved_entities.get(g_qid, {})
+                        labels = g_ent.get("labels", {})
+                        en_label = labels.get("en", {}).get("value")
+                        if en_label:
+                            wikidata_genres.append(en_label)
+                    
+                    if wikidata_genres:
+                        results["wikidata_genres"] = wikidata_genres
+                        Logger.info("[ENRICH] Wikidata genres resolved", count=len(wikidata_genres), **context)
+        else:
+            Logger.info("[ENRICH] Wikidata genres skipped", reason="artist MBID unavailable", **context)
+    except Exception as exc:
+        Logger.warning("[ENRICH] Wikidata genres failed", error=_safe_error(exc), **context)
+
+    return results
+
+
 def _lookup_musicbrainz_album_type(artist: str, album: str) -> tuple[str | None, str | None]:
     clean_album = _sanitize_release_name(album)
     context = {"artist": artist, "album": album, "query_album": clean_album}
@@ -1776,6 +1866,7 @@ def enrich_album_extras(
         options,
         _get_discogs_token(),
     )
+    
     extra_context: dict[str, Any] = {}
     if metadata.get("country"):
         extra_context["artist_country"] = metadata["country"]
@@ -1783,6 +1874,14 @@ def enrich_album_extras(
         extra_context["similar_artists_lastfm"] = similar["lastfm"]
     if similar.get("listenbrainz"):
         extra_context["similar_artists_listenbrainz"] = similar["listenbrainz"]
+
+    # FETCH AND INJECT NEW GENRES HERE
+    external_genres = _fetch_external_genres(artist)
+    if external_genres.get("audiodb_genres"):
+        extra_context["audiodb_genres"] = external_genres["audiodb_genres"]
+    if external_genres.get("wikidata_genres"):
+        extra_context["wikidata_genres"] = external_genres["wikidata_genres"]
+
     return extra_context, similar, metadata
 
 
