@@ -264,7 +264,8 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "single_detection_last_updated": "TIMESTAMP", "single_manual_override": "BOOLEAN DEFAULT FALSE",
         "genres": "TEXT", "genre": "TEXT", "manual_genres": "JSONB", "navidrome_genres": "JSONB", 
         "spotify_genres": "JSONB", "listenbrainz_genres": "JSONB", "discogs_genres": "JSONB", 
-        "musicbrainz_genres": "JSONB", "essentia_genres": "JSONB",
+        "musicbrainz_genres": "JSONB", "essentia_genres": "JSONB", 
+        "audiodb_genres": "JSONB", "wikidata_genres": "JSONB", # <-- Added Here
         "mood": "TEXT", "mood_confidence": "DOUBLE PRECISION", "mood_source": "TEXT",
         "mood_last_updated": "TIMESTAMP", "danceability": "DOUBLE PRECISION",
         "bpm": "DOUBLE PRECISION", "essentia_last_updated": "TIMESTAMP", 
@@ -430,6 +431,9 @@ INDEXES_TO_ENSURE: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_tracks_mb_genres_gin ON tracks USING gin (musicbrainz_genres)",
     "CREATE INDEX IF NOT EXISTS idx_tracks_discogs_genres_gin ON tracks USING gin (discogs_genres)",
     "CREATE INDEX IF NOT EXISTS idx_tracks_lastfm_tags_gin ON tracks USING gin (lastfm_tags)",
+    # New JSONB GIN Indexes for fast querying
+    "CREATE INDEX IF NOT EXISTS idx_tracks_audiodb_genres_gin ON tracks USING gin (audiodb_genres)",
+    "CREATE INDEX IF NOT EXISTS idx_tracks_wikidata_genres_gin ON tracks USING gin (wikidata_genres)",
 )
 
 # =============================================================================
