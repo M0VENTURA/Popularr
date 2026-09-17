@@ -8,8 +8,10 @@ Key Responsibilities:
     - Conflict detection and removal (e.g., "electronic" vs "punk")
     - Weighted aggregation from multiple sources
     - Top-N genre selection based on source authority and cross-source agreement
+    - Dynamic 3rd genre inclusion for strong consensus
     - Rank-decay voting to penalize low-frequency meme tags
     - Native JSONB/string compatibility with robust scalar and delimiter parsing
+    - Preservation of filter-friendly tags (Live, Christmas, Acoustic, etc.)
 """
 
 from __future__ import annotations
@@ -82,15 +84,26 @@ _GENERIC_ROOT_PATTERNS: dict[str, re.Pattern[str]] = {
     root: re.compile(rf"\b{re.escape(root)}\b") for root in _GENERIC_ROOTS
 }
 
+# Tags that are stripped from the main "genre" voting pool, 
+# but safely appended at the end of the list for playlist filtering
+_FILTER_TAGS: frozenset[str] = frozenset({
+    "live", "acoustic", "unplugged", "remix", "remixed", 
+    "instrumental", "cover", "comedy", "orchestral", 
+    "symphonic", "soundtrack", "christmas", "holiday"
+})
+
+_ADMIN_GENRE_WORDS: frozenset[str] = frozenset({
+    "covers", "tribute", "tributes", "tribute band",
+    "live album", "live recordings", "rework", "reworked", 
+    "mashup", "mashups", "demo", "demos", "mixtape", "mixtapes",
+    "soundtracks", "score", "scores", "original soundtrack",
+    "karaoke", "instrumentals", "bootleg", "bootlegs", 
+    "unofficial", "promo", "promos", "sampler",
+})
+
 
 def _genre_synonyms() -> dict[str, str]:
-    """Live-reloaded genre synonym map.
-
-    Mirrors `_source_weight()`'s pattern below: re-read the config on every
-    call so a hot config reload takes effect immediately, falling back to
-    the module-level snapshot only if the live read fails (e.g. very early
-    at startup, before config is fully available).
-    """
+    """Live-reloaded genre synonym map."""
     try:
         return get_genre_synonyms() or {}
     except Exception:
@@ -101,17 +114,6 @@ def normalize_genre(genre: Any) -> str:
     value = str(genre or "").lower().strip()
     value = _BUILTIN_SYNONYMS.get(value, value)
     return _genre_synonyms().get(value, value)
-
-
-_ADMIN_GENRE_WORDS: frozenset[str] = frozenset({
-    "cover", "covers", "tribute", "tributes", "tribute band",
-    "live", "unplugged", "live album", "live recordings",
-    "remix", "remixes", "remixed", "rework", "reworked", "mashup", "mashups",
-    "demo", "demos", "mixtape", "mixtapes",
-    "soundtrack", "soundtracks", "score", "scores", "original soundtrack",
-    "karaoke", "instrumental", "instrumentals",
-    "bootleg", "bootlegs", "unofficial", "promo", "promos", "sampler",
-})
 
 
 def _strip_admin_genre_markers(value: str) -> str:
@@ -139,6 +141,9 @@ def is_admin_genre(genre: Any) -> bool:
     if not value:
         return True
     if value in _ADMIN_GENRE_WORDS:
+        return True
+    # Filter tags shouldn't participate in main voting pool
+    if value in _FILTER_TAGS: 
         return True
     return False
 
@@ -359,18 +364,30 @@ def _vote_genres(
     source_map: dict[str, Any] | None,
     *,
     extra_votes: dict[str, tuple[float, str]] | None = None,
-) -> tuple[dict[str, float], dict[str, list[tuple[float, str]]], dict[str, set[str]]]:
+) -> tuple[dict[str, float], dict[str, list[tuple[float, str]]], dict[str, set[str]], set[str]]:
+    """Returns votes, spellings, source_hits, and any intercepted _FILTER_TAGS."""
     votes: dict[str, float] = defaultdict(float)
     spellings: dict[str, list[tuple[float, str]]] = defaultdict(list)
     source_hits: dict[str, set[str]] = defaultdict(set)
+    intercepted_filters: set[str] = set()
 
     for source, raw_genres in (source_map or {}).items():
         base_weight = _source_weight(source)
         genres = _parse_genre_input(raw_genres)
 
         for rank, genre in enumerate(genres or []):
+            lower_g = genre.strip().lower()
+            
+            # Intercept filter tags before junk/admin validation strips them
+            if lower_g in _FILTER_TAGS or _strip_admin_genre_markers(lower_g) in _FILTER_TAGS:
+                # Resolve specifically if it matches our clean set
+                matched_filter = next((f for f in _FILTER_TAGS if f in lower_g), None)
+                if matched_filter:
+                    intercepted_filters.add(matched_filter.title())
+
             if is_junk_genre(genre) or is_admin_genre(genre):
                 continue
+                
             key = normalize_genre_for_vote(genre)
             if not key:
                 continue
@@ -413,7 +430,7 @@ def _vote_genres(
         del spellings[k]
         del source_hits[k]
 
-    return votes, spellings, source_hits
+    return votes, spellings, source_hits, intercepted_filters
 
 
 def _context_boost_votes(context_title: str, context_album: str) -> dict[str, tuple[float, str]]:
@@ -459,27 +476,55 @@ def _rank_genres(
 
     display_names = [_resolve_display_name(k, spellings) for k in qualified]
     cleaned = clean_conflicting_genres(display_names)
-    final_list = cleaned[:max_genres]
+    
+    # -----------------------------------------------------------------
+    # DYNAMIC 3RD GENRE INCLUSION
+    # -----------------------------------------------------------------
+    if len(cleaned) > max_genres and max_genres >= 2:
+        # Check if the genre just outside the cutoff (e.g. rank #3) is strongly corroborated
+        runner_up_key = normalize_genre_for_vote(cleaned[max_genres])
+        runner_up_weight = votes.get(runner_up_key, 0.0)
+        runner_up_hits = len(source_hits.get(runner_up_key, set()))
+        
+        # Compare against the weakest included genre (e.g. rank #2)
+        borderline_key = normalize_genre_for_vote(cleaned[max_genres - 1])
+        borderline_weight = votes.get(borderline_key, 0.0)
+        
+        # Rule: If it appears in at least 2 sources and has >= 60% of the weight of #2, include it!
+        if runner_up_hits >= 2 and borderline_weight > 0 and (runner_up_weight / borderline_weight) >= 0.60:
+            logger.debug(f"Promoted strong runner-up genre '{cleaned[max_genres]}' past the cutoff")
+            return cleaned[:max_genres + 1]
 
-    # Cleaned up log: avoids dumping massive mathematical vote maps to the log
+    final_list = cleaned[:max_genres]
     logger.debug("Genre ranking complete", final_genres=final_list)
 
     return final_list
 
 
-def _append_extra_genres(genres: list[str], title: str, album: str) -> list[str]:
+def _append_extra_genres(genres: list[str], title: str, album: str, intercepted_filters: set[str] = None) -> list[str]:
     title_lower = str(title or "").lower()
     context_lower = f"{title or ''} {album or ''}".lower()
     
+    # Base heuristic checks
     if bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", title_lower)) or \
        any(re.search(p, context_lower) for p in [r"\bconcert\b", r"\bat\s+\w+\s+(arena|stadium|hall|club|theatre|theater)"]):
-        if not any(g.lower() == "live" for g in genres):
-            genres.append("Live")
+        if intercepted_filters is not None:
+            intercepted_filters.add("Live")
             
     if re.search(r"\b(cover|tribute)\b", context_lower):
-        if not any(g.lower() == "cover" for g in genres):
-            genres.append("Cover")
+        if intercepted_filters is not None:
+            intercepted_filters.add("Cover")
             
+    if "remaster" in title_lower or "remaster" in context_lower:
+        if intercepted_filters is not None:
+            intercepted_filters.add("Remaster")
+
+    # Append all safely intercepted filter tags
+    existing_lower = {g.lower() for g in genres}
+    for f_tag in (intercepted_filters or []):
+        if f_tag.lower() not in existing_lower:
+            genres.append(f_tag)
+
     return genres
 
 
@@ -490,13 +535,13 @@ def aggregate_genres(
     context_album: str = "",
     nav_genres: Any = None,
 ) -> list[str]:
-    votes, spellings, source_hits = _vote_genres(
+    votes, spellings, source_hits, intercepted_filters = _vote_genres(
         source_map,
         extra_votes=_context_boost_votes(context_title, context_album),
     )
     nav_keys = _normalize_nav_keys(nav_genres)
     top_genres = _rank_genres(votes, spellings, source_hits, max_genres=max_genres, nav_keys=nav_keys)
-    return _append_extra_genres(top_genres, context_title, context_album)
+    return _append_extra_genres(top_genres, context_title, context_album, intercepted_filters)
 
 
 def get_top_genres_with_navidrome(
@@ -505,13 +550,13 @@ def get_top_genres_with_navidrome(
     title: str = "",
     album: str = "",
 ) -> tuple[list[str], list[str]]:
-    votes, spellings, source_hits = _vote_genres(
+    votes, spellings, source_hits, intercepted_filters = _vote_genres(
         sources,
         extra_votes=_context_boost_votes(title, album),
     )
     nav_keys = _normalize_nav_keys(nav_genres)
     online_top = _rank_genres(votes, spellings, source_hits, max_genres=2, nav_keys=nav_keys)
-    online_top = _append_extra_genres(online_top, title, album)
+    online_top = _append_extra_genres(online_top, title, album, intercepted_filters)
 
     nav_cleaned = sorted({
         normalize_genre(g).capitalize()
@@ -529,13 +574,13 @@ def rank_genres_with_local_tags(
     *,
     max_genres: int = 2,
 ) -> list[str]:
-    votes, spellings, source_hits = _vote_genres(
+    votes, spellings, source_hits, intercepted_filters = _vote_genres(
         sources,
         extra_votes=_context_boost_votes(title, album),
     )
     nav_keys = _normalize_nav_keys(nav_genres)
     top_genres = _rank_genres(votes, spellings, source_hits, max_genres=max_genres, nav_keys=nav_keys)
-    return _append_extra_genres(top_genres, title, album)
+    return _append_extra_genres(top_genres, title, album, intercepted_filters)
 
 
 def update_get_top_genres_with_navidrome(
@@ -553,7 +598,7 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
             text("""
                 SELECT lastfm_tags, musicbrainz_genres, discogs_genres,
                        listenbrainz_genres, spotify_genres, essentia_genres,
-                       manual_genres, navidrome_genres
+                       manual_genres, navidrome_genres, audiodb_genres, wikidata_genres
                 FROM tracks 
                 WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist 
                   AND album = :album
@@ -572,6 +617,8 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
         ("essentia", 5),
         ("manual", 6),
         ("navidrome", 7),
+        ("audiodb", 8),
+        ("wikidata", 9),
     ]
 
     for row in rows:
