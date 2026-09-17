@@ -137,22 +137,19 @@ def get_track_genre_sources(track_dict: dict[str, Any]) -> dict[str, list[dict[s
     """Extract all genre/tag sources from a single track dictionary."""
     sources: dict[str, list[dict[str, Any]]] = {}
 
-    # JSON array sources
     for key in ("lastfm_tags", "listenbrainz_genres", "discogs_genres",
-                "musicbrainz_genres", "spotify_genres"):
+                "musicbrainz_genres", "spotify_genres", "audiodb_genres", "wikidata_genres"):
         if track_dict.get(key):
             parsed = parse_json_tags(track_dict[key])
             if parsed:
                 sources[key] = parsed
 
-    # Comma-separated sources (Added "genres" here)
     for key in ("genres", "essentia_genres", "navidrome_genres", "manual_genres"):
         if track_dict.get(key):
             parsed = parse_delimited_tags(track_dict[key])
             if parsed:
                 sources[key] = parsed
 
-    # Moods
     if track_dict.get("mood"):
         moods = parse_mood_values(track_dict["mood"])
         if moods:
