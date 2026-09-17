@@ -1,0 +1,705 @@
+/* ==========================================================================
+   Popularr — Global Application Styles
+   Loaded from base.html on every page.
+
+   Theme: Spotify-derived dark palette. --accent-color / --spotify-green
+   IS the Spotify brand green (#1db954) and remains the single source for
+   every "primary action" surface (buttons, active states, links, focus
+   rings). Brand tokens for OTHER services (Last.fm, Discogs, MusicBrainz,
+   ListenBrainz, Navidrome, Essentia, Wikipedia) are kept separate from
+   semantic status tokens (failed/queued/complete/etc.) — conflating the
+   two is what caused the colour drift documented throughout this file.
+   ========================================================================== */
+
+/* ── Theme Tokens ────────────────────────────────────────────────────────── */
+:root {
+    /* Surface colors */
+    --primary-bg: #121212;
+    --secondary-bg: #1e1e1e;
+    --tertiary-bg: #282828;
+    --border-color: #282828;
+
+    /* Accent colors (Spotify green heritage) — the ONE primary-action colour */
+    --accent-color: #1db954;
+    --accent-hover: #1ed760;
+    --accent-rgb: 29, 185, 84;
+    --spotify-green: var(--accent-color);
+    --spotify-green-hover: var(--accent-hover);
+
+    /* Text tones */
+    --text-primary: #ffffff;
+    --text-secondary: #d0d0d0;
+    --text-tertiary: #a0a0a0;
+    --text-main: var(--text-primary);
+    --text-muted: var(--text-secondary);
+
+    /* Brand & Source Colors — identity only. Never reused for a semantic
+       meaning (status, primary action, etc.) — see --accent-info below for
+       why that matters. */
+    --brand-spotify: #1db954;
+    --brand-lastfm: #d51007;
+    --brand-listenbrainz: #0066ff;
+    --brand-discogs: #6c757d;
+    --brand-essentia: #6f42c1;
+    --brand-navidrome: #17a589;
+    --brand-musicbrainz: #eb743b;
+    --brand-wikipedia: #7887a0;
+    --brand-mood: #f59c00;
+
+    /* Status Colors — queue/scan state, independent of any brand */
+    --status-failed: #f87171;
+    --status-downloading: #60a5fa;
+    --status-queued: #facc15;
+    --status-complete: #4ade80;
+    --status-pending: #94a3b8;
+    --status-info: #3498db;
+    --status-warning: #ff6b00;
+    --status-danger: #e74c3c;
+
+    /* Interactive cyan accent — consolidates what used to be THREE separate
+       near-cyans in this file: .btn-outline-info borrowed --brand-listenbrainz
+       (#0dcaf0, not ListenBrainz's real brand colour #0066ff, restored
+       above), while the MusicBrainz search component hardcoded a THIRD value
+       (#22d3ee) for the same "cyan interactive" meaning. One token now. */
+    --accent-info: #22d3ee;
+
+    /* Layout metrics
+       --------------------------------------------------------------------
+       --navbar-height is the SINGLE source of truth for how far the fixed
+       navbar pushes content down. It was previously declared 68px here,
+       defaulted to 112px in dashboard.css, and hard-coded as 6rem (96px)
+       inline in base.html — three different numbers for one measurement,
+       which is why the flyout floated and content sat under the navbar.
+
+       The navbar is `flex-wrap`, so its real height changes when the
+       search row wraps. The per-breakpoint values below track that.
+       main.js's syncNavbarHeight() measures the real element and
+       overwrites this var at runtime; every consumer follows automatically.
+       -------------------------------------------------------------------- */
+    --navbar-height: 68px;
+    --player-bar-height: 64px;
+    --status-bar-height: 2.4rem;
+    --footer-stack-height: var(--status-bar-height);
+
+    /* Z-index scale — declared in one place so the stacking order is
+       auditable. Bootstrap's fixed-top navbar sits at 1030. */
+    --z-dropdown: 1040;
+    --z-search-flyout: 1035;
+    --z-navbar: 1030;
+    --z-player-bar: 1029;
+    --z-search-backdrop: 1028;
+}
+
+/* The navbar wraps its search row below the lg breakpoint, making it
+   taller. Without these, main content is pushed too far down on desktop
+   and not far enough on mobile. */
+@media (max-width: 991.98px) {
+    :root { --navbar-height: 112px; }
+}
+@media (max-width: 575.98px) {
+    :root { --navbar-height: 104px; }
+}
+
+/* ── App Shell & Base Rules ──────────────────────────────────────────────── */
+* { color-scheme: dark; }
+
+html, body {
+    height: 100%;
+    background-color: var(--primary-bg) !important;
+}
+
+body {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    overflow: hidden; /* Page scrolling lives inside main */
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Helvetica Neue", sans-serif;
+
+    &.player-visible {
+        --footer-stack-height: calc(var(--status-bar-height) + var(--player-bar-height));
+    }
+}
+
+main.container-fluid {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: calc(var(--navbar-height) + 0.75rem) 0.75rem 1rem 0.75rem;
+}
+
+/* ── Navbar Layout ───────────────────────────────────────────────────────────
+   Moved out of the inline <style> block in base.html. These rules control
+   whether the navbar's search row wraps onto its own line, which is what
+   makes the navbar taller below the lg breakpoint — so they belong next to
+   the --navbar-height values above rather than in a separate file where a
+   change to one could silently invalidate the other.
+   ------------------------------------------------------------------------- */
+.nav-brand-row      { flex: 1 1 100%; order: 1; }
+.nav-search-wrapper { flex: 1 1 100%; order: 3; margin-top: 0.5rem; }
+.nav-links-wrapper  { order: 4; width: 100%; }
+
+@media (min-width: 992px) {
+    .nav-brand-row      { flex: 0 0 auto !important; width: auto; }
+    .nav-search-wrapper { flex: 0 1 320px; margin-top: 0; margin-left: 1rem; margin-right: 1rem; order: 2; }
+    .nav-links-wrapper  { flex: 0 0 auto; width: auto; order: 3; }
+}
+
+/* The global modal wrappers in base.html are direct children of <body>,
+   which is a flex column. Their contents are position:fixed modals, so the
+   wrappers themselves would sit in the flex flow as zero-height items.
+   `display: contents` removes them from the layout entirely while keeping
+   their children in the DOM. */
+#global-mb-search-container,
+#global-unified-search-container {
+    display: contents;
+}
+
+p, div, span, label, h1, h2, h3, h4, h5, h6, li, td, th, strong, b { color: var(--text-primary); }
+
+a:not(.btn) {
+    color: var(--spotify-green);
+    &:hover { color: var(--spotify-green-hover); }
+}
+
+/* Keep the fixed navbar on the documented rung of the z-scale. */
+.navbar.fixed-top { z-index: var(--z-navbar); }
+
+/* ── Global Header Search Flyout ─────────────────────────────────────────── */
+.search-flyout {
+    position: fixed;
+    inset: var(--navbar-height) 0 auto 0;
+    z-index: var(--z-search-flyout);
+    background: var(--secondary-bg);
+    border-bottom: 1px solid var(--border-color);
+    box-shadow: 0 10px 30px color-mix(in srgb, black 50%, transparent);
+    max-height: calc(100dvh - var(--navbar-height) - 8px);
+    overflow-y: auto;
+}
+
+.search-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-search-backdrop);
+    background: color-mix(in srgb, black 55%, transparent);
+}
+
+/* ── Cards, Tables & Components ──────────────────────────────────────────── */
+.card, .card-body, .card-header, .table, .table th, .table td {
+    background-color: var(--secondary-bg) !important;
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
+
+.card {
+    border-radius: 0.75rem;
+    box-shadow: 0 4px 6px -1px color-mix(in srgb, black 30%, transparent);
+    border: 1px solid color-mix(in srgb, white 5%, transparent);
+
+    .card-header {
+        background-color: var(--tertiary-bg);
+        border-bottom: 1px solid var(--border-color);
+    }
+}
+
+.progress {
+    height: 4px !important;
+    border-radius: 999px;
+    background-color: color-mix(in srgb, white 10%, transparent) !important;
+}
+
+.album-art-container {
+    width: min(200px, 50vw);
+    aspect-ratio: 1;
+    border-radius: 0.5rem;
+    overflow: hidden;
+    background-color: var(--tertiary-bg);
+    border: 2px solid var(--border-color);
+}
+
+.album-art-sm {
+    width: 80px;
+    height: 80px;
+    border-radius: 0.35rem;
+    object-fit: cover;
+    border: 1px solid var(--border-color);
+    background-color: var(--tertiary-bg);
+}
+
+@media (min-width: 768px) {
+    .table-hover tbody tr {
+        transition: background-color 0.15s ease-in-out;
+        &:hover { background-color: color-mix(in srgb, white 5%, transparent) !important; }
+    }
+}
+
+/* ── Mobile: Tables → Stacked Cards (data-mobile-cards) ──────────────────── */
+@media (max-width: 767.98px) {
+    table[data-mobile-cards] {
+        &, tbody, tr, td { display: block; width: 100%; }
+
+        /* Zeroed on all four box-model properties: display:none alone is
+           normally enough, but a UA or Bootstrap rule that puts a border on
+           <thead> can still reserve space in some engines. */
+        thead {
+            display: none !important;
+            border: none !important;
+            padding: 0 !important;
+            margin: 0 !important;
+        }
+
+        tr {
+            background-color: var(--secondary-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            margin-bottom: 1rem;
+            padding: 0.5rem;
+        }
+
+        /* Target direct cells to prevent breaking nested tables inside modals */
+        > tbody > tr > td {
+            border: none !important;
+            padding: 0.4rem 0.5rem !important;
+            text-align: left !important;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+
+            &.text-center { justify-content: flex-end; }
+
+            &[data-label]::before {
+                content: attr(data-label);
+                font-weight: 600;
+                color: var(--text-muted);
+                margin-right: 0.5rem;
+                flex-shrink: 0;
+            }
+
+            /* A cell with no data-label would otherwise render a stray gap
+               where the label pseudo-element should be. Collapsing it keeps
+               rows tidy on tables that have not had data-label added to
+               every <td> yet. */
+            &:empty::before, &:not([data-label])::before { content: none; }
+        }
+    }
+}
+
+/* ── UI Elements & Badges ────────────────────────────────────────────────── */
+.extra-small { font-size: 0.72rem; }
+.min-w-0 { min-width: 0; }
+.hover-bg-dark:hover { background-color: var(--tertiary-bg); }
+
+::placeholder { color: var(--text-secondary) !important; opacity: 1 !important; }
+
+input, select, textarea {
+    color: var(--text-primary);
+    background-color: var(--secondary-bg);
+    border-color: var(--border-color);
+
+    &:focus {
+        background-color: var(--tertiary-bg);
+        border-color: var(--spotify-green);
+        box-shadow: 0 0 0 0.2rem color-mix(in srgb, var(--spotify-green) 25%, transparent);
+    }
+}
+
+/* Fixed-size checkboxes for toolbars.
+   ACTIVELY USED: artist_detail.html's Scan Artist form renders
+   `<input class="form-check-input" name="force" id="artistForceScan">`.
+   Without this it falls back to Bootstrap's default sizing and stops
+   lining up with its label in the toolbar row. */
+.scan-toolbar .form-check-input,
+form .form-check-input[name="force"] {
+    width: 1.25rem;
+    height: 1.25rem;
+    margin-top: 0;
+    flex-shrink: 0;
+    cursor: pointer;
+}
+
+.scan-toolbar .form-check-label,
+form .form-check-input[name="force"] + .form-check-label {
+    font-size: 0.85rem;
+    line-height: 1.25rem;
+    cursor: pointer;
+    user-select: none;
+}
+
+/* Buttons */
+.btn-primary {
+    background-color: var(--spotify-green); border-color: var(--spotify-green); color: #000; font-weight: 600;
+    &:hover { background-color: var(--spotify-green-hover); border-color: var(--spotify-green-hover); }
+}
+.btn-outline-primary {
+    color: var(--spotify-green); border-color: var(--spotify-green); background-color: transparent;
+    &:hover { background-color: var(--spotify-green); color: #000; }
+}
+.btn-outline-info {
+    color: var(--accent-info); border-color: var(--accent-info);
+    background-color: color-mix(in srgb, var(--accent-info) 10%, transparent);
+    &:hover { color: #000; background-color: var(--accent-info); border-color: var(--accent-info); }
+}
+.btn-outline-secondary {
+    color: var(--text-tertiary); border-color: var(--border-color);
+    background-color: color-mix(in srgb, white 4%, transparent);
+    &:hover { color: var(--text-primary); background-color: var(--tertiary-bg); border-color: var(--text-tertiary); }
+}
+.btn-secondary { background-color: var(--tertiary-bg); border-color: var(--border-color); color: var(--text-primary); }
+.btn-warning { background-color: var(--status-warning); border-color: var(--status-warning); color: #fff; font-weight: 600; }
+
+/* Alerts & Badges */
+.alert {
+    background-color: var(--secondary-bg); border: 1px solid var(--border-color);
+    &.alert-info { border-left: 4px solid var(--spotify-green); }
+    &.alert-warning { border-left: 4px solid var(--status-warning); }
+    &.alert-danger { border-left: 4px solid var(--status-danger); }
+}
+
+.badge-success { background-color: color-mix(in srgb, var(--spotify-green) 25%, transparent); color: var(--spotify-green); border-color: var(--spotify-green); }
+.bg-success { background-color: var(--spotify-green) !important; color: #000 !important; }
+.bg-danger { background-color: var(--status-danger) !important; color: #fff !important; }
+.bg-info { background-color: var(--status-info) !important; }
+
+/* Scraper Source Key Badge — rendered by services/upcoming-releases.js and
+   pages/dashboard.js for Wikipedia-scraped rows carrying a source_key. */
+.source-key-badge {
+    display: inline-block;
+    padding: 0 0.5rem;
+    font-size: 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    line-height: 1.5;
+    color: #c4b5fd;
+    background: color-mix(in srgb, #581c87 55%, transparent);
+    border: 1px solid color-mix(in srgb, #a855f7 45%, transparent);
+    border-radius: 0.25rem;
+    white-space: nowrap;
+}
+
+/* Genre Chips — rendered by services/genres.js. Replaces the old
+   `badge-outline-primary`, which did not exist in Bootstrap or here, and
+   the inline Bootstrap-blue styles that used to compensate for it. */
+.genre-chip {
+    border: 1px solid var(--accent-color);
+    background-color: transparent;
+    color: var(--accent-color);
+    font-weight: 500;
+    font-size: 0.95rem;
+    padding: 0.45rem 0.65rem;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color 0.15s ease, color 0.15s ease;
+
+    &:hover { background-color: color-mix(in srgb, var(--accent-color) 15%, transparent); }
+    &.selected { background-color: var(--accent-color); color: #000; }
+    &:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 2px; }
+}
+
+/* ── Custom Component Overrides ──────────────────────────────────────────── */
+.modal-content { background-color: var(--secondary-bg); border: 1px solid var(--border-color); }
+.modal-header { border-bottom: 1px solid var(--border-color); background-color: var(--tertiary-bg); }
+.modal-footer { border-top: 1px solid var(--border-color); background-color: var(--tertiary-bg); }
+.btn-close { filter: invert(1); }
+
+/* Dropdown menus were pinned at 1020 — BELOW the fixed navbar (1030), the
+   player bar and the search backdrop — so any menu opening near the top or
+   bottom of the viewport rendered behind them and appeared to "not open".
+   1040 places them above the whole app-shell chrome. */
+.dropdown-menu {
+    background-color: var(--secondary-bg) !important;
+    border-color: var(--border-color) !important;
+    z-index: var(--z-dropdown) !important;
+}
+.dropdown-item {
+    color: var(--text-primary) !important; background-color: var(--secondary-bg) !important;
+    &:hover { background-color: var(--tertiary-bg) !important; color: var(--spotify-green) !important; }
+}
+
+/* A dropdown inside a Bootstrap modal must clear the modal itself (1055). */
+.modal .dropdown-menu { z-index: 1060 !important; }
+
+/* Prevent clipping on cards that host dropdowns */
+.card:has(.dropdown), .card:has(.dropdown-menu), .card-body:has(.dropdown) { overflow: visible !important; }
+
+/* Nav Tabs & Accordions */
+.nav-tabs {
+    border-bottom-color: var(--border-color);
+    .nav-link {
+        color: var(--text-secondary); border-color: transparent;
+        &:hover { border-color: var(--border-color); color: var(--text-primary); }
+        &.active { background-color: var(--secondary-bg); border-color: var(--border-color) var(--border-color) var(--secondary-bg); color: var(--spotify-green); }
+    }
+}
+
+/* Nav Pills.
+   `.nav-pills .nav-link.active` used to be the ONLY .nav-pills rule in the
+   codebase — compare the four .nav-tabs rules above (container, resting,
+   hover, active). With no colour set on a non-active pill, it fell through
+   to Bootstrap's default link blue. The clearest victim is
+   artist_detail.html's sticky section nav (Overview / Stats / Similar /
+   Top Tracks / Genres and Moods / Albums / Covers / Appears On) — those are
+   anchor links that never receive `.active`, so all eight rendered blue on
+   every artist page with no code path able to colour them. */
+.nav-pills {
+    .nav-link {
+        color: var(--text-secondary);
+        background-color: transparent;
+        border: 1px solid transparent;
+        transition: color 0.15s ease, background-color 0.15s ease;
+
+        &:hover { color: var(--text-primary); background-color: var(--tertiary-bg); }
+
+        /* Bootstrap's default focus ring is the same blue this file exists
+           to remove. */
+        &:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; box-shadow: none; }
+
+        &.disabled, &:disabled {
+            color: var(--text-tertiary);
+            background-color: transparent;
+            opacity: 0.55;
+            pointer-events: none;
+        }
+    }
+
+    .nav-link.active,
+    .show > .nav-link {
+        background-color: var(--spotify-green) !important;
+        color: #000 !important;
+        border-color: var(--spotify-green);
+    }
+
+    /* Without this the plain :hover above would grey out an ACTIVE pill,
+       since .active only wins on background via !important. */
+    .nav-link.active:hover {
+        background-color: var(--accent-hover) !important;
+        color: #000 !important;
+    }
+
+    /* A green focus ring would vanish into the active pill's own green
+       fill, so it inverts to a light ring in that state. */
+    .nav-link.active:focus-visible { outline-color: var(--text-primary); }
+}
+
+/* Opt-in segmented-control look: add `nav-segmented` alongside `nav-pills`
+   on the container (`<ul class="nav nav-pills nav-segmented">`) instead of
+   putting Bootstrap's `bg-secondary` on it directly — that grey (#6c757d)
+   is lighter than every surface token in this theme and reads as a pale
+   band rather than a recessed track. */
+.nav-pills.nav-segmented {
+    background-color: var(--primary-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 0.25rem;
+    gap: 0.25rem;
+
+    .nav-link {
+        border-radius: 0.375rem;
+        text-align: center;
+        flex: 1 1 0;
+        min-height: 40px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.4rem;
+    }
+}
+
+.accordion-button {
+    background-color: var(--secondary-bg) !important; color: var(--text-primary) !important; border-color: var(--border-color) !important;
+    &:not(.collapsed) { background-color: var(--tertiary-bg) !important; color: var(--spotify-green) !important; }
+}
+
+/* ── Artist/Album Details ────────────────────────────────────────────────── */
+.hero-card {
+    background-color: var(--secondary-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+
+    .btn-success.btn-lg {
+        background-color: var(--accent-color);
+        border-color: var(--accent-color);
+        color: #000;
+        letter-spacing: 0.5px;
+    }
+}
+
+.hero-avatar-wrap {
+    position: relative; display: inline-block; cursor: pointer;
+    .hero-avatar-overlay { position: absolute; inset: 0; background: color-mix(in srgb, black 55%, transparent); opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+    &:hover .hero-avatar-overlay { opacity: 1; }
+}
+
+.artist-similar-card {
+    border: 1px solid var(--border-color); background-color: var(--secondary-bg);
+    &:hover { border-color: var(--accent-color); }
+}
+
+.artist-member-former { background-color: transparent; border: 1px solid var(--border-color); color: var(--text-secondary); opacity: 0.7; }
+
+/* Brand Source Badges */
+.badge-source-spotify { background-color: var(--brand-spotify) !important; color: #fff !important; }
+.badge-source-lastfm { background-color: var(--brand-lastfm) !important; color: #fff !important; }
+.badge-source-musicbrainz { background-color: var(--brand-musicbrainz) !important; color: #fff !important; }
+.badge-source-discogs { background-color: var(--brand-discogs) !important; color: #fff !important; }
+.badge-source-listenbrainz { background-color: var(--brand-listenbrainz) !important; color: #fff !important; }
+
+/* ── Shared MusicBrainz Search Component ─────────────────────────────────── */
+.mb-search-form {
+    margin-bottom: 0.75rem;
+    .form-control:focus, .form-select:focus {
+        border-color: var(--accent-info);
+        box-shadow: 0 0 0 0.2rem color-mix(in srgb, var(--accent-info) 12%, transparent);
+    }
+}
+.mb-results-container {
+    max-height: 60vh; overflow-y: auto; overflow-x: hidden;
+    .card {
+        transition: border-color 0.15s ease;
+        &:hover { border-color: var(--accent-info); }
+    }
+}
+.mb-select-btn {
+    border-color: var(--border-color); color: var(--text-tertiary);
+    &:hover, &:focus { border-color: var(--accent-info); color: var(--accent-info); }
+}
+
+/* ── Mobile Overrides & Media Queries ─────────────────────────────────────── */
+@media (max-width: 576px) {
+    main.container-fluid { padding-bottom: 0.75rem; }
+    .card { margin-bottom: 0.75rem; }
+    /* App-wide touch target. artist.css's mobile btn-group sizing and the
+       artist page's action-button row both assume this is set globally —
+       do not re-fork it into a page stylesheet. */
+    .btn { min-height: 44px; }
+}
+
+@media (max-width: 991.98px) {
+    .navbar-nav { flex-direction: column !important; width: 100%; }
+    .navbar-nav .nav-link { padding: 0.875rem 1.25rem !important; min-height: 48px; }
+    .navbar-collapse.show { max-height: calc(100dvh - var(--navbar-height) - 0.5rem); overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    [data-mobile-tab], [data-mobile-group], [data-album-group] { display: none !important; }
+    [data-mobile-tab].mobile-tab-active, [data-mobile-group].mobile-tab-active, [data-album-group].album-mobile-active { display: block !important; }
+}
+@media (min-width: 992px) {
+    [data-mobile-tab], [data-mobile-group], [data-album-group] { display: block !important; }
+}
+
+/* ── Footer App Shell Stacks (Log bar / Player) ──────────────────────────── */
+#scanStatusBar {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    height: var(--status-bar-height);
+    padding: 0.25rem 0.75rem;
+    background: color-mix(in srgb, #121212 97%, transparent);
+    border-top: 1px solid var(--border-color);
+    backdrop-filter: blur(10px);
+    cursor: pointer;
+    font-size: 0.8rem;
+    box-shadow: 0 -4px 16px color-mix(in srgb, black 40%, transparent);
+
+    &:hover { background: color-mix(in srgb, #1e1e1e 97%, transparent); }
+    .scan-status-idle { color: var(--text-tertiary); }
+    .scan-status-active { color: var(--spotify-green); animation: scan-status-pulse 1.6s ease-in-out infinite; }
+    .scan-status-open {
+        margin-left: auto; display: inline-flex; align-items: center; gap: 0.3rem;
+        color: var(--text-secondary); border: 1px solid var(--border-color);
+        border-radius: 999px; padding: 0.1rem 0.6rem; font-size: 0.75rem;
+    }
+}
+
+.scan-queue-summary {
+    display: inline-flex; align-items: center; gap: 0.25rem; color: var(--text-secondary);
+    font-size: 0.8rem; white-space: nowrap; padding-right: 0.75rem; border-right: 1px solid var(--border-color);
+    & + #scanStatusLine { padding-left: 0.75rem; }
+}
+
+@keyframes scan-status-pulse { 50% { opacity: 0.45; } }
+
+/* The player bar is a FLEX FOOTER ITEM of <body>, not an overlay — that is
+   what makes `body.player-visible { --footer-stack-height: ... }` correct
+   and keeps the bar from covering content. base.html previously forced
+   `position: fixed` inline, which detached it from the flex column and made
+   the footer-stack maths wrong.
+   `relative`, NOT `static`: #playerQueuePanel below is
+   `position: absolute; bottom: 100%`, so it needs this element to remain a
+   positioning context. Under `static` the Up Next panel would resolve
+   against the initial containing block and fly to the top of the viewport. */
+#globalPlayerBar {
+    flex-shrink: 0;
+    position: relative;
+    z-index: var(--z-player-bar);
+}
+
+#playerQueuePanel {
+    position: absolute; left: 0; right: 0; bottom: 100%; max-width: 480px; margin: 0 auto;
+    background: color-mix(in srgb, #121212 97%, transparent);
+    border-top: 1px solid var(--border-color); border-radius: 0.5rem 0.5rem 0 0; padding: 0.5rem 1rem;
+    box-shadow: 0 -8px 24px color-mix(in srgb, black 50%, transparent); backdrop-filter: blur(10px);
+}
+
+#playerQueueList .player-queue-row {
+    display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0.5rem; border-radius: 0.35rem; cursor: pointer; font-size: 0.8rem;
+    &:hover { background: color-mix(in srgb, white 5%, transparent); }
+    &.active { background: color-mix(in srgb, #22c55e 12%, transparent); color: var(--spotify-green); }
+}
+
+/* ── Unified Search Layout Overrides ─────────────────────────────────────── */
+.us-results { max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; }
+.us-section-title { font-size: 0.82rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.4px; border-bottom: 1px solid var(--border-color); padding-bottom: 0.35rem; margin: 0.9rem 0 0.45rem; }
+.us-row {
+    display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0.6rem; border-radius: 0.5rem; text-decoration: none !important; color: var(--text-primary) !important;
+    &:hover { background: var(--tertiary-bg); color: var(--text-primary) !important; }
+    .us-row-icon { flex-shrink: 0; width: 2rem; height: 2rem; display: inline-flex; align-items: center; justify-content: center; border-radius: 0.4rem; background: var(--tertiary-bg); color: var(--spotify-green); }
+    .us-row-main { min-width: 0; flex: 1; }
+    .us-row-title { font-weight: 600; font-size: 0.9rem; color: var(--text-primary); text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+    .us-row-sub { color: var(--text-secondary); font-size: 0.78rem; line-height: 1.3; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+    .us-row-meta { color: var(--text-tertiary); font-size: 0.72rem; flex-shrink: 0; }
+}
+
+.search-flyout #unifiedScopeTabs {
+    &.us-scope-chips { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; &::-webkit-scrollbar { display: none; } }
+    .nav-link {
+        background-color: #1e1e1e !important; border: 1px solid transparent !important; border-radius: 0.5rem !important; color: #a0a0a0 !important; min-height: 44px !important; display: inline-flex !important; align-items: center !important; gap: 0.4rem !important; padding: 0.5rem 0.9rem !important;
+        &.active { background-color: #2a2a2a !important; border-color: color-mix(in srgb, white 65%, transparent) !important; color: #ffffff !important; }
+    }
+}
+
+/* Advanced Filter Sheet (opened by #unifiedFiltersToggle) */
+.us-filter-backdrop { position: fixed; inset: 0; z-index: 2040; background: color-mix(in srgb, black 60%, transparent); }
+.us-filter-sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 2045; max-height: 70vh; overflow-y: auto; background: var(--secondary-bg); border-top: 1px solid var(--border-color); border-radius: 0.75rem 0.75rem 0 0; box-shadow: 0 -8px 30px color-mix(in srgb, black 60%, transparent); padding-bottom: env(safe-area-inset-bottom, 0); transform: translateY(100%); transition: transform 0.22s ease;
+    &.show { transform: translateY(0); }
+    @media (prefers-reduced-motion: reduce) { transition: none; }
+}
+.us-filter-sheet-header { border-bottom: 1px solid var(--border-color); position: sticky; top: 0; background: var(--secondary-bg); }
+.us-filter-option {
+    display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 48px; padding: 0.6rem 1rem; background: transparent; border: none; border-bottom: 1px solid color-mix(in srgb, white 5%, transparent); color: var(--text-primary); text-align: left;
+    &:hover { background: var(--tertiary-bg); }
+    &.active { color: var(--spotify-green); .us-filter-check { display: inline-block; } }
+    .us-filter-check { display: none; }
+}
+.us-filter-btn.active { border-color: var(--spotify-green) !important; color: var(--spotify-green) !important; }
+
+/* Desktop: a centred dialog rather than a bottom sheet. The transform is
+   used for centring here, so the enter animation switches to opacity/scale
+   — a translateY start state would fight the -50%/-50% centring. */
+@media (min-width: 768px) {
+    .us-filter-sheet { left: 50%; right: auto; bottom: auto; top: 50%; width: min(92vw, 420px); border-radius: 0.75rem; border: 1px solid var(--border-color); transform: translate(-50%, -50%) scale(0.96); opacity: 0; transition: transform 0.18s ease, opacity 0.18s ease; }
+    .us-filter-sheet.show { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+}
+
+/* Metro jump grid overlay */
+.metro-jump-overlay { position: fixed; inset: 0; z-index: 2050; background: color-mix(in srgb, #0a0a0a 88%, transparent); backdrop-filter: blur(10px); display: flex; align-items: center; justify-content: center; padding: 1rem; }
+.metro-jump-content { width: min(92vw, 380px); background: var(--secondary-bg); border: 1px solid var(--border-color); border-radius: 0.75rem; padding: 1.25rem; }
+.metro-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.6rem; }
+.metro-tile {
+    aspect-ratio: 1; background-color: var(--accent-color); color: #000; border: none; border-radius: 0.35rem; font-size: 1.35rem; font-weight: 700; display: flex; align-items: center; justify-content: center; transition: transform 0.1s ease, background-color 0.15s ease; cursor: pointer;
+    &:hover:not(:disabled) { transform: scale(1.06); background-color: var(--accent-hover); }
+    &:disabled, &.disabled { background-color: color-mix(in srgb, white 5%, transparent) !important; color: color-mix(in srgb, white 20%, transparent) !important; cursor: not-allowed; transform: none !important; }
+}
+
+/* ── Miscellaneous ─────────────────────────────────────────────────────────── */
+.category-empty { display: none !important; }
+.sticky-save-bar { position: fixed; bottom: var(--footer-stack-height); left: 0; right: 0; z-index: 2020; background: color-mix(in srgb, #121212 98%, transparent); border-top: 1px solid color-mix(in srgb, #22c55e 50%, transparent); box-shadow: 0 -4px 20px color-mix(in srgb, black 50%, transparent); padding: 0.6rem 1rem; &.d-none { display: none; } }
+.config-save-bar { position: sticky; bottom: 0; z-index: 2010; background: color-mix(in srgb, #121212 96%, transparent); border-top: 1px solid color-mix(in srgb, #22c55e 40%, transparent); box-shadow: 0 -4px 20px color-mix(in srgb, black 50%, transparent); padding: 0.6rem 1rem; border-radius: 0.5rem 0.5rem 0 0; }

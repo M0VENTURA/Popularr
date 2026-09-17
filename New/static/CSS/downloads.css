@@ -1,0 +1,161 @@
+/* ==========================================================================
+   Downloads & Queue Styles
+   Loaded after popularr.css on the downloads route only.
+   ========================================================================== */
+
+.processing-log {
+    max-height: 400px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 0.85rem;
+}
+
+.status-badge-pending { background-color: var(--brand-spotify) !important; }
+.status-badge-incomplete { background-color: var(--brand-lastfm) !important; }
+
+/* ==========================================================================
+   Folder Groups & Unmatched Folders
+   ========================================================================== */
+
+#folderGroupsSection, #unmatchedFoldersSection {
+    background-color: var(--secondary-bg) !important;
+    border: 1px solid var(--border-color);
+
+    .card-header {
+        background-color: var(--tertiary-bg) !important;
+        border-bottom: 1px solid var(--border-color) !important;
+    }
+}
+
+.queue-item, .list-group-item {
+    background-color: var(--secondary-bg) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
+}
+
+/* Album-folder queue groups */
+.queue-group-toggle .queue-group-chevron {
+    transition: transform 0.15s ease;
+    &.rotated { transform: rotate(180deg); }
+}
+
+.queue-group-body {
+    background-color: color-mix(in srgb, black 15%, transparent);
+    border-left: 2px solid var(--spotify-green) !important;
+
+    .list-group-item {
+        border: none;
+        border-bottom: 1px solid color-mix(in srgb, white 8%, transparent) !important;
+        &:last-child { border-bottom: none !important; }
+    }
+}
+
+/* Slim outlined status pills, driven by the status tokens in popularr.css
+   rather than a standalone Tailwind-style palette — these used to be a
+   fourth, unrelated colour scale (#f87171/#60a5fa/#facc15/#4ade80/#94a3b8
+   as bare hex) that happened to match --status-* by coincidence of having
+   been copied from the same source at different times. */
+.status-pill {
+    border: 1px solid color-mix(in srgb, white 15%, transparent);
+    background: transparent;
+    font-weight: 500;
+    font-size: 0.72rem;
+    padding: 0.25em 0.6em;
+    white-space: nowrap;
+
+    &.status-failed { color: var(--status-failed); border-color: color-mix(in srgb, var(--status-failed) 50%, transparent); }
+    &.status-downloading { color: var(--status-downloading); border-color: color-mix(in srgb, var(--status-downloading) 50%, transparent); }
+    &.status-queued { color: var(--status-queued); border-color: color-mix(in srgb, var(--status-queued) 50%, transparent); }
+    &.status-complete { color: var(--status-complete); border-color: color-mix(in srgb, var(--status-complete) 50%, transparent); }
+    &.status-pending { color: var(--status-pending); border-color: color-mix(in srgb, var(--status-pending) 50%, transparent); }
+}
+
+/* Readable meta chips.
+   Background is now var(--tertiary-bg) (#282828), not the old hardcoded
+   #2a2a2a — two greys, two pixels apart, that used to sit directly next to
+   real --tertiary-bg surfaces on the same page. */
+.queue-item .queue-item-meta .badge,
+.meta-pill {
+    color: var(--text-tertiary);
+    background-color: var(--tertiary-bg) !important;
+    border: 1px solid color-mix(in srgb, white 8%, transparent);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.78rem;
+    font-weight: 400;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+    opacity: 1;
+
+    i { color: var(--text-tertiary); }
+}
+
+.queue-item .text-muted { color: var(--text-tertiary) !important; }
+
+/* ── Mobile Layout Fixes ─────────────────────────────────────────────────── */
+/* File-manager tabs & Stat pills stay on ONE swipable row */
+#downloadManagerTabs,
+.stat-pills-row {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    &::-webkit-scrollbar { display: none; }
+}
+
+#downloadManagerTabs .nav-link {
+    white-space: nowrap;
+    flex: 1 0 auto;
+    text-align: center;
+}
+
+.stat-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.28rem 0.75rem;
+    border: 1px solid color-mix(in srgb, white 15%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, white 3%, transparent);
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    flex: 0 0 auto;
+
+    strong {
+        color: var(--text-primary);
+        font-variant-numeric: tabular-nums;
+    }
+}
+
+.stat-pills-row .stat-pill.d-none { display: none !important; }
+
+.upcoming-table {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 576px) {
+    .upcoming-table .col-source,
+    .upcoming-table .col-mbid { display: none; }
+
+    .queue-item .d-flex.justify-content-between {
+        flex-direction: column;
+        align-items: flex-start !important;
+        gap: 0.5rem;
+
+        > .d-flex:last-child {
+            width: 100%;
+            justify-content: flex-end;
+        }
+    }
+
+    #fm-upcoming {
+        .d-flex.flex-wrap { gap: 0.35rem !important; }
+        .btn { padding: 0.2rem 0.45rem; font-size: 0.78rem; }
+    }
+}

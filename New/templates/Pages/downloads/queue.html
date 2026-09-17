@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+
+{% block title %}Downloads · Popularr{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+  <div class="mb-4 d-flex align-items-center justify-content-between gap-2 flex-wrap">
+    {% include 'components/_downloads_header.html' %}
+    <div class="d-flex gap-2 flex-shrink-0 ms-auto">
+      {#
+        BUG FIXED: this called onclick="jumpToUpcomingReleases()", a
+        function that exists ONLY as an inline <script> in monitor.html —
+        it was copy-pasted here along with the header markup, but the
+        function definition was not, and this page has no
+        #upcomingReleasesSection to scroll to in the first place (that
+        section only exists on /downloads/monitor). Clicking this button
+        on /downloads/queue threw ReferenceError.
+
+        monitor.html's own jumpToUpcomingReleases() falls back to exactly
+        this URL whenever the section isn't found on the page, so a plain
+        link reproduces its only reachable behaviour here, without needing
+        a copy of that function.
+      #}
+      <a href="/downloads/discover/upcoming" class="btn btn-sm btn-outline-success flex-shrink-0" title="View upcoming releases">
+        <i class="bi bi-arrow-down-circle"></i> <span class="d-none d-sm-inline">Upcoming Releases</span>
+      </a>
+      <a href="/downloads/banned-words" class="btn btn-sm btn-outline-danger flex-shrink-0" title="Manage banned words">
+        <i class="bi bi-slash-circle"></i> <span class="d-none d-sm-inline">Banned Words</span>
+      </a>
+    </div>
+  </div>
+
+  {#
+    `nav-segmented` (popularr.css) replaces the old `bg-secondary p-1
+    rounded` combination — same fix as monitor.html's identical tab strip.
+  #}
+  <ul class="nav nav-pills nav-segmented nav-fill mb-4 shadow-sm" id="searchTabs" role="tablist">
+    <li class="nav-item" role="presentation">
+      <button class="nav-link active py-2" id="soulseek-tab" data-bs-toggle="tab" data-bs-target="#soulseek" type="button" role="tab" aria-selected="true">
+        <i class="bi bi-music-note-beamed me-1"></i> Soulseek
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link py-2" id="playlists-tab" data-bs-toggle="tab" data-bs-target="#playlists" type="button" role="tab" aria-selected="false">
+        <i class="bi bi-collection-play me-1"></i> Playlists
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link py-2" id="queue-tab" data-bs-toggle="tab" data-bs-target="#queueMonitor" type="button" role="tab" aria-selected="false">
+        <i class="bi bi-list-task me-1"></i> Active Queue
+      </button>
+    </li>
+  </ul>
+
+  <div class="tab-content" id="searchTabsContent">
+    <div class="tab-pane fade show active" id="soulseek" role="tabpanel" aria-labelledby="soulseek-tab">
+      {% include 'components/search/_soulseek.html' %}
+    </div>
+    <div class="tab-pane fade" id="playlists" role="tabpanel" aria-labelledby="playlists-tab">
+      {% include 'components/search/_playlists.html' %}
+    </div>
+    <div class="tab-pane fade" id="queueMonitor" role="tabpanel" aria-labelledby="queue-tab">
+       {% include 'components/search/_queue_status.html' %}
+    </div>
+  </div>
+</div>
+
+{# Shared Modals #}
+{% include 'components/modals/_track_edit.html' %}
+{% include 'components/modals/_organize_group.html' %}
+{% include 'components/modals/_slskd_results.html' %}
+{% include 'components/modals/_manual_match.html' %}
+{% include 'components/modals/_soulseek_manual_search.html' ignore missing %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.AppConfig = {
+    slskdEnabled: {{ slskd_config.enabled | default(false) | tojson }},
+    queueStatusConfig: {{ queue_status_config | default({}) | tojson }}
+  };
+</script>
+<link rel="stylesheet" href="{{ versioned_static('css/downloads.css') }}">
+{#
+  Everything base.html loads globally (utils/dom.js, utils/api.js,
+  utils/poller.js, ui/toast.js, ui/modal.js, ui/confirm.js,
+  ui/button-state.js, services/musicbrainz-picker.js, ui/player.js,
+  pages/folder-groups.js, main.js, ui/search-flyout.js) is NOT repeated
+  here. This page additionally needs the same three as monitor.html's
+  queue tab (this page is a subset of it — Soulseek search, playlist
+  downloads and the active queue, without the unmatched-folders or
+  upcoming-releases sections, so pages/monitor.js itself is correctly NOT
+  loaded here):
+
+    js/downloads.js    → js/pages/download-queue.js. Provides
+                       loadQueueStatus(), which renders
+                       components/search/_queue_status.html's Active
+                       Queue tab.
+    ui/status-badge.js pages/download-queue.js calls global.statusBadge
+                       directly; base.html does not load this globally.
+    services/slskd.js pages/download-queue.js calls global.slskd.* for
+                       the Soulseek search results it renders.
+    js/genre-utils.js  REMOVED. Nothing in this template's markup, and
+                       nothing in pages/download-queue.js, calls a
+                       genre-chip function.
+  #}
+<script src="{{ versioned_static('js/ui/status-badge.js') }}"></script>
+<script src="{{ versioned_static('js/services/slskd.js') }}"></script>
+<script src="{{ versioned_static('js/pages/download-queue.js') }}"></script>
+{% endblock %}
