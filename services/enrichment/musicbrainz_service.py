@@ -474,6 +474,122 @@ def _release_track_count(release: Any) -> int:
         if isinstance(medium, dict)
     )
 
+# Secondary release-group types that mean the release is NOT the canonical
+# studio album. A track that also appears on a live tour album, a various-
+# artists compilation or a remix collection must not adopt THAT release's
+# identity as its album.
+_NON_STUDIO_SECONDARY_TYPES = frozenset({
+    "live", "compilation", "remix", "soundtrack", "spokenword", "demo",
+    "dj-mix", "mixtape", "interview", "audiobook",
+})
+
+# How closely a release's album identity must match the album being scanned
+# before it is treated as the same album. Matches the floor used by
+# ``_recording_matches_album`` so both paths agree on "same album".
+_ALBUM_IDENTITY_MATCH_FLOOR = 0.6
+
+def _release_group_title_of(release: Any) -> str:
+    """The release GROUP's title for a release, or "".
+
+    This is the album's identity. The release's own ``title`` is the
+    EDITION ("72 Seasons (Live at ...)"), so it must never win over this.
+    """
+    if not isinstance(release, dict):
+        return ""
+    group = release.get("release-group") or {}
+    if not isinstance(group, dict):
+        return ""
+    return str(group.get("title") or "").strip()
+
+def _release_group_primary_type_of(release: Any) -> str:
+    if not isinstance(release, dict):
+        return ""
+    group = release.get("release-group") or {}
+    if not isinstance(group, dict):
+        return ""
+    return str(group.get("primary-type") or group.get("primary_type") or "").strip().casefold()
+
+def _release_group_secondary_types_of(release: Any) -> list[str]:
+    if not isinstance(release, dict):
+        return []
+    group = release.get("release-group") or {}
+    if not isinstance(group, dict):
+        return []
+    return _parse_secondary_types(group.get("secondary-types") or group.get("secondary_types"))
+
+def _release_album_identity(release: Any) -> str:
+    """The album name a release declares: its release-GROUP title, else its title."""
+    return _release_group_title_of(release) or str(
+        (release.get("title") if isinstance(release, dict) else "") or ""
+    ).strip()
+
+def _select_primary_release(releases: Any, album_name: str | None) -> dict[str, Any]:
+    """Choose which of a recording's releases describes the album being scanned.
+
+    WHY THIS EXISTS: a recording lists every release it appears on, and
+    MusicBrainz returns them in NO meaningful order. A Metallica track from
+    "72 Seasons" that was also played live on the M72 tour is listed on the
+    tour album too, so ``releases[0]`` is frequently a LIVE release — the
+    track then adopted the tour release-group's name as its album and the
+    folder shattered into a dozen one-track "albums".
+
+    Selection order:
+    1. A release whose album identity matches ``album_name`` — this pins the
+       track to the album actually being scanned.
+    2. A canonical STUDIO release: primary type ``album`` (or untyped) with no
+       live/compilation/remix secondary type. Prefers one that carries a
+       release-group, so the name can never fall back to an edition title.
+    3. The earliest release date.
+
+    Every stage breaks ties on the release id, so the result is deterministic
+    and does not depend on MusicBrainz's ordering.
+    """
+    candidates = [r for r in (releases or []) if isinstance(r, dict)]
+    if not candidates:
+        return {}
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    def _sort_key(release: dict[str, Any]) -> tuple[Any, ...]:
+        return (str(release.get("date") or "9999"), str(release.get("id") or ""))
+
+    # ── 1. The release matching the scanned album ──────────────────────────
+    anchor = str(album_name or "").strip()
+    if anchor:
+        matching = [
+            r for r in candidates
+            if _release_album_identity(r)
+            and _similarity(_release_album_identity(r), anchor) >= _ALBUM_IDENTITY_MATCH_FLOOR
+        ]
+        if matching:
+            return min(matching, key=_sort_key)
+
+    # ── 2. A canonical studio release ──────────────────────────────────────
+    def _is_studio(release: dict[str, Any]) -> bool:
+        primary = _release_group_primary_type_of(release)
+        if primary not in ("", "album"):
+            return False
+        return not any(
+            str(secondary).strip().casefold() in _NON_STUDIO_SECONDARY_TYPES
+            for secondary in _release_group_secondary_types_of(release)
+        )
+
+    studio = [r for r in candidates if _is_studio(r)]
+    if studio:
+        # A release-group-backed release always yields a real album name; one
+        # without would fall back to an edition title.
+        studio.sort(
+            key=lambda r: (
+                0 if _release_group_title_of(r) else 1,
+                *_sort_key(r),
+            )
+        )
+        return studio[0]
+
+    # ── 3. Earliest, deterministically ─────────────────────────────────────
+    return min(candidates, key=_sort_key)
+
 def _client_available(client: Any) -> bool:
     Checker = getattr(client, "is_available", None)
     if not callable(Checker):
@@ -650,9 +766,14 @@ class MusicBrainzService:
             Logger.exception("[MB] recording suggestion failed", error=_error(exc), **context)
             return "", 0.0
 
-    def lookup_recording_metadata(self, title: str, artist: str, **kwargs: Any) -> dict[str, Any]:
-        """Resolve a recording's full metadata via search-then-fetch."""
-        context = {"title": title, "artist": artist}
+    def lookup_recording_metadata(self, title: str, artist: str, *, album: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        """Resolve a recording's full metadata via search-then-fetch.
+
+        ``album`` is the album being scanned. Supplying it pins the recording
+        to THAT album's release instead of whichever release MusicBrainz
+        happens to list first — see ``_select_primary_release``.
+        """
+        context = {"title": title, "artist": artist, "album": album}
         if not title or not artist:
             Logger.info("[MB] recording metadata skipped", reason="incomplete input", **context)
             return {}
@@ -670,9 +791,10 @@ class MusicBrainzService:
             if not recording:
                 Logger.info("[MB] recording metadata empty", mbid=mbid, **context)
                 return {}
-            # Single-track lookup: no album authority is available here, so the
-            # recording's own release information is used.
-            return self._recording_to_metadata(recording, mbid, confidence)
+            # ``album`` (when known) is authoritative for the album identity;
+            # the release selection falls back to the canonical studio release
+            # when it is not.
+            return self._recording_to_metadata(recording, mbid, confidence, album_name=album)
         except Exception as exc:
             Logger.exception("[MB] recording metadata lookup failed", error=_error(exc), **context)
             return {}
@@ -748,14 +870,23 @@ class MusicBrainzService:
             artist_mbid = ""
 
         releases = recording.get("releases") or []
-        specific_release = releases[0] if releases and isinstance(releases[0], dict) else {}
+        authoritative_album = str(album_name or "").strip()
+
+        # Pick the release that actually describes the album being scanned.
+        # ``releases[0]`` is arbitrary — MusicBrainz returns a recording's
+        # releases in no meaningful order — so a track that also appears on a
+        # live tour album, a various-artists compilation or a single used to
+        # adopt THAT release's identity and shatter one album into many, each
+        # named after a different release group.
+        specific_release = _select_primary_release(releases, authoritative_album)
         specific_title = str(specific_release.get("title") or "").strip()
         version_release_year = _year_of(specific_release.get("date"))
 
-        release_group = specific_release.get("release-group") or {}
-        release_group_title = str(release_group.get("title") or "").strip()
+        # The album's IDENTITY is the release GROUP's title. The release's own
+        # title is the EDITION ("72 Seasons (Live at ...)"), so it is only the
+        # last resort and is never used while a release group is available.
+        release_group_title = _release_group_title_of(specific_release)
 
-        authoritative_album = str(album_name or "").strip()
         effective_album = authoritative_album or release_group_title or specific_title
         effective_year = (
             original_release_year
@@ -1841,8 +1972,8 @@ def get_shared_mb_service() -> MusicBrainzService:
             _shared_mb_service = MusicBrainzService(http_client=Client, enabled=True)
     return _shared_mb_service
 
-def lookup_recording_metadata(title: str, artist: str) -> dict[str, Any]:
-    return _get_service().lookup_recording_metadata(title, artist)
+def lookup_recording_metadata(title: str, artist: str, *, album: str | None = None) -> dict[str, Any]:
+    return _get_service().lookup_recording_metadata(title, artist, album=album)
 
 def merge_metadata(base: dict[str, Any], mb: dict[str, Any], overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     return _get_service().merge_metadata(base, mb, overrides)

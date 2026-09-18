@@ -724,7 +724,17 @@ def _resolve_track_mb_metadata(
             _from_batch = bool(mb_data)
 
             if not mb_data:
-                mb_data = mb_service.lookup_recording_metadata(title, artist)
+                # Pass the album being scanned so the recording is pinned to
+                # THAT album's release. Without it, MusicBrainz's arbitrary
+                # release ordering let a track adopt a live-tour album, a
+                # compilation or a single as its album — splitting one folder
+                # into many and titling it with the wrong release group.
+                _album_anchor = _as_str(
+                    album_context.get("album") if isinstance(album_context, dict) else ""
+                ).strip()
+                mb_data = mb_service.lookup_recording_metadata(
+                    title, artist, album=_album_anchor or None,
+                )
                 _from_batch = False
 
         if mb_data:

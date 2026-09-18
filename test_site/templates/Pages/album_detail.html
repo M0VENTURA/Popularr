@@ -58,18 +58,7 @@
         need ONE backend table and ONE function name, not two.
       #}
 
-      <div{# Edition tagline: the specific release this collection actually
-             holds, plus its own year when that differs from the original.
-             Rendered only when it adds information (see _show_rel_* above). #}
-          {% if _show_rel_title or _show_rel_year %}
-            <div class="small text-muted text-truncate album-hero-release mb-1">
-              <i class="bi bi-disc"></i>
-              {% if _show_rel_title %}<span title="{{ _rel_title }}">{{ _rel_title }}</span>{% endif %}
-              {% if _show_rel_title and _show_rel_year %}<span class="mx-1">·</span>{% endif %}
-              {% if _show_rel_year %}<span title="This edition's release year">{{ _rel_year }} edition</span>{% endif %}
-            </div>
-          {% endif %}
-           class="d-flex align-items-start gap-3 mb-3">
+      <div class="d-flex align-items-start gap-3 mb-3">
         <div class="flex-shrink-0">
           <div class="album-art-container position-relative rounded overflow-hidden shadow-sm" style="width: 80px; height: 80px;">
             <img id="albumArtImage" src="/api/album/{{ artist_name|path_segment }}/{{ album_name|path_segment }}/art" 
@@ -85,6 +74,17 @@
           <h1 class="h5 fw-bold mb-1 album-hero-title text-truncate">
             {{ album_name }}{% if album_data and album_data.album_year %} <span class="text-muted fw-normal" style="font-size:0.85rem;">({{ album_data.album_year }})</span>{% endif %}
           </h1>
+          {# Edition tagline: the specific release this collection actually
+             holds, plus its own year when that differs from the original.
+             Rendered only when it adds information (see _show_rel_* above). #}
+          {% if _show_rel_title or _show_rel_year %}
+            <div class="small text-muted text-truncate album-hero-release mb-1">
+              <i class="bi bi-disc"></i>
+              {% if _show_rel_title %}<span title="{{ _rel_title }}">{{ _rel_title }}</span>{% endif %}
+              {% if _show_rel_title and _show_rel_year %}<span class="mx-1">·</span>{% endif %}
+              {% if _show_rel_year %}<span title="This edition's release year">{{ _rel_year }} edition</span>{% endif %}
+            </div>
+          {% endif %}
           <div class="small text-muted mb-1 album-hero-sub">
             by <a href="{{ url_for('ui.artist_detail', name=artist_name) }}" class="text-success text-decoration-none fw-semibold">{{ artist_name }}</a>
             {% if album_data and album_data.avg_stars is not none and album_data.avg_stars != '' %}
