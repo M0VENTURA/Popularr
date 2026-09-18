@@ -313,7 +313,16 @@ window.performMbSearch = async function () {
       // escapeJsString for the inline-onclick arguments: escapeHtml escapes
       // for an HTML text context, not a JS string literal, so a title
       // containing an apostrophe (very common) broke the handler.
-      const actionButtons = window._mbSearchCallback
+      //
+      // ⚠️ Gated on _mbMatchIntent, NOT _mbSearchCallback. The callback is
+      // nulled once a match is applied, so gating on it made every subsequent
+      // search in the same session render the Soulseek button — even when the
+      // modal had been opened to MATCH a release. Falls back to the callback
+      // so a caller that sets only that keeps the old behaviour.
+      const wantsMatch = (typeof window._mbMatchIntent === 'boolean')
+        ? window._mbMatchIntent
+        : !!window._mbSearchCallback;
+      const actionButtons = wantsMatch
         ? `<button class="btn btn-sm btn-success" onclick="handleGlobalMbSelect('${encodeInlineArg(release)}')"><i class="bi bi-check-circle"></i> Select Match</button>`
         : `<button class="btn btn-sm btn-success" onclick="downloadMbRelease('${escapeJsString(release.id)}', '${escapeJsString(release.title)}', '${escapeJsString(resultArtist)}', 'slskd')" title="Download via Soulseek"><i class="bi bi-music-note-list"></i> Soulseek</button>`;
 

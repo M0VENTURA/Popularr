@@ -93,6 +93,17 @@
   let selectionCallback = null;
 
   /**
+   * Whether the CURRENT modal session is a "match this release to my album"
+   * flow rather than a "download it" flow.
+   *
+   * Kept SEPARATE from ``selectionCallback`` on purpose. The callback is
+   * consumed (set to null) when the user applies a match, but the intent of
+   * the session does not change — so gating the result button on the callback
+   * made the button silently revert to "Soulseek" after a single match.
+   */
+  let matchIntent = false;
+
+  /**
    * Open the shared modal, optionally pre-filling the form.
    *
    * @param {string} artist
@@ -119,6 +130,10 @@
     });
 
     selectionCallback = typeof callback === 'function' ? callback : null;
+    // A callback means the caller wants the chosen release handed back (match);
+    // no callback means the modal is a download browser. This is set ONCE per
+    // open, so a later search inside the same session keeps the right action.
+    matchIntent = selectionCallback !== null;
     pendingRelease = null;
 
     const panel = document.getElementById('mbSelectedRelease');
@@ -264,13 +279,19 @@
         : '<div class="rounded bg-secondary d-flex align-items-center justify-content-center shadow-sm" ' +
           'style="width:80px;height:80px;"><i class="bi bi-music-note-beamed text-white fs-4"></i></div>';
 
-      // data-index rather than an inline onclick carrying an encoded release
-      // object. The old markup interpolated the whole release through
-      // encodeInlineArg into an attribute — workable, but it put a JSON blob
-      // in the DOM for every result and had to be decoded on each click.
-      const action = selectionCallback
+      // The action reflects the caller's INTENT, not a transient flag.
+      //
+      // ⚠️ BUG FIXED: this used to read `selectionCallback` alone, and
+      // confirmReleaseSelection() set that to null after using it. So after a
+      // first successful match, EVERY later search in the same modal session
+      // rendered the "Soulseek" download button instead of "Match Release" —
+      // even though the modal had been opened from the album page's
+      // "Lookup MBID" button, whose whole purpose is matching. The action is
+      // now driven by `matchIntent`, which only changes when the modal is
+      // opened with a different intent (see openGlobalMbSearch).
+      const action = matchIntent
         ? `<button class="btn btn-sm btn-success mb-select-match" data-index="${index}">
-             <i class="bi bi-check-circle"></i> Select Match</button>`
+             <i class="bi bi-check-circle"></i> Match Release</button>`
         : `<button class="btn btn-sm btn-success mb-download-release" data-index="${index}"
                    title="Download via Soulseek">
              <i class="bi bi-music-note-list"></i> Soulseek</button>`;
@@ -338,15 +359,28 @@
   function confirmReleaseSelection() {
     if (!pendingRelease) return;
 
-    if (selectionCallback) {
-      selectionCallback(pendingRelease);
-      selectionCallback = null;
-    }
+    // Capture before clearing: the callback is single-use, but `matchIntent`
+    // deliberately is not (it describes the session, not this one pick).
+    const callback = selectionCallback;
+    const release = pendingRelease;
+
     pendingRelease = null;
+    selectionCallback = null;
 
     const panel = document.getElementById('mbSelectedRelease');
     if (panel) panel.classList.add('d-none');
     if (global.modal) global.modal.hide(MODAL_ID);
+
+    if (callback) {
+      try {
+        callback(release);
+      } catch (error) {
+        // A throwing caller must not leave the modal in a half-closed state,
+        // and the user needs to know the match did not apply.
+        console.error('MusicBrainz selection callback failed', error);
+        if (global.toast) global.toast.error('Could not apply the release: ' + error.message);
+      }
+    }
   }
 
   /**

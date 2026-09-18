@@ -669,30 +669,160 @@
       return;
     }
     global.openGlobalMbSearch(pageArtist(), pageAlbum(), function (selected) {
-      if (selected && selected.id) applyAlbumMbid(selected.id);
+      if (selected) applyAlbumMatch(selected);
     });
+  }
+
+  /**
+   * Apply a chosen MusicBrainz release to the Edit Album form.
+   *
+   * ⚠️ TWO BUGS FIXED HERE.
+   *
+   * 1. WRONG FIELD. The search modal returns RELEASE-GROUP results, so
+   *    `selected.id` is a release-GROUP MBID. The old code passed it to
+   *    applyAlbumMbid(), which wrote it into `#album_mbid` — the CONCRETE
+   *    RELEASE field. Saving then stored a group id where a release id
+   *    belongs, which is why a lookup could appear to "work" and still leave
+   *    the album unmatched. The group id now goes to
+   *    `#album_release_group_mbid` (its correct field) and the concrete
+   *    release id is resolved separately.
+   *
+   * 2. METADATA WAS NOT IMPORTED. Only the id field was filled, so the user
+   *    had to run compare/update separately to get anything else. The
+   *    descriptive fields the release actually provides (edition title, years,
+   *    country, cover, type) are now populated too.
+   *
+   * Nothing is written to the database or to any file here — this only fills
+   * the form, so the user reviews the values and presses Save Metadata. That
+   * matches how the rest of this page works and keeps a bad match harmless.
+   */
+  async function applyAlbumMatch(release) {
+    if (!release || !release.id) {
+      notifyError('No release selected.');
+      return;
+    }
+
+    // The release-GROUP id belongs in the release-group field.
+    setFieldValue('album_release_group_mbid', release.id);
+
+    // The group's first release date is the ORIGINAL year (what `year`
+    // stores), so a reissue still groups with its original pressing.
+    const originalYear = yearOf(release.first_release_date);
+    if (originalYear) setFieldValue('album_originalyear', originalYear);
+
+    // The edition's own title, when MusicBrainz exposes one distinct from the
+    // album name. Kept OUT of #album_title: that holds the album's main
+    // identity, and silently renaming an album from a search hit is not
+    // something a "match" should do behind the user's back.
+    const editionTitle = String(release.release_title || release.title || '').trim();
+    if (editionTitle && editionTitle.toLowerCase() !== pageAlbum().toLowerCase()) {
+      setFieldValue('album_release_title', editionTitle);
+    }
+
+    // Category -> the form's type select, when the option exists.
+    const category = String(release.category || release.primary_type || '').toLowerCase();
+    if (category) setAlbumTypeIfPresent(category);
+
+    if (release.cover_art_url) {
+      const coverField = document.getElementById('cover_art_url');
+      if (coverField) coverField.value = release.cover_art_url;
+    }
+
+    const tabBtn = document.querySelector('#albumPageTabs [data-bs-target="#tab-details"]');
+    if (tabBtn && global.bootstrap) global.bootstrap.Tab.getOrCreateInstance(tabBtn).show();
+
+    markDirty();
+    notifySuccess('Release matched. Resolving the exact edition…');
+
+    // Resolve the CONCRETE release inside the group so the release-id field,
+    // the edition year and the country can be filled from real release data.
+    // A failure here must not undo the match — the group id is already set and
+    // the user can still save or pick a version manually.
+    try {
+      const data = await global.api.postJson('/api/album/musicbrainz/best-release', {
+        release_group_mbid: release.id,
+        artist: pageArtist(),
+        album: pageAlbum(),
+      });
+
+      const best = (data && data.best_release) || null;
+      if (best && best.id) {
+        setFieldValue('album_mbid', best.id);
+
+        const releaseYear = yearOf(best.date);
+        if (releaseYear) setFieldValue('release_year', releaseYear);
+
+        if (best.country) setFieldValue('album_releasecountry', best.country);
+        if (best.cover_art_url && !(release.cover_art_url)) {
+          const coverField = document.getElementById('cover_art_url');
+          if (coverField) coverField.value = best.cover_art_url;
+        }
+      }
+    } catch (error) {
+      // Non-fatal by design — see above.
+      console.warn('Could not resolve the concrete release for this group', error);
+    }
+
+    notifySuccess(
+      'Release matched and metadata filled in. Review the Edit Album tab, then click "Save Metadata". ' +
+      'Use "Compare with MusicBrainz" to import the tracklist.'
+    );
+  }
+
+  /** First four digits of a MusicBrainz date ("2014-11-24" → 2014). */
+  function yearOf(value) {
+    const text = String(value || '').trim();
+    return text.length >= 4 && /^\d{4}/.test(text) ? text.slice(0, 4) : '';
+  }
+
+  /** Set a value on a form field by id, if it exists. */
+  function setFieldValue(id, value) {
+    const field = document.getElementById(id);
+    if (!field) return false;
+    field.value = value;
+    field.style.transition = 'background-color 0.3s';
+    field.style.backgroundColor = 'var(--accent-color)';
+    setTimeout(() => { field.style.backgroundColor = ''; }, 500);
+    return true;
+  }
+
+  /**
+   * Select the matching option in #album_type when one exists.
+   *
+   * Only selects an EXISTING option: adding one for an arbitrary MusicBrainz
+   * category would silently change what the form submits. "album+live" and
+   * friends are matched on their parts so they still land on the Live option.
+   */
+  function setAlbumTypeIfPresent(category) {
+    const select = document.getElementById('album_type');
+    if (!select) return false;
+
+    const wanted = String(category).toLowerCase();
+    const options = Array.from(select.options);
+    const exact = options.find((o) => String(o.value).toLowerCase() === wanted);
+    const partial = exact || options.find((o) => {
+      const value = String(o.value).toLowerCase();
+      return value && (wanted.includes(value) || value.includes(wanted));
+    });
+    if (!partial) return false;
+
+    select.value = partial.value;
+    return true;
   }
 
   /**
    * Apply a chosen release MBID to the Edit Album form.
    *
-   * Replaces the old confirmReleaseSelection(), which read
-   * #mbSelectedReleaseId — an element that exists on no page in this app —
-   * then fell back to window._selectedMbReleaseId, which nothing ever set.
-   * It therefore always reported "No release selected or MBID not found".
+   * Retained for callers that already have a concrete release MBID (the
+   * release picker). The shared search modal returns release GROUPS, so its
+   * callback goes through applyAlbumMatch() instead.
    */
   function applyAlbumMbid(mbid) {
     if (!mbid) {
       notifyError('No release selected.');
       return;
     }
-    const field = document.getElementById('album_mbid');
-    if (!field) return;
-
-    field.value = mbid;
-    field.style.transition = 'background-color 0.3s';
-    field.style.backgroundColor = 'var(--accent-color)';
-    setTimeout(() => { field.style.backgroundColor = ''; }, 500);
+    if (!setFieldValue('album_mbid', mbid)) return;
 
     markDirty();
 

@@ -857,6 +857,19 @@ window.openGlobalMbSearch = function (artist, album, callback, track, year) {
   // Assign callback to global window object so the component can trigger it
   window._mbSearchCallback = callback;
 
+  // ⚠️ Whether this session is a MATCH or a DOWNLOAD must be recorded
+  // separately from the callback itself.
+  //
+  // The result renderer picks its button from `_mbSearchCallback`, but that is
+  // set to null as soon as a match is applied (so it cannot fire twice). After
+  // one match, every later search in the same modal session therefore fell
+  // through to the "Soulseek" download button — even when the user had opened
+  // the modal from the album page's "Lookup MBID" action purely to match.
+  //
+  // This flag is set once per open and is NOT cleared by applying a match, so
+  // the button keeps reflecting the caller's intent for the whole session.
+  window._mbMatchIntent = typeof callback === 'function';
+
   // Show Modal
   const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
   modal.show();

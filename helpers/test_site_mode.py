@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import structlog
 from jinja2 import ChoiceLoader, FileSystemLoader, TemplateNotFound
@@ -65,6 +65,25 @@ LIVE_STATIC = _REPO_ROOT / "static"
 #: Config key that selects the mode (``features.use_test_site``).
 CONFIG_KEY = "use_test_site"
 
+#: Templates the rebuilt tree must NOT serve, even though a file exists for
+#: them.  Lookups fall through to the live tree instead.
+#:
+#: This exists because ``test_site/`` cannot be edited destructively from the
+#: environment it is maintained in, so a known-bad file can be *shadowed*
+#: instead of deleted.
+#:
+#: ``pages/downloads/monitor.html`` — the rebuilt copy is a stray artist-page
+#: snapshot (title "{{ artist_name }}", thousands of lines, none of the monitor
+#: ids). Serving it raised ``BuildError: Could not build url for endpoint
+#: 'dashboard'`` on GET /downloads/monitor, because its links use BARE endpoint
+#: names while every blueprint in this app is namespaced (``ui.dashboard``).
+#: The live ``templates/pages/downloads/monitor.html`` is the correct page.
+#:
+#: REMOVE an entry once the rebuilt file is replaced or deleted.
+_SHADOWED_TEMPLATES: Final[frozenset[str]] = frozenset({
+    "pages/downloads/monitor.html",
+})
+
 
 class CaseInsensitiveFileSystemLoader(FileSystemLoader):
     """``FileSystemLoader`` that retries a lookup case-insensitively.
@@ -73,14 +92,46 @@ class CaseInsensitiveFileSystemLoader(FileSystemLoader):
     ``pages/`` and ``playlists/``. That resolves by accident on Windows/macOS and
     fails outright on Linux, so the match is done explicitly here instead of
     relying on the host filesystem.
+
+    ``shadowed`` additionally refuses named templates, so a known-bad rebuilt
+    file falls through to the live tree rather than raising.  This matters
+    because the rebuilt tree is a PREFERRED loader: without the check, a broken
+    file there is served in preference to a working live file.
+
+    ``shadowed`` is PER INSTANCE, not global, and that is essential — the live
+    loader is wrapped in this same class, and a global check would make the live
+    tree refuse the very file it is supposed to provide, turning a shadowed
+    template into a 500 instead of a fallback.
     """
 
+    def __init__(self, *args: Any, shadowed: frozenset[str] | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._shadowed: frozenset[str] = shadowed or frozenset()
+
+    def _shadows(self, template: str) -> bool:
+        return str(template or "").replace("\\", "/").casefold() in self._shadowed
+
     def get_source(self, environment: Any, template: str) -> Any:
+        if self._shadows(template):
+            logger.warning(
+                "Template shadowed in the rebuilt tree — serving the live version",
+                requested=template,
+            )
+            raise TemplateNotFound(template)
         try:
             return super().get_source(environment, template)
         except TemplateNotFound:
             resolved = self._resolve_case_insensitive(template)
             if resolved is None or resolved == template:
+                raise
+            # A case-insensitive hit must still honour the shadow list: the
+            # caller asked for the lowercase form, but the file that resolved
+            # may be the shadowed one.
+            if self._shadows(resolved):
+                logger.warning(
+                    "Template shadowed in the rebuilt tree — serving the live version",
+                    requested=template, resolved=resolved,
+                )
                 raise
             logger.debug(
                 "Template resolved case-insensitively",
@@ -201,7 +252,12 @@ def apply_test_site_cutover(app: Quart) -> bool:
         return False
 
     app.jinja_loader = ChoiceLoader([
-        CaseInsensitiveFileSystemLoader(str(TEST_SITE_TEMPLATES)),
+        # The rebuilt tree is PREFERRED, so it carries the shadow list; the live
+        # tree must be able to serve anything (it is the fallback for every
+        # shadowed template), so it gets none.
+        CaseInsensitiveFileSystemLoader(
+            str(TEST_SITE_TEMPLATES), shadowed=_SHADOWED_TEMPLATES
+        ),
         CaseInsensitiveFileSystemLoader(str(LIVE_TEMPLATES)),
     ])
 
