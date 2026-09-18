@@ -1,43 +1,43 @@
 /* ==========================================================================
    Popularr — Artist Detail Page Styles
-   Loaded by artist_detail.html AFTER popularr.css.
 
-   SCOPE: this file contains ONLY rules that are genuinely specific to the
-   artist page. It was previously two inline <style> blocks in the template
-   totalling ~330 lines and 76 `!important` declarations, most of which
-   re-stated rules popularr.css already owns — but with Bootstrap's default
-   palette instead of the theme tokens. That is what made the artist page's
-   buttons blue/cyan while the rest of the app was green.
+   Loaded by pages/artist_detail_v2.html AFTER popularr.css.
 
-   Rules deleted here and the reason why:
-     .card / .card-header / .card-body          popularr.css owns these
-     .table / thead / tbody / tr / td           popularr.css owns these
-     .table-responsive                          popularr.css owns these
-     .table-hover tbody tr:hover                popularr.css owns these
-     .modal-content / -header / -body           popularr.css owns these
-     .modal-body .form-control (+ :focus)       popularr.css `input, select,
-                                                textarea` owns these
-     .modal-body .table*                        popularr.css owns these
-     .btn-outline-primary (+ :hover)            OVERRODE the theme with
-                                                Bootstrap blue #0d6efd
-     .btn-outline-info (+ :hover)               moved to popularr.css (global)
-     .btn-outline-secondary (+ :hover)          moved to popularr.css (global)
-     .artist-page .card / .table / thead        duplicate of the above, kept
-                                                only as a "prevent white
-                                                flash" guard that popularr.css
-                                                already provides in <head>
-     .missing-release-card                      DEAD — class never rendered
-     .missing-release-art img                   DEAD — class never rendered;
-                                                was also an exact copy of
-                                                popularr.css's .album-art-sm
-     .artist-genre-source-badge                 DEAD — class never rendered
-     .artist-genre-badge                        DEAD — the recommendation
-                                                chips this styled are now
-                                                rendered by services/genres.js
-                                                as .genre-chip (popularr.css)
+   ⚠️ THIS FILE USED TO BE DEAD. Its header claimed it was "loaded by
+   artist_detail.html", but no route renders that template — the artist route
+   serves artist_detail_v2.html. Nothing referenced this file at all, so its
+   rules had no effect on any page. It is now genuinely linked from
+   artist_detail_v2.html, alongside the identical live copy at
+   static/css/artist.css.
 
-   Everything below is either unique to this page or a deliberate,
-   documented deviation from the global theme.
+   versioned_static() searches the rebuilt tree FIRST, so under
+   features.use_test_site this copy wins; in live mode (the DEFAULT) the
+   static/ copy wins. KEEP THE TWO IN STEP.
+
+   The old file also could never have worked: it styled
+   `.artist-page tr.album-row`, but the artist page renders album rows as
+   `<div class="album-row">`, not `<tr>`. Those selectors matched nothing, and
+   have been removed rather than fixed — the markup is the contract.
+
+   SCOPE: only rules genuinely specific to the artist page. Anything
+   popularr.css already owns stays there — do not re-fork it here.
+
+   Rules deliberately NOT restored (and why):
+     .card / .card-header / .card-body        popularr.css owns these
+     .table / thead / tbody / tr / td         popularr.css owns these
+     .table-responsive                        popularr.css owns these
+     .table-hover tbody tr:hover              popularr.css owns these
+     .modal-content / -header / -body         popularr.css owns these
+     .modal-body .form-control (+ :focus)     popularr.css owns these
+     .modal-body .table*                      popularr.css owns these
+     .btn-outline-primary (+ :hover)          OVERRODE the theme with
+                                              Bootstrap blue #0d6efd
+     .btn-outline-info (+ :hover)             moved to popularr.css (global)
+     .btn-outline-secondary (+ :hover)        moved to popularr.css (global)
+     .artist-genre-source-badge               DEAD — class never rendered
+     .artist-genre-badge                      DEAD — the recommendation chips
+                                              are now rendered by
+                                              services/genres.js as .genre-chip
    ========================================================================== */
 
 /* ── Table Headers ───────────────────────────────────────────────────────────
@@ -115,83 +115,19 @@
     padding: 0.45rem 0.65rem;
 }
 
-/* ── Mobile: Album Tables → Stacked Cards ────────────────────────────────────
-   NOTE: popularr.css already ships a generic version of this as
-   `table[data-mobile-cards]`, driven by `data-label` attributes on each
-   <td>. This page predates it and uses positional `nth-child` selectors
-   with hard-coded labels instead, so the two must not be mixed.
+/* ── Mobile: album rows and tracklists ───────────────────────────────────────
+   DELETED: a 70-line block that styled `.artist-page tr.album-row` and
+   `.artist-page tr.tracklist-row`.
 
-   Migrating is a template change, not a CSS one: add
-   `data-mobile-cards` to each album <table> and `data-label="Year"` etc. to
-   the <td>s in the `render_album_row` macro, then delete this entire block.
-   Until then this stays as-is — it is the only thing making the six album
-   tables readable under 768px.
+   It could never match. `render_release_category` emits each album as
+   `<div class="album-row ...">` — a DIV, not a <tr> — so every selector in
+   that block (including its `nth-child` positional `::before { content:
+   'Year' }` labels) was inert. This is the same defect that made this whole
+   file dead, and it is why the block was never noticed to be broken.
+
+   The album rows do not need a mobile block at all: they are already a
+   flex row of a 48px cover plus a title/meta stack, which reflows on its own.
+   The one table on this page (Covers in Collection, tracklist) opts in
+   explicitly with `data-mobile-cards` + per-<td> `data-label`, which
+   popularr.css owns globally. Do not reintroduce `tr.album-row` selectors.
    ------------------------------------------------------------------------ */
-@media (max-width: 767.98px) {
-    .artist-page .table-responsive {
-        overflow-x: hidden;
-    }
-
-    .artist-page tr.album-row {
-        display: block;
-        margin-bottom: 0.75rem;
-        border: 1px solid var(--border-color);
-        border-radius: var(--radius-card);
-        background-color: var(--secondary-bg);
-        overflow: hidden;
-    }
-
-    .artist-page tr.album-row td {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.75rem;
-        width: 100%;
-        padding: 0.5rem 0.75rem;
-        border: 0 !important;
-    }
-
-    /* 1: album art — centred, no label */
-    .artist-page tr.album-row td:nth-child(1) {
-        justify-content: center;
-        padding-top: 0.75rem;
-    }
-
-    .artist-page tr.album-row td:nth-child(1) img {
-        width: 92px !important;
-        height: 92px !important;
-    }
-
-    /* 2: title — left aligned, no label */
-    .artist-page tr.album-row td:nth-child(2) {
-        justify-content: flex-start;
-        font-weight: 600;
-        padding-top: 0.25rem;
-    }
-
-    /* 3-7: labelled rows. Shared styling, content set per-column below. */
-    .artist-page tr.album-row td:nth-child(3)::before,
-    .artist-page tr.album-row td:nth-child(4)::before,
-    .artist-page tr.album-row td:nth-child(5)::before,
-    .artist-page tr.album-row td:nth-child(6)::before,
-    .artist-page tr.album-row td:nth-child(7)::before {
-        color: var(--text-secondary);
-        font-size: 0.82rem;
-    }
-
-    .artist-page tr.album-row td:nth-child(3)::before { content: 'Year'; }
-    .artist-page tr.album-row td:nth-child(4)::before { content: 'Status'; }
-    .artist-page tr.album-row td:nth-child(5)::before { content: 'Tracks'; }
-    .artist-page tr.album-row td:nth-child(6)::before { content: 'Avg'; }
-    .artist-page tr.album-row td:nth-child(7)::before { content: 'Actions'; }
-
-    .artist-page tr.album-row td:nth-child(7) .btn-group {
-        width: 100%;
-        justify-content: flex-end;
-        flex-wrap: wrap;
-    }
-
-    .artist-page tr.tracklist-row td {
-        padding: 0.5rem 0.25rem !important;
-    }
-}

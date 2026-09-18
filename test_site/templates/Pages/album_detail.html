@@ -253,6 +253,11 @@
           </div>
         </div>
         <div class="table-responsive">
+          {# NOT data-mobile-cards. This table's rows are only partly server-rendered:
+             album_detail.js injects missing/update/extra sub-rows whose cells are
+             non-columnar (an empty cell plus a colspan=3 cell), so the stacked-card
+             layout — which labels each cell from its data-label — would render those
+             rows unlabelled. Opting in would degrade them, not improve them. #}
           <table class="table table-hover table-dark align-middle mb-0">
             <thead>
               <tr class="text-muted small">

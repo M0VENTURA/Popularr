@@ -18,6 +18,17 @@
     --spotify-green: var(--accent-color);
     --spotify-green-hover: var(--accent-hover);
 
+    /* Interactive cyan — used by .btn-outline-info and the MusicBrainz search
+       component. Aligned with test_site/static/css/popularr.css, which
+       consolidated three near-cyans (Bootstrap's #0dcaf0, #22d3ee, and
+       ListenBrainz's borrowed brand cyan) onto this single token. */
+    --accent-info: #22d3ee;
+
+    /* Status colours. --status-warning is the same value .btn-warning and
+       .alert-warning already hardcoded; naming it lets new rules reference
+       the token instead of copying the hex. */
+    --status-warning: #ff6b00;
+
     /* Text tones */
     --text-primary: #ffffff;
     --text-secondary: #d0d0d0;
@@ -273,6 +284,27 @@ input:focus, select:focus, textarea:focus {
 .btn-secondary { background-color: var(--tertiary-bg); border-color: var(--border-color); color: var(--text-primary); }
 .btn-warning { background-color: #ff6b00; border-color: #ff6b00; color: #fff; font-weight: 600; }
 
+/* `.btn-outline-secondary` (~140 uses in the live templates) and
+   `.btn-outline-info` (~59) had NO rule in this file, so both fell through to
+   Bootstrap's defaults — a grey and a cyan that do not belong to this theme,
+   which is why secondary buttons read as washed-out and info buttons as a
+   foreign blue. The rebuilt stylesheet already had these; the live one did
+   not, so live mode (the DEFAULT) was the mode showing the wrong colours.
+
+   `--accent-info` is defined here for the first time: test_site consolidated
+   three near-cyans (#0dcaf0 from --brand-listenbrainz, #22d3ee from the
+   MusicBrainz component, and Bootstrap's own) onto this one token. */
+.btn-outline-secondary {
+    color: var(--text-tertiary); border-color: var(--border-color);
+    background-color: color-mix(in srgb, white 4%, transparent);
+}
+.btn-outline-secondary:hover { color: var(--text-primary); background-color: var(--tertiary-bg); border-color: var(--text-tertiary); }
+.btn-outline-info {
+    color: var(--accent-info); border-color: var(--accent-info);
+    background-color: color-mix(in srgb, var(--accent-info) 10%, transparent);
+}
+.btn-outline-info:hover { color: #000; background-color: var(--accent-info); border-color: var(--accent-info); }
+
 .alert { background-color: var(--secondary-bg); border: 1px solid var(--border-color); }
 .alert-info { border-left: 4px solid var(--spotify-green); }
 .alert-warning { border-left: 4px solid #ff6b00; }
@@ -498,6 +530,24 @@ form .form-check-input[name="force"] + .form-check-label {
 .badge-source-lastfm { background-color: var(--brand-lastfm) !important; color: #fff !important; }
 .badge-source-musicbrainz { background-color: var(--brand-musicbrainz) !important; color: #fff !important; }
 .badge-source-discogs { background-color: var(--brand-discogs) !important; color: #fff !important; }
+/* ListenBrainz was the one brand badge with no rule, so it alone fell back to
+   the plain `.badge` surface and did not read as a source badge at all. */
+.badge-source-listenbrainz { background-color: var(--brand-listenbrainz) !important; color: #fff !important; }
+
+/* Scraper Source Key Badge — rendered by services/upcoming-releases.js and
+   pages/dashboard.js for Wikipedia-scraped rows carrying a source_key. */
+.source-key-badge {
+    display: inline-block;
+    padding: 0 0.5rem;
+    font-size: 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    line-height: 1.5;
+    color: #c4b5fd;
+    background: color-mix(in srgb, #581c87 55%, transparent);
+    border: 1px solid color-mix(in srgb, #a855f7 45%, transparent);
+    border-radius: 0.25rem;
+    white-space: nowrap;
+}
 
 /* ── Shared MusicBrainz Search Component ─────────────────────────────────── */
 /* Moved here out of components/_musicbrainz_search_component.html.  That
@@ -508,8 +558,8 @@ form .form-check-input[name="force"] + .form-check-label {
 .mb-search-form { margin-bottom: 0.75rem; }
 .mb-search-form .form-control:focus,
 .mb-search-form .form-select:focus {
-    border-color: #22d3ee;
-    box-shadow: 0 0 0 0.2rem rgba(34, 211, 238, 0.12);
+    border-color: var(--accent-info);
+    box-shadow: 0 0 0 0.2rem color-mix(in srgb, var(--accent-info) 12%, transparent);
 }
 .mb-results-container { max-height: 60vh; overflow-y: auto; overflow-x: hidden; }
 .mb-results-container .card { transition: border-color 0.15s ease; }

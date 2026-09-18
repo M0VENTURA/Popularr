@@ -106,25 +106,27 @@
   </div>
   <div class="card-body">
     <form id="addToQueueForm" onsubmit="addToQueue(event)">
+      {# Every column needs an xs width: bare col-md-* is 100%-wide below md, but
+         col-md-1 collapses the select/priority controls to ~30px on a phone. #}
       <div class="row g-2">
-        <div class="col-md-3">
+        <div class="col-12 col-md-3">
           <input type="text" class="form-control" id="queueArtist" placeholder="Artist *" required>
         </div>
-        <div class="col-md-3">
+        <div class="col-12 col-md-3">
           <input type="text" class="form-control" id="queueTitle" placeholder="Song Title *" required>
         </div>
-        <div class="col-md-3">
+        <div class="col-12 col-md-3">
           <input type="text" class="form-control" id="queueAlbum" placeholder="Album (optional)">
         </div>
-        <div class="col-md-1">
+        <div class="col-6 col-md-1">
           <select class="form-select" id="queueSource">
             <option value="soulseek">Soulseek</option>
           </select>
         </div>
-        <div class="col-md-1">
+        <div class="col-6 col-md-1">
           <input type="number" class="form-control" id="queuePriority" value="5" min="1" max="10" title="Priority (1=highest)">
         </div>
-        <div class="col-md-1">
+        <div class="col-12 col-md-1">
           <button type="submit" class="btn btn-primary w-100">
             <i class="bi bi-plus"></i> Add
           </button>

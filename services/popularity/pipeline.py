@@ -347,9 +347,25 @@ def run_popularity_from_artist(
     force_rescan: bool = False,
     progress_file: str | None = None,
     verbose: bool = False,
+    caller_scan_type: str | None = None,
 ):
+    """Run a popularity scan starting at ``artist``.
+
+    ``caller_scan_type`` names the progress-file scan type the CALLING scan owns.
+    It is accepted here because the route passes it (see
+    ``routes/scan_routes/popularity.py::api_scan_from_artist``) and because
+    ``run_popularity_scan``/``run_scan`` accept the same keyword — this entry
+    point used to omit it, so the thread died with
+
+        TypeError: run_popularity_from_artist() got an unexpected keyword
+        argument 'caller_scan_type'
+
+    on every artist- or letter-initiated scan. Defaults to ``"popularity"`` so a
+    caller that omits it keeps the historical behaviour.
+    """
     _reload_config_before_scan()
     logger.info("Starting popularity scan from artist", artist=artist)
+    _effective_scan_type = caller_scan_type or "popularity"
     
     from helpers.logging_config import log_unified
     log_unified(f"Starting popularity scan from artist '{artist}'")
@@ -377,7 +393,7 @@ def run_popularity_from_artist(
             force=force_rescan,
             resume_from=artist,
             progress_file=progress_file,
-            caller_scan_type="popularity",
+            caller_scan_type=_effective_scan_type,
         )
 
         if progress_file:

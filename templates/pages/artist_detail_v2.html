@@ -113,161 +113,18 @@
   {% endif %}
 {% endmacro %}
 
-<style>
-/* ── Page-specific overrides for artist page ──────────────────────────── */
-@media (max-width: 576px) {
-  .album-art-container { width: 150px !important; height: 150px !important; }
-  .d-flex.flex-row.flex-wrap .btn { min-height: 44px; }
-  .btn-group.btn-group-sm .btn { min-height: 40px; padding: 0.375rem 0.75rem; }
-  .col-12.col-lg-6 input.form-control { font-size: 16px; }
-}
-/* Ensure sticky nav doesn't cover section headers when clicked */
-[id$="-section"] { scroll-margin-top: 130px; }
+{#
+  Page-scoped styles now live in css/artist.css. They used to be an inline
+  <style> block here (~155 lines), which the browser re-parsed with every HTML
+  response and which could not be cached or linted.
 
-/* ── Stat cards: compact 2×2 grid on phones ── */
-@media (max-width: 575.98px) {
-  #artist-stats-section .card-body { padding: 0.6rem 0.5rem; }
-  #artist-stats-section .h4 { font-size: 1.15rem; margin-bottom: 0; }
-  #artist-stats-section .text-muted { margin-bottom: 0.2rem !important; font-size: 0.75rem !important; }
-}
-
-/* Former band members: muted outline pills (active members stay solid) */
-.artist-member-former {
-  background-color: transparent;
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  opacity: 0.7;
-}
-
-/* ── Artist IDs collapse toggle chevron ── */
-#artistIdsToggle[aria-expanded="true"] .bi-chevron-down { transform: rotate(180deg); }
-#artistIdsToggle .bi-chevron-down { transition: transform 0.2s ease; }
-
-/* Missing release cards */
-.missing-release-card {
-  background-color: var(--primary-bg);
-  border: 1px solid var(--border-color);
-  border-radius: 0.5rem;
-  padding: 0.75rem;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
-}
-.missing-release-art img {
-  width: 80px; height: 80px; border-radius: 0.35rem; object-fit: cover;
-  border: 1px solid var(--border-color); background-color: #2a2a2a;
-}
-/* Font sizing */
-#artist-similar-section .card-title, #artist-genres-section .card-title { font-size: 1.2rem; }
-#artistSimilarArtistsContainer strong { font-size: 1.05rem; }
-.similar-artist-pill { font-size: 0.95rem; padding: 0.45rem 0.6rem; }
-.artist-similar-card { border: 1px solid var(--border-color); background-color: var(--primary-bg); }
-.artist-similar-card:hover { border-color: var(--accent-color); }
-#artistGenresContainer .badge { font-size: 0.95rem; padding: 0.45rem 0.65rem; }
-/* Accordion album rows */
-.artist-page .accordion-item {
-  border: 1px solid var(--border-color);
-  margin-bottom: 0.25rem;
-  background-color: var(--secondary-bg);
-}
-.artist-page .accordion-header-row {
-  background-color: var(--secondary-bg);
-  color: var(--text-primary);
-  box-shadow: none;
-}
-.artist-page .accordion-header-row:not(.collapsed) {
-  background-color: var(--primary-bg);
-  color: var(--text-primary);
-}
-.artist-page .accordion-chevron-btn {
-  color: var(--text-secondary);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.5rem;
-  height: 1.5rem;
-  border-radius: 0.25rem;
-}
-.artist-page .accordion-chevron-btn:hover {
-  color: var(--text-primary);
-  background-color: var(--tertiary-bg);
-}
-.artist-page .album-chevron-icon {
-  transition: transform 0.2s ease;
-}
-.artist-page .accordion-chevron-btn:not(.collapsed) .album-chevron-icon {
-  transform: rotate(90deg);
-}
-.artist-page .accordion-header-row .album-art-wrapper img { border-radius: 4px; }
-@media (max-width: 767.98px) {
-  .artist-page .accordion-header-row .flex-grow-1 { font-size: 0.9rem; }
-}
-/* Bio Read More clamp */
-.bio-clamp {
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.bio-clamp.expanded {
-  -webkit-line-clamp: unset;
-  display: block;
-}
-/* Hero bio snippet: strictly 2 lines with an inline [more] prompt */
-.bio-clamp-2 {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.35;
-  max-height: 2.7em;
-}
-  /* Mobile 4-tab grouping: only the active group is visible on phones.
-     The default "Albums" group is pre-marked mobile-tab-active in the
-     template so the page is never blank before/without JS. */
-  @media (max-width: 991.98px) {
-    .mobile-tab-group { display: none; }
-    .mobile-tab-group.mobile-tab-active { display: block; }
-  }
-  @media (min-width: 992px) {
-    .mobile-tab-group { display: block !important; }
-  }
-/* Sticky queue toast */
-.queue-toast {
-  position: fixed;
-  bottom: 1rem; left: 1rem; right: 1rem;
-  z-index: 2100;
-  background: rgba(20, 30, 24, 0.97);
-  border: 1px solid rgba(34, 197, 94, 0.5);
-  color: var(--text-primary);
-  border-radius: 0.6rem;
-  padding: 0.75rem 1rem;
-  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  font-size: 0.95rem;
-  animation: queueToastSlideUp 0.25s ease;
-}
-@keyframes queueToastSlideUp {
-  from { transform: translateY(100%); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
-}
-.queue-toast .queue-toast-close { cursor: pointer; opacity: 0.7; }
-.queue-toast .queue-toast-close:hover { opacity: 1; }
-/* Quick Queue button */
-.btn-quick-queue {
-  min-height: 44px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.35rem;
-  white-space: nowrap;
-}
-@media (min-width: 992px) {
-  .btn-quick-queue { min-height: 0; }
-}
-</style>
+  This page previously loaded NO page stylesheet at all, while a stale
+  test_site/static/css/artist.css sat unreferenced and styled
+  `.artist-page tr.album-row` — a selector that can never match, because album
+  rows here are `<div class="album-row">`, not `<tr>`. See the header of
+  static/css/artist.css.
+#}
+<link rel="stylesheet" href="{{ versioned_static('css/artist.css') }}">
 
 <div class="container-fluid mt-3 artist-page" data-bs-spy="scroll" data-bs-target="#artist-nav" data-bs-smooth-scroll="true" tabindex="0">
 

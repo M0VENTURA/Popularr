@@ -128,7 +128,7 @@
       </div>
       <div class="card-body">
         <div class="table-responsive">
-          <table class="table table-hover mb-0">
+          <table class="table table-hover mb-0" data-mobile-cards>
             <thead>
               <tr>
                 <th>Track</th>
@@ -140,14 +140,14 @@
             <tbody>
               {% for bookmark in track_bookmarks %}
               <tr>
-                <td>
+                <td data-label="Track">
                   <a href="{{ url_for('ui.track_detail', track_id=bookmark.track_id) }}" class="text-decoration-none">
                     {{ bookmark.name }}
                   </a>
                 </td>
-                <td>{{ bookmark.artist }}</td>
-                <td>{{ bookmark.album }}</td>
-                <td class="text-center">
+                <td data-label="Artist">{{ bookmark.artist }}</td>
+                <td data-label="Album">{{ bookmark.album }}</td>
+                <td class="text-center" data-label="Actions">
                   <button type="button" class="btn btn-sm btn-outline-danger"
                           data-action="bookmark-remove"
                           data-bookmark-id="{{ bookmark.id }}"

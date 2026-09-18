@@ -220,10 +220,12 @@
         <div id="playerArtist" class="text-truncate text-muted" style="font-size:0.8rem;"></div>
       </div>
 
+      {# 44px, not 32px: these are the most-tapped controls in the app and 32px
+         is below the minimum comfortable touch target. #}
       <div class="d-flex align-items-center gap-2 flex-shrink-0 mx-auto">
-        <button id="playerPrev" class="btn btn-sm btn-dark border-secondary rounded-circle d-flex align-items-center justify-content-center" title="Previous" style="width: 32px; height: 32px;"><i class="bi bi-skip-start-fill"></i></button>
-        <button id="playerPlayPause" class="btn btn-sm btn-success rounded-circle d-flex align-items-center justify-content-center shadow-sm" title="Play" style="width: 40px; height: 40px;"><i class="bi bi-play-fill fs-5" style="margin-left: 2px;"></i></button>
-        <button id="playerNext" class="btn btn-sm btn-dark border-secondary rounded-circle d-flex align-items-center justify-content-center" title="Next" style="width: 32px; height: 32px;"><i class="bi bi-skip-end-fill"></i></button>
+        <button id="playerPrev" class="btn btn-sm btn-dark border-secondary rounded-circle d-flex align-items-center justify-content-center" title="Previous" style="width: 44px; height: 44px;"><i class="bi bi-skip-start-fill"></i></button>
+        <button id="playerPlayPause" class="btn btn-sm btn-success rounded-circle d-flex align-items-center justify-content-center shadow-sm" title="Play" style="width: 44px; height: 44px;"><i class="bi bi-play-fill fs-5" style="margin-left: 2px;"></i></button>
+        <button id="playerNext" class="btn btn-sm btn-dark border-secondary rounded-circle d-flex align-items-center justify-content-center" title="Next" style="width: 44px; height: 44px;"><i class="bi bi-skip-end-fill"></i></button>
       </div>
 
       <div class="d-none d-md-flex flex-grow-1 align-items-center gap-2 ms-3">
