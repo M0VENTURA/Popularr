@@ -815,7 +815,7 @@ _DEFAULT_METADATA_UPDATE_FIELDS = {
 # setting ``album_name_source: dedupe`` silently fell through to ``album``
 # and stripped the edition instead — the exact opposite of the request, with
 # nothing logged to explain it.
-_VALID_ALBUM_NAME_SOURCES = ("dedupe", "album", "release")
+_VALID_ALBUM_NAME_SOURCES = ("dedupe", "album", "release", "release_group")
 
 
 def get_metadata_update_config() -> dict[str, Any]:
@@ -827,7 +827,7 @@ def get_metadata_update_config() -> dict[str, Any]:
 
     ```yaml
     metadata_update:
-      album_name_source: dedupe       # dedupe | album | release
+      album_name_source: dedupe       # dedupe | album | release_group (release = alias)
       album_name_update_target: db    # db | files
       update_on_files:
         album_name: false
@@ -849,8 +849,16 @@ def get_metadata_update_config() -> dict[str, Any]:
         stripped ENTIRELY ("Doomsday Machine (reissue) (reissue)" →
         "Doomsday Machine").  Legacy behaviour — this DISCARDS the edition,
         so two pressings of one release collapse to the same name.
-      - ``release``: the MusicBrainz release title when a confident match
-        exists (falls back to ``dedupe``).
+      - ``release_group`` (alias ``release``): the MusicBrainz RELEASE-GROUP
+        title, i.e. the album's main identity ("Experience"), when a
+        confident match exists (falls back to ``dedupe``).
+
+    NOTE: neither value applies the SPECIFIC release/edition title.  A release
+    group has many releases, so the edition name ("Experience: Expanded
+    (Remixes and B-Sides)") is stored separately on the track as
+    ``release_title`` and surfaced as a tagline beneath the album name.  The
+    ``release`` spelling is retained because it is persisted in existing
+    config.yaml files; it behaves identically to ``release_group``.
 
     ``album_name_update_target`` decides where the cleaned/renamed album
     name is written:

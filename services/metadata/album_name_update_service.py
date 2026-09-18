@@ -9,8 +9,12 @@ on the Config page):
                     "X (tour edition)").
     * ``album``   — collapse duplicates AND strip edition markers entirely
                     ("X (tour edition)" becomes "X"). Legacy behaviour.
-    * ``release`` — prefer the MusicBrainz release title when a confident
-                    match exists, falling back to ``dedupe``.
+    * ``release_group`` (alias ``release``) — prefer the MusicBrainz
+                    RELEASE-GROUP title (the album's main identity, e.g.
+                    "Experience") when a confident match exists, falling back
+                    to ``dedupe``.  The SPECIFIC release/edition title is not
+                    used for the album name; it is stored as ``release_title``
+                    and shown as a tagline beneath the album name.
 - ``album_name_update_target`` — ``db`` (tracks table only) or ``files``
   (tracks table AND the ALBUM tag on the audio files).
 - ``update_on_files`` — per-field file-tag write switches; ``album_name``
@@ -174,14 +178,20 @@ def resolve_album_name(
     if not current:
         return album, None
 
-    if source == "release":
+    if source in ("release", "release_group"):
+        # Both spellings apply the RELEASE-GROUP title: `_release_title_for_album`
+        # searches release GROUPS, and the group name is the album's main
+        # identity ("Experience"). The specific edition title is deliberately
+        # NOT used here — it is stored as ``release_title`` and shown as the
+        # album page's tagline. `release` is the legacy spelling kept for
+        # config.yaml files written before the rename.
         release_title = _release_title_for_album(artist, album)
         if release_title:
             resolved, verdict = safe_album_rename(current, release_title)
             if resolved and resolved != current:
-                return resolved, f"release ({verdict})"
+                return resolved, f"release_group ({verdict})"
             logger.debug(
-                "[ALBUM_NAME] Release-title rename rejected",
+                "[ALBUM_NAME] Release-group-title rename rejected",
                 artist=artist, album=album, proposed=release_title, reason=verdict,
             )
         # Fall through to annotation repair.

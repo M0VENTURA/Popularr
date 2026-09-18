@@ -1563,8 +1563,9 @@
         <div class="col-12 col-sm-6 col-lg-4">
           <label class="form-label form-label-sm">Album Name Source</label>
           <select class="form-select form-select-sm" id="metadata_update_album_name_source">
-            <option value="album" {% if (config.get('metadata_update', {}) or {}).get('album_name_source', 'album') == 'album' %}selected{% endif %}>Album name (cleaned)</option>
-            <option value="release" {% if (config.get('metadata_update', {}) or {}).get('album_name_source', 'album') == 'release' %}selected{% endif %}>Release Name (MusicBrainz)</option>
+            <option value="dedupe" {% if (config.get('metadata_update', {}) or {}).get('album_name_source', 'dedupe') == 'dedupe' %}selected{% endif %}>Repair only (keep edition)</option>
+            <option value="release_group" {% if (config.get('metadata_update', {}) or {}).get('album_name_source', 'dedupe') in ('release_group', 'release') %}selected{% endif %}>Release Group (MusicBrainz)</option>
+            <option value="album" {% if (config.get('metadata_update', {}) or {}).get('album_name_source', 'dedupe') == 'album' %}selected{% endif %}>Album name (cleaned, edition stripped)</option>
           </select>
           <small class="form-text text-muted">
             The album name will be cleaned up with the <strong>Name</strong> during the <strong>Popularity Scan</strong>:

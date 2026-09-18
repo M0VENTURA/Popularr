@@ -18,6 +18,22 @@
   .album-hero-sub a:hover { text-decoration: underline !important; }
 </style>
 
+{# ── Release (edition) name vs release-GROUP name ────────────────────────
+   A release GROUP is the album's main identity and contains many RELEASES,
+   so the specific release name differs whenever the collection holds a
+   non-original pressing:
+       release group  "Experience"
+       release        "Experience: Expanded (Remixes and B-Sides)"
+
+   `album_name` is the group name; `release_title` is the edition. `year` is
+   the ORIGINAL year while `release_year` is this edition's year, so the
+   tagline is rendered only when it adds information. #}
+{% set _rel_title = (album_data.release_title if album_data and album_data.release_title else '')|trim %}
+{% set _rel_year = ((album_data.release_year|string|trim) if album_data and album_data.release_year else '') %}
+{% set _orig_year = ((album_data.album_year|string|trim) if album_data and album_data.album_year else '') %}
+{% set _show_rel_title = _rel_title and _rel_title|lower != (album_name or '')|lower %}
+{% set _show_rel_year = _rel_year and _rel_year != _orig_year %}
+
 <div class="container-fluid mt-4">
   <nav aria-label="breadcrumb">
     <ol class="breadcrumb">
@@ -42,7 +58,18 @@
         need ONE backend table and ONE function name, not two.
       #}
 
-      <div class="d-flex align-items-start gap-3 mb-3">
+      <div{# Edition tagline: the specific release this collection actually
+             holds, plus its own year when that differs from the original.
+             Rendered only when it adds information (see _show_rel_* above). #}
+          {% if _show_rel_title or _show_rel_year %}
+            <div class="small text-muted text-truncate album-hero-release mb-1">
+              <i class="bi bi-disc"></i>
+              {% if _show_rel_title %}<span title="{{ _rel_title }}">{{ _rel_title }}</span>{% endif %}
+              {% if _show_rel_title and _show_rel_year %}<span class="mx-1">·</span>{% endif %}
+              {% if _show_rel_year %}<span title="This edition's release year">{{ _rel_year }} edition</span>{% endif %}
+            </div>
+          {% endif %}
+           class="d-flex align-items-start gap-3 mb-3">
         <div class="flex-shrink-0">
           <div class="album-art-container position-relative rounded overflow-hidden shadow-sm" style="width: 80px; height: 80px;">
             <img id="albumArtImage" src="/api/album/{{ artist_name|path_segment }}/{{ album_name|path_segment }}/art" 
@@ -89,6 +116,11 @@
           <div class="col-6 col-md-3 border-end border-secondary">
             <div class="extra-small text-muted text-uppercase fw-semibold">Year</div>
             <div class="h6 fw-bold mb-0 text-white">{{ album_data.album_year or (album_data.spotify_release_date[:4] if album_data and album_data.spotify_release_date else '—') }}</div>
+            {# The ORIGINAL year is the headline; the edition's own year is
+               secondary context, shown only when it differs. #}
+            {% if _show_rel_year %}
+              <div class="extra-small text-muted" title="This edition's release year">{{ _rel_year }} edition</div>
+            {% endif %}
           </div>
           <div class="col-6 col-md-3 border-end border-secondary">
             <div class="extra-small text-muted text-uppercase fw-semibold">Rating</div>
@@ -296,9 +328,23 @@
                 <label for="album_artist" class="form-label small">Album Artist *</label>
                 <input type="text" class="form-control bg-dark text-light border-secondary" id="album_artist" name="album_artist" value="{{ artist_name }}" required>
               </div>
+              {# The Album Title above is the release GROUP's name (the album's
+                 main identity). This is the SPECIFIC release/edition the
+                 collection holds, shown as a tagline beneath the title. #}
+              <div class="col-12">
+                <label for="album_release_title" class="form-label small">Release Name <span class="text-muted fw-normal">— specific edition</span></label>
+                <input type="text" class="form-control bg-dark text-light border-secondary" id="album_release_title" name="album_release_title" value="{{ album_data.release_title or '' }}" placeholder="e.g. Experience: Expanded (Remixes and B-Sides)">
+                <div class="form-text text-muted">Leave blank when the collection holds the original release.</div>
+              </div>
+              <div class="col-6 col-md-3">
+                <label for="album_originalyear" class="form-label small">Original Year</label>
+                <input type="number" class="form-control bg-dark text-light border-secondary" id="album_originalyear" name="album_originalyear" value="{{ album_data.originalyear or album_data.year or album_data.album_year or '' }}" placeholder="YYYY">
+                <div class="form-text text-muted">Release group's first release.</div>
+              </div>
               <div class="col-6 col-md-3">
                 <label for="release_year" class="form-label small">Release Year</label>
-                <input type="number" class="form-control bg-dark text-light border-secondary" id="release_year" name="release_year" value="{{ album_data.year or album_data.album_year or '' }}" placeholder="YYYY">
+                <input type="number" class="form-control bg-dark text-light border-secondary" id="release_year" name="release_year" value="{{ album_data.release_year or '' }}" placeholder="YYYY">
+                <div class="form-text text-muted">This edition's year.</div>
               </div>
               <div class="col-6 col-md-3">
                 <label for="album_type" class="form-label small">Album Type</label>

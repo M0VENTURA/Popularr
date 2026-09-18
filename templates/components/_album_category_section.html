@@ -58,6 +58,17 @@
               {{ album.get('album') or album.get('title') }}
             </a>
           {% endif %}
+          {# Edition tagline: the SPECIFIC release this collection actually
+             holds, shown only when it differs from the release-GROUP name
+             (which is the album title above). Missing releases have no local
+             edition, so this applies to owned albums only. #}
+          {% if not is_missing %}
+            {% set _row_rel_title = (album.get('release_title') or '')|trim %}
+            {% set _row_group_title = (album.get('album') or album.get('title') or '')|trim %}
+            {% if _row_rel_title and _row_rel_title|lower != _row_group_title|lower %}
+              <div class="text-muted extra-small text-truncate" style="max-width: 340px;" title="{{ _row_rel_title }}">{{ _row_rel_title }}</div>
+            {% endif %}
+          {% endif %}
           {% if album_is_downloading %}
             <span class="badge ms-2" style="background-color: rgba(34,211,238,0.15); color: #22d3ee; border: 1px solid rgba(34,211,238,0.5);" title="This release is currently in the download queue">
               🔵 Queued

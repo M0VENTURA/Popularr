@@ -817,6 +817,12 @@ class MusicBrainzService:
             "original_release_year": original_release_year,
             "version_release_year": version_release_year,
             "musicbrainz_release_title": specific_title,
+            # Keys named after the actual tracks columns so the scan can
+            # persist them: the release GROUP name stays in ``album`` while the
+            # SPECIFIC edition's name and year are stored separately, which is
+            # what lets the album page show an edition tagline.
+            "release_title": specific_title,
+            "release_year": version_release_year,
             "recording_mbid": mbid,
             "confidence": confidence,
             "writer": ", ".join(dict.fromkeys(writers)),

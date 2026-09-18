@@ -497,7 +497,7 @@
         {},
         (global.pageConfig && global.pageConfig.metadata_update) || {},
         {
-          album_name_source: getValue('metadata_update_album_name_source', 'album'),
+          album_name_source: getValue('metadata_update_album_name_source', 'dedupe'),
           album_name_update_target: getValue('metadata_update_album_name_target', 'db'),
           update_on_files: Object.assign(
             {},

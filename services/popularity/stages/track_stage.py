@@ -843,6 +843,34 @@ def _resolve_track_mb_metadata(
                 if _should_update_year:
                     payload["year"] = _mb_year
 
+            # Release (edition) identity.  ``album`` holds the release GROUP
+            # name; the SPECIFIC edition's name and its own year are stored
+            # separately so the album page can show an edition tagline
+            # ("Experience: Expanded (Remixes and B-Sides)").
+            #
+            # ``year`` is the album's ORIGINAL year (handled above), so
+            # ``release_year`` is the ONLY place the edition's year lives.
+            # Both respect an existing value unless this is a forced metadata
+            # pass, so a manual edit is never silently clobbered.
+            _mb_release_title = _as_str(mb_data.get("release_title") or "").strip()
+            if _mb_release_title and (
+                _force_meta or not _as_str(track.get("release_title") or "").strip()
+            ):
+                payload["release_title"] = _mb_release_title
+
+            _mb_release_year = mb_data.get("release_year")
+            if _mb_release_year and (
+                _force_meta or not _as_str(track.get("release_year") or "").strip()
+            ):
+                try:
+                    payload["release_year"] = int(str(_mb_release_year)[:4])
+                except (TypeError, ValueError):
+                    logger.debug(
+                        "Discarded unparsable release year",
+                        track_id=track_id,
+                        value=_mb_release_year,
+                    )
+
     return {
         "mb_data": mb_data,
         "payload": payload,

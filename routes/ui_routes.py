@@ -743,6 +743,11 @@ async def artist_detail(name: str) -> Any:
                 "avg_stars": None,
                 "total_duration": 0,
                 "last_updated": track.get("updated_at"),
+                # The SPECIFIC release/edition held in the collection. The
+                # release-GROUP name is ``album``; this is rendered as a
+                # second line under the album name when it differs.
+                "release_title": track.get("release_title"),
+                "release_year": track.get("release_year"),
                 "spotify_album_type": track.get("musicbrainz_albumtype")
                     or track.get("spotify_album_type")
                     or track.get("album_type"),
@@ -762,6 +767,14 @@ async def artist_detail(name: str) -> Any:
         year = _leading_year(track)
         if year and not album_entry.get("album_year"):
             album_entry["album_year"] = year
+
+        # Backfill the edition name/year from any track that carries them —
+        # the first track of an album is not necessarily the one the scan
+        # enriched first.
+        if not album_entry.get("release_title") and track.get("release_title"):
+            album_entry["release_title"] = track.get("release_title")
+        if not album_entry.get("release_year") and track.get("release_year"):
+            album_entry["release_year"] = track.get("release_year")
 
         updated = track.get("updated_at")
         existing_updated = album_entry.get("last_updated")
