@@ -29,10 +29,17 @@ the most likely way this regresses.
 from __future__ import annotations
 
 import pathlib
+import re
 
 import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+#: A browser navigation to a track view, capturing everything after ``/track/``.
+#: Matches ``location.href = `/track/${id}/edit` `` and the ``/delete`` form it
+#: replaced; ``${...}`` interpolations are stripped by the caller before the
+#: remaining path is judged.
+_TRACK_NAV_RE = re.compile(r"location\.href\s*=\s*[`\"']/track/([^`\"']*)[`\"']")
 
 
 def _rule_strings(app) -> set[str]:
@@ -160,6 +167,23 @@ async def test_delete_accepts_a_bodyless_post(client):
 # The front-end no longer navigates to the dead URL
 # ---------------------------------------------------------------------------
 
+def _strip_js_comments(source: str) -> str:
+    """Remove ``//`` line comments and ``/* */`` blocks from JS.
+
+    Both controllers document the bug they fix, and that documentation quotes
+    the dead URL verbatim — so a naive ``in source`` check would match the
+    explanatory comment and pass/fail on prose rather than on behaviour. The
+    assertions below are about what the code DOES, so comments are removed
+    first.
+
+    Regex rather than a real parser: these files contain no regex or string
+    literal that looks like a comment, and pulling in a JS tokenizer for two
+    assertions would not be worth the dependency.
+    """
+    without_blocks = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    return re.sub(r"//[^\n]*", "", without_blocks)
+
+
 @pytest.mark.parametrize(
     "rel_path",
     [
@@ -168,14 +192,36 @@ async def test_delete_accepts_a_bodyless_post(client):
     ],
 )
 def test_album_js_does_not_navigate_to_the_dead_delete_url(rel_path: str):
-    """Neither album controller may navigate to ``/track/<id>/delete``.
+    """No controller may navigate to ``/track/<id>/...`` — only ``/track/<id>``.
 
     Both trees carried the identical bug, so both are checked — fixing one and
     not the other is exactly the kind of half-fix that caused this.
+
+    WHY THIS PARSES THE URL rather than searching for a fragment: the only
+    registered track *view* route is ``/track/<track_id>``
+    (``routes/ui_routes.py``), and the edit-modal fallback legitimately
+    navigates there. So ``/delete`` and ``/edit`` are both wrong, and a bare
+    ``"/delete" not in source`` would also match the explanatory comment (these
+    functions document the bug they fix, quoting the dead URL). Each navigation
+    is therefore extracted, its ``${...}`` interpolations removed, and the
+    LEFTOVER — the extra path segment — must be empty.
     """
-    source = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
-    assert "/track/${trackId}/delete" not in source
-    assert "/track/${encodeURIComponent(trackId)}/delete" not in source
+    code = _strip_js_comments((REPO_ROOT / rel_path).read_text(encoding="utf-8"))
+
+    navigations = _TRACK_NAV_RE.findall(code)
+    assert navigations, (
+        f"{rel_path}: expected at least one /track/<id> navigation to check; "
+        "if the fallbacks were removed, delete this test rather than leaving "
+        "it vacuously passing."
+    )
+
+    for nav in navigations:
+        remainder = re.sub(r"\$\{[^}]*\}", "", nav).strip().strip("/")
+        assert remainder == "", (
+            f"{rel_path}: navigates to /track/<id>/{remainder} — NO such route "
+            "exists. The only registered track view is /track/<track_id>; "
+            "deletes are POST /api/v1/tracks/<id>/delete."
+        )
 
 
 @pytest.mark.parametrize(
@@ -187,6 +233,6 @@ def test_album_js_does_not_navigate_to_the_dead_delete_url(rel_path: str):
 )
 def test_album_js_targets_the_real_endpoint(rel_path: str):
     """Both controllers must call the registered POST endpoint."""
-    source = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
-    assert "/tracks/${encodeURIComponent(trackId)}/delete" in source
-    assert "POST" in source or "postJson" in source
+    code = _strip_js_comments((REPO_ROOT / rel_path).read_text(encoding="utf-8"))
+    assert "/tracks/${encodeURIComponent(trackId)}/delete" in code
+    assert "POST" in code or "postJson" in code

@@ -225,7 +225,11 @@
     if (!modalEl) {
       // Component not included on this page — fall back rather than show
       // nothing.
-      global.location.href = `/track/${encodeURIComponent(trackId)}/edit`;
+      // The route is /track/<id> — NOT /track/<id>/edit. The latter has never
+      // been registered (same class of bug as the delete button below, which
+      // navigated to /track/<id>/delete), so this fallback 404'd whenever the
+      // edit modal was absent from the page.
+      global.location.href = `/track/${encodeURIComponent(trackId)}`;
       return;
     }
 

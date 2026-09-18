@@ -8,11 +8,15 @@
   .min-w-0 { min-width: 0; }
   [id$="-section"] { scroll-margin-top: 130px; }
   .album-hero-sub a:hover { text-decoration: underline !important; }
-  
-  /* Fix Bootstrap nav-link default blue colors */
-  #albumPageTabs .nav-link { color: #adb5bd !important; border-color: transparent !important; }
-  #albumPageTabs .nav-link:hover { color: #ffffff !important; }
-  #albumPageTabs .nav-link.active { background-color: var(--spotify-green, #1db954) !important; color: #000 !important; }
+
+  /* The `#albumPageTabs .nav-link` colour/hover/active overrides that used to
+     live here are GONE. They existed only because popularr.css defined just
+     `.nav-pills .nav-link.active`, leaving an inactive pill to fall through to
+     Bootstrap's default link blue, and because the container used
+     `bg-secondary` (#6c757d — lighter than every surface token in this theme).
+     popularr.css now owns the whole .nav-pills block and the container uses
+     `nav-segmented`, so the local copy was duplicating (and could drift from)
+     the shared rule. Keep page CSS to things that are genuinely page-specific. */
 </style>
 
 {# ── Release (edition) name vs release-GROUP name ────────────────────────
@@ -196,7 +200,14 @@
   </div>
 
   <!-- Standard Bootstrap Nav Pills -->
-  <ul class="nav nav-pills nav-fill bg-secondary p-1 rounded mb-3 shadow-sm" role="tablist" id="albumPageTabs">
+  {#
+    `nav-segmented` (popularr.css) replaces `bg-secondary p-1 rounded`.
+    Bootstrap's bg-secondary (#6c757d) is lighter than every surface token in
+    this theme, so the strip read as a pale grey band floating on the card
+    rather than a recessed track behind the active green pill. Matches the
+    rebuilt tree and every other tabbed page in the app.
+  #}
+  <ul class="nav nav-pills nav-segmented nav-fill mb-3 shadow-sm" role="tablist" id="albumPageTabs">
     <li class="nav-item" role="presentation">
       <button class="nav-link active fw-bold" id="tab-tracks-btn" data-bs-toggle="tab" data-bs-target="#tab-tracks" type="button" role="tab" aria-selected="true">
         <i class="bi bi-music-note-list me-1"></i> Tracks ({{ tracks|length }})

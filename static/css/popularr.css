@@ -383,7 +383,62 @@ form .form-check-input[name="force"] + .form-check-label {
 .nav-tabs .nav-link { color: var(--text-secondary); border-color: transparent; }
 .nav-tabs .nav-link:hover { border-color: var(--border-color); color: var(--text-primary); }
 .nav-tabs .nav-link.active { background-color: var(--secondary-bg); border-color: var(--border-color) var(--border-color) var(--secondary-bg); color: var(--spotify-green); }
-.nav-pills .nav-link.active { background-color: var(--spotify-green, #1db954) !important; color: #000 !important; }
+
+/* Nav Pills.
+   `.nav-pills .nav-link.active` used to be the ONLY .nav-pills rule here, so
+   an INACTIVE pill had no colour of its own and fell through to Bootstrap's
+   default link blue. Every unselected tab rendered blue on a green-and-neutral
+   UI, and no markup could fix it because no class was wrong — the rule simply
+   did not exist.
+
+   Two pages had already worked around this locally (album_detail.html's
+   `#albumPageTabs .nav-link` and track_detail.html's inline block), which is
+   exactly why the gap went unnoticed. artist_detail_v2.html has NO local rule,
+   so its tab strip is the one that rendered blue — and it is the page the
+   \"grey/blue tab strip\" report came from. Declaring it once here lets those
+   local workarounds be dropped.
+
+   Kept as FLAT selectors rather than nesting: this file's other rules are
+   flat, and these need to stay readable next to them. */
+.nav-pills .nav-link {
+    color: var(--text-secondary);
+    background-color: transparent;
+    border: 1px solid transparent;
+    transition: color 0.15s ease, background-color 0.15s ease;
+}
+.nav-pills .nav-link:hover { color: var(--text-primary); background-color: var(--tertiary-bg); }
+
+/* Bootstrap's default focus ring is the same blue this file exists to remove. */
+.nav-pills .nav-link:focus-visible {
+    outline: 2px solid var(--accent-color);
+    outline-offset: 2px;
+    box-shadow: none;
+}
+.nav-pills .nav-link.disabled,
+.nav-pills .nav-link:disabled {
+    color: var(--text-tertiary);
+    background-color: transparent;
+    opacity: 0.55;
+    pointer-events: none;
+}
+.nav-pills .nav-link.active,
+.nav-pills .show > .nav-link {
+    background-color: var(--spotify-green, #1db954) !important;
+    color: #000 !important;
+    border-color: var(--spotify-green);
+}
+
+/* Without this the plain :hover above would grey out an ACTIVE pill. The
+   `!important`s are required, not decorative: the .active rule above sets the
+   background and colour with !important, and !important outranks specificity,
+   so a plain declaration here would never apply no matter how specific. */
+.nav-pills .nav-link.active:hover {
+    background-color: var(--accent-hover) !important;
+    color: #000 !important;
+}
+
+/* A green focus ring vanishes into the active pill's own green fill. */
+.nav-pills .nav-link.active:focus-visible { outline-color: var(--text-primary); }
 
 /* Opt-in segmented-control look: add `nav-segmented` alongside `nav-pills`
    on the container instead of putting Bootstrap's `bg-secondary` on it — that

@@ -88,7 +88,11 @@ window.openEditTrackFromAlbum = function (trackId) {
     if (modalEl && typeof bootstrap !== 'undefined') {
         bootstrap.Modal.getOrCreateInstance(modalEl).show();
     } else {
-        window.location.href = `/track/${trackId}/edit`;
+        // The route is /track/<id> — NOT /track/<id>/edit. The latter has never
+        // been registered (same class of bug as the delete button below, which
+        // navigated to /track/<id>/delete), so this fallback 404'd whenever the
+        // edit modal was absent from the page.
+        window.location.href = `/track/${encodeURIComponent(trackId)}`;
     }
 };
 
