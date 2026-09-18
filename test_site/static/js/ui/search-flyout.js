@@ -64,6 +64,11 @@
   let _scope = SCOPE_ALL;
   let _runSeq = 0;
   const _queuedIds = Object.create(null);
+  // "A queue/pick request is currently in flight for this release", kept apart
+  // from _queuedIds ("already queued"). The picker path is asynchronous and
+  // previously recorded NOTHING until its callback fired, so repeat clicks each
+  // started a fresh MusicBrainz probe and every result arrived at once.
+  const _queuedInFlight = Object.create(null);
   let _mbIndex = Object.create(null);
   const _counts = { all: 0, library: 0, mb: 0 };
   let _lastQuery = null;
@@ -672,36 +677,90 @@
     btn.disabled = true;
   }
 
+  /**
+   * Queue one release.
+   *
+   * TWO bugs are fixed here, both reported as "the queue button doesn't show
+   * anything when selected, then pressing a few times gives multiple popups
+   * ~20 seconds later":
+   *
+   * 1. NO FEEDBACK. The `openReleasePicker` branch returned immediately
+   *    without touching the button, so the click looked ignored while a
+   *    MusicBrainz probe (seconds) and then the queue POST ran.
+   * 2. NO IN-FLIGHT GUARD. `_queuedIds[id]` was only set inside the picker's
+   *    CALLBACK, which fires after the user has picked a version — so until
+   *    then a second click was not blocked and started ANOTHER probe. N
+   *    clicks → N probes → N popups arriving together.
+   *
+   * A *pick* and a *queue* are different events: picking opens the version
+   * flyout, queueing actually enqueues. Only the latter may mark the button
+   * "Queued", so the two are tracked separately.
+   */
   async function queueRelease(rel, btn) {
     const id = rel.id || '';
     if (!id || _queuedIds[id]) return;
+
+    // Blocks re-clicks for the whole lookup+queue window, not just the POST.
+    if (_queuedInFlight[id]) return;
+    _queuedInFlight[id] = true;
+
     const artist = mbReleaseArtist(rel);
 
-    if (typeof global.openReleasePicker === 'function') {
-      global.openReleasePicker(id, rel.title || '', artist, function () {
+    // Show a spinner immediately — the release-picker probe is a network
+    // round trip measured in seconds, so silence reads as "nothing happened".
+    const restoreBusy = (global.buttonState && global.buttonState.setBusy)
+      ? global.buttonState.setBusy(btn, 'Queuing…')
+      : function () {};
+
+    // Always clear the guard and the busy state, then either mark the button
+    // queued or return it to normal. Shared by both branches so neither can
+    // leave the button stuck.
+    const settle = (queued) => {
+      delete _queuedInFlight[id];
+      try { restoreBusy(); } catch (_e) { /* already restored */ }
+      if (queued) {
         _queuedIds[id] = true;
         markQueued(btn);
-      });
+      }
+    };
+
+    if (typeof global.openReleasePicker === 'function') {
+      let didQueue = false;
+      try {
+        // `openReleasePicker` is async and resolves once the probe has decided:
+        // either it queued the single version, or it opened the version flyout
+        // and handed the choice to the user.
+        await global.openReleasePicker(id, rel.title || '', artist, () => {
+          didQueue = true;
+          settle(true);
+        });
+      } catch (_error) {
+        // The picker already surfaced the failure; just release the button.
+        if (!didQueue) settle(false);
+        return;
+      }
+      // Flyout open (or probe failed): the request is no longer in flight, so
+      // release the guard and restore the button. Leaving it busy while the
+      // flyout is open would strand the button forever if the user cancelled.
+      if (!didQueue) settle(false);
       return;
     }
 
-    _queuedIds[id] = true;
     try {
-      await global.buttonState.withBusy(btn, '', async () => {
-        await global.api.postJson('/api/musicbrainz/download', {
-          release_id: id,
-          release_title: rel.title || '',
-          artist,
-          method: 'slskd',
-          queue_items_only: true,
-        });
+      await global.api.postJson('/api/musicbrainz/download', {
+        release_id: id,
+        release_title: rel.title || '',
+        artist,
+        method: 'slskd',
+        queue_items_only: true,
       });
-      markQueued(btn);
+      settle(true);
       if (global.toast) global.toast.queued(rel.title || 'Release');
     } catch (error) {
       // Delete rather than set false, so the key cannot linger as a
       // permanently-falsy entry in the map.
       delete _queuedIds[id];
+      settle(false);
       notifyError('Queue failed: ' + error.message);
     }
   }

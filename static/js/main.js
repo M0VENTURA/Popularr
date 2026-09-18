@@ -480,7 +480,12 @@ window.openReleasePicker = function (releaseGroupId, title, artist, onQueued) {
   // Probe the release group first: a group with exactly ONE release is
   // queued directly (no flyout); multi-version groups open the picker so
   // the user can choose the exact edition (CD / deluxe / promo).
-  fetch(url + '&format=json', { headers: { 'Accept': 'application/json' } })
+  //
+  // RETURNS the promise for the whole flow. Callers (unified_search.js
+  // queueRelease) need to know when the request has SETTLED so they can clear
+  // the button's busy state — without that, the button stayed inert and every
+  // extra click fired another probe.
+  return fetch(url + '&format=json', { headers: { 'Accept': 'application/json' } })
     .then(function (r) { return r.json().catch(function () { return null; }); })
     .then(function (data) {
       var releases = (data && Array.isArray(data.releases)) ? data.releases : null;

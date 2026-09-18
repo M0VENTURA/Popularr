@@ -15,6 +15,12 @@
   var _scope = SCOPE_ALL;
   var _runSeq = 0;
   var _queuedIds = {};
+  // Transient "a queue request is in flight for this release" state, kept
+  // separate from _queuedIds (which means "already queued"). Both the lookup
+  // and the queue POST take seconds, and the button previously gave no
+  // feedback at all, so a second click was indistinguishable from the first —
+  // see queueRelease().
+  var _queuedInFlight = {};
   var _mbIndex = {};
   var _counts = { all: 0, library: 0, mb: 0 };
   var _lastQuery = null;
@@ -586,24 +592,100 @@
     notifyError._timer = setTimeout(function () { errEl.classList.add('d-none'); }, 5000);
   }
 
+  // ── Queue button states ─────────────────────────────────────────────────
+  //
+  // Three distinct states, and the button has to move through them:
+  //   1. idle      -> "Queue"            (this file's markup)
+  //   2. in flight -> spinner + disabled (setQueueBtnBusy)
+  //   3. queued    -> tick + disabled    (markQueueBtnDone)
+  //
+  // State 2 did not exist before, which is why clicking appeared to do
+  // nothing and could be repeated freely.
+  //
+  // NOTE: this tree has no `ui/button-state.js`, so the live dashboard has no
+  // `global.buttonState`. These helpers therefore manage the button directly,
+  // and mirror what buttonState.setBusy/setDone do (including `aria-busy`) so
+  // the two trees behave identically.
+  var QUEUE_BTN_IDLE_HTML = '<i class="bi bi-download"></i> Queue';
+
+  function setQueueBtnBusy(btn, label) {
+    if (!btn) return;
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    btn.innerHTML =
+      '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>' +
+      (label ? ' ' + esc(label) : '');
+  }
+
+  function restoreQueueBtn(btn) {
+    if (!btn) return;
+    if (btn.classList.contains('btn-success')) return; // already marked queued
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+    btn.innerHTML = QUEUE_BTN_IDLE_HTML;
+  }
+
+  function markQueueBtnDone(btn) {
+    if (!btn) return;
+    btn.disabled = true;
+    btn.removeAttribute('aria-busy');
+    btn.classList.replace('btn-outline-primary', 'btn-success');
+    btn.innerHTML = '<i class="bi bi-check2"></i> Queued';
+  }
+
   function queueRelease(rel, btn) {
     var id = rel.id || '';
     if (!id || _queuedIds[id]) return;
+
+    // In-flight guard. The picker path below is asynchronous, and it used to
+    // `return` immediately WITHOUT marking the button busy or recording any
+    // state — so the click looked ignored, nothing blocked a second click, and
+    // each click started ANOTHER MusicBrainz probe. N clicks therefore produced
+    // N popups/toasts arriving together ~20s later.
+    if (_queuedInFlight[id]) return;
+    _queuedInFlight[id] = true;
+
     var artist = mbReleaseArtist(rel);
 
-    if (typeof window.openReleasePicker === 'function') {
-      window.openReleasePicker(id, rel.title || '', artist, function () {
+    // Show progress immediately: the release-picker probe is a network round
+    // trip (measured in seconds), and the queue POST is another.
+    setQueueBtnBusy(btn, 'Queuing…');
+
+    // Shared settle path for BOTH branches. Always restores the busy state
+    // first so the button cannot be left stuck, then either marks it queued or
+    // returns it to normal.
+    var settle = function (queued) {
+      delete _queuedInFlight[id];
+      restoreQueueBtn(btn);
+      if (queued) {
         _queuedIds[id] = true;
-        btn.classList.replace('btn-outline-primary', 'btn-success');
-        btn.innerHTML = '<i class="bi bi-check2"></i> Queued';
-        btn.disabled = true;
+        markQueueBtnDone(btn);
+      }
+    };
+
+    if (typeof window.openReleasePicker === 'function') {
+      var didQueue = false;
+      var promise = window.openReleasePicker(id, rel.title || '', artist, function () {
+        didQueue = true;
+        settle(true);
       });
+
+      if (promise && typeof promise.then === 'function') {
+        // The picker resolved WITHOUT queueing: either the multi-version
+        // flyout is now open for the user to choose from, or the lookup
+        // failed. Either way the request is no longer in flight, so clear the
+        // busy state and let the button be used again.
+        promise.then(
+          function () { if (!didQueue) settle(false); },
+          function () { if (!didQueue) settle(false); }
+        );
+      } else {
+        // No promise to await (an older openReleasePicker signature). Release
+        // the guard on the next tick so the button can never be stuck forever.
+        setTimeout(function () { if (!didQueue) settle(false); }, 0);
+      }
       return;
     }
-
-    _queuedIds[id] = true;
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
 
     fetch('/api/musicbrainz/download', {
       method: 'POST',
@@ -619,14 +701,11 @@
       .then(function (res) { return res.json().catch(function () { return {}; }).then(function (data) { return { ok: res.ok, data: data }; }); })
       .then(function (out) {
         if (!out.ok) throw new Error(out.data.error || 'Queue request failed');
-        btn.classList.replace('btn-outline-primary', 'btn-success');
-        btn.innerHTML = '<i class="bi bi-check2"></i> Queued';
+        settle(true);
         if (typeof window.showQueueToast === 'function') window.showQueueToast(rel.title || 'Release');
       })
       .catch(function (e) {
-        _queuedIds[id] = false;
-        btn.disabled = false;
-        btn.innerHTML = '<i class="bi bi-plus-lg"></i> Queue';
+        settle(false);
         notifyError('Queue failed: ' + e.message);
       });
   }

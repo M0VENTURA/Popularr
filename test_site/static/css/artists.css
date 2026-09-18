@@ -40,18 +40,34 @@
 
 /* ── Metro jump grid overlay ───────────────────────────────────────────── */
 
+/*
+  `right: 0` / `bottom: 0`, NOT `width: 100vw` / `height: 100vh`.
+
+  100vw includes the vertical scrollbar's width, so a fixed overlay sized that
+  way is wider than the viewport's content box and extends under/over the
+  scrollbar — which sits on the right. That is the reported "the banner covers
+  the scroll bar on the right side of the page".
+
+  A fixed element with left:0/right:0 is laid out against the viewport's
+  content box, so it stops exactly at the scrollbar. `inset: 0` would also work
+  and is what popularr.css uses for its other overlays; the longhands are kept
+  here for clarity in a rule that has already caused one regression.
+*/
 .metro-jump-overlay {
   position: fixed;
   top: 0;
   left: 0;
-  width: 100vw;
-  height: 100vh;
+  right: 0;
+  bottom: 0;
   background: rgba(0, 0, 0, 0.8);
   z-index: 2000;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 1rem;
+  /* The overlay can be taller than the viewport on the tile grid; scrolling
+     stays INSIDE it so the page behind never scrolls. */
+  overflow-y: auto;
 }
 
 /* `d-none` must win over the `display: flex` above — Bootstrap's utility is

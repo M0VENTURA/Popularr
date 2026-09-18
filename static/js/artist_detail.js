@@ -2273,6 +2273,12 @@ function checkMissingReleases(artistName, silent = false, background = false) {
       });
 
       initializeMissingToggle();
+      // Re-assert the active filter: the rows above were injected AFTER the
+      // user may have already chosen "In Library" or "Missing", and every new
+      // row arrives with data-status="missing" and no inline display, so
+      // without this an active filter would be silently undone by the
+      // injection (newly-added missing albums would appear under "In Library").
+      if (typeof applyArtistFilter === 'function') applyArtistFilter();
       if (!silent) {
         alert(addedCount > 0
           ? `✅ Added ${addedCount} missing release(s) inline from MusicBrainz`
@@ -3805,6 +3811,133 @@ function initializeMissingToggle() {
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', initializeMissingToggle);
+
+// ---------------------------------------------------------------------------
+// Album status filter — All / In Library / Missing
+// ---------------------------------------------------------------------------
+//
+// artist_detail_v2.html renders a filter bar whose three buttons call
+//     setArtistFilter('all' | 'library' | 'missing')
+// from inline onclick attributes. This function did not exist ANYWHERE in the
+// codebase, so every one of those clicks threw
+//     ReferenceError: setArtistFilter is not defined
+// and nothing filtered — the reported "can't filter out the missing albums on
+// the artist page". The buttons also carry `artist-filter-btn` + `data-filter`,
+// which is what lets this read the current selection back off the DOM.
+//
+// Release rows are server-rendered by the release-category macro as
+//     <div class="album-row" data-status="missing" | "library">
+// inside a `<div class="card category-section" id="<section_id>-section">`.
+// So the filter keys off `data-status`, then hides any category card left with
+// zero visible rows — otherwise an emptied section keeps its header and a
+// stale "N / M in Library" badge sitting above an empty body.
+//
+// Rows injected later by checkMissingReleases() also carry
+// data-status="missing", so they filter correctly with no special-casing; that
+// function re-asserts the filter afterwards because the injection happens
+// AFTER a filter may already be active.
+
+const ARTIST_ALBUM_FILTER_KEY = 'artistAlbumFilterState';
+
+//: The active filter. Kept module-level so applyArtistFilter() can re-assert
+//: it after rows are injected or re-sorted.
+let artistAlbumFilterState = 'all';
+
+/** Is this row owned for the purposes of the "In Library" filter? */
+function _artistRowIsLibrary(row) {
+  const status = String(row.getAttribute('data-status') || '').toLowerCase();
+  // NOTE: only an explicit "missing" counts as missing. The two filters are
+  // deliberately NOT symmetric — wrongly hiding an owned album is worse than
+  // wrongly showing a missing one, and "Missing" is the explicit opt-in. So an
+  // unexpected/future status (or an absent one) leans to Library rather than
+  // silently disappearing from both views.
+  return status !== 'missing';
+}
+
+/**
+ * Re-assert the CURRENT filter without changing the selection.
+ *
+ * Split out from setArtistFilter() so it can also be called after rows are
+ * added, removed or re-sorted — the filter is a state that must be
+ * re-applied, not a one-off class change.
+ */
+function applyArtistFilter() {
+  const filter = artistAlbumFilterState;
+
+  // 1. Show/hide each release row according to its status.
+  document.querySelectorAll('.category-section .album-row[data-status]').forEach(row => {
+    let visible;
+    if (filter === 'all') {
+      visible = true;
+    } else if (filter === 'missing') {
+      visible = String(row.getAttribute('data-status') || '').toLowerCase() === 'missing';
+    } else {
+      visible = _artistRowIsLibrary(row);
+    }
+    // Set '' rather than 'block': the rows are flex containers in v2 and
+    // table rows in the legacy page, and clearing the inline style lets each
+    // layout keep its own display value.
+    row.style.display = visible ? '' : 'none';
+  });
+
+  // 2. Hide a category card once it has no visible rows left. Cards with no
+  //    status rows at all (e.g. "Covers of ...", which is populated by JS)
+  //    are left alone.
+  document.querySelectorAll('.category-section').forEach(section => {
+    const rows = section.querySelectorAll('.album-row[data-status]');
+    if (!rows.length) {
+      section.style.display = '';
+      return;
+    }
+    const anyVisible = Array.from(rows).some(row => row.style.display !== 'none');
+    section.style.display = anyVisible ? '' : 'none';
+  });
+
+  // 3. Reflect the selection on the buttons so the active filter is obvious.
+  document.querySelectorAll('.artist-filter-btn').forEach(btn => {
+    const value = String(btn.getAttribute('data-filter') || 'all').toLowerCase();
+    btn.classList.toggle('active', value === filter);
+  });
+}
+
+/**
+ * Apply an album status filter. Called from the filter bar's inline onclick.
+ *
+ * Clicking the ALREADY-ACTIVE filter clears it back to "All", so the buttons
+ * behave as on/off switches rather than a sticky 3-way radio (the behaviour
+ * the 2026-08-19 artist-filter-toggles changelog describes).
+ */
+function setArtistFilter(filter) {
+  const wanted = String(filter || 'all').toLowerCase();
+  const valid = ['all', 'library', 'missing'];
+  const next = valid.includes(wanted) ? wanted : 'all';
+
+  artistAlbumFilterState = (next === artistAlbumFilterState && next !== 'all') ? 'all' : next;
+
+  try {
+    localStorage.setItem(ARTIST_ALBUM_FILTER_KEY, artistAlbumFilterState);
+  } catch (e) {
+    // Private mode / storage disabled — the filter still works for this page
+    // view, it just will not be remembered. Never let this break filtering.
+  }
+
+  applyArtistFilter();
+}
+
+/** Restore the remembered filter and apply it on page load. */
+function initializeArtistAlbumFilter() {
+  let saved = 'all';
+  try {
+    const raw = localStorage.getItem(ARTIST_ALBUM_FILTER_KEY);
+    if (raw === 'all' || raw === 'library' || raw === 'missing') saved = raw;
+  } catch (e) {
+    saved = 'all';
+  }
+  artistAlbumFilterState = saved;
+  applyArtistFilter();
+}
+
+document.addEventListener('DOMContentLoaded', initializeArtistAlbumFilter);
 
 // Search for all releases on MusicBrainz for an artist
 function searchMusicBrainzForAllReleases(artistName) {

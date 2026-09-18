@@ -32,18 +32,28 @@
     }
 
     /* Windows Phone style Metro jump grid overlay styling */
+    /*
+      `right: 0` / `bottom: 0`, NOT `width: 100vw` / `height: 100vh`.
+
+      100vw INCLUDES the vertical scrollbar's width, so a fixed overlay sized
+      that way is wider than the viewport's content box and runs under/over the
+      scrollbar on the right — the reported "the banner covers the scroll bar".
+      A fixed element with left:0/right:0 is laid out against the content box,
+      so it stops exactly where the scrollbar begins.
+    */
     .metro-jump-overlay {
         position: fixed;
         top: 0;
         left: 0;
-        width: 100vw;
-        height: 100vh;
+        right: 0;
+        bottom: 0;
         background: rgba(0, 0, 0, 0.8);
         z-index: 2000;
         display: flex;
         align-items: center;
         justify-content: center;
         padding: 1rem;
+        overflow-y: auto;
     }
     .metro-jump-overlay.d-none {
         display: none !important;

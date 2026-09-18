@@ -305,6 +305,13 @@ def _run_full_scan_as_artist_pipeline(
             "total_artists": total,
             "processed_artists": 0,
             "percent_complete": 0,
+            # Mirror the artist counters onto the *_items keys the dashboard
+            # actually renders, so the counter shows "0/80" from the very first
+            # frame instead of "0/?".  `total` is known here (the artist list
+            # has been loaded), so there is no reason to leave it unknown.
+            "total_items": total,
+            "processed_items": 0,
+            "current_stage": "Metadata",
         },
     )
 
@@ -393,6 +400,16 @@ def _run_full_scan_as_artist_pipeline(
                                 "current_item": item or _artist,
                                 "processed_artists": _i,
                                 "total_artists": total,
+                                # The dashboard renders `processed_items/total_items`
+                                # (dashboard.js: `${scan.processed_items ?? 0}/${scan.total_items ?? "?"}`),
+                                # NOT the *_artists keys. Writing only the artist
+                                # counters is why the panel read "0/?" for the whole
+                                # scan. Both spellings are written so the counter
+                                # works and `processed_artists` stays available for
+                                # the artist-oriented summaries and the abandoned
+                                # -artist banner.
+                                "processed_items": _i,
+                                "total_items": total,
                             },
                         )
                         _cb.last_write = time.monotonic()
@@ -505,6 +522,11 @@ def _run_full_scan_as_artist_pipeline(
                 "percent_complete": 100 if status == "complete" else 0,
                 "processed_artists": total if status == "complete" else 0,
                 "total_artists": total,
+                # Keep the rendered *_items counters consistent with the final
+                # outcome; otherwise the row is swapped out for the idle view
+                # while still showing a stale mid-scan count.
+                "processed_items": total if status == "complete" else 0,
+                "total_items": total,
             },
         )
         log_unified(f"[FULL_SCAN] Finished with status={status}")

@@ -757,7 +757,7 @@ function updateActiveScans() {
               <span><i class="bi bi-activity me-1"></i><strong>${escapeHtml(SCAN_TYPE_DISPLAY_NAMES[scan.scan_type] || scan.scan_type)}</strong>
               ${scan.current_stage ? `<span class="badge bg-info ms-2" style="font-size:0.7rem;">${escapeHtml(scan.current_stage)}</span>` : ''}
               ${scan.message ? `<span class="text-muted small ms-2">${escapeHtml(scan.message)}</span>` : ''}</span>
-              <span class="small text-muted">${scan.processed_items || 0}/${scan.total_items || "?"}</span>
+              <span class="small text-muted">${scan.processed_items ?? 0}/${scan.total_items ?? "?"}</span>
             </div>
             ${scan.current_item ? `<div class="small text-muted mb-1 text-truncate" style="max-width:600px;">${escapeHtml(scan.current_item)}</div>` : ''}
             <div class="progress" style="height:8px;">

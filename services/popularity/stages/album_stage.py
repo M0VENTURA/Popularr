@@ -64,6 +64,7 @@ from db.utils import row_get
 from services.catalog.album_classification_service import (
     classify_compilation_category,
     detect_live_album_type,
+    is_live_or_alternate_album,
     is_live_or_unplugged_track_title,
     normalize_primary_release_type,
 )
@@ -287,6 +288,14 @@ _HETEROGENEOUS_MARKERS = (
     "+compilation", "(compilation)", "+soundtrack", "(soundtrack)",
     "+live", "(live)", "+remix", "(remix)", "+spokenword", "(spokenword)",
 )
+
+#: Patterns used ONLY by ``_detect_album_type`` to classify a LOCAL album title
+#: (no MusicBrainz input). Deliberately narrow: this drives the type written to
+#: the DB from the title alone.
+#:
+#: DO NOT add the corroboration guard's logic here — ``_album_title_suggests_live``
+#: used to read this same tuple, which is how the bug below happened. See that
+#: function for the split and the reasoning.
 _LIVE_ALBUM_PATTERNS = (
     r"\blive\s+at\b", r"\blive\s+in\b", r"\blive\s+from\b",
     r"\blive\s+session\b", r"[\(\[]live[\)\]]\s*$",
@@ -342,8 +351,42 @@ def _detect_album_type(
 
 
 def _album_title_suggests_live(album: str) -> bool:
-    album_lower = (album or "").casefold().strip()
-    return any(re.search(pattern, album_lower) for pattern in _LIVE_ALBUM_PATTERNS)
+    """True when the LOCAL album TITLE corroborates a live/acoustic release.
+
+    Delegates to ``is_live_or_alternate_album`` (services/catalog) rather than
+    matching a local pattern list.
+
+    WHY THIS IS A DELEGATION, NOT A PATTERN LIST — the bug this fixes:
+    ``_LIVE_ALBUM_PATTERNS`` above is a NARROW list tuned for classifying a
+    title with no other evidence, and it is missing the bare trailing-
+    `` Live `` form (``\\s+live\\s*$``) which the canonical list has. So an
+    album genuinely titled "...Tour Live" — which MusicBrainz reports as
+    ``album+live`` AND which the local ``_detect_album_type`` also classified
+    ``album+live`` — had its MusicBrainz type *rejected* here, downgraded to a
+    plain ``album``, and left every track with ``is_live=False``. That is the
+    reported symptom ("Showed Live false, but it is tagged as Album+Live").
+
+    Two pattern lists that must agree will drift, so this asks the canonical
+    detector instead of re-implementing it. ``is_live_or_alternate_album`` is
+    chosen deliberately over ``is_live_album_enhanced``:
+
+    * it is a STRICT SUPERSET of the narrow list used before, so every title
+      this guard accepted still passes — nothing regresses;
+    * it still covers ``unplugged`` / ``acoustic`` / ``orchestral``, which
+      matter because ``_DESTRUCTIVE_SECONDARY_TYPES`` includes ``+acoustic``.
+      ``is_live_album_enhanced`` is a narrower list that drops those (it
+      deliberately matches only unambiguous ``live`` format tags), so using
+      it would have silently stopped corroborating acoustic releases;
+    * it already carries the "How to Live" false-positive exemption, so no
+      local exemption list is needed here — adding one would just be a third
+      divergent rule.
+    """
+    try:
+        return is_live_or_alternate_album(album)
+    except Exception:
+        # Never let a classification helper failure reject MusicBrainz's own
+        # answer — fall back to the local patterns.
+        return any(re.search(pattern, (album or "").casefold()) for pattern in _LIVE_ALBUM_PATTERNS)
 
 
 def _live_track_ratio(tracks: list[dict[str, Any]]) -> tuple[int, int]:

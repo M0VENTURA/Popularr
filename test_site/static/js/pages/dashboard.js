@@ -301,6 +301,13 @@
     popularity_scan: 'Popularity Scan',
     singles_scan: 'Singles Detection',
     essentia_mood_scan: 'Essentia Mood Scan',
+    // The dashboard "All" scan writes its progress row as `full_scan`
+    // (services/scanning/pipelines/popularity_pipeline.py).  Without this key
+    // the panel fell through to the raw scan_type and rendered "full_scan"
+    // instead of a human label.
+    full_scan: 'Full Scan',
+    library_scan: 'Library Scan',
+    missing_releases_scan: 'Missing Releases Scan',
   };
 
   function scanDisplayName(type) {
@@ -414,7 +421,7 @@
               <i class="bi bi-activity me-1"></i>
               <strong>${esc(scanDisplayName(scan.scan_type))}</strong>${stage}${message}
             </span>
-            <span class="small text-muted">${esc(String(scan.processed_items || 0))}/${esc(String(scan.total_items || '?'))}</span>
+            <span class="small text-muted">${esc(String(scan.processed_items ?? 0))}/${esc(String(scan.total_items ?? '?'))}</span>
           </div>
           ${currentItem}
           <div class="progress" style="height:8px;">
@@ -524,12 +531,35 @@
         .filter((v, i, arr) => arr.indexOf(v) === i)
         .join(', ');
 
+      // Rows must be CLICKABLE. This renderer previously emitted plain <div>
+      // text with no anchors, so recent scans were inert on the rebuilt
+      // dashboard while the live one linked through — the reported "the
+      // artists and albums on recent scans aren't selectable by clicking
+      // them".
+      //
+      // Session rows (`_SCAN_SESSION_`) are not about one artist, so they get
+      // no link; `encodeURIComponent` on each segment keeps slashes and "#" in
+      // names from breaking the path.
+      const isSession = entry.artist === '_SCAN_SESSION_' || !entry.artist;
+      const artistUrl = `/artist/${encodeURIComponent(entry.artist || '')}`;
+      const albumUrl = (entry.album && entry.album !== '…')
+        ? `/album/${encodeURIComponent(entry.artist || '')}/${encodeURIComponent(entry.album)}`
+        : artistUrl;
+
+      const artistHtml = isSession
+        ? `<strong>${esc(entry.artist || '')}</strong>`
+        : `<a href="${artistUrl}" class="text-success text-decoration-none fw-semibold">${esc(entry.artist || '')}</a>`;
+
+      const albumHtml = (isSession || !entry.album || entry.album === '…')
+        ? (entry.album ? `<div class="small text-muted text-truncate">${esc(entry.album)}</div>` : '')
+        : `<div class="small text-muted text-truncate"><a href="${albumUrl}" class="text-muted text-decoration-none">${esc(entry.album)}</a></div>`;
+
       return `
         <div class="border-bottom px-3 py-2">
           <div class="d-flex justify-content-between align-items-start gap-2">
             <div class="text-truncate" style="min-width:0;">
-              <div class="text-truncate"><strong>${esc(entry.artist || '')}</strong></div>
-              <div class="small text-muted text-truncate">${esc(entry.album || '')}</div>
+              <div class="text-truncate">${artistHtml}</div>
+              ${albumHtml}
               <div class="small text-muted">${types}</div>
             </div>
             <div class="text-end flex-shrink-0">

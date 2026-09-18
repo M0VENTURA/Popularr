@@ -1414,10 +1414,33 @@ def run_scan(
         if effective_stop_file and artist and artist != last_checkpoint_artist:
             try:
                 _row_scan_type = "full_scan" if effective_stop_file == get_scan_progress_path("full_scan") else "popularity_scan"
+                # PERCENTAGE OWNERSHIP: when the row is ``full_scan`` the OUTER
+                # orchestrator owns percent_complete — it reports progress across
+                # ALL artists (0-100), whereas ``progress`` here is only this
+                # artist's album fraction on a 5-95 scale.  Writing it to the
+                # shared row made the bar drop back to ~5% at every new artist,
+                # which is the reported "doesn't properly detail where the scan
+                # is".  The checkpoint exists to record WHERE we are (artist +
+                # item) for resume/display, so on the full_scan row it updates
+                # only those.
+                if _row_scan_type == "full_scan":
+                    _extra = {
+                        "status": "running",
+                        "current_item": current_item,
+                    }
+                else:
+                    _extra = {
+                        "status": "running",
+                        "percent_complete": progress,
+                        "current_item": current_item,
+                        "current_stage": "Albums",
+                        "processed_items": album_index,
+                        "total_items": total_albums,
+                    }
                 write_progress_with_current_artist(
                     effective_stop_file, _row_scan_type, True,
                     current_artist=artist,
-                    extra={"status": "running", "percent_complete": progress, "current_item": current_item},
+                    extra=_extra,
                 )
                 if not artist_filter and not album_filter:
                     save_artist_scan_checkpoint(artist, effective_stop_file)

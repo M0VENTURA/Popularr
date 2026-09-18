@@ -59,6 +59,32 @@ def _normalise_entry(scan_type: str, state: dict[str, Any]) -> dict[str, Any]:
     Convert raw progress JSON into a consistent API entry.
     """
 
+    # ── Counter aliasing ───────────────────────────────────────────────────
+    # Writers disagree on the spelling: the full-scan orchestrator records
+    # ``processed_artists``/``total_artists``, popularity uses
+    # ``processed_artists`` too, and the in-memory tracker uses
+    # ``processed_items``/``total_items``.  The dashboard renders the *_items
+    # pair (``${scan.processed_items || 0}/${scan.total_items || "?"}``), so an
+    # entry carrying only the artist counters rendered "0/?" for the entire
+    # scan — the reported symptom.  Fall back across BOTH spellings here, at
+    # the single point the API contract is built, rather than forcing every
+    # writer to know which key the UI happens to read.
+    #
+    # ``api_popularity_status_compat`` (routes/scan_routes/api.py) already did
+    # this fallback for its own response; doing it on the entry means every
+    # consumer gets it, and the renderer no longer has to guess.
+    #
+    # Explicit ``is None`` checks, NOT ``or``: a legitimate ``0`` (scan just
+    # started, or an empty artist list) must not be replaced by the next
+    # candidate, and the artist counters are what a stale row would otherwise
+    # win with.
+    processed_items = state.get("processed_items")
+    if processed_items is None:
+        processed_items = state.get("processed_artists")
+    total_items = state.get("total_items")
+    if total_items is None:
+        total_items = state.get("total_artists")
+
     return {
         "scan_type": state.get("scan_type") or scan_type,
         "is_running": bool(state.get("is_running", False)),
@@ -71,8 +97,8 @@ def _normalise_entry(scan_type: str, state: dict[str, Any]) -> dict[str, Any]:
         # Progress counters
         "processed_artists": state.get("processed_artists"),
         "total_artists": state.get("total_artists"),
-        "processed_items": state.get("processed_items"),
-        "total_items": state.get("total_items"),
+        "processed_items": processed_items,
+        "total_items": total_items,
 
         # Optional extras
         "status": state.get("status"),
@@ -99,17 +125,40 @@ def _merge_tracker_into_entry(entry: dict[str, Any]) -> None:
         return
 
     # Only merge into primary scan types (avoid polluting navidrome/library)
+    #
+    # NOTE: "full_scan" is DELIBERATELY absent. The tracker reports the
+    # CURRENT artist's album fraction on a 5-95 scale, while the full-scan
+    # orchestrator's percent_complete spans ALL artists on 0-100, and the
+    # orchestrator's stage labels ("Metadata" / "Popularity" / "Singles
+    # Detection" / "Essentia") are display strings where the tracker's are
+    # technical ("album" / "finalising"). Merging would overwrite a
+    # monotonic overall percentage with a per-artist one and downgrade the
+    # stage label — i.e. exactly the "doesn't properly detail where the scan
+    # is" symptom. The full-scan row already carries its own stage + item.
     if entry["scan_type"] not in {"popularity_scan", "library_scan", "combined_scan"}:
         return
 
-    entry.update({
-        "current_stage": tracker.get("current_stage"),
-        "percent_complete": tracker.get("progress") or entry.get("percent_complete"),
-        "message": tracker.get("message") or entry.get("message"),
-        "current_item": tracker.get("current_item") or entry.get("current_item"),
-        "processed_items": tracker.get("processed_items"),
-        "total_items": tracker.get("total_items"),
-    })
+    # Each field is only taken from the tracker when the tracker actually has
+    # a value. A blanket ``update()`` copied ``None`` straight over a good
+    # value, so a partially-populated tracker erased stage/item/counters that
+    # the DB row had set correctly.
+    for key in (
+        "current_stage", "message", "current_item",
+        "processed_items", "total_items",
+    ):
+        value = tracker.get(key)
+        if value is not None:
+            entry[key] = value
+
+    # ``progress`` is 0 at the very start, and 0 is falsy — the previous
+    # ``or entry.get(...)`` therefore masked a legitimate 0 with a stale
+    # percentage. Prefer the tracker when it has advanced past 0, or when the
+    # entry has no percentage of its own.
+    tracker_progress = tracker.get("progress")
+    if tracker_progress:
+        entry["percent_complete"] = tracker_progress
+    elif entry.get("percent_complete") is None:
+        entry["percent_complete"] = tracker_progress or 0
 
 
 # -------------------------------------------------------------------------
