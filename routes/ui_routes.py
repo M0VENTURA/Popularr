@@ -29,6 +29,11 @@ from helpers.artist_sort import (
     artist_sort_name,
     artist_sort_sql,
 )
+from services.catalog.release_categories import (
+    category_for_musicbrainz,
+    normalise_category,
+    ordered_specs,
+)
 from helpers.config_helpers import (
     clear_config_cache,
     get_config,
@@ -970,25 +975,19 @@ async def artist_detail(name: str) -> Any:
 
                 category = str(mr.get("category") or "").strip()
                 if category:
-                    category_key = category.lower().replace(" ", "_")
-                    missing_entry["_category"] = {
-                        "album": "album", "ep": "ep", "single": "single",
-                        "compilation": "compilation", "live_album": "live_album",
-                        "live": "live_album", "remix": "remix_album",
-                        "soundtrack": "compilation",
-                    }.get(category_key, "album")
+                    # ``normalise_category`` resolves canonical keys, legacy
+                    # display labels ("Live Album") AND composite type strings,
+                    # so rows written before the category registry existed land
+                    # in the right section instead of defaulting to Studio.
+                    missing_entry["_category"] = normalise_category(category)
                 else:
-                    primary_type = str(mr.get("primary_type") or "").lower()
-                    if primary_type in ("ep", "single", "compilation"):
-                        missing_entry["_category"] = primary_type
-                    elif primary_type == "live":
-                        missing_entry["_category"] = "live_album"
-                    elif primary_type in ("remix", "remix+compilation"):
-                        missing_entry["_category"] = "remix_album"
-                    elif primary_type == "soundtrack":
-                        missing_entry["_category"] = "compilation"
-                    else:
-                        missing_entry["_category"] = "album"
+                    # No stored category: derive it from the release-group type
+                    # rather than guessing "album", which is what put field
+                    # recordings and DJ-mixes under Studio Albums.
+                    missing_entry["_category"] = category_for_musicbrainz(
+                        str(mr.get("primary_type") or ""),
+                        mr.get("secondary_types") or "",
+                    )
 
                 missing_entries.append(missing_entry)
     except Exception as exc:
@@ -1003,14 +1002,19 @@ async def artist_detail(name: str) -> Any:
         ),
     )
 
-    albums_by_category = {
-        "album": [], "ep": [], "single": [],
-        "compilation": [], "live_album": [], "remix_album": [],
-    }
-
+    # Buckets are built from the DATA, not a fixed list: a category exists only
+    # if something is in it, so an artist with no field recordings never grows a
+    # "Field Recordings" section.  ``album_categories`` carries the ordered
+    # (key, label, icon) list the template iterates, so section order is
+    # decided by the registry rather than by row order.
+    albums_by_category: dict[str, list[dict[str, Any]]] = {}
     for album_entry in all_albums:
-        category = album_entry.get("_category") or classify_album(album_entry)
+        category = normalise_category(
+            album_entry.get("_category") or classify_album(album_entry)
+        )
         albums_by_category.setdefault(category, []).append(album_entry)
+
+    album_categories = ordered_specs(albums_by_category.keys())
 
     appears_by_key: dict[str, dict[str, Any]] = {}
 
@@ -1178,6 +1182,9 @@ async def artist_detail(name: str) -> Any:
         genre_sources=genre_sources,
         genres=genres,
         albums_by_category=albums_by_category,
+        # Ordered (key, label, icon) specs for the sections that actually have
+        # content — the template loops this instead of hard-coding sections.
+        album_categories=album_categories,
         appears_on_albums=appears_on_albums,
         artist_bio=artist_bio,
         artist_country=artist_country,

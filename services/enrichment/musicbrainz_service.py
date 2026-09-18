@@ -1608,6 +1608,208 @@ class MusicBrainzService:
             )
             return []
 
+    def _artist_singles_fallback(self, artist: str) -> list[dict[str, Any]]:
+        """Every release-group credited to *artist*, memoised.
+
+        Used by ``_release_group_has_single_release`` when the track-scoped
+        release-group search comes back empty — a track's own single is often
+        not the best text match for its own title, so the artist's full
+        release-group list has to be consulted.
+
+        ⚠️ Deliberately NOT ``_artist_release_groups``.  That helper resolves
+        the artist MBID first and then BROWSES that artist's groups, which is
+        right for album metadata lookups but wrong here: it costs an extra MBID
+        lookup and returns nothing when the artist cannot be resolved.  This
+        searches directly by artist NAME (``artist:"…"``) and memoises per
+        artist, because this query carries no track-specific terms and would
+        otherwise be re-issued for every track on an album.
+
+        Returning a list (not a dict payload) is part of the contract:
+        ``_release_group_has_single_release`` iterates groups directly.
+        """
+        key = str(artist or "").casefold().strip()
+        if not key:
+            return []
+        with self._mem_lock:
+            cached = self._artist_singles_cache.get(key)
+        if cached is not None:
+            Logger.debug(
+                "[MB] artist release-group cache hit",
+                artist=artist,
+                group_count=len(cached),
+            )
+            return cached
+
+        if not _client_available(self.http):
+            Logger.info(
+                "[MB] artist release-group fallback skipped",
+                reason="MusicBrainz reported unavailable",
+                artist=artist,
+            )
+            return []
+
+        groups = _call_with_heartbeat(
+            "single.release_group_artist_fallback",
+            self.http.search_release_groups,
+            f'artist:"{Escape_lucene_special_chars(artist)}"',
+            limit=100,
+            Log_context={"artist": artist},
+        ) or []
+        groups = [group for group in groups if isinstance(group, dict)]
+        with self._mem_lock:
+            self._artist_singles_cache[key] = groups
+        Logger.info(
+            "[MB] artist release-group fallback cached",
+            artist=artist,
+            group_count=len(groups),
+        )
+        return groups
+
+    def _release_group_has_single_release(self, title: str, artist: str) -> bool:
+        """True when a release-GROUP named after the track is a Single/EP.
+
+        Searches release-groups by title+artist and falls back to the artist's
+        full release-group list when the search misses — a track's own single
+        is often not the best text match for the query.
+
+        Called by ``is_single``; this method was missing from the class, so
+        every call raised ``AttributeError`` and single detection aborted.
+        """
+        query_title = Normalize_title_for_lucene_query(Strip_search_keywords(title))
+        query = (
+            f'releasegroup:"{Escape_lucene_special_chars(query_title)}" '
+            f'AND artist:"{Escape_lucene_special_chars(artist)}"'
+        )
+        context = {"artist": artist, "title": title}
+        groups = _call_with_heartbeat(
+            "single.release_group_search",
+            self.http.search_release_groups,
+            query,
+            limit=10,
+            Log_context=context,
+        ) or []
+        if not groups:
+            groups = self._artist_singles_fallback(artist)
+        normalized = Normalize_title_for_lookup(title)
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            if _release_group_primary_type(group) not in {"single", "ep"}:
+                continue
+            group_title = str(group.get("title") or "")
+            # Edition annotations must be compatible in BOTH directions:
+            # "Valhalla" must not match "Valhalla (Epic Edition)" unless the
+            # local title carries the annotation too.
+            if not Edition_annotations_compatible(title, group_title):
+                continue
+            if _similarity(normalized, Normalize_title_for_lookup(group_title)) >= 0.7:
+                return True
+        return False
+
+    def _recording_search_has_single_release(self, title: str, artist: str) -> bool:
+        """True when the recording's RELEASES are on a Single/EP group.
+
+        Unlike ``_release_group_has_single_release`` (which searches groups by
+        name), this inspects the release-groups the recording actually appears
+        on, so a track released as a B-side or album cut tagged single-only
+        elsewhere is judged from its own release data.
+        """
+        query_title = Normalize_title_for_lucene_query(Strip_search_keywords(title))
+        query = (
+            f'recording:"{Escape_lucene_special_chars(query_title)}" '
+            f'AND artist:"{Escape_lucene_special_chars(artist)}"'
+        )
+        recordings = _call_with_heartbeat(
+            "single.recording_search",
+            self.http.search_recordings,
+            query,
+            limit=10,
+            Log_context={"artist": artist, "title": title},
+        ) or []
+        for recording in recordings:
+            if not isinstance(recording, dict):
+                continue
+            for release in recording.get("releases") or []:
+                if not isinstance(release, dict):
+                    continue
+                group = release.get("release-group") or {}
+                if _release_group_primary_type(group) in {
+                    "single",
+                    "ep",
+                } and self._rg_title_matches(title, str(group.get("title") or "")):
+                    return True
+        return False
+
+    @staticmethod
+    def _rg_title_matches(title: str, release_group_title: str) -> bool:
+        """Whether a track title and a release-group title describe one release.
+
+        Stricter than the group search's 0.7: the release-group here is only a
+        CONTAINER for the track, so an unrelated single the artist also
+        released must not make this track look like a single.  The single
+        suffixes ("- Single", " - Single Version") are stripped on both sides
+        before comparing so they do not defeat the match.
+        """
+        if not title or not release_group_title:
+            return False
+        if not Edition_annotations_compatible(title, release_group_title):
+            return False
+        left = Normalize_title_for_lookup(Strip_single_release_suffix(title) or title)
+        right = Normalize_title_for_lookup(
+            Strip_single_release_suffix(release_group_title) or release_group_title
+        )
+        return left == right or _similarity(left, right) >= 0.85
+
+    def _recording_has_single_release(self, mbid: str, title: str = "") -> bool:
+        """True when the recording (by MBID) sits on a Single/EP release.
+
+        Checks the release-groups of the recording's own releases.  With no
+        ``title`` supplied any single/EP release counts; with one, the group
+        title must also match the track.
+        """
+        recording = _call_with_heartbeat(
+            "single.recording_get",
+            self.http.get_recording,
+            mbid,
+            inc="releases+release-groups",
+            Log_context={"mbid": mbid, "title": title},
+        )
+        releases = (recording or {}).get("releases") or []
+
+        # This check is only meaningful when the response actually carries
+        # release-group sub-documents.  If the HTTP client drops the requested
+        # `inc`, every release looks typeless and the answer is a false
+        # negative, so say so loudly ONCE rather than silently returning False
+        # for every track in the library.
+        if releases and not any(
+            isinstance(release, dict) and release.get("release-group")
+            for release in releases
+        ):
+            if not self._missing_release_group_warned:
+                self._missing_release_group_warned = True
+                Logger.warning(
+                    "[MB] recording lookup returned no release-group data",
+                    reason=(
+                        "the requested inc=release-groups was not honoured; "
+                        "single detection via recording lookup cannot succeed"
+                    ),
+                    mbid=mbid,
+                    title=title,
+                )
+            return False
+
+        for release in releases:
+            if not isinstance(release, dict):
+                continue
+            group = release.get("release-group") or {}
+            if _release_group_primary_type(group) not in {"single", "ep"}:
+                continue
+            if not title or self._rg_title_matches(
+                title, str(group.get("title") or "")
+            ):
+                return True
+        return False
+
     def clear_transient_caches(self) -> None:
         """Drop the in-memory caches that can go stale between scans."""
         with self._mem_lock:

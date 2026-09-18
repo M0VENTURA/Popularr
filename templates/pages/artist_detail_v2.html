@@ -409,7 +409,7 @@
   {# =================================================================== #}
   {# TAB NAVIGATION BAR                                                  #}
   {# =================================================================== #}
-  {% set cat_keys = ['album', 'compilation', 'live_album', 'remix_album', 'ep', 'single'] %}
+  {% set cat_keys = album_categories|map(attribute='key')|list %}
   {% set ns_totals = namespace(all=0, library=0, missing=0) %}
   {% for key in cat_keys %}
     {% set ns_totals.all = ns_totals.all + (albums_by_category.get(key) or [])|length %}
@@ -456,12 +456,30 @@
       </div>
 
       <!-- Categories (Auto-hidden if 0 entries) -->
-      {{ render_release_category('studio-albums', 'Studio Albums', 'bi-vinyl-fill', albums_by_category.album, artist_name) }}
-      {{ render_release_category('compilations', 'Compilations & Featured', 'bi-collection', albums_by_category.compilation, artist_name) }}
-      {{ render_release_category('live-albums', 'Live Albums', 'bi-broadcast', albums_by_category.live_album, artist_name) }}
-      {{ render_release_category('remix-albums', 'Remix Albums', 'bi-soundwave', albums_by_category.remix_album, artist_name) }}
-      {{ render_release_category('eps', 'EPs', 'bi-disc', albums_by_category.ep, artist_name) }}
-      {{ render_release_category('singles', 'Singles', 'bi-music-note-beamed', albums_by_category.single, artist_name) }}
+      {#
+        Sections are GENERATED from `album_categories`, which the route builds
+        from services/catalog/release_categories — the single source of truth
+        for release-type categories.
+
+        Hard-coding the six standard categories here is what made every
+        non-standard MusicBrainz type vanish or misfile: `Album + Field
+        recording` and `Album + DJ-mix + Mixtape/Street` were classified as
+        plain studio albums, so they appeared under Studio Albums. Now each
+        type gets its own section, titled with MusicBrainz's own vocabulary.
+
+        The macro renders nothing when `items` is empty, so a section only
+        appears when it has content — an artist with no field recordings never
+        grows a "Field Recordings" heading.
+      #}
+      {% for spec in album_categories %}
+        {{ render_release_category(
+             spec.section_id,
+             spec.label,
+             spec.icon,
+             albums_by_category.get(spec.key) or [],
+             artist_name
+           ) }}
+      {% endfor %}
 
       <!-- Covers in Collection -->
       <div class="card mb-3 category-section" id="covers-section">

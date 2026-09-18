@@ -80,45 +80,23 @@ def normalize_primary_release_type(album_type: str) -> str:
 
 
 def classify_album_type(album_row: dict[str, Any]) -> str:
-    """Classify an album into the artist-page discography buckets."""
-    raw_type = str(
-        album_row.get("musicbrainz_albumtype")
-        or album_row.get("spotify_album_type")
-        or album_row.get("album_type")
-        or ""
-    ).lower()
+    """Classify an album into the artist-page discography buckets.
 
-    album_name = str(album_row.get("album") or "").lower()
+    Delegates to ``services.catalog.release_categories`` — the single source of
+    truth for this decision.
 
-    # Prioritize official MusicBrainz primary/secondary types if available and non-live
-    if "album" in raw_type and "live" not in raw_type and "acoustic" not in raw_type:
-        if "compilation" in raw_type:
-            return "compilation"
-        return "album"
+    This function used to carry its own rule list, and it had a bug that the
+    shared registry fixes: an early ``if "album" in raw_type …: return "album"``
+    matched every composite type the album-type pipeline writes
+    (``album+remix``, ``album+soundtrack``, ``album+fieldrecording``, …) and
+    returned the STUDIO bucket, making its own ``soundtrack`` and ``remix``
+    branches below unreachable.  A remix album that was IN the library therefore
+    filed under Studio Albums while the identical missing release filed under
+    Remix — the same release in two different sections depending on ownership.
+    """
+    from services.catalog.release_categories import category_for_album_row
 
-    if "compilation" in raw_type:
-        return "compilation"
-    if "soundtrack" in raw_type or "soundtrack" in album_name:
-        return "compilation"
-
-    if "live" in raw_type or "unplugged" in raw_type:
-        return "live_album"
-
-    # Fallback to string matching only if raw_type is ambiguous, but protect embedded words like 'how to live'
-    if not raw_type or raw_type == "album":
-        if "how to live" not in album_name and is_live_or_alternate_album(album_name):
-            return "live_album"
-
-    if "remix" in raw_type or "remix" in album_name:
-        return "remix_album"
-
-    if "ep" in raw_type:
-        return "ep"
-
-    if "single" in raw_type:
-        return "single"
-
-    return "album"
+    return category_for_album_row(album_row)
 
 
 def is_live_or_alternate_album(album: str) -> bool:

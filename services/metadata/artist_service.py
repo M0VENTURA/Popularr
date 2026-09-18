@@ -163,15 +163,14 @@ def get_correction_albums(artist_name: str) -> tuple[dict[str, Any], int]:
             """), {"name": artist_name})
 
             def _classify(album_row: dict[str, Any]) -> str:
-                import re as _re
-                album_name = str(album_row.get("album") or "").lower()
-                if "soundtrack" in album_name:
-                    return "compilation"
-                if _re.search(r'\blive\b', album_name) or "unplugged" in album_name:
-                    return "live_album"
-                if "remix" in album_name:
-                    return "remix_album"
-                return "album"
+                # Delegates to the canonical registry so this per-artist view
+                # agrees with the artist page.  It used to classify by TITLE
+                # only, which meant a library album whose stored type was
+                # "album+remix" or "album+soundtrack" was bucketed from its
+                # name and could differ from the artist page's section.
+                from services.catalog.release_categories import category_for_album_row
+
+                return category_for_album_row(album_row)
 
             albums = []
             for r in rows.fetchall():

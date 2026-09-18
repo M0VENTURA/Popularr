@@ -33,77 +33,80 @@ CACHE_FRESH_HOURS = 24 * 7
 def _derive_musicbrainz_category(release_group: dict[str, Any]) -> str:
     """Derive the artist-page display category from a MusicBrainz release-group.
 
-    Mirrors ``_categorize_release`` in ``services.metadata.artist_scan_service``
-    so the cache-driven gap detection stores the same categories as the
-    dedicated missing-releases scan. Secondary types (Live, Compilation,
-    Remix) are honoured, otherwise a live album / compilation would fall
-    through as a plain "Album" and appear under Studio Albums on the artist
-    page.
+    Delegates to ``services.catalog.release_categories`` so this path and the
+    in-library classifier cannot disagree — they previously did, which put the
+    same release in different sections depending on whether it was owned.
+
+    Returns a canonical category KEY.  Secondary types beyond live/compilation/
+    remix (soundtrack, field recording, DJ-mix, mixtape, demo, spokenword,
+    interview, audiobook, audio drama, score) now get their own section instead
+    of being flattened into Studio Albums.
     """
-    primary = str(release_group.get("primary-type") or release_group.get("primary_type") or "").lower()
-    if primary not in ("album", "ep", "single"):
-        return "Album"
+    from services.catalog.release_categories import category_for_musicbrainz
 
+    primary = release_group.get("primary-type") or release_group.get("primary_type") or ""
     # Search results can carry ``secondary-types`` as a comma-joined STRING
-    # ("Live,Compilation"); iterating it character-by-character never matches,
-    # so normalise to a list first (mirrors musicbrainz_service).
-    raw_secondary: Any = release_group.get("secondary-types") or release_group.get("secondary_types") or []
-    if isinstance(raw_secondary, str):
-        raw_secondary = [raw_secondary]
-    secondary = [
-        s.lower()
-        for s in raw_secondary
-        if isinstance(s, str) and s.strip()
-    ]
-
-    if "single" in secondary:
-        return "Single"
-    if "ep" in secondary:
-        return "EP"
-    if primary == "ep":
-        return "EP"
-    if primary == "single":
-        return "Single"
-    if "compilation" in secondary:
-        return "Compilation"
-    if "live" in secondary:
-        return "Live Album"
-    if "remix" in secondary:
-        return "Remix"
-    return "Album"
+    # ("Live,Compilation"); the registry normalises that (iterating it
+    # character-by-character never matched, which is what flattened every
+    # live/compilation release into Studio).
+    secondary = (
+        release_group.get("secondary-types")
+        or release_group.get("secondary_types")
+        or []
+    )
+    return category_for_musicbrainz(str(primary), secondary)
 
 
 def _derive_discogs_category(fmt_tokens: str) -> str:
     """Derive the artist-page display category from Discogs format tokens.
 
-    Discogs format strings carry the secondary type as an explicit token
-    ("CD, Album, Live", "2xLP, Compilation", "CD, Album, Remix") — honour it
-    so live albums / compilations / remixes are not flattened into "Album".
+    Discogs format strings carry the type as explicit tokens ("CD, Album, Live",
+    "2xLP, Compilation", "CD, Album, Remix").  Mapped onto the canonical
+    registry so a Discogs release lands in the same section its MusicBrainz
+    equivalent would.
     """
-    tokens = set((fmt_tokens or "").lower().split())
-    if "compilation" in tokens or "soundtrack" in tokens:
-        return "Compilation"
+    from services.catalog.release_categories import category_for_musicbrainz
+
+    tokens = set((fmt_tokens or "").lower().replace(",", " ").split())
+    # Discogs spells it "DJ Mix" and "Mixtape" where MusicBrainz uses "DJ-mix"
+    # and "Mixtape/Street"; map onto MusicBrainz's vocabulary before delegating.
+    secondary: list[str] = []
+    if "compilation" in tokens:
+        secondary.append("compilation")
+    if "soundtrack" in tokens:
+        secondary.append("soundtrack")
     if "live" in tokens:
-        return "Live Album"
+        secondary.append("live")
     if "remix" in tokens:
-        return "Remix"
+        secondary.append("remix")
+    if "mixtape" in tokens or "street" in tokens:
+        secondary.append("mixtape/street")
+    if "dj" in tokens or "dj-mix" in tokens or "djmix" in tokens:
+        secondary.append("dj-mix")
+    if "spokenword" in tokens or "spoken word" in tokens:
+        secondary.append("spokenword")
+
     if "ep" in tokens:
-        return "EP"
+        return "ep"
     if "single" in tokens:
-        return "Single"
-    return "Album"
+        return "single"
+    return category_for_musicbrainz("album", secondary)
 
 
 def _fallback_release_category(title: str) -> str:
-    """Conservative title-based category for cache rows persisted without one.
+    """Title-based category for cache rows persisted without one.
 
     Rows written before the ``category`` column existed (or from sources that
     did not expose a secondary type) only carry ``release_type`` — a live
     album / compilation / remix stored as plain ``album`` would otherwise be
-    flattened into the Studio Albums bucket on the artist page. Mirrors the
-    legacy artist-page heuristics (``_derive_release_bucket``) using the same
-    format-tag markers the in-library classifier trusts.
+    flattened into the Studio Albums bucket on the artist page.
+
+    Returns a canonical category KEY; the registry owns the labels.  An
+    unrecognisable title stays in Studio, which is the correct default when
+    there is genuinely no signal to go on.
     """
+    from services.catalog.release_categories import STUDIO_KEY
+
     try:
         from services.catalog.album_classification_service import (
             detect_greatest_hits_album,
@@ -114,21 +117,19 @@ def _fallback_release_category(title: str) -> str:
         is_live_album_enhanced = None
 
     text = (title or "").lower()
-    if (
-        "compilation" in text
-        or "soundtrack" in text
-        or (detect_greatest_hits_album and detect_greatest_hits_album(title, ""))
+    if (is_live_album_enhanced and is_live_album_enhanced(title)) or (
+        "unplugged" in text or "in concert" in text
     ):
-        return "Compilation"
-    if (
-        (is_live_album_enhanced and is_live_album_enhanced(title))
-        or "unplugged" in text
-        or "in concert" in text
+        return "live_album"
+    if "compilation" in text or (
+        detect_greatest_hits_album and detect_greatest_hits_album(title, "")
     ):
-        return "Live Album"
+        return "compilation"
+    if "soundtrack" in text or "ost" in text:
+        return "soundtrack"
     if "remix" in text:
-        return "Remix"
-    return "Album"
+        return "remix_album"
+    return STUDIO_KEY
 
 
 def _cache_has_source(artist: str, source: str) -> bool:

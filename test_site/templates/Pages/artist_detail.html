@@ -522,6 +522,7 @@
   {% set total_discovered_remix_albums = albums_by_category.remix_album|selectattr('is_missing', 'equalto', False)|list|length %}
   {% set total_missing_remix_albums = albums_by_category.remix_album|selectattr('is_missing', 'equalto', True)|list|length %}
   
+  {% if albums_by_category.album|length > 0 %}
   <div class="card mb-4" id="albums-section">
     <div class="card-header d-flex justify-content-between align-items-center">
       <h5 class="card-title mb-0">
@@ -575,7 +576,10 @@
     </div>
   </div>
 
+  {% endif %}
+
   <!-- Compilations Section -->
+  {% if albums_by_category.compilation|length > 0 %}
   <div class="card mb-4" id="compilations-section">
     <div class="card-header d-flex justify-content-between align-items-center">
       <div>
@@ -624,7 +628,10 @@
     </div>
   </div>
 
+  {% endif %}
+
   <!-- Live Albums Section -->
+  {% if albums_by_category.live_album|length > 0 %}
   <div class="card mb-4" id="live-albums-section">
     <div class="card-header d-flex justify-content-between align-items-center">
       <h5 class="card-title mb-0">
@@ -677,8 +684,10 @@
       </table>
     </div>
   </div>
+  {% endif %}
 
   <!-- Remix Albums Section -->
+  {% if albums_by_category.remix_album|length > 0 %}
   <div class="card mb-4" id="remix-albums-section">
     <div class="card-header d-flex justify-content-between align-items-center">
       <h5 class="card-title mb-0">
@@ -731,8 +740,10 @@
       </table>
     </div>
   </div>
+  {% endif %}
 
   <!-- EPs Section -->
+  {% if albums_by_category.ep|length > 0 %}
   <div class="card mb-4" id="eps-section">
     <div class="card-header d-flex justify-content-between align-items-center">
       <h5 class="card-title mb-0">
@@ -785,8 +796,10 @@
       </table>
     </div>
   </div>
+  {% endif %}
 
   <!-- Singles Section -->
+  {% if albums_by_category.single|length > 0 %}
   <div class="card mb-4" id="singles-section">
     <div class="card-header d-flex justify-content-between align-items-center">
       <h5 class="card-title mb-0">
@@ -839,6 +852,70 @@
       </table>
     </div>
   </div>
+  {% endif %}
+
+  {#
+    ── NON-STANDARD RELEASE TYPES ───────────────────────────────────────────
+
+    Generated from `album_categories`, which the route builds from
+    services/catalog/release_categories — the single source of truth for
+    release-type categories.
+
+    These are the MusicBrainz secondary types the page previously had no
+    section for (soundtrack, field recording, DJ-mix, mixtape/street, demo,
+    spoken word, interview, audiobook, audio drama, score). Because the
+    classifier fell through to the STUDIO bucket for anything it did not
+    recognise, releases like Prodigy's `Album + Field recording` and
+    `Album + DJ-mix + Mixtape/Street` appeared under Studio Albums.
+
+    The six standard sections above keep their bespoke markup and are NOT
+    repeated here. A section renders only when it has content, so an artist
+    with no field recordings never grows a "Field Recordings" heading.
+  #}
+  {% set _standard_keys = ['album', 'ep', 'single', 'compilation', 'live_album', 'remix_album'] %}
+  {% for spec in album_categories if spec.key not in _standard_keys %}
+    {% set _items = albums_by_category.get(spec.key) or [] %}
+    {% if _items|length > 0 %}
+      {% set _discovered = _items|selectattr('is_missing', 'equalto', False)|list|length %}
+      {% set _missing = _items|selectattr('is_missing', 'equalto', True)|list|length %}
+      <div class="card mb-4" id="{{ spec.section_id }}-section">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <h5 class="card-title mb-0">
+            <i class="bi {{ spec.icon }}"></i> {{ spec.label }}
+            <span class="badge bg-primary">{{ _discovered }}</span>
+            {% if _missing > 0 %}
+              <span class="badge bg-warning text-dark">{{ _missing }} missing</span>
+            {% endif %}
+          </h5>
+          {% if _missing > 0 %}
+            <button class="btn btn-sm btn-outline-secondary toggle-missing-btn" onclick="toggleMissing('{{ spec.section_id }}')" title="Show/hide missing {{ spec.label|lower }}" data-show="false">
+              <i class="bi bi-eye-slash"></i> <span class="d-none d-sm-inline">Show Missing</span>
+            </button>
+          {% endif %}
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover mb-0">
+            <thead class="d-none d-md-table-header-group">
+              <tr>
+                <th style="width: 100px;">Art</th>
+                <th>Title</th>
+                <th class="text-center" style="width: 80px;">Year</th>
+                <th class="text-center" style="width: 100px;">Status</th>
+                <th class="text-center" style="width: 80px;">Tracks</th>
+                <th class="text-center" style="width: 100px;">Avg ★</th>
+                <th class="text-center" style="width: 150px;">Actions</th>
+              </tr>
+            </thead>
+            <tbody class="{{ spec.section_id }}-tbody">
+              {% for album in _items %}
+                {{ render_album_row(album, artist_name, album.is_missing) }}
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    {% endif %}
+  {% endfor %}
 
   <!-- Covered By Section -->
   <div class="card mb-4" id="artist-covers-section">

@@ -204,36 +204,23 @@ def _fetch_all_musicbrainz_releases(
 
 
 def _categorize_release(release_group: dict[str, Any]) -> str:
-    """Route a release-group into a display category."""
-    primary_type = (release_group.get("primary-type") or release_group.get("primary_type") or "").lower()
-    if primary_type not in ("album", "ep", "single"):
-        return "Album"
+    """Route a release-group into a display category.
 
-    raw_secondary = release_group.get("secondary-types") or release_group.get("secondary_types") or []
-    if isinstance(raw_secondary, str):
-        raw_secondary = [raw_secondary]
+    Returns a canonical category KEY (e.g. ``field_recording``), not a display
+    label — ``services.catalog.release_categories`` owns the key set and the
+    labels.  Delegating fixes the bug this function had: only ``live`` /
+    ``compilation`` / ``remix`` were recognised, so ``Album + Field recording``
+    and ``Album + DJ-mix + Mixtape/Street`` fell through to the STUDIO bucket.
+    """
+    from services.catalog.release_categories import category_for_musicbrainz
 
-    secondary = [
-        s.lower()
-        for s in raw_secondary
-        if isinstance(s, str) and s.strip()
-    ]
-
-    if "single" in secondary:
-        return "Single"
-    if "ep" in secondary:
-        return "EP"
-    if primary_type == "ep":
-        return "EP"
-    if primary_type == "single":
-        return "Single"
-    if "compilation" in secondary:
-        return "Compilation"
-    if "live" in secondary:
-        return "Live Album"
-    if "remix" in secondary:
-        return "Remix"
-    return "Album"
+    primary = release_group.get("primary-type") or release_group.get("primary_type") or ""
+    secondary = (
+        release_group.get("secondary-types")
+        or release_group.get("secondary_types")
+        or []
+    )
+    return category_for_musicbrainz(str(primary), secondary)
 
 
 def _release_cover_art_url(release_group: dict[str, Any]) -> str:
