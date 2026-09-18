@@ -79,7 +79,6 @@ from services.enrichment.genre_aggregation_service import aggregate_genres, _par
 from db.repositories.tracks import insert_or_update_track
 from helpers.normalization_service import (
     edition_annotations_compatible,
-    safe_album_rename,
     safe_int,
     safe_str,
 )
@@ -656,16 +655,6 @@ def _score_track_popularity(
         instrumental_weight_penalty=cfg_instrumental_penalty,
     )
 
-    # FIXED: ``calculate_combined_popularity_score`` previously returned exactly
-    # ``(score_data, lb_percentile)`` and was unpacked into two names here. The
-    # function now returns additional diagnostic values, which raised
-    # ``ValueError: too many values to unpack (expected 2)`` for EVERY track,
-    # was swallowed by the caller's except block, and left every track scoring
-    # 0.0 / 1★.
-    #
-    # Only the score dict is consumed here -- lb_percentile is recalculated
-    # immediately below -- so accept any return arity rather than hard-coding
-    # one. This stays correct if the signature changes again.
     if isinstance(_scored, tuple):
         score_data = _scored[0] if _scored else {}
     else:
@@ -785,32 +774,14 @@ def _resolve_track_mb_metadata(
             if _mb_isrc and not _as_str(track.get("isrc") or "").strip():
                 payload["isrc"] = _mb_isrc
 
+            # STRICT ALBUM COHESION GUARD:
+            # Never allow a track-level recording match to rename an existing album.
+            # Recordings map to many releases (compilations, live bootlegs), which
+            # shatters album grouping. Only fill if completely missing.
             _existing_album = _as_str(track.get("album") or "").strip()
             _mb_album = _as_str(mb_data.get("album") or "").strip()
-            if _mb_album:
-                if not _existing_album:
-                    payload["album"] = _mb_album
-                elif _force_meta:
-                    _album_resolved, _album_reason = safe_album_rename(
-                        _existing_album, _mb_album,
-                    )
-                    if _album_resolved and _album_resolved != _existing_album:
-                        payload["album"] = _album_resolved
-                        logger.info(
-                            "Album corrected from MusicBrainz",
-                            track_id=track_id,
-                            old=_existing_album,
-                            new=_album_resolved,
-                            reason=_album_reason,
-                        )
-                    elif not _album_resolved:
-                        logger.debug(
-                            "Album correction rejected",
-                            track_id=track_id,
-                            existing=_existing_album,
-                            proposed=_mb_album,
-                            reason=_album_reason,
-                        )
+            if _mb_album and not _existing_album:
+                payload["album"] = _mb_album
 
             _existing_artist = _as_str(track.get("artist") or "").strip()
             _mb_artist = _as_str(mb_data.get("artist") or "").strip()
