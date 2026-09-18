@@ -12,6 +12,7 @@ from sqlalchemy import text
 from db.engine import db_session
 from helpers.response_helpers import _fail, _ok
 from services.enrichment.genre_tag_aggregator import get_track_genre_sources
+from services.metadata.artist_service import delete_track as delete_track_service
 
 from . import api_v1_bp
 
@@ -163,5 +164,50 @@ async def ignore_track_mb_field(track_id: str) -> Any:
         return jsonify(payload), status
     except Exception as exc:
         logger.error("Failed to ignore MB field", track_id=track_id, error=str(exc))
+        payload, status = _fail(str(exc), 500)
+        return jsonify(payload), status
+
+
+@api_v1_bp.route("/tracks/<track_id>/delete", methods=["POST"])
+async def delete_track(track_id: str) -> Any:
+    """Delete ONE track — the album page's per-row trash button.
+
+    Body (optional JSON): ``{"delete_file": bool}`` — defaults to ``True`` so
+    the row's file goes with the row.  Pass ``false`` for a database-only
+    delete (the album page's bulk flow offers the same two choices).
+
+    WHY THIS ROUTE EXISTS: the album page's trash button did
+    ``window.location.href = `/track/${id}/delete` `` — a browser GET to a URL
+    that has never had a route in this app, so every click 404'd.  A POST
+    endpoint is also the correct shape here: the old navigation made a
+    destructive state change reachable by a GET, i.e. by a prefetch, a
+    crawler, or a plain link.
+
+    Delegates to ``services.metadata.artist_service.delete_track`` — the same
+    service the artist page's corrections route uses — so a single-track
+    delete behaves identically on both pages (file removal, the
+    ``__queued_for_download__`` stub guard, and the logging) instead of
+    growing a second implementation.
+    """
+    try:
+        data = await request.get_json(force=True, silent=True) or {}
+        delete_file = bool(data.get("delete_file", True))
+
+        result, service_status = delete_track_service(
+            track_id=track_id, delete_file=delete_file
+        )
+        if not result.get("success"):
+            payload, status = _fail(
+                result.get("error") or "Failed to delete track", service_status
+            )
+            return jsonify(payload), status
+
+        payload, status = _ok(
+            deleted_track_id=result.get("deleted_track_id") or track_id,
+            deleted_file=bool(result.get("deleted_file")),
+        )
+        return jsonify(payload), status
+    except Exception as exc:
+        logger.error("Failed to delete track", track_id=track_id, error=str(exc))
         payload, status = _fail(str(exc), 500)
         return jsonify(payload), status

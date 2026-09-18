@@ -1829,9 +1829,51 @@ def _drop_live_genres_from_csv(raw: Any) -> str | None:
     return ", ".join(kept) if kept != parts else None
 
 
+def track_carries_live_state(track: dict[str, Any]) -> bool:
+    """True when a track row MIGHT need a live/acoustic revert.
+
+    This mirrors the decision `revert_track_live_state` makes internally, so a
+    caller holding the already-loaded row can skip the call entirely.
+
+    Why it exists: the owner (album/track save) calls the revert for EVERY
+    track whenever the album is not live, and the revert then opens its own
+    session, re-reads the row, and finds nothing to do. That is one extra
+    SELECT per track for the overwhelmingly common case — a studio album with
+    no live state — plus two INFO log lines each, so a 20-track album emitted
+    ~40 lines of noise on every save.
+
+    Conservative by design: it returns True whenever it cannot prove the track
+    is clean, so a caller never skips a revert that was actually needed.
+    """
+    if not isinstance(track, dict):
+        return True
+
+    if row_get(track, "is_live") or row_get(track, "is_acoustic") or row_get(track, "album_context_live"):
+        return True
+
+    title = str(track.get("title") or "")
+    if title and strip_live_acoustic_suffix(title) != title:
+        return True
+
+    if _drop_live_genres_from_json(track.get("musicbrainz_genres")) is not None:
+        return True
+    if _drop_live_genres_from_csv(track.get("genres")) is not None:
+        return True
+
+    return False
+
+
 def revert_track_live_state(track_id: str) -> bool:
+    """Undo live/acoustic tagging for one track. Returns True when it changed something.
+
+    Logging contract (this is what makes it usable in a per-track loop):
+    * nothing to do — the NORMAL case — is logged at DEBUG, never INFO;
+    * a real change is logged at INFO.
+    The function used to log `revert started` at INFO before doing any work and
+    then log the no-op at INFO too, so a studio-album save produced two INFO
+    lines per track for no work at all.
+    """
     context = {"track_id": str(track_id)}
-    Logger.info("[ENRICH] live-state revert started", **context)
     try:
         with db_session() as session:
             row = session.execute(
@@ -1864,7 +1906,9 @@ def revert_track_live_state(track_id: str) -> bool:
                 and new_genres is None
                 and not flags_set
             ):
-                Logger.info(
+                # The normal case for a studio album — DEBUG, not INFO. See the
+                # logging contract in this function's docstring.
+                Logger.debug(
                     "[ENRICH] live-state revert skipped",
                     reason="track carries no live state to revert",
                     title=old_title,

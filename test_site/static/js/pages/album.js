@@ -442,15 +442,39 @@
     });
   }
 
+  /**
+   * Delete one track.
+   *
+   * FIXED: this navigated to `/track/${id}/delete`, a URL no route in this
+   * app has ever served — every click 404'd. It also made a destructive
+   * change reachable by a GET (prefetch, crawler, stray link). Now a POST to
+   * the api_v1 track-delete route, which reuses the same service the artist
+   * page's corrections page calls, so both pages delete identically.
+   */
   async function deleteTrack(trackId) {
     const accepted = await confirmFn({
       title: 'Delete track',
       message: 'Delete this track?',
+      detail: 'It is removed from the database, and its file is deleted from disk too, if it exists. This cannot be undone.',
       tone: 'danger',
       confirmLabel: 'Delete',
     });
     if (!accepted) return;
-    global.location.href = `/track/${encodeURIComponent(trackId)}/delete`;
+
+    try {
+      const data = await global.api.postJson(
+        `${API_V1}/tracks/${encodeURIComponent(trackId)}/delete`,
+        { delete_file: true },
+      );
+      if (!data.success) {
+        notifyError(data.error || 'Failed to delete track');
+        return;
+      }
+      notifySuccess(`Deleted track${data.deleted_file ? ' and its file' : ' (no file on disk)'}.`);
+      setTimeout(() => global.location.reload(), 500);
+    } catch (error) {
+      notifyError('Error: ' + error.message);
+    }
   }
 
   /** Fill the Track Artist field with the most common artist on this album. */

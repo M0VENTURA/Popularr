@@ -62,7 +62,10 @@ from services.metadata.tag_file_service import (
     update_file_tags,
     write_tags_to_file,
 )
-from services.popularity.stages.album_stage import revert_track_live_state
+from services.popularity.stages.album_stage import (
+    revert_track_live_state,
+    track_carries_live_state,
+)
 from services.scanning.scan_history_service import get_recent_album_scans
 from services.scheduler.scheduler_service import reschedule_jobs_from_config
 
@@ -1657,11 +1660,17 @@ async def album_detail(album_path: str) -> Any:
                 )
 
             if album_type and "+live" not in album_type.lower() and "(live)" not in album_type.lower():
-                try:
-                    if revert_track_live_state(str(track_id)):
-                        reverted_live_count += 1
-                except Exception as revert_err:
-                    logger.debug("Live-state revert failed", track_id=track_id, error=str(revert_err))
+                # Guard first: the revert opens its own session and re-reads the
+                # row, so calling it for every track on a plainly studio album
+                # cost one SELECT per track and logged two INFO lines each for
+                # no work. `track_carries_live_state` inspects the row we
+                # already hold and only lets genuinely suspicious tracks through.
+                if track_carries_live_state(track):
+                    try:
+                        if revert_track_live_state(str(track_id)):
+                            reverted_live_count += 1
+                    except Exception as revert_err:
+                        logger.debug("Live-state revert failed", track_id=track_id, error=str(revert_err))
 
         # ── Album-level cover art: download + embed ──────────────────────
         # The MB lookup fills ``cover_art_url`` (a CAA URL string).  Saving
@@ -2450,11 +2459,16 @@ async def track_detail(track_id: str) -> Any:
                             album_tracks_updated = 0
                             
                         if album_tracks_updated:
-                            await flash(f"Album metadata also applied to {album_tracks_updated} other track(s).", "info")
-                            
-                    db.commit()
-
-                    if any(f in update_values for f in ("is_live", "is_acoustic")) \
+                        # Guarded for the same reason as the album save path:
+                        # the user is CLEARING the live flag, so the row may
+                        # legitimately need a revert — make the cheap check
+                        # decide rather than opening a session per track.
+                        if track_carries_live_state(track):
+                            try:
+                                if revert_track_live_state(str(track_id)):
+                                    await flash("Removed \"(Live)\"/\"(Acoustic)\" suffix from the track title.", "info")
+                            except Exception as revert_err:
+                        if any(f in update_values for f in ("is_live", "is_acoustic")) \
                             and not (update_values.get("is_live") or update_values.get("is_acoustic")):
                         try:
                             if revert_track_live_state(str(track_id)):

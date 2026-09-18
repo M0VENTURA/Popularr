@@ -394,6 +394,56 @@ form .form-check-input[name="force"] + .form-check-label {
 }
 
 .badge-success { background-color: color-mix(in srgb, var(--spotify-green) 25%, transparent); color: var(--spotify-green); border-color: var(--spotify-green); }
+
+/* `bg-secondary` was the ONE Bootstrap background utility left un-themed.
+   Bootstrap's #6c757d is lighter than every surface token in this theme, so a
+   neutral badge (`<span class="badge bg-secondary">`) read as a grey blob on
+   a card — the grey patches reported on the artist and album pages.
+   Re-pointed at the raised surface token so "neutral" means "matches the UI". */
+.bg-secondary { background-color: var(--tertiary-bg) !important; color: var(--text-primary) !important; }
+
+/* Bootstrap's greys are BLUE-tinted (#212529, #343a40, #6c757d) while this
+   theme is a pure neutral, and Bootstrap 5.3 keeps those 5.3.2 values under
+   data-bs-theme="dark". `.bg-dark` carries `!important`, so it beat every
+   local rule in this file that did NOT also declare `!important` — which is
+   most of them. The sites that genuinely rendered Bootstrap's blue-grey:
+     - `modal-content bg-dark`        (.modal-content sets no !important)
+     - `form-control bg-dark`         (`input, select, textarea` sets none)
+     - `input-group-text bg-dark`     (base.html's navbar search icon)
+     - `alert-secondary bg-dark`      (.alert sets none)
+   Note `.card.bg-dark` / `.card-header.bg-dark` were NOT affected — the
+   `!important` rule at the top of this section already won those, so the
+   album cards were fine and are not part of this fix.
+
+   Maps to --secondary-bg, NOT --primary-bg: each call site above is meant to
+   be a card/control surface, and --primary-bg would make them darker than the
+   panel they already sit on — trading a grey patch for a black one. */
+.bg-dark { background-color: var(--secondary-bg) !important; color: var(--text-primary) !important; }
+
+/* Bootstrap's border-secondary is #6c757d — a mid grey far lighter than any
+   surface token here. Because it too carries `!important`, it beat the plain
+   `border-color: var(--border-color)` rules and drew bright grey rules across
+   a near-black UI: the album hero's `border-end border-secondary` metric
+   dividers, every `border-secondary` form-control outline, and the borders on
+   the cards. A low-opacity white reads as the same hairline .card uses. */
+.border-secondary { border-color: color-mix(in srgb, white 12%, transparent) !important; }
+
+/* `.text-secondary` resolves to Bootstrap's #6c757d — a muddy mid-grey that
+   is noticeably desaturated against this theme's neutral surfaces, which is
+   what reads as the "grey that doesn't look right" on the artist and album
+   pages (band-member badges, card sub-copy, similar-artist rows).
+
+   The RGB VARIABLE is overridden rather than the `color` shorthand. Bootstrap
+   5.3 declares
+       .text-secondary { color: rgba(var(--bs-secondary-rgb), var(--bs-text-opacity)) !important }
+   so re-pointing the triple fixes the colour while `text-opacity-75` (used by
+   the playlist track rows) keeps working. A plain `color: … !important` here
+   would have silently disabled text-opacity on every page.
+
+   Scoped to `.text-secondary` — NOT :root — because the same triple also
+   drives `bg-secondary` and `border-secondary`, which need the token values
+   applied by the two rules above. */
+.text-secondary { --bs-secondary-rgb: 208, 208, 208; }
 .bg-success { background-color: var(--spotify-green) !important; color: #000 !important; }
 .bg-danger { background-color: var(--status-danger) !important; color: #fff !important; }
 .bg-info { background-color: var(--status-info) !important; }

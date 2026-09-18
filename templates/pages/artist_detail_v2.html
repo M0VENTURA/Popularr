@@ -367,10 +367,17 @@
       </div>
 
       <!-- Admin Controls Row -->
-      <form id="artistScanForm" action="{{ url_for('scans.scan_artist_custom') }}" method="post" class="d-flex align-items-center gap-2 mb-3 scan-toolbar">
+      <form id="artistScanForm" action="{{ url_for('scans.scan_artist_custom') }}" method="post" class="d-flex align-items-center gap-2 mb-3 flex-wrap scan-toolbar">
         <input type="hidden" name="artist" value="{{ artist_name }}">
 
-        <div class="flex-grow-1" style="max-width: 160px;">
+        {#
+          No fixed width. The partial emits BOTH the scan-type <select> AND
+          the "Restart" checkbox, so a 160px cap squashed Restart into a
+          narrow column and wrapped it onto a second line, which is what left
+          Run / Force / Restart looking misaligned. The select already sets
+          its own min-width.
+        #}
+        <div class="d-flex align-items-center gap-2">
           {% include 'components/_scan_selector.html' ignore missing %}
         </div>
 
@@ -417,7 +424,15 @@
     {% set ns_totals.missing = ns_totals.missing + (albums_by_category.get(key) or [])|selectattr('is_missing', 'equalto', True)|list|length %}
   {% endfor %}
 
-  <ul class="nav nav-pills nav-fill bg-secondary p-1 rounded mb-3" role="tablist" id="artistPageTabs">
+  {#
+    `nav-segmented` (popularr.css) replaces `bg-secondary p-1 rounded`.
+    Bootstrap's bg-secondary (#6c757d) is lighter than every surface token in
+    this theme, so the tab strip read as a pale grey band floating on the page
+    instead of a recessed track behind the active green pill. This is the same
+    treatment album_detail.html and every other tabbed page already uses —
+    the artist page was the one that never got migrated.
+  #}
+  <ul class="nav nav-pills nav-segmented nav-fill mb-3" role="tablist" id="artistPageTabs">
     <li class="nav-item" role="presentation">
       <button class="nav-link active" id="tab-albums-btn" data-bs-toggle="tab" data-bs-target="#tab-albums" type="button" role="tab" aria-selected="true">
         <i class="bi bi-vinyl me-1"></i> Albums ({{ ns_totals.all }})

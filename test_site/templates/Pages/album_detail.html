@@ -144,20 +144,32 @@
       </div>
 
       <!-- Scan & Actions Toolbar Row -->
-      <form id="albumScanForm" action="{{ url_for('scans.scan_album_custom') }}" method="post" class="d-flex align-items-center justify-content-between gap-2 mb-3 flex-wrap p-2 rounded border border-secondary" style="background: var(--tertiary-bg, #282828);">
+      <form id="albumScanForm" action="{{ url_for('scans.scan_album_custom') }}" method="post" class="d-flex align-items-center justify-content-between gap-2 mb-3 flex-wrap p-2 rounded border border-secondary scan-toolbar" style="background: var(--tertiary-bg, #282828);">
         <input type="hidden" name="artist" value="{{ artist_name }}">
         <input type="hidden" name="album" value="{{ album_name }}">
 
         <div class="d-flex align-items-center gap-2 flex-wrap">
-          <div style="width: 140px;">
+          {#
+            No fixed width on this wrapper. The partial emits BOTH the
+            scan-type <select> AND the "Restart" checkbox, so pinning the
+            wrapper to 140px squashed Restart into a narrow column and wrapped
+            it onto its own line — the misalignment against Run and Force.
+            The select already sets its own min-width.
+          #}
+          <div class="d-flex align-items-center gap-2">
             {% include 'components/_scan_selector.html' ignore missing %}
           </div>
-          <button type="submit" class="btn btn-warning fw-bold px-3 py-1 text-nowrap" title="Run Scan">
+          <button type="submit" class="btn btn-warning btn-sm fw-bold text-nowrap" title="Run Scan">
             <i class="bi bi-lightning-fill"></i> Run
           </button>
-          <div class="form-check m-0 text-nowrap px-2 py-1 bg-dark rounded border border-secondary" title="Force full rescan">
+          {#
+            Matches the artist page's plain inline Force checkbox. The old
+            px-2 py-1 + border + bg-dark box was taller than every sibling in
+            the row, which is a second reason the controls did not line up.
+          #}
+          <div class="form-check form-check-inline m-0 text-nowrap" title="Force full rescan">
             <input class="form-check-input" type="checkbox" id="albumForceScan" name="force" value="1">
-            <label class="form-check-label small text-muted ms-1" for="albumForceScan">Force</label>
+            <label class="form-check-label" for="albumForceScan">Force</label>
           </div>
         </div>
 

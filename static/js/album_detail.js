@@ -92,10 +92,32 @@ window.openEditTrackFromAlbum = function (trackId) {
     }
 };
 
+// Delete one track. This used to be
+//     window.location.href = `/track/${trackId}/delete`
+// which 404'd on every click: no route with that URL shape has ever existed
+// (the deletes are POST /api/... endpoints). It also made a destructive
+// change reachable by a GET, so a prefetch or a stray link could have fired
+// it. Now it POSTs to the api_v1 track-delete route and reloads.
 window.deleteTrack = function (trackId) {
-    if (!confirm('Are you sure you want to delete this track?')) return;
-    // Fallback directly to the server's delete route view
-    window.location.href = `/track/${trackId}/delete`;
+    if (!confirm(`Delete this track?\n\nIt is removed from the database, and its file is deleted from disk too, if it exists.\n\nThis cannot be undone.`)) return;
+
+    fetch(`${_API_V1_PREFIX}/tracks/${encodeURIComponent(trackId)}/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delete_file: true })
+    })
+        .then(r => r.json())
+        .then(data => {
+            if (!data.success) {
+                alert('❌ Error: ' + (data.error || 'Failed to delete track'));
+                return;
+            }
+            alert(`✅ Deleted track${data.deleted_file ? ' and its file' : ' (no file on disk)'}`);
+            window.location.reload();
+        })
+        .catch(err => {
+            alert('❌ Network error: ' + err.message);
+        });
 };
 
 // ---------------------------------------------------------------------------
