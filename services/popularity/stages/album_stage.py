@@ -1621,6 +1621,171 @@ def _persist_album_type_to_tracks(
         Logger.exception("[ENRICH] release MBID propagation failed", error=_safe_error(exc), **context)
 
 
+def _resolve_album_release_mbid(artist: str, album: str) -> str:
+    """The MusicBrainz RELEASE id already stored for an album, or \"\".
+
+    Read from the tracks table rather than taken as an argument, so the
+    extended-metadata fill still works on albums whose release id was resolved
+    and persisted on an EARLIER scan (the common case on a rescan, where the
+    release-MBID block short-circuits because every track already has one).
+    """
+    try:
+        with db_session() as session:
+            row = session.execute(
+                text(
+                    "SELECT musicbrainz_album_mbid "
+                    "FROM tracks "
+                    "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
+                    "  AND album = :album "
+                    "  AND musicbrainz_album_mbid IS NOT NULL "
+                    "  AND TRIM(musicbrainz_album_mbid) <> '' "
+                    "LIMIT 1"
+                ),
+                {"artist": artist, "album": album},
+            ).first()
+        if not row:
+            return ""
+        return str(row[0] or "").strip()
+    except Exception as exc:
+        Logger.debug(
+            "[ENRICH] release-MBID lookup for extended metadata failed",
+            error=_safe_error(exc),
+            artist=artist,
+            album=album,
+        )
+        return ""
+
+
+def _persist_release_extended_fields(
+    artist: str,
+    album: str,
+    release_mbid: str = "",
+    tracks: list[dict[str, Any]] | None = None,
+) -> int:
+    """Fill the album page's Extended Metadata columns from the MB release.
+
+    Writes the SIX album-level release fields onto every track of the album so
+    they agree — they describe the RELEASE, not an individual track:
+
+        recordlabel, catalognumber, barcode, releasedate, media, releasecountry
+
+    WHY THIS IS NEEDED: nothing ever populated these. The scan only resolved the
+    release MBID, and the extended fields were not even EXTRACTED from
+    MusicBrainz (``fetch_musicbrainz_release_metadata`` never requested
+    ``labels`` and had no ``label-info`` / ``barcode`` / ``release-events``
+    parsing), so the album page's Extended Metadata panel was permanently
+    blank.
+
+    ``release_mbid`` is optional: when omitted it is read from the album's
+    stored tracks, so a rescan still fills an album whose release id was
+    persisted earlier.
+
+    Fill-only: a column that already holds a value is left alone, so a manual
+    edit on the album page is never silently clobbered by a rescan. Each column
+    is considered separately rather than skipping the whole album when one
+    field is already set, so a partially-filled album still gains the rest.
+
+    Returns the number of rows updated.
+    """
+    release_mbid = str(release_mbid or "").strip() or _resolve_album_release_mbid(
+        artist, album
+    )
+    if not release_mbid:
+        Logger.info(
+            "[ENRICH] extended-metadata skipped",
+            reason="no MusicBrainz release id for the album",
+            artist=artist,
+            album=album,
+        )
+        return 0
+    context = {"artist": artist, "album": album, "release_mbid": release_mbid}
+
+    try:
+        from services.enrichment.musicbrainz_service import (
+            fetch_musicbrainz_release_metadata,
+        )
+        release = fetch_musicbrainz_release_metadata(release_mbid) or {}
+    except Exception as exc:
+        Logger.warning(
+            "[ENRICH] extended-metadata fetch failed",
+            error=_safe_error(exc),
+            **context,
+        )
+        return 0
+
+    if not release:
+        Logger.info(
+            "[ENRICH] extended-metadata fetch returned nothing", **context,
+        )
+        return 0
+
+    # The six columns this function owns. Named after the actual tracks
+    # columns so no mapping table is needed.
+    _COLUMNS = (
+        "recordlabel", "catalognumber", "barcode",
+        "releasedate", "media", "releasecountry",
+    )
+
+    values: dict[str, str] = {}
+    for column in _COLUMNS:
+        raw = release.get(column)
+        text_value = str(raw or "").strip()
+        if not text_value:
+            continue
+        try:
+            # MappedTrait-safe: ints (e.g. a numeric barcode) must persist as
+            # their string form, since the columns are TEXT.
+            values[column] = text_value
+        except Exception:
+            continue
+
+    if not values:
+        Logger.info(
+            "[ENRICH] extended-metadata empty on the MusicBrainz release",
+            **context,
+        )
+        return 0
+
+    # COALESCE(NULLIF(TRIM(col), ''), '') = '' -> fill only when empty.
+    set_clause = ", ".join(
+        f"{column} = CASE WHEN COALESCE(NULLIF(TRIM({column}), ''), '') = '' "
+        f"THEN :{column} ELSE {column} END"
+        for column in values
+    )
+    params: dict[str, Any] = dict(values)
+    params.update({"artist": artist, "album": album})
+
+    try:
+        with _log_section("full.release_extended_fields_persist", **context):
+            with db_session() as session:
+                result = session.execute(
+                    text(
+                        f"""
+                        UPDATE tracks
+                        SET {set_clause}
+                        WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
+                          AND album = :album
+                        """
+                    ),
+                    params,
+                )
+                rows_updated = result.rowcount or 0
+        Logger.info(
+            "[ENRICH] extended-metadata persisted",
+            rows_updated=rows_updated,
+            fields=sorted(values),
+            **context,
+        )
+        return rows_updated
+    except Exception as exc:
+        Logger.exception(
+            "[ENRICH] extended-metadata persistence failed",
+            error=_safe_error(exc),
+            **context,
+        )
+        return 0
+
+
 def _genre_values(label: str, mb_genres_raw: Any, genres_raw: Any) -> tuple[Any, str]:
     mb_list = _json_list(mb_genres_raw)
     mb_list = [str(value).strip() for value in mb_list if str(value).strip()]
@@ -2091,6 +2256,18 @@ def _run_full_enrichment(
 
     with _log_section("full.lastfm_tags", **context):
         _fetch_artist_lastfm_tags(artist)
+
+    # ── Extended Metadata (album page panel) ──────────────────────────────
+    # Record label / catalog number / barcode / release date / media format /
+    # release country come from the MusicBrainz RELEASE. Nothing populated
+    # them before, so the panel was permanently blank.
+    #
+    # This runs BEFORE the artist-country fallback below so a real release
+    # country wins, and the runtime-checkable ``_resolve_album_release_mbid``
+    # lookup means it fills an album even when the release id was persisted on
+    # an earlier scan.
+    with _log_section("full.release_extended_fields", **context):
+        _persist_release_extended_fields(artist, album, tracks=album_tracks)
 
     if metadata.get("country"):
         try:

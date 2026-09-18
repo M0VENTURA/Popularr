@@ -1983,6 +1983,96 @@ def merge_metadata(base: dict[str, Any], mb: dict[str, Any], overrides: dict[str
 # through to "Could not fetch MusicBrainz release data" regardless of input.)
 # ---------------------------------------------------------------------------
 
+
+def _unique_join(values: Any, *, limit: int = 8) -> str:
+    """Join distinct non-empty strings with " / " preserving first-seen order.
+
+    MusicBrainz repeats a value per medium (a 2-CD release yields "CD" twice)
+    and per label entry, so the raw lists must be de-duplicated before being
+    stored in a single text column.
+    """
+    seen: list[str] = []
+    for value in values or []:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.append(text)
+    return " / ".join(seen[:limit])
+
+
+def _release_event_country(release: dict[str, Any]) -> str:
+    """Country of the release's FIRST release event, else ``release.country``.
+
+    A release can be issued in several countries; ``release-events`` carries
+    them with an ``area``. The earliest event is the closest analogue of
+    "where this release is from", which is what the album page's Release
+    Country field means. Falls back to the singular ``country`` field, which
+    older/partial payloads still use.
+    """
+    events = release.get("release-events") or release.get("release_events") or []
+    if isinstance(events, list):
+        dates: list[tuple[str, str]] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            area = event.get("area") or {}
+            name = str(area.get("name") or "").strip() if isinstance(area, dict) else ""
+            if name:
+                dates.append((str(event.get("date") or "9999"), name))
+        if dates:
+            dates.sort(key=lambda item: item[0])
+            return dates[0][1]
+    return str(release.get("country") or "").strip()
+
+
+def _release_extended_fields(release: dict[str, Any], media: Any) -> dict[str, str]:
+    """The six album-page "Extended Metadata" values, read from a release.
+
+    Keys are named after the ``tracks`` columns so the scan can persist them
+    directly:
+
+        recordlabel    label-info[].label.name          ("Nuclear Blast")
+        catalognumber  label-info[].catalog-number      ("NB 5678-2")
+        barcode        release.barcode                  ("0727361567824")
+        releasedate    release.date                     ("2023-04-14")
+        media          media[].format                   ("CD")
+        releasecountry release-events[].area.name       ("United States")
+
+    Every value is a de-duplicated string, because MusicBrainz repeats them
+    per medium/label and the columns are single text fields. Missing data
+    yields "", never a placeholder — the album page treats empty as "unknown"
+    and a placeholder would be written to the audio files as a real tag.
+    """
+    labels: list[str] = []
+    catalogs: list[str] = []
+    label_info = release.get("label-info") or release.get("label_info") or []
+    if isinstance(label_info, list):
+        for entry in label_info:
+            if not isinstance(entry, dict):
+                continue
+            label = entry.get("label") or {}
+            if isinstance(label, dict) and label.get("name"):
+                labels.append(str(label["name"]))
+            if entry.get("catalog-number"):
+                catalogs.append(str(entry["catalog-number"]))
+            elif entry.get("catalog_number"):
+                catalogs.append(str(entry["catalog_number"]))
+
+    formats: list[str] = []
+    if isinstance(media, list):
+        for medium in media:
+            if isinstance(medium, dict) and medium.get("format"):
+                formats.append(str(medium["format"]))
+
+    return {
+        "recordlabel": _unique_join(labels),
+        "catalognumber": _unique_join(catalogs),
+        "barcode": str(release.get("barcode") or "").strip(),
+        "releasedate": str(release.get("date") or "").strip(),
+        "media": _unique_join(formats),
+        "releasecountry": _release_event_country(release),
+    }
+
+
 def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None:
     """Fetch and flatten a MusicBrainz release for comparison/Link/Align.
 
@@ -1999,7 +2089,12 @@ def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None
             "release.fetch_metadata",
             Client.get_release,
             release_id,
-            inc="recordings+artist-credits+release-groups+media",
+            # ``labels`` supplies ``label-info`` (record label + catalog
+            # number + barcode).  It was missing here, and because an explicit
+            # ``inc`` BYPASSES the client's ``_RELEASE_INC_SUPERSET`` fallback,
+            # the album page's Extended Metadata panel never had a label or
+            # catalog number to show.
+            inc="recordings+artist-credits+release-groups+media+labels",
             Log_context={"release_id": release_id},
         )
     except Exception as exc:
@@ -2074,6 +2169,12 @@ def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None
         "album_type": Album_type,
         "disc_count": len(Media),
         "artist_credit": build_artist_credit_string(Artist_credit),
+        # The album page's "Extended Metadata" panel. Keys are named after the
+        # ``tracks`` columns so the scan can persist them without a mapping
+        # table. ``media`` here is the FORMAT string ("CD / Digital"), not the
+        # raw MB media array — collision with the local ``Media`` variable is
+        # deliberate and safe because the array is not otherwise returned.
+        **_release_extended_fields(Release, Media),
         "tracks": Tracks,
     }
 

@@ -684,6 +684,17 @@
 </script>
 
 <script src="{{ versioned_static('js/genre-utils.js') }}"></script>
+{#
+  The album All / In Library / Missing filter. It lives in its own module
+  because `js/artist_detail.js` is currently NOT JavaScript — it is a Jinja page
+  template (line 1 is `{% extends "base.html" %}`) loaded via <script src>, so
+  the browser throws SyntaxError and discards the whole file. That made
+  setArtistFilter() undefined and the filter buttons do nothing.
+
+  A SyntaxError in one <script src> does not stop later scripts, so keeping the
+  filter here restores it immediately, independently of that larger repair.
+#}
+<script src="{{ versioned_static('js/artist-album-filter.js') }}"></script>
 <script src="{{ versioned_static('js/artist_detail.js') }}"></script>
 
 <script>
