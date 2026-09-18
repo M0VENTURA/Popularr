@@ -590,6 +590,41 @@ def _select_primary_release(releases: Any, album_name: str | None) -> dict[str, 
     # ── 3. Earliest, deterministically ─────────────────────────────────────
     return min(candidates, key=_sort_key)
 
+def _recording_live_affinity(recording: Any) -> bool | None:
+    """Whether a search candidate is a LIVE recording, or ``None`` if unknown.
+
+    MusicBrainz's ``recording/search`` returns no release data unless ``inc``
+    asks for it, so ``None`` ("cannot tell") is a real outcome distinct from
+    ``False`` ("known studio") — a candidate we cannot classify must never be
+    treated as if it were verified studio.
+
+    WHY THIS EXISTS: a live album routinely ships PLAINLY TITLED tracks
+    (every track on Metallica's "S&M" is titled exactly as its studio
+    original). The studio recording and the live recording then have the SAME
+    title, so text similarity scores both 1.0 and the studio one wins on
+    MusicBrainz's relevance ordering. The track is then stamped with the
+    STUDIO recording MBID and its popularity data is read from the studio
+    recording — which is why live albums were scoring like studio albums.
+    Release-group data is the only signal that separates the two.
+
+    NOTE: ``_parse_secondary_types`` returns the raw MusicBrainz casing
+    (``"Live"``), so each element MUST be casefolded here — a plain
+    ``"live" in [...]`` membership test silently never matches.
+    """
+    if not isinstance(recording, dict):
+        return None
+    releases = [r for r in (recording.get("releases") or []) if isinstance(r, dict)]
+    if not releases:
+        return None
+    for release in releases:
+        secondary = {
+            str(s).strip().casefold()
+            for s in _release_group_secondary_types_of(release)
+        }
+        if "live" in secondary:
+            return True
+    return False
+
 def _client_available(client: Any) -> bool:
     Checker = getattr(client, "is_available", None)
     if not callable(Checker):
@@ -683,8 +718,16 @@ class MusicBrainzService:
         self._maybe_flush_cache(force=True)
 
     @staticmethod
-    def _cache_key(title: str, artist: str) -> str:
-        return f"{artist.casefold().strip()}::{title.casefold().strip()}"
+    def _cache_key(title: str, artist: str, is_live: bool = False) -> str:
+        """Cache key for an MBID lookup.
+
+        ``is_live`` is part of the key because a plainly titled live track
+        ("Enter Sandman" on S&M) and its studio namesake produce the SAME
+        title+artist, so a shared key let whichever was scanned first resolve
+        the other one too. The suffix keeps the two answers apart.
+        """
+        base = f"{artist.casefold().strip()}::{title.casefold().strip()}"
+        return f"{base}::live" if is_live else base
 
     def get_suggested_mbid(self, title: str, artist: str, limit: int = 5, **kwargs: Any) -> tuple[str, float]:
         """Return the best-matching recording MBID for ``(title, artist)``.
@@ -693,8 +736,24 @@ class MusicBrainzService:
         does not re-query MusicBrainz for the same song.  Candidates whose
         edition annotations conflict (e.g. a remaster asked for a plain title)
         are rejected before scoring.
+
+        ``is_live_release`` (keyword) tells the search that the track being
+        resolved belongs to a LIVE release. This matters because a live album
+        routinely ships plainly titled tracks, so the live and the studio
+        recordings score an identical 1.0 on title similarity and the studio
+        one wins by relevance order — leaving the live track stamped with the
+        studio recording's MBID and inheriting its popularity. When the flag
+        is set, candidates whose release-group secondary type says "live" are
+        preferred; when it is clear, they are demoted. Candidates the response
+        cannot classify are never treated as verified studio.
         """
-        context = {"artist": artist, "track": title, "limit": limit}
+        is_live_release = bool(kwargs.get("is_live_release"))
+        context = {
+            "artist": artist,
+            "track": title,
+            "limit": limit,
+            "is_live_release": is_live_release,
+        }
         if not self.enabled or not title or not artist:
             Logger.info(
                 "[MB] recording suggestion skipped",
@@ -703,7 +762,7 @@ class MusicBrainzService:
             )
             return "", 0.0
 
-        cache_key = self._cache_key(title, artist)
+        cache_key = self._cache_key(title, artist, is_live=is_live_release)
         now = time.time()
         with self._mem_lock:
             cached = self._mbid_cache.get(cache_key)
@@ -732,9 +791,16 @@ class MusicBrainzService:
                 self.http.search_recordings,
                 query,
                 limit=limit,
+                # ``inc`` is REQUIRED for the live/studio disambiguation below:
+                # without release data every candidate looks identical, which
+                # is exactly how a plainly titled live track used to adopt its
+                # studio namesake's recording MBID. The extra weight is one
+                # album's worth of release groups per uncached search.
+                inc="releases+release-groups",
                 Log_context=context,
             ) or []
             best_mbid, best_score = "", 0.0
+            best_rank: tuple[int, float] | None = None
             normalized_title = Normalize_title_for_mbid_match(title)
             for recording in recordings:
                 if not isinstance(recording, dict):
@@ -746,7 +812,25 @@ class MusicBrainzService:
                     normalized_title,
                     Normalize_title_for_mbid_match(candidate_title),
                 )
-                if score > best_score:
+                if score <= 0:
+                    continue
+
+                # Rank: liveness agreement FIRST, then text similarity. A
+                # plainly titled live track and its studio namesake both score
+                # 1.0, so similarity alone cannot separate them — the
+                # release-group secondary type is the only signal that can.
+                # Unknown candidates (no release data) sit in the middle so a
+                # live lookup is never satisfied by an unclassifiable hit, and
+                # a studio lookup is never blocked by one either.
+                _affinity = _recording_live_affinity(recording)
+                if _affinity is None:
+                    _live_rank = 1
+                else:
+                    _live_rank = 2 if _affinity == is_live_release else 0
+                _rank = (_live_rank, score)
+
+                if best_rank is None or _rank > best_rank:
+                    best_rank = _rank
                     best_mbid = str(recording.get("id") or "")
                     best_score = score
 
@@ -766,19 +850,33 @@ class MusicBrainzService:
             Logger.exception("[MB] recording suggestion failed", error=_error(exc), **context)
             return "", 0.0
 
-    def lookup_recording_metadata(self, title: str, artist: str, *, album: str | None = None, **kwargs: Any) -> dict[str, Any]:
+    def lookup_recording_metadata(self, title: str, artist: str, *, album: str | None = None, is_live_release: bool = False, **kwargs: Any) -> dict[str, Any]:
         """Resolve a recording's full metadata via search-then-fetch.
 
         ``album`` is the album being scanned. Supplying it pins the recording
         to THAT album's release instead of whichever release MusicBrainz
         happens to list first — see ``_select_primary_release``.
+
+        ``is_live_release`` tells the recording SEARCH that the track belongs
+        to a live release, so a plainly titled live cut resolves to its own
+        recording instead of its identically titled studio namesake. Without
+        it the live track inherits the studio recording's MBID and therefore
+        its ListenBrainz/Last.fm popularity — the reason live albums were
+        scoring like studio albums.
         """
-        context = {"title": title, "artist": artist, "album": album}
+        context = {
+            "title": title,
+            "artist": artist,
+            "album": album,
+            "is_live_release": bool(is_live_release),
+        }
         if not title or not artist:
             Logger.info("[MB] recording metadata skipped", reason="incomplete input", **context)
             return {}
         try:
-            mbid, confidence = self.get_suggested_mbid(title, artist)
+            mbid, confidence = self.get_suggested_mbid(
+                title, artist, is_live_release=is_live_release
+            )
             if not mbid:
                 return {}
             recording = _call_with_heartbeat(
@@ -1972,8 +2070,17 @@ def get_shared_mb_service() -> MusicBrainzService:
             _shared_mb_service = MusicBrainzService(http_client=Client, enabled=True)
     return _shared_mb_service
 
-def lookup_recording_metadata(title: str, artist: str, *, album: str | None = None) -> dict[str, Any]:
-    return _get_service().lookup_recording_metadata(title, artist, album=album)
+def lookup_recording_metadata(
+    title: str,
+    artist: str,
+    *,
+    album: str | None = None,
+    is_live_release: bool = False,
+) -> dict[str, Any]:
+    """Module-level wrapper. See ``MusicBrainzService.lookup_recording_metadata``."""
+    return _get_service().lookup_recording_metadata(
+        title, artist, album=album, is_live_release=is_live_release
+    )
 
 def merge_metadata(base: dict[str, Any], mb: dict[str, Any], overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     return _get_service().merge_metadata(base, mb, overrides)

@@ -209,7 +209,8 @@ class TestLookupRecordingMetadataArtistMbid:
         from services.enrichment.musicbrainz_service import MusicBrainzService
 
         svc = MusicBrainzService(enabled=True)
-        svc.get_suggested_mbid = lambda title, artist, limit=5: (
+        # ``**kwargs`` because the production seam passes ``is_live_release``.
+        svc.get_suggested_mbid = lambda title, artist, limit=5, **kwargs: (
             "rec-1234",
             0.99,
         )
@@ -240,7 +241,8 @@ class TestLookupRecordingMetadataArtistMbid:
         from services.enrichment.musicbrainz_service import MusicBrainzService
 
         svc = MusicBrainzService(enabled=True)
-        svc.get_suggested_mbid = lambda title, artist, limit=5: ("rec-5678", 0.9)
+        # ``**kwargs`` because the production seam passes ``is_live_release``.
+        svc.get_suggested_mbid = lambda title, artist, limit=5, **kwargs: ("rec-5678", 0.9)
         svc.http.get_recording = lambda mbid, inc="": {
             "title": "Some Track",
             "releases": [{"title": "Some Album"}],

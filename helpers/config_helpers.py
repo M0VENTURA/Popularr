@@ -937,12 +937,20 @@ def get_playlists_config() -> dict[str, Any]:
         - genre_playlists_delete_threshold: 80
         - genre_playlists_max_tracks: 300
         - new_music_playlist_enabled: True
+        - exclude_christmas_from_playlists: True
+        - christmas_playlist_marker: "christmas"
 
     NOTE: ``genre_playlists_max_tracks`` (300) is deliberately larger than
     ``genre_playlists_create_threshold`` (100).  A genre with between 100 and
     300 qualifying tracks therefore yields a playlist containing its ENTIRE
     qualifying pool rather than a curated top slice.  Lower the max, or raise
     the create threshold, if you want every genre playlist to be a selection.
+
+    NOTE: ``exclude_christmas_from_playlists`` keeps Christmas music out of every
+    generated playlist EXCEPT those whose name contains
+    ``christmas_playlist_marker`` (default "christmas"), which is what lets the
+    "Christmas - Top Tracks" / "Christmas Pop - Top Tracks" playlists exist
+    while ordinary genre, Essential and New Music playlists stay seasonal-free.
     """
     cfg = get_config() or {}
     p = cfg.get("playlists") or {}
@@ -972,6 +980,12 @@ def get_playlists_config() -> dict[str, Any]:
             1, int(p.get("genre_playlists_max_tracks", 300) or 300)
         ),
         "new_music_playlist_enabled": bool(p.get("new_music_playlist_enabled", True)),
+        "exclude_christmas_from_playlists": bool(
+            p.get("exclude_christmas_from_playlists", True)
+        ),
+        "christmas_playlist_marker": str(
+            p.get("christmas_playlist_marker") or "christmas"
+        ).strip().lower() or "christmas",
     }
 
 

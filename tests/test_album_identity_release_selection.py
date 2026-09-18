@@ -192,7 +192,9 @@ class TestLookupRecordingMetadataAlbumAnchor:
         from services.enrichment.musicbrainz_service import MusicBrainzService
 
         svc = MusicBrainzService(enabled=True)
-        svc.get_suggested_mbid = lambda title, artist, limit=5: ("rec-lux", 0.9)
+        # ``**kwargs`` because the production seam passes ``is_live_release``;
+        # this stub only cares about the MBID it returns.
+        svc.get_suggested_mbid = lambda title, artist, limit=5, **kwargs: ("rec-lux", 0.9)
         svc.http.get_recording = lambda mbid, inc="": _recording(
             [_live_tour_release(), _studio_release()]
         )

@@ -2262,6 +2262,24 @@
         </div>
       </div>
 
+      <div class="setting-card">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_exclude_christmas">Exclude Christmas From Playlists</label>
+          <p class="setting-description">Keeps Christmas music out of every generated playlist (genre, Essential Collection, New Music) <strong>except</strong> those whose name contains the marker below. A track counts as Christmas when its title, album or genres say so — including tags like <code>Holiday</code>, <code>Xmas</code> and <code>Noel</code>. Turn this off to let seasonal tracks appear everywhere again.</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_exclude_christmas" {% if config.get('playlists', {}).get('exclude_christmas_from_playlists', True) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+
+      <div class="input-card naming-card">
+        <label for="playlists_christmas_marker">Christmas Playlist Marker</label>
+        <input type="text" class="form-control" id="playlists_christmas_marker" placeholder="christmas" value="{{ config.get('playlists', {}).get('christmas_playlist_marker', 'christmas') }}">
+        <span class="help-text">A playlist whose <em>name</em> contains this text may hold Christmas tracks; every other playlist excludes them. Default: <strong>christmas</strong> (matches “Christmas - Top Tracks” and “Christmas Pop - Top Tracks”).</span>
+      </div>
+
       <!-- 2. Thresholds & limits — auto-reflowing grid -->
       <div class="thresholds-grid">
         <div class="input-card">

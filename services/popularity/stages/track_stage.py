@@ -698,6 +698,8 @@ def _resolve_track_mb_metadata(
     options: dict[str, Any],
     batch_artist: str = "",
     batch_title: str = "",
+    album_context: dict[str, Any] | None = None,
+    album_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     title = _as_str(track_title or "")
@@ -732,8 +734,25 @@ def _resolve_track_mb_metadata(
                 _album_anchor = _as_str(
                     album_context.get("album") if isinstance(album_context, dict) else ""
                 ).strip()
+                # Release-level liveness. A live album routinely ships PLAINLY
+                # TITLED tracks ("Enter Sandman" on S&M is titled exactly as
+                # its studio original), so the studio and live recordings score
+                # an identical title match and the studio one wins by relevance
+                # order. The track then carries the STUDIO recording's MBID,
+                # and every popularity figure read from it (ListenBrainz
+                # listens via that MBID, Last.fm via the release-scoped match)
+                # is the studio recording's — which is why live albums were
+                # scoring like studio albums. Passing the flag lets the search
+                # prefer the live recording.
+                _is_live_release = bool(
+                    _album_type_indicates_live(track, album_context, album_result)
+                    or is_live_or_alternate_track_title(title)
+                )
                 mb_data = mb_service.lookup_recording_metadata(
-                    title, artist, album=_album_anchor or None,
+                    title,
+                    artist,
+                    album=_album_anchor or None,
+                    is_live_release=_is_live_release,
                 )
                 _from_batch = False
 
@@ -1021,6 +1040,8 @@ def process_track(
                 options=options,
                 batch_artist=_as_str(track_context.get("artist") or track.get("artist")),
                 batch_title=_as_str(track_context.get("title") or track.get("title")),
+                album_context=album_context,
+                album_result=album_result,
             )
         except Exception as exc:
             logger.debug("MB pre-resolution failed", track_id=track_id, error=str(exc))
@@ -1332,7 +1353,19 @@ def process_track(
                                     if _mb_entry and _mb_entry.get("recording_mbid"):
                                         recording_mbid = _mb_entry["recording_mbid"]
                                     else:
-                                        recording_mbid, _conf = get_shared_mb_service().get_suggested_mbid(raw_title or title, artist)
+                                        # ``is_live_release`` matters here for the
+                                        # same reason it does in the metadata
+                                        # lookup: a plainly titled live track must
+                                        # not resolve to its studio namesake, or
+                                        # the ListenBrainz count fetched for that
+                                        # MBID is the STUDIO recording's — which
+                                        # is how a live album scored like a studio
+                                        # album.
+                                        recording_mbid, _conf = get_shared_mb_service().get_suggested_mbid(
+                                            raw_title or title,
+                                            artist,
+                                            is_live_release=is_live_release,
+                                        )
 
                                 if recording_mbid:
                                     _lb_source = _lb_source or "mbid_resolved"

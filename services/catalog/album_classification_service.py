@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
 from typing import Any
@@ -311,6 +312,74 @@ def detect_christmas_song(track_title: str, album_title: str) -> bool:
     """Detect if a song is Christmas-related based on track or album title."""
     combined = f"{track_title or ''} {album_title or ''}".lower()
     return any(re.search(pattern, combined) for pattern in _CHRISTMAS_PATTERNS)
+
+
+#: Genre tokens that mean "this is Christmas music", beyond the literal word.
+#:
+#: The genre aggregation service intercepts these as filter tags and stores
+#: whichever spelling the source used, so a track can legitimately carry
+#: "Holiday" or "Xmas" in ``tracks.genres`` and be Christmas music. A check for
+#: the literal string "christmas" misses all of them.
+CHRISTMAS_GENRE_TOKENS = frozenset({
+    "christmas", "xmas", "x mas", "x-mas", "holiday", "holidays",
+    "noel", "yule", "yuletide", "advent", "hanukkah", "chanukah",
+})
+
+
+def is_christmas_genre(genres: Any) -> bool:
+    """True when any genre token marks the track as Christmas music.
+
+    Accepts the DB forms a caller might hold: a comma/semicolon/backslash
+    separated string, a JSON list string, or an actual list. Tokens are matched
+    whole (after light normalisation) so "holiday" matches but a genre such as
+    "Holiday Rock" — a real genre — does not.
+    """
+    if not genres:
+        return False
+
+    tokens: list[str] = []
+    if isinstance(genres, (list, tuple, set)):
+        tokens = [str(g) for g in genres]
+    else:
+        raw = str(genres).strip()
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    tokens = [str(g) for g in parsed]
+            except Exception:
+                tokens = []
+        if not tokens:
+            tokens = [g for g in re.split(r"[,;/\\|]+", raw) if g]
+
+    for token in tokens:
+        norm = re.sub(r"[^\w\s-]", "", str(token).strip().lower()).strip()
+        if norm in CHRISTMAS_GENRE_TOKENS:
+            return True
+    return False
+
+
+def is_christmas_track(
+    *,
+    title: str = "",
+    album: str = "",
+    genres: Any = None,
+) -> bool:
+    """Canonical "is this Christmas music?" test across title, album and genres.
+
+    Every caller that filters Christmas out of a playlist should use this rather
+    than testing one signal. A track qualifies when its title/album matches the
+    Christmas patterns OR its genres carry a Christmas token — a track on a
+    Christmas album and a track whose only Christmas signal is a "Holiday" tag
+    are both Christmas music.
+
+    WHY IT LIVES HERE: this module already owns ``detect_christmas_song`` and is
+    imported by the popularity stage, so there is one definition rather than a
+    per-caller substring check that silently drifts.
+    """
+    if detect_christmas_song(title, album):
+        return True
+    return is_christmas_genre(genres)
 
 
 # --------------------------------------------------------------------

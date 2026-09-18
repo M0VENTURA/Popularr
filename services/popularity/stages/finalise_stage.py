@@ -83,6 +83,8 @@ from services.popularity.popularity_math import (
 )
 from services.popularity.popularity_zscore import composite_listener_z
 from services.catalog.album_classification_service import (
+    is_christmas_genre as is_christmas_genre_token,
+    is_christmas_track,
     is_instrumental_track_title,
     is_live_or_alternate_track_title,
 )
@@ -1042,15 +1044,87 @@ def _playlist_sync_succeeded(result: dict[str, Any] | None) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# Christmas exclusion policy
+# ---------------------------------------------------------------------------
+
+def _christmas_exclusion_enabled() -> bool:
+    """True when Christmas music must be kept out of ordinary playlists."""
+    try:
+        from helpers.config_helpers import get_playlists_config
+        return bool(get_playlists_config().get("exclude_christmas_from_playlists", True))
+    except Exception:
+        return True
+
+
+def _christmas_playlist_marker() -> str:
+    """The name fragment that marks a playlist as Christmas-eligible."""
+    try:
+        from helpers.config_helpers import get_playlists_config
+        return str(
+            get_playlists_config().get("christmas_playlist_marker") or "christmas"
+        ).strip().lower() or "christmas"
+    except Exception:
+        return "christmas"
+
+
+def _playlist_allows_christmas(playlist_name: str) -> bool:
+    """True when ``playlist_name`` is allowed to contain Christmas tracks.
+
+    Only a playlist whose NAME contains the marker (default "christmas") may
+    hold Christmas music. Everything else — Essential Collection, New Music,
+    every ordinary genre playlist — must exclude it.
+    """
+    marker = _christmas_playlist_marker()
+    return marker in str(playlist_name or "").casefold()
+
+
+def _filter_christmas_rows(
+    rows: list[dict[str, Any]],
+    playlist_name: str,
+) -> list[dict[str, Any]]:
+    """Drop Christmas tracks unless ``playlist_name`` is a Christmas playlist.
+
+    Returns ``rows`` unchanged when the exclusion is disabled or the playlist is
+    Christmas-eligible, so callers can apply it unconditionally.
+    """
+    if not _christmas_exclusion_enabled():
+        return rows
+    if _playlist_allows_christmas(playlist_name):
+        return rows
+
+    kept: list[dict[str, Any]] = []
+    removed = 0
+    for row in rows:
+        if is_christmas_track(
+            title=str(row.get("title") or ""),
+            album=str(row.get("album") or ""),
+            genres=row.get("genres"),
+        ):
+            removed += 1
+            continue
+        kept.append(row)
+
+    if removed:
+        logger.info(
+            "Excluded Christmas tracks from playlist",
+            playlist=playlist_name,
+            excluded=removed,
+            kept=len(kept),
+        )
+    return kept
+
+
 def _create_new_music_playlist() -> int:
     rows: list[dict[str, Any]] = []
     try:
         with db_session() as session:
             result = session.execute(
                 text("""
-                    SELECT id, title, file_path, duration,
+                    SELECT id, title, album, file_path, duration,
                            COALESCE(NULLIF(album_artist, ''), artist) AS artist,
                            COALESCE(stars, star_rating) AS stars,
+                           genres,
                            updated_at
                     FROM tracks
                     WHERE COALESCE(stars, star_rating) >= 4
@@ -1064,6 +1138,10 @@ def _create_new_music_playlist() -> int:
     except Exception as exc:
         logger.debug("New Music fetch failed", error=str(exc))
         return 0
+
+    # Christmas music is seasonal and must not surface in a rolling "recently
+    # added" playlist.
+    rows = _filter_christmas_rows(rows, "New Music")
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
@@ -1185,12 +1263,12 @@ def _sync_essential_playlist(
         with db_session() as session:
             result = session.execute(
                 text("""
-                    SELECT id, title, file_path, duration,
+                    SELECT id, title, album, file_path, duration,
                            COALESCE(stars, star_rating) AS stars,
                            COALESCE(is_live, 0) AS is_live,
                            COALESCE(is_compilation, 0) AS is_compilation,
                            COALESCE(popularity, final_score, 0) AS popularity_score,
-                           year, release_year, artist, album_artist
+                           year, release_year, artist, album_artist, genres
                     FROM tracks
                     WHERE COALESCE(stars, star_rating) >= 4
                       AND (
@@ -1233,6 +1311,11 @@ def _sync_essential_playlist(
                     rows.append(row)
         except Exception as exc:
             logger.debug("Featured-track merge failed", artist=artist, error=str(exc))
+
+    # Christmas music is excluded from every Essential Collection. Only a
+    # playlist whose name contains the configured marker may hold it, and an
+    # artist's Essential Collection is never one.
+    rows = _filter_christmas_rows(rows, playlist_name)
 
     def _track_year(row: dict[str, Any]) -> int:
         raw = row.get("release_year") or row.get("year") or 0
@@ -1588,7 +1671,7 @@ _GENRE_ROWS_AT = 0.0
 _GENRE_ROWS_TTL_SECONDS = 120.0
 
 _GENRE_ROWS_SQL = """
-    SELECT id, title, file_path, duration, artist, album_artist,
+    SELECT id, title, album, file_path, duration, artist, album_artist,
            COALESCE(stars, star_rating) AS stars,
            COALESCE(popularity, final_score, 0) AS popularity_score,
            COALESCE(is_live, 0) AS is_live,
@@ -1731,10 +1814,28 @@ def _create_genre_top_track_playlists(
 
     for row in rows:
         track_genres = _track_genres(row)
-        norm_track_genres = [re.sub(r"[^\w\s-]", "", g.lower()).strip() for g in track_genres]
-        
-        # Check if this track is flagged as a Christmas track
-        is_christmas = "christmas" in norm_track_genres
+
+        # Christmas detection MUST use the FULL genre list, not the truncated
+        # window above.
+        #
+        # ``_genre_playlist_track_genres`` returns at most ``max_genres`` items,
+        # and the genre aggregator APPENDS filter tags (Christmas / Live /
+        # Cover / Remaster) after the voted genres — so a Christmas track with
+        # three real genres stores "pop, rock, metal, Christmas" and the window
+        # shows only "pop, rock, metal". Testing the window for the literal
+        # word "christmas" therefore returned False and the track pooled
+        # straight into the ordinary Pop/Rock/Metal playlists, which is the
+        # reported bug.
+        #
+        # ``is_christmas_track`` also matches the other spellings the aggregator
+        # can store ("Holiday", "Xmas", "Noel", …) and falls back to the
+        # title/album patterns, so a track whose only signal is a "Holiday" tag
+        # is caught too.
+        is_christmas = is_christmas_track(
+            title=str(row.get("title") or ""),
+            album=str(row.get("album") or ""),
+            genres=row.get("genres"),
+        )
 
         for genre in track_genres:
             norm_key = re.sub(r"[^\w\s-]", "", genre.lower()).strip()
@@ -1742,9 +1843,15 @@ def _create_genre_top_track_playlists(
                 continue
 
             # INTERCEPT: Isolate Christmas tracks from standard genres.
-            if is_christmas and norm_key != "christmas":
+            # A Christmas track only ever lands in a playlist whose name
+            # contains "Christmas" — every other pool is skipped for it.
+            if is_christmas and not is_christmas_genre_token(norm_key):
                 target_norm_key = f"christmas {norm_key}"
                 target_display = f"Christmas {genre.title()}"
+            elif is_christmas:
+                # It IS the Christmas token, so keep the plain pool name.
+                target_norm_key = norm_key
+                target_display = genre
             else:
                 target_norm_key = norm_key
                 target_display = genre
