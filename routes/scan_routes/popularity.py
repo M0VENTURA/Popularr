@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 import services.scanning.runtime_state as runtime_state
 from db.engine import db_session
+from helpers.artist_sort import artist_sort_letter_sql, artist_sort_sql, artist_starts_with_letter_sql
 from routes.scan_routes import scans_bp
 from routes.scan_routes._common import form_bool, is_process_alive, run_async
 from services.popularity.pipeline import run_popularity_from_artist, run_popularity_scan
@@ -26,9 +27,21 @@ def _resolve_first_artist_for_letter(letter: str) -> str:
     """Resolve the first matching local library artist for a starting letter.
 
     This keeps artist-page scans independent from Navidrome availability/state.
+
+    The letter is matched against the artist's CORE name, and the ordering is
+    the same filing order the /artists list uses.  That matters: the list files
+    ``The Offspring`` under **O**, so pressing O here must find it and pressing T
+    must not.  Matching ``UPPER(artist) LIKE 'O%'`` — the obvious spelling —
+    would do exactly the opposite and make the letter tiles disagree with the
+    sections they sit above.
     """
     letter_upper = letter.upper()
     artist_expr = "COALESCE(NULLIF(album_artist, ''), artist)"
+    letter_expr = artist_sort_letter_sql(artist_expr)
+    # The outer query only exposes the inner SELECT's alias, so this MUST order
+    # by `t.artist_name` — referencing album_artist/artist out here would name
+    # columns that do not exist in the outer scope.
+    order_expr = artist_sort_sql("t.artist_name")
 
     with db_session() as session:
         if letter_upper == "#":
@@ -39,9 +52,9 @@ def _resolve_first_artist_for_letter(letter: str) -> str:
                         FROM tracks
                         WHERE {artist_expr} IS NOT NULL
                           AND {artist_expr} <> ''
-                          AND UPPER(SUBSTR({artist_expr}, 1, 1)) NOT BETWEEN 'A' AND 'Z'
+                          AND {letter_expr} NOT BETWEEN 'A' AND 'Z'
                     ) t
-                    ORDER BY LOWER(t.artist_name)
+                    ORDER BY {order_expr}
                     LIMIT 1
                 """)
             )
@@ -53,9 +66,9 @@ def _resolve_first_artist_for_letter(letter: str) -> str:
                         FROM tracks
                         WHERE {artist_expr} IS NOT NULL
                           AND {artist_expr} <> ''
-                          AND UPPER({artist_expr}) LIKE :prefix
+                          AND {artist_starts_with_letter_sql(artist_expr)}
                     ) t
-                    ORDER BY LOWER(t.artist_name)
+                    ORDER BY {order_expr}
                     LIMIT 1
                 """),
                 {"prefix": f"{letter_upper}%"},

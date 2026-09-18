@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Setup · Popularr</title>
+  {#
+    First-run setup wizard.
+
+    STANDALONE by necessity: the app shell (base.html) cannot be used here
+    because the shell's nav/search/player assume a configured library, and the
+    wizard runs before there is one. It therefore loads its own stylesheet and
+    controller rather than extending base.html.
+
+    CHANGED FROM templates/auth/setup.html:
+      * the inline <style> moved to static/css/setup.css
+      * the inline <script> moved to static/js/pages/setup.js
+      * every inline onclick/onchange replaced with data-action attributes
+        handled by one delegated listener — including testConnection(), which
+        read the implicit global `event` and therefore threw unless it was called
+        from a real click
+      * the :root palette realigned to the current theme (the old
+        --text-primary #e0e0e0 / --border-color #333 values made the wizard look
+        like a different app from the one it configures)
+  #}
+  {% set dist = url_for('static', filename='dist') %}
+  {% if config.get('features', {}).get('use_local_assets', False) %}
+  <link href="{{ dist }}/vendor/bootstrap.min.css" rel="stylesheet">
+  <link href="{{ dist }}/vendor/bootstrap-icons.css" rel="stylesheet">
+  {% else %}
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+  {% endif %}
+  <link rel="stylesheet" href="{{ versioned_static('css/setup.css') }}">
+</head>
+<body>
+<div class="setup-container">
+  <div class="text-center mb-4">
+    <i class="bi bi-music-note-beamed" style="font-size: 2.5rem; color: var(--spotify-green);"></i>
+    <h1 class="h3 mt-2">Welcome to Popularr</h1>
+    <p class="text-muted">Let's get you set up in a few steps</p>
+  </div>
+  <div class="step-indicator" id="stepIndicator">
+    <div class="step-dot active" data-step="1"></div>
+    <div class="step-dot" data-step="2"></div>
+    <div class="step-dot" data-step="3"></div>
+    <div class="step-dot" data-step="4"></div>
+    <div class="step-dot" data-step="5"></div>
+    <div class="step-dot" data-step="6"></div>
+  </div>
+
+  <!-- Step 1: Navidrome + Database -->
+  <div class="step-card" id="step1">
+    <div class="d-flex align-items-center gap-2 mb-3">
+      <span class="badge bg-success rounded-pill">1</span>
+      <h5 class="mb-0">Connect to Navidrome</h5>
+      <span class="text-muted small">(required)</span>
+    </div>
+    <p class="text-muted small mb-3">Popularr reads your library from Navidrome and sends star ratings back. Your password is stored in <code>config.yaml</code> only.</p>
+    <div class="mb-3">
+      <label class="form-label" for="navUrl">Navidrome URL</label>
+      <input type="url" class="form-control" id="navUrl" placeholder="https://music.yourdomain.com" value="{{ defaults.get('nav_url', 'http://navidrome:4533') }}">
+      <small class="form-text text-muted">Full URL including the scheme — no trailing slash required. Example: <code>https://music.yourdomain.com</code></small>
+    </div>
+    <div class="row g-3 mb-3">
+      <div class="col-sm-6"><label class="form-label" for="navUser">Username</label><input type="text" class="form-control" id="navUser" placeholder="admin" value="{{ defaults.get('nav_user', '') }}"></div>
+      <div class="col-sm-6"><label class="form-label" for="navPass">Password</label><input type="password" class="form-control" id="navPass" placeholder="••••••••" value="{{ defaults.get('nav_pass', '') }}"></div>
+    </div>
+
+    <!-- Database (pre-filled from env if available) -->
+    <details class="mb-3" {{ 'open' if pg.get('host') else '' }}>
+      <summary class="fw-semibold small mb-2"><i class="bi bi-database"></i> PostgreSQL Database <span class="text-muted fw-normal">(pre-filled from environment)</span></summary>
+      <div class="border rounded p-3 mt-2">
+        <div class="row g-2">
+          <div class="col-sm-6"><label class="form-label form-label-sm" for="pgHost">Host</label><input type="text" class="form-control form-control-sm" id="pgHost" value="{{ pg.get('host', '') }}"></div>
+          <div class="col-sm-3"><label class="form-label form-label-sm" for="pgPort">Port</label><input type="text" class="form-control form-control-sm" id="pgPort" value="{{ pg.get('port', '5432') }}"></div>
+          <div class="col-sm-3"><label class="form-label form-label-sm" for="pgDb">Database</label><input type="text" class="form-control form-control-sm" id="pgDb" value="{{ pg.get('database', 'popularr') }}"></div>
+          <div class="col-sm-6"><label class="form-label form-label-sm" for="pgUser">User</label><input type="text" class="form-control form-control-sm" id="pgUser" value="{{ pg.get('user', 'popularr') }}"></div>
+          <div class="col-sm-6"><label class="form-label form-label-sm" for="pgPass">Password</label><input type="password" class="form-control form-control-sm" id="pgPass" value="{{ pg.get('password', '') }}"></div>
+        </div>
+      </div>
+    </details>
+
+    <div class="d-flex justify-content-between align-items-center">
+      <div>
+        <button type="button" class="btn btn-outline-primary btn-sm" data-action="test-connection"><i class="bi bi-plug"></i> Test Connection</button>
+        <span id="connectionStatus" class="ms-2 small" role="status"></span>
+      </div>
+      <button type="button" class="btn btn-primary" data-action="next-step" data-next-step="2">Continue <i class="bi bi-arrow-right"></i></button>
+    </div>
+  </div>
+
+  <!-- Step 2: API Keys (optional) -->
+  <div class="step-card d-none" id="step2">
+    <div class="d-flex align-items-center gap-2 mb-3">
+      <span class="badge bg-secondary rounded-pill">2</span>
+      <h5 class="mb-0">API Keys</h5>
+      <span class="text-muted small">(optional — skip if unsure)</span>
+    </div>
+    <p class="text-muted small mb-3">Enable popularity scoring and recommendations. You can add these later from Config.</p>
+    <div class="border rounded p-3 mb-3">
+      <h6 class="mb-2"><i class="bi bi-database-fill text-info"></i> Last.fm</h6>
+      <input type="text" class="form-control form-control-sm" id="lfmApiKey" placeholder="API Key" value="{{ defaults.get('lfm_api_key', '') }}">
+      <small class="form-text text-muted">Get your API account at <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api/account/create</a></small>
+    </div>
+    <div class="border rounded p-3 mb-3">
+      <h6 class="mb-2"><i class="bi bi-vinyl"></i> Discogs</h6>
+      <input type="text" class="form-control form-control-sm" id="dgToken" placeholder="Personal Access Token" value="{{ defaults.get('dg_token', '') }}">
+      <small class="form-text text-muted">Generate a token at <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener">discogs.com/settings/developers</a></small>
+    </div>
+    <div class="border rounded p-3 mb-3">
+      <h6 class="mb-2"><i class="bi bi-headphones text-secondary"></i> ListenBrainz</h6>
+      <input type="text" class="form-control form-control-sm" id="lbToken" placeholder="User Token" value="{{ defaults.get('lb_token', '') }}">
+      <small class="form-text text-muted">Get your token from <a href="https://listenbrainz.org/settings/" target="_blank" rel="noopener">listenbrainz.org/settings</a></small>
+    </div>
+
+    <!-- Soulseek / slskd -->
+    <div class="border rounded p-3 mb-3">
+      <h6 class="mb-2"><i class="bi bi-music-note-beamed text-warning"></i> Soulseek (slskd)</h6>
+      <div class="row g-2">
+        <div class="col-sm-6"><input type="url" class="form-control form-control-sm" id="slskdUrl" placeholder="http://slskd:5030" value="{{ defaults.get('slskd_url', 'http://slskd:5030') }}"></div>
+        <div class="col-sm-6"><input type="password" class="form-control form-control-sm" id="slskdApiKey" placeholder="API Key" value="{{ defaults.get('slskd_api_key', '') }}"></div>
+      </div>
+      <small class="form-text text-muted">slskd is a modern Soulseek client. Provide its web UI URL and API key for downloading music.</small>
+    </div>
+
+    <div class="d-flex justify-content-between">
+      <button type="button" class="btn btn-outline-secondary" data-action="go-step" data-step="1"><i class="bi bi-arrow-left"></i> Back</button>
+      <button type="button" class="btn btn-primary wizard-next-btn" data-action="next-step" data-next-step="3">Skip Step <i class="bi bi-arrow-right"></i></button>
+    </div>
+  </div>
+
+  <!-- Step 3: Essentia (opt-in) -->
+  <div class="step-card d-none" id="step3">
+    <div class="d-flex align-items-center gap-2 mb-3">
+      <span class="badge bg-secondary rounded-pill">3</span>
+      <h5 class="mb-0">Mood &amp; Genre Analysis</h5>
+      <span class="text-muted small">(optional — off by default)</span>
+    </div>
+    <p class="text-muted small mb-3">Essentia runs ML models locally to detect <strong>mood</strong> and <strong>genre</strong> tags. Downloads ~87 MB of model files.</p>
+    <div class="border rounded p-3 mb-3">
+      <div class="form-check form-switch mb-2">
+        <input class="form-check-input" type="checkbox" id="essentiaEnabled"{% if defaults.get('essentia_enabled') %} checked{% endif %}>
+        <label class="form-check-label" for="essentiaEnabled"><strong>Enable Essentia Analysis</strong></label>
+      </div>
+      <div id="essentiaOptions" class="d-none mt-3">
+        <div class="d-flex align-items-center flex-wrap gap-2 mb-2">
+          <button type="button" class="btn btn-sm btn-outline-primary" id="essentiaDownloadBtn" data-action="download-essentia"><i class="bi bi-cloud-download"></i> Download Models (~87 MB)</button>
+          <span id="essentiaDownloadStatus" class="small text-muted" role="status"></span>
+          <div class="progress d-none flex-grow-1" id="essentiaProgress" style="height:6px;min-width:120px"><div class="progress-bar" id="essentiaProgressBar" style="width:0%"></div></div>
+        </div>
+        <div class="row g-2">
+          <div class="col-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="essentiaMoods"{% if defaults.get('essentia_tag_moods', True) %} checked{% endif %}><label class="form-check-label small" for="essentiaMoods">Detect Moods</label></div></div>
+          <div class="col-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="essentiaGenres"{% if defaults.get('essentia_tag_genres') %} checked{% endif %}><label class="form-check-label small" for="essentiaGenres">Detect Genres</label></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="d-flex justify-content-between">
+      <button type="button" class="btn btn-outline-secondary" data-action="go-step" data-step="2"><i class="bi bi-arrow-left"></i> Back</button>
+      <button type="button" class="btn btn-primary wizard-next-btn" data-action="next-step" data-next-step="4">Skip Step <i class="bi bi-arrow-right"></i></button>
+    </div>
+  </div>
+
+  <!-- Step 4: File Management (optional) -->
+  <div class="step-card d-none" id="step4">
+    <div class="d-flex align-items-center gap-2 mb-3">
+      <span class="badge bg-secondary rounded-pill">4</span>
+      <h5 class="mb-0">File Management</h5>
+      <span class="text-muted small">(optional — sensible defaults provided)</span>
+    </div>
+    <p class="text-muted small mb-3">How files are organized into your music library when downloaded or renamed. You can change this later in Settings → File Management.</p>
+    <div class="border rounded p-3 mb-3">
+      <label class="form-label" for="setupFileNameFormat"><strong>Default Naming Convention</strong></label>
+      <input type="text" class="form-control font-monospace" id="setupFileNameFormat" placeholder="{album_artist}/{year} - {album}/{track_number}. {artist} - {title}" value="{{ defaults.get('file_name_format', '{album_artist}/{year} - {album}/{track_number}. {artist} - {title}') }}">
+      <div class="row g-2 mt-1">
+        <div class="col-sm-6 small text-muted"><code>{track_number}</code> — 2-digit track number</div>
+        <div class="col-sm-6 small text-muted"><code>{album_artist}</code> — album artist name</div>
+        <div class="col-sm-6 small text-muted"><code>{artist}</code> — track artist name</div>
+        <div class="col-sm-6 small text-muted"><code>{title}</code> — track title</div>
+        <div class="col-sm-6 small text-muted"><code>{album}</code> — album title</div>
+        <div class="col-sm-6 small text-muted"><code>{year}</code> — release year</div>
+      </div>
+    </div>
+    <div class="border rounded p-3 mb-3">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h6 class="mb-0"><i class="bi bi-arrow-repeat"></i> File Conversion</h6>
+        <div class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" id="setupConversionEnabled"{% if defaults.get('conversion_enabled') %} checked{% endif %}><label class="form-check-label small" for="setupConversionEnabled">Enable</label></div>
+      </div>
+      <div id="setupConversionOptions" class="d-none">
+        <div class="row g-2">
+          <div class="col-sm-6">
+            <label class="form-label form-label-sm" for="setupConversionMode">Mode</label>
+            <select class="form-select form-select-sm" id="setupConversionMode">
+              <option value="flac_to_mp3" {% if defaults.get('conversion_mode', 'flac_to_mp3') == 'flac_to_mp3' %}selected{% endif %}>FLAC to MP3</option>
+              <option value="none" {% if defaults.get('conversion_mode', 'flac_to_mp3') == 'none' %}selected{% endif %}>Disabled (Move as-is)</option>
+            </select>
+          </div>
+          <div class="col-sm-6">
+            <label class="form-label form-label-sm" for="setupConversionBitrate">MP3 Bitrate (kbps)</label>
+            <input type="number" class="form-control form-control-sm" id="setupConversionBitrate" min="96" max="320" step="1" value="{{ defaults.get('conversion_bitrate', 320) }}">
+          </div>
+        </div>
+        <small class="form-text text-muted mt-2 d-block">FLAC files are converted to MP3 when imported or renamed. Metadata and cover art are carried over during conversion.</small>
+      </div>
+    </div>
+    <div class="d-flex justify-content-between">
+      <button type="button" class="btn btn-outline-secondary" data-action="go-step" data-step="3"><i class="bi bi-arrow-left"></i> Back</button>
+      <button type="button" class="btn btn-primary wizard-next-btn" data-action="next-step" data-next-step="5">Skip Step <i class="bi bi-arrow-right"></i></button>
+    </div>
+  </div>
+
+  <!-- Step 5: Automation & Extras (recommended defaults) -->
+  <div class="step-card d-none" id="step5">
+    <div class="d-flex align-items-center gap-2 mb-3">
+      <span class="badge bg-secondary rounded-pill">5</span>
+      <h5 class="mb-0">Automation &amp; Extras</h5>
+      <span class="text-muted small">(recommended defaults — change anytime in Config)</span>
+    </div>
+    <p class="text-muted small mb-3">Popularr runs several background jobs automatically. Switch them on or off now — everything here can be changed later from <strong>Config → Automation Services</strong>.</p>
+    <div class="border rounded p-3 mb-3">
+      <h6 class="mb-2"><i class="bi bi-arrow-repeat text-success"></i> Background Services</h6>
+      <div class="row g-3">
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_auto_import"{% if defaults.get('auto_import_enabled', True) %} checked{% endif %}>
+            <label class="form-check-label" for="setup_auto_import"><strong>Auto Import</strong></label>
+          </div>
+          <small class="text-muted d-block mt-1">Automatically import newly detected songs from Navidrome.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_auto_popularity"{% if defaults.get('auto_popularity_scan', True) %} checked{% endif %}>
+            <label class="form-check-label" for="setup_auto_popularity"><strong>Auto Popularity Scan</strong></label>
+          </div>
+          <small class="text-muted d-block mt-1">Score popularity for tracks automatically after each import.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_downloads_watcher"{% if defaults.get('downloads_watcher_enabled', True) %} checked{% endif %}>
+            <label class="form-check-label" for="setup_downloads_watcher"><strong>Downloads Watcher</strong></label>
+          </div>
+          <small class="text-muted d-block mt-1">Monitor the downloads folder and process completed files automatically.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_cover_detection"{% if defaults.get('cover_detection_enabled', True) %} checked{% endif %}>
+            <label class="form-check-label" for="setup_cover_detection"><strong>Cover Song Detection</strong></label>
+          </div>
+          <small class="text-muted d-block mt-1">Flag cover songs during scans (uses MusicBrainz lookups).</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_upcoming_scans"{% if defaults.get('upcoming_releases_scan_enabled', True) %} checked{% endif %}>
+            <label class="form-check-label" for="setup_upcoming_scans"><strong>Upcoming Releases Scans</strong></label>
+          </div>
+          <small class="text-muted d-block mt-1">Daily Wikipedia + weekly MusicBrainz scan for new releases of your artists.</small>
+        </div>
+      </div>
+    </div>
+    <div class="border rounded p-3 mb-3">
+      <h6 class="mb-2"><i class="bi bi-stars text-warning"></i> Scan Outputs &amp; Extras</h6>
+      <div class="row g-3">
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_essential_playlists"{% if defaults.get('essential_playlists_enabled', True) %} checked{% endif %}>
+            <label class="form-check-label" for="setup_essential_playlists"><strong>Essential Playlists</strong></label>
+          </div>
+          <small class="text-muted d-block mt-1">Generate "{artist} - Essential Collection.m3u" playlists from 4★/5★ tracks.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_genre_playlists"{% if defaults.get('genre_playlists_enabled', True) %} checked{% endif %}>
+            <label class="form-check-label" for="setup_genre_playlists"><strong>Genre Top-Tracks Playlists</strong></label>
+          </div>
+          <small class="text-muted d-block mt-1">Generate "{genre} - Top Tracks.m3u" playlists across the whole library.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_new_music_playlist"{% if defaults.get('new_music_playlist_enabled', True) %} checked{% endif %}>
+            <label class="form-check-label" for="setup_new_music_playlist"><strong>New Music Playlist</strong></label>
+          </div>
+          <small class="text-muted d-block mt-1">Rolling "New Music.m3u" of your most recently added 4★/5★ tracks — created once 100 qualify, newest additions push older ones out.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_write_tags"{% if defaults.get('write_tags_to_file', True) %} checked{% endif %}>
+            <label class="form-check-label" for="setup_write_tags"><strong>Write Tags to Audio Files</strong></label>
+          </div>
+          <small class="text-muted d-block mt-1">Embed ratings, genres and cover art into your audio files. Turn off for a read-only library.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_sync_all_users"{% if defaults.get('sync_ratings_to_all_users') %} checked{% endif %}>
+            <label class="form-check-label" for="setup_sync_all_users"><strong>Sync Ratings to All Users</strong></label>
+          </div>
+          <small class="text-muted d-block mt-1">Push star ratings to every Navidrome user after each scan (not just the primary user).</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_quality_filter"{% if defaults.get('quality_filter_enabled') %} checked{% endif %}>
+            <label class="form-check-label" for="setup_quality_filter"><strong>Download Quality Filter</strong></label>
+          </div>
+          <small class="text-muted d-block mt-1">Only accept FLAC / 320 kbps MP3 downloads and reject lower-quality matches.</small>
+        </div>
+      </div>
+    </div>
+    <div class="d-flex justify-content-between">
+      <button type="button" class="btn btn-outline-secondary" data-action="go-step" data-step="4"><i class="bi bi-arrow-left"></i> Back</button>
+      <button type="button" class="btn btn-primary" data-action="next-step" data-next-step="6">Finish Setup <i class="bi bi-arrow-right"></i></button>
+    </div>
+  </div>
+
+  <!-- Step 6: Summary & Save -->
+  <div class="step-card d-none" id="step6">
+    <div class="text-center mb-4">
+      <i class="bi bi-check-circle" style="font-size:3rem;color:var(--spotify-green);"></i>
+      <h4 class="mt-2">You're All Set!</h4>
+    </div>
+    <div class="border rounded p-3 mb-2"><h6><i class="bi bi-server"></i> Navidrome</h6><p class="mb-0 small" id="summaryNavidrome">-</p></div>
+    <div class="border rounded p-3 mb-2"><h6><i class="bi bi-database"></i> Database</h6><p class="mb-0 small text-muted" id="summaryDatabase">PostgreSQL (container defaults)</p></div>
+    <div class="border rounded p-3 mb-2"><h6><i class="bi bi-plug"></i> APIs</h6><p class="mb-0 small text-muted" id="summaryApis">None enabled</p></div>
+    <div class="border rounded p-3 mb-2"><h6><i class="bi bi-cpu"></i> Essentia</h6><p class="mb-0 small text-muted" id="summaryEssentia">Not enabled</p></div>
+    <div class="border rounded p-3 mb-3"><h6><i class="bi bi-folder-symlink"></i> File Management</h6><p class="mb-0 small text-muted" id="summaryFiles">-</p></div>
+    <div class="border rounded p-3 mb-3"><h6><i class="bi bi-lightning-charge-fill"></i> Automation</h6><p class="mb-0 small text-muted" id="summaryAutomation">-</p></div>
+    <div class="d-flex justify-content-between">
+      <button type="button" class="btn btn-outline-secondary" data-action="go-step" data-step="5"><i class="bi bi-arrow-left"></i> Back</button>
+      <button type="button" class="btn btn-primary btn-lg" data-action="save-setup"><i class="bi bi-check-circle"></i> Save &amp; Go to Dashboard</button>
+    </div>
+  </div>
+</div>
+
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:11"><div id="setupToast" class="toast"><div class="toast-header"><strong class="me-auto" id="toastTitle">Status</strong><button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button></div><div class="toast-body" id="toastMessage"></div></div></div>
+
+{% if config.get('features', {}).get('use_local_assets', False) %}
+<script src="{{ url_for('static', filename='dist/vendor/bootstrap.bundle.min.js') }}"></script>
+{% else %}
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+{% endif %}
+<script src="{{ versioned_static('js/pages/setup.js') }}"></script>
+</body>
+</html>

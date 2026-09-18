@@ -307,6 +307,14 @@
 
   <script src="{{ versioned_static('js/player.js') }}"></script>
   <script src="{{ versioned_static('js/musicbrainz-folder-groups.js') }}"></script>
+  {#
+    Artist filing (global.artistNames). Loaded here because the unified search
+    below and several page scripts use it, and the server files the /artists
+    sections by the same rules — the two must agree.
+    Delete this tag together with js/artist_names.js once the rebuilt UI
+    (test_site/) is live; that tree has its own copy at js/utils/artist-names.js.
+  #}
+  <script src="{{ versioned_static('js/artist_names.js') }}"></script>
   <script src="{{ versioned_static('js/main.js') }}"></script>
   <script src="{{ versioned_static('js/unified_search.js') }}"></script>
   {% block scripts %}{% endblock %}

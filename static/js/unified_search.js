@@ -227,13 +227,27 @@
     return out;
   }
 
+  // base.html loads js/artist_names.js before this module. Artists are shown
+  // filed ("Offspring, The") so the bucket matches the /artists sections and the
+  // ordering the server already applies.
+  //
+  // The href and the image URL below deliberately keep the RAW name: the
+  // inverted form is a display label, not the artist's identity, and using it
+  // for either would break the link and the avatar lookup.
+  //
+  // Falls back to the raw name rather than throwing — search must keep working
+  // if that script is ever missing.
+  var artistNames = global.artistNames || {
+    sortName: function (v) { return (v === null || v === undefined) ? '' : String(v); },
+  };
+
   function artistRows(artists) {
     return artists.map(function (a) {
       var isVarious = String(a.name || '').trim().toLowerCase() === 'various artists';
       return '<a class="us-row" href="/artist/' + encodeURIComponent(a.name) + '">' +
         thumbHtml('/api/artist/image?name=' + encodeURIComponent(a.name), 'rounded-circle border border-secondary', a.name) +
         '<span class="us-row-main">' +
-          '<span class="us-row-title d-block">' + esc(a.name) + '</span>' +
+          '<span class="us-row-title d-block">' + esc(artistNames.sortName(a.name)) + '</span>' +
           '<span class="us-row-sub d-block">' + a.track_count + ' track' + (a.track_count === 1 ? '' : 's') + ' - ' + a.album_count + ' album' + (a.album_count === 1 ? '' : 's') + '</span>' +
         '</span>' +
         '<span class="us-row-meta badge bg-secondary-subtle text-secondary-emphasis">Artist</span>' +

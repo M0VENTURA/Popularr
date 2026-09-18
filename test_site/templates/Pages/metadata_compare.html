@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+
+{% block title %}Metadata Comparison - Popularr{% endblock %}
+
+{% block content %}
+{#
+  Metadata Comparison.
+
+  CHANGED FROM templates/pages/metadata_compare.html:
+    * every action moved from inline `onclick="fn('{{ artist|escape }}', …)"`
+      to `data-action` / `data-artist` attributes handled by ONE delegated
+      listener in static/js/pages/metadata-compare.js. The old markup interpolated
+      artist/album into a JS string literal, so an apostrophe in a name
+      ("Guns N' Roses") broke the handler and a crafted value could inject code.
+    * the MusicBrainz result payload is no longer JSON-encoded into an onclick.
+      Results live in a module-local registry and each row carries
+      `data-result-index`.
+    * the inline <script> moved to that module; the inline <style> (which was a
+      global `.badge { margin-right }` leak) moved to css/metadata-compare.css
+      scoped to the comparison table.
+    * `table-light` dropped — it forced a light header on the dark theme.
+
+  Context (from routes/ui_routes.py::metadata_compare):
+    album_comparisons — [{album, artist, track_count, navidrome{...}, beets{...}}]
+#}
+<link rel="stylesheet" href="{{ versioned_static('css/metadata-compare.css') }}">
+
+<div class="container-fluid">
+  <div class="row mb-4">
+    <div class="col">
+      <h1><i class="bi bi-diagram-3"></i> Metadata Comparison</h1>
+      <p class="text-secondary mb-0">Compare Navidrome and Beets metadata for albums with mismatches</p>
+    </div>
+  </div>
+
+  {% if album_comparisons %}
+    <div class="row">
+      <div class="col-12">
+        <div class="card">
+          <div class="card-header">
+            <h5 class="mb-0">Album Mismatches ({{ album_comparisons|length }} albums)</h5>
+          </div>
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table-hover metadata-compare-table mb-0">
+                <thead>
+                  <tr>
+                    <th style="width: 35%;">Album</th>
+                    <th style="width: 20%;">Artist</th>
+                    <th style="width: 15%;">Tracks</th>
+                    <th style="width: 30%;">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for comp in album_comparisons %}
+                  <tr>
+                    <td><strong>{{ comp.album }}</strong></td>
+                    <td>{{ comp.artist }}</td>
+                    <td><span class="badge bg-secondary">{{ comp.track_count }} tracks</span></td>
+                    <td>
+                      <button type="button"
+                              class="btn btn-sm btn-outline-info"
+                              data-action="search"
+                              data-artist="{{ comp.artist }}"
+                              data-album="{{ comp.album }}"
+                              data-bs-toggle="collapse"
+                              data-bs-target="#compare-{{ loop.index }}"
+                              aria-expanded="false"
+                              aria-controls="compare-{{ loop.index }}">
+                        <i class="bi bi-chevron-down"></i> Compare
+                      </button>
+                    </td>
+                  </tr>
+                  <tr id="compare-{{ loop.index }}" class="collapse">
+                    <td colspan="4">
+                      <div class="p-4 metadata-compare-panel">
+                        <div class="row g-3">
+                          <div class="col-md-6">
+                            <div class="card border-info metadata-source-card metadata-source-card--navidrome">
+                              <div class="card-header bg-info text-dark">
+                                <h6 class="mb-0"><i class="bi bi-music-note"></i> Navidrome Data</h6>
+                              </div>
+                              <div class="card-body">
+                                <p class="mb-2">
+                                  <strong>Album:</strong> {{ comp.album }}<br>
+                                  <strong>Artist:</strong> {{ comp.artist }}<br>
+                                  <strong>Year:</strong> <span class="badge bg-info text-dark">{{ comp.navidrome.year or 'N/A' }}</span>
+                                </p>
+                                {% if comp.navidrome.genres %}
+                                <div class="mb-3">
+                                  <strong>Genres:</strong>
+                                  <div class="mt-2">
+                                    {% for genre in comp.navidrome.genres %}
+                                      {% if genre %}<span class="badge bg-info text-dark">{{ genre }}</span>{% endif %}
+                                    {% endfor %}
+                                  </div>
+                                </div>
+                                {% endif %}
+                                <button type="button"
+                                        class="btn btn-sm btn-success"
+                                        data-action="accept-navidrome"
+                                        data-artist="{{ comp.artist }}"
+                                        data-album="{{ comp.album }}">
+                                  <i class="bi bi-check-circle"></i> Keep This Data
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div class="col-md-6">
+                            <div class="card border-warning metadata-source-card metadata-source-card--beets">
+                              <div class="card-header bg-warning text-dark">
+                                <h6 class="mb-0"><i class="bi bi-disc"></i> Beets Data</h6>
+                              </div>
+                              <div class="card-body">
+                                <p class="mb-2">
+                                  <strong>Album:</strong> {{ comp.album }}<br>
+                                  <strong>Artist:</strong> {{ comp.artist }}<br>
+                                  <strong>Year:</strong> <span class="badge bg-warning text-dark">{{ comp.beets.year or 'N/A' }}</span>
+                                </p>
+                                {% if comp.beets.genres %}
+                                <div class="mb-3">
+                                  <strong>Genres:</strong>
+                                  <div class="mt-2">
+                                    {% for genre in comp.beets.genres %}
+                                      {% if genre %}<span class="badge bg-warning text-dark">{{ genre }}</span>{% endif %}
+                                    {% endfor %}
+                                  </div>
+                                </div>
+                                {% endif %}
+                                <button type="button"
+                                        class="btn btn-sm btn-primary"
+                                        data-action="search"
+                                        data-artist="{{ comp.artist }}"
+                                        data-album="{{ comp.album }}">
+                                  <i class="bi bi-search"></i> Search for Better Match
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  {% else %}
+    <div class="row">
+      <div class="col-12">
+        <div class="alert alert-success" role="alert">
+          <i class="bi bi-check-circle"></i> <strong>No mismatches found!</strong>
+          <p class="mb-0 mt-2">All albums have matching metadata between Navidrome and Beets.</p>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+</div>
+
+<!-- MusicBrainz Search Modal -->
+<div class="modal fade" id="mbSearchModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-search"></i> Search MusicBrainz</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="mbSearchResults"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/* and ui/toast.js, so this page adds only its
+  controller and stylesheet.
+
+    js/pages/metadata-compare.js   delegated actions, MB search, apply/lock
+#}
+<script src="{{ versioned_static('js/pages/metadata-compare.js') }}"></script>
+{% endblock %}

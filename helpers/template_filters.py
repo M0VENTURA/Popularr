@@ -156,6 +156,22 @@ def register_filters(app):
             out.append(lowered)
         return ' '.join(out)
 
+    @app.template_filter('artist_sort_name')
+    def artist_sort_name_filter(value):
+        """File an artist name with a leading "The" moved to the end.
+
+        ``"The Offspring"`` → ``"Offspring, The"``, so a list reads in the order
+        it sorts.  Names without a leading "The" — including "Theatre of
+        Tragedy" and "Theodore" — pass through untouched.
+
+        DISPLAY ONLY.  Never feed the result to ``url_for``, an API parameter or
+        a database write: the artist's identity is the raw name, and rewriting
+        it would break images, links and matching.  See ``helpers/artist_sort``
+        for the sort key and section letter that go with this label.
+        """
+        from helpers.artist_sort import artist_sort_name
+        return artist_sort_name(value)
+
     # ----------------------------------------------------------------------
     # Tests
     # ----------------------------------------------------------------------

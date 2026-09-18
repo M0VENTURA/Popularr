@@ -23,6 +23,12 @@ from sqlalchemy import text
 from api_clients.navidrome import NavidromeClient
 from db.engine import db_session
 from db.repositories.tracks import insert_or_update_track
+from helpers.artist_sort import (
+    artist_sort_key,
+    artist_sort_letter,
+    artist_sort_name,
+    artist_sort_sql,
+)
 from helpers.config_helpers import (
     clear_config_cache,
     get_config,
@@ -479,22 +485,25 @@ async def dashboard() -> Any:
 
 @ui_bp.route("/artists")
 async def artists() -> Any:
+    # Filing expression shared by the SQL ordering and the Python sort below.
+    # "The Offspring" is filed as "offspring, the" so it sorts among the O's.
+    _artist_expr = "COALESCE(NULLIF(album_artist, ''), artist)"
+    _artist_order = artist_sort_sql(_artist_expr)
+
     with db_session() as session:
-        result = session.execute(text("""
+        result = session.execute(text(f"""
             SELECT
-                COALESCE(NULLIF(album_artist, ''), artist) AS canonical,
+                {_artist_expr} AS canonical,
                 COUNT(DISTINCT album) AS album_count,
                 COUNT(*) AS track_count,
                 COALESCE(SUM(CASE WHEN stars = 5 THEN 1 ELSE 0 END), 0) AS five_star_count,
                 MAX(last_scanned) AS last_updated
             FROM tracks
-            WHERE COALESCE(NULLIF(album_artist, ''), artist) IS NOT NULL
-              AND COALESCE(NULLIF(album_artist, ''), artist) != ''
+            WHERE {_artist_expr} IS NOT NULL
+              AND {_artist_expr} != ''
             GROUP BY canonical
             HAVING COUNT(DISTINCT album) > 0
-            ORDER BY LOWER(
-                COALESCE(NULLIF(album_artist, ''), artist)
-            )
+            ORDER BY {_artist_order}
         """))
         rows = [dict(r._mapping) for r in result.fetchall()]
 
@@ -507,15 +516,17 @@ async def artists() -> Any:
         if not clean:
             continue
 
-        first_char = clean[0].upper()
-        sort_letter = first_char if first_char.isalpha() else "#"
+        # Section letter comes from the CORE name, so "The Offspring" files
+        # under O and the O section and the scan-letter action agree.
+        sort_letter = artist_sort_letter(clean)
 
         if clean not in merged:
             merged[clean] = {
-                "sort_key": clean,
+                "sort_key": artist_sort_key(clean),
                 "sort_letter": sort_letter,
                 "display_name": raw_name,
                 "link_artist": raw_name,
+                "sort_name": artist_sort_name(raw_name),
                 "album_count": 0,
                 "track_count": 0,
                 "five_star_count": 0,
@@ -537,6 +548,13 @@ async def artists() -> Any:
 
         if row_updated and (not entry_updated or row_updated > entry_updated):
             entry["last_updated"] = row_updated
+
+    # Re-derive the label from whichever spelling won the merge above.  Several
+    # raw variants ("The Offspring", "the offspring ") collapse into one entry,
+    # and display_name tracks the one with the most albums — so the label has to
+    # follow it rather than being fixed when the entry was created.
+    for _entry in merged.values():
+        _entry["sort_name"] = artist_sort_name(_entry["display_name"])
 
     artists_data = sorted(
         merged.values(),
@@ -2614,7 +2632,17 @@ async def config_sandbox_route() -> Any:
 async def config_editor() -> Any:
     config, raw = {}, ""
     config_path = os.environ.get("CONFIG_PATH", "/config/config.yaml")
-    
+
+    # Test-site cutover diagnostics. Surfaced so the Config page can show whether
+    # the rebuilt UI is actually being served, rather than only reading the
+    # config value back (which would still say "true" if the tree were missing
+    # and the cutover had silently declined).
+    try:
+        from helpers.test_site_mode import status as _test_site_status
+        test_site = _test_site_status()
+    except Exception:
+        test_site = {"enabled": False, "available": False, "active": False}
+
     try:
         if os.path.exists(config_path):
             with open(config_path) as f:
@@ -2635,7 +2663,7 @@ async def config_editor() -> Any:
                     await flash("Config must be a YAML mapping (top-level object)", "error")
                     return await render_template(
                         "pages/config.html", config=config, config_raw=config_content,
-                        needs_setup=needs_setup(),
+                        needs_setup=needs_setup(), test_site=test_site,
                     )
                     
                 with open(config_path, "w", encoding="utf-8") as f:
@@ -2651,7 +2679,7 @@ async def config_editor() -> Any:
                 await flash(f"Invalid YAML — not saved: {exc}", "error")
                 return await render_template(
                     "pages/config.html", config=config, config_raw=config_content,
-                    needs_setup=needs_setup(),
+                    needs_setup=needs_setup(), test_site=test_site,
                 )
         return redirect(url_for("ui.config_editor"))
         
@@ -2660,6 +2688,7 @@ async def config_editor() -> Any:
         config=config,
         config_raw=raw,
         needs_setup=needs_setup(),
+        test_site=test_site,
     )
 
 
@@ -2969,7 +2998,137 @@ async def artist_corrections(name: str) -> Any:
 
 @ui_bp.route("/artist/<path:name>/genre-management")
 async def artist_genre_management(name: str) -> Any:
-    return await render_template("pages/artist_genres.html", artist_name=name)
+    """Genre management for one artist, grouped artist → album → track.
+
+    BUG FIXED: this passed only ``artist_name`` while the template renders
+    ``albums`` / ``artist_current_genres`` / ``artist_recommended_genres``. In
+    Jinja an undefined name is falsy rather than an error, so the page rendered
+    "No genres" and "No tracks found for this artist." for every artist —
+    silently, with no exception to point at it.
+
+    Genre data comes from the same fields the rest of the app aggregates from:
+    the artist's stored ``genres`` are "current", and the per-source columns
+    (Discogs / Last.fm / MusicBrainz) are "recommended" once lower-cased
+    de-duplication drops anything already current.
+    """
+    artist_name = unquote(name or "").strip()
+
+    def _values(value: Any) -> list[str]:
+        """Coerce a stored genre column (CSV, JSON list, JSON dict) to names.
+
+        Handles the shapes the DB actually holds: a comma/backslash CSV string,
+        a JSON array, or a JSONB list of ``{"name": ...}`` dicts (Discogs and
+        MusicBrainz store the latter).
+        """
+        if value in (None, ""):
+            return []
+
+        raw: list[Any]
+        if isinstance(value, (list, tuple)):
+            raw = list(value)
+        else:
+            text = str(value).strip()
+            if text.startswith(("[", "{")):
+                try:
+                    parsed = json.loads(text)
+                    raw = list(parsed) if isinstance(parsed, (list, tuple)) else [parsed]
+                except Exception:
+                    raw = re.split(r"[,;|\\]+", text)
+            else:
+                raw = re.split(r"[,;|\\]+", text)
+
+        cleaned: list[str] = []
+        for item in raw:
+            if isinstance(item, dict):
+                item = item.get("name") or ""
+            text_val = str(item).strip()
+            if text_val:
+                cleaned.append(text_val)
+        # Preserve first-seen order/casing, drop case-insensitive duplicates.
+        return list(dict.fromkeys(cleaned))
+
+    rows: list[dict[str, Any]] = []
+    try:
+        with db_session() as session:
+            result = session.execute(
+                text("""
+                    SELECT id, album, title, track_number, disc_number,
+                           file_path, artist,
+                           COALESCE(NULLIF(album_artist, ''), artist) AS album_artist,
+                           COALESCE(genres, '') AS genres,
+                           discogs_genres, lastfm_tags, musicbrainz_genres
+                    FROM tracks
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                    ORDER BY album, disc_number, track_number, title
+                """),
+                {"artist": artist_name},
+            )
+            rows = [dict(r._mapping) for r in result.fetchall()]
+    except Exception as exc:
+        logger.warning("Genre management load failed", artist=artist_name, error=str(exc))
+
+    all_current: set[str] = set()
+    all_recommended_raw: set[str] = set()
+    albums_map: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        album = str(row.get("album") or "")
+        current = _values(row.get("genres"))
+        current_lower = {g.casefold() for g in current}
+
+        rec_raw: list[str] = []
+        for column in ("discogs_genres", "lastfm_tags", "musicbrainz_genres"):
+            rec_raw.extend(_values(row.get(column)))
+        # Preserve first-seen casing while dropping duplicates.
+        rec_raw = list(dict.fromkeys(rec_raw))
+        recommended = [g for g in rec_raw if g.casefold() not in current_lower]
+
+        track_dict = {
+            "id": row.get("id"),
+            "title": str(row.get("title") or ""),
+            "album": album,
+            "track_number": row.get("track_number"),
+            "disc_number": row.get("disc_number"),
+            "file_path": str(row.get("file_path") or ""),
+            "artist": str(row.get("artist") or ""),
+            "current_genres": current,
+            "recommended_genres": recommended,
+        }
+
+        bucket = albums_map.setdefault(
+            album, {"tracks": [], "current": set(), "rec_raw": set()}
+        )
+        bucket["tracks"].append(track_dict)
+        bucket["current"].update(current)
+        bucket["rec_raw"].update(rec_raw)
+        all_current.update(current)
+        all_recommended_raw.update(rec_raw)
+
+    albums: list[dict[str, Any]] = []
+    for album_name, bucket in albums_map.items():
+        current_lower = {g.casefold() for g in bucket["current"]}
+        albums.append({
+            "album": album_name,
+            "current_genres": sorted(bucket["current"]),
+            "recommended_genres": [
+                g for g in dict.fromkeys(bucket["rec_raw"])
+                if g.casefold() not in current_lower
+            ],
+            "tracks": bucket["tracks"],
+        })
+
+    artist_current_lower = {g.casefold() for g in all_current}
+
+    return await render_template(
+        "pages/artist_genres.html",
+        artist_name=artist_name,
+        albums=albums,
+        artist_current_genres=sorted(all_current),
+        artist_recommended_genres=[
+            g for g in dict.fromkeys(all_recommended_raw)
+            if g.casefold() not in artist_current_lower
+        ],
+    )
 
 
 @ui_bp.route("/metadata-compare")

@@ -387,6 +387,11 @@ function buildConfigObject() {
         interlude_lb_max_duration_s: parseInt(getValue('interlude_lb_max_duration_s', '180'), 10) || 180,
         interlude_lb_ratio_factor: parseFloat(getValue('interlude_lb_ratio_factor', '3.0')) || 3.0,
         interlude_lb_min_count: parseInt(getValue('interlude_lb_min_count', '500'), 10) || 500,
+        // Various Artists compilation guard. Without these two the checkboxes
+        // would appear to save and then silently revert on reload — the same
+        // class of bug as every other field omitted from this object.
+        compilation_tracklist_guard: getChecked('compilation_tracklist_guard', true),
+        compilation_tracklist_floor: parseFloat(getValue('compilation_tracklist_floor', '0.6')) || 0.6,
         star_5: {
           album_z: parseNumber('star5_album_z', 1.0),
           artist_z: parseNumber('star5_artist_z', 1.2)

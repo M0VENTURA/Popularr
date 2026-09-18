@@ -89,12 +89,14 @@ PREVIEWABLE: dict[str, tuple[str, str]] = {
     "queue": ("/downloads", "Needs slskd_config + queue_status_config, supplied below."),
     "monitor": ("/downloads/monitor", "Needs slskd_config + queue_status_config, supplied below."),
     "upcoming": ("/downloads/discover/upcoming", "Needs slskd_config, supplied below."),
+    "bookmarks": ("/bookmarks", "Bookmark rows load client-side; the page itself needs no server context."),
+    "playlist_import_csv": ("/playlists/import-csv", "Reads the uploaded CSV client-side; no server context needed."),
 }
 
 #: Pages that cannot be previewed standalone, and why. Kept explicit so the
 #: index is honest rather than silently omitting them.
 NEEDS_CONTEXT: dict[str, str] = {
-    "dashboard": "Not yet ported — the live page is still templates/pages/dashboard.html.",
+    "dashboard": "Needs nav_users, stats, recent_scans and launch flags from the live dashboard route.",
     "album_detail": "Needs album, album_name, artist_name, album_tracks, stats… from the live album route.",
     "artist_detail": "Needs albums_by_category, stats, top_tracks, genres, appearances… from the live artist route.",
     "artist_list": "Needs artist_groups, total_stats and total_artists from the live artists route.",
@@ -134,19 +136,66 @@ async def preview_static(filename: str) -> Any:
 
 
 def _discover_pages() -> list[str]:
-    """Slugs of every rendered page in the New tree, from the file names."""
-    pages_dir = PREVIEW_TEMPLATES_DIR / "Pages"
-    if not pages_dir.is_dir():
+    """Slugs of every renderable page in the rebuilt tree.
+
+    Walks the WHOLE template tree, not just ``Pages/``, because some pages live
+    elsewhere — ``auth/setup.html`` and ``Playlists/index.html``. Shared partials
+    (``base.html``, ``components/``, ``layouts/``) are excluded since they are
+    fragments rather than pages.
+    """
+    if not PREVIEW_TEMPLATES_DIR.is_dir():
         return []
 
+    skip_dirs = {"components", "layouts", "modals"}
+
     found: list[str] = []
-    for path in sorted(pages_dir.rglob("*.html")):
-        # Pages/downloads/queue.html and Pages/dashboard.html both become
-        # "queue" / "dashboard" — the slug is the bare file name.
-        if path.stem in found:
+    for path in sorted(PREVIEW_TEMPLATES_DIR.rglob("*.html")):
+        rel = path.relative_to(PREVIEW_TEMPLATES_DIR)
+        if any(part.casefold() in skip_dirs for part in rel.parts[:-1]):
+            continue
+        if path.name.startswith("_"):          # _preview_index.html
+            continue
+        if path.stem in ("base",) or path.stem in found:
             continue
         found.append(path.stem)
     return found
+
+
+def _template_path(slug: str) -> Path | None:
+    """On-disk template for a slug, searching the WHOLE tree.
+
+    The tree nests pages in several places — ``Pages/downloads/queue.html``,
+    ``Playlists/index.html`` and ``auth/setup.html`` — while the slug is just the
+    bare stem. Checking ``Pages/<slug>.html`` alone reported every nested page as
+    missing, which is how four present pages came to be listed as absent.
+    """
+    if not PREVIEW_TEMPLATES_DIR.is_dir():
+        return None
+
+    # Prefer an exact Pages/ or root match so the common case never depends on
+    # directory-walk ordering.
+    for direct in (
+        PREVIEW_TEMPLATES_DIR / f"Pages/{slug}.html",
+        PREVIEW_TEMPLATES_DIR / f"{slug}.html",
+    ):
+        if direct.is_file():
+            return direct
+
+    for candidate in sorted(PREVIEW_TEMPLATES_DIR.rglob(f"{slug}.html")):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _relative_template(slug: str) -> str | None:
+    """Template name relative to the template root, for ``render_template``."""
+    path = _template_path(slug)
+    if path is None:
+        return None
+    try:
+        return path.relative_to(PREVIEW_TEMPLATES_DIR).as_posix()
+    except ValueError:
+        return None
 
 
 def _preview_context(slug: str) -> dict[str, Any]:
@@ -161,6 +210,18 @@ def _preview_context(slug: str) -> dict[str, Any]:
         # base.html reads this; empty is fine (the bookmarks dropdown is guarded).
         "custom_bookmark_links": [],
     }
+
+    # The Config page's User Interface card renders cutover state, so it must not
+    # be undefined when that page is previewed.
+    try:
+        from helpers.test_site_mode import status as _test_site_status
+        base["test_site"] = _test_site_status()
+    except Exception:
+        base["test_site"] = {"enabled": False, "available": False, "active": False}
+
+    if slug == "playlist_import_csv":
+        # CSV importer: no server data, the page reads the uploaded file.
+        pass
 
     if slug == "logs":
         log_dir = resolve_log_dir()
@@ -228,11 +289,11 @@ async def preview_index() -> Any:
     `absent` so the gap is visible instead of silent.
     """
     discovered = _discover_pages()
-    unknown = [slug for slug in discovered if slug not in PREVIEWABLE and slug not in NEEDS_CONTEXT]
+    unknown = [slug for slug in discovered
+               if slug not in PREVIEWABLE and slug not in NEEDS_CONTEXT]
 
     def _exists(slug: str) -> bool:
-        return (PREVIEW_TEMPLATES_DIR / f"Pages/{slug}.html").is_file() or \
-               (PREVIEW_TEMPLATES_DIR / f"{slug}.html").is_file()
+        return _template_path(slug) is not None
 
     previewable = {slug: info for slug, info in PREVIEWABLE.items() if _exists(slug)}
     absent = {
@@ -264,11 +325,11 @@ async def preview_page(slug: str) -> Any:
             abort(404, description=f"'{slug}' needs its live route's context — see /test-site. {NEEDS_CONTEXT[slug]}")
         abort(404)
 
-    template = f"Pages/{slug}.html"
-    if not (PREVIEW_TEMPLATES_DIR / template).is_file():
+    template = _relative_template(slug)
+    if template is None:
         # The slug is in PREVIEWABLE but the file is not there — say which, so
         # this is a one-line diagnosis rather than a mystery 500.
-        abort(404, description=f"{template} is not in {PREVIEW_TEMPLATES_DIR}")
+        abort(404, description=f"No template found for '{slug}' under {PREVIEW_TEMPLATES_DIR}")
 
     logger.debug("Preview render", slug=slug, template=template)
     return await render_template(template, **_preview_context(slug))

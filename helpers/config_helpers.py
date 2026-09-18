@@ -693,6 +693,12 @@ def get_standout_config() -> dict[str, Any]:
         "standout_gap_z": 0.75,
         "star_epsilon_score_points": 0.5,
         "live_4star_requires_single": True,
+        # Various-artists compilation guard: a compilation must have a
+        # tracklist resembling the candidate release-group before its MBID is
+        # bound or its album type adopted.  See
+        # album_stage._tracklist_corroborates_release_group.
+        "compilation_tracklist_guard": True,
+        "compilation_tracklist_floor": 0.6,
         "star_5": {"album_z": 1.0, "artist_z": 1.2, "artist_pct": 0.10},
         "star_4": {"album_z": 0.5, "artist_z": 1.0, "artist_pct": 0.20},
         "star_3": {"album_z": -0.5},
@@ -710,7 +716,8 @@ def get_standout_config() -> dict[str, Any]:
                 "popularity_5star_z_threshold", "lb_unreliable_5star_threshold",
                 "listener_5star_z_threshold",
                 "standout_gap_z", "star_epsilon_score_points",
-                "live_4star_requires_single"):
+                "live_4star_requires_single",
+                "compilation_tracklist_guard", "compilation_tracklist_floor"):
         if key in sd_config:
             result[key] = sd_config[key]
 

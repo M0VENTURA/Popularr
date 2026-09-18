@@ -5,32 +5,30 @@
 {% block content %}
 <div class="container-fluid mt-4">
     {#
-      TEMPORARY — test-site entry point.
-
-      Links to /test-site, which renders the rebuilt templates under test_site/
-      (assets from test_site/static) without touching any live route, so the
-      ported pages can be clicked through before the cutover.
-
-      Kept prominent and OUTSIDE the collapsible nav on purpose: it is the whole
-      point of the test tree, and burying it in a dropdown would make it easy to
-      forget it exists. It is also linked from the top of the Config page.
-
-      Delete this block — plus routes/preview_routes.py, its blueprint
-      registration in helpers/app_bootstrap.py, the Config-page banner, and
-      test_site/templates/_preview_index.html — once the test tree replaces
-      templates/ + static/.
+      A one-line pointer while the two UI trees coexist. The switch itself lives
+      on the Config page (User Interface card); this stays prominent and outside
+      the collapsible nav only because the preview route is otherwise easy to
+      forget. Delete this block — plus routes/preview_routes.py, its blueprint
+      registration in helpers/app_bootstrap.py, and
+      test_site/templates/_preview_index.html — once the rebuilt tree fully
+      replaces templates/ + static/.
     #}
-    <div class="alert alert-warning d-flex align-items-center justify-content-between flex-wrap gap-2 py-2 shadow-sm">
+    <div class="alert alert-secondary d-flex align-items-center justify-content-between flex-wrap gap-2 py-2 shadow-sm">
         <div class="d-flex align-items-center gap-2 small">
-            <i class="bi bi-cone-striped fs-5"></i>
+            <i class="bi bi-layers fs-6"></i>
             <div>
-                <strong>Test site available.</strong>
-                <span class="text-muted">The rebuilt UI is running alongside this one — nothing here has changed yet.</span>
+                <strong>Rebuilt UI available.</strong>
+                <span class="text-muted">Switch between the live and rebuilt interface from Config ▸ User Interface.</span>
             </div>
         </div>
-        <a href="/test-site" class="btn btn-sm btn-warning fw-bold flex-shrink-0">
-            <i class="bi bi-box-arrow-up-right me-1"></i> Open test site
-        </a>
+        <div class="d-flex gap-2 flex-shrink-0">
+            <a href="{{ url_for('ui.config_editor') }}#ui-tree" class="btn btn-sm btn-outline-light">
+                <i class="bi bi-sliders me-1"></i> Choose interface
+            </a>
+            <a href="/test-site" class="btn btn-sm btn-outline-warning">
+                <i class="bi bi-box-arrow-up-right me-1"></i> Preview
+            </a>
+        </div>
     </div>
 
     <div id="dashboardFlags"

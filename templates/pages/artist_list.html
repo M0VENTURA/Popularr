@@ -168,7 +168,14 @@
                         </div>
                         <div class="overflow-hidden min-w-0">
                             <a href="{{ url_for('ui.artist_detail', name=artist.link_artist) }}" class="fw-bold text-light text-decoration-none fs-6 d-block text-truncate mb-1">
-                                {{ artist.display_name }}
+                                {#
+                                  sort_name is the FILED label ("Offspring, The") so the
+                                  row reads in the position it sorts in. display_name and
+                                  link_artist stay the raw name — they feed the image
+                                  lookup and the /artist/… href, both of which would break
+                                  on the inverted form.
+                                #}
+                                {{ artist.sort_name }}
                             </a>
                             <div class="extra-small text-muted d-flex align-items-center gap-2 flex-wrap">
                                 <span class="badge bg-dark border border-secondary fw-normal">{{ artist.album_count or 0 }} album{{ 's' if artist.album_count != 1 else '' }}</span>

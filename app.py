@@ -81,6 +81,21 @@ register_app_hooks(app)
 register_asset_helpers(app)
 
 # -------------------------------------------------------------------------
+# TEST-SITE CUTOVER
+# -------------------------------------------------------------------------
+# When config.yaml sets features.use_test_site: true, the rebuilt UI tree under
+# test_site/ is served at the ROOT of the app. Every URL is unchanged, so all
+# links, forms and url_for calls work with no shims — the rebuilt site behaves
+# exactly like the live one. Applied AFTER blueprint registration so the static
+# view it rebinds already exists, and before the server starts.
+#
+# Failure here is non-fatal by design: a bad config value or a missing tree
+# leaves the live UI serving rather than taking the app down.
+from helpers.test_site_mode import maybe_apply_cutover
+
+_TEST_SITE_ACTIVE = maybe_apply_cutover(app)
+
+# -------------------------------------------------------------------------
 # LEADER ELECTION & BACKGROUND SERVICES
 # -------------------------------------------------------------------------
 

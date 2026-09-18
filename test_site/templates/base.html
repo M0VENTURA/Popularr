@@ -354,6 +354,12 @@
   <script src="{{ versioned_static('js/utils/dom.js') }}"></script>
   <script src="{{ versioned_static('js/utils/api.js') }}"></script>
   <script src="{{ versioned_static('js/utils/poller.js') }}"></script>
+  {#
+    Artist filing (global.artistNames). Loaded here rather than per page because
+    BOTH the global search flyout below and the page modules use it, and the
+    server files the /artists sections by the same rules — the two must agree.
+  #}
+  <script src="{{ versioned_static('js/utils/artist-names.js') }}"></script>
 
   <script src="{{ versioned_static('js/ui/toast.js') }}"></script>
   <script src="{{ versioned_static('js/ui/modal.js') }}"></script>

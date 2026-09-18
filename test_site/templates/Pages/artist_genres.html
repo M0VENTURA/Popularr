@@ -1,0 +1,194 @@
+{% extends "base.html" %}
+
+{% block title %}Genre Management - {{ artist_name }} - Popularr{% endblock %}
+
+{% block content %}
+{#
+  Artist genre management.
+
+  CHANGED FROM templates/pages/artist_genres.html:
+    * the inline <style> moved to static/css/artist-genres.css and the inline
+      <script> to static/js/pages/artist-genres.js
+    * hard-coded Bootstrap hex colours (#0d6efd / #198754 / #dc3545) replaced with
+      the shared theme tokens so the badges match the rest of the app
+    * the artist name is passed via a JSON <script type="application/json"> block
+      and read with JSON.parse, replacing an inline JS string literal — an artist
+      whose name contains a quote or a backslash previously broke the script
+
+  Context (from routes/ui_routes.py::artist_genre_management):
+    artist_name, artist_current_genres, artist_recommended_genres,
+    albums[{album, current_genres, recommended_genres, tracks[]}]
+
+  NOTE the data IS server-rendered, not fetched. An earlier version of the route
+  passed only artist_name, which left every other name undefined — Jinja treats
+  that as falsy rather than raising, so the page silently claimed the artist had
+  no genres at all.
+#}
+<link rel="stylesheet" href="{{ versioned_static('css/artist-genres.css') }}">
+
+<div class="container-fluid mt-4">
+  <nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+      <li class="breadcrumb-item"><a href="{{ url_for('ui.dashboard') }}">Dashboard</a></li>
+      <li class="breadcrumb-item"><a href="{{ url_for('ui.artists') }}">Artists</a></li>
+      <li class="breadcrumb-item"><a href="{{ url_for('ui.artist_detail', name=artist_name) }}">{{ artist_name }}</a></li>
+      <li class="breadcrumb-item active" aria-current="page">Genre Management</li>
+    </ol>
+  </nav>
+
+  <div class="d-flex flex-column flex-md-row justify-content-between align-items-start align-items-md-center mb-3 gap-2">
+    <h1 class="h3 mb-0"><i class="bi bi-tags"></i> Genre Management for {{ artist_name }}</h1>
+  </div>
+
+  <div id="save-status" class="alert d-none mb-3" role="alert"></div>
+
+  <div class="mb-3 d-flex gap-2 flex-wrap">
+    <button type="button" class="btn btn-primary" id="save-btn-top">
+      <span class="spinner-border spinner-border-sm d-none" id="save-spinner-top" role="status"></span>
+      <i class="bi bi-floppy" id="save-icon-top"></i> Save All Changes
+    </button>
+    <small class="text-muted align-self-center">
+      Tick a <span class="text-info fw-semibold">current</span> genre to remove it.
+      Tick a <span class="text-success fw-semibold">recommended</span> genre to add it.
+    </small>
+  </div>
+
+  <!-- ===== ARTIST LEVEL ===== -->
+  <div class="card mb-4 genre-card">
+    <div class="card-header">
+      <h5 class="mb-0"><i class="bi bi-person-fill"></i> Artist Genres — Apply to All Albums &amp; Tracks</h5>
+    </div>
+    <div class="card-body">
+      <div class="d-flex flex-wrap align-items-center">
+        <span class="genres-section-label">Current:</span>
+        {% if artist_current_genres %}
+          {% for genre in artist_current_genres %}
+          <label class="genre-badge-wrap" title="Tick to remove from all tracks">
+            <input type="checkbox" class="genre-chk" data-scope="artist" data-action="remove"
+                   data-genre="{{ genre | e }}" data-artist="{{ artist_name | e }}">
+            <span class="genre-badge current" data-badge>{{ genre | e }}</span>
+          </label>
+          {% endfor %}
+        {% else %}
+          <span class="text-muted small">No genres</span>
+        {% endif %}
+      </div>
+      {% if artist_recommended_genres %}
+      <div class="d-flex flex-wrap align-items-center mt-2">
+        <span class="genres-section-label">Recommended:</span>
+        {% for genre in artist_recommended_genres %}
+        <label class="genre-badge-wrap" title="Tick to add to all tracks">
+          <input type="checkbox" class="genre-chk" data-scope="artist" data-action="add"
+                 data-genre="{{ genre | e }}" data-artist="{{ artist_name | e }}">
+          <span class="genre-badge recommended" data-badge>{{ genre | e }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- ===== PER-ALBUM ===== -->
+  {% for album in albums %}
+  <div class="card mb-3 genre-card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h6 class="mb-0"><i class="bi bi-disc"></i> {{ album.album | e or '(Unknown Album)' }}</h6>
+      <button class="btn btn-sm btn-outline-secondary" type="button"
+              data-bs-toggle="collapse" data-bs-target="#tracks-{{ loop.index }}"
+              aria-expanded="false" aria-controls="tracks-{{ loop.index }}"
+              aria-label="Toggle tracks for {{ album.album | e or 'Unknown Album' }}">
+        <i class="bi bi-chevron-down"></i> Tracks
+      </button>
+    </div>
+    <div class="card-body pb-1">
+      <div class="d-flex flex-wrap align-items-center">
+        <span class="genres-section-label">Album current:</span>
+        {% if album.current_genres %}
+          {% for genre in album.current_genres %}
+          <label class="genre-badge-wrap" title="Tick to remove from all tracks on this album">
+            <input type="checkbox" class="genre-chk" data-scope="album" data-action="remove"
+                   data-genre="{{ genre | e }}" data-artist="{{ artist_name | e }}"
+                   data-album="{{ album.album | e }}">
+            <span class="genre-badge current" data-badge>{{ genre | e }}</span>
+          </label>
+          {% endfor %}
+        {% else %}
+          <span class="text-muted small">No genres</span>
+        {% endif %}
+      </div>
+      {% if album.recommended_genres %}
+      <div class="d-flex flex-wrap align-items-center mt-1">
+        <span class="genres-section-label">Album recommended:</span>
+        {% for genre in album.recommended_genres %}
+        <label class="genre-badge-wrap" title="Tick to add to all tracks on this album">
+          <input type="checkbox" class="genre-chk" data-scope="album" data-action="add"
+                 data-genre="{{ genre | e }}" data-artist="{{ artist_name | e }}"
+                 data-album="{{ album.album | e }}">
+          <span class="genre-badge recommended" data-badge>{{ genre | e }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Track list (collapsible) -->
+    <div class="collapse" id="tracks-{{ loop.index }}">
+      <div class="card-body pt-0 px-0 pb-0">
+        {% for track in album.tracks %}
+        <div class="track-row d-flex flex-wrap align-items-start gap-2">
+          <span class="track-num">{{ track.track_number or '—' }}</span>
+          <span class="track-title">{{ track.title | e }}</span>
+          <div class="d-flex flex-wrap align-items-center">
+            <span class="genres-section-label">Current:</span>
+            {% if track.current_genres %}
+              {% for genre in track.current_genres %}
+              <label class="genre-badge-wrap" title="Tick to remove from this track">
+                <input type="checkbox" class="genre-chk" data-scope="track" data-action="remove"
+                       data-genre="{{ genre | e }}" data-artist="{{ artist_name | e }}"
+                       data-album="{{ track.album | e }}" data-track-id="{{ track.id }}">
+                <span class="genre-badge current" data-badge>{{ genre | e }}</span>
+              </label>
+              {% endfor %}
+            {% else %}
+              <span class="text-muted small">—</span>
+            {% endif %}
+            {% if track.recommended_genres %}
+            <span class="genres-section-label ms-2">Recommended:</span>
+            {% for genre in track.recommended_genres %}
+            <label class="genre-badge-wrap" title="Tick to add to this track">
+              <input type="checkbox" class="genre-chk" data-scope="track" data-action="add"
+                     data-genre="{{ genre | e }}" data-artist="{{ artist_name | e }}"
+                     data-album="{{ track.album | e }}" data-track-id="{{ track.id }}">
+              <span class="genre-badge recommended" data-badge>{{ genre | e }}</span>
+            </label>
+            {% endfor %}
+            {% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="alert alert-secondary">No tracks found for this artist.</div>
+  {% endfor %}
+
+  <div class="mb-4">
+    <button type="button" class="btn btn-primary" id="save-btn-bottom">
+      <span class="spinner-border spinner-border-sm d-none" id="save-spinner-bottom" role="status"></span>
+      <i class="bi bi-floppy" id="save-icon-bottom"></i> Save All Changes
+    </button>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{#
+  base.html already loads utils/* and ui/toast.js.
+
+    css/artist-genres.css     badge + track-row styling
+    js/pages/artist-genres.js save handler, badge toggling, change grouping
+#}
+<script id="page-data" type="application/json">{{ {"artistName": artist_name} | tojson | safe }}</script>
+<script src="{{ versioned_static('js/pages/artist-genres.js') }}"></script>
+{% endblock %}

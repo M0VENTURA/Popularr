@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block title %}Help - {{ doc_title }}{% endblock %}
+
+{% block content %}
+{#
+  Help / documentation viewer.
+
+  CHANGED FROM templates/pages/help.html:
+    * the ~260-line inline <style> moved to static/css/help.css
+    * the inline <script> moved to static/js/pages/help.js
+    * every var(--token) fallback was dropped — popularr.css defines all of
+      them, so the literals were dead weight that could drift from the theme
+
+  Context (from routes/ui_routes.py::help_page):
+    doc_title, content, current_doc, doc_files
+#}
+<link rel="stylesheet" href="{{ versioned_static('css/help.css') }}">
+
+<div class="container-fluid">
+  <div class="row">
+    <div class="col-12">
+      <h1><i class="bi bi-question-circle"></i> Documentation</h1>
+    </div>
+  </div>
+
+  <div class="help-container">
+    <!-- Sidebar Navigation -->
+    <div class="help-sidebar" id="helpSidebar">
+      <!-- Mobile: collapsed to a compact bar by default so the document
+           content sits directly below; tap to expand the categories. -->
+      <button type="button" class="help-mobile-toggle" id="helpMobileToggle" aria-expanded="false">
+        <i class="bi bi-list"></i>
+        <span class="ms-2">Documentation</span>
+        {% if doc_title %}<span class="help-mobile-current">· {{ doc_title }}</span>{% endif %}
+        <i class="bi bi-chevron-down ms-auto help-toggle-chevron"></i>
+      </button>
+      <div class="help-sidebar-body" id="helpSidebarBody">
+        <div class="help-search">
+          <input type="text" id="docSearch" placeholder="Search documentation..." class="form-control">
+        </div>
+
+        <div class="doc-category">
+          <div class="doc-category-title">Quick Start</div>
+          <ul class="doc-list">
+            <li><a href="/help/USER_GUIDE" class="{% if current_doc == 'USER_GUIDE.md' %}active{% endif %}">📘 User Guide (start here)</a></li>
+            <li><a href="/help/README" class="{% if current_doc == 'README.md' %}active{% endif %}">📖 Documentation Index</a></li>
+          </ul>
+        </div>
+
+        <div class="doc-category">
+          <div class="doc-category-title">Features</div>
+          <ul class="doc-list">
+            <li><a href="/help/USER_GUIDE#1-how-the-application-works-big-picture" class="{% if current_doc == 'USER_GUIDE.md' %}active{% endif %}">🖥️ How the App Works</a></li>
+            <li><a href="/help/USER_GUIDE#2-the-six-scan-options" class="{% if current_doc == 'USER_GUIDE.md' %}active{% endif %}">🔍 Scan Options</a></li>
+            <li><a href="/help/USER_GUIDE#4-how-popularity-is-calculated" class="{% if current_doc == 'USER_GUIDE.md' %}active{% endif %}">📊 Popularity &amp; Ratings</a></li>
+            <li><a href="/help/USER_GUIDE#10-playlists" class="{% if current_doc == 'USER_GUIDE.md' %}active{% endif %}">📝 Playlists</a></li>
+            <li><a href="/help/USER_GUIDE#11-downloads" class="{% if current_doc == 'USER_GUIDE.md' %}active{% endif %}">📥 Downloads</a></li>
+          </ul>
+        </div>
+
+        <div class="doc-category">
+          <div class="doc-category-title">Configuration</div>
+          <ul class="doc-list">
+            <li><a href="/help/Services/CONFIGURATION_GUIDE" class="{% if current_doc == 'Services/CONFIGURATION_GUIDE.md' %}active{% endif %}">⚙️ Configuration Guide</a></li>
+            <li><a href="/help/Services/QUICK_REFERENCE" class="{% if current_doc == 'Services/QUICK_REFERENCE.md' %}active{% endif %}">⚡ Quick Reference</a></li>
+          </ul>
+        </div>
+
+        <div class="doc-category">
+          <div class="doc-category-title">Technical</div>
+          <ul class="doc-list">
+            <li><a href="/help/POPULARR_ARCHITECTURE" class="{% if current_doc == 'POPULARR_ARCHITECTURE.md' %}active{% endif %}">🏗️ Architecture</a></li>
+            <li><a href="/help/USER_GUIDE#5-star-ratings-1-5" class="{% if current_doc == 'USER_GUIDE.md' %}active{% endif %}">⭐ Rating Algorithm</a></li>
+          </ul>
+        </div>
+
+        <div class="doc-category">
+          <div class="doc-category-title">All Documents</div>
+          <ul class="doc-list" id="allDocsList">
+            {% for doc_file in doc_files %}
+            <li>
+              <a href="/help/{{ doc_file|replace('.md', '') }}"
+                 class="{% if current_doc == doc_file %}active{% endif %} doc-item"
+                 data-doc-name="{{ doc_file|replace('.md', '')|replace('_', ' ')|lower }}">
+                {{ doc_file|replace('.md', '')|replace('_', ' ') }}
+              </a>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div><!-- /help-sidebar-body -->
+    </div>
+
+    <!-- Main Content -->
+    <div class="help-content">
+      {{ content|safe }}
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ versioned_static('js/pages/help.js') }}"></script>
+{% endblock %}

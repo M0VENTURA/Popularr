@@ -35,6 +35,47 @@
   </div>
   {% endif %}
 
+  {# ── UI tree (test-site cutover) ─────────────────────────────────────────
+     Switches the whole app between the live templates/static tree and this
+     rebuilt tree. Present HERE as well as on the live Config page so that
+     once the rebuilt UI is active there is a way back to the live one —
+     without it, switching would be a one-way door.
+
+     Applied at STARTUP (`test_site.active` is the real state; `enabled` is
+     just what config says), so switching needs a restart. #}
+  <div class="card shadow-sm mb-3" id="ui-tree">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-layers"></i> User Interface</h5>
+    </div>
+    <div class="card-body">
+      <div class="row g-3 align-items-start">
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_use_test_site">Interface</label>
+          <select class="form-select form-select-sm feature-field" id="feature_use_test_site" name="feature_use_test_site">
+            <option value="false" {% if not config.get('features', {}).get('use_test_site', False) %}selected{% endif %}>Live (templates/)</option>
+            <option value="true" {% if config.get('features', {}).get('use_test_site', False) %}selected{% endif %}>Rebuilt (test_site/)</option>
+          </select>
+          <small class="form-text text-muted">
+            <strong>Requires a restart</strong> — the interface is bound at startup.
+          </small>
+        </div>
+        <div class="col-12 col-lg-8">
+          {% if test_site and test_site.get('active') %}
+            <div class="alert alert-success py-2 mb-0 small">
+              <i class="bi bi-check-circle-fill"></i>
+              <strong>Rebuilt UI is active</strong> — select Live and restart to go back.
+            </div>
+          {% else %}
+            <div class="alert alert-secondary py-2 mb-0 small">
+              <i class="bi bi-window"></i>
+              <strong>Live UI active.</strong> The rebuilt tree is served once switched on and the app restarted.
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Vertical Tab Navigation -->
   <div class="row mt-3">
     <div class="col-12 col-md-3 col-xl-2 mb-4">
@@ -242,6 +283,7 @@
           {# Keys that moved to dedicated cards (Scan Behaviour / Single Detection) — never shown here #}
           {% set moved_feature_keys = ['album_skip_days', 'popularity_skip_days', 'singles_skip_days', 'metadata_skip_days', 'album_skip_min_tracks', 'skip_unchanged_albums', 'run_singles_on_skipped_albums', 'cover_detection_enabled', 'mature_track_min_age_years',
             'old_album_age_months', 'album_old_album_skip_days', 'popularity_old_album_skip_days', 'singles_old_album_skip_days', 'metadata_old_album_skip_days',
+            'deep_genre_search', 'use_test_site',
             'source_discogs_confidence', 'source_musicbrainz_confidence', 'source_musicbrainz_compilation_confidence',
             'source_discogs_video_confidence', 'source_lastfm_confidence', 'source_radio_edit_confidence'] %}
           {# Legacy keys from the old system with no readers in the current codebase — never shown or re-saved #}
@@ -1890,6 +1932,35 @@
           <label class="form-label form-label-sm">Min LB listens</label>
           <input type="number" step="50" min="10" class="form-control form-control-sm" id="interlude_lb_min_count" placeholder="500" value="{{ config.get('single_detection', {}).get('interlude_lb_min_count', 500) }}">
           <small class="form-text text-muted">ListenBrainz must be this healthy before the filter applies — tiny/noisy counts are never flagged. Default: <strong>500</strong></small>
+        </div>
+      </div>
+
+      <hr class="my-3">
+      <h6 class="mb-3">3e · Various Artists Compilation Guard</h6>
+      <p class="text-muted small mb-3">
+        Every MusicBrainz release-group credited <em>Various Artists</em> scores a free 1.0 on the artist
+        half of the name-match, so a compilation whose title is generic ("Greatest Hits", "Best Of") can
+        bind to an unrelated release-group on title similarity alone. With this on, a VA compilation must
+        also have a <strong>tracklist that resembles the candidate release</strong> before its MBID is
+        stored or its album type is adopted. Nothing is written when it fails — the album simply keeps its
+        title-based type.
+      </p>
+      <p class="text-muted small mb-3">
+        Only applies to <strong>Various Artists</strong> compilations, so normal artist albums pay no
+        extra lookups. Read per album, so no restart is needed.
+      </p>
+      <div class="row g-3">
+        <div class="col-12 col-sm-6 col-lg-3">
+          <div class="form-check form-switch mt-2">
+            <input class="form-check-input" type="checkbox" id="compilation_tracklist_guard" {% if config.get('single_detection', {}).get('compilation_tracklist_guard', True) %}checked{% endif %}>
+            <label class="form-check-label" for="compilation_tracklist_guard">Require a matching tracklist</label>
+          </div>
+          <small class="form-text text-muted">Master switch. Turn off to restore title-only matching for VA compilations. Default: <strong>on</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm">Tracklist Match Floor</label>
+          <input type="number" step="0.05" min="0.05" max="1.0" class="form-control form-control-sm" id="compilation_tracklist_floor" placeholder="0.6" value="{{ config.get('single_detection', {}).get('compilation_tracklist_floor', 0.6) }}">
+          <small class="form-text text-muted">Share of your tracks that must also be on the candidate release. Lower = more tolerant of bonus/renamed tracks. Default: <strong>0.6</strong></small>
         </div>
       </div>
 

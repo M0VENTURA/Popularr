@@ -1,0 +1,128 @@
+/*
+  First-run setup wizard (/setup).
+
+  Extracted from the inline <style> in templates/auth/setup.html.
+
+  This page is STANDALONE — it does not extend base.html, because the wizard
+  runs before the app shell is usable. It therefore cannot rely on the theme
+  tokens in popularr.css, so the small palette it needs is declared here.
+
+  The hard-coded `--text-primary: #e0e0e0` / `--text-secondary: #b0b0b0` /
+  `--border-color: #333` from the inline block were the OLD theme values; they
+  are realigned to the current shell (#ffffff / #d0d0d0 / #282828) so the wizard
+  does not look like a different application from the one it sets up.
+*/
+
+:root {
+  --primary-bg: #121212;
+  --secondary-bg: #1e1e1e;
+  --tertiary-bg: #282828;
+  --text-primary: #ffffff;
+  --text-secondary: #d0d0d0;
+  --text-muted: #a0a0a0;
+  --border-color: #282828;
+  --spotify-green: #1db954;
+  --spotify-green-hover: #1ed760;
+}
+
+body {
+  background: var(--primary-bg);
+  color: var(--text-primary);
+  min-height: 100vh;
+}
+
+.setup-container {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+.step-card {
+  background: var(--secondary-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 2rem;
+  margin-bottom: 1.5rem;
+}
+
+/* ── Progress dots ────────────────────────────────────────────────────── */
+
+.step-indicator {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-bottom: 2rem;
+}
+
+.step-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--tertiary-bg);
+  transition: all 0.3s;
+}
+
+.step-dot.active {
+  background: var(--spotify-green);
+  box-shadow: 0 0 8px rgba(29, 185, 84, 0.5);
+}
+
+.step-dot.done {
+  background: var(--spotify-green);
+}
+
+/* ── Form controls ────────────────────────────────────────────────────── */
+
+.form-control,
+.form-select {
+  background: var(--primary-bg);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+}
+
+.form-control::placeholder {
+  color: var(--text-muted);
+}
+
+.form-control:focus,
+.form-select:focus {
+  background: var(--primary-bg);
+  color: var(--text-primary);
+  border-color: var(--spotify-green);
+  box-shadow: 0 0 0 0.2rem rgba(29, 185, 84, 0.25);
+}
+
+/* Restore the dropdown chevron wiped by the flat background override. */
+.form-select {
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23adb5bd' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 16px 12px;
+  padding-right: 2.5rem;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────── */
+
+.btn-primary {
+  background: var(--spotify-green);
+  border: none;
+  color: #000000;
+  font-weight: 600;
+}
+
+.btn-primary:hover,
+.btn-primary:focus {
+  background: var(--spotify-green-hover);
+  color: #000000;
+}
+
+.btn-primary:disabled {
+  background: var(--spotify-green);
+  color: #000000;
+}
+
+/* Collapsible sections and the summary cards read better with a defined edge
+   on this page because there is no card styling from the app shell. */
+.border.rounded {
+  border-color: var(--border-color) !important;
+}

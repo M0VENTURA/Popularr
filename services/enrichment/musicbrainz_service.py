@@ -145,6 +145,16 @@ _RELEASE_GROUP_MATCH_FLOOR = 0.6
 _TRACK_COUNT_REFINE_LIMIT = 3
 _RECORDING_RELATIONSHIP_INC = "artist-rels+work-rels+work-level-rels"
 
+#: Per-track title similarity for calling a local track "present" on a
+#: candidate release.  Equal to the floor `_match_mb_tracks_to_library` uses for
+#: its own fuzzy fallback, so both agree on what "the same track" means.
+_TRACKLIST_TITLE_FLOOR = 0.55
+
+#: Default share of a LOCAL album's tracks that must be found on a candidate
+#: release before that release-group is accepted for a Various Artists
+#: compilation.  See `release_group_tracklist_similarity`.
+_TRACKLIST_MATCH_FLOOR = 0.6
+
 # Fields the Align auto-fix is allowed to overwrite on a track row. Kept as a
 # fixed whitelist (never derived from request input) so _update_track_fields
 # can safely interpolate column names into an UPDATE statement.
@@ -2294,6 +2304,148 @@ def _match_mb_tracks_to_library(
     ]
 
     return Comparison, Extra_tracks
+
+def _title_present_in(
+    title: str,
+    candidates: list[str],
+    floor: float = _TRACKLIST_TITLE_FLOOR,
+) -> bool:
+    """True when *title* has a close counterpart among *candidates*.
+
+    Titles are normalised on both sides first, so "Song (Radio Edit)" matches
+    "Song" the same way the fuzzy fallback in `_match_mb_tracks_to_library`
+    would, rather than depending on punctuation.
+    """
+    normalised = Normalize_title_for_lookup(str(title or ""))
+    if not normalised:
+        return False
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if _similarity(normalised, Normalize_title_for_lookup(candidate)) >= floor:
+            return True
+    return False
+
+def release_group_tracklist_similarity(
+    release_group_mbid: str,
+    library_tracks: list[dict[str, Any]],
+    artist: str = "",
+    album: str = "",
+    prefer_release_id: str | None = None,
+) -> float:
+    """Share of *library_tracks* whose title appears on the release-group.
+
+    Returns ``0.0`` when the release-group cannot be read, which callers treat
+    as "no corroboration" — an unreadable candidate must never be trusted.
+
+    ⚠️ WHY THIS COMPARES TITLES AND NOT TRACK NUMBERS
+    ``_match_mb_tracks_to_library`` pairs MB tracks to library rows by
+    ``(disc_number, track_number)`` FIRST and only falls back to a title match
+    afterwards.  For this gate that ordering is unusable: two different
+    twelve-track compilations pair one-to-one on position alone, so a
+    position-based comparison would score 1.0 for two entirely unrelated
+    releases and the gate would never reject anything.  Titles are the only
+    signal that actually distinguishes a compilation from its namesakes.
+
+    WHICH RELEASE IS COMPARED
+    ``prefer_release_id`` wins when supplied.  Otherwise this asks
+    ``get_musicbrainz_best_release`` for the release that best fits the local
+    album, which in the scan path is normally a CACHE HIT — that function is
+    already called for the top candidates by the track-count refinement in
+    ``search_releasegroup_matches``, and both its result and the underlying
+    browse are memoised.  Scoring against the best-matching release rather than
+    an arbitrary member of the group matters, because one release-group can hold
+    a 10-track and a 30-track edition and only one of them resembles the album.
+    """
+    if not release_group_mbid or not library_tracks:
+        return 0.0
+
+    release_id = str(prefer_release_id or "").strip()
+    if not release_id and artist and album:
+        try:
+            best = get_musicbrainz_best_release(artist, album, release_group_mbid)
+        except Exception as exc:
+            best = {}
+            Logger.warning(
+                "[MB] tracklist verification best-release lookup failed",
+                release_group_mbid=release_group_mbid,
+                error=_error(exc),
+            )
+        if isinstance(best, dict):
+            release_id = str(
+                ((best.get("best_release") or {}).get("id")) or ""
+            ).strip()
+
+    if not release_id:
+        try:
+            releases = _browse_group_releases(
+                release_group_mbid, "tracklist.verify_browse"
+            )
+        except Exception as exc:
+            Logger.warning(
+                "[MB] tracklist verification browse failed",
+                release_group_mbid=release_group_mbid,
+                error=_error(exc),
+            )
+            return 0.0
+        if not releases:
+            return 0.0
+        release_id = str(releases[0].get("id") or "").strip()
+    if not release_id:
+        return 0.0
+
+    try:
+        metadata = fetch_musicbrainz_release_metadata(release_id)
+    except Exception as exc:
+        Logger.warning(
+            "[MB] tracklist verification fetch failed",
+            release_group_mbid=release_group_mbid,
+            release_id=release_id,
+            error=_error(exc),
+        )
+        return 0.0
+    if not metadata:
+        return 0.0
+
+    mb_titles = [
+        str(track.get("mb_title") or "")
+        for track in (metadata.get("tracks") or [])
+        if isinstance(track, dict)
+    ]
+    if not mb_titles:
+        return 0.0
+
+    present = sum(
+        1
+        for track in library_tracks
+        if isinstance(track, dict)
+        and _title_present_in(str(track.get("title") or ""), mb_titles)
+    )
+    return present / len(library_tracks)
+
+def release_group_tracklist_passes(
+    release_group_mbid: str,
+    library_tracks: list[dict[str, Any]],
+    floor: float | None = None,
+    artist: str = "",
+    album: str = "",
+    prefer_release_id: str | None = None,
+) -> tuple[bool, float]:
+    """``(passed, similarity)`` for the tracklist corroboration gate.
+
+    ``floor`` defaults to ``_TRACKLIST_MATCH_FLOOR`` (config-overridable by the
+    caller) rather than being read from config here, so this module stays free
+    of config access and stays directly testable.
+    """
+    threshold = _TRACKLIST_MATCH_FLOOR if floor is None else float(floor)
+    similarity = release_group_tracklist_similarity(
+        release_group_mbid,
+        library_tracks,
+        artist=artist,
+        album=album,
+        prefer_release_id=prefer_release_id,
+    )
+    return similarity >= threshold, similarity
 
 def compare_musicbrainz_release(
     Artist: str,

@@ -62,6 +62,7 @@ from sqlalchemy import bindparam, text
 from db.engine import db_session
 from db.utils import row_get
 from services.catalog.album_classification_service import (
+    classify_compilation_category,
     detect_live_album_type,
     is_live_or_unplugged_track_title,
     normalize_primary_release_type,
@@ -1085,7 +1086,195 @@ def _fetch_external_genres(artist: str) -> dict[str, list[str]]:
     return results
 
 
-def _lookup_musicbrainz_album_type(artist: str, album: str) -> tuple[str | None, str | None]:
+#: Artist credits that identify a Various Artists compilation on their own.
+#: Narrower than ``_COMPILATION_ARTISTS`` on purpose: that set also carries
+#: "soundtrack"/"compilation", which `classify_compilation_category` files as
+#: SINGLE-ARTIST compilations.  The tracklist gate is scoped to VA because VA is
+#: the only case with a free artist-similarity contribution — see
+#: `_tracklist_corroborates_release_group`.
+_VA_ARTIST_MARKERS = frozenset({
+    "various artists", "various artist", "various", "va", "v/a",
+})
+
+
+def _is_various_artists_compilation(
+    artist: str,
+    album_artist: str | None,
+    album: str = "",
+    tracks: list[dict[str, Any]] | None = None,
+) -> bool:
+    """True when this album is a Various Artists compilation.
+
+    Deliberately delegates the multi-artist decision to
+    `classify_compilation_category` — the app's established definition, the same
+    one that produces ``is_va_compilation`` for the star-rating path — so the
+    gate and the scoring code agree about what a VA compilation is rather than
+    keeping two subtly different lists.
+
+    The name check runs first so the gate still applies when no track list was
+    supplied.  That matters because the name is the actual source of the
+    problem: MusicBrainz credits every VA release-group "Various Artists", so a
+    local artist of the same name scores a free 1.0 on the artist term.
+    """
+    names = {
+        (artist or "").casefold().strip(),
+        (album_artist or "").casefold().strip(),
+    }
+    if names & _VA_ARTIST_MARKERS:
+        return True
+
+    if not tracks:
+        return False
+
+    try:
+        return classify_compilation_category(
+            artist or "", album or "", tracks, album_artist=album_artist
+        ) == "va"
+    except Exception as exc:  # pragma: no cover - defensive
+        Logger.debug(
+            "[ENRICH] VA compilation classification failed",
+            artist=artist,
+            album=album,
+            error=_safe_error(exc),
+        )
+        return False
+
+
+def _compilation_tracklist_guard_config() -> tuple[bool, float]:
+    """``(enabled, floor)`` for the VA-compilation tracklist gate.
+
+    Defaults ON with a 0.6 floor.  Read through ``get_config()`` so the Config
+    page (the source of truth for user-editable settings) can disable it or
+    loosen the requirement without a code change.
+    """
+    try:
+        from helpers.config_helpers import get_config
+
+        block = (get_config() or {}).get("single_detection") or {}
+        if not isinstance(block, dict):
+            return True, 0.6
+        enabled = bool(block.get("compilation_tracklist_guard", True))
+        raw_floor = block.get("compilation_tracklist_floor", 0.6)
+        try:
+            floor = float(raw_floor)
+        except (TypeError, ValueError):
+            floor = 0.6
+        # A floor outside (0, 1] would either disable the gate silently or
+        # reject everything; clamp rather than honour a nonsense value.
+        if not 0.0 < floor <= 1.0:
+            floor = 0.6
+        return enabled, floor
+    except Exception as exc:  # pragma: no cover - defensive
+        Logger.debug("[ENRICH] tracklist guard config read failed", error=_safe_error(exc))
+        return True, 0.6
+
+
+def _tracklist_corroborates_release_group(
+    artist: str,
+    album: str,
+    album_artist: str | None,
+    tracks: list[dict[str, Any]],
+    release_group_mbid: str,
+    context: dict[str, Any],
+) -> bool:
+    """Does this release-group's tracklist actually look like the local album?
+
+    Only consulted for Various Artists compilations (see the caller).  The
+    reason it exists: every MusicBrainz VA release-group is credited
+    "Various Artists", so ``calculate_match_score``'s artist term is a free
+    ``1.0`` for a compilation and contributes a flat 0.4 that no other album
+    gets.  Against the 0.6 acceptance floor that means only ~0.33 of title
+    similarity is required, so generic compilations ("Greatest Hits", "Best
+    Of") readily bind to unrelated VA release-groups.  Requiring the tracklists
+    to agree is what actually distinguishes a real match.
+
+    Fails CLOSED (returns False) when the tracklist cannot be read: the whole
+    point is to prevent a bad bind, so an unverifiable candidate must not be
+    accepted.  The cost of a false rejection is only that the album keeps its
+    title-heuristic type — nothing is written.
+    """
+    enabled, floor = _compilation_tracklist_guard_config()
+    if not enabled:
+        Logger.info(
+            "[ENRICH] tracklist guard disabled by config",
+            release_group_mbid=release_group_mbid,
+            **context,
+        )
+        return True
+
+    if not tracks:
+        # No local tracks to compare against, so the gate cannot distinguish a
+        # real match.  Fall back to the pre-existing title-only behaviour
+        # rather than rejecting outright, which would be a silent regression
+        # for any caller that passes an empty track list.
+        Logger.info(
+            "[ENRICH] tracklist guard skipped",
+            reason="no local tracks supplied",
+            **context,
+        )
+        return True
+
+    from services.enrichment.musicbrainz_service import (
+        release_group_tracklist_passes,
+    )
+
+    try:
+        passed, similarity = _call_with_heartbeat(
+            "album_type.tracklist_corroboration",
+            release_group_tracklist_passes,
+            release_group_mbid,
+            tracks,
+            floor,
+            artist,
+            album,
+            log_context=context,
+        )
+    except Exception as exc:
+        Logger.warning(
+            "[ENRICH] tracklist guard errored; rejecting match",
+            release_group_mbid=release_group_mbid,
+            error=_safe_error(exc),
+            **context,
+        )
+        return False
+
+    if passed:
+        Logger.info(
+            "[ENRICH] tracklist corroborated MusicBrainz release-group",
+            release_group_mbid=release_group_mbid,
+            tracklist_similarity=round(float(similarity), 3),
+            tracklist_floor=floor,
+            local_track_count=len(tracks),
+            **context,
+        )
+        return True
+
+    Logger.warning(
+        "[ENRICH] MusicBrainz release-group rejected by tracklist check",
+        reason=(
+            "a Various Artists compilation matched on title alone, but its "
+            "tracklist does not resemble the local album — refusing to bind "
+            "the release-group MBID or adopt its album type"
+        ),
+        release_group_mbid=release_group_mbid,
+        tracklist_similarity=round(float(similarity), 3),
+        tracklist_floor=floor,
+        local_track_count=len(tracks),
+        **context,
+    )
+    return False
+
+
+def _lookup_musicbrainz_album_type(
+    artist: str,
+    album: str,
+    album_artist: str | None = None,
+    tracks: list[dict[str, Any]] | None = None,
+) -> tuple[str | None, str | None]:
+    # Signature note: `album_artist` and `tracks` are OPTIONAL so the existing
+    # two-argument callers (and the tests that call this directly) keep
+    # working.  When they are absent the VA tracklist gate cannot run, and the
+    # previous title-only behaviour is preserved.
     clean_album = _sanitize_release_name(album)
     context = {"artist": artist, "album": album, "query_album": clean_album}
     try:
@@ -1107,6 +1296,17 @@ def _lookup_musicbrainz_album_type(artist: str, album: str) -> tuple[str | None,
         if score < 0.6:
             Logger.info("[ENRICH] MusicBrainz album type match rejected", match_score=score, **context)
             return None, None
+
+        # Various Artists compilations need a second, independent signal.
+        # `album`/`tracks` are passed so a compilation is still recognised when
+        # it is not literally credited "Various Artists" (e.g. a release whose
+        # tracks each carry a different artist).
+        if _is_various_artists_compilation(artist, album_artist, album, tracks):
+            candidate_mbid = str(best.get("id") or "").strip()
+            if not candidate_mbid or not _tracklist_corroborates_release_group(
+                artist, album, album_artist, tracks or [], candidate_mbid, context
+            ):
+                return None, None
 
         primary = str(best.get("primary_type") or "").casefold()
         release_group_mbid = str(best.get("id") or "").strip() or None
@@ -1182,7 +1382,13 @@ def _resolve_album_type(
     detected = _detect_album_type(artist, album, album_artist, spotify_type)
     Logger.info("[ENRICH] local album type detected", detected_type=detected, **context)
 
-    mb_type, release_group_mbid = _lookup_musicbrainz_album_type(artist, album)
+    # ``tracks`` is passed so the VA-compilation tracklist gate can compare the
+    # local tracklist against the candidate release-group.  Without it a VA
+    # compilation could bind to an unrelated release-group on a title match
+    # alone (the artist term is a free 1.0 for every VA candidate).
+    mb_type, release_group_mbid = _lookup_musicbrainz_album_type(
+        artist, album, album_artist, tracks
+    )
     original_mb_type = mb_type
 
     if mb_type:

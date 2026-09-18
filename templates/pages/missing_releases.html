@@ -58,6 +58,17 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// Artist filing — base.html loads js/artist_names.js. "The Offspring" is shown
+// as "Offspring, The" and sorted among the O's, matching the server's ordering
+// for /api/missing/overview and the /artists sections.
+//
+// Falls back to the raw name rather than throwing: a display nicety must never
+// be able to break this page.
+const artistFiling = window.artistNames || {
+  sortName: (v) => (v === null || v === undefined ? '' : String(v)),
+  compare: (a, b) => (a < b ? -1 : a > b ? 1 : 0),
+};
+
 function fmtDuration(secs) {
   if (!secs) return '—';
   const m = Math.floor(secs / 60);
@@ -106,7 +117,7 @@ function renderGapAlbums(gapAlbums) {
     if (!byArtist[a.artist]) byArtist[a.artist] = [];
     byArtist[a.artist].push(a);
   }
-  const sortedArtists = Object.keys(byArtist).sort((a, b) => a.localeCompare(b));
+  const sortedArtists = Object.keys(byArtist).sort(artistFiling.compare);
 
   countBadge.textContent = gapAlbums.length + ' album' + (gapAlbums.length !== 1 ? 's' : '');
 
@@ -122,7 +133,7 @@ function renderGapAlbums(gapAlbums) {
         <button class="accordion-button" type="button" data-bs-toggle="collapse"
                 data-bs-target="#col_${safeId}" aria-expanded="true" aria-controls="col_${safeId}">
           <a href="${escHtml(artistUrl)}" class="fw-bold me-2 text-decoration-none"
-             onclick="event.stopPropagation()">${escHtml(artist)}</a>
+             onclick="event.stopPropagation()">${escHtml(artistFiling.sortName(artist))}</a>
           <span class="badge bg-warning text-dark ms-1">${albums.length} album${albums.length !== 1 ? 's' : ''}</span>
         </button>
       </h2>
@@ -426,8 +437,8 @@ function renderMissingArtists(artists) {
                 data-safe-id="${safeId}"
                 onclick="onMissingArtistExpand(this)">
           <a href="${escHtml(artistUrl)}" class="fw-bold me-2 text-decoration-none"
-             onclick="event.stopPropagation()">${escHtml(entry.artist)}</a>
-          <span class="badge bg-info ms-1">${entry.missing_count} missing</span>
+             onclick="event.stopPropagation()">${escHtml(artistFiling.sortName(entry.artist))}</a>
+          <span class="badge bg-info ms-1">${entry.missing_count ?? 0} missing</span>
         </button>
       </h2>
       <div id="col_${safeId}" class="accordion-collapse collapse" aria-labelledby="hdr_${safeId}">

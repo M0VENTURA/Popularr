@@ -26,6 +26,7 @@ from services.metadata.artist_scan_service import (
 from services.metadata import artist_metadata_service as metadata
 from services.enrichment.musicbrainz_service import get_shared_mb_client
 from db.engine import db_session
+from helpers.artist_sort import artist_sort_sql
 
 logger = structlog.get_logger(__name__)
 artist_bp = Blueprint("artist", __name__)
@@ -409,10 +410,17 @@ def api_missing_overview() -> Any:
 
     try:
         with db_session() as session:
-            result = session.execute(sa_text("""
-                SELECT DISTINCT artist
+            # COUNT(*) restores the per-artist total the client renders
+            # ("N missing"); this query previously selected the name alone, so
+            # the badge read "undefined missing" for every row.
+            #
+            # Ordered by the FILED name, so "The Offspring" sits among the O's
+            # exactly as it does on /artists.
+            result = session.execute(sa_text(f"""
+                SELECT artist, COUNT(*) AS missing_count
                 FROM missing_releases
-                ORDER BY artist
+                GROUP BY artist
+                ORDER BY {artist_sort_sql('artist')}
             """))
             missing_artists = [dict(r._mapping) for r in result.fetchall() or []]
     except Exception as exc:

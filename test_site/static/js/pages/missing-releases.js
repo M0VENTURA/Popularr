@@ -57,6 +57,17 @@
   const LIBRARY_TRACKS_ENDPOINT = '/api/album/library-tracks';
   const CACHED_MISSING_ENDPOINT = '/api/artist/cached-missing-releases';
   const QUEUE_ADD_ENDPOINT = '/api/queue/add';
+
+  // base.html loads js/utils/artist-names.js before page modules. "The Offspring"
+  // is shown as "Offspring, The" and sorted among the O's, matching what the
+  // server does for /api/missing/overview and the /artists sections.
+  //
+  // The fallback degrades to the RAW name rather than throwing: a display
+  // nicety must never be able to take this page down.
+  const names = global.artistNames || {
+    sortName: (v) => (v === null || v === undefined ? '' : String(v)),
+    compare: (a, b) => (a < b ? -1 : a > b ? 1 : 0),
+  };
   const DEFAULT_QUEUE_SOURCE = 'soulseek';
 
   function esc(value) {
@@ -133,7 +144,9 @@
         `${gapAlbums.length} album${gapAlbums.length !== 1 ? 's' : ''}`;
     }
 
-    Object.keys(byArtist).sort((a, b) => a.localeCompare(b)).forEach((artist, artistIdx) => {
+    // Sort by the FILED key, not localeCompare, so this section's order matches
+    // the server-rendered lists ("The Cure" before "The Offspring").
+    Object.keys(byArtist).sort(names.compare).forEach((artist, artistIdx) => {
       const albums = byArtist[artist].slice().sort((a, b) => a.album.localeCompare(b.album));
       const safeId = `gap_artist_${artistIdx}`;
 
@@ -144,7 +157,7 @@
           <button class="accordion-button" type="button" data-bs-toggle="collapse"
                   data-bs-target="#col_${esc(safeId)}" aria-expanded="true" aria-controls="col_${esc(safeId)}">
             <a href="/artist/${seg(artist)}" class="fw-bold me-2 text-decoration-none"
-               data-stop-propagation>${esc(artist)}</a>
+               data-stop-propagation>${esc(names.sortName(artist))}</a>
             <span class="badge bg-warning text-dark ms-1">${albums.length} album${albums.length !== 1 ? 's' : ''}</span>
           </button>
         </h2>
@@ -462,8 +475,8 @@
                   data-artist="${esc(entry.artist)}"
                   data-safe-id="${esc(safeId)}">
             <a href="/artist/${seg(entry.artist)}" class="fw-bold me-2 text-decoration-none"
-               data-stop-propagation>${esc(entry.artist)}</a>
-            <span class="badge bg-info ms-1">${esc(String(entry.missing_count))} missing</span>
+               data-stop-propagation>${esc(names.sortName(entry.artist))}</a>
+            <span class="badge bg-info ms-1">${esc(String(entry.missing_count ?? 0))} missing</span>
           </button>
         </h2>
         <div id="col_${esc(safeId)}" class="accordion-collapse collapse" aria-labelledby="hdr_${esc(safeId)}">

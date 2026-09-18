@@ -32,28 +32,60 @@
   </div>
   {% endif %}
 
-  {#
-    TEMPORARY — test-site entry point (also linked from the dashboard).
+  {# ── UI tree (test-site cutover) ─────────────────────────────────────────
+     Switches the whole app between the live templates/static tree and the
+     rebuilt test_site/ tree. Applied at STARTUP, so a change needs a restart:
+     both mechanisms it drives (the Jinja loader and the /static view function)
+     are one-time app-level rebinds, and mutating them per request would race
+     under the concurrent workers.
 
-    The rebuilt UI runs alongside this one under test_site/, served at
-    /test-site by routes/preview_routes.py. Nothing on this page is affected.
-
-    Delete this block along with the dashboard banner, routes/preview_routes.py,
-    its registration in helpers/app_bootstrap.py and
-    test_site/templates/_preview_index.html once the test tree replaces
-    templates/ + static/.
-  #}
-  <div class="alert alert-warning d-flex align-items-center justify-content-between flex-wrap gap-2 py-2 shadow-sm mb-4">
-    <div class="d-flex align-items-center gap-2 small">
-      <i class="bi bi-cone-striped fs-5"></i>
-      <div>
-        <strong>Test site available.</strong>
-        <span class="text-muted">Preview the rebuilt UI before it replaces these pages.</span>
+     `test_site` carries the REAL state — `enabled` is what config says and
+     `active` is whether the cutover actually applied. They differ when the
+     rebuilt tree is missing, which is exactly the case worth surfacing. #}
+  <div class="card shadow-sm mb-3" id="ui-tree">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-layers"></i> User Interface</h5>
+    </div>
+    <div class="card-body">
+      <div class="row g-3 align-items-start">
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_use_test_site">Interface</label>
+          <select class="form-select form-select-sm feature-field" id="feature_use_test_site" name="feature_use_test_site">
+            <option value="false" {% if not config.get('features', {}).get('use_test_site', False) %}selected{% endif %}>Live (templates/)</option>
+            <option value="true" {% if config.get('features', {}).get('use_test_site', False) %}selected{% endif %}>Rebuilt (test_site/)</option>
+          </select>
+          <small class="form-text text-muted">
+            <strong>Requires a restart</strong> — the interface is bound at startup.
+          </small>
+        </div>
+        <div class="col-12 col-lg-8">
+          {% if test_site and test_site.get('active') %}
+            <div class="alert alert-success py-2 mb-0 small">
+              <i class="bi bi-check-circle-fill"></i>
+              <strong>Rebuilt UI is active.</strong>
+              Templates: <code>{{ test_site.get('templates_dir') }}</code>
+            </div>
+          {% elif test_site and test_site.get('enabled') and not test_site.get('available') %}
+            <div class="alert alert-danger py-2 mb-0 small">
+              <i class="bi bi-exclamation-triangle-fill"></i>
+              <strong>Rebuilt UI requested but not found</strong> — the live UI is being served instead.
+              Expected <code>{{ test_site.get('templates_dir') }}/base.html</code>.
+            </div>
+          {% elif test_site and test_site.get('enabled') and test_site.get('available') %}
+            <div class="alert alert-warning py-2 mb-0 small">
+              <i class="bi bi-arrow-clockwise"></i>
+              <strong>Rebuilt UI enabled — restart to apply.</strong>
+            </div>
+          {% else %}
+            <div class="alert alert-secondary py-2 mb-0 small">
+              <i class="bi bi-window"></i>
+              <strong>Live UI active.</strong>
+              The rebuilt tree is served instead once switched on and the app restarted.
+            </div>
+          {% endif %}
+        </div>
       </div>
     </div>
-    <a href="/test-site" class="btn btn-sm btn-warning fw-bold flex-shrink-0">
-      <i class="bi bi-box-arrow-up-right me-1"></i> Open test site
-    </a>
   </div>
 
   <!-- Vertical Tab Navigation -->
@@ -260,9 +292,10 @@
     <div class="card-body">
       <div id="featuresWeightsForm">
         <div class="row g-3">
-          {# Keys that moved to dedicated cards (Scan Behaviour / Single Detection) — never shown here #}
+          {# Keys that moved to dedicated cards (Scan Behaviour / Single Detection / User Interface) — never shown here #}
           {% set moved_feature_keys = ['album_skip_days', 'popularity_skip_days', 'singles_skip_days', 'metadata_skip_days', 'album_skip_min_tracks', 'skip_unchanged_albums', 'run_singles_on_skipped_albums', 'cover_detection_enabled', 'mature_track_min_age_years',
             'old_album_age_months', 'album_old_album_skip_days', 'popularity_old_album_skip_days', 'singles_old_album_skip_days', 'metadata_old_album_skip_days',
+            'deep_genre_search', 'use_test_site',
             'source_discogs_confidence', 'source_musicbrainz_confidence', 'source_musicbrainz_compilation_confidence',
             'source_discogs_video_confidence', 'source_lastfm_confidence', 'source_radio_edit_confidence'] %}
           {# Legacy keys from the old system with no readers in the current codebase — never shown or re-saved #}
@@ -1911,6 +1944,35 @@
           <label class="form-label form-label-sm">Min LB listens</label>
           <input type="number" step="50" min="10" class="form-control form-control-sm" id="interlude_lb_min_count" placeholder="500" value="{{ config.get('single_detection', {}).get('interlude_lb_min_count', 500) }}">
           <small class="form-text text-muted">ListenBrainz must be this healthy before the filter applies — tiny/noisy counts are never flagged. Default: <strong>500</strong></small>
+        </div>
+      </div>
+
+      <hr class="my-3">
+      <h6 class="mb-3">3e · Various Artists Compilation Guard</h6>
+      <p class="text-muted small mb-3">
+        Every MusicBrainz release-group credited <em>Various Artists</em> scores a free 1.0 on the artist
+        half of the name-match, so a compilation whose title is generic ("Greatest Hits", "Best Of") can
+        bind to an unrelated release-group on title similarity alone. With this on, a VA compilation must
+        also have a <strong>tracklist that resembles the candidate release</strong> before its MBID is
+        stored or its album type is adopted. Nothing is written when it fails — the album simply keeps its
+        title-based type.
+      </p>
+      <p class="text-muted small mb-3">
+        Only applies to <strong>Various Artists</strong> compilations, so normal artist albums pay no
+        extra lookups. Read per album, so no restart is needed.
+      </p>
+      <div class="row g-3">
+        <div class="col-12 col-sm-6 col-lg-3">
+          <div class="form-check form-switch mt-2">
+            <input class="form-check-input" type="checkbox" id="compilation_tracklist_guard" {% if config.get('single_detection', {}).get('compilation_tracklist_guard', True) %}checked{% endif %}>
+            <label class="form-check-label" for="compilation_tracklist_guard">Require a matching tracklist</label>
+          </div>
+          <small class="form-text text-muted">Master switch. Turn off to restore title-only matching for VA compilations. Default: <strong>on</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm">Tracklist Match Floor</label>
+          <input type="number" step="0.05" min="0.05" max="1.0" class="form-control form-control-sm" id="compilation_tracklist_floor" placeholder="0.6" value="{{ config.get('single_detection', {}).get('compilation_tracklist_floor', 0.6) }}">
+          <small class="form-text text-muted">Share of your tracks that must also be on the candidate release. Lower = more tolerant of bonus/renamed tracks. Default: <strong>0.6</strong></small>
         </div>
       </div>
 
