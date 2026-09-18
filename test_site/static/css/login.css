@@ -14,15 +14,35 @@
    They are intentionally kept in sync with popularr.css's palette. If the theme
    changes, change both — or give the login page a link to popularr.css and
    delete this block, accepting that the shell's body/nav rules come with it.
+
+   ⚠️ THE VALUES WERE ALIGNED TO popularr.css (2026-09-18). They had drifted:
+   --text-primary was #e0e0e0 against the shell's #ffffff, --text-secondary
+   #b0b0b0 against #d0d0d0, and --border-color #333 against #282828. Because
+   this page is the only one that does not load popularr.css, that drift was
+   invisible here and only showed up when comparing this page against the app —
+   the same label rendered a different grey. A local copy of a shared token is
+   only safe while it holds the same value.
    ========================================================================== */
 
 :root {
   --primary-bg: #121212;
   --secondary-bg: #1e1e1e;
-  --text-primary: #e0e0e0;
-  --text-secondary: #b0b0b0;
-  --border-color: #333;
+  --tertiary-bg: #282828;
+  --text-primary: #ffffff;
+  --text-secondary: #d0d0d0;
+  --text-tertiary: #a0a0a0;
+  --border-color: #282828;
   --spotify-green: #1db954;
+  --accent-color: #1db954;
+  --accent-hover: #1ed760;
+
+  /* Radius scale — mirrored from popularr.css because this page never loads it.
+     Kept identical so a component moved between here and the app renders the
+     same corner. */
+  --radius-card: 0.75rem;
+  --radius-control: 0.5rem;
+  --radius-sm: 0.25rem;
+  --radius-pill: 999px;
 }
 
 body {
@@ -43,7 +63,7 @@ body {
 .login-card {
   background-color: var(--secondary-bg);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   padding: 2.5rem;
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
 }
@@ -108,7 +128,7 @@ body {
 }
 
 .alert {
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   border: none;
 }
 

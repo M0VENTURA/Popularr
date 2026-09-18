@@ -73,9 +73,17 @@ data-action attributes, consistent with components/_musicbrainz_search_component
       </div>
     </div>
 
-    <!-- Scope Tabs -->
-    <div class="d-flex align-items-center gap-2 mb-3 bg-secondary p-1 rounded">
-      <ul class="nav nav-pills gap-1 us-scope-chips flex-grow-1" id="unifiedScopeTabs" role="tablist">
+    <!-- Scope Tabs
+         `nav-segmented` (popularr.css) replaces the `bg-secondary p-1 rounded`
+         wrapper this used to carry — the same treatment as every other tab
+         strip in the app. Bootstrap's bg-secondary (#6c757d) is lighter than
+         any surface token in this theme, so the strip read as a pale band
+         rather than a recessed track behind the active pill.
+
+         The wrapper is kept (it also holds the filter button) but now only
+         lays out; the segment styling belongs on the list itself. -->
+    <div class="d-flex align-items-center gap-2 mb-3">
+      <ul class="nav nav-pills nav-segmented gap-1 us-scope-chips flex-grow-1" id="unifiedScopeTabs" role="tablist">
         <li class="nav-item flex-grow-1 text-center" role="presentation">
           <button type="button" class="nav-link active w-100 py-1" data-scope="all" role="tab" aria-selected="true">
             All <span class="us-scope-count badge bg-dark border border-secondary ms-1 d-none">0</span>

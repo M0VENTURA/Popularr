@@ -19,7 +19,9 @@
   #section1, #section2, #gapArtistAccordion, #noGapAlbums, #gapAlbumCount,
   #missingArtistAccordion, #noMissingAlbums, #missingArtistCount.
 #}
-<div class="container-fluid py-3">
+{# Page wrapper matches every other page: `container-fluid mt-4`.
+   Was `py-3`, which double-padded the bottom and set a different top rhythm. #}
+<div class="container-fluid mt-4">
 
   <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
     <h4 class="mb-0"><i class="bi bi-exclamation-circle text-warning"></i> Missing Tracks &amp; Albums</h4>

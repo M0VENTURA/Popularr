@@ -1,17 +1,17 @@
 {% extends "base.html" %}
 {#
-  Preview index — rendered by routes/preview_routes.py at /new.
+  Test-site index — rendered by routes/preview_routes.py at /test-site.
 
-  Lives at the ROOT of New/templates (not in Pages/) because it belongs to the
-  preview blueprint rather than to any application route, and it is the one file
-  in this tree that will be deleted at cutover along with the blueprint.
+  Lives at the ROOT of test_site/templates (not in Pages/) because it belongs to
+  the preview blueprint rather than to any application route, and it is the one
+  file in this tree that will be deleted at cutover along with the blueprint.
 
-  It extends the NEW base.html — the blueprint's template_folder is
-  New/templates, so "base.html" resolves to the rebuilt shell. That is
+  It extends the REBUILT base.html — the blueprint's template_folder is
+  test_site/templates, so "base.html" resolves to the rebuilt shell. That is
   deliberate: it is the fastest way to check the new shell renders at all.
 #}
 
-{% block title %}New UI Preview{% endblock %}
+{% block title %}Test Site · Popularr{% endblock %}
 
 {% block content %}
 <div class="container-fluid mt-4" style="max-width: 1100px;">
@@ -19,8 +19,8 @@
   <div class="alert alert-warning shadow-sm">
     <h5 class="mb-2"><i class="bi bi-cone-striped me-2"></i>Preview of the rebuilt UI — not the live app</h5>
     <p class="mb-2 small">
-      These pages come from <code>New/templates</code>, with assets served from
-      <code>New/static</code>. The live routes and templates are untouched, so the
+      These pages come from <code>test_site/templates</code>, with assets served from
+      <code>test_site/static</code>. The live routes and templates are untouched, so the
       normal app keeps working while you compare.
     </p>
     <p class="mb-0 small text-muted">
@@ -90,17 +90,45 @@
     </div>
   </div>
 
+  {# ── Missing files ───────────────────────────────────────────────────── #}
+  {% if absent %}
+  <div class="card mb-4 border-danger shadow-sm">
+    <div class="card-header bg-transparent py-2">
+      <h5 class="mb-0 fw-bold text-danger">
+        <i class="bi bi-file-earmark-x me-2"></i>Template missing from this tree
+        <span class="badge bg-danger ms-2">{{ absent|length }}</span>
+      </h5>
+    </div>
+    <div class="card-body">
+      <p class="small mb-3">
+        These are registered in <code>routes/preview_routes.py</code> but their
+        <code>Pages/&lt;slug&gt;.html</code> is not on disk, so they cannot be
+        opened. This is a real gap in the tree, not a routing problem — most
+        likely they did not survive the rename from <code>New/</code> to
+        <code>test_site/</code>. Each needs its page, its
+        <code>static/js/pages/</code> module and its
+        <code>static/css/</code> stylesheet restored.
+      </p>
+      <ul class="mb-0 small">
+        {% for slug in absent.keys() %}
+        <li><code>{{ slug }}</code></li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+  {% endif %}
+
   {# ── Drift check ─────────────────────────────────────────────────────── #}
   {% if unknown %}
   <div class="card mb-4 border-danger shadow-sm">
     <div class="card-header bg-transparent py-2">
       <h5 class="mb-0 fw-bold text-danger">
-        <i class="bi bi-exclamation-triangle me-2"></i>Unclassified pages in the New tree
+        <i class="bi bi-exclamation-triangle me-2"></i>Unclassified pages in the test tree
       </h5>
     </div>
     <div class="card-body">
       <p class="small mb-2">
-        These files exist under <code>New/templates/Pages/</code> but are in neither
+        These files exist under <code>test_site/templates/Pages/</code> but are in neither
         list above — either newly ported and not yet classified, or leftovers.
         Add them to <code>PREVIEWABLE</code> or <code>NEEDS_CONTEXT</code> in
         <code>routes/preview_routes.py</code>.
@@ -113,9 +141,9 @@
   {% endif %}
 
   <p class="small text-muted">
-    {{ discovered|length }} page file(s) found under <code>New/templates/Pages/</code>.
-    This index and the <code>/new</code> blueprint are temporary — delete both at
-    cutover (see <code>New/MIGRATION.md</code>).
+    {{ discovered|length }} page file(s) found under <code>test_site/templates/Pages/</code>.
+    This index and the <code>/test-site</code> blueprint are temporary — delete both at
+    cutover.
   </p>
 </div>
 {% endblock %}

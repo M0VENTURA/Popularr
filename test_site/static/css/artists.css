@@ -61,10 +61,14 @@
   display: none !important;
 }
 
+/* Fallback values match popularr.css — see the note in logs.css for why that
+   matters (a mis-cased popularr.css made every fallback live). This overlay is
+   the only place the jump picker is styled, so a mismatched fallback would have
+   made it read as a different surface from every other card. */
 .metro-jump-content {
   background: var(--secondary-bg, #1e1e1e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 0.5rem;
+  border: 1px solid var(--border-color, #282828);
+  border-radius: var(--radius-control, 0.5rem);
   width: 100%;
   max-width: 400px;
   padding: 1.25rem;
@@ -78,9 +82,9 @@
 
 .metro-tile {
   background: var(--tertiary-bg, #282828);
-  color: var(--text-primary, #fff);
-  border: 1px solid var(--border-color, #444);
-  border-radius: 0.25rem;
+  color: var(--text-primary, #ffffff);
+  border: 1px solid var(--border-color, #282828);
+  border-radius: var(--radius-card, 0.75rem);
   font-weight: bold;
   font-size: 1.15rem;
   aspect-ratio: 1;
@@ -92,9 +96,9 @@
 }
 
 .metro-tile:hover:not(.disabled) {
-  background: var(--spotify-green, #1db954);
+  background: var(--accent-color, #1db954);
   color: #fff;
-  border-color: var(--spotify-green, #1db954);
+  border-color: var(--accent-color, #1db954);
 }
 
 .metro-tile.disabled {

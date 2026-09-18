@@ -88,6 +88,24 @@
     --z-navbar: 1030;
     --z-player-bar: 1029;
     --z-search-backdrop: 1028;
+
+    /* Radius scale — one source for corner rounding.
+       --------------------------------------------------------------------
+       Before this, the same visual property was declared a different way in
+       almost every page stylesheet: cards were 0.75rem here, 0.5rem in
+       artist.css, 0.25rem in artists.css, 4px in downloads.css, 8px/12px in
+       login.css. Nothing was wrong in isolation, but pages read as subtly
+       different products and fixing one card never fixed the others.
+
+       --radius-card     cards, modals, accordions, mobile card rows, tiles
+       --radius-control  inputs, small buttons, badges, panels, side bars
+       --radius-sm       small inline chips (meta pills, tags)
+       --radius-pill     fully rounded — progress bars, pills, avatars
+       -------------------------------------------------------------------- */
+    --radius-card: 0.75rem;
+    --radius-control: 0.5rem;
+    --radius-sm: 0.25rem;
+    --radius-pill: 999px;
 }
 
 /* The navbar wraps its search row below the lg breakpoint, making it
@@ -191,8 +209,26 @@ a:not(.btn) {
     border-color: var(--border-color);
 }
 
+/* Table headers get the raised surface token, matching .card-header, so a
+   table's head is distinguishable from its body on every page.
+
+   This exists because search.css used to supply that distinction — with
+   `--primary-bg`, a DIFFERENT and darker value than the rest of the app — and
+   when that override was removed the search table would otherwise have gone
+   flat. Declaring it once here gives every page the same treatment instead of
+   each page inventing its own.
+
+   Row hover already lives further down (`.table-hover tbody tr` at >=768px);
+   deliberately not re-declared here. */
+.table > thead th,
+.table > thead td {
+    background-color: var(--tertiary-bg) !important;
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
+
 .card {
-    border-radius: 0.75rem;
+    border-radius: var(--radius-card);
     box-shadow: 0 4px 6px -1px color-mix(in srgb, black 30%, transparent);
     border: 1px solid color-mix(in srgb, white 5%, transparent);
 
@@ -204,19 +240,21 @@ a:not(.btn) {
 
 .progress {
     height: 4px !important;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background-color: color-mix(in srgb, white 10%, transparent) !important;
 }
 
 .album-art-container {
     width: min(200px, 50vw);
     aspect-ratio: 1;
-    border-radius: 0.5rem;
+    border-radius: var(--radius-control);
     overflow: hidden;
     background-color: var(--tertiary-bg);
     border: 2px solid var(--border-color);
 }
 
+/* Deliberately SMALLER than --radius-control: this is an 80px thumbnail, and
+   the card-scale radius reads as a blob at that size. */
 .album-art-sm {
     width: 80px;
     height: 80px;

@@ -5,20 +5,31 @@
 {% block content %}
 <div class="container-fluid mt-4">
     {#
-      TEMPORARY — "New UI" preview entry point.
+      TEMPORARY — test-site entry point.
 
-      Links to /new, which renders the rebuilt templates under New/ (assets from
-      New/static) without touching any live route, so the ported pages can be
-      clicked through before the cutover.
+      Links to /test-site, which renders the rebuilt templates under test_site/
+      (assets from test_site/static) without touching any live route, so the
+      ported pages can be clicked through before the cutover.
 
-      Delete this block — and routes/preview_routes.py, its blueprint
-      registration in helpers/app_bootstrap.py, and New/templates/_preview_index.html
-      — once the New tree replaces static/ + templates/. See New/MIGRATION.md.
+      Kept prominent and OUTSIDE the collapsible nav on purpose: it is the whole
+      point of the test tree, and burying it in a dropdown would make it easy to
+      forget it exists. It is also linked from the top of the Config page.
+
+      Delete this block — plus routes/preview_routes.py, its blueprint
+      registration in helpers/app_bootstrap.py, the Config-page banner, and
+      test_site/templates/_preview_index.html — once the test tree replaces
+      templates/ + static/.
     #}
-    <div class="d-flex justify-content-end mb-2">
-        <a href="/new" class="btn btn-sm btn-outline-warning" target="_blank" rel="noopener"
-           title="Preview the rebuilt UI before it replaces these pages">
-            <i class="bi bi-cone-striped me-1"></i> New UI preview
+    <div class="alert alert-warning d-flex align-items-center justify-content-between flex-wrap gap-2 py-2 shadow-sm">
+        <div class="d-flex align-items-center gap-2 small">
+            <i class="bi bi-cone-striped fs-5"></i>
+            <div>
+                <strong>Test site available.</strong>
+                <span class="text-muted">The rebuilt UI is running alongside this one — nothing here has changed yet.</span>
+            </div>
+        </div>
+        <a href="/test-site" class="btn btn-sm btn-warning fw-bold flex-shrink-0">
+            <i class="bi bi-box-arrow-up-right me-1"></i> Open test site
         </a>
     </div>
 

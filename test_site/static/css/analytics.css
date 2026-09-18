@@ -37,14 +37,14 @@
 
 .metric-track {
   background: rgba(120, 120, 120, 0.15);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   height: 12px;
   overflow: hidden;
 }
 
 .metric-fill {
   height: 100%;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   transition: width 200ms ease;
 }
 

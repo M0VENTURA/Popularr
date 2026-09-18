@@ -16,8 +16,10 @@
       closed has been moved into {% block scripts %}
     * the markup itself is unchanged; the ids below are what the module binds
 #}
-<!-- Use h-100 flex-column so the card fills the entire 'main' scrollport -->
-<div class="container-fluid mt-3 h-100 d-flex flex-column" style="min-height: 0;">
+<!-- Use h-100 flex-column so the card fills the entire 'main' scrollport.
+     `mt-4` (not mt-3) to match every other page's top rhythm; h-100 +
+     flex-column are specific to this page's full-height viewer. -->
+<div class="container-fluid mt-4 h-100 d-flex flex-column" style="min-height: 0;">
 
     <!-- Header Row -->
     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3 flex-shrink-0">

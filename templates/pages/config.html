@@ -32,6 +32,30 @@
   </div>
   {% endif %}
 
+  {#
+    TEMPORARY — test-site entry point (also linked from the dashboard).
+
+    The rebuilt UI runs alongside this one under test_site/, served at
+    /test-site by routes/preview_routes.py. Nothing on this page is affected.
+
+    Delete this block along with the dashboard banner, routes/preview_routes.py,
+    its registration in helpers/app_bootstrap.py and
+    test_site/templates/_preview_index.html once the test tree replaces
+    templates/ + static/.
+  #}
+  <div class="alert alert-warning d-flex align-items-center justify-content-between flex-wrap gap-2 py-2 shadow-sm mb-4">
+    <div class="d-flex align-items-center gap-2 small">
+      <i class="bi bi-cone-striped fs-5"></i>
+      <div>
+        <strong>Test site available.</strong>
+        <span class="text-muted">Preview the rebuilt UI before it replaces these pages.</span>
+      </div>
+    </div>
+    <a href="/test-site" class="btn btn-sm btn-warning fw-bold flex-shrink-0">
+      <i class="bi bi-box-arrow-up-right me-1"></i> Open test site
+    </a>
+  </div>
+
   <!-- Vertical Tab Navigation -->
   <div class="row mt-3">
     <div class="col-12 col-md-3 col-xl-2 mb-4">

@@ -136,7 +136,7 @@
         display: block;
         margin-bottom: 0.75rem;
         border: 1px solid var(--border-color);
-        border-radius: 0.5rem;
+        border-radius: var(--radius-card);
         background-color: var(--secondary-bg);
         overflow: hidden;
     }

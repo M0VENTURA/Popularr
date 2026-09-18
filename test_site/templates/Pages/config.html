@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Config · Popularr{% endblock %}
 {% block content %}
-<div class="container-fluid py-3 py-md-4">
+{# Page wrapper matches every other page: `container-fluid mt-4`.
+   Was `py-3 py-md-4` — a different top rhythm from the rest of the app, and
+   padding that duplicates what `main` already applies. #}
+<div class="container-fluid mt-4">
   <script>
     // Make config data available to JavaScript
     window.pageConfig = {{ config | tojson }};

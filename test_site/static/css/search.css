@@ -1,21 +1,24 @@
 /* ==========================================================================
-   ⛔ SUPERSEDED — DELETE THIS FILE. DO NOT LOAD IT.
+   ⛔ DEAD FILE — DELETE ME. Verified orphaned 2026-09-18.
 
-   Styles for the standalone /search page's own result rendering, which is
-   superseded: ui/search-flyout.js owns search now and brings its own styles in
-   popularr.css. templates/Pages/search.html no longer links this file.
+   Nothing loads this file. `grep versioned_static('css/search.css')` across
+   test_site/templates/ returns no matches:
+
+     * templates/Pages/search.html is now a thin ENTRY POINT onto the global
+       search flyout — it links no stylesheet at all, because
+       ui/search-flyout.js brings its own rules from popularr.css.
+     * The standalone library-search implementation this file styled is gone
+       (superseded), along with its script, js/pages/library-search.js.
+
+   Kept as an empty shell only so the filename is visible in the tree; the real
+   action is to delete it along with js/pages/library-search.js.
 
    ==========================================================================
-   (Original header follows, for reference only.)
-
    static/css/search.css
-   Library search page (templates/Pages/search.html).
-
-   Extracted from the inline <style> block in templates/pages/search.html.
-
-   ⚠️ WORTH CHECKING BEFORE TRUSTING THIS FILE
-   The `.table`, `.table thead`, `.table tbody`, `.table-hover` and
-   `.table-responsive` rules near the bottom are NOT search-specific — they are a
+   (Original header, for reference: styles for the superseded standalone
+   /search page's own result rendering — result cards, section titles, grids
+   and a page-local dark-table theme.)
+   ========================================================================== */
    page-local dark-theme override of Bootstrap's tables, using the same tokens
    popularr.css already defines. If popularr.css's table rules cover them, this
    block is a competing definition and should be deleted rather than moved. It
@@ -101,60 +104,27 @@
   }
 }
 
-/* ── Dark-theme table styling (see the warning at the top) ─────────────── */
+/* ── REMOVED: a page-wide dark-table theme ────────────────────────────────
+   This file used to carry 12 bare selectors (.table, .table thead, .table
+   tbody td, .table-hover tbody tr:hover, .table-responsive, …) with 20
+   `!important`s, re-implementing what popularr.css already does globally:
 
-.table {
-  color: var(--text-primary) !important;
-  background-color: transparent !important;
-}
+       .card, .card-body, .card-header, .table, .table th, .table td {
+           background-color: var(--secondary-bg) !important;
+           color: var(--text-primary);
+           border-color: var(--border-color);
+       }
 
-.table thead {
-  background-color: var(--primary-bg) !important;
-  color: var(--text-primary) !important;
-}
+   It was WORSE than redundant — it disagreed. Its `thead` used
+   `--primary-bg` (#121212) where the shell uses `--secondary-bg` (#1e1e1e),
+   and it forced every `tbody` to `transparent`, so the search results table
+   rendered visibly darker and flatter than every other table in the app. Two
+   competing `!important` definitions for the same property, with the winner
+   decided by stylesheet order.
 
-.table thead th {
-  background-color: var(--primary-bg) !important;
-  color: var(--text-primary) !important;
-  border-color: var(--border-color) !important;
-}
+   Harmony across pages is the whole point of this stylesheet set, so the
+   override is gone and the shell themes the table, like everywhere else.
 
-.table tbody {
-  background-color: transparent !important;
-}
-
-.table tbody tr {
-  background-color: transparent !important;
-  border-color: var(--border-color) !important;
-}
-
-.table tbody td {
-  background-color: transparent !important;
-  color: var(--text-primary) !important;
-  border-color: var(--border-color) !important;
-}
-
-.table tbody td a {
-  color: var(--spotify-green) !important;
-}
-
-.table tbody td a:hover {
-  color: var(--text-primary) !important;
-}
-
-.table tbody td strong {
-  color: var(--text-primary) !important;
-}
-
-.table-hover tbody tr:hover {
-  background-color: var(--primary-bg) !important;
-  color: var(--text-primary) !important;
-}
-
-.table-hover tbody tr:hover td {
-  background-color: var(--primary-bg) !important;
-}
-
-.table-responsive {
-  background-color: var(--secondary-bg) !important;
-}
+   If a distinction IS wanted for the results table specifically, scope it to
+   this page (e.g. `#searchResults .table`) rather than to `.table`.
+   ────────────────────────────────────────────────────────────────────────── */

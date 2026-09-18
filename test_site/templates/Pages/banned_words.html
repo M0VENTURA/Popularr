@@ -16,7 +16,16 @@
   The ids the script needs are unchanged: #newWordInput, #bannedWordsList,
   #suggestedWordsList, #bannedCount, #suggestedCount.
 #}
-<div class="container mt-4">
+{#
+  Page wrapper uses the same idiom as every other page: `container-fluid mt-4`.
+
+  It was `container` (fixed max-width) — the only page in the tree using it —
+  so this page was narrower and centre-aligned where every other page is
+  full-bleed. `mt-4` rather than `py-3`: main already supplies its own bottom
+  padding, so `py-3` was double-padding, and every other page sets only the top
+  rhythm.
+#}
+<div class="container-fluid mt-4">
     <div class="d-flex align-items-center mb-3 gap-3">
         <h4 class="mb-0"><i class="bi bi-slash-circle me-2"></i>Banned Search Words</h4>
         <a href="/downloads/monitor" class="btn btn-sm btn-outline-secondary">

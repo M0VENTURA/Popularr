@@ -20,9 +20,11 @@
    script already sets (text-success / text-danger).
    ========================================================================== */
 
-/* One row per simulated track. */
+/* One row per simulated track.
+   Fallback values match popularr.css — see the note in logs.css for why that
+   matters (a mis-cased popularr.css made every fallback live). */
 .sandbox-delta {
-  border-color: var(--border-color, #333);
+  border-color: var(--border-color, #282828);
   background-color: var(--secondary-bg, #1e1e1e);
   transition: background-color 0.15s ease, border-color 0.15s ease;
 }
@@ -39,13 +41,13 @@
   background-color: rgba(220, 53, 69, 0.10);
 }
 
-/* Live vs simulated score pair. */
+/* Live vs simulated score pair. Fallbacks match popularr.css (see logs.css). */
 .score-old {
-  color: var(--text-secondary, #b0b0b0);
+  color: var(--text-secondary, #d0d0d0);
 }
 
 .score-new {
-  color: var(--text-primary, #e0e0e0);
+  color: var(--text-primary, #ffffff);
   font-weight: 600;
 }
 
@@ -59,6 +61,6 @@
 }
 
 .score-arrow {
-  color: var(--text-secondary, #b0b0b0);
+  color: var(--text-secondary, #d0d0d0);
   opacity: 0.6;
 }

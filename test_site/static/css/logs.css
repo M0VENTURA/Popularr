@@ -42,10 +42,19 @@
 
 /* ── Level colours ───────────────────────────────────────────────────────
    Applied to both the line and its level token, so a filtered view stays
-   scannable — the level is the thing the user is looking for. */
+   scannable — the level is the thing the user is looking for.
+
+   THE FALLBACK VALUES MATCH popularr.css ON PURPOSE. A `var(--token, fallback)`
+   fallback only fires when the token is missing — and popularr.css WAS missing
+   (its path was mis-cased, so every stylesheet 404'd), which meant these
+   fallbacks were live and the viewer rendered #e0e0e0/#b0b0b0 where the rest of
+   the app uses #ffffff/#d0d0d0. The fallbacks were faithful copies of the
+   original inline styles, so this is a wiring fix, not a design change: if the
+   token ever goes missing again, the page should degrade to the app's own
+   colours rather than to a slightly different grey. */
 
 .log-level-debug {
-  color: var(--text-secondary, #b0b0b0);
+  color: var(--text-secondary, #d0d0d0);
 }
 
 .log-line.log-level-debug {
@@ -53,11 +62,11 @@
 }
 
 .log-level-info {
-  color: var(--text-primary, #e0e0e0);
+  color: var(--text-primary, #ffffff);
 }
 
 .log-line.log-level-info {
-  color: var(--text-primary, #e0e0e0);
+  color: var(--text-primary, #ffffff);
 }
 
 .log-level-warning {

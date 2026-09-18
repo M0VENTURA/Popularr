@@ -1,38 +1,41 @@
-"""New-UI preview routes.
+"""Test-site preview routes.
 
-Serves the rebuilt templates and assets under ``New/`` so the ported pages can be
-clicked through in a browser **before** the real routes are switched over.
+Serves the rebuilt templates and assets under ``test_site/`` so the ported pages
+can be clicked through in a browser **before** the real routes are switched over.
 
-Mounted at ``/new`` — nothing here touches the live routes, so the existing UI
-keeps working exactly as it does today. The point is to give a side-by-side:
-use the app normally, and open ``/new`` to exercise the replacement.
+Mounted at ``/test-site`` — nothing here touches the live routes, so the existing
+UI keeps working exactly as it does today. The point is to give a side-by-side:
+use the app normally, and open ``/test-site`` to exercise the replacement.
+
+The dashboard and config pages both link here, so it is reachable from inside the
+app rather than by typing the URL.
 
 Why a blueprint rather than a flag on the existing routes
 ---------------------------------------------------------
-The New templates are drop-in replacements that read the same context the live
-ones do, and they extend ``base.html``, which in the New tree lives at
-``New/templates/base.html``. Rendering them from the app's normal template folder
-is therefore impossible — they would resolve the *old* base.html and the *old*
-component partials. A separate blueprint with its own ``template_folder`` keeps
-the two trees independent right up to the cutover.
+The rebuilt templates are drop-in replacements that read the same context the
+live ones do, and they extend ``base.html``, which in the test tree lives at
+``test_site/templates/base.html``. Rendering them from the app's normal template
+folder is therefore impossible — they would resolve the *old* base.html and the
+*old* component partials. A separate blueprint with its own ``template_folder``
+keeps the two trees independent right up to the cutover.
 
 The ``versioned_static`` override
 ---------------------------------
 The New templates call ``versioned_static('js/pages/…')``. The app's global
 implementation resolves against the live ``static/`` folder, which still holds
-the OLD scripts — the extracted modules only exist under ``New/static``. Passing
+the OLD scripts — the extracted modules only exist under ``test_site/static``. Passing
 a shadowing ``versioned_static`` in the render context (Jinja resolves context
 names before globals) points every asset at this blueprint's own static route, so
 the preview loads the new JS/CSS instead of the legacy files.
 
 Docker
 ------
-``Dockerfile`` does ``COPY . /app``, so ``New/`` is already in the image. Check
+``Dockerfile`` does ``COPY . /app``, so ``test_site/`` is already in the image. Check
 ``.dockerignore`` only if a rebuild does not pick the folder up.
 
 Scope
 -----
-Every ported page is listed by ``/new``. Pages that need their live route's
+Every ported page is listed by ``/test-site``. Pages that need their live route's
 context (album / artist / track detail, config, dashboard, …) are listed with a
 reason rather than a link — those are verified after the cutover, or by adding a
 context shim here. Previewing them with empty context would fail on the first
@@ -54,15 +57,19 @@ from services.metadata.correction_service import get_album_tag_inconsistencies
 
 logger = structlog.get_logger(__name__)
 
+#: The test tree. Renamed from ``New/`` when the migration finished — this is a
+#: plain directory name, not a git branch or a build artefact.
+_TEST_SITE = "test_site"
+
 # routes/ -> repo root
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-PREVIEW_TEMPLATES_DIR = _REPO_ROOT / "New" / "templates"
-PREVIEW_STATIC_DIR = _REPO_ROOT / "New" / "static"
+PREVIEW_TEMPLATES_DIR = _REPO_ROOT / _TEST_SITE / "templates"
+PREVIEW_STATIC_DIR = _REPO_ROOT / _TEST_SITE / "static"
 
 preview_bp = Blueprint(
     "preview",
     __name__,
-    url_prefix="/new",
+    url_prefix="/test-site",
     template_folder=str(PREVIEW_TEMPLATES_DIR),
 )
 
@@ -211,19 +218,38 @@ def _preview_context(slug: str) -> dict[str, Any]:
 
 @preview_bp.route("/")
 async def preview_index() -> Any:
-    """Index of the ported pages, with a link per previewable one."""
+    """Index of the ported pages, with a link per previewable one.
+
+    The lists are FILTERED against what is actually on disk. A slug can be in
+    PREVIEWABLE while its template is absent — the four last-ported pages went
+    missing during the tree move — and an index that promises a page it cannot
+    open is worse than one that omits it, because it looks like the route is
+    broken rather than the file. Missing entries are surfaced separately as
+    `absent` so the gap is visible instead of silent.
+    """
     discovered = _discover_pages()
     unknown = [slug for slug in discovered if slug not in PREVIEWABLE and slug not in NEEDS_CONTEXT]
 
+    def _exists(slug: str) -> bool:
+        return (PREVIEW_TEMPLATES_DIR / f"Pages/{slug}.html").is_file() or \
+               (PREVIEW_TEMPLATES_DIR / f"{slug}.html").is_file()
+
+    previewable = {slug: info for slug, info in PREVIEWABLE.items() if _exists(slug)}
+    absent = {
+        slug: info for slug, info in {**PREVIEWABLE, **{k: ("", v) for k, v in NEEDS_CONTEXT.items()}}.items()
+        if not _exists(slug)
+    }
+
     return await render_template(
         "_preview_index.html",
-        # The index extends the NEW base.html, so it needs the same asset
-        # override the pages get — otherwise the new shell would pull the old
+        # The index extends the rebuilt base.html, so it needs the same asset
+        # override the pages get — otherwise the rebuilt shell would pull the old
         # scripts from static/.
         versioned_static=preview_versioned_static,
         custom_bookmark_links=[],
-        previewable=PREVIEWABLE,
+        previewable=previewable,
         needs_context=NEEDS_CONTEXT,
+        absent=absent,
         discovered=discovered,
         unknown=unknown,
         preview_templates_dir=str(PREVIEW_TEMPLATES_DIR),
@@ -235,7 +261,7 @@ async def preview_page(slug: str) -> Any:
     """Render one ported page from the New tree."""
     if slug not in PREVIEWABLE:
         if slug in NEEDS_CONTEXT:
-            abort(404, description=f"'{slug}' needs its live route's context — see /new. {NEEDS_CONTEXT[slug]}")
+            abort(404, description=f"'{slug}' needs its live route's context — see /test-site. {NEEDS_CONTEXT[slug]}")
         abort(404)
 
     template = f"Pages/{slug}.html"
