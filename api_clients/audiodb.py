@@ -86,7 +86,7 @@ class AudioDbClient:
             return None
         return album.get("strAlbumThumb") or album.get("strAlbumCDart") or None
 
-def get_artist_genres(self, artist_name: str, timeout: float = 10.0) -> list[str]:
+    def get_artist_genres(self, artist_name: str, timeout: float = 10.0) -> list[str]:
         """Return primary artist genre and style as a list for compatibility."""
         artist = self.search_artist(artist_name, timeout=timeout)
         if not artist:

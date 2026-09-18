@@ -662,7 +662,15 @@ def normalize_title_for_mbid_match(title: str) -> str:
 
 
 def normalize_title_for_lucene_query(title: str) -> str:
-    """Punctuation-free title for MusicBrainz Lucene phrase queries."""
+    """Punctuation-free title for MusicBrainz Lucene term queries.
+
+    Punctuation is replaced with a SPACE (not deleted) so it still separates
+    tokens: "GOLDEN HOUR: Part.4" must normalise to "golden hour part 4".
+    Deleting it produced "golden hour part4", which no longer matches
+    MusicBrainz's own tokenisation (the colon/period are token boundaries
+    there) and made the unquoted release-group fallback miss punctuation-heavy
+    titles.  Runs of whitespace left behind are collapsed at the end.
+    """
     if not title:
         return ""
 
@@ -670,7 +678,7 @@ def normalize_title_for_lucene_query(title: str) -> str:
     value = normalize_unicode_punctuation(value.lower())
     value = unicodedata.normalize("NFKD", value)
     value = "".join(c for c in value if not unicodedata.combining(c))
-    value = re.sub(r"[^\w\s]", "", value)
+    value = re.sub(r"[^\w\s]", " ", value)
     return re.sub(r"\s+", " ", value).strip()
 
 

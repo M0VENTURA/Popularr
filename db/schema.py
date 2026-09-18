@@ -251,6 +251,20 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "title": "TEXT", "duration": "DOUBLE PRECISION", "file_path": "TEXT",
         "track_number": "TEXT", "disc_number": "TEXT", "year": "TEXT", "release_year": "INTEGER",
         "releasecountry": "TEXT", "releasetype": "TEXT", "writer": "TEXT", 
+        # Release-detail fields. The album form posts these and the scan
+        # extracts them from file tags, but they had no column — so
+        # save_to_db's "only known columns" filter silently discarded every
+        # value, and the album page's inputs appeared to save then reset.
+        "releasestatus": "TEXT", "releasedate": "TEXT", "recordlabel": "TEXT",
+        "catalognumber": "TEXT", "barcode": "TEXT", "asin": "TEXT",
+        "media": "TEXT", "copyright": "TEXT", "language": "TEXT",
+        "explicitstatus": "TEXT", "originalyear": "TEXT", "originaldate": "TEXT",
+        "tracktotal": "TEXT", "disctotal": "TEXT", "script": "TEXT",
+        "discsubtitle": "TEXT", "albumversion": "TEXT",
+        # SPECIFIC release/edition name, e.g. "Experience: Expanded
+        # (Remixes and B-Sides)".  The release-GROUP name (the album's main
+        # identity) stays in ``album``; this is the tagline shown beneath it.
+        "release_title": "TEXT",
         "work": "TEXT", "isrc": "TEXT", "base_track_id": "TEXT",
         "is_single": "BOOLEAN DEFAULT FALSE",
         "is_cover": "BIGINT DEFAULT 0", "is_cover_reason": "TEXT", "original_cover_artist": "TEXT",
@@ -284,7 +298,8 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "musicbrainz_album_mbid": "TEXT", "musicbrainz_artistid": "TEXT", "musicbrainz_albumartistid": "TEXT",
         "musicbrainz_releasegroupid": "TEXT", "musicbrainz_releasetrackid": "TEXT",
         "musicbrainz_workid": "TEXT", "musicbrainz_albumstatus": "TEXT", "musicbrainz_albumtype": "TEXT",
-        "discogs_artist_id": "TEXT", "spotify_album_type": "TEXT",
+        "discogs_artist_id": "TEXT", "discogs_album_id": "TEXT",
+        "spotify_album_type": "TEXT",
         "last_scanned": "TEXT", "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", 
         "musicbrainz_last_updated": "TIMESTAMP", "discogs_last_updated": "TIMESTAMP",
         "pending_mb_updates": "TEXT", "mb_ignored_fields": "TEXT",

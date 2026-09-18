@@ -328,7 +328,7 @@
               </div>
               <div class="col-12 col-md-6">
                 <label for="album_discogs_id" class="form-label small">Discogs Release ID</label>
-                <input type="text" class="form-control bg-dark text-light border-secondary" id="album_discogs_id" name="album_discogs_id" value="{{ album_data.discogs_release_id or '' }}">
+                <input type="text" class="form-control bg-dark text-light border-secondary" id="album_discogs_id" name="album_discogs_id" value="{{ album_data.discogs_album_id or album_data.discogs_release_id or '' }}">
               </div>
             </div>
 

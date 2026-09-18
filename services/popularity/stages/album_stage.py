@@ -1033,7 +1033,7 @@ def _fetch_external_genres(artist: str) -> dict[str, list[str]]:
                 artist_mbid = row_get(row, "mbid")
 
         if artist_mbid:
-            from api_clients.wikidata import WikidataHttpClient
+            from api_clients.wikidata_http import WikidataHttpClient
             wd_client = WikidataHttpClient()
             qid = _call_with_heartbeat(
                 "external_genres.wikidata.qid_lookup",

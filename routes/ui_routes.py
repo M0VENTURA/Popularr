@@ -1279,6 +1279,14 @@ async def album_detail(album_path: str) -> Any:
         new_title = (form.get("album_title") or "").strip()
         new_artist = (form.get("album_artist") or "").strip()
         release_year = (form.get("release_year") or "").strip()
+        # The album's ORIGINAL year (the release group's first release), which
+        # is what ``year`` stores so a reissue groups with the original
+        # pressing.  The edition's own year is ``release_year``.
+        original_year = (form.get("album_originalyear") or "").strip()
+        # SPECIFIC release/edition name, e.g. "Experience: Expanded
+        # (Remixes and B-Sides)".  Distinct from the release-GROUP name, which
+        # lives in the album's ``album`` column.
+        release_title = (form.get("album_release_title") or "").strip()
         album_type = (form.get("album_type") or "").strip()
         track_artist = (form.get("track_artist") or "").strip()
         track_composer = (form.get("track_composer") or "").strip()
@@ -1294,7 +1302,7 @@ async def album_detail(album_path: str) -> Any:
             "recordlabel", "catalognumber", "barcode", "asin", "releasedate",
             "media", "releasetype", "releasestatus", "releasecountry", "copyright",
             "language", "explicitstatus", "originalyear", "originaldate",
-            "tracktotal", "disctotal", "script", "discsubtitle",
+            "tracktotal", "disctotal", "script", "discsubtitle", "albumversion",
         ]
         release_values = {
             f: (form.get(f"album_{f}") or "").strip()
@@ -1487,12 +1495,26 @@ async def album_detail(album_path: str) -> Any:
                     _cover_renamed_title = f"{_cur_title} ({_cover_original_artist} Cover)"
                     payload["title"] = _cover_renamed_title
 
-            if release_year:
+            # The two years are DISTINCT and stored separately:
+            #   year          -> the album's ORIGINAL year (the release group's
+            #                    first release), so a reissue groups with the
+            #                    original pressing.
+            #   release_year  -> THIS edition's year.
+            # Falling back to release_year preserves the old behaviour for a
+            # library that carries only a single date.
+            if original_year:
+                payload["year"] = original_year
+            elif release_year:
                 payload["year"] = release_year
+
+            if release_year:
                 try:
                     payload["release_year"] = int(release_year)
                 except ValueError:
                     pass
+
+            if release_title:
+                payload["release_title"] = release_title
 
             if album_type:
                 payload["spotify_album_type"] = album_type
@@ -1510,6 +1532,8 @@ async def album_detail(album_path: str) -> Any:
                 payload["musicbrainz_releasegroupid"] = album_rg_mbid
             if artist_mbid:
                 payload["musicbrainz_artistid"] = artist_mbid
+            if discogs_id:
+                payload["discogs_album_id"] = discogs_id
 
             if cover_url:
                 payload["cover_art_url"] = cover_url
@@ -1836,6 +1860,19 @@ async def album_detail(album_path: str) -> Any:
         "originaldate": first_value("originaldate"),
         "tracktotal": first_value("tracktotal"),
         "disctotal": first_value("disctotal"),
+        "discsubtitle": first_value("discsubtitle"),
+        "albumversion": first_value("albumversion"),
+        "script": first_value("script"),
+        # Album-level years/names. Declared explicitly (rather than relying on
+        # the ``**first_track`` spread) so every track agrees on the same
+        # value instead of inheriting whichever track happened to be first.
+        #   year          the album's ORIGINAL year
+        #   release_year  this specific edition's year
+        "year": first_value("year"),
+        "release_year": first_value("release_year"),
+        # The SPECIFIC release/edition name. Shown as a tagline beneath the
+        # album title only when it differs from the release-group name.
+        "release_title": first_value("release_title"),
         "last_scanned": first_value("last_scanned", "updated_at", "created_at"),
         "musicbrainz_album_mbid": first_value("musicbrainz_album_mbid", "musicbrainz_releaseid", "musicbrainz_albumid"),
         "musicbrainz_releasegroupid": first_value("musicbrainz_releasegroupid", "musicbrainz_release_group_id"),
