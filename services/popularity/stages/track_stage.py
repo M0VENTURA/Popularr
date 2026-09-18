@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import time
 import re
+from collections import Counter
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -1820,15 +1821,43 @@ def process_track(
 
     # -------------------------------------------------------------------------
     # 5.5 ALBUM YEAR UNIFICATION
+    #
+    # BOTH year columns are pinned to ONE album-level verdict.  They used to
+    # be written per track, and because MusicBrainz resolves each recording to
+    # whichever release lists it first, a multi-edition album picked up a
+    # different ``release_year`` on different tracks of the SAME folder.
+    #
+    # That split the album, because the UI groups albums on (name, year) and
+    # falls back to ``release_year`` when ``year`` is empty:
+    #   routes/ui_routes.py   album_key = f"{album.lower()}::{track_year}"
+    #   dashboard SQL         GROUP BY ..., COALESCE(year, release_year)
+    #
+    # ``year`` is the album's ORIGINAL year (the release group); ``release_year``
+    # is THIS edition's year and is a property of the release, not of the
+    # individual recording — so every track of the folder must agree on it.
+    #
+    # The scan runner resolves the authoritative pair once per album and
+    # supplies it via ``album_context``; the album-wide scan below is the
+    # fallback for direct callers (and for tests) that pass no album_context.
     # -------------------------------------------------------------------------
     if not popularity_only and not singles_detection_only:
         try:
+            _auth_year = album_context.get("authoritative_year")
+            _auth_edition_year = album_context.get("authoritative_release_year")
+
             _album_years = []
+            _album_edition_years = []
             for _at in (album_tracks or []):
-                _y = _as_str(_at.get("year") or _at.get("release_year")).strip()
+                _y = _as_str(_at.get("year")).strip()
                 if _y:
                     try:
                         _album_years.append(int(str(_y)[:4]))
+                    except ValueError:
+                        pass
+                _ey = _as_str(_at.get("release_year")).strip()
+                if _ey:
+                    try:
+                        _album_edition_years.append(int(str(_ey)[:4]))
                     except ValueError:
                         pass
 
@@ -1839,22 +1868,61 @@ def process_track(
                 except ValueError:
                     pass
 
-            if _album_years:
-                _min_year = min(_album_years)
-                _curr_year = _as_str(update_payload.get("year") or track.get("year") or track.get("release_year")).strip()
+            # ── Original year ────────────────────────────────────────────
+            if _auth_year is not None:
+                _year_target = int(str(_auth_year)[:4])
+            else:
+                _year_target = min(_album_years) if _album_years else None
+
+            if _year_target is not None:
+                _curr_year = _as_str(update_payload.get("year") or track.get("year")).strip()
 
                 _update_needed = False
                 if not _curr_year:
                     _update_needed = True
                 else:
                     try:
-                        if int(str(_curr_year)[:4]) > _min_year:
+                        if int(str(_curr_year)[:4]) != _year_target:
                             _update_needed = True
                     except ValueError:
                         _update_needed = True
 
                 if _update_needed:
-                    update_payload["year"] = str(_min_year)
+                    update_payload["year"] = str(_year_target)
+
+            # ── Edition year ─────────────────────────────────────────────
+            # Majority verdict: the edition year belongs to the RELEASE, so the
+            # value most tracks carry is the release's.  Ties go to the earlier
+            # year so the outcome is deterministic.  Only written when known —
+            # never clobbered to NULL, and never invented from the original.
+            if _auth_edition_year is not None:
+                _edition_target = int(str(_auth_edition_year)[:4])
+            elif _album_edition_years:
+                _edition_counts = Counter(_album_edition_years)
+                _best_edition_count = max(_edition_counts.values())
+                _edition_target = min(
+                    year for year, count in _edition_counts.items()
+                    if count == _best_edition_count
+                )
+            else:
+                _edition_target = None
+
+            if _edition_target is not None:
+                _curr_edition = _as_str(
+                    update_payload.get("release_year") or track.get("release_year")
+                ).strip()
+                _edition_needs_update = False
+                if not _curr_edition:
+                    _edition_needs_update = True
+                else:
+                    try:
+                        if int(str(_curr_edition)[:4]) != _edition_target:
+                            _edition_needs_update = True
+                    except ValueError:
+                        _edition_needs_update = True
+
+                if _edition_needs_update:
+                    update_payload["release_year"] = _edition_target
         except Exception as e:
             logger.debug("Album year unification failed", track_id=track_id, error=str(e))
 

@@ -366,6 +366,98 @@ def _collapse_album_mb_batch(mb_batch: dict[str, dict[str, Any]], track_contexts
             _meta["album"] = canonical
 
 
+def _year_of_value(value: Any) -> int | None:
+    """Leading 4-digit year of a tag value ("2018", "2018-04-20", 2018) or None."""
+    text_value = str(value or "").strip()
+    if len(text_value) >= 4 and text_value[:4].isdigit():
+        return int(text_value[:4])
+    return None
+
+
+def _resolve_album_authoritative_year(
+    tracks: list[dict[str, Any]] | None,
+    mb_batch: dict[str, dict[str, Any]] | None = None,
+) -> tuple[int | None, int | None]:
+    """Resolve ONE release-year pair for an entire album.
+
+    Returns ``(original_year, edition_year)``.
+
+    WHY THIS EXISTS: ``tracks.year`` and ``tracks.release_year`` are written
+    PER TRACK by the enrichment stage, and MusicBrainz resolves each recording
+    to whichever release lists it first.  A multi-edition album therefore ends
+    up with a different ``release_year`` on different tracks of the SAME
+    folder.  That splits the album in the UI, which groups on (name, year):
+
+    - ``routes/ui_routes.py`` builds ``album_key = f"{album}::{year}"`` and
+      ``_leading_year()`` falls back to ``release_year`` when ``year`` is
+      empty, so one folder renders as two "albums".
+    - the dashboard's recent-albums query groups on
+      ``COALESCE(year, release_year)`` for the same reason.
+
+    Resolving the pair ONCE per album and forcing every track onto it is what
+    keeps a folder as one album.
+
+    ``original_year`` is the EARLIEST year seen: ``year`` stores the album's
+    ORIGINAL release (what the release-group represents), so a reissue must
+    group with the original pressing.
+
+    ``edition_year`` is the MOST COMMON ``release_year`` seen — the edition is
+    a property of the release, not of the individual recording, so the
+    majority verdict is the release's.  Ties break to the EARLIEST year so the
+    result is deterministic and errs toward the original pressing.
+
+    STORED track values are preferred and the MusicBrainz batch is only
+    consulted when the tracks carry NO year at all.  A year already in the
+    database may be a deliberate edit, and sourcing from it first keeps this
+    helper's ``year`` verdict identical to the track-local ``min()`` it
+    replaces instead of silently re-dating every album from MusicBrainz.
+
+    ``(None, None)`` when nothing is known, so the caller leaves the columns
+    alone rather than inventing a year.
+    """
+    _original_years: list[int] = []
+    _edition_years: list[int] = []
+
+    for _track in tracks or []:
+        _year = _year_of_value(_track.get("year"))
+        if _year is not None:
+            _original_years.append(_year)
+        _edition = _year_of_value(_track.get("release_year"))
+        if _edition is not None:
+            _edition_years.append(_edition)
+
+    if not _original_years or not _edition_years:
+        for _meta in (mb_batch or {}).values():
+            if not isinstance(_meta, dict):
+                continue
+            # ``_recording_to_metadata`` names these explicitly; a raw release
+            # search result carries only ``date``.  Accept all three shapes.
+            if not _original_years:
+                _year = _year_of_value(
+                    _meta.get("original_release_year") or _meta.get("year") or _meta.get("date")
+                )
+                if _year is not None:
+                    _original_years.append(_year)
+            if not _edition_years:
+                _edition = _year_of_value(
+                    _meta.get("version_release_year") or _meta.get("release_year") or _meta.get("date")
+                )
+                if _edition is not None:
+                    _edition_years.append(_edition)
+            if _original_years and _edition_years:
+                break
+
+    _original = min(_original_years) if _original_years else None
+
+    _edition: int | None = None
+    if _edition_years:
+        _counts = Counter(_edition_years)
+        _best_count = max(_counts.values())
+        _edition = min(year for year, count in _counts.items() if count == _best_count)
+
+    return _original, _edition
+
+
 def _resolve_scan_type(options: dict[str, Any]) -> str:
     if options.get("metadata_only"):
         return "metadata"
@@ -1728,6 +1820,48 @@ def run_scan(
                 else:
                     _pop_scored_recently = (was_album_scanned(artist, album, "popularity", _pop_window) or was_album_scanned(artist, album, "combined", _pop_window))
                     _pop_due = not _pop_scored_recently
+
+            # -------------------------------------------------------------
+            # Album-authoritative release year.
+            #
+            # Resolved ONCE here, from every track's stored year plus the
+            # album's MusicBrainz batch, and handed to each track through
+            # ``album_context`` — so all tracks in the folder persist the same
+            # ``year`` AND the same ``release_year``.
+            #
+            # Without this the enrichment stage writes whatever edition each
+            # individual recording resolved to, and the UI (which groups albums
+            # on (name, year), falling back to ``release_year``) renders one
+            # folder as two or three separate albums.  Runs for every pass
+            # that writes metadata: the singles pass touches neither column,
+            # and popularity-only skips album identity entirely.
+            # -------------------------------------------------------------
+            if not _mode_pop and not _mode_singles:
+                try:
+                    _auth_original, _auth_edition = _resolve_album_authoritative_year(
+                        track_dicts,
+                        options.get("mb_batch_metadata"),
+                    )
+                    if _auth_original is not None:
+                        album_context["authoritative_year"] = _auth_original
+                    if _auth_edition is not None:
+                        album_context["authoritative_release_year"] = _auth_edition
+                    if _auth_original is not None or _auth_edition is not None:
+                        logger.info(
+                            "Album release year unified",
+                            artist=artist,
+                            album=album,
+                            original_year=_auth_original,
+                            edition_year=_auth_edition,
+                            track_count=len(track_dicts),
+                        )
+                except Exception as exc:
+                    logger.debug(
+                        "Album authoritative year resolution failed",
+                        artist=artist,
+                        album=album,
+                        error=str(exc),
+                    )
 
             _track_jobs: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]] = []
             for track_context in track_contexts:

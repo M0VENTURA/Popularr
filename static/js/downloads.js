@@ -2237,7 +2237,7 @@ function renderQueueList(kind, items) {
   listEl.style.display = 'block';
   if (badgeEl) { badgeEl.textContent = items.length + ' item' + (items.length !== 1 ? 's' : ''); badgeEl.style.display = 'inline-block'; }
 
-  const groups = buildQueueGroups(items);
+  const groups = buildQueueGroups(items, { byFolder: kind === 'completed' });
   window.__queueGroupsArr = groups;
   const rows = groups.map(function (group, index) {
     if (group.items.length === 1) {
@@ -2251,17 +2251,59 @@ function renderQueueList(kind, items) {
   restoreQueueGroupExpansion(listEl);
 }
 
-function buildQueueGroups(items) {
+/**
+ * The folder a queue item's file currently sits in.
+ *
+ * ``file_path`` is where the download/scan put the file. ``music_file_path``
+ * points into the LIBRARY and is only set once the item has already been
+ * imported, so it is the last resort — grouping an unorganised item by a
+ * library folder would hide which folder still needs attention.
+ */
+function folderOf(item) {
+  const candidates = [item.file_path, item.matched_file_path, item.music_file_path];
+
+  for (const candidate of candidates) {
+    // Normalise Windows separators before splitting so a "D:\\dl\\Album\\01.mp3"
+    // path yields the same folder as the equivalent POSIX path.
+    const raw = String(candidate || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
+    if (!raw) continue;
+
+    const index = raw.lastIndexOf('/');
+    // index === 0 is a bare filename with nothing to group on.
+    if (index > 0) return raw.slice(0, index);
+  }
+
+  return '';
+}
+
+/** Last path segment — the folder's display name. */
+function folderLabel(folder) {
+  const trimmed = String(folder || '').replace(/\/+$/, '');
+  return trimmed.slice(trimmed.lastIndexOf('/') + 1) || trimmed;
+}
+
+function buildQueueGroups(items, opts) {
+  var byFolder = !!(opts && opts.byFolder);
   var groups = [];
   var map = {};
   (items || []).forEach(function (item) {
     var album = (item.album || item.queue_folder || '').trim();
     var artist = (item.album_artist || item.artist || '').trim();
     var title = (item.title || '').trim();
+    var folder = byFolder ? folderOf(item) : '';
     var key, label, sublabel;
 
-    // Explicitly ignore "default" so legacy rows don't merge
-    if (item.import_group && item.import_group !== 'default' && item.import_group !== 'manual') {
+    if (folder) {
+      // FOLDER FIRST for the completed list — see the note in the rebuilt
+      // tree. Tracks of one folder can carry different album/import_group
+      // values, which shredded a single folder across several groups. The
+      // folder on disk is the unit the user organises, so it is the key.
+      // The label still prefers the real album name, shown alongside the
+      // folder rather than replaced by it.
+      key = 'fld_' + folder.toLowerCase();
+      label = album || folderLabel(folder);
+      sublabel = artist;
+    } else if (item.import_group && item.import_group !== 'default' && item.import_group !== 'manual') {
       key = 'grp_' + String(item.import_group);
       label = album || String(item.import_group);
       sublabel = artist;
@@ -2276,11 +2318,25 @@ function buildQueueGroups(items) {
     }
 
     if (!map[key]) {
-      map[key] = { key: key, label: label, sublabel: sublabel, items: [] };
+      map[key] = { key: key, label: label, sublabel: sublabel, folder: folder || '', items: [] };
       groups.push(map[key]);
     }
     map[key].items.push(item);
   });
+
+  // The API returns rows in ``updated_at DESC`` order, which for a
+  // folder-per-album downloads area looks random. Sorting by folder makes the
+  // list scannable and stable across polls. Only the folder-grouped list is
+  // reordered; the active/failed lists keep their own recency order.
+  if (byFolder) {
+    groups.sort(function (a, b) {
+      var left = (a.folder || a.label || '').toLowerCase();
+      var right = (b.folder || b.label || '').toLowerCase();
+      if (left !== right) return left < right ? -1 : 1;
+      return a.label.toLowerCase() < b.label.toLowerCase() ? -1 : 1;
+    });
+  }
+
   return groups;
 }
 
@@ -2437,6 +2493,12 @@ function renderQueueGroupRow(group, kind, index) {
     '<div class="text-truncate flex-grow-1" style="min-width:0;">' +
     '<strong><i class="bi bi-folder2-open me-1"></i>' + escapeHtml(group.label) + '</strong>' + subline +
     '<br><small class="text-muted">' + total + ' track' + (total !== 1 ? 's' : '') + ' · ' + escapeHtml(summary) + '</small>' +
+    // The folder is the grouping key and the thing an Organize action moves,
+    // so showing it makes clear why these tracks are grouped together.
+    (group.folder
+      ? '<br><small class="text-muted text-truncate d-block" title="' + escapeHtml(group.folder) + '">' +
+        '<i class="bi bi-folder"></i> ' + escapeHtml(group.folder) + '</small>'
+      : '') +
     '</div>' +
     '<div class="d-flex align-items-center gap-1 flex-shrink-0">' + actions + '</div>' +
     '</div>' +

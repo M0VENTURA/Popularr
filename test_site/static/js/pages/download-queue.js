@@ -120,12 +120,52 @@
   const groupRegistry = Object.create(null);
 
   /**
-   * Bucket queue items into album groups.
+   * The folder a queue item's file currently sits in.
+   *
+   * Completed items are the files waiting in the downloads area, and
+   * ``file_path`` is where the download/scan put them.  ``music_file_path``
+   * points into the LIBRARY and is only set once an item has already been
+   * imported, so it is the last resort here — grouping an unorganised item by
+   * a library folder would hide which folder still needs attention.
+   *
+   * @param {Object} item
+   * @returns {string} absolute folder path, or '' when the item has no path
+   */
+  function folderOf(item) {
+    const candidates = [item.file_path, item.matched_file_path, item.music_file_path];
+
+    for (const candidate of candidates) {
+      // Windows separators arrive from the scanner; normalise before splitting
+      // so "D:\\dl\\Album\\01.mp3" yields the same folder as a POSIX path.
+      const raw = String(candidate || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
+      if (!raw) continue;
+
+      const index = raw.lastIndexOf('/');
+      // index === 0 is a bare filename (or a root path) with nothing to group
+      // on, so fall through to the next candidate.
+      if (index > 0) return raw.slice(0, index);
+    }
+
+    return '';
+  }
+
+  /** Last path segment — the folder's display name. */
+  function folderLabel(folder) {
+    const trimmed = String(folder || '').replace(/\/+$/, '');
+    return trimmed.slice(trimmed.lastIndexOf('/') + 1) || trimmed;
+  }
+
+  /**
+   * Bucket queue items into groups.
    *
    * @param {Array<Object>} items
-   * @returns {Array<Object>} [{ key, label, sublabel, items }]
+   * @param {Object} [opts]
+   * @param {boolean} [opts.byFolder] group the completed list by the FOLDER its
+   *        files sit in, and sort those groups by folder
+   * @returns {Array<Object>} [{ key, label, sublabel, folder, items }]
    */
-  function buildQueueGroups(items) {
+  function buildQueueGroups(items, opts) {
+    const byFolder = !!(opts && opts.byFolder);
     const groups = [];
     const byKey = Object.create(null);
 
@@ -133,14 +173,28 @@
       const album = (item.album || item.queue_folder || '').trim();
       const artist = (item.album_artist || item.artist || '').trim();
       const title = (item.title || '').trim();
+      const folder = byFolder ? folderOf(item) : '';
 
       let key;
       let label;
       let sublabel;
 
-      // "default" and "manual" are sentinel import groups — treating them as
-      // real groups would merge every unrelated legacy row into one album.
-      if (item.import_group && item.import_group !== 'default' && item.import_group !== 'manual') {
+      if (folder) {
+        // FOLDER FIRST for the completed list. The download scanner can put
+        // tracks of one album in one folder while only some of them carry an
+        // ``album``/``import_group``, so the album-based keys below shredded a
+        // single folder across several groups. The folder on disk is the unit
+        // the user actually organises, so it is the key that matches reality.
+        //
+        // The label still prefers the real album name when one is known; the
+        // folder is shown alongside it (renderGroupRow) rather than replacing
+        // it, because a folder name is often "Artist - Album (WEB)".
+        key = 'fld_' + folder.toLowerCase();
+        label = album || folderLabel(folder);
+        sublabel = artist;
+      } else if (item.import_group && item.import_group !== 'default' && item.import_group !== 'manual') {
+        // "default" and "manual" are sentinel import groups — treating them as
+        // real groups would merge every unrelated legacy row into one album.
         key = 'grp_' + String(item.import_group);
         label = album || String(item.import_group);
         sublabel = artist;
@@ -155,11 +209,25 @@
       }
 
       if (!byKey[key]) {
-        byKey[key] = { key, label, sublabel, items: [] };
+        byKey[key] = { key, label, sublabel, folder: folder || '', items: [] };
         groups.push(byKey[key]);
       }
       byKey[key].items.push(item);
     });
+
+    // Groups arrived in whatever order the API returned (``updated_at DESC``),
+    // which for a folder-per-album downloads area looks random. Sorting by
+    // folder makes the list scannable and stable across polls. Only the
+    // folder-grouped list is reordered — the active/failed lists keep their
+    // insertion order, which is their own recency signal.
+    if (byFolder) {
+      groups.sort((a, b) => {
+        const left = (a.folder || a.label || '').toLowerCase();
+        const right = (b.folder || b.label || '').toLowerCase();
+        if (left !== right) return left < right ? -1 : 1;
+        return a.label.toLowerCase() < b.label.toLowerCase() ? -1 : 1;
+      });
+    }
 
     return groups;
   }
@@ -391,6 +459,14 @@
         title: 'Organize and move this album (folder format and metadata)',
       }));
     }
+    // NOTE: a folder group (`fld_`) deliberately does NOT get the organize
+    // MODAL. That modal posts its group id to /api/queue/organize-group, and
+    // organize_group_sync() resolves the batch with
+    // `WHERE import_group = :group AND status = 'completed'` — a folder path
+    // is not an import_group, so the call would fail with "No completed items
+    // found for this group". The plain Organize button below covers folders:
+    // organizeGroup() falls back to per-item /organize when the group carries
+    // no import_group.
     buttons.push(global.itemGroups.actionButton({
       className: 'btn-outline-danger group-delete', icon: 'bi-trash', data: keyData,
       title: 'Remove all tracks in this album',
@@ -413,7 +489,15 @@
       },
       titleHtml:
         `<strong><i class="bi bi-folder2-open me-1"></i>${esc(group.label)}</strong>${subline}`,
-      metaHtml: `<br><small class="text-muted">${total} track${total === 1 ? '' : 's'} · ${esc(summary)}</small>`,
+      metaHtml:
+        `<br><small class="text-muted">${total} track${total === 1 ? '' : 's'} · ${esc(summary)}</small>` +
+        // The folder is what the user actually moves, and it is the grouping
+        // key — showing it makes clear WHY these tracks are together and which
+        // folder an Organize action will act on.
+        (group.folder
+          ? `<br><small class="text-muted text-truncate d-block" title="${esc(group.folder)}">` +
+            `<i class="bi bi-folder"></i> ${esc(group.folder)}</small>`
+          : ''),
       actionsHtml: buttons.join(''),
       bodyHtml: children,
     });
@@ -469,7 +553,9 @@
   }
 
   function renderGroupedList(listEl, kind, items) {
-    const groups = buildQueueGroups(items);
+    // The completed list is grouped by the FOLDER its files sit in; the active
+    // and failed lists keep their album-based grouping. See buildQueueGroups.
+    const groups = buildQueueGroups(items, { byFolder: kind === 'completed' });
     registerGroups(kind, groups);
 
     // DE-DUPLICATED 2026-09-18 — the completed list used to repeat the album's
@@ -926,10 +1012,35 @@
 
     const run = async () => {
       try {
-        const withGroup = group.items.find((i) => i.import_group);
-        if (withGroup) {
-          await global.api.postJson('/api/queue/organize-group',
-            { group_id: withGroup.import_group }, { timeoutMs: ORGANIZE_TIMEOUT_MS });
+        // A group can span MORE THAN ONE import_group once the completed list
+        // is grouped by folder (a folder may hold tracks queued from different
+        // searches). The old code took only the FIRST import_group it found and
+        // posted that as the group id, so every track belonging to any other
+        // group in the same folder was silently left unorganized.
+        //
+        // Collect the import groups, then fall back to per-item organize for
+        // the whole folder when they are absent — which is also what used to
+        // happen only when NO item carried one.
+        const importGroups = [];
+        copyable.forEach((item) => {
+          const groupId = item.import_group;
+          if (groupId && groupId !== 'default' && groupId !== 'manual'
+              && !importGroups.includes(groupId)) {
+            importGroups.push(groupId);
+          }
+        });
+
+        if (importGroups.length) {
+          for (const groupId of importGroups) {
+            await global.api.postJson('/api/queue/organize-group',
+              { group_id: groupId }, { timeoutMs: ORGANIZE_TIMEOUT_MS });
+          }
+          // Any copyable track outside those groups still needs the per-item
+          // path, otherwise it is reported as organized but never moved.
+          const orphaned = copyable.filter((i) => !importGroups.includes(i.import_group));
+          for (const item of orphaned) {
+            await global.api.postJson(`/api/queue/${item.id}/organize`, {}, { timeoutMs: 120000 });
+          }
         } else {
           for (const item of copyable) {
             await global.api.postJson(`/api/queue/${item.id}/organize`, {}, { timeoutMs: 120000 });
