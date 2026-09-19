@@ -24,9 +24,6 @@
         <span class="badge {{ 'bg-warning text-dark' if is_missing else 'bg-success' }} release-status-badge">
           {{ 'Missing' if is_missing else 'In Library' }}
         </span>
-        {% if not is_missing %}
-        <span class="badge bg-warning text-dark album-missing-tracks-badge ms-1" style="display:none;"></span>
-        {% endif %}
       </div>
       <div class="release-sub text-muted small">{{ year or '—' }}</div>
     </div>
