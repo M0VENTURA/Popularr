@@ -54,6 +54,30 @@ _POPULARITY_MAX_WAITS = 120  # ~2 hours before giving up on the sweep
 
 _popularity_probe_warned = False
 
+# Candidate accessors for "is a popularity scan running?", tried in order.
+#
+# Only ONE accessor exists in this build. The four legacy candidates this list
+# used to carry (``services.scanning.scan_state.is_popularity_scan_running``,
+# ``services.scanning.scan_state.is_scan_running``,
+# ``services.popularity.scan_state.is_scan_running`` and
+# ``services.scheduler.scheduler_service.is_popularity_scan_active``) were all
+# permanently dead: none of those modules/attributes has ever existed, because
+# ``scheduler_service`` imports the function lazily inside a function body. The
+# probe therefore NEVER resolved, so the sweep always concluded "no popularity
+# scan is running" — including while one genuinely was — and ran concurrently
+# with it against the shared 1 req/s MusicBrainz budget.
+#
+# The list remains a list so that a future move of the accessor can be covered
+# by appending a candidate; the import/getattr probing below still degrades to a
+# single warning rather than raising.
+_CANONICAL_POPULARITY_ACCESSOR = (
+    "services.scanning.pipelines.popularity_pipeline",
+    "is_popularity_scan_active",
+)
+_POPULARITY_SCAN_PROBES: tuple[tuple[str, str], ...] = (
+    _CANONICAL_POPULARITY_ACCESSOR,
+)
+
 
 # ---------------------------------------------------------------------------
 # Cross-scan coordination
@@ -68,12 +92,8 @@ def _popularity_scan_active() -> bool:
     """
     global _popularity_probe_warned
 
-    probes = (
-        ("services.scanning.scan_state", "is_popularity_scan_running"),
-        ("services.scanning.scan_state", "is_scan_running"),
-        ("services.popularity.scan_state", "is_scan_running"),
-        ("services.scheduler.scheduler_service", "is_popularity_scan_active"),
-    )
+    probes = _POPULARITY_SCAN_PROBES
+    canonical_name = ".".join(_CANONICAL_POPULARITY_ACCESSOR)
 
     for module_name, attribute in probes:
         try:
@@ -101,6 +121,7 @@ def _popularity_scan_active() -> bool:
                 "serialise itself against the popularity scan"
             ),
             probed=[f"{m}.{a}" for m, a in probes],
+            canonical=canonical_name,
         )
     return False
 

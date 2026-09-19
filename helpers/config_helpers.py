@@ -621,6 +621,38 @@ def get_queue_matching_config_legacy() -> dict:
 # Standout / star rating configuration
 # -----------------------------------------------------------------------------
 
+# Album RATIO standout defaults (the "shape of popularity" 5★ gate).
+#
+# These are MULTIPLIERS, not z-scores or raw counts. A z-score measures
+# deviation relative to the album's own spread, which SHRINKS on a small flat
+# album — so a 3-listener gap on counts of 8..14 looks like a large z-score
+# while the numbers are indistinguishable from noise. Ratios are scale-free:
+# "is #1 three times the median?" means the same at 100 listeners or 10M.
+#
+#   1. runner_up — top / #2.      Is #1 separated from its nearest rival?
+#   2. median    — top / median.  How far above the album's standard fare?
+#   3. floor     — top / bottom.  Total dynamic range of the album.
+#
+# `min_passed` is how many of the three must hold (default: all three).
+# Lower it to require only two — e.g. a live album often has a flat bottom
+# (crowd noise on every track) which makes the floor ratio weak even when the
+# hit is obvious.
+#
+# Reference case (Anti-Flag acoustic; counts 14, 13, 13, ~11, 8):
+#   runner_up 1.07x (needs 1.5)  median 1.27x (needs 3.0)  floor 1.75x (needs 10)
+#   -> fails all three, correctly: no standout on that album.
+_DEFAULT_ALBUM_RATIO_STANDOUT: dict[str, float] = {
+    "enabled": 1,
+    "runner_up_min": 1.5,
+    "median_min": 3.0,
+    "floor_min": 10.0,
+    "min_passed": 3,
+    "live_runner_up_min": 1.5,
+    "live_median_min": 2.0,
+    "live_floor_min": 5.0,
+    "live_min_passed": 2,
+}
+
 # Live-album rating defaults.
 #
 # Live releases are rated against the ARTIST's catalogue (artist-z), not
@@ -750,6 +782,16 @@ def get_standout_config() -> dict[str, Any]:
     if isinstance(user_live_scaling, dict):
         live_scaling.update(user_live_scaling)
     result["live_album_scaling"] = live_scaling
+
+    # Album ratio standout gate (the "shape of popularity" 5★ test). Merged
+    # the same way as live_album_scaling: always present, partial user block
+    # overrides only the keys it names. finalise_stage reads these via
+    # ``get_standout_config()["album_ratio_standout"]``.
+    ratio_rules = dict(_DEFAULT_ALBUM_RATIO_STANDOUT)
+    user_ratio_rules = sd_config.get("album_ratio_standout")
+    if isinstance(user_ratio_rules, dict):
+        ratio_rules.update(user_ratio_rules)
+    result["album_ratio_standout"] = ratio_rules
 
     return result
 

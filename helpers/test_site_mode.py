@@ -79,6 +79,16 @@ CONFIG_KEY = "use_test_site"
 #: names while every blueprint in this app is namespaced (``ui.dashboard``).
 #: The live ``templates/pages/downloads/monitor.html`` is the correct page.
 #:
+#: NOTE on ``components/_release_section.html``: the rebuilt copy used to be a
+#: stray FULL ARTIST PAGE (byte-identical to templates/pages/artist_detail.html)
+#: that defined NO MACRO, so importing it raised
+#: ``ImportError: cannot import name 'render_release_section'`` — and because the
+#: rebuilt tree is a PREFERRED loader, that broken copy also won over the correct
+#: live macro. It has since been REPAIRED in place (it now defines the macro and
+#: keeps the superseded snapshot as an inert comment), so it is deliberately NOT
+#: shadowed: shadowing would make the rebuilt copy dead weight. Keep both copies
+#: equivalent; tests/test_artist_page_contract.py asserts that they are.
+#:
 #: REMOVE an entry once the rebuilt file is replaced or deleted.
 _SHADOWED_TEMPLATES: Final[frozenset[str]] = frozenset({
     "pages/downloads/monitor.html",

@@ -9,7 +9,7 @@ because they change what the album IS.
 
 from __future__ import annotations
 
-from services.scanning.navidrome_import import artist_album_name_diff
+from services.scanning.navidrome_import import compute_artist_album_diff
 from helpers.normalization_service import strip_album_edition_marker
 
 
@@ -76,7 +76,10 @@ class TestArtistAlbumNameDiffEditionStripping:
             def fetch_artist_albums(self, artist_id):
                 return [{"id": "al-1", "name": "Slipknot (Clean)", "songCount": 12}]
 
-        skip, changed, removed = artist_album_name_diff("Slipknot", "ar-1", client=_FakeClient())
+        skip, changed, removed = compute_artist_album_diff(
+            "Slipknot",
+            _FakeClient().fetch_artist_albums("ar-1"),
+        )
         assert skip is False
         assert changed == {"Slipknot"}
         assert removed == set()
@@ -109,6 +112,9 @@ class TestArtistAlbumNameDiffEditionStripping:
             def fetch_artist_albums(self, artist_id):
                 return [{"id": "al-2", "name": "Current Album", "songCount": 3}]
 
-        skip, changed, removed = artist_album_name_diff("Some Artist", "ar-2", client=_FakeClient())
+        skip, changed, removed = compute_artist_album_diff(
+            "Some Artist",
+            _FakeClient().fetch_artist_albums("ar-2"),
+        )
         assert skip is False
         assert removed == {"Gone Album"}

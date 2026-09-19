@@ -420,6 +420,21 @@ function buildConfigObject() {
           minor_max_5star_slots: parseInt(getValue('era_minor_max_5star_slots', '2')) || 2,
           peak_era_min_ratio: parseFloat(getValue('peak_era_min_ratio', '0.75')) || 0.75,
           solid_era_min_ratio: parseFloat(getValue('solid_era_min_ratio', '0.40')) || 0.40
+        },
+        // The album RATIO standout gate — the "shape of popularity" 5★ test.
+        // Every field must be listed or it saves, appears to work, then
+        // silently reverts on reload (the same bug class as omitting a field
+        // from any other payload object here).
+        album_ratio_standout: {
+          enabled: getChecked('album_ratio_standout_enabled', true),
+          runner_up_min: parseFloat(getValue('album_ratio_runner_up_min', '1.5')) || 1.5,
+          median_min: parseFloat(getValue('album_ratio_median_min', '3.0')) || 3.0,
+          floor_min: parseFloat(getValue('album_ratio_floor_min', '10.0')) || 10.0,
+          min_passed: parseInt(getValue('album_ratio_min_passed', '3'), 10) || 3,
+          live_runner_up_min: parseFloat(getValue('album_ratio_live_runner_up_min', '1.5')) || 1.5,
+          live_median_min: parseFloat(getValue('album_ratio_live_median_min', '2.0')) || 2.0,
+          live_floor_min: parseFloat(getValue('album_ratio_live_floor_min', '5.0')) || 5.0,
+          live_min_passed: parseInt(getValue('album_ratio_live_min_passed', '2'), 10) || 2
         }
       }
     ),

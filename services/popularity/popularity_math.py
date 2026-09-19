@@ -184,7 +184,145 @@ def effective_album_ratio(effective_median: float, m_peak: float) -> float:
     """Return ``R_eff`` -- where the album sits on the artist's career curve."""
     if not m_peak or float(m_peak) <= 0:
         return 1.0
-    return min(1.0, max(0.0, float(effective_median) / float(m_peak)))
+    return min(1.0, max(0.0, float(effective_median) / float(m_peak))))
+
+
+# ---------------------------------------------------------------------------
+# Album standout RATIOS (shape-of-popularity test for 5★)
+# ---------------------------------------------------------------------------
+#
+# Why ratios rather than z-scores or raw counts
+# ---------------------------------------------
+# A z-score answers "how many standard deviations above the mean is this
+# track?" -- and on a SMALL, FLAT album it answers that misleadingly, because
+# the spread (sigma/MAD) also shrinks. A 3-listener gap on an album whose
+# counts are 8..14 produces a perfectly respectable z-score even though the
+# listener numbers are indistinguishable from noise and the "top" track is
+# only 7% ahead of the runner-up.
+#
+# Ratios (multipliers) measure the SHAPE of the album's popularity and are
+# scale-free: "is #1 three times the median?" means the same thing whether the
+# artist has 100 listeners or 10 million. A genuine standout eclipses the rest
+# of the album; a flat album has no standout at any magnitude.
+#
+# Three independent multipliers, each answering a different question:
+#
+#   1. Runner-up gap  (top / #2)      -- is #1 separated from its nearest rival?
+#      A true standout typically sits 1.5x-2.0x clear of the runner-up.
+#      Near 1.0x means the top two are a tie (no standout).
+#
+#   2. Baseline       (top / median)  -- how far above the album's "standard
+#      fare" is it? A genuine hit usually runs 3x-5x the album median.
+#
+#   3. Spread         (top / bottom)  -- total dynamic range of the album. On a
+#      studio album with a hit and unpopular deep cuts this is routinely
+#      10x-50x; on a uniformly-unlistened album it collapses toward 1x.
+#
+# Reference case (Anti-Flag, acoustic album; counts 14, 13, 13, ~11 median, 8):
+#   runner-up 14/13 = 1.07x   baseline 14/11 = 1.27x   spread 14/8 = 1.75x
+#   -> all three fail, correctly: that album has no standout.
+
+
+#: Minimum usable counts before the ratio test is meaningful at all. Below
+#: this the gate is INCONCLUSIVE and must not block a rating.
+ALBUM_RATIO_MIN_COUNTS = 3
+
+
+def album_standout_ratios(
+    counts: list[float] | list[int] | None,
+) -> dict[str, float]:
+    """Return the three standout multipliers for one album's listener counts.
+
+    Returns an empty dict when fewer than ``ALBUM_RATIO_MIN_COUNTS`` positive
+    counts are available — the caller must treat that as "inconclusive" and
+    NOT as a failure, so thin data can never suppress a rating.
+
+    Keys:
+        ``top``/``runner_up``/``median``/``floor``  the raw counts behind each
+        ratio, so a log line can show the actual numbers a decision used.
+        ``runner_up_ratio``/``median_ratio``/``floor_ratio``  the multipliers.
+    """
+    valid = sorted(
+        (float(c) for c in (counts or []) if float(c or 0) > 0),
+        reverse=True,
+    )
+    if len(valid) < ALBUM_RATIO_MIN_COUNTS:
+        return {}
+
+    top = valid[0]
+    runner_up = valid[1]
+    med = float(median(valid))
+    floor = valid[-1]
+
+    return {
+        "top": top,
+        "runner_up": runner_up,
+        "median": med,
+        "floor": floor,
+        "n": float(len(valid)),
+        "runner_up_ratio": (top / runner_up) if runner_up > 0 else 0.0,
+        "median_ratio": (top / med) if med > 0 else 0.0,
+        "floor_ratio": (top / floor) if floor > 0 else 0.0,
+    }
+
+
+def album_ratio_standout(
+    count: float,
+    counts: list[float] | list[int] | None,
+    *,
+    runner_up_min: float = 1.5,
+    median_min: float = 3.0,
+    floor_min: float = 10.0,
+    min_passed: int = 3,
+) -> tuple[bool, str, dict[str, float]]:
+    """Is ``count`` a RATIO standout within ``counts``?
+
+    The candidate must BE the album's top track: the multipliers describe the
+    distance between #1 and the rest, so any other track is ineligible by
+    definition. (This is also what stops a flat album from minting several
+    5★ tracks — only one track can be the top.)
+
+    ``min_passed`` is how many of the three multipliers must be satisfied;
+    ``3`` (the default) means all of them. It exists so the three tests can be
+    relaxed independently without adding three separate switches.
+
+    Returns ``(ok, reason, ratios)``. ``ok`` is True when the data is
+    INCONCLUSIVE (fewer than three counts), so a short album is never
+    penalised for lacking a distribution to measure.
+    """
+    ratios = album_standout_ratios(counts)
+    if not ratios:
+        return True, "ratio_inconclusive(too_few_counts)", {}
+
+    try:
+        cand = float(count or 0)
+    except (TypeError, ValueError):
+        return True, "ratio_inconclusive(bad_count)", ratios
+
+    top = float(ratios.get("top") or 0)
+    if cand <= 0 or top <= 0:
+        return True, "ratio_inconclusive(no_counts)", ratios
+
+    # The ratios are a property of the album's #1 track.
+    if cand < top:
+        return False, f"ratio_not_album_top({cand:.0f}<{top:.0f})", ratios
+
+    checks = (
+        ("runner_up", float(ratios["runner_up_ratio"]), float(runner_up_min)),
+        ("median", float(ratios["median_ratio"]), float(median_min)),
+        ("floor", float(ratios["floor_ratio"]), float(floor_min)),
+    )
+    passed = [name for name, value, minimum in checks if value >= minimum]
+    needed = max(1, min(int(min_passed or 1), len(checks)))
+
+    detail = ", ".join(
+        f"{name}={value:.2f}x/{minimum:.2f}x" for name, value, minimum in checks
+    )
+
+    if len(passed) >= needed:
+        return True, f"ratio_standout({detail})", ratios
+    failed = [name for name, value, minimum in checks if value < minimum]
+    return False, f"ratio_flat({len(passed)}/{needed} passed; failed={','.join(failed)}; {detail})", ratios
 
 
 def calculate_lastfm_popularity_score(listeners: int, artist_max_listeners: int = 0) -> float:

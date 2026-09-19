@@ -197,3 +197,102 @@
 @media (min-width: 992px) {
   .btn-quick-queue { min-height: 0; }
 }
+
+/* ── Release sections ─────────────────────────────────────────────────────
+   Styling for templates/components/_release_section.html — the per-category
+   release lists (Albums / EPs / Singles / …).
+
+   These rules previously existed ONLY in test_site/static/css/artist.css.
+   versioned_static() searches the rebuilt tree first, so in cutover mode the
+   rebuilt copy won and everything looked correct — while in LIVE mode (the
+   default) the sections rendered completely unstyled. A stylesheet present in
+   only one tree is a defect in the other, which is why
+   test_artist_stylesheets_exist_in_both_trees() exists.
+   ------------------------------------------------------------------------ */
+
+/* Jump chips: one per category that has content, linking to that section. */
+.release-jump-bar { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.release-jump-chip {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.35rem 0.7rem; border-radius: 999px;
+  background-color: var(--secondary-bg);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  text-decoration: none; font-size: 0.85rem;
+}
+.release-jump-chip:hover {
+  background-color: var(--accent-color);
+  border-color: var(--accent-color);
+  color: #0a0a0a;
+}
+
+/* Anchor offset: the sticky nav must not cover a jumped-to section header. */
+.release-section { scroll-margin-top: 5.5rem; }
+
+.release-section-header {
+  display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem;
+  align-items: center; justify-content: space-between;
+}
+.release-section-toggle {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  background: none; border: none; padding: 0;
+  color: var(--text-primary); font-weight: 600; font-size: 1.05rem;
+}
+.release-section-toggle .section-chevron { transition: transform 0.2s ease; }
+.release-section-toggle[aria-expanded="false"] .section-chevron { transform: rotate(-90deg); }
+
+.release-section-controls {
+  display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center;
+}
+
+.release-item { border-bottom: 1px solid var(--border-color); }
+.release-item:last-child { border-bottom: none; }
+
+.release-summary {
+  display: flex; align-items: center; gap: 0.85rem;
+  padding: 0.65rem 1rem; cursor: pointer;
+}
+.release-summary:hover { background-color: var(--secondary-bg); }
+.release-summary:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -2px;
+}
+
+.release-art {
+  width: 56px; height: 56px; object-fit: cover;
+  border-radius: 4px; border: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+/* Shown when a row has no artwork, or when the img fails to load. */
+.release-art-placeholder {
+  display: flex; align-items: center; justify-content: center;
+  background-color: var(--tertiary-bg);
+  color: var(--text-secondary); font-size: 1.2rem;
+}
+
+.release-meta { flex: 1 1 auto; min-width: 0; }
+.release-title-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.release-title { font-weight: 600; }
+.release-actions { display: flex; gap: 0.35rem; flex-shrink: 0; }
+
+.release-tracklist {
+  padding: 0 1rem 1rem 1rem;
+  background-color: var(--secondary-bg);
+}
+
+.release-empty-note { border-top: 1px solid var(--border-color); }
+
+/* Rows are the filter target; the radio group is a real input group so it is
+   keyboard-navigable (arrow keys move between All / Library / Missing). */
+.release-filter-radio:focus-visible + label {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+
+@media (max-width: 576px) {
+  .release-summary { padding: 0.6rem 0.75rem; gap: 0.6rem; }
+  .release-art { width: 48px; height: 48px; }
+  /* One scrolling row instead of wrapping into three lines of chips. */
+  .release-jump-bar { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 0.25rem; }
+  .release-section-controls { width: 100%; }
+}

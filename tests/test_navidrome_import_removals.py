@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from db.engine import db_session
 from services.scanning.filters import should_skip_cached_album
-from services.scanning.navidrome_import import artist_album_name_diff, scan_artist_to_db
+from services.scanning.navidrome_import import compute_artist_album_diff, scan_artist_to_db
 from sqlalchemy import text
 
 
@@ -65,7 +65,7 @@ def test_skip_cached_album_empty_nav_tracks_processed():
 
 
 # ---------------------------------------------------------------------------
-# artist_album_name_diff — removed-album detection
+# compute_artist_album_diff — removed-album detection
 # ---------------------------------------------------------------------------
 
 
@@ -93,7 +93,7 @@ def test_artist_diff_reports_removed_albums():
 
     client = _FakeDiffClient([{"id": "al-keep", "name": "Keep Album", "songCount": 1}])
 
-    skip, changed, removed = artist_album_name_diff("X", "ar-x", client=client)
+    skip, changed, removed = compute_artist_album_diff("X", client.albums)
 
     assert skip is False
     assert "Gone Album" in changed

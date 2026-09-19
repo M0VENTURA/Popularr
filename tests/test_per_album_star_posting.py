@@ -287,10 +287,21 @@ class TestZStandoutSourceReVerification:
     def test_album_top_listeners_honour_standout_flag(self):
         from services.popularity.stages import finalise_stage as fs
 
-        lf, lb = self._listeners()
-        # The clear intra-album listener standout IS honoured → 5★.
+        # A GENUINE album-internal standout shape: 50,000 against a 500
+        # runner-up (100x), a 350 median (~143x) and a 100 floor (500x), so
+        # all three ratio multipliers clear comfortably.
+        #
+        # NOTE the fixture change. This test previously reused ``_listeners()``
+        # = [10000, 9000, 8000, 7000, 6000, 5000], a uniformly-declining album
+        # whose top track is only 1.11x the runner-up and 1.54x the median.
+        # Under the album RATIO standout rule that distribution contains NO
+        # standout, so 5* is now correctly withheld from it — the fixture had
+        # to become an actually-standout album to keep testing what the test
+        # is named for. See TestAlbumRatioStandout for the policy itself.
+        lf = [50000, 500, 400, 300, 200, 100]
+        lb = [20000, 18000, 16000, 14000, 12000, 10000]
         track = self._track(
-            90.0, 10000, 20000,
+            90.0, 50000, 20000,
             single_sources='[{"source": "popularity_z_standout", "matched": true, "confidence": 0.5}]',
         )
         assert fs._assign_stars(track, self._album(), self._artist(), lf, lb) == 5
@@ -305,14 +316,187 @@ class TestZStandoutSourceReVerification:
         )
         assert fs._assign_stars(track, self._album(), self._artist()) == 5
 
-    def test_popularity_marked_standout_not_listener_gated(self):
+    def test_popularity_marked_is_ratio_gated_but_not_listener_z_gated(self):
         from services.popularity.stages import finalise_stage as fs
 
-        lf, lb = self._listeners()
-        # The artist top-10% marking is a DIFFERENT proof path (not the
-        # z_standout source) — the listener re-verification does not apply.
-        track = self._track(90.0, 6000, 12000, popularity_marked=True)
-        assert fs._assign_stars(track, self._album(), self._artist(), lf, lb) == 5
+        # TWO gates sit on the 5* path and they have DIFFERENT scope:
+        #
+        #   * the ``popularity_z_standout`` re-verification (composite LF/LB
+        #     listener z >= listener_5star_z_threshold) applies ONLY to that
+        #     source; and
+        #   * the album RATIO standout test applies to EVERY popularity-based
+        #     5*, including the artist top-10% ``popularity_marked`` flag.
+        #
+        # This test previously asserted the marking was exempt from listener
+        # gating entirely. It is still exempt from the LISTENER-Z check — but
+        # the top-10% marking alone is no longer sufficient on a flat album:
+        # the track must also be a genuine standout within its own release.
+        #
+        # The artist top-10% marking is a CATALOGUE-level signal; it says
+        # nothing about whether the album itself contains a standout. A hit
+        # sitting on an album of uniformly-played tracks is not a standout.
+        lf_flat = [10000, 9000, 8000, 7000, 6000, 5000]
+        lb_flat = [20000, 18000, 16000, 14000, 12000, 10000]
+
+        flat = self._track(90.0, 10000, 20000, popularity_marked=True)
+        assert fs._assign_stars(flat, self._album(), self._artist(), lf_flat, lb_flat) == 4
+
+        # ...whereas a real standout shape does grant 5*.
+        lf_real = [50000, 500, 400, 300, 200, 100]
+        real = self._track(90.0, 50000, 20000, popularity_marked=True)
+        assert fs._assign_stars(real, self._album(), self._artist(), lf_real, lb_flat) == 5
+
+
+class TestAlbumRatioStandout:
+    """5★ must ALSO require the album to contain a genuine standout.
+
+    Why: the z-score paths answer "how far above this album's mean is the
+    track?" — but on a small, FLAT album the spread shrinks too, so a
+    6-listener gap over the runner-up can clear every z-bound while the album
+    plainly has no standout. The ratio test is scale-free and closes that hole.
+
+    Reference case is a real one (Anti-Flag, acoustic album; counts
+    14, 13, 13, ~11 median, 8), where the top track is only 1.07x the
+    runner-up and 1.27x the median — a tie, not a standout.
+    """
+
+    #: The reference album. Deliberately FLAT at a tiny magnitude.
+    ANTIFLAG = [14, 13, 13, 11, 11, 10, 9, 8]
+
+    #: A genuine studio standout: hit + unpopular deep cuts.
+    REAL_STANDOUT = [500000, 40000, 30000, 25000, 20000, 15000, 12000, 10000]
+
+    def _track(self, score, lf, lb, **overrides):
+        track = {
+            "track_id": "t1", "artist": "Anti-Flag", "album": "Acoustic",
+            "title": "Song",
+            "popularity_score": score, "final_score": score,
+            "lastfm_listeners": lf, "listenbrainz_listens": lb,
+            "lastfm_score": 8.0, "listenbrainz_score": 9.0,
+            "is_single": False, "single_confidence": "low",
+            "single_sources": "", "is_live": False, "popularity_marked": True,
+        }
+        track.update(overrides)
+        return track
+
+    #: Wide album/artist score spread so the z-bounds are satisfied — the
+    #: ratio test must be what decides, not a z-score failure.
+    _SCORES = [1, 10, 19, 28, 37, 46, 55, 64, 73, 82, 91, 100]
+
+    def test_anticheat_reference_album_is_not_a_five_star(self):
+        from services.popularity.stages import finalise_stage as fs
+
+        track = self._track(100.0, 14, 0)
+        stars = fs._assign_stars(
+            track, self._SCORES, self._SCORES,
+            [float(v) for v in self.ANTIFLAG], [0.0] * len(self.ANTIFLAG),
+        )
+        assert stars < 5, (
+            "the Anti-Flag reference album (14/13/13/11/11/10/9/8) has no "
+            "standout — top is only 1.08x the runner-up and 1.27x the median"
+        )
+        assert "ratio_flat" in str(track.get("_ratio_5star_reason") or "")
+
+    def test_real_standout_album_still_reaches_five_stars(self):
+        from services.popularity.stages import finalise_stage as fs
+
+        track = self._track(100.0, 500000, 0)
+        stars = fs._assign_stars(
+            track, self._SCORES, self._SCORES,
+            [float(v) for v in self.REAL_STANDOUT], [0.0] * len(self.REAL_STANDOUT),
+        )
+        assert stars == 5, (
+            "a hit at 500k against a 10k floor (50x) on a wide-spread album "
+            "is exactly the shape the rule should accept"
+        )
+
+    def test_inconclusive_data_never_blocks_five_stars(self):
+        from services.popularity.stages import finalise_stage as fs
+
+        # Only two listener counts -> no distribution to judge. The gate must
+        # be permissive here, or short albums could never score 5★.
+        track = self._track(100.0, 14, 0)
+        stars = fs._assign_stars(track, self._SCORES, self._SCORES, [14.0, 13.0], [0.0, 0.0])
+        assert stars == 5
+        assert "inconclusive" in str(track.get("_ratio_5star_reason") or "")
+
+    def test_non_top_track_is_ineligible(self):
+        from services.popularity.stages import finalise_stage as fs
+
+        # The multipliers describe the distance between #1 and the rest, so a
+        # track that is not the album's top can never satisfy them — this is
+        # what stops a standout album from minting several 5★ tracks.
+        track = self._track(100.0, 40000, 0)
+        stars = fs._assign_stars(
+            track, self._SCORES, self._SCORES,
+            [float(v) for v in self.REAL_STANDOUT], [0.0] * len(self.REAL_STANDOUT),
+        )
+        assert stars < 5
+        assert "not_album_top" in str(track.get("_ratio_5star_reason") or "")
+
+    def test_gate_can_be_disabled_by_config(self, monkeypatch):
+        from services.popularity.stages import finalise_stage as fs
+        import helpers.config_helpers as ch
+
+        real = ch.get_standout_config
+        monkeypatch.setattr(
+            fs, "get_standout_config",
+            lambda: {**real(), "album_ratio_standout": {"enabled": 0}},
+        )
+        track = self._track(100.0, 14, 0)
+        stars = fs._assign_stars(
+            track, self._SCORES, self._SCORES,
+            [float(v) for v in self.ANTIFLAG], [0.0] * len(self.ANTIFLAG),
+        )
+        assert stars == 5, "disabled gate must restore the pre-ratio behaviour"
+
+    def test_live_album_uses_the_looser_live_thresholds(self, monkeypatch):
+        from services.popularity.stages import finalise_stage as fs
+        import helpers.config_helpers as ch
+        from services.popularity.popularity_math import calculate_robust_zscore
+
+        # A live album routinely has a flat BOTTOM (applause/tuning on every
+        # track), so the floor ratio rarely clears. The live rules require only
+        # 2 of 3 multipliers for exactly this reason.
+        artist = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 100.0]
+        live_shape = [500000, 40000, 12000, 11000, 10500, 10000, 9800, 9500]
+        track = self._track(
+            100.0, 500000, 0, is_live=True, single_confidence="high",
+        )
+        stars = fs._assign_stars(
+            track, [40.0, 50.0, 60.0, 70.0, 80.0, 90.0], artist,
+            [float(v) for v in live_shape], [0.0] * len(live_shape),
+            popularity_only=False, is_live_album=True,
+        )
+        assert stars == 5, "2/3 live multipliers met -> still a live standout"
+
+    def test_live_flat_album_is_gated(self):
+        from services.popularity.stages import finalise_stage as fs
+
+        artist = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 100.0]
+        track = self._track(
+            100.0, 14, 0, is_live=True, single_confidence="high",
+        )
+        stars = fs._assign_stars(
+            track, [40.0, 50.0, 60.0, 70.0, 80.0, 90.0], artist,
+            [float(v) for v in self.ANTIFLAG], [0.0] * len(self.ANTIFLAG),
+            popularity_only=False, is_live_album=True,
+        )
+        assert stars <= 4
+
+    def test_user_override_is_never_demoted(self):
+        from services.popularity.stages import finalise_stage as fs
+
+        artist = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 100.0]
+        track = self._track(
+            100.0, 14, 0, is_live=True, single_confidence="user",
+        )
+        stars = fs._assign_stars(
+            track, [40.0, 50.0, 60.0, 70.0, 80.0, 90.0], artist,
+            [float(v) for v in self.ANTIFLAG], [0.0] * len(self.ANTIFLAG),
+            popularity_only=False, is_live_album=True,
+        )
+        assert stars == 5, "a user override is an explicit instruction, not a guess"
 
 
 class TestPostAlbumStarRatings:

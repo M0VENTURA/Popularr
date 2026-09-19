@@ -1,0 +1,229 @@
+{#
+  Artist-page modals (rebuilt tree).
+
+  ── WHY THIS FILE EXISTS ─────────────────────────────────────────────────
+  templates/Pages/artist_detail.html includes
+
+      {% include "components/modals/_artist_modals.html" %}
+
+  but the rebuilt tree only ever had `_artist_modal.html` — SINGULAR. Jinja's
+  default is to raise TemplateNotFound, so the whole artist page failed to
+  render with
+
+      TemplateNotFound: components/modals/_artist_modals.html
+
+  The live tree has `_artist_modals.html` (plural, without the download modal)
+  and the rebuilt tree has `_artist_modal.html` (singular, WITH it). Neither
+  name satisfied the include, so the page could not be previewed or served at
+  all under features.use_test_site.
+
+  This file provides the plural name with the union of both: the rebuilt tree's
+  download modal plus the track/artist/ID dialogs the page's inline handlers
+  call by id. Resolution then works in BOTH trees regardless of which spelling
+  a template uses.
+
+  ── ID CONTRACT (called from inline onclick handlers) ─────────────────────
+    downloadModal / downloadArtistName / qbitSearchInput / slskdSearchInput
+    artistMbSearchModal / artistMbSearchArtist / artistMbSearchStatus
+      / artistMbSearchError / artistMbSearchResults
+    editTrackFromArtistModal / editArtistTrackId / editArtistTrackTitleField
+    editReleaseModal / editReleaseArtist / editReleaseOriginalTitle
+      / editReleaseTitle / editReleaseYear / editReleaseMbid / editReleaseSaveBtn
+    editTrackModal / editTrackId / editTrackCurrentField / editTrackValue
+
+  These ids are shared with templates/components/modals/_artist_modals.html in
+  the live tree, so static/js modules can target either tree unchanged.
+#}
+
+{# ── Download search modal ─────────────────────────────────────────────── #}
+{% if qbit_config is defined and slskd_config is defined %}
+  {% if qbit_config.enabled or slskd_config.enabled %}
+<div class="modal fade" id="downloadModal" tabindex="-1">
+  <div class="modal-dialog modal-xl">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-download"></i> Download: <span id="downloadArtistName"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <ul class="nav nav-tabs mb-3" id="downloadTabs">
+          {% if qbit_config.enabled and qbit_config.web_url %}
+          <li class="nav-item"><button class="nav-link active" id="qbit-tab" data-bs-toggle="tab" data-bs-target="#qbit-content" type="button">qBittorrent</button></li>
+          {% endif %}
+          {% if slskd_config.enabled %}
+          <li class="nav-item"><button class="nav-link {% if not (qbit_config.enabled and qbit_config.web_url) %}active{% endif %}" id="slskd-tab" data-bs-toggle="tab" data-bs-target="#slskd-content" type="button">Soulseek</button></li>
+          {% endif %}
+        </ul>
+        <div class="tab-content">
+          {% if qbit_config.enabled and qbit_config.web_url %}
+          <div class="tab-pane fade show active" id="qbit-content">
+            <div class="input-group mb-3">
+              <input type="text" class="form-control" id="qbitSearchInput" placeholder="Search torrents…">
+              <button class="btn btn-primary" type="button" onclick="performQbitSearch()"><i class="bi bi-search"></i> Search</button>
+            </div>
+            <div id="qbitLoading" class="text-center py-4" style="display:none;"><div class="spinner-border text-primary"></div></div>
+            <div id="qbitResults"></div>
+          </div>
+          {% endif %}
+          {% if slskd_config.enabled %}
+          <div class="tab-pane fade {% if not (qbit_config.enabled and qbit_config.web_url) %}show active{% endif %}" id="slskd-content">
+            <div class="input-group mb-3">
+              <input type="text" class="form-control" id="slskdSearchInput" placeholder="Search Soulseek…">
+              <button class="btn btn-primary" type="button" onclick="performSlskdSearch()"><i class="bi bi-search"></i> Search</button>
+            </div>
+            <div id="slskdTracksContainer" class="mb-3"></div>
+            <div id="slskdLoading" class="text-center py-4" style="display:none;"><div class="spinner-border text-primary"></div></div>
+            <div id="slskdResults"></div>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+  {% endif %}
+{% endif %}
+
+{# ── MusicBrainz release search ────────────────────────────────────────── #}
+<div class="modal fade" id="artistMbSearchModal" tabindex="-1">
+  <div class="modal-dialog modal-xl">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-music-note-list"></i> MusicBrainz Release Search</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="artistMbSearchInfo" class="alert alert-info mb-3" style="display:none;">Searching <strong id="artistMbSearchArtist"></strong></div>
+        <div id="artistMbSearchStatus" class="text-center py-4" style="display:none;"><div class="spinner-border text-primary"></div></div>
+        <div id="artistMbSearchError" class="alert alert-danger" style="display:none;"></div>
+        <div id="artistMbSearchResults"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Artist image picker ───────────────────────────────────────────────── #}
+<div class="modal fade" id="artistImageModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-image"></i> Change Artist Image</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="artistImageResults" class="mb-2">
+          <div class="text-muted small">Searching for images…</div>
+        </div>
+        <div class="input-group">
+          <input type="url" class="form-control" id="artistImageUrlInput" placeholder="…or paste an image URL">
+          <button class="btn btn-primary" type="button" onclick="setArtistImage(document.getElementById('artistImageUrlInput').value)">Use URL</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── External IDs ──────────────────────────────────────────────────────── #}
+<div class="modal fade" id="editArtistIdsModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-link-45deg"></i> Edit External IDs</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label" for="editMusicbrainzArtistId">MusicBrainz Artist ID</label>
+          <input type="text" class="form-control" id="editMusicbrainzArtistId" placeholder="e.g. a74b1b7f-71a5-4011-9441-d0b5e4122711">
+        </div>
+        <div class="mb-3">
+          <label class="form-label" for="editDiscogsArtistId">Discogs Artist ID</label>
+          <input type="text" class="form-control" id="editDiscogsArtistId" placeholder="e.g. 123456">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="editArtistIdsSaveBtn">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Track edit from the artist page ───────────────────────────────────── #}
+<div class="modal fade" id="editTrackFromArtistModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-pencil-square"></i> Edit Track</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <form id="editArtistTrackForm">
+          <input type="hidden" id="editArtistTrackId" name="track_id">
+          <div class="row g-3">
+            <div class="col-md-12"><label class="form-label" for="editArtistTrackTitleField">Title</label><input type="text" class="form-control" id="editArtistTrackTitleField" required></div>
+            <div class="col-md-6"><label class="form-label" for="editArtistTrackArtistField">Artist</label><input type="text" class="form-control" id="editArtistTrackArtistField"></div>
+            <div class="col-md-6"><label class="form-label" for="editArtistTrackAlbumField">Album</label><input type="text" class="form-control" id="editArtistTrackAlbumField"></div>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" onclick="saveArtistEditedTrack()">Save Changes</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Release edit (driven by release rows) ─────────────────────────────── #}
+<div class="modal fade" id="editReleaseModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Edit Release</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="editReleaseArtist">
+        <input type="hidden" id="editReleaseOriginalTitle">
+        <div class="mb-3">
+          <label class="form-label" for="editReleaseTitle">Title</label>
+          <input type="text" class="form-control" id="editReleaseTitle">
+        </div>
+        <div class="mb-3">
+          <label class="form-label" for="editReleaseYear">Year</label>
+          <input type="text" class="form-control" id="editReleaseYear" placeholder="Year">
+        </div>
+        <div class="mb-3">
+          <label class="form-label" for="editReleaseMbid">MBID</label>
+          <input type="text" class="form-control" id="editReleaseMbid" placeholder="MBID">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="editReleaseSaveBtn">Save Changes</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Simple single-field edit ──────────────────────────────────────────── #}
+<div class="modal fade" id="editTrackModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Edit Title</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="editTrackId">
+        <input type="hidden" id="editTrackCurrentField">
+        <input type="text" class="form-control" id="editTrackValue">
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" onclick="saveEditedTrackFromArtistPage()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>

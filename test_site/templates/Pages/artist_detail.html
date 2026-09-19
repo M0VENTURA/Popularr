@@ -1,3 +1,28 @@
+{#
+  ==========================================================================
+  ALIAS — do not add markup here.
+
+  The artist route renders ``pages/artist_detail_v2.html`` (see
+  routes/ui_routes.py::artist_detail), so THAT file is the page. This one is a
+  leftover from an earlier revision and nothing resolves it.
+
+  It is kept as a pure alias rather than deleted because it previously carried
+  a full copy of the page that could not render AT ALL: every ``url_for`` used a
+  BARE endpoint name, and every blueprint here is namespaced, so the first link
+  raised
+
+      BuildError: Could not build url for endpoint 'dashboard'
+
+  A duplicate page one bad edit away from being re-linked is a landmine, so the
+  body below is commented out and this file simply extends the real template.
+  There is now exactly ONE artist page body: it can neither drift nor fail to
+  build. To change the artist page, edit Pages/artist_detail_v2.html.
+  ==========================================================================
+#}
+{% extends "Pages/artist_detail_v2.html" %}
+
+{#- Dead body of the superseded page, kept inert for reference. -#}
+{% raw %}
 {% extends "base.html" %}
 
 {% block title %}{{ artist_name }} · Popularr{% endblock %}
@@ -251,7 +276,7 @@
     </div>
   </div>
 
-  {# NEW RELEASES SECTION #}
+  NEW RELEASES SECTION (superseded)
   {% from "components/_release_section.html" import render_release_section %}
 
   {% set _standard_specs = [
@@ -331,3 +356,4 @@
 <script src="{{ versioned_static('js/pages/artist.js') }}"></script>
 <script src="{{ versioned_static('js/pages/artist-releases.js') }}"></script>
 {% endblock %}
+{% endraw %}

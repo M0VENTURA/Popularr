@@ -236,3 +236,125 @@ class TestValidatedResumeArtist:
                 text("SELECT last_scanned_artist FROM scan_states WHERE scan_type = 'library'")
             ).fetchone()
             assert row[0] is None
+
+
+class TestMissingReleasesSweepProbe:
+    """The missing-releases sweep must be able to see a running popularity scan.
+
+    Regression: the sweep's accessor probe listed four module/attribute
+    candidates, none of which exist in this build, so it logged
+
+        Cannot determine whether a popularity scan is active
+        reason='no known accessor found; the missing-releases sweep cannot
+        serialise itself against the popularity scan'
+
+    and then always returned False. Because the two scans share one 1 req/s
+    MusicBrainz budget, that let the sweep run concurrently with a popularity
+    scan. The canonical accessor is
+    ``services.scanning.pipelines.popularity_pipeline.is_popularity_scan_active``.
+    """
+
+    def _reset_warning_flag(self):
+        import services.metadata.artist_scan_service as svc
+
+        svc._popularity_probe_warned = False
+        return svc
+
+    def test_canonical_accessor_is_probed_first(self):
+        """The one accessor that exists must be the first candidate tried."""
+        from services.metadata.artist_scan_service import _POPULARITY_SCAN_PROBES
+
+        assert _POPULARITY_SCAN_PROBES[0] == (
+            "services.scanning.pipelines.popularity_pipeline",
+            "is_popularity_scan_active",
+        )
+
+    def test_every_probed_attribute_exists(self):
+        """No permanently-dead candidate may remain in the probe list.
+
+        Each entry has to resolve to a real callable, or the entry is noise
+        that only serves to hide the canonical accessor when it moves.
+        """
+        from services.metadata.artist_scan_service import _POPULARITY_SCAN_PROBES
+
+        missing: list[str] = []
+        for module_name, attribute in _POPULARITY_SCAN_PROBES:
+            try:
+                module = __import__(module_name, fromlist=[attribute])
+            except Exception:
+                missing.append(f"{module_name}.{attribute}")
+                continue
+            if not callable(getattr(module, attribute, None)):
+                missing.append(f"{module_name}.{attribute}")
+
+        assert missing == []
+
+    def test_probe_false_when_idle(self):
+        _fresh_db()
+        from services.metadata.artist_scan_service import _popularity_scan_active
+
+        assert _popularity_scan_active() is False
+
+    def test_probe_true_when_shared_popularity_scan_running(self):
+        _fresh_db()
+        _set_scan_running("popularity_scan", running=True)
+
+        from services.metadata.artist_scan_service import _popularity_scan_active
+
+        assert _popularity_scan_active() is True
+
+    def test_probe_true_when_shared_full_scan_running(self):
+        """The dashboard "All" scan runs as ``full_scan`` and must also block."""
+        _fresh_db()
+        _set_scan_running("full_scan", running=True)
+
+        from services.metadata.artist_scan_service import _popularity_scan_active
+
+        assert _popularity_scan_active() is True
+
+    def test_probe_true_when_runtime_registry_running(self):
+        _fresh_db()
+        from services.scanning.runtime_state import set_runtime
+
+        set_runtime("popularity", {"thread": threading.current_thread(), "type": "test"})
+
+        from services.metadata.artist_scan_service import _popularity_scan_active
+
+        assert _popularity_scan_active() is True
+
+    def test_no_warning_when_the_accessor_resolves(self):
+        _fresh_db()
+        svc = self._reset_warning_flag()
+
+        with patch.object(svc.logger, "warning") as warn:
+            assert svc._popularity_scan_active() is False
+
+        assert [
+            c for c in warn.call_args_list
+            if c.args and c.args[0] == "Cannot determine whether a popularity scan is active"
+        ] == []
+
+    def test_warns_once_when_no_accessor_resolves(self):
+        """Forward-compat: a moved accessor degrades to ONE warning, not a crash."""
+        import services.metadata.artist_scan_service as svc
+
+        svc._popularity_probe_warned = False
+        dead_probes = (
+            ("services.scanning.scan_state", "is_popularity_scan_running"),
+            ("services.popularity.scan_state", "is_scan_running"),
+        )
+
+        with patch.object(svc, "_POPULARITY_SCAN_PROBES", dead_probes), \
+                patch.object(svc.logger, "warning") as warn:
+            assert svc._popularity_scan_active() is False
+            assert svc._popularity_scan_active() is False
+
+        scan_warnings = [
+            c for c in warn.call_args_list
+            if c.args and c.args[0] == "Cannot determine whether a popularity scan is active"
+        ]
+        assert len(scan_warnings) == 1
+        assert scan_warnings[0].kwargs["probed"] == [
+            "services.scanning.scan_state.is_popularity_scan_running",
+            "services.popularity.scan_state.is_scan_running",
+        ]

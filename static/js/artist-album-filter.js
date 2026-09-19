@@ -29,18 +29,27 @@
    so this module is loaded independently and the filter works now, while the
    larger file is repaired separately.
 
-   -- MARKUP CONTRACT -----------------------------------------------------------
-   Release rows are server-rendered by the release-category macro as
+   -- MARKUP CONTRACT (UPDATED) -------------------------------------------------
+   The release rows are now rendered by the SHARED component
+   templates/components/_release_section.html, and the status filter moved INTO
+   each section (see static/js/artist-releases.js). The old markup was
 
        .category-section                                  (the category card)
          .album-row[data-status="library" | "missing"]
 
-   and the filter bar is
+   and the new markup is
 
-       .artist-filter-btn[data-filter="all" | "library" | "missing"]
+       .release-section                                   (the category card)
+         .release-item[data-status="library" | "missing"]
 
-   Rows injected later by checkMissingReleases() also carry
-   data-status="missing", so they filter with no special-casing.
+   Both shapes are matched below. The previous version only knew the OLD one, so
+   after the release-section migration every selector matched nothing and this
+   module became inert while looking entirely correct — the exact failure mode
+   its own header warns about.
+
+   `setArtistFilter()` is kept for compatibility with any remaining inline
+   handler and now also drives the new per-section radios, so a page-wide
+   selection still reaches the rows.
    ========================================================================== */
 
 (function () {
@@ -48,6 +57,11 @@
 
   var STORAGE_KEY = 'artistAlbumFilterState';
   var VALID = ['all', 'library', 'missing'];
+
+  // Current markup (release-section component) plus the legacy shape, so the
+  // module is correct during and after the migration.
+  var ROW_SELECTOR = '.release-section .release-item[data-status], .category-section .album-row[data-status]';
+  var SECTION_SELECTOR = '.release-section, .category-section';
 
   // Kept module-level so applyArtistFilter() can RE-ASSERT the current
   // selection after rows are injected or re-sorted: the filter is a state,
@@ -78,7 +92,7 @@
     var filter = currentFilter;
 
     // 1. Show/hide each release row according to its status.
-    document.querySelectorAll('.category-section .album-row[data-status]').forEach(function (row) {
+    document.querySelectorAll(ROW_SELECTOR).forEach(function (row) {
       var visible;
       if (filter === 'all') {
         visible = true;
@@ -96,8 +110,8 @@
     //    status rows at all (e.g. "Covers of ...", populated by JS) are left
     //    alone - otherwise an emptied section keeps its header and a stale
     //    "N / M in Library" badge above an empty body.
-    document.querySelectorAll('.category-section').forEach(function (section) {
-      var rows = section.querySelectorAll('.album-row[data-status]');
+    document.querySelectorAll(SECTION_SELECTOR).forEach(function (section) {
+      var rows = section.querySelectorAll('.release-item[data-status], .album-row[data-status]');
       if (!rows.length) {
         section.style.display = '';
         return;
@@ -112,6 +126,17 @@
     document.querySelectorAll('.artist-filter-btn').forEach(function (btn) {
       var value = String(btn.getAttribute('data-filter') || 'all').toLowerCase();
       btn.classList.toggle('active', value === filter);
+    });
+
+    // 4. Re-assert the selection on the per-section radios that replaced the
+    //    page-wide bar, so the two controls cannot disagree. Guarded because
+    //    artist-releases.js owns those radios and may not be loaded.
+    document.querySelectorAll('.release-section').forEach(function (section) {
+      var radio = section.querySelector('.release-filter-radio[value="' + filter + '"]');
+      if (radio && !radio.checked) {
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change', { bubbles: true }));
+      }
     });
   }
 

@@ -16,7 +16,7 @@ Fix verified here:
     seconds value made the delta gate always pass).
   - ``build_delta_artist_index`` surfaces artists from ``getIndexes`` — the
     only delta source that catches "new songs added to an existing album".
-  - ``artist_album_name_diff`` marks an existing album changed when
+  - ``compute_artist_album_diff`` marks an existing album changed when
     Navidrome's ``songCount`` exceeds the local track count, so the
     per-artist diff re-imports the new tracks.
 """
@@ -27,7 +27,7 @@ from datetime import datetime
 
 from api_clients.navidrome import NavidromeClient
 from db.engine import db_session
-from services.scanning.navidrome_import import artist_album_name_diff
+from services.scanning.navidrome_import import compute_artist_album_diff
 from services.scanning.navidrome_service import build_delta_artist_index
 from sqlalchemy import text
 
@@ -185,7 +185,7 @@ def test_delta_index_without_since_ts_falls_back_to_full_index():
 
 
 class _FakeArtistClient:
-    """Fake client for ``artist_album_name_diff`` (getArtist album list)."""
+    """Fake client for ``compute_artist_album_diff`` (getArtist album list)."""
 
     def __init__(self, albums):
         self.albums = albums
@@ -218,15 +218,59 @@ def test_artist_diff_marks_existing_album_changed_when_song_count_grows():
         ]
     )
 
-    skip_artist, changed_albums, removed_albums = artist_album_name_diff(
+    skip_artist, changed_albums, removed_albums = compute_artist_album_diff(
         "Existing Artist",
-        "ar-1",
-        client=client,
+        client.albums,
     )
 
     assert skip_artist is False
     assert changed_albums == {"Album"}
     assert removed_albums == set()
+
+
+# ---------------------------------------------------------------------------
+# getAlbumList2 list types
+# ---------------------------------------------------------------------------
+
+
+def test_delta_list_types_exclude_unimplemented_recently_added():
+    """Navidrome does not implement ``recentlyAdded`` for ``getAlbumList2``.
+
+    It answers with ``status="failed"`` and
+    ``code=0 message="type 'recentlyAdded' not implemented"``, which the
+    client logs as a WARNING on every delta scan. Requesting it therefore
+    bought nothing but noise, so only ``newest`` may be requested.
+    """
+    from services.scanning.navidrome_service import _DELTA_LIST_TYPES
+
+    assert "recentlyAdded" not in _DELTA_LIST_TYPES
+    assert "newest" in _DELTA_LIST_TYPES
+
+
+def test_album_sort_ts_ignores_recently_added_field():
+    """Navidrome album objects carry ``created``/``updated``, not ``recentlyAdded``."""
+    from services.scanning.navidrome_service import _album_sort_ts
+
+    assert _album_sort_ts({"created": "2026-08-01T00:00:00Z"}) > 0
+    assert _album_sort_ts({"updated": "2026-08-01T00:00:00Z"}) > 0
+    # An album exposing ONLY the never-present field sorts to 0 ("unknown").
+    assert _album_sort_ts({"recentlyAdded": "2026-08-01T00:00:00Z"}) == 0.0
+
+
+def test_fetch_changed_albums_requests_only_implemented_list_types():
+    """The caller must never send a list type Navidrome rejects."""
+    from services.scanning.navidrome_service import fetch_changed_albums
+
+    requested: list[str] = []
+
+    class _Recorder:
+        def get_album_list2_page(self, list_type="newest", size=200, offset=0):
+            requested.append(list_type)
+            return []
+
+    fetch_changed_albums(_Recorder(), since_ts=None, page_size=10, max_pages=1)
+
+    assert requested == ["newest"]
 
 
 def test_artist_diff_skips_artist_when_counts_match():
@@ -249,10 +293,9 @@ def test_artist_diff_skips_artist_when_counts_match():
         ]
     )
 
-    skip_artist, changed_albums, removed_albums = artist_album_name_diff(
+    skip_artist, changed_albums, removed_albums = compute_artist_album_diff(
         "Steady Artist",
-        "ar-2",
-        client=client,
+        client.albums,
     )
 
     assert skip_artist is True

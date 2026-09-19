@@ -1,39 +1,65 @@
 {% extends "base.html" %}
 
+{#
+  ==========================================================================
+  Artist detail page — REBUILT TREE.
+
+  This is the test_site mirror of templates/pages/artist_detail_v2.html. The
+  two are kept in lock-step deliberately: the route asks for
+  ``pages/artist_detail_v2.html``, and under features.use_test_site the rebuilt
+  loader is PREFERRED, so this file is what gets served. A divergence therefore
+  shows up as the page changing shape purely by toggling the cutover flag.
+
+  FILE NAME IS LOAD-BEARING
+  -------------------------
+  The rebuilt tree uses ``Pages/`` (capital P). The app's loader is
+  case-insensitive (helpers/test_site_mode.py::CaseInsensitiveFileSystemLoader),
+  so the directory case resolves either way — but the FILENAME must match:
+  the route asks for ``artist_detail_v2.html``, so a file named
+  ``artist_detail.html`` is simply never reached. (test_site/templates/Pages/
+  artist_detail.html is such an orphan — nothing resolves it.)
+
+  ── LAYOUT ───────────────────────────────────────────────────────────────
+  Hero (avatar, bio, metrics, scan controls, PLAY TOP TRACKS) → tabbed body:
+
+    Albums   per-category release sections, each with its OWN All / Library /
+             Missing filter, Search-All / Check-Missing actions and expandable
+             tracklists, then the Covers list.
+    Top      stat cards and the Top 20 table.
+    About    bio, country, band members, external IDs, similar artists.
+
+  The tabbed layout is kept from the previous revision. What changed is the
+  Albums tab: the old PAGE-WIDE All / In-Library / Missing bar is gone, because
+  one global filter could only express one intent for the whole page — choosing
+  "Missing" hid every owned album in every category at once, so an artist with
+  one missing single and twenty owned albums looked like they owned nothing.
+
+  ── EVERY url_for HERE IS NAMESPACED ─────────────────────────────────────
+  Blueprints are registered with names (``ui``, ``scans``, ``artist``), so a
+  BARE endpoint name raises ``BuildError: Could not build url for endpoint
+  'dashboard'`` at render time. That is exactly what the sibling orphan
+  (Pages/artist_detail.html) does, which is why it cannot render.
+
+  ── SCRIPTS ──────────────────────────────────────────────────────────────
+  Loaded by base.html already: utils/dom.js (escapeHtml), utils/api.js (api),
+  ui/toast.js (toast/showToast), ui/modal.js, ui/player.js (Player).
+  Added here:
+    js/services/genres.js               genre suggestions
+    js/pages/artist.js                  bio, similar, favourite, covered-by,
+                                        download search, IDs modal, track edit
+    js/pages/artist-detail-extras.js    the handlers artist.js does NOT define
+    js/pages/artist-releases.js         release sections, tracklists, import
+  ==========================================================================
+#}
+
 {% block title %}{{ artist_name }} · Popularr{% endblock %}
 
 {% block content %}
-{# ========================================================================= #}
-{# RELEASE SECTIONS — now a SHARED component                            #
-{# ========================================================================= #}
-{#
-  The release-category rendering used to be a 100-line macro defined inline in
-  this template. It now lives in components/_release_section.html and is shared
-  with the rebuilt tree, so the two cannot drift apart.
+{% from "components/_release_section.html" import render_release_section %}
 
-  Read the field contract in that file before changing `album.*` accesses: the
-  route builds `albums_by_category` from TWO shapes (owned albums aggregated
-  from tracks, and missing releases from missing_releases), and no single key
-  exists on both. Reading the wrong key renders a blank cell rather than
-  raising, which is how the previous version shipped an empty album name for
-  every owned release.
-#}
-{% from "components/_release_section.html" import render_release_section as render_release_section_v2 %}
-
-{#
-  Page-scoped styles now live in css/artist.css. They used to be an inline
-  <style> block here (~155 lines), which the browser re-parsed with every HTML
-  response and which could not be cached or linted.
-
-  This page previously loaded NO page stylesheet at all, while a stale
-  test_site/static/css/artist.css sat unreferenced and styled
-  `.artist-page tr.album-row` — a selector that can never match, because album
-  rows here are `<div class="album-row">`, not `<tr>`. See the header of
-  static/css/artist.css.
-#}
 <link rel="stylesheet" href="{{ versioned_static('css/artist.css') }}">
 
-<div class="container-fluid mt-3 artist-page" data-bs-spy="scroll" data-bs-target="#artist-nav" data-bs-smooth-scroll="true" tabindex="0">
+<div class="container-fluid mt-3 artist-page" tabindex="0">
 
   <nav aria-label="breadcrumb">
     <ol class="breadcrumb mb-3">
@@ -43,7 +69,8 @@
     </ol>
   </nav>
 
-  {# Playlist for the "Play Top Tracks" CTA (top 20 by popularity) #}
+  {# Playlist for the PLAY TOP TRACKS CTA: the top 20 by popularity, in the
+     shape Player.playQueue() expects ({id, title, artist, albumArtUrl}). #}
   {% set _play_tracks = [] %}
   {% for t in (top_tracks or [])[:20] %}
     {% if t.id and t.title %}
@@ -57,20 +84,21 @@
   <script>window._artistPlaylist = {{ _play_tracks|tojson }};</script>
 
   {# =================================================================== #}
-  {# HERO HEADER CARD                                                    #}
+  {# HERO                                                                #}
   {# =================================================================== #}
   <div class="card mb-4 position-relative hero-card">
     <button data-artist-fav-btn
-            class="btn btn-link p-0 text-danger border-0 position-absolute top-0 end-0 m-3 shadow-none"
+            type="button"
+            class="btn btn-link p-0 text-secondary border-0 position-absolute top-0 end-0 m-3 shadow-none"
             onclick='toggleArtistFavourite({{ artist_name|tojson }})'
             title="Favourite Artist" aria-label="Favourite this artist">
       <i class="bi bi-heart fs-4" data-artist-fav-icon></i>
     </button>
 
     <div class="card-body p-3 p-md-4">
-      <!-- Avatar + Metadata -->
       <div class="d-flex align-items-start gap-3 mb-3">
         <div class="hero-avatar-wrap position-relative flex-shrink-0 cursor-pointer"
+             role="button" tabindex="0"
              onclick='openArtistImageModal({{ artist_name|tojson }})'
              title="Change Artist Image">
           <img id="artistImage"
@@ -78,14 +106,14 @@
                alt="{{ artist_name }}"
                class="rounded-circle border border-secondary"
                style="width: 80px; height: 80px; object-fit: cover; background-color: #2a2a2a;"
-               onerror="this.src='/api/album-art-placeholder';">
+               onerror="this.src='/api/album/art-placeholder';">
           <div class="hero-avatar-overlay rounded-circle d-flex align-items-center justify-content-center">
             <i class="bi bi-pencil-fill text-white extra-small"></i>
           </div>
         </div>
 
         <div class="overflow-hidden min-w-0 pe-4">
-          <h1 class="h3 fw-bold mb-1 text-truncate">
+          <h1 class="h3 fw-bold mb-1 text-truncate" data-artist-name="{{ artist_name|e }}">
             {{ artist_name }}
             {% if artist_country %}
               <span class="badge bg-info align-middle fs-6 ms-1">{{ artist_country }}</span>
@@ -97,7 +125,7 @@
               <span class="badge bg-primary-subtle text-primary border border-primary-subtle extra-small">{{ genre }}</span>
             {% endfor %}
             {% if (genres or [])|length > 2 %}
-              <span class="text-muted extra-small ms-1">+{{ (genres|length - 2) }} more</span>
+              <span class="text-muted extra-small ms-1">+{{ genres|length - 2 }} more</span>
             {% endif %}
           </div>
 
@@ -108,8 +136,7 @@
         </div>
       </div>
 
-      <!-- Inset Metrics Grid -->
-      <div class="hero-metrics-box rounded p-3 mb-3" style="background-color: var(--tertiary-bg, #222222); border: 1px solid var(--border-color);">
+      <div class="hero-metrics-box rounded p-3 mb-3" style="background-color: var(--tertiary-bg); border: 1px solid var(--border-color);">
         <div class="row text-center g-2">
           <div class="col-3 border-end border-secondary">
             <div class="extra-small text-muted text-uppercase fw-semibold">Albums</div>
@@ -130,17 +157,14 @@
         </div>
       </div>
 
-      <!-- Admin Controls Row -->
-      <form id="artistScanForm" action="{{ url_for('scans.scan_artist_custom') }}" method="post" class="d-flex align-items-center gap-2 mb-3 flex-wrap scan-toolbar">
+      <form id="artistScanForm"
+            action="{{ url_for('scans.scan_artist_custom') }}"
+            method="post"
+            class="d-flex align-items-center gap-2 mb-3 flex-wrap scan-toolbar">
         <input type="hidden" name="artist" value="{{ artist_name }}">
 
-        {#
-          No fixed width. The partial emits BOTH the scan-type <select> AND
-          the "Restart" checkbox, so a 160px cap squashed Restart into a
-          narrow column and wrapped it onto a second line, which is what left
-          Run / Force / Restart looking misaligned. The select already sets
-          its own min-width.
-        #}
+        {# The partial emits the scan-type <select> AND the Restart checkbox.
+           `ignore missing` keeps the page rendering in a tree without it. #}
         <div class="d-flex align-items-center gap-2">
           {% include 'components/_scan_selector.html' ignore missing %}
         </div>
@@ -155,7 +179,8 @@
         </div>
 
         <div class="dropdown ms-auto">
-          <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="More actions">
+          <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button"
+                  data-bs-toggle="dropdown" aria-expanded="false" title="More actions">
             <i class="bi bi-three-dots-vertical"></i> <span class="d-none d-sm-inline">Actions</span>
           </button>
           <ul class="dropdown-menu dropdown-menu-end">
@@ -168,7 +193,6 @@
         </div>
       </form>
 
-      <!-- Full-Width Primary Green CTA Bar -->
       <button type="button"
               class="btn btn-success btn-lg w-100 fw-bold d-flex align-items-center justify-content-center gap-2"
               onclick="playArtistTopTracks()">
@@ -177,25 +201,25 @@
     </div>
   </div>
 
+  {# Advisory banner: unhidden by artist-detail-extras.js only when the API
+     reports outstanding releases, so it never shows for a clean artist. #}
+  <div id="artist-corrections-banner" style="display:none;" class="mb-3">
+    <a href="{{ url_for('ui.artist_corrections', name=artist_name) }}" class="btn btn-outline-danger btn-sm">
+      <i class="bi bi-tools"></i> Needs Correcting
+    </a>
+    <span id="artist-missing-tracks-badge" class="badge bg-warning text-dark ms-2" style="display:none;"></span>
+  </div>
+
   {# =================================================================== #}
-  {# TAB NAVIGATION BAR                                                  #}
+  {# TABS                                                                #}
   {# =================================================================== #}
-  {% set cat_keys = album_categories|map(attribute='key')|list %}
   {% set ns_totals = namespace(all=0, library=0, missing=0) %}
-  {% for key in cat_keys %}
+  {% for key in album_categories|map(attribute='key')|list %}
     {% set ns_totals.all = ns_totals.all + (albums_by_category.get(key) or [])|length %}
-    {% set ns_totals.library = ns_totals.library + (albums_by_category.get(key) or [])|selectattr('is_missing', 'equalto', False)|list|length %}
-    {% set ns_totals.missing = ns_totals.missing + (albums_by_category.get(key) or [])|selectattr('is_missing', 'equalto', True)|list|length %}
+    {% set ns_totals.library = ns_totals.library + (albums_by_category.get(key) or [])|rejectattr('is_missing')|list|length %}
+    {% set ns_totals.missing = ns_totals.missing + (albums_by_category.get(key) or [])|selectattr('is_missing')|list|length %}
   {% endfor %}
 
-  {#
-    `nav-segmented` (popularr.css) replaces `bg-secondary p-1 rounded`.
-    Bootstrap's bg-secondary (#6c757d) is lighter than every surface token in
-    this theme, so the tab strip read as a pale grey band floating on the page
-    instead of a recessed track behind the active green pill. This is the same
-    treatment album_detail.html and every other tabbed page already uses —
-    the artist page was the one that never got migrated.
-  #}
   <ul class="nav nav-pills nav-segmented nav-fill mb-3" role="tablist" id="artistPageTabs">
     <li class="nav-item" role="presentation">
       <button class="nav-link active" id="tab-albums-btn" data-bs-toggle="tab" data-bs-target="#tab-albums" type="button" role="tab" aria-selected="true">
@@ -214,27 +238,11 @@
     </li>
   </ul>
 
-  {# =================================================================== #}
-  {# TAB CONTENT PANELS                                                  #}
-  {# =================================================================== #}
   <div class="tab-content">
 
-    {# ── TAB 1: ALBUMS (DISCOGRAPHY) ─────────────────────────────────── #}
+    {# ── TAB 1: ALBUMS ───────────────────────────────────────────────── #}
     <div class="tab-pane fade show active" id="tab-albums" role="tabpanel" aria-labelledby="tab-albums-btn">
-      {#
-        The page-wide All / In Library / Missing filter bar lived here. It is
-        REPLACED by a per-section filter inside components/_release_section.html.
 
-        A single page-wide filter could only express one intent for the whole
-        page: choosing "Missing" hid every owned album in every category at
-        once, so an artist with one missing single and twenty owned albums
-        looked like they owned nothing. Each release category now carries its
-        own All / Library / Missing control, and keeps its own selection.
-
-        The old bar's onclick handlers called setArtistFilter(), which only ever
-        understood `.category-section .album-row` — markup that no longer exists
-        — so the buttons are removed rather than left wired to nothing.
-      #}
       <div class="d-flex align-items-center justify-content-between gap-2 mb-3 p-2 rounded flex-wrap" style="background-color: var(--secondary-bg);">
         <span class="text-muted small">
           <i class="bi bi-funnel me-1"></i>
@@ -253,7 +261,6 @@
         </div>
       </div>
 
-      <!-- Categories (Auto-hidden if 0 entries) -->
       {#
         Jump chips: one per NON-EMPTY category, linking to that section. This is
         the design's own navigation, and `album_categories` only ever contains
@@ -273,22 +280,12 @@
       {% endif %}
 
       {#
-        Sections come from components/_release_section.html and are driven by
-        `album_categories` (services/catalog/release_categories — the single
-        source of truth for release types), so a new MusicBrainz type appears
-        without a template change.
-
-        Each section carries its own All / Library / Missing filter, its own
-        Search-All / Check-Missing actions, and expandable tracklists. The macro
-        renders nothing when `items` is empty, so an artist with no field
-        recordings never grows a "Field Recordings" heading.
-
         `#releases-sections` is the initialisation gate for
-        static/js/artist-releases.js — that module is inert without it.
+        js/pages/artist-releases.js — that module stays inert without it.
       #}
       <div id="releases-sections">
       {% for spec in album_categories %}
-        {{ render_release_section_v2(
+        {{ render_release_section(
              spec.key,
              spec.section_id,
              spec.icon,
@@ -313,26 +310,16 @@
       {% endif %}
       </div>
 
-      <!-- Covers in Collection -->
-      <div class="card mb-3 category-section" id="covers-section">
-        <div class="card-header p-0" style="background-color: var(--tertiary-bg);">
-          <button class="btn btn-link w-100 text-start d-flex align-items-center justify-content-between p-3 text-decoration-none text-white accordion-header-btn"
-                  type="button"
-                  data-bs-toggle="collapse"
-                  data-bs-target="#collapse-covers">
-            <div class="d-flex align-items-center gap-2 flex-wrap">
-              <i class="bi bi-music-note-list text-info fs-5"></i>
-              <h5 class="h6 fw-bold mb-0 me-2">Covers of {{ artist_name }}'s Songs</h5>
-              <span class="badge bg-secondary" id="artistCoveredByCount">Checking...</span>
-            </div>
-            <i class="bi bi-chevron-down text-muted accordion-chevron"></i>
-          </button>
+      <div class="card mb-3" id="artist-covers-section">
+        <div class="card-header">
+          <h5 class="card-title mb-0 d-flex align-items-center gap-2 flex-wrap">
+            <i class="bi bi-music-note-list"></i> Covers of {{ artist_name }}'s Songs
+            <span class="badge bg-secondary" id="artistCoveredByCount">…</span>
+          </h5>
         </div>
-        <div id="collapse-covers" class="collapse show card-body p-2">
+        <div class="card-body p-0">
           <div id="artistCoveredByContainer">
-            <div class="text-center py-3 text-muted">
-              <span class="spinner-border spinner-border-sm me-2"></span>Loading covers in library...
-            </div>
+            <div class="text-center py-3"><div class="spinner-border spinner-border-sm"></div></div>
           </div>
         </div>
       </div>
@@ -372,6 +359,12 @@
           <i class="bi bi-graph-up-arrow me-1"></i> Top 20 Tracks
         </div>
         <div class="table-responsive">
+          {#
+            `data-mobile-cards` hides <thead> below 768px and rebuilds each
+            column name from the cell's `data-label`, so EVERY <td> needs a
+            data-label. Adding the attribute without them removes the headers
+            rather than restacking the table.
+          #}
           <table class="table table-hover mb-0" data-mobile-cards>
             <thead>
               <tr class="d-none d-md-table-row">
@@ -395,7 +388,7 @@
                 </tr>
               {% else %}
                 <tr>
-                  <td colspan="4" class="text-center text-muted py-4">
+                  <td colspan="4" class="text-center text-muted py-4" data-label="Tracks">
                     <i class="bi bi-info-circle"></i> No tracks available for ranking
                   </td>
                 </tr>
@@ -406,36 +399,49 @@
       </div>
     </div>
 
-    {# ── TAB 3: ABOUT (No Redundant Avatar) ───────────────────────────── #}
+    {# ── TAB 3: ABOUT ────────────────────────────────────────────────── #}
     <div class="tab-pane fade" id="tab-about" role="tabpanel" aria-labelledby="tab-about-btn">
+
       <div class="card mb-3">
         <div class="card-body">
           <h5 class="card-title h6 fw-bold"><i class="bi bi-journal-text me-2"></i>Biography</h5>
           <div id="artistBioClamp" class="bio-clamp">
-            <p class="text-secondary small mb-0">
+            {#
+              `data-has-initial-bio` tells artist-page.js whether a fetch is
+              needed: when the route already supplied the bio there is no
+              reason to request it again.
+            #}
+            <p class="text-secondary small mb-0" id="artistBio"
+               data-has-initial-bio="{{ '1' if artist_bio else '0' }}">
               {% if artist_bio %}
                 {{ artist_bio|e|replace('&lt;br /&gt;', '<br>')|replace('&lt;br/&gt;', '<br>')|replace('&lt;br&gt;', '<br>')|replace('\n', '<br>')|safe }}
               {% else %}
-                No biography available.
+                Loading artist biography…
               {% endif %}
             </p>
           </div>
-          {% if artist_bio %}
-            <button id="artistBioToggle" class="btn btn-link btn-sm p-0 mt-2 text-decoration-none" onclick="toggleArtistBio()">
-              <i class="bi bi-chevron-down me-1"></i>Read More
-            </button>
-          {% endif %}
+          <button id="artistBioToggle" class="btn btn-link btn-sm p-0 mt-2 text-decoration-none" onclick="toggleArtistBio()">
+            <i class="bi bi-chevron-down me-1"></i>Read More
+          </button>
         </div>
       </div>
 
       <div class="card mb-3">
         <div class="card-body p-3">
           <h6 class="fw-bold mb-2"><i class="bi bi-globe me-2"></i>Country &amp; Band Members</h6>
-          <div class="mb-3">
-            <span class="badge bg-info me-2">{{ artist_country or 'Unknown Origin' }}</span>
-            <button class="btn btn-xs btn-outline-secondary" onclick="editArtistCountry()">Edit</button>
-            <button class="btn btn-xs btn-outline-primary" onclick="fetchArtistCountry()" id="fetchArtistCountryBtn">
+          <div class="mb-3" id="artistCountryDisplay">
+            {% if artist_country %}
+              <span class="badge bg-info me-2">{{ artist_country }}</span>
+            {% else %}
+              <span class="text-muted small me-2">No country information available.</span>
+            {% endif %}
+          </div>
+          <div class="d-flex gap-2 flex-wrap mb-3">
+            <button class="btn btn-sm btn-outline-primary" onclick="fetchArtistCountry()" id="fetchArtistCountryBtn">
               <i class="bi bi-cloud-download"></i> Get from MusicBrainz
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="editArtistCountry()">
+              <i class="bi bi-pencil"></i> Edit Manually
             </button>
           </div>
           <div id="artistMembersDisplay" class="d-flex flex-wrap gap-1">
@@ -453,33 +459,50 @@
 
       <div class="card mb-3">
         <div class="card-body p-3">
-          <h6 class="fw-bold mb-2"><i class="bi bi-link-45deg me-2"></i>External IDs</h6>
-          <div class="small text-muted">
-            <div><strong>MusicBrainz:</strong> <code id="musicbrainzArtistId">{{ stats.musicbrainz_artist_id or stats.lastfm_artist_mbid or 'Not linked' }}</code></div>
-            <div><strong>Discogs:</strong> <code id="discogsArtistId">{{ stats.discogs_artist_id or 'Not linked' }}</code></div>
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="fw-bold mb-0"><i class="bi bi-link-45deg me-2"></i>External IDs</h6>
+            <button class="btn btn-sm btn-outline-primary" onclick="openEditArtistIdsModal()">
+              <i class="bi bi-pencil"></i> Edit IDs
+            </button>
           </div>
-          <button class="btn btn-sm btn-outline-primary mt-2" onclick="openEditArtistIdsModal()">Edit IDs</button>
+          <div class="small text-muted">
+            <div class="mb-1">
+              <strong>MusicBrainz:</strong>
+              <code id="musicbrainzArtistId">{{ stats.musicbrainz_artist_id or stats.lastfm_artist_mbid or 'Not linked' }}</code>
+              {% if stats.musicbrainz_artist_id or stats.lastfm_artist_mbid %}
+                <a href="https://musicbrainz.org/artist/{{ stats.musicbrainz_artist_id or stats.lastfm_artist_mbid }}"
+                   target="_blank" rel="noopener" class="text-decoration-none ms-1"><i class="bi bi-box-arrow-up-right"></i></a>
+              {% endif %}
+            </div>
+            <div>
+              <strong>Discogs:</strong>
+              <code id="discogsArtistId">{{ stats.discogs_artist_id or 'Not linked' }}</code>
+              {% if stats.discogs_artist_id %}
+                <a href="https://www.discogs.com/artist/{{ stats.discogs_artist_id }}"
+                   target="_blank" rel="noopener" class="text-decoration-none ms-1"><i class="bi bi-box-arrow-up-right"></i></a>
+              {% endif %}
+            </div>
+          </div>
         </div>
       </div>
 
-      <!-- Similar Artists -->
       <div class="card mb-3" id="artist-similar-section">
         <div class="card-body p-3">
           <h6 class="fw-bold mb-2"><i class="bi bi-people me-2"></i>Similar Artists</h6>
           <div id="artistSimilarArtistsContainer">
-            {% set similar_list = (similar_artists.display if similar_artists else []) or [] %}
-            {% if similar_list %}
+            {% set _similar = (similar_artists.display if similar_artists else []) or [] %}
+            {% if _similar %}
               <div class="d-flex flex-wrap gap-2">
-                {% for sa in similar_list %}
-                  <a href="/artist/{{ sa.name|path_segment }}" class="badge artist-similar-card text-decoration-none" style="font-size: 0.95rem; padding: 0.45rem 0.6rem;">
+                {% for sa in _similar %}
+                  <a href="/artist/{{ sa.name|path_segment }}"
+                     class="badge {{ 'bg-success' if sa.in_collection else 'bg-secondary' }} artist-similar-card text-decoration-none">
                     {{ sa.name }}
                   </a>
                 {% endfor %}
               </div>
             {% else %}
               <div class="text-muted small">
-                <span>No similar artists available yet.</span>
-                <br><small>Similar artists are collected during popularity scans from Last.fm and ListenBrainz.</small>
+                <span>Loading similar artists…</span>
               </div>
             {% endif %}
           </div>
@@ -489,6 +512,10 @@
 
   </div>
 </div>
+
+{# The ID contract these modals provide is consumed by the modules above and
+   by inline onclick handlers, so the include is required, not cosmetic. #}
+{% include "components/modals/_artist_modals.html" %}
 {% endblock %}
 
 {% block scripts %}
@@ -496,31 +523,11 @@
   {{ {"artistName": artist_name} | tojson | safe }}
 </script>
 <script>
-  const _pd = JSON.parse(document.getElementById('page-data').textContent);
-  window.artistName = _pd.artistName;
+  window.artistName = {{ artist_name | tojson }};
 </script>
 
-<script src="{{ versioned_static('js/genre-utils.js') }}"></script>
-{#
-  The album All / In Library / Missing filter. It lives in its own module
-  because `js/artist_detail.js` is currently NOT JavaScript — it is a Jinja page
-  template (line 1 is `{% extends "base.html" %}`) loaded via <script src>, so
-  the browser throws SyntaxError and discards the whole file. That made
-  setArtistFilter() undefined and the filter buttons do nothing.
-
-  A SyntaxError in one <script src> does not stop later scripts, so keeping the
-  filter here restores it immediately, independently of that larger repair.
-#}
-<script src="{{ versioned_static('js/artist-album-filter.js') }}"></script>
-<script src="{{ versioned_static('js/artist-page.js') }}"></script>
-<script src="{{ versioned_static('js/artist-releases.js') }}"></script>
-
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-  // Load covers of this artist's songs
-  if (typeof loadArtistCoveredBy === 'function') {
-    loadArtistCoveredBy(window.artistName);
-  }
-});
-</script>
+<script src="{{ versioned_static('js/services/genres.js') }}"></script>
+<script src="{{ versioned_static('js/pages/artist.js') }}"></script>
+<script src="{{ versioned_static('js/pages/artist-detail-extras.js') }}"></script>
+<script src="{{ versioned_static('js/pages/artist-releases.js') }}"></script>
 {% endblock %}

@@ -138,13 +138,19 @@ def build_artist_index(client: NavidromeClient) -> dict[str, dict[str, Any]]:
 # Delta-scan helpers (only import what changed)
 # -------------------------------------------------------------------------
 
-_DELTA_LIST_TYPES = ("newest", "recentlyAdded")
+# `getAlbumList2` list types that Navidrome actually implements. Navidrome
+# rejects Subsonic's `recentlyAdded` with
+# `code=0 message="type 'recentlyAdded' not implemented"`, which the client
+# logs as a WARNING on every delta scan. `newest` is ordered by `created`
+# descending, so it already covers "albums added since <timestamp>"; the
+# per-album `created`/`updated` filter below does the rest.
+_DELTA_LIST_TYPES = ("newest",)
 _DELTA_MAX_PAGES = 5
 
 
 def _album_sort_ts(album: dict[str, Any]) -> float:
     """Return a sortable timestamp for an album (newest first)."""
-    raw = album.get("created") or album.get("updated") or album.get("recentlyAdded") or ""
+    raw = album.get("created") or album.get("updated") or ""
     try:
         from datetime import datetime
         dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
@@ -162,8 +168,8 @@ def fetch_changed_albums(
 ) -> list[dict[str, Any]]:
     """Fetch only recently added/changed albums from Navidrome.
 
-    Pages ``getAlbumList2`` with ``newest`` + ``recentlyAdded`` list types
-    (deduped by album id) rather than crawling the full library. When
+    Pages ``getAlbumList2`` with the ``newest`` list type (deduped by album id)
+    rather than crawling the full library. When
     ``since_ts`` is provided the returned list is filtered to albums whose
     ``created``/``updated`` timestamp is at or after that time; otherwise the
     head of the lists is treated as "recent".

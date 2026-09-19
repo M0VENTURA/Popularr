@@ -95,10 +95,20 @@ def test_static_js_contains_no_jinja(js_file: Path) -> None:
 
 
 def test_artist_filter_module_is_loaded_and_publishes_globals() -> None:
-    """The artist album filter must be a real module AND be loaded by the page.
+    """The artist album filter must be a real module AND still be loaded.
 
-    Pins the specific regression: the filter bar calls ``setArtistFilter(...)``
-    from inline onclick attributes, so the function must exist on ``window``.
+    Pins the specific regression: the page-wide filter bar called
+    ``setArtistFilter(...)`` from inline onclick attributes, so the function had
+    to exist on ``window``.
+
+    That page-wide bar is GONE — the artist page now filters PER RELEASE
+    SECTION (All / Library / Missing radios inside each
+    components/_release_section.html card, wired by
+    static/js/artist-releases.js). The module is still kept and loaded as the
+    shared helper for any remaining page-wide control, so its globals must
+    still resolve — but asserting that the artist page calls
+    ``setArtistFilter`` from an onclick would now assert markup that was
+    deliberately removed.
     """
     module = REPO_ROOT / "static" / "js" / "artist-album-filter.js"
     assert module.is_file(), "static/js/artist-album-filter.js is missing"
@@ -110,15 +120,24 @@ def test_artist_filter_module_is_loaded_and_publishes_globals() -> None:
         "resolve by global name"
     )
 
+    # The module understood only the OLD `.category-section .album-row` markup
+    # and had to be retargeted when the release rows moved to .release-item.
+    # A selector that can never match is valid CSS/JS, so this needs pinning.
+    assert "release-item" in body, (
+        "artist-album-filter.js does not reference the new .release-item rows. "
+        "Its old selector (.category-section .album-row) matches nothing after "
+        "the release-section migration, which makes the whole module inert "
+        "while looking entirely correct."
+    )
+
     template = REPO_ROOT / "templates" / "pages" / "artist_detail_v2.html"
     html = template.read_text(encoding="utf-8")
     assert "artist-album-filter.js" in html, (
-        "artist_detail_v2.html does not load the filter module, so the filter "
-        "bar's onclick handlers will not resolve"
+        "artist_detail_v2.html does not load the filter module"
     )
 
-    # The page calls it three ways; each must be a real value in the module.
-    for handler in ("setArtistFilter",):
-        assert re.search(rf"onclick=\"[^\"]*{handler}\(", html), (
-            f"the filter bar no longer calls {handler}()"
-        )
+    assert "releases-sections" in html, (
+        "artist_detail_v2.html lost the #releases-sections marker, so "
+        "js/artist-releases.js (which owns the per-section All/Library/Missing "
+        "filter and the tracklists) never initialises"
+    )

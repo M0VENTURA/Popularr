@@ -1824,6 +1824,86 @@
         </div>
       </div>
 
+      {#
+        Album RATIO standout gate — the "shape of popularity" test.
+
+        A z-score answers "how far above this album's mean is the track?", but
+        on a small FLAT album the spread shrinks too, so a 6-listener gap over
+        the runner-up can clear every z-bound while the album plainly has no
+        standout. These MULTIPLIERS are scale-free, so they mean the same thing
+        whether the artist has 100 listeners or 10 million.
+
+        The three tests (values must be > 1x — 1x means "no separation"):
+          runner-up  top / #2      is #1 separated from its nearest rival?
+          median     top / median  how far above the album's standard fare?
+          floor      top / bottom  total dynamic range of the album
+
+        KEEP IN STEP WITH templates/pages/config.html — the Config page is the
+        source of truth for user-editable settings, so both trees must offer
+        the same fields or a saved value would differ by UI mode.
+      #}
+      <div class="border rounded p-3 mt-3">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <h6 class="mb-0">Album Standout Ratios (5★ shape test)</h6>
+          <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" id="album_ratio_standout_enabled" {% if config.get('single_detection', {}).get('album_ratio_standout', {}).get('enabled', 1) %}checked{% endif %}>
+            <label class="form-check-label form-label-sm" for="album_ratio_standout_enabled">Enabled</label>
+          </div>
+        </div>
+        <small class="form-text text-muted d-block mb-3">
+          A 5★ track must also be a genuine standout <strong>within its own album</strong> — measured by
+          multipliers rather than z-scores, so the test is scale-free. Turn this OFF to rate 5★ on the
+          z-score bands alone. A user-set rating is never overridden either way.
+        </small>
+        <div class="row g-3">
+          <div class="col-12 col-sm-6 col-lg-3">
+            <label class="form-label form-label-sm">Runner-Up Minimum</label>
+            <input type="number" step="0.1" min="1" max="10" class="form-control form-control-sm" id="album_ratio_runner_up_min" placeholder="1.5" value="{{ config.get('single_detection', {}).get('album_ratio_standout', {}).get('runner_up_min', 1.5) }}">
+            <small class="form-text text-muted"><code>top ÷ #2</code>. A true standout sits clear of its nearest rival. Default: <strong>1.5</strong></small>
+          </div>
+          <div class="col-12 col-sm-6 col-lg-3">
+            <label class="form-label form-label-sm">Median Minimum</label>
+            <input type="number" step="0.1" min="1" max="20" class="form-control form-control-sm" id="album_ratio_median_min" placeholder="3.0" value="{{ config.get('single_detection', {}).get('album_ratio_standout', {}).get('median_min', 3.0) }}">
+            <small class="form-text text-muted"><code>top ÷ median</code>. How far above the album's standard fare. Default: <strong>3.0</strong></small>
+          </div>
+          <div class="col-12 col-sm-6 col-lg-3">
+            <label class="form-label form-label-sm">Floor Minimum</label>
+            <input type="number" step="0.1" min="1" max="100" class="form-control form-control-sm" id="album_ratio_floor_min" placeholder="10.0" value="{{ config.get('single_detection', {}).get('album_ratio_standout', {}).get('floor_min', 10.0) }}">
+            <small class="form-text text-muted"><code>top ÷ bottom</code>. Total dynamic range. Default: <strong>10.0</strong></small>
+          </div>
+          <div class="col-12 col-sm-6 col-lg-3">
+            <label class="form-label form-label-sm">Tests That Must Pass</label>
+            <input type="number" step="1" min="1" max="3" class="form-control form-control-sm" id="album_ratio_min_passed" placeholder="3" value="{{ config.get('single_detection', {}).get('album_ratio_standout', {}).get('min_passed', 3) }}">
+            <small class="form-text text-muted">How many of the three must hold (1-3). Default: <strong>3</strong> (all)</small>
+          </div>
+        </div>
+        <div class="row g-3 mt-1">
+          <div class="col-12">
+            <small class="form-text text-muted">
+              <strong>Live albums</strong> use looser values (default 2 of 3, and lower multipliers), because a live
+              recording has crowd noise and applause on <em>every</em> track — the bottom cut is never far below the
+              top, so the floor ratio carries little signal there.
+            </small>
+          </div>
+          <div class="col-12 col-sm-6 col-lg-3">
+            <label class="form-label form-label-sm">Live · Runner-Up Minimum</label>
+            <input type="number" step="0.1" min="1" max="10" class="form-control form-control-sm" id="album_ratio_live_runner_up_min" placeholder="1.5" value="{{ config.get('single_detection', {}).get('album_ratio_standout', {}).get('live_runner_up_min', 1.5) }}">
+          </div>
+          <div class="col-12 col-sm-6 col-lg-3">
+            <label class="form-label form-label-sm">Live · Median Minimum</label>
+            <input type="number" step="0.1" min="1" max="20" class="form-control form-control-sm" id="album_ratio_live_median_min" placeholder="2.0" value="{{ config.get('single_detection', {}).get('album_ratio_standout', {}).get('live_median_min', 2.0) }}">
+          </div>
+          <div class="col-12 col-sm-6 col-lg-3">
+            <label class="form-label form-label-sm">Live · Floor Minimum</label>
+            <input type="number" step="0.1" min="1" max="100" class="form-control form-control-sm" id="album_ratio_live_floor_min" placeholder="5.0" value="{{ config.get('single_detection', {}).get('album_ratio_standout', {}).get('live_floor_min', 5.0) }}">
+          </div>
+          <div class="col-12 col-sm-6 col-lg-3">
+            <label class="form-label form-label-sm">Live · Tests That Must Pass</label>
+            <input type="number" step="1" min="1" max="3" class="form-control form-control-sm" id="album_ratio_live_min_passed" placeholder="2" value="{{ config.get('single_detection', {}).get('album_ratio_standout', {}).get('live_min_passed', 2) }}">
+          </div>
+        </div>
+      </div>
+
       <hr class="my-3">
       <h6 class="mb-3">3 · Score Adjustments</h6>
       <div class="row g-3">

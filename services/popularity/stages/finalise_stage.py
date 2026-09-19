@@ -94,6 +94,7 @@ from db.engine import db_session
 from db.utils import row_get
 from services.popularity.popularity_math import (
     age_skew_multiplier,
+    album_ratio_standout,
     apply_album_relative_popularity,
     calculate_robust_zscore,
     effective_album_ratio,
@@ -123,6 +124,22 @@ _DEFAULT_ERA_RULES: dict[str, dict[str, float | int]] = {
     "peak": {"catalog_top_pct": 0.20, "album_top_n": 3, "max_5star_slots": 4},
     "solid": {"catalog_top_pct": 0.15, "album_top_n": 3, "max_5star_slots": 3},
     "minor": {"catalog_top_pct": 0.10, "album_top_n": 3, "max_5star_slots": 2},
+}
+
+#: Fallbacks for the album ratio-standout gate, mirroring
+#: helpers/config_helpers._DEFAULT_ALBUM_RATIO_STANDOUT. Kept here as well so
+#: the gate has sane values when it is reached without a config layer (tests,
+#: direct calls).
+_DEFAULT_ALBUM_RATIO_RULES: dict[str, float] = {
+    "enabled": 1.0,
+    "runner_up_min": 1.5,
+    "median_min": 3.0,
+    "floor_min": 10.0,
+    "min_passed": 3.0,
+    "live_runner_up_min": 1.5,
+    "live_median_min": 2.0,
+    "live_floor_min": 5.0,
+    "live_min_passed": 2.0,
 }
 
 
@@ -223,6 +240,102 @@ def _live_album_scaling_configured() -> bool:
         return isinstance(block, dict) and bool(block)
     except Exception:
         return False
+
+
+def _album_ratio_rules(*, live: bool = False) -> dict[str, float]:
+    """Album ratio-standout thresholds, read live from config.
+
+    ``live=True`` selects the ``live_*`` variants, which are deliberately
+    looser: a live album routinely has a flat BOTTOM (crowd noise, applause,
+    and tuning appear on every track, so the least-played cut is not far below
+    the most-played). The floor ratio therefore carries little signal there,
+    and the default requires only two of the three multipliers instead of
+    all three.
+    """
+    cfg = get_standout_config() or {}
+    block = cfg.get("album_ratio_standout") or {}
+    if not isinstance(block, dict):
+        block = {}
+
+    defaults = _DEFAULT_ALBUM_RATIO_RULES
+    prefix = "live_" if live else ""
+    return {
+        "enabled": _safe_float(block.get("enabled"), float(defaults["enabled"])),
+        "runner_up_min": _safe_float(
+            block.get(f"{prefix}runner_up_min"), float(defaults[f"{prefix}runner_up_min"])
+        ),
+        "median_min": _safe_float(
+            block.get(f"{prefix}median_min"), float(defaults[f"{prefix}median_min"])
+        ),
+        "floor_min": _safe_float(
+            block.get(f"{prefix}floor_min"), float(defaults[f"{prefix}floor_min"])
+        ),
+        "min_passed": _safe_float(
+            block.get(f"{prefix}min_passed"), float(defaults[f"{prefix}min_passed"])
+        ),
+    }
+
+
+def _album_ratio_standout_ok(
+    track: dict[str, Any],
+    *,
+    album_lf_listeners: list[float] | None,
+    album_lb_listens: list[float] | None,
+    live: bool = False,
+) -> tuple[bool, str]:
+    """Apply the ratio ("shape of popularity") test to a 5★ candidate.
+
+    ONE PROVIDER, RAW COUNTS — both points are load-bearing:
+
+    * **One provider.** The series must measure one thing. Last.fm listeners
+      and ListenBrainz listens differ by orders of magnitude for the same
+      recording, so pairing them per track (or concatenating them) would make
+      the multipliers meaningless. Last.fm is preferred; ListenBrainz is the
+      fallback when Last.fm has no usable series.
+
+    * **Raw counts, never log-transformed.** This is the subtle one. A log
+      compression (``log10(n) * 16``, as ``album_prominence_score`` does) is
+      monotonic but massively shrinks large ratios: 500,000 vs 10,000 is a 50x
+      spread in raw listeners but only ~1.42x after log compression, because
+      ``log10`` maps both to 5.7 and 4.0. Taking the ratio AFTER compressing
+      therefore destroys exactly the dynamic range this test exists to
+      measure, and every album looks flat. The multipliers must be taken on the
+      linear counts the user actually sees.
+
+    Returns ``(ok, reason)``. ``ok`` is True when the test is DISABLED or the
+    data is too thin to judge, so this gate only ever blocks a 5★ it can
+    actually justify.
+    """
+    rules = _album_ratio_rules(live=live)
+    if not bool(rules.get("enabled", 1)):
+        return True, "ratio_gate_disabled"
+
+    def _series(values: list[float] | None) -> list[float]:
+        return [float(v or 0) for v in (values or []) if float(v or 0) > 0]
+
+    lf_series = _series(album_lf_listeners)
+    lb_series = _series(album_lb_listens)
+
+    track_lf = float(track.get("lastfm_listeners") or 0)
+    track_lb = float(track.get("listenbrainz_listens") or 0)
+
+    if len(lf_series) >= 3 and track_lf > 0:
+        counts, candidate, source = lf_series, track_lf, "lastfm"
+    elif len(lb_series) >= 3 and track_lb > 0:
+        counts, candidate, source = lb_series, track_lb, "listenbrainz"
+    else:
+        # Neither provider has a usable album series for this track.
+        return True, "ratio_inconclusive(no_usable_series)"
+
+    ok, reason, _ratios = album_ratio_standout(
+        candidate,
+        counts,
+        runner_up_min=float(rules["runner_up_min"]),
+        median_min=float(rules["median_min"]),
+        floor_min=float(rules["floor_min"]),
+        min_passed=int(rules["min_passed"]),
+    )
+    return ok, f"{reason}[{source}]"
 
 
 def _detect_live_album(album_results: list[dict[str, Any]]) -> bool:
@@ -390,8 +503,21 @@ def _live_album_stars(
     artist_scores: list[float],
     single_confidence: str,
     organic: bool,
+    album_lf_listeners: list[float] | None = None,
+    album_lb_listens: list[float] | None = None,
 ) -> tuple[int, str]:
-    """Star rating for a track on a LIVE album, driven by artist-z."""
+    """Star rating for a track on a LIVE album, driven by artist-z.
+
+    A 5★ produced here is additionally subject to the album RATIO standout
+    test (``_album_ratio_standout_ok``, live variant). Artist-z answers
+    "how does this track compare to the artist's catalogue?"; it does not
+    answer "does this live record actually contain a standout?". A live album
+    whose tracks are uniformly played across the artist's career can clear the
+    artist-z 5★ band while being internally flat, so the ratio test is applied
+    as the final gate and demotes a failing 5★ to 4★.
+
+    A user override is never demoted — it is an explicit instruction.
+    """
     rules = _live_album_rules()
     max_stars = int(rules["max_stars"])
 
@@ -414,7 +540,7 @@ def _live_album_stars(
     th = _live_star_thresholds()
     epsilon_z = _star_epsilon_z(artist_spread, th["epsilon"])
 
-    return live_album_star_from_artist_z(
+    stars, reason = live_album_star_from_artist_z(
         artist_z,
         album_z,
         mode=str(rules["mode"]),
@@ -429,6 +555,20 @@ def _live_album_stars(
         default_max=max_stars,
         epsilon_z=epsilon_z,
     )
+
+    if stars >= 5 and str(single_confidence or "").strip().casefold() != "user":
+        _ratio_ok, _ratio_reason = _album_ratio_standout_ok(
+            track,
+            album_lf_listeners=album_lf_listeners,
+            album_lb_listens=album_lb_listens,
+            live=True,
+        )
+        track["_ratio_5star_reason"] = _ratio_reason
+        if not _ratio_ok:
+            stars = 4
+            reason = f"{reason}+ratio_gate_failed"
+
+    return stars, reason
 
 
 def _album_top_genres(
@@ -665,6 +805,7 @@ def _assign_stars(
     track.pop("_era_5star", None)
     track.pop("_force_floor", None)
     track.pop("_live_reason", None)
+    track.pop("_ratio_5star_reason", None)
 
     is_live = (
         bool(track.get("is_live"))
@@ -709,6 +850,8 @@ def _assign_stars(
             artist_scores,
             single_confidence,
             organic,
+            album_lf_listeners=album_lf_listeners,
+            album_lb_listens=album_lb_listens,
         )
         track["_live_reason"] = live_reason
         if live_stars >= 5:
@@ -730,8 +873,22 @@ def _assign_stars(
                 and artist_z >= th["star5_artist_z"] - _epsilon_art
             )
             if _clears_5star_bounds:
-                track["_global_5star_locked"] = True
-                return 5
+                # The z-bounds say "catalogue-top"; the RATIO test asks the
+                # different question of whether this album actually CONTAINS a
+                # standout. An album can be the artist's most popular release
+                # (clearing every z-bound) while being internally flat — in
+                # which case its "top" track is only marginally ahead of the
+                # rest and is not a standout, however high its z-score.
+                _ratio_ok, _ratio_reason = _album_ratio_standout_ok(
+                    track,
+                    album_lf_listeners=album_lf_listeners,
+                    album_lb_listens=album_lb_listens,
+                    live=is_live,
+                )
+                track["_ratio_5star_reason"] = _ratio_reason
+                if _ratio_ok:
+                    track["_global_5star_locked"] = True
+                    return 5
             track["_global_5star_locked"] = False
             track["_force_floor"] = 4
             return 4
@@ -882,6 +1039,24 @@ def _assign_stars(
             if catalog_cutoff is not None and score < float(catalog_cutoff):
                 five_star_eligible = False
             if _album_rank(score, album_scores) > album_top_n:
+                five_star_eligible = False
+
+        # Ratio ("shape of popularity") gate. The z-bounds above answer "is
+        # this track far above its album's mean?"; on a small, flat album the
+        # spread shrinks too, so a 6-listener gap over the runner-up can clear
+        # every z-bound while the album plainly has no standout. The ratio
+        # test is scale-free and closes that hole. It runs LAST so the cheap
+        # checks short-circuit first, and it is skipped once a track has
+        # already been rejected for a cheaper reason.
+        if five_star_eligible:
+            _ratio_ok, _ratio_reason = _album_ratio_standout_ok(
+                track,
+                album_lf_listeners=album_lf_listeners,
+                album_lb_listens=album_lb_listens,
+                live=is_live,
+            )
+            track["_ratio_5star_reason"] = _ratio_reason
+            if not _ratio_ok:
                 five_star_eligible = False
 
         if five_star_eligible:

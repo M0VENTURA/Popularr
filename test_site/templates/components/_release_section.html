@@ -1,6 +1,216 @@
-{% extends "base.html" %}
+{#
+  ==========================================================================
+  Release-section macro for the artist page.
 
-{% block title %}{{ artist_name }} · Popularr{% endblock %}
+  Renders ONE release category (Albums / EPs / Singles / …) as a collapsible
+  card of release rows, each with an expandable tracklist.
+
+  IMPORTED BY: test_site/templates/Pages/artist_detail.html
+    {% from "components/_release_section.html" import render_release_section %}
+
+  ── THIS FILE USED TO BE WRONG ───────────────────────────────────────────
+  It was a 333-line FULL ARTIST PAGE (`{% extends "base.html" %}`, byte-identical
+  to templates/pages/artist_detail.html) that defined NO MACRO at all. Importing
+  it raised
+
+      ImportError: cannot import name 'render_release_section'
+
+  and because the rebuilt tree is a PREFERRED loader under the cutover, that
+  broken copy also won over the correct live one. The stray body is now inert
+  and the file exports the real macro.
+
+  The authoritative copy is templates/components/_release_section.html; this one
+  exists so the rebuilt tree resolves the same import path. Keep them in step.
+
+  ── WHY EVERY FIELD IS READ DEFENSIVELY ──────────────────────────────────
+  routes/ui_routes.py::artist_detail builds ``albums_by_category`` from TWO
+  different shapes, so no single key is present on both:
+
+  * LIBRARY albums (aggregated from the tracks table) carry
+        album, album_year, track_count, avg_stars, total_duration,
+        release_title, release_year, spotify_album_type, album_type,
+        is_missing = False
+    — there is NO ``title``, NO ``year``, and NO MusicBrainz id.
+
+  * MISSING releases (from the missing_releases table) carry
+        album, title, album_year, track_count, is_missing = True,
+        first_release_date, cover_art_url, release_id, _category
+
+  Reading ``album.title`` alone therefore rendered an EMPTY name for every
+  owned album — silently, because Jinja's default Undefined is falsy and a bad
+  key produces a blank cell rather than an error.
+  ==========================================================================
+#}
+
+{% macro _title_of(album) -%}
+{{- album.album or album.title or '' -}}
+{% endmacro %}
+
+{% macro _year_of(album) -%}
+{%- set _y = album.album_year or album.release_year or album.year or album.originalyear -%}
+{%- if _y -%}
+{{- _y -}}
+{%- elif album.first_release_date -%}
+{{- album.first_release_date[:4] -}}
+{%- endif -%}
+{% endmacro %}
+
+{% macro _mbid_of(album) -%}
+{{- album.musicbrainz_album_mbid or album.release_mbid or album.mbid or album.release_id or '' -}}
+{% endmacro %}
+
+{% macro _rgid_of(album) -%}
+{{- album.musicbrainz_releasegroupid or album.release_group_mbid or '' -}}
+{% endmacro %}
+
+{% macro _cover_of(album, artist_name) -%}
+{#-
+  Owned albums resolve art through the album-art route (the same URL pattern
+  components/_album_category_section.html already uses, so there is one
+  convention rather than two). Missing releases only ever have a remote
+  cover_art_url. Blank means "render the placeholder glyph" — never a request
+  for a file that does not exist.
+-#}
+{%- if album.cover_art_url -%}
+{{- album.cover_art_url -}}
+{%- elif not album.is_missing -%}
+/api/album/{{ artist_name|path_segment }}/{{ _title_of(album)|trim|path_segment }}/art?s=48
+{%- endif -%}
+{% endmacro %}
+
+{% macro render_release_row(album, artist_name, section_id) %}
+{%- set year = _year_of(album)|trim -%}
+{%- set title = _title_of(album)|trim -%}
+{%- set mbid = _mbid_of(album)|trim -%}
+{%- set rgid = _rgid_of(album)|trim -%}
+{%- set cover = _cover_of(album, artist_name)|trim -%}
+{%- set is_missing = album.is_missing -%}
+{#-
+  ``data-status`` is consumed by the per-section All / Library / Missing radio
+  filter rendered in render_release_section, and by
+  static/js/artist-releases.js. Missing rows are flagged distinctly so the
+  section's "Library" filter hides them.
+
+  The row deliberately does NOT set ``id="tracklist-…"``: the ids are derived
+  client-side from artist+title by safeForDomId(), because a release-GROUP
+  title is not unique on its own (three self-titled Weezer albums) and the
+  server cannot know which rows will collide.
+-#}
+<div class="release-item" data-status="{{ 'missing' if is_missing else 'library' }}" data-year="{{ year or 0 }}" data-title="{{ title|e }}" data-mbid="{{ mbid|e }}">
+  <div class="release-summary" role="button" tabindex="0" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}">
+    {% if cover %}
+    <img class="release-art" src="{{ cover }}" alt="{{ title|e }}" loading="lazy"
+         onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+    <div class="release-art release-art-placeholder" style="display:none;"><i class="bi bi-music-note"></i></div>
+    {% else %}
+    <div class="release-art release-art-placeholder"><i class="bi bi-music-note"></i></div>
+    {% endif %}
+    <div class="release-meta">
+      <div class="release-title-row">
+        <span class="release-title">{{ title }}</span>
+        <span class="badge {{ 'bg-warning text-dark' if is_missing else 'bg-success' }} release-status-badge">
+          {{ 'Missing' if is_missing else 'In Library' }}
+        </span>
+        {#- Populated by static/js/artist-releases.js via /api/album/missing-tracks.
+            Hidden until a count arrives, so an album with no gap never shows a
+            "0 tracks missing" badge. -#}
+        <span class="badge bg-warning text-dark album-missing-tracks-badge" style="display:none;"></span>
+      </div>
+      {%- set _rel_title = (album.release_title or '')|trim -%}
+      {%- if not is_missing and _rel_title and _rel_title|lower != title|lower %}
+      {#- The SPECIFIC edition held in the collection, when it differs from the
+          release-group name shown above. -#}
+      <div class="release-sub text-muted small text-truncate" title="{{ _rel_title|e }}">{{ _rel_title }}</div>
+      {%- endif %}
+      <div class="release-sub text-muted small">{{ year or '—' }}</div>
+    </div>
+    <div class="release-actions" onclick="event.stopPropagation();">
+      {% if not is_missing %}
+        <a class="btn btn-sm btn-outline-secondary release-open-btn"
+           href="/album/{{ artist_name|path_segment }}/{{ title|path_segment }}{% if year %}/{{ year }}{% endif %}"
+           title="Open album"><i class="bi bi-box-arrow-up-right"></i></a>
+        <button type="button" class="btn btn-sm btn-outline-secondary release-edit-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-rgid="{{ rgid|e }}" data-year="{{ year|e }}" title="Edit release"><i class="bi bi-pencil"></i></button>
+      {% else %}
+        <button type="button" class="btn btn-sm btn-outline-success release-import-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-release-id="{{ album.release_id|e }}" title="Import release"><i class="bi bi-download"></i></button>
+        <button type="button" class="btn btn-sm btn-outline-info release-mb-search-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" title="Search MusicBrainz"><i class="bi bi-search"></i></button>
+      {% endif %}
+      <button type="button" class="btn btn-sm btn-outline-info release-toggle-btn" aria-expanded="false" title="Show tracklist"><i class="bi bi-chevron-down"></i></button>
+    </div>
+  </div>
+  <div class="release-tracklist" style="display:none;"><div class="release-tracklist-content pt-2"></div></div>
+</div>
+{% endmacro %}
+
+{#
+  One release category. Renders NOTHING when ``items`` is empty, so an artist
+  with no field recordings never grows a "Field Recordings" heading — the
+  sections are generated from services/catalog/release_categories, where every
+  MusicBrainz release type gets its own bucket.
+
+  ``key`` is the category registry key (e.g. "live_album"); ``section_id`` is
+  the DOM/id fragment (e.g. "live-albums"). They differ deliberately: the key
+  is a data identifier, the id is a URL fragment the jump bar links to.
+#}
+{% macro render_release_section(key, section_id, icon, label, items, artist_name, description=None) %}
+{%- set library = items|rejectattr('is_missing')|list -%}
+{%- set missing = items|selectattr('is_missing')|list -%}
+{%- if items|length > 0 %}
+<div class="card mb-3 release-section" id="{{ section_id }}-section" data-category="{{ key }}" data-section-id="{{ section_id }}">
+  <div class="card-header release-section-header">
+    <button type="button" class="release-section-toggle" data-bs-toggle="collapse" data-bs-target="#{{ section_id }}-body" aria-expanded="true">
+      <i class="bi bi-chevron-down section-chevron"></i> <i class="bi {{ icon }}"></i> {{ label }}
+      <span class="badge bg-success">{{ library|length }}</span>
+      {% if missing %}<span class="badge bg-warning text-dark">{{ missing|length }} missing</span>{% endif %}
+    </button>
+    <div class="release-section-controls">
+      <div class="btn-group btn-group-sm release-filter-group" role="group" aria-label="{{ label }} filter">
+        <input type="radio" class="btn-check release-filter-radio" name="filter-{{ section_id }}" id="filter-{{ section_id }}-all" value="all" checked autocomplete="off">
+        <label class="btn btn-outline-secondary" for="filter-{{ section_id }}-all">All ({{ items|length }})</label>
+        <input type="radio" class="btn-check release-filter-radio" name="filter-{{ section_id }}" id="filter-{{ section_id }}-library" value="library" autocomplete="off">
+        <label class="btn btn-outline-secondary" for="filter-{{ section_id }}-library">Library ({{ library|length }})</label>
+        <input type="radio" class="btn-check release-filter-radio" name="filter-{{ section_id }}" id="filter-{{ section_id }}-missing" value="missing" autocomplete="off">
+        <label class="btn btn-outline-secondary" for="filter-{{ section_id }}-missing">Missing ({{ missing|length }})</label>
+      </div>
+      <button type="button" class="btn btn-sm btn-outline-info release-search-all-btn" data-artist="{{ artist_name|e }}" title="Search MusicBrainz for unreleased material"><i class="bi bi-cloud-download"></i> <span class="d-none d-md-inline">Search All</span></button>
+      <button type="button" class="btn btn-sm btn-outline-warning release-check-missing-btn" data-artist="{{ artist_name|e }}" data-category="{{ key }}" title="Check for missing releases"><i class="bi bi-flag"></i> <span class="d-none d-md-inline">Check Missing</span></button>
+    </div>
+  </div>
+  <div class="collapse show release-section-body" id="{{ section_id }}-body">
+    {% if description %}<div class="text-muted small px-3 pt-2">{{ description }}</div>{% endif %}
+    <div class="release-list" data-category="{{ key }}" data-section-id="{{ section_id }}">
+      {% for album in items %}
+        {{ render_release_row(album, artist_name, section_id) }}
+      {% endfor %}
+    </div>
+    <div class="release-empty-note text-muted small p-3" style="display:none;"><i class="bi bi-funnel"></i> No releases match this filter.</div>
+  </div>
+</div>
+{%- endif %}
+{% endmacro %}
+
+{#
+  ======================================================================
+  DEAD TEMPLATE BELOW — inert, awaiting deletion.
+  ======================================================================
+  This file used to BE the 333-line page snapshot reproduced below. It is kept
+  rather than deleted because this tree cannot be edited destructively from the
+  environment it is maintained in.
+
+  It is wrapped in {% raw %} so it is unambiguously inert: raw content is not
+  parsed as Jinja, so it cannot render, cannot `extends`, and cannot define a
+  macro — it can never shadow the real render_release_section() defined above.
+
+  (A Jinja comment would also work, but only if its prose never spells the
+  closing comment delimiter — and prose explaining the hazard tends to do
+  exactly that, which silently ends the comment early. {% raw %} has no such
+  trap.)
+
+  Git already records the full history, so this block adds nothing but weight.
+  DELETE IT when the environment allows; the file is fully correct without it.
+  ======================================================================
+#}
+{% raw %}
+{% extends "base.html" %}
 
 {% block content %}
 <div class="container-fluid mt-4 artist-page">
@@ -100,7 +310,7 @@
                 <p class="text-center mt-2"><small>Loading artist information...</small></p>
               {% endif %}
             </div>
-            
+
             <div class="mt-4 pt-3" style="border-top: 1px solid var(--border-color);">
               <h6 class="mb-3"><i class="bi bi-globe"></i> Country/Origin</h6>
               <div id="artistCountryDisplay">
@@ -251,7 +461,7 @@
     </div>
   </div>
 
-  {# NEW RELEASES SECTION #}
+  NEW RELEASES SECTION
   {% from "components/_release_section.html" import render_release_section %}
 
   {% set _standard_specs = [
@@ -331,3 +541,5 @@
 <script src="{{ versioned_static('js/pages/artist.js') }}"></script>
 <script src="{{ versioned_static('js/pages/artist-releases.js') }}"></script>
 {% endblock %}
+{% endraw %}
+{#- END OF DEAD SNAPSHOT -#}

@@ -161,27 +161,45 @@ def test_artist_css_has_no_dead_album_row_selectors(css_file: Path) -> None:
     This is the defect that made the original file dead on arrival. Asserting
     the element type against the real template is the only way to catch it,
     because a non-matching selector is perfectly valid CSS.
+
+    COMMENTS ARE STRIPPED FIRST. These stylesheets explain the defect in their
+    own headers — quoting ``tr.album-row`` in prose to say it can never match —
+    so a raw scan matches the documentation and fails on a file that is
+    correct. The guard must test CODE, not commentary.
     """
-    body = css_file.read_text(encoding="utf-8")
+    body = re.sub(r"/\*.*?\*/", "", css_file.read_text(encoding="utf-8"), flags=re.DOTALL)
     offenders = re.findall(r"tr\.album-row", body)
     assert not offenders, (
-        f"{css_file.relative_to(REPO_ROOT)} styles 'tr.album-row', but "
-        "render_release_category emits album rows as "
-        '<div class="album-row ...">. Those selectors match nothing. Use '
-        "'.artist-page .album-row' or style the div directly."
+        f"{css_file.relative_to(REPO_ROOT)} styles 'tr.album-row' in a real "
+        "rule, but the album-row markup is a <div>. Those selectors match "
+        "nothing. Use '.artist-page .album-row' or style the div directly."
     )
 
 
-def test_artist_page_markup_matches_that_assertion() -> None:
-    """Pin the markup shape the rule above depends on."""
-    tpl = LIVE_TEMPLATES / "pages" / "artist_detail_v2.html"
-    body = tpl.read_text(encoding="utf-8")
+def test_album_row_markup_matches_that_assertion() -> None:
+    """Pin the markup shape the rule above depends on.
+
+    Targets ``components/_album_category_section.html`` — the component that
+    actually emits ``.album-row`` (as ``<div class="accordion-item album-row">``).
+    It used to target the artist page, but the artist page no longer renders
+    ``.album-row`` at all: its release rows are ``.release-item`` inside
+    ``.release-section`` (see components/_release_section.html). Pointing this
+    assertion at the artist page would make it assert the absence of markup that
+    moved, rather than the element type of markup that exists.
+    """
+    component = LIVE_TEMPLATES / "components" / "_album_category_section.html"
+    assert component.is_file(), (
+        f"{component.relative_to(REPO_ROOT)} is gone; it is the component that "
+        "emits .album-row, so the dead-selector guard has nothing to check "
+        "against. Retarget it at whatever emits the album rows now."
+    )
+    body = component.read_text(encoding="utf-8")
     assert re.search(r'<div[^>]*class="[^"]*\balbum-row\b', body), (
-        "artist_detail_v2.html no longer renders .album-row as a <div>; if the "
-        "markup changed to <tr>, update the artist.css guard to match"
+        "_album_category_section.html no longer renders .album-row as a <div>; "
+        "if the markup changed to <tr>, update the artist.css guard to match"
     )
     assert not re.search(r"<tr[^>]*\balbum-row", body), (
-        "artist_detail_v2.html now uses <tr class=\"album-row\">, so the "
+        "_album_category_section.html now uses <tr class=\"album-row\">, so the "
         "tr.album-row prohibition may be obsolete - re-check before relaxing it"
     )
 
