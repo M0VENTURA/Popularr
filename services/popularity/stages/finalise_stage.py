@@ -51,6 +51,27 @@ Global 5-star catalogue-top pre-pass (scan_runner):
   to 4★ instead, so a confirmed catalogue-top single still gets recognised
   without displacing genuine standouts from the 5★ tier or starving the 4★
   tier.
+
+COMPILATION RATING FIX (this revision):
+- A compilation ("Various Artists"-style) album groups many different
+  CREDITED artists under one shared album/album_artist folder. The star
+  rating for each compilation track must be computed against the CREDITED
+  TRACK ARTIST's own catalogue -- not against the album/album_artist's
+  catalogue, and not against the generic "Various Artists" pool.
+- ``post_album_star_ratings`` now builds a per-credited-artist score
+  distribution (``track_artist_score_map``) for compilation albums, keyed by
+  the track's own ``artist`` field (the recording credit), and passes that
+  distribution into ``_assign_stars`` as the catalogue reference for that
+  track instead of the whole-album/whole-compilation ``artist_scores`` list.
+- ``_assign_stars`` compilation branch is rewritten to rate a track primarily
+  against its credited artist's catalogue z-score/percentile. Verified single
+  status is corroborating evidence that can raise a track to a floor, not the
+  primary ranking ladder. Absolute score/listener thresholds are now used only
+  as a fallback when the credited artist's catalogue is too thin (<5 usable
+  scores) to compute a robust z-score.
+- The catalogue-top 5-star lock is no longer evaluated against the
+  compilation's shared distribution; for compilation tracks it defers
+  entirely to the compilation branch's own catalogue-relative decision.
 """
 
 from __future__ import annotations
@@ -504,6 +525,118 @@ def _artist_dominant_genres(
         return []
 
 
+# ---------------------------------------------------------------------------
+# Compilation track-artist catalogue helpers
+# ---------------------------------------------------------------------------
+
+def _compilation_track_artist(track: dict[str, Any]) -> str:
+    """Return the CREDITED recording artist for a compilation track.
+
+    Compilations share one ``album_artist`` folder (e.g. "Various Artists")
+    across many different recording artists. Rating a compilation track
+    correctly requires comparing it against the artist actually credited on
+    that recording, which is carried in ``track["artist"]`` by the track
+    stage. ``album_artist``/``canonical_artist`` are intentionally NOT
+    preferred here, since on a compilation those usually resolve back to the
+    compilation's shared album artist rather than the recording artist.
+    """
+    return str(track.get("artist") or track.get("album_artist") or "").strip()
+
+
+def compute_track_artist_scores(
+    track_artist: str,
+    scan_results: list[dict[str, Any]],
+) -> list[float]:
+    """Build the credited track artist's catalogue score distribution.
+
+    Combines in-memory scan results for the SAME pass (so a large multi-CD
+    compilation with several tracks by the same artist gets a usable
+    distribution even before anything is persisted) with the artist's
+    existing database history, excluding any (album, title) pair already
+    covered by the in-memory scores so nothing is double-counted.
+    """
+    artist_key = str(track_artist or "").strip().casefold()
+    if not artist_key:
+        return []
+
+    scanned_keys: set[tuple[str, str]] = set()
+    scores: list[float] = []
+
+    for result in scan_results:
+        result_artist = str(result.get("artist") or "").strip().casefold()
+        if result_artist != artist_key:
+            continue
+
+        score = float(result.get("popularity_score") or result.get("final_score") or 0)
+        if score <= 0 or bool(result.get("exclude_from_stats")):
+            continue
+
+        scores.append(score)
+        scanned_keys.add(
+            (
+                str(result.get("album") or "").strip().casefold(),
+                _normalise_essential_title(str(result.get("title") or "")),
+            )
+        )
+
+    db_rows: list[tuple[str, float]] = []
+    try:
+        from services.catalog.album_classification_service import is_bonus_track_title
+
+        with db_session() as session:
+            rows = session.execute(
+                text(
+                    "SELECT title, album, final_score FROM tracks "
+                    "WHERE LOWER(TRIM(artist)) = LOWER(TRIM(:artist)) AND final_score > 0"
+                ),
+                {"artist": track_artist},
+            ).fetchall() or []
+
+        for row in rows:
+            title = str(row_get(row, "title") or "").strip()
+            album = str(row_get(row, "album") or "").strip()
+            score = float(row_get(row, "final_score") or 0)
+
+            if score <= 0 or is_bonus_track_title(title):
+                continue
+
+            key = (album.casefold(), _normalise_essential_title(title))
+            if key in scanned_keys:
+                continue
+
+            db_rows.append((album, score))
+    except Exception as exc:
+        logger.debug("Track-artist catalogue fetch failed", artist=track_artist, error=str(exc))
+
+    try:
+        from services.popularity.popularity_math import reanchor_scores_to_album_relative
+        scores.extend(reanchor_scores_to_album_relative(db_rows))
+    except Exception as exc:
+        logger.debug("Track-artist catalogue re-anchor failed", artist=track_artist, error=str(exc))
+        scores.extend(score for _album, score in db_rows)
+
+    return [float(s) for s in scores if float(s or 0) > 0]
+
+
+def _build_compilation_track_artist_scores(
+    album_results: list[dict[str, Any]],
+) -> dict[str, list[float]]:
+    """Build one score distribution per credited artist on a compilation."""
+    credited_artists = {
+        _compilation_track_artist(track)
+        for track in album_results
+        if _compilation_track_artist(track)
+    }
+
+    score_map: dict[str, list[float]] = {}
+    for credited_artist in credited_artists:
+        score_map[credited_artist.casefold()] = compute_track_artist_scores(
+            credited_artist,
+            album_results,
+        )
+    return score_map
+
+
 def _assign_stars(
     track: dict[str, Any],
     album_scores: list[float],
@@ -517,7 +650,15 @@ def _assign_stars(
     generic_compilation_artist: bool = False,
     is_live_album: bool = False,
 ) -> int:
-    """Assign 1-5 star rating to a single track."""
+    """Assign 1-5 star rating to a single track.
+
+    ``artist_scores`` for a COMPILATION track must already be the CREDITED
+    track artist's own catalogue distribution (see
+    ``_build_compilation_track_artist_scores``), not the compilation
+    album/album-artist's shared pool. The caller (``post_album_star_ratings``)
+    is responsible for resolving that distribution per track before calling
+    this function.
+    """
     score = float(track.get("popularity_score") or track.get("final_score") or 0)
     single_confidence = str(track.get("single_confidence") or "low").strip().casefold()
 
@@ -546,9 +687,15 @@ def _assign_stars(
 
     organic = score >= _org_score or int(track.get("lastfm_listeners") or 0) >= _org_listeners
 
-    ref_scores = artist_scores if is_compilation else album_scores
-    album_z, album_spread = _compute_album_z(score, ref_scores)
-    artist_z, artist_spread = _compute_artist_z(score, artist_scores)
+    if is_compilation:
+        # Both z-scores are computed against the SAME credited-artist
+        # catalogue distribution -- there is no separate "album" pool that
+        # means anything for a compilation track.
+        album_z, album_spread = _compute_artist_z(score, artist_scores)
+        artist_z, artist_spread = album_z, album_spread
+    else:
+        album_z, album_spread = _compute_album_z(score, album_scores)
+        artist_z, artist_spread = _compute_artist_z(score, artist_scores)
 
     popularity_marked = bool(track.get("popularity_marked"))
     if is_instrumental_track_title(str(track.get("title") or "")):
@@ -568,7 +715,13 @@ def _assign_stars(
             track["_era_5star"] = True
         return live_stars
 
-    if track.get("_global_5star_locked") and not popularity_only:
+    # The catalogue-top pre-pass lock is only meaningful when it was computed
+    # against the SAME distribution being used to rate the track. For
+    # compilations that distribution is the credited artist's own catalogue,
+    # resolved just above -- so the lock is honoured there via the ordinary
+    # 5-star z-score bounds instead of this whole-album/whole-compilation
+    # shortcut.
+    if track.get("_global_5star_locked") and not popularity_only and not is_compilation:
         if not is_live and organic:
             _epsilon_alb = _star_epsilon_z(album_spread, th["epsilon"])
             _epsilon_art = _star_epsilon_z(artist_spread, th["epsilon"])
@@ -636,32 +789,51 @@ def _assign_stars(
 
     if is_compilation:
         raw_lf = float(track.get("lastfm_listeners") or 0)
-        is_verified_single = single_confidence in ("high", "medium")
+        is_verified_single = single_confidence in ("high", "medium", "user")
 
-        if is_verified_single and not popularity_only:
-            if score >= 55.0 or raw_lf >= 1_000_000:
+        valid_catalogue_scores = [
+            float(v) for v in (artist_scores or []) if float(v or 0) > 0
+        ]
+        has_usable_catalogue = len(valid_catalogue_scores) >= 5
+
+        if has_usable_catalogue:
+            # ``album_z``/``artist_z`` were already computed above against
+            # this SAME credited-artist distribution, so re-use them rather
+            # than recomputing.
+            catalogue_z = artist_z
+            _epsilon_z = _star_epsilon_z(artist_spread, th["epsilon"])
+
+            if catalogue_z >= th["star5_artist_z"] - _epsilon_z:
                 comp_stars = 5
-            elif score >= 45.0 or raw_lf >= 250_000:
+            elif catalogue_z >= th["star4_artist_z"] - _epsilon_z:
                 comp_stars = 4
-            elif score >= 30.0 or raw_lf >= 50_000:
+            elif catalogue_z >= 0.0 - _epsilon_z:
                 comp_stars = 3
-            elif score >= 15.0 or raw_lf >= 10_000:
+            elif catalogue_z >= th["star2_album_z"] - _epsilon_z:
                 comp_stars = 2
             else:
                 comp_stars = 1
+
+            # Verified single status is corroborating evidence -- it can
+            # raise a track to a floor, but it does not override a track's
+            # position within its own artist's catalogue.
+            if is_verified_single and organic and not popularity_only:
+                comp_stars = max(comp_stars, 3)
+
+            track["_compilation_rating_mode"] = "track_artist_catalogue"
+            track["_compilation_artist_z"] = catalogue_z
         else:
-            has_deep_catalog = (
-                not generic_compilation_artist
-                and len([s for s in artist_scores if s > 0]) >= max(len(album_scores) + 15, 30)
-            )
-            if has_deep_catalog:
-                if artist_z >= th["star5_artist_z"]:
+            # Thin-catalogue fallback: fewer than 5 usable scores for the
+            # credited artist means a robust z-score cannot be computed, so
+            # fall back to absolute popularity thresholds.
+            if is_verified_single and not popularity_only:
+                if score >= 55.0 or raw_lf >= 1_000_000:
                     comp_stars = 5
-                elif artist_z >= th["star4_artist_z"]:
+                elif score >= 45.0 or raw_lf >= 250_000:
                     comp_stars = 4
-                elif artist_z >= 0.0:
+                elif score >= 30.0 or raw_lf >= 50_000:
                     comp_stars = 3
-                elif artist_z >= th["star2_album_z"]:
+                elif score >= 15.0 or raw_lf >= 10_000:
                     comp_stars = 2
                 else:
                     comp_stars = 1
@@ -677,6 +849,11 @@ def _assign_stars(
                 else:
                     comp_stars = 1
 
+            track["_compilation_rating_mode"] = "absolute_thin_catalogue_fallback"
+            track["_compilation_artist_z"] = None
+
+        track["_compilation_catalogue_size"] = len(valid_catalogue_scores)
+
         if is_live:
             comp_stars = max(1, comp_stars - 1)
         if comp_stars == 5:
@@ -686,7 +863,7 @@ def _assign_stars(
     base_stars = _album_z_band_star(
         score=score,
         album_scores=album_scores,
-        reference_scores=ref_scores,
+        reference_scores=album_scores,
         artist_scores=artist_scores,
         is_live=is_live,
         single_confidence=single_confidence,
@@ -2236,6 +2413,16 @@ def post_album_star_ratings(
 
         _log_scan_weights(artist, album, album_model, is_live_album=is_live_album)
 
+        # Compilation albums group many different credited recording artists
+        # under one shared album/album_artist folder. Build a per-credited-
+        # artist score distribution up front so each track can be rated
+        # against ITS OWN artist's catalogue, not the compilation's shared
+        # pool (which for a "Various Artists" release carries no meaningful
+        # per-artist signal at all).
+        compilation_track_artist_scores: dict[str, list[float]] = {}
+        if is_compilation:
+            compilation_track_artist_scores = _build_compilation_track_artist_scores(album_results)
+
         _stored_stars: dict[str, int] = {}
         _stored_paths: dict[str, str] = {}
         try:
@@ -2307,10 +2494,20 @@ def post_album_star_ratings(
         # 1. Assign star ratings in memory
         for track in album_results:
             try:
+                if is_compilation:
+                    _credited_artist = _compilation_track_artist(track)
+                    _rating_artist_scores = compilation_track_artist_scores.get(
+                        _credited_artist.casefold(), []
+                    )
+                    track["_rating_artist"] = _credited_artist
+                    track["_rating_catalogue_size"] = len(_rating_artist_scores)
+                else:
+                    _rating_artist_scores = artist_scores
+
                 stars = _assign_stars(
                     track,
                     album_scores,
-                    artist_scores,
+                    _rating_artist_scores,
                     album_lf_listeners,
                     album_lb_listens,
                     popularity_only=bool(options.get("popularity_only")),
@@ -2514,8 +2711,16 @@ def post_album_star_ratings(
             track_id = str(track.get("track_id") or "").strip()
             _track_score = float(track.get("popularity_score") or track.get("final_score") or 0)
             _final_score = float(track.get("final_score") or _track_score or 0)
-            _album_z = _compute_album_z(_track_score, album_scores)[0]
-            _artist_z = _compute_artist_z(_track_score, artist_scores)[0]
+
+            if is_compilation:
+                _rating_scores_for_log = compilation_track_artist_scores.get(
+                    _compilation_track_artist(track).casefold(), []
+                )
+                _album_z = _compute_artist_z(_track_score, _rating_scores_for_log)[0]
+                _artist_z = _album_z
+            else:
+                _album_z = _compute_album_z(_track_score, album_scores)[0]
+                _artist_z = _compute_artist_z(_track_score, artist_scores)[0]
 
             _src_names: list[str] = []
             try:
@@ -2537,9 +2742,21 @@ def post_album_star_ratings(
             if track.get("_live_reason"):
                 _live_part = f", live={track.get('_live_reason')}"
 
+            if is_compilation:
+                _credited_artist_for_log = _compilation_track_artist(track) or artist
+                _catalogue_n = int(track.get("_rating_catalogue_size") or 0)
+                _rating_mode = str(track.get("_compilation_rating_mode") or "unknown")
+                _comparison_part = (
+                    f"track_artist={_credited_artist_for_log}, "
+                    f"catalogue_z={_artist_z:.2f}, catalogue_n={_catalogue_n}, "
+                    f"mode={_rating_mode}"
+                )
+            else:
+                _comparison_part = f"album_z={_album_z:.2f}, artist_z={_artist_z:.2f}"
+
             log_unified(
                 f"[TRACK_RESULT] {artist} - {track.get('title')} → {stars}★ "
-                f"(final_score={_final_score:.1f}, album_z={_album_z:.2f}, artist_z={_artist_z:.2f}, "
+                f"(final_score={_final_score:.1f}, {_comparison_part}, "
                 f"single={track.get('is_single')}/{track.get('single_confidence')}"
                 + (f", era={album_model.get('era')}/R={float(album_model.get('reff') or 0):.2f}" if album_model.get("has_benchmark") else "")
                 + _live_part
@@ -2575,14 +2792,20 @@ def post_album_star_ratings(
             if singles_detected:
                 log_unified(f"Singles Detection - Detected {len(singles_detected)} single(s) in '{album}'")
 
-            _ref_scores = artist_scores if is_compilation else album_scores
             rows: list[dict[str, Any]] = []
             for t in album_results:
                 t_stars = int(t.get("stars") or 0)
                 t_conf = str(t.get("single_confidence") or "low").lower()
                 t_title = str(t.get("title") or "Unknown").strip()
                 t_score = float(t.get("popularity_score") or t.get("final_score") or 0)
-                album_z, _ = _compute_album_z(t_score, _ref_scores)
+
+                if is_compilation:
+                    _ref_scores_for_row = compilation_track_artist_scores.get(
+                        _compilation_track_artist(t).casefold(), []
+                    )
+                    album_z, _ = _compute_artist_z(t_score, _ref_scores_for_row)
+                else:
+                    album_z, _ = _compute_album_z(t_score, album_scores)
 
                 note = ""
                 try:
@@ -2617,10 +2840,13 @@ def post_album_star_ratings(
             rows.sort(key=lambda r: (-r["stars"], -r["score"]))
 
             _header_suffix = " [LIVE]" if is_live_album else ""
+            if is_compilation:
+                _header_suffix += " [COMPILATION: per-track-artist rating]"
             log_unified("=" * 80)
             log_unified(f"📊 SCAN RESULTS: {str(artist or '').strip()} — {str(album or '').strip()}{_header_suffix} ({len(album_results)} Tracks)")
             log_unified("=" * 80)
-            log_unified(f"{'RATING':<7} {'TRACK TITLE':<34} {'Z-SCORE':>7} {'SCORE':>6} {'LF LISTENS':>10}  SINGLE CONF")
+            _z_header = "CAT-Z" if is_compilation else "Z-SCORE"
+            log_unified(f"{'RATING':<7} {'TRACK TITLE':<34} {_z_header:>7} {'SCORE':>6} {'LF LISTENS':>10}  SINGLE CONF")
             log_unified("-" * 80)
             for r in rows:
                 star_str = "★" * r["stars"] + "☆" * (5 - r["stars"])
