@@ -31,32 +31,57 @@ cleanup() {
 # ---------------------------------------------------------------------------
 verify_scan_unwrap_fix() {
     # Startup self-check for the "Album failed: <Future ...>" fix.
-    # Reports whether the RUNNING code actually contains the Future-unwrap
-    # (the marker string in the source AND what a fresh import loads), so an
-    # operator can tell at a glance whether a stale .pyc / old image is in use.
-    local marker="Album future completed"
+    #
+    # THE BUG: per-track work runs in a thread pool, and the collector used to
+    # let a raw concurrent.futures.Future escape into the album-failure report,
+    # so the log read  "Album failed: <Future at 0x...>"  instead of the real
+    # exception. The fix unwraps every future -- ``future.result()`` inside a
+    # guarded loop in the collector -- so a worker failure surfaces as itself.
+    #
+    # ⚠ THIS CHECK USED TO GREP A LOG STRING. It looked for the literal
+    # "Album future completed", a message the original fix happened to log.
+    # A later refactor of the track executor (5193741e "Cleaned up some issues
+    # causing timeouts during scanning") removed that message, so the check
+    # printed  source_marker_hits=0 loaded_module=MISSING  on EVERY boot and
+    # could never pass again. That also destroyed the only thing it exists for:
+    # telling an operator whether a stale .pyc / old image is running -- a
+    # warning that always fires cannot distinguish "old image" from "expected".
+    #
+    # It now probes the STRUCTURAL invariant instead, which survives rewording:
+    # the collector must exist and must call .result() on each completed future.
+    # Log strings are free to change; that call IS the fix.
     local file="/app/services/popularity/scan_stage_runner.py"
-    local src_hits=0
-    if [ -f "$file" ]; then
-        src_hits=$(grep -c "$marker" "$file" 2>/dev/null || true)
+    local src_state="0"
+    if [ ! -f "$file" ]; then
+        # Distinguish "wrong image / wrong path" from "marker absent" — both
+        # used to collapse to the same 0, which hid a missing file entirely.
+        src_state="FILE-MISSING"
+    else
+        src_state=$(grep -c "as_completed" "$file" 2>/dev/null || true)
     fi
+
     local loaded
     loaded=$(python3 -c "
 import inspect
 try:
-    import services.popularity.scan_stage_runner as m
-    src = inspect.getsource(m)
-    print('PRESENT' if '$marker' in src else 'MISSING')
+    from services.popularity.scan_stage_runner import _execute_track_jobs_safely as fn
+    src = inspect.getsource(fn)
 except Exception as exc:
     print('ERROR: %s' % exc)
+else:
+    print('PRESENT' if ('as_completed' in src and 'future.result()' in src) else 'MISSING')
 " 2>&1)
 
-    log "Scan unwrap fix check: source_marker_hits=${src_hits} loaded_module=${loaded}"
-    if [ "${src_hits:-0}" -ge 1 ] && echo "$loaded" | grep -q "PRESENT"; then
-        ok2 "Scan unwrap fix VERIFIED (source + fresh import both have the unwrap)"
+    log "Scan unwrap fix check: collector_source=${src_state} loaded_function=${loaded}"
+    if [ "$src_state" = "FILE-MISSING" ]; then
+        warn "Scan unwrap fix NOT VERIFIED — ${file} is not present in this image."
+        return 1
+    fi
+    if [ "${src_state:-0}" -ge 1 ] && echo "$loaded" | grep -q "PRESENT"; then
+        ok2 "Scan unwrap fix VERIFIED (per-future unwrap present in source + fresh import)"
         return 0
     fi
-    warn "Scan unwrap fix NOT VERIFIED — source_marker_hits=${src_hits}, loaded_module=${loaded}"
+    warn "Scan unwrap fix NOT VERIFIED — collector_source=${src_state}, loaded_function=${loaded}"
     warn "If this is the current image, check for stale __pycache__/old image."
     return 1
 }
