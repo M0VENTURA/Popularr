@@ -492,3 +492,169 @@ def test_release_module_is_not_jinja() -> None:
                 f"({tokens[0][:50]!r}). It is served as JavaScript, so the "
                 "browser will discard the entire file."
             )
+
+
+# --------------------------------------------------------------------------
+# 7. The page-load per-album MusicBrainz probes must be BOUNDED and must stand
+#    down while a scan owns the shared MusicBrainz rate budget.
+#
+#    This is the "starting a scan from the artist page froze the whole server"
+#    regression, and it is invisible to every other check here: the markup is
+#    valid, the endpoints resolve, the module parses. The damage is purely
+#    runtime, so it has to be pinned structurally.
+# --------------------------------------------------------------------------
+
+#: How many "N missing" probes may ever be in flight at once.
+MAX_MISSING_PROBE_CONCURRENCY = 4
+
+
+def _release_module_paths() -> list[Path]:
+    """The shared release module, in whichever trees have it."""
+    return [
+        p
+        for p in (
+            LIVE_STATIC / "js/artist-releases.js",
+            REBUILT_STATIC / "js/pages/artist-releases.js",
+        )
+        if p.is_file()
+    ]
+
+
+@pytest.mark.parametrize("path", _release_module_paths())
+def test_missing_track_probes_are_bounded(path: Path) -> None:
+    """The page must not fire one unbounded MusicBrainz request per album.
+
+    ``/api/album/missing-tracks`` is a SYNCHRONOUS Quart handler that calls
+    MusicBrainz, so Quart runs it in the event loop's DEFAULT executor — the very
+    pool ``asyncio.to_thread`` uses for ``routes/ui_routes.py::artist_detail``.
+    MusicBrainz is throttled to ~1 req/s by
+    ``api_clients/musicbrainz_http.py::_strict_throttle``, which enforces the
+    budget by RESERVING a future slot and only then sleeping to it.
+
+    One probe per owned album, fired at page load, therefore:
+      1. claimed N slots of the shared budget, pushing a running scan's own
+         MusicBrainz calls ~1.2s x N further out (the scan looked stuck), and
+      2. held one executor thread per probe while it slept, starving the pool so
+         every other request in the worker — including the artist page's own
+         render — could not start.
+
+    The artist page is reloaded the instant the scan form is POSTed, which is
+    exactly why starting a scan from it froze the whole server. Removing the cap
+    reintroduces that bug.
+    """
+    code = _module_body(path)
+    rel = path.relative_to(REPO_ROOT)
+
+    match = re.search(r"var\s+MISSING_PROBE_CONCURRENCY\s*=\s*(\d+)\s*;", code)
+    assert match, (
+        f"{rel} no longer declares MISSING_PROBE_CONCURRENCY, so its "
+        "missing-track probes are unbounded again and can saturate both the "
+        "default executor and the shared MusicBrainz rate budget."
+    )
+
+    concurrency = int(match.group(1))
+    assert 1 <= concurrency <= MAX_MISSING_PROBE_CONCURRENCY, (
+        f"{rel} sets the probe concurrency to {concurrency}; at most "
+        f"{MAX_MISSING_PROBE_CONCURRENCY} requests may be in flight, because "
+        "each one blocks a worker thread while it waits for its MusicBrainz slot."
+    )
+
+    assert "i < MISSING_PROBE_CONCURRENCY" in code, (
+        f"{rel} declares the concurrency cap but never uses it to prime the "
+        "worker pool, so the probes still burst."
+    )
+
+
+@pytest.mark.parametrize("path", _release_module_paths())
+def test_missing_track_probes_stand_down_during_a_scan(path: Path) -> None:
+    """While a scan runs, the probes must not consume the MB budget at all.
+
+    Bounding them is not enough on its own: a scan issues MusicBrainz calls
+    continuously, and every page-load probe still queues ahead of (or beside)
+    them. The route publishes ``data-scan-active`` on ``#releases-sections``
+    precisely so the page can skip the probes entirely — the scan owns the
+    budget and is rewriting this data anyway.
+
+    The gate must be OPT-IN on the attribute value (``=== '1'``): an absent
+    attribute has to mean "not scanning", so an older template or a cached copy
+    of this script degrades to the bounded path rather than to the storm.
+    """
+    code = _module_body(path)
+    rel = path.relative_to(REPO_ROOT)
+
+    assert "data-scan-active" in code, (
+        f"{rel} no longer reads data-scan-active, so it cannot tell that a scan "
+        "is running and will probe MusicBrainz during one."
+    )
+    assert "if (scanIsActive()) return;" in code, (
+        f"{rel} reads the scan-active flag but does not bail out before probing."
+    )
+    assert "=== '1'" in code or '=== "1"' in code, (
+        f"{rel} must treat only an explicit \"1\" as 'a scan is running'. If a "
+        "missing attribute counts as scanning, the badges never load."
+    )
+
+
+@pytest.mark.parametrize("page", _artist_pages())
+def test_artist_page_publishes_the_scan_active_flag(page: Path) -> None:
+    """The flag the module reads has to be rendered by the page.
+
+    The module's gate is worthless if no template emits the attribute, and that
+    failure is silent: the attribute is simply absent, so the probes keep
+    running. Both trees must render it, since either can serve this page.
+    """
+    body = _strip_jinja_comments(_read(page))
+    rel = page.relative_to(REPO_ROOT)
+
+    marker = re.search(r"<div[^>]*id=\"releases-sections\"[^>]*>", body)
+    assert marker, (
+        f"{rel} no longer renders #releases-sections, which is the module's "
+        "initialisation gate."
+    )
+    assert "data-scan-active=" in marker.group(0), (
+        f"{rel} does not render data-scan-active on #releases-sections, so the "
+        "page's per-album MusicBrainz probes keep running during a scan."
+    )
+
+
+def test_artist_route_supplies_scan_active() -> None:
+    """``_build_artist_detail_payload`` must actually probe and export the flag.
+
+    Checked statically (via ``ast``) rather than by importing the route module:
+    this suite is deliberately import-light, and booting the whole app to read
+    one dict key would make the guard depend on unrelated startup state.
+    """
+    import ast
+
+    path = REPO_ROOT / "routes" / "ui_routes.py"
+    source = _read(path)
+    tree = ast.parse(source)
+
+    function = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_build_artist_detail_payload"
+        ),
+        None,
+    )
+    assert function is not None, (
+        "routes/ui_routes.py no longer defines _build_artist_detail_payload, "
+        "the synchronous context builder that artist_detail offloads to a thread."
+    )
+
+    body = ast.get_source_segment(source, function) or ""
+    assert "is_popularity_scan_active" in body, (
+        "_build_artist_detail_payload no longer probes for a running scan, so "
+        "the page has no way to know its probes would compete with one."
+    )
+    assert '"scan_active": scan_active' in body, (
+        "_build_artist_detail_payload no longer exports scan_active, so the "
+        "template cannot render data-scan-active."
+    )
+    assert "await" not in body and "async def" not in body, (
+        "_build_artist_detail_payload must stay SYNCHRONOUS: artist_detail "
+        "offloads it with asyncio.to_thread, and a coroutine-returning body "
+        "would silently skip the work."
+    )

@@ -285,8 +285,13 @@
 
         `#releases-sections` is the initialisation gate for
         static/js/artist-releases.js — that module is inert without it.
+
+        `data-scan-active` tells that module a scan already owns the MusicBrainz
+        rate budget, so it must NOT fire its per-album missing-track probes —
+        they would queue behind the scan's MB calls and occupy the loop's
+        default executor, freezing every request in this worker.
       #}
-      <div id="releases-sections">
+      <div id="releases-sections" data-scan-active="{{ 1 if scan_active else 0 }}">
       {% for spec in album_categories %}
         {{ render_release_section_v2(
              spec.key,

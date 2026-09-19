@@ -636,6 +636,24 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
     name = unquote(name or "").strip()
     cfg = get_config()
 
+    # Is a scan running right now? The page's per-album "N missing" badges are
+    # filled in client-side by /api/album/missing-tracks, which needs
+    # MusicBrainz. A running scan OWNS the process-wide MusicBrainz budget
+    # (1 req/s, reserve-then-sleep), so a page-load burst of those probes both
+    # starves the scan and occupies the loop's default executor — the same pool
+    # ``asyncio.to_thread`` uses for this very payload. Publishing the flag lets
+    # the page skip the probes while the scan is working (see
+    # static/js/artist-releases.js).
+    #
+    # Probed defensively: a failure here must never stop the page rendering.
+    scan_active = False
+    try:
+        from services.scanning.pipelines.popularity_pipeline import is_popularity_scan_active
+
+        scan_active = bool(is_popularity_scan_active())
+    except Exception as exc:
+        logger.debug("Scan-active probe failed", artist=name, error=str(exc))
+
     def safe_float(value: Any) -> float | None:
         try:
             if value in (None, ""):
@@ -1211,6 +1229,7 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
         "artist_country": artist_country,
         "artist_members": artist_members,
         "similar_artists": similar_artists,
+        "scan_active": scan_active,
         "slskd_config": cfg.get("slskd", {}),
     }
 

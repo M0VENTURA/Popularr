@@ -495,29 +495,80 @@
     The inverse of "I can't hide the missing releases that are populated": an
     OWNED album with gaps should advertise them. Only rows that have a
     MusicBrainz id are probed, because the endpoint keys on the MBID.
+
+    WHY THE PROBES ARE BOUNDED AND STAND DOWN DURING A SCAN
+    ------------------------------------------------------  
+    /api/album/missing-tracks is a SYNCHRONOUS handler that calls
+    MusicBrainz, and Quart runs synchronous handlers in the loop's DEFAULT
+    executor -- the same pool routes/ui_routes.py::artist_detail uses via
+    asyncio.to_thread. MusicBrainz is globally throttled to ~1 req/s by
+    api_clients/musicbrainz_http.py::_strict_throttle, which enforces the
+    budget by RESERVING a future slot and only then sleeping to it. So one
+    probe per owned album, fired at page load, used to:
+
+      1. claim N slots in that throttle, pushing the running scan's own
+         MusicBrainz calls ~1.2s x N further out -- the scan looked stuck;
+      2. hold one executor thread per probe while it slept; and
+      3. starve the default executor, so every other request in the worker,
+         including this page's own render, could not start.
+
+    The artist page is reloaded the instant the scan form is POSTed, which is
+    exactly why starting a scan from the artist page froze the whole server.
+
+    Two guards, both cheap:
+      * MISSING_PROBE_CONCURRENCY caps how many probes are in flight, so this
+        page can never monopolise the shared executor or the MB budget.
+      * While a scan is running the probes stand down completely
+        (data-scan-active="1" on #releases-sections, rendered by the route):
+        the scan owns the MusicBrainz budget and is rewriting this data
+        anyway. An ABSENT attribute means "not scanning", so an older template
+        or a cached script degrades to the safe bounded path, never the storm.
   */
+
+  var MISSING_PROBE_CONCURRENCY = 3;
+
+  function scanIsActive() {
+    var marker = doc.getElementById('releases-sections');
+    return !!marker && marker.getAttribute('data-scan-active') === '1';
+  }
+
   function fetchMissingTrackCounts() {
     var artist = artistName();
     if (!artist) return;
+    if (scanIsActive()) return;
 
+    var jobs = [];
     Array.prototype.forEach.call(doc.querySelectorAll('.release-item[data-status="library"][data-mbid]'), function (item) {
       var summary = item.querySelector('.release-summary');
       var badge = item.querySelector('.album-missing-tracks-badge');
       var mbid = summary && summary.getAttribute('data-mbid');
       if (!badge || !mbid) return;
+      jobs.push({ summary: summary, badge: badge, mbid: mbid });
+    });
+    if (!jobs.length) return;
 
+    var next = 0;
+
+    function runNext() {
+      if (next >= jobs.length) return;
+      var job = jobs[next++];
       getJson('/api/album/missing-tracks?artist=' + encodeURIComponent(artist)
-        + '&album=' + encodeURIComponent(summary.getAttribute('data-album') || '')
-        + '&mbid=' + encodeURIComponent(mbid))
+        + '&album=' + encodeURIComponent(job.summary.getAttribute('data-album') || '')
+        + '&mbid=' + encodeURIComponent(job.mbid))
         .then(function (data) {
           var count = data && data.missing_count;
           if (count > 0) {
-            badge.textContent = count + ' missing';
-            badge.style.display = '';
+            job.badge.textContent = count + ' missing';
+            job.badge.style.display = '';
           }
         })
-        .catch(function () { /* cosmetic */ });
-    });
+        .catch(function () { /* cosmetic */ })
+        .then(runNext);
+    }
+
+    // Prime the pool: each completion pulls the next job, so at most
+    // MISSING_PROBE_CONCURRENCY requests are ever in flight.
+    for (var i = 0; i < MISSING_PROBE_CONCURRENCY; i++) runNext();
   }
 
   // ── Expanding / collapsing every section's tracklists ───────────────────
