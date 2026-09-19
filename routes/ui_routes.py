@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import glob
 import json
 import os
@@ -612,8 +613,26 @@ async def artists() -> Any:
     )
 
 
-@ui_bp.route("/artist/<path:name>")
-async def artist_detail(name: str) -> Any:
+def _build_artist_detail_payload(name: str) -> dict[str, Any]:
+    """Build the artist-page template context.
+
+    Deliberately SYNCHRONOUS and module-level. It performs blocking work —
+    several ``db_session`` reads plus MusicBrainz/Last.fm lookups via
+    ``get_artist_members_cached`` and ``get_artist_genre_sources`` — so it must
+    run in a worker thread (``asyncio.to_thread``), never on the event loop.
+
+    WHY THIS MATTERS: as an ``async`` handler this body used to run inline on
+    the event loop. ``get_artist_members_cached`` calls MusicBrainz through
+    ``_strict_throttle``, which enforces a global 1 req/s budget by SLEEPING to
+    claim a future slot. While a popularity scan is running it saturates that
+    budget, so this lookup can block for tens of seconds (the log shows 30-40s
+    MusicBrainz calls and repeated "call still running" warnings). Every other
+    request handled by the same hypercorn worker stalled behind it, which is
+    the reported "app freezes when running a scan from the artist page".
+
+    Only the render stays on the event loop; it needs the app/request context,
+    which a worker thread does not have.
+    """
     name = unquote(name or "").strip()
     cfg = get_config()
 
@@ -1176,25 +1195,37 @@ async def artist_detail(name: str) -> Any:
     except Exception as exc:
         logger.debug("Failed to load similar artists", artist=name, error=str(exc))
 
-    return await render_template(
-        "pages/artist_detail_v2.html",
-        artist_name=name,
-        albums=albums,
-        stats=stats,
-        top_tracks=top_tracks,
-        genre_sources=genre_sources,
-        genres=genres,
-        albums_by_category=albums_by_category,
+    return {
+        "artist_name": name,
+        "albums": albums,
+        "stats": stats,
+        "top_tracks": top_tracks,
+        "genre_sources": genre_sources,
+        "genres": genres,
+        "albums_by_category": albums_by_category,
         # Ordered (key, label, icon) specs for the sections that actually have
         # content — the template loops this instead of hard-coding sections.
-        album_categories=album_categories,
-        appears_on_albums=appears_on_albums,
-        artist_bio=artist_bio,
-        artist_country=artist_country,
-        artist_members=artist_members,
-        similar_artists=similar_artists,
-        slskd_config=cfg.get("slskd", {}),
-    )
+        "album_categories": album_categories,
+        "appears_on_albums": appears_on_albums,
+        "artist_bio": artist_bio,
+        "artist_country": artist_country,
+        "artist_members": artist_members,
+        "similar_artists": similar_artists,
+        "slskd_config": cfg.get("slskd", {}),
+    }
+
+
+@ui_bp.route("/artist/<path:name>")
+async def artist_detail(name: str) -> Any:
+    """Render the artist page.
+
+    The context build is blocking (sync DB reads + rate-limited MusicBrainz
+    lookups), so it is executed in a worker thread. Doing that work inline on
+    the event loop froze every request in this worker while a scan held the
+    MusicBrainz rate-limit budget.
+    """
+    payload = await asyncio.to_thread(_build_artist_detail_payload, name)
+    return await render_template("pages/artist_detail_v2.html", **payload)
 
 
 def _coerce_track_numerics(track: dict[str, Any]) -> dict[str, Any]:
