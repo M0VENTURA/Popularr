@@ -1,0 +1,77 @@
+{% macro _year_of(album) -%}
+{{- (album.year or album.release_year or album.originalyear or (album.first_release_date[:4] if album.first_release_date else '')) or '' -}}
+{% endmacro %}
+
+{% macro _mbid_of(album) -%}
+{{- album.musicbrainz_album_mbid or album.mbid or album.release_mbid or album.id or '' -}}
+{% endmacro %}
+
+{% macro _rgid_of(album) -%}
+{{- album.musicbrainz_releasegroupid or album.release_group_mbid or '' -}}
+{% endmacro %}
+
+{% macro render_release_row(album, artist_name, section_id) %}
+{%- set year = _year_of(album) -%}
+{%- set mbid = _mbid_of(album) -%}
+{%- set rgid = _rgid_of(album) -%}
+{%- set is_missing = album.is_missing -%}
+<div class="release-item" data-status="{{ 'missing' if is_missing else 'library' }}" data-year="{{ year or 0 }}" data-title="{{ (album.title or '')|e }}" data-mbid="{{ mbid|e }}">
+  <div class="release-summary" role="button" tabindex="0" data-artist="{{ artist_name|e }}" data-album="{{ (album.title or '')|e }}" data-mbid="{{ mbid|e }}">
+    <img class="release-art" src="{{ album.cover_art_url or '/api/album-art-placeholder' }}" alt="{{ album.title|e }}" loading="lazy">
+    <div class="release-meta">
+      <div class="release-title-row">
+        <span class="release-title">{{ album.title }}</span>
+        <span class="badge {{ 'bg-warning text-dark' if is_missing else 'bg-success' }} release-status-badge">
+          {{ 'Missing' if is_missing else 'In Library' }}
+        </span>
+        {% if not is_missing %}
+        <span class="badge bg-warning text-dark album-missing-tracks-badge ms-1" style="display:none;"></span>
+        {% endif %}
+      </div>
+      <div class="release-sub text-muted small">{{ year or '—' }}</div>
+    </div>
+    <div class="release-actions" onclick="event.stopPropagation();">
+      {% if not is_missing %}
+        <button type="button" class="btn btn-sm btn-outline-secondary release-edit-btn" data-artist="{{ artist_name|e }}" data-album="{{ (album.title or '')|e }}" data-mbid="{{ mbid|e }}" data-rgid="{{ rgid|e }}" data-year="{{ year|e }}"><i class="bi bi-pencil"></i></button>
+      {% else %}
+        <button type="button" class="btn btn-sm btn-outline-success release-import-btn" data-artist="{{ artist_name|e }}" data-album="{{ (album.title or '')|e }}" data-mbid="{{ mbid|e }}"><i class="bi bi-download"></i></button>
+        <button type="button" class="btn btn-sm btn-outline-info release-mb-search-btn" data-artist="{{ artist_name|e }}" data-album="{{ (album.title or '')|e }}"><i class="bi bi-search"></i></button>
+      {% endif %}
+      <button type="button" class="btn btn-sm btn-outline-info release-toggle-btn"><i class="bi bi-chevron-down"></i></button>
+    </div>
+  </div>
+  <div class="release-tracklist" style="display:none;"><div class="release-tracklist-content pt-2"></div></div>
+</div>
+{% endmacro %}
+
+{% macro render_release_section(key, section_id, icon, label, items, artist_name) %}
+{%- set discovered = items|selectattr('is_missing', 'equalto', False)|list -%}
+{%- set missing = items|selectattr('is_missing', 'equalto', True)|list -%}
+{%- if items|length > 0 %}
+<div class="card mb-3 release-section" id="{{ section_id }}-section" data-category="{{ section_id }}">
+  <div class="card-header release-section-header">
+    <button type="button" class="release-section-toggle" data-bs-toggle="collapse" data-bs-target="#{{ section_id }}-body" aria-expanded="true">
+      <i class="bi bi-chevron-down section-chevron"></i> <i class="bi {{ icon }}"></i> {{ label }}
+      <span class="badge bg-primary">{{ discovered|length }}</span>
+      {% if missing|length > 0 %}<span class="badge bg-warning text-dark">{{ missing|length }} missing</span>{% endif %}
+    </button>
+    <div class="release-section-controls">
+      <div class="btn-group btn-group-sm release-filter-group">
+        <input type="radio" class="btn-check release-filter-radio" name="filter-{{ section_id }}" id="filter-{{ section_id }}-all" value="all" checked><label class="btn btn-outline-secondary" for="filter-{{ section_id }}-all">All</label>
+        <input type="radio" class="btn-check release-filter-radio" name="filter-{{ section_id }}" id="filter-{{ section_id }}-library" value="library"><label class="btn btn-outline-secondary" for="filter-{{ section_id }}-library">Library</label>
+        <input type="radio" class="btn-check release-filter-radio" name="filter-{{ section_id }}" id="filter-{{ section_id }}-missing" value="missing"><label class="btn btn-outline-secondary" for="filter-{{ section_id }}-missing">Missing</label>
+      </div>
+      <button type="button" class="btn btn-sm btn-outline-info release-search-all-btn" data-artist="{{ artist_name|e }}"><i class="bi bi-cloud-download"></i> Search All</button>
+      <button type="button" class="btn btn-sm btn-outline-warning release-check-missing-btn" data-artist="{{ artist_name|e }}" data-category="{{ section_id }}"><i class="bi bi-flag"></i> Check Missing</button>
+    </div>
+  </div>
+  <div class="collapse show release-section-body" id="{{ section_id }}-body">
+    <div class="release-list" data-category="{{ section_id }}">
+      {% for album in items %}
+        {{ render_release_row(album, artist_name, section_id) }}
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{%- endif %}
+{% endmacro %}
