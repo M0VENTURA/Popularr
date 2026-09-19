@@ -1,74 +1,333 @@
-{% macro _year_of(album) -%}
-{{- (album.year or album.release_year or album.originalyear or (album.first_release_date[:4] if album.first_release_date else '')) or '' -}}
-{% endmacro %}
+{% extends "base.html" %}
 
-{% macro _mbid_of(album) -%}
-{{- album.musicbrainz_album_mbid or album.mbid or album.release_mbid or album.id or '' -}}
-{% endmacro %}
+{% block title %}{{ artist_name }} · Popularr{% endblock %}
 
-{% macro _rgid_of(album) -%}
-{{- album.musicbrainz_releasegroupid or album.release_group_mbid or '' -}}
-{% endmacro %}
+{% block content %}
+<div class="container-fluid mt-4 artist-page">
+  <nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+      <li class="breadcrumb-item"><a href="{{ url_for('dashboard') }}">Dashboard</a></li>
+      <li class="breadcrumb-item"><a href="{{ url_for('artists') }}">Artists</a></li>
+      <li class="breadcrumb-item active" aria-current="page">{{ artist_name }}</li>
+    </ol>
+  </nav>
 
-{% macro render_release_row(album, artist_name, section_id) %}
-{%- set year = _year_of(album) -%}
-{%- set mbid = _mbid_of(album) -%}
-{%- set rgid = _rgid_of(album) -%}
-{%- set is_missing = album.is_missing -%}
-<div class="release-item" data-status="{{ 'missing' if is_missing else 'library' }}" data-year="{{ year or 0 }}" data-title="{{ (album.title or '')|e }}" data-mbid="{{ mbid|e }}">
-  <div class="release-summary" role="button" tabindex="0" data-artist="{{ artist_name|e }}" data-album="{{ (album.title or '')|e }}" data-mbid="{{ mbid|e }}">
-    <img class="release-art" src="{{ album.cover_art_url or '/api/album-art-placeholder' }}" alt="{{ album.title|e }}" loading="lazy">
-    <div class="release-meta">
-      <div class="release-title-row">
-        <span class="release-title">{{ album.title }}</span>
-        <span class="badge {{ 'bg-warning text-dark' if is_missing else 'bg-success' }} release-status-badge">
-          {{ 'Missing' if is_missing else 'In Library' }}
-        </span>
-      </div>
-      <div class="release-sub text-muted small">{{ year or '—' }}</div>
+  <div class="d-flex flex-column flex-md-row justify-content-between align-items-start mb-4 gap-3">
+    <div class="flex-grow-1">
+      <h1 class="h2 mb-2" data-artist-name="{{ artist_name|e }}">
+        <i class="bi bi-person-music"></i> {{ artist_name }}
+      </h1>
+      <p class="text-muted mb-0">Artist overview</p>
     </div>
-    <div class="release-actions" onclick="event.stopPropagation();">
-      {% if not is_missing %}
-        <button type="button" class="btn btn-sm btn-outline-secondary release-edit-btn" data-artist="{{ artist_name|e }}" data-album="{{ (album.title or '')|e }}" data-mbid="{{ mbid|e }}" data-rgid="{{ rgid|e }}" data-year="{{ year|e }}"><i class="bi bi-pencil"></i></button>
-      {% else %}
-        <button type="button" class="btn btn-sm btn-outline-success release-import-btn" data-artist="{{ artist_name|e }}" data-album="{{ (album.title or '')|e }}" data-mbid="{{ mbid|e }}"><i class="bi bi-download"></i></button>
-        <button type="button" class="btn btn-sm btn-outline-info release-mb-search-btn" data-artist="{{ artist_name|e }}" data-album="{{ (album.title or '')|e }}"><i class="bi bi-search"></i></button>
+    <div class="d-flex gap-2 flex-row flex-wrap">
+      {% if (qbit_config.enabled and qbit_config.web_url) or slskd_config.enabled %}
+      <button class="btn btn-outline-info" onclick='openDownloadSearch(document.querySelector("[data-artist-name]").dataset.artistName)' title="Download {{ artist_name }} releases">
+        <i class="bi bi-download"></i> <span class="d-none d-sm-inline">Download</span>
+      </button>
       {% endif %}
-      <button type="button" class="btn btn-sm btn-outline-info release-toggle-btn"><i class="bi bi-chevron-down"></i></button>
+      <button id="artistFavouriteBtn" class="btn btn-outline-danger" onclick='toggleArtistFavourite(document.querySelector("[data-artist-name]").dataset.artistName)' title="Favourite this artist">
+        <i class="bi bi-heart" id="artistFavouriteIcon"></i> <span class="d-none d-sm-inline" id="artistFavouriteLabel">Favourite</span>
+      </button>
+      <a class="btn btn-outline-secondary" href="{{ url_for('artists') }}">
+        <i class="bi bi-arrow-left"></i> <span class="d-none d-sm-inline">Back</span>
+      </a>
+      <form action="{{ url_for('scan_artist_custom') }}" method="post" class="d-flex align-items-center gap-2 flex-wrap">
+        <input type="hidden" name="artist" value="{{ artist_name }}">
+        <select name="scan_type" class="form-select form-select-sm" style="min-width: 160px; width: auto;" title="Select scan type">
+          <option value="full">Full</option>
+          <option value="navidrome">Navidrome</option>
+          <option value="popularity">Popularity</option>
+          <option value="metadata">Metadata</option>
+          <option value="singles">Singles</option>
+          <option value="essentia">Essentia</option>
+        </select>
+        <div class="form-check form-check-inline mb-0" title="Force full rescan for this artist">
+          <input class="form-check-input" type="checkbox" id="artistForceScan" name="force" value="1">
+          <label class="form-check-label small" for="artistForceScan">Force</label>
+        </div>
+        <button type="submit" class="btn btn-warning" title="Run selected scan for this artist">
+          <i class="bi bi-play-circle"></i> <span class="d-none d-sm-inline">Scan Artist</span>
+        </button>
+      </form>
     </div>
   </div>
-  <div class="release-tracklist" style="display:none;"><div class="release-tracklist-content pt-2"></div></div>
-</div>
-{% endmacro %}
 
-{% macro render_release_section(key, section_id, icon, label, items, artist_name) %}
-{%- set discovered = items|selectattr('is_missing', 'equalto', False)|list -%}
-{%- set missing = items|selectattr('is_missing', 'equalto', True)|list -%}
-{%- if items|length > 0 %}
-<div class="card mb-3 release-section" id="{{ section_id }}-section" data-category="{{ section_id }}">
-  <div class="card-header release-section-header">
-    <button type="button" class="release-section-toggle" data-bs-toggle="collapse" data-bs-target="#{{ section_id }}-body" aria-expanded="true">
-      <i class="bi bi-chevron-down section-chevron"></i> <i class="bi {{ icon }}"></i> {{ label }}
-      <span class="badge bg-primary">{{ discovered|length }}</span>
-      {% if missing|length > 0 %}<span class="badge bg-warning text-dark">{{ missing|length }} missing</span>{% endif %}
-    </button>
-    <div class="release-section-controls">
-      <div class="btn-group btn-group-sm release-filter-group">
-        <input type="radio" class="btn-check release-filter-radio" name="filter-{{ section_id }}" id="filter-{{ section_id }}-all" value="all" checked><label class="btn btn-outline-secondary" for="filter-{{ section_id }}-all">All</label>
-        <input type="radio" class="btn-check release-filter-radio" name="filter-{{ section_id }}" id="filter-{{ section_id }}-library" value="library"><label class="btn btn-outline-secondary" for="filter-{{ section_id }}-library">Library</label>
-        <input type="radio" class="btn-check release-filter-radio" name="filter-{{ section_id }}" id="filter-{{ section_id }}-missing" value="missing"><label class="btn btn-outline-secondary" for="filter-{{ section_id }}-missing">Missing</label>
-      </div>
-      <button type="button" class="btn btn-sm btn-outline-info release-search-all-btn" data-artist="{{ artist_name|e }}"><i class="bi bi-cloud-download"></i> Search All</button>
-      <button type="button" class="btn btn-sm btn-outline-warning release-check-missing-btn" data-artist="{{ artist_name|e }}" data-category="{{ section_id }}"><i class="bi bi-flag"></i> Check Missing</button>
+  <div id="artist-corrections-banner" style="display:none;" class="mb-3">
+    <a href="{{ url_for('artist_corrections', name=artist_name) }}" class="btn btn-outline-danger btn-sm">
+      <i class="bi bi-tools"></i> Needs Correcting
+    </a>
+    <span id="artist-missing-tracks-badge" class="badge bg-warning text-dark ms-2" style="display:none;"></span>
+  </div>
+  <div class="mb-3">
+    <a href="{{ url_for('artist_genre_management', name=artist_name) }}" class="btn btn-outline-info btn-sm">
+      <i class="bi bi-tags"></i> Genre Management
+    </a>
+  </div>
+
+  <div class="card mb-4 sticky-top" style="top: 4rem; z-index: 1000;">
+    <div class="card-body py-2 px-3">
+      <ul class="nav nav-pills gap-2 small">
+        <li class="nav-item"><a class="nav-link" href="#artist-overview-section">Overview</a></li>
+        <li class="nav-item"><a class="nav-link" href="#artist-stats-section">Stats</a></li>
+        <li class="nav-item"><a class="nav-link" href="#artist-similar-section">Similar</a></li>
+        <li class="nav-item"><a class="nav-link" href="#artist-top-tracks-section">Top Tracks</a></li>
+        <li class="nav-item"><a class="nav-link" href="#artist-genres-section">Genres and Moods</a></li>
+        <li class="nav-item"><a class="nav-link" href="#albums-section">Releases</a></li>
+        <li class="nav-item"><a class="nav-link" href="#artist-covers-section">Covers</a></li>
+        <li class="nav-item"><a class="nav-link" href="#artist-appears-on-section">Appears On</a></li>
+      </ul>
     </div>
   </div>
-  <div class="collapse show release-section-body" id="{{ section_id }}-body">
-    <div class="release-list" data-category="{{ section_id }}">
-      {% for album in items %}
-        {{ render_release_row(album, artist_name, section_id) }}
+
+  <div class="mb-4" id="artist-overview-section">
+    <div class="card">
+      <div class="card-body">
+        <div class="row g-4">
+          <div class="col-12 col-md-3 d-flex flex-column align-items-center">
+            <div class="artist-img-wrap position-relative mb-3" style="border-radius: 0.5rem; overflow: hidden; background-color: #2a2a2a; border: 2px solid var(--border-color);">
+              <img id="artistImage" src="{{ url_for('api_artist_image', name=artist_name) }}" alt="{{ artist_name }}" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.src='/api/album-art-placeholder';">
+              <button class="btn btn-sm btn-dark position-absolute bottom-0 start-50 translate-middle-x mb-2" onclick='openArtistImageModal(document.querySelector("[data-artist-name]").dataset.artistName)'>
+                <i class="bi bi-pencil"></i> Change Image
+              </button>
+            </div>
+          </div>
+          <div class="col-12 col-md-9">
+            <h5 class="mb-3"><i class="bi bi-info-circle"></i> Artist Bio</h5>
+            <div id="artistBio" class="text-muted" style="min-height: 120px;" data-has-initial-bio="{{ '1' if artist_bio else '0' }}">
+              {% if artist_bio %}
+                <p>{{ artist_bio|e|replace('&lt;br /&gt;', '<br>')|replace('\n', '<br>')|safe }}</p>
+              {% else %}
+                <p class="text-center mt-2"><small>Loading artist information...</small></p>
+              {% endif %}
+            </div>
+            
+            <div class="mt-4 pt-3" style="border-top: 1px solid var(--border-color);">
+              <h6 class="mb-3"><i class="bi bi-globe"></i> Country/Origin</h6>
+              <div id="artistCountryDisplay">
+                {% if artist_country %}
+                  <div class="d-flex align-items-center gap-2 mb-2">
+                    <span class="badge bg-info" style="font-size: 0.95rem; padding: 0.4rem 0.8rem;">{{ artist_country }}</span>
+                  </div>
+                {% else %}
+                  <span class="text-muted small">No country information available.</span>
+                {% endif %}
+              </div>
+              <div class="btn-group btn-group-sm mt-2">
+                <button class="btn btn-outline-primary btn-sm" onclick="fetchArtistCountry()">Get from MusicBrainz</button>
+                <button class="btn btn-outline-secondary btn-sm" onclick="editArtistCountry()">Edit Manually</button>
+              </div>
+            </div>
+
+            <div class="mt-4 pt-3" style="border-top: 1px solid var(--border-color);">
+              <h6 class="mb-3"><i class="bi bi-people"></i> Band Members</h6>
+              <div id="artistMembersDisplay">
+                {% if artist_members %}
+                  <div class="d-flex flex-wrap gap-2">
+                    {% for member in artist_members %}
+                      <span class="badge bg-secondary text-light">{{ member.name }}{% if member.ended %} · former{% endif %}</span>
+                    {% endfor %}
+                  </div>
+                {% else %}
+                  <span class="text-muted small">No band members available.</span>
+                {% endif %}
+              </div>
+            </div>
+
+            <div class="mt-4 pt-3" style="border-top: 1px solid var(--border-color);">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="mb-0"><i class="bi bi-link-45deg"></i> Artist IDs</h6>
+                <button class="btn btn-sm btn-primary" onclick="openEditArtistIdsModal()"><i class="bi bi-pencil"></i> Edit</button>
+              </div>
+              <div class="row g-2">
+                <div class="col-12 col-lg-6">
+                  <label class="form-label fw-bold small">MusicBrainz Artist ID</label>
+                  <div class="input-group input-group-sm">
+                    <input type="text" class="form-control" id="musicbrainzArtistId" value="{{ stats.musicbrainz_artist_id or stats.lastfm_artist_mbid or '' }}" readonly>
+                    {% if stats.musicbrainz_artist_id or stats.lastfm_artist_mbid %}
+                    <a href="https://musicbrainz.org/artist/{{ stats.musicbrainz_artist_id or stats.lastfm_artist_mbid }}" target="_blank" class="btn btn-outline-secondary"><i class="bi bi-box-arrow-up-right"></i></a>
+                    {% endif %}
+                  </div>
+                </div>
+                <div class="col-12">
+                  <label class="form-label fw-bold small">Discogs Artist ID</label>
+                  <div class="input-group input-group-sm">
+                    <input type="text" class="form-control" id="discogsArtistId" value="{{ stats.discogs_artist_id or '' }}" readonly>
+                    {% if stats.discogs_artist_id %}
+                    <a href="https://www.discogs.com/artist/{{ stats.discogs_artist_id }}" target="_blank" class="btn btn-outline-secondary"><i class="bi bi-box-arrow-up-right"></i></a>
+                    {% endif %}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-2 g-md-3 mb-4" id="artist-stats-section">
+    <div class="col-6 col-md-3">
+      <div class="card h-100"><div class="card-body text-center"><div class="text-muted mb-2"><i class="bi bi-disc"></i> Albums</div><div class="h4 mb-0">{{ stats.album_count or 0 }}</div></div></div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card h-100"><div class="card-body text-center"><div class="text-muted mb-2"><i class="bi bi-music-note"></i> Tracks</div><div class="h4 mb-0">{{ stats.track_count or 0 }}</div></div></div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card h-100"><div class="card-body text-center"><div class="text-muted mb-2"><i class="bi bi-star-fill"></i> Avg</div><div class="h4 mb-0">{{ stats.avg_stars|round(2) if stats.avg_stars else "—" }}</div></div></div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card h-100"><div class="card-body text-center"><div class="text-muted mb-2"><i class="bi bi-star-fill"></i> 5★</div><div class="h4 mb-0">{{ stats.five_star_count or 0 }}</div></div></div>
+    </div>
+  </div>
+
+  <div class="card mb-4" id="artist-similar-section">
+    <div class="card-header"><h5 class="card-title mb-0"><i class="bi bi-person-heart"></i> Similar Artists</h5></div>
+    <div class="card-body" style="background-color: var(--secondary-bg);">
+      <div id="artistSimilarArtistsContainer"><div class="text-center py-3"><div class="spinner-border spinner-border-sm"></div></div></div>
+    </div>
+  </div>
+
+  <div class="mb-4" id="artist-genres-section">
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="card-title mb-0"><i class="bi bi-collection"></i> Genres and Moods</h5>
+        <button class="btn btn-sm btn-outline-primary" onclick="fetchArtistGenreRecommendations()" id="fetchArtistGenresBtn">Get Online Suggestions</button>
+      </div>
+      <div class="card-body">
+        <div class="mb-3">
+          <h6 class="mb-2"><i class="bi bi-music-note-beamed"></i> Top Genres</h6>
+          <div id="artistGenresContainer">
+            {% if genres %}
+            <div class="d-flex flex-wrap gap-2 mb-3" id="currentArtistGenres">
+              {% for genre in genres %}
+              <label class="badge bg-primary" style="font-size: 1rem; cursor: pointer; padding: 0.45rem 0.65rem;">
+                <input type="checkbox" value="{{ genre }}" style="margin-right: 0.5rem;" onchange="toggleGenreCheckbox('currentArtistGenres', 'removeSelectedArtistGenresBtn')">{{ genre }}
+              </label>
+              {% endfor %}
+            </div>
+            <button class="btn btn-sm btn-warning" id="removeSelectedArtistGenresBtn" style="display: none;" onclick="removeSelectedArtistGenres()">Remove Selected</button>
+            {% else %}
+              <span class="text-muted small">No genres found</span>
+            {% endif %}
+          </div>
+        </div>
+        <div id="recommendedArtistGenresSection" style="display: none;">
+          <h6 class="mb-2"><i class="bi bi-stars"></i> Suggested Genres</h6>
+          <div class="d-flex flex-wrap gap-2 mb-3" id="recommendedArtistGenres"></div>
+          <button class="btn btn-sm btn-success" onclick="applySelectedArtistGenres()" id="applyArtistGenresBtn" style="display: none;">Apply Selected</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-4" id="artist-top-tracks-section">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="card-title mb-0"><i class="bi bi-graph-up-arrow"></i> Top Tracks</h5>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-hover mb-0">
+          <thead>
+            <tr><th class="text-center">#</th><th>Track</th><th>Album</th><th class="text-center">Z-Score</th><th class="text-center">Pop</th><th class="text-center">Stars</th></tr>
+          </thead>
+          <tbody>
+            {% if top_tracks and top_tracks|length > 0 %}
+              {% for track in top_tracks %}
+                <tr>
+                  <td class="text-center text-muted">{{ loop.index }}</td>
+                  <td><a href="{{ url_for('track_detail', artist=artist_name, album=track.album, track_id=track.id) }}" class="text-decoration-none">{{ track.title }}</a></td>
+                  <td><a href="{{ url_for('album_detail', artist=artist_name, album=track.album) }}" class="text-decoration-none">{{ track.album }}</a></td>
+                  <td class="text-center"><span class="badge bg-info">{{ '%.2f'|format(track.artist_z_score or 0) }}</span></td>
+                  <td class="text-center">{{ (track.popularity_score or 0)|round(1) }}</td>
+                  <td class="text-center">{{ track.stars or 0 }}★</td>
+                </tr>
+              {% endfor %}
+            {% else %}
+              <tr><td colspan="6" class="text-center text-muted py-4">No tracks available</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {# NEW RELEASES SECTION #}
+  {% from "components/_release_section.html" import render_release_section %}
+
+  {% set _standard_specs = [
+    {'key': 'album', 'section_id': 'albums', 'icon': 'bi-vinyl-fill', 'label': 'Albums'},
+    {'key': 'ep', 'section_id': 'eps', 'icon': 'bi-disc', 'label': 'EPs'},
+    {'key': 'single', 'section_id': 'singles', 'icon': 'bi-music-note-beamed', 'label': 'Singles'},
+    {'key': 'compilation', 'section_id': 'compilations', 'icon': 'bi-collection', 'label': 'Compilations'},
+    {'key': 'live_album', 'section_id': 'live-albums', 'icon': 'bi-broadcast', 'label': 'Live Albums'},
+    {'key': 'remix_album', 'section_id': 'remix-albums', 'icon': 'bi-soundwave', 'label': 'Remix Albums'},
+  ] %}
+  {% set _standard_keys = _standard_specs|map(attribute='key')|list %}
+  {% set _dynamic_specs = [] %}
+  {% for spec in album_categories if spec.key not in _standard_keys %}
+    {% set _ = _dynamic_specs.append({'key': spec.key, 'section_id': spec.section_id, 'icon': spec.icon, 'label': spec.label}) %}
+  {% endfor %}
+  {% set release_specs = _standard_specs + _dynamic_specs %}
+
+  {% set _nonempty_keys = albums_by_category|dictsort|selectattr('1')|map(attribute=0)|list %}
+  {% set visible_specs = release_specs|selectattr('key', 'in', _nonempty_keys)|list %}
+
+  <div class="card mb-4" id="albums-section">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <h5 class="card-title mb-0"><i class="bi bi-collection-play"></i> Releases</h5>
+      <div class="d-flex gap-2">
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="releasesExpandAllBtn"><i class="bi bi-arrows-expand"></i> Expand All</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="releasesCollapseAllBtn"><i class="bi bi-arrows-collapse"></i> Collapse All</button>
+      </div>
+    </div>
+    {% if visible_specs|length > 0 %}
+    <div class="card-body py-2 release-jump-bar">
+      {% for spec in visible_specs %}
+        <a class="release-jump-chip" href="#{{ spec.section_id }}-section" data-section="{{ spec.section_id }}">
+          <i class="bi {{ spec.icon }}"></i> {{ spec.label }} <span class="badge bg-secondary">{{ (albums_by_category.get(spec.key) or [])|length }}</span>
+        </a>
       {% endfor %}
     </div>
+    {% endif %}
   </div>
+
+  <div id="releases-sections">
+    {% for spec in release_specs %}
+      {{ render_release_section(spec.key, spec.section_id, spec.icon, spec.label, albums_by_category.get(spec.key) or [], artist_name) }}
+    {% endfor %}
+
+    {% if albums_by_category.values()|map('length')|sum == 0 %}
+      <div class="card mb-4">
+        <div class="card-body text-center text-muted py-5">
+          <i class="bi bi-info-circle fs-3 d-block mb-2"></i> No releases found.
+          <div class="mt-2">
+            <button type="button" class="btn btn-sm btn-outline-info release-search-all-btn" data-artist="{{ artist_name|e }}">
+              <i class="bi bi-cloud-download"></i> Search MusicBrainz
+            </button>
+          </div>
+        </div>
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="card mb-4" id="artist-covers-section">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="card-title mb-0"><i class="bi bi-music-note-list"></i> Covers of {{ artist_name }}'s Songs</h5>
+    </div>
+    <div class="card-body p-0">
+      <div id="artistCoveredByContainer"><div class="text-center py-3"><div class="spinner-border spinner-border-sm"></div></div></div>
+    </div>
+  </div>
+
 </div>
-{%- endif %}
-{% endmacro %}
+
+<!-- INCLUDES ALL MODALS -->
+{% include "components/modals/_artist_modals.html" %}
+
+<!-- SCRIPTS -->
+<script src="{{ versioned_static('js/services/musicbrainz-queue.js') }}"></script>
+<script src="{{ versioned_static('js/services/slskd.js') }}"></script>
+<script src="{{ versioned_static('js/services/genres.js') }}"></script>
+<script src="{{ versioned_static('js/pages/artist.js') }}"></script>
+<script src="{{ versioned_static('js/pages/artist-releases.js') }}"></script>
+{% endblock %}
