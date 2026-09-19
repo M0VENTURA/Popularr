@@ -1,0 +1,67 @@
+{% if qbit_config.enabled or slskd_config.enabled %}
+<div class="modal fade" id="downloadModal" tabindex="-1" aria-labelledby="downloadModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-xl">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="downloadModalLabel">
+          <i class="bi bi-download"></i> Download Album: <span id="downloadArtistName"></span>
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <ul class="nav nav-tabs mb-3" id="downloadTabs" role="tablist">
+          {% if qbit_config.enabled and qbit_config.web_url %}
+          <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="qbit-tab" data-bs-toggle="tab" data-bs-target="#qbit-content" type="button" role="tab">
+              <i class="bi bi-cloud-download"></i> qBittorrent
+            </button>
+          </li>
+          {% endif %}
+          {% if slskd_config.enabled %}
+          <li class="nav-item" role="presentation">
+            <button class="nav-link {% if not (qbit_config.enabled and qbit_config.web_url) %}active{% endif %}" id="slskd-tab" data-bs-toggle="tab" data-bs-target="#slskd-content" type="button" role="tab">
+              <i class="bi bi-music-note-list"></i> Soulseek
+            </button>
+          </li>
+          {% endif %}
+        </ul>
+        <div class="tab-content" id="downloadTabsContent">
+          {% if qbit_config.enabled and qbit_config.web_url %}
+          <div class="tab-pane fade show active" id="qbit-content" role="tabpanel">
+            <div class="mb-3">
+              <div class="input-group">
+                <input type="text" class="form-control" id="qbitSearchInput" placeholder="Search query...">
+                <button class="btn btn-primary" onclick="performQbitSearch()">
+                  <i class="bi bi-search"></i> Search
+                </button>
+              </div>
+            </div>
+            <div id="qbitLoading" class="text-center py-4" style="display: none;">
+              <div class="spinner-border text-primary" role="status"></div>
+            </div>
+            <div id="qbitResults"></div>
+          </div>
+          {% endif %}
+          {% if slskd_config.enabled %}
+          <div class="tab-pane fade {% if not (qbit_config.enabled and qbit_config.web_url) %}show active{% endif %}" id="slskd-content" role="tabpanel">
+            <div class="mb-3">
+              <div class="input-group">
+                <input type="text" class="form-control" id="slskdSearchInput" placeholder="Search query...">
+                <button class="btn btn-primary" onclick="performSlskdSearch()">
+                  <i class="bi bi-search"></i> Search
+                </button>
+              </div>
+            </div>
+            <div id="slskdTracksContainer" class="mb-3"></div>
+            <div id="slskdLoading" class="text-center py-4" style="display: none;">
+              <div class="spinner-border text-primary" role="status"></div>
+            </div>
+            <div id="slskdResults"></div>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
