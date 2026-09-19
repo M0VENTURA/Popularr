@@ -875,8 +875,13 @@ def _resolve_track_mb_metadata(
     return {
         "mb_data": mb_data,
         "payload": payload,
-        "artist": artist,
-        "title": title,
+        # Use the MusicBrainz-corrected identity downstream.
+        "artist": _as_str(payload.get("artist") or artist),
+        "title": _as_str(
+            payload.get("musicbrainz_title")
+            or payload.get("title")
+            or title
+        ),
         "has_genres": _has_genres,
         "force_meta": _force_meta,
     }
@@ -905,6 +910,15 @@ def process_track(
     track_id = _as_str(raw_track_id)
     track_title = _as_str(track.get("title"))
     track_artist = _as_str(track.get("artist"))
+
+    # Carry release-level/current-pass liveness through to finalisation.
+    _resolved_is_live = bool(
+        track.get("is_live")
+        or track.get("album_context_live")
+        or album_context.get("is_live_album")
+        or _album_type_indicates_live(track, album_context, album_result)
+        or is_live_or_alternate_track_title(track_title)
+    )
 
     from helpers.logging_config import log_unified
     _track_started = time.monotonic()
@@ -1399,6 +1413,7 @@ def process_track(
                     is_live_release
                     or _has_safe_live_recording_tag(update_payload)
                 )
+                _resolved_is_live = bool(_resolved_is_live or is_live_flag)
                 is_instrumental_flag = is_instrumental_track(raw_title or title)
                 is_featured_flag = bool(
                     "feat" in str(artist or "").lower()
@@ -1548,10 +1563,18 @@ def process_track(
             _sd_eligible = True
             if sd_popularity > 0:
                 try:
+                    _sd_album_artist = _as_str(
+                        effective_track.get("album_artist")
+                        or album_context.get("album_artist")
+                        or ""
+                    ).strip().casefold()
                     _is_comp_album = bool(
                         album_context.get("is_va_compilation")
-                        or str(sd_artist or "").strip().lower() in ("various artists", "various", "compilation", "soundtrack")
-                        or "various artists" in str(sd_album or "").lower()
+                        or _sd_album_artist in {
+                            "various artists", "various", "va", "v/a",
+                            "compilation", "soundtrack", "soundtracks",
+                        }
+                        or "various artists" in str(sd_album or "").casefold()
                     )
                     if not _is_comp_album:
                         _album_scores = [
@@ -1635,34 +1658,23 @@ def process_track(
             else:
                 sd_result = None
 
-            _sd_title_lower = str(sd_title or "").lower()
-            _known_global_hits = [
-                "toxic", "oops", "baby one more time", "slave 4 u", "lucky",
-                "everytime", "stronger", "sometimes", "overprotected", "prerogative",
-                "crazy", "boys", "outrageous", "girl, not yet a woman", "somethin", "me against the music"
-            ]
-            _is_known_hit = any(hit in _sd_title_lower for hit in _known_global_hits) or int(lastfm_listeners or 0) >= 300_000
-
-            if sd_result or _is_known_hit:
-                if sd_result:
-                    update_payload["is_single"] = sd_result.get("is_single", False) or _is_known_hit
-                    existing_conf = str(sd_result.get("confidence", "low")).lower()
-                    if _is_known_hit and existing_conf not in ("high", "medium"):
-                        update_payload["single_confidence"] = "medium"
-                    else:
-                        update_payload["single_confidence"] = sd_result.get("confidence", "low")
-                    update_payload["single_confidence_score"] = sd_result.get("confidence_score", 0.0)
-                    update_payload["single_status"] = sd_result.get("single_status", "none")
-                    update_payload["single_sources"] = json.dumps(sd_result.get("sources", []), ensure_ascii=False)
-                else:
-                    update_payload["is_single"] = True
-                    update_payload["single_confidence"] = "medium"
-                    update_payload["single_confidence_score"] = 0.85
-                    update_payload["single_sources"] = json.dumps([{"source": "hit_safeguard", "matched": True}], ensure_ascii=False)
-                    _single_summary = "Single: MEDIUM (hit safeguard)"
-
+            # Persist only source-backed single evidence. Popularity is not
+            # proof of a single release, and generic code must not contain
+            # artist-specific title safeguards. Curated exceptions belong in
+            # single_manual_override or an ISRC/MBID-backed override store.
+            if sd_result:
+                update_payload["is_single"] = bool(sd_result.get("is_single", False))
+                update_payload["single_confidence"] = sd_result.get("confidence", "low")
+                update_payload["single_confidence_score"] = sd_result.get("confidence_score", 0.0)
+                update_payload["single_status"] = sd_result.get("single_status", "none")
+                update_payload["single_sources"] = json.dumps(
+                    sd_result.get("sources", []),
+                    ensure_ascii=False,
+                )
                 update_payload["single_detection_last_updated"] = sd_now
-                _sd_conf_str = str(update_payload.get("single_confidence", "low") or "low").upper()
+                _sd_conf_str = str(
+                    update_payload.get("single_confidence", "low") or "low"
+                ).upper()
                 _sd_chips = _single_chips(update_payload.get("single_sources"))
                 _single_summary = f"Single: {_sd_conf_str} {_sd_chips}".strip()
             else:
@@ -1672,8 +1684,14 @@ def process_track(
                     update_payload["is_single"] = False
                     update_payload["single_confidence"] = "low"
                     update_payload["single_confidence_score"] = 0.0
+                    update_payload["single_status"] = "none"
                     update_payload["single_sources"] = json.dumps([], ensure_ascii=False)
-                    _single_summary = "Single: LOW (below top-50% album popularity)"
+                    update_payload["single_detection_last_updated"] = sd_now
+                    _single_summary = (
+                        "Single: LOW (no source-backed single evidence)"
+                        if _sd_eligible
+                        else "Single: LOW (below top-50% album popularity)"
+                    )
         except Exception as e:
             logger.debug("Single detection failed", track_id=track_id, error=str(e))
             _single_summary = f"Single: ERROR ({e})"
@@ -2054,10 +2072,6 @@ def process_track(
         "single_confidence": _ret_single_conf,
         "single_sources": _ret_single_srcs,
         "popularity_marked": bool(track.get("popularity_marked", False)),
-        "is_live": bool(
-            track.get("is_live")
-            or track.get("album_context_live")
-            or is_live_or_alternate_track_title(track.get("title"))
-        ),
+        "is_live": bool(_resolved_is_live),
         "exclude_from_stats": bool(track.get("exclude_from_stats")),
     }
