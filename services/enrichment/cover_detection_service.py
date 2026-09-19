@@ -14,6 +14,8 @@ Key Functions:
 
 Rebuilt with the following corrections:
 
+- Added `album_artist` to SQL extraction so `detect_cover_song` can fall
+  back to it if the track artist is "Soundtrack" or differs.
 - The row mapping in ``detect_covers_for_artist`` read ``composer`` (index 4)
   into the ``writer`` field and never read the real ``writer`` column
   (index 5), so writer-based attribution ran on the wrong data.
@@ -46,19 +48,20 @@ _ARTIST_TRACK_COLUMNS = (
     "id",                       # 0
     "title",                    # 1
     "artist",                   # 2
-    "album",                    # 3
-    "composer",                 # 4
-    "writer",                   # 5
-    "isrc",                     # 6
-    "mbid",                     # 7
-    "musicbrainz_album_mbid",   # 8
-    "file_path",                # 9
-    "is_cover",                 # 10
-    "genres",                   # 11
-    "musicbrainz_genres",       # 12
-    "original_cover_artist",    # 13
-    "cover_manual_override",    # 14
-    "cover_last_checked",       # 15
+    "album_artist",             # 3
+    "album",                    # 4
+    "composer",                 # 5
+    "writer",                   # 6
+    "isrc",                     # 7
+    "mbid",                     # 8
+    "musicbrainz_album_mbid",   # 9
+    "file_path",                # 10
+    "is_cover",                 # 11
+    "genres",                   # 12
+    "musicbrainz_genres",       # 13
+    "original_cover_artist",    # 14
+    "cover_manual_override",    # 15
+    "cover_last_checked",       # 16
 )
 
 
@@ -103,25 +106,24 @@ def detect_covers_for_artist(
     albums: dict[str, list[dict[str, Any]]] = {}
     updated = 0
     for row in rows:
-        # Indices must track _ARTIST_TRACK_COLUMNS exactly. Previously
-        # composer (4) was read into writer, and writer (5) was never read.
         track = {
             "id": str(row_get(row, "id", 0, "")),
             "title": str(row_get(row, "title", 1, "")),
             "artist": str(row_get(row, "artist", 2, "")),
-            "album": str(row_get(row, "album", 3, "")),
-            "composer": row_get(row, "composer", 4),
-            "writer": row_get(row, "writer", 5),
-            "isrc": row_get(row, "isrc", 6),
-            "mbid": row_get(row, "mbid", 7),
-            "musicbrainz_album_mbid": row_get(row, "musicbrainz_album_mbid", 8),
-            "file_path": row_get(row, "file_path", 9),
-            "is_cover": row_get(row, "is_cover", 10),
-            "genres": row_get(row, "genres", 11),
-            "musicbrainz_genres": row_get(row, "musicbrainz_genres", 12),
-            "original_cover_artist": row_get(row, "original_cover_artist", 13, ""),
-            "cover_manual_override": row_get(row, "cover_manual_override", 14, False),
-            "cover_last_checked": row_get(row, "cover_last_checked", 15),
+            "album_artist": str(row_get(row, "album_artist", 3, "")),
+            "album": str(row_get(row, "album", 4, "")),
+            "composer": row_get(row, "composer", 5),
+            "writer": row_get(row, "writer", 6),
+            "isrc": row_get(row, "isrc", 7),
+            "mbid": row_get(row, "mbid", 8),
+            "musicbrainz_album_mbid": row_get(row, "musicbrainz_album_mbid", 9),
+            "file_path": row_get(row, "file_path", 10),
+            "is_cover": row_get(row, "is_cover", 11),
+            "genres": row_get(row, "genres", 12),
+            "musicbrainz_genres": row_get(row, "musicbrainz_genres", 13),
+            "original_cover_artist": row_get(row, "original_cover_artist", 14, ""),
+            "cover_manual_override": row_get(row, "cover_manual_override", 15, False),
+            "cover_last_checked": row_get(row, "cover_last_checked", 16),
         }
         album_key = track["album"] or "_no_album"
         albums.setdefault(album_key, []).append(track)
@@ -129,7 +131,7 @@ def detect_covers_for_artist(
     for album_name, tracks in albums.items():
         # Prefer the album artist the scan was requested for; the first
         # track's artist can be a featured or per-track credit.
-        artist = artist_name or (tracks[0].get("artist") or album_name)
+        artist = artist_name or (tracks[0].get("album_artist") or tracks[0].get("artist") or album_name)
         try:
             results = detector.detect_covers_for_album(
                 album=album_name, artist=artist, tracks=tracks, force=force,
@@ -209,6 +211,21 @@ def detect_cover_song(
     Skips return the *existing* verdict rather than ``False``, so a caller
     writing the result back cannot clear a confirmed cover flag.
     """
+    # Evaluate if 'Soundtrack' or mismatched track/album artists need correcting
+    if track_data:
+        t_artist = str(track_data.get("artist") or "").strip()
+        a_artist = str(track_data.get("album_artist") or "").strip()
+        
+        if t_artist and a_artist and t_artist != a_artist:
+            # If the track artist is practically useless for detection (e.g., 'Soundtrack'), use the album artist
+            if t_artist.lower() == "soundtrack":
+                artist = a_artist
+            elif a_artist.lower() == "soundtrack":
+                artist = t_artist
+            else:
+                # Typically, when they differ, the specific track artist is the better metric to verify a cover
+                artist = t_artist
+
     if not force and track_data:
         existing_cover = bool(track_data.get("is_cover"))
 
