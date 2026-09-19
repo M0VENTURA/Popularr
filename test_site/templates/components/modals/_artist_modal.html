@@ -1,0 +1,120 @@
+{% if qbit_config.enabled or slskd_config.enabled %}
+<div class="modal fade" id="downloadModal" tabindex="-1">
+  <div class="modal-dialog modal-xl">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-download"></i> Download: <span id="downloadArtistName"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <ul class="nav nav-tabs mb-3" id="downloadTabs">
+          {% if qbit_config.enabled %}
+          <li class="nav-item"><button class="nav-link active" id="qbit-tab" data-bs-toggle="tab" data-bs-target="#qbit-content">qBittorrent</button></li>
+          {% endif %}
+          {% if slskd_config.enabled %}
+          <li class="nav-item"><button class="nav-link {% if not qbit_config.enabled %}active{% endif %}" id="slskd-tab" data-bs-toggle="tab" data-bs-target="#slskd-content">Soulseek</button></li>
+          {% endif %}
+        </ul>
+        <div class="tab-content">
+          {% if qbit_config.enabled %}
+          <div class="tab-pane fade show active" id="qbit-content">
+            <div class="input-group mb-3">
+              <input type="text" class="form-control" id="qbitSearchInput">
+              <button class="btn btn-primary" onclick="performQbitSearch()"><i class="bi bi-search"></i> Search</button>
+            </div>
+            <div id="qbitLoading" class="text-center py-4" style="display:none;"><div class="spinner-border text-primary"></div></div>
+            <div id="qbitResults"></div>
+          </div>
+          {% endif %}
+          {% if slskd_config.enabled %}
+          <div class="tab-pane fade {% if not qbit_config.enabled %}show active{% endif %}" id="slskd-content">
+            <div class="input-group mb-3">
+              <input type="text" class="form-control" id="slskdSearchInput">
+              <button class="btn btn-primary" onclick="performSlskdSearch()"><i class="bi bi-search"></i> Search</button>
+            </div>
+            <div id="slskdTracksContainer" class="mb-3"></div>
+            <div id="slskdLoading" class="text-center py-4" style="display:none;"><div class="spinner-border text-primary"></div></div>
+            <div id="slskdResults"></div>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="modal fade" id="artistMbSearchModal" tabindex="-1">
+  <div class="modal-dialog modal-xl">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-music-note-list"></i> MusicBrainz Release Search</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="artistMbSearchInfo" class="alert alert-info mb-3" style="display:none;">Searching <strong id="artistMbSearchArtist"></strong></div>
+        <div id="artistMbSearchStatus" class="text-center py-4" style="display:none;"><div class="spinner-border text-primary"></div></div>
+        <div id="artistMbSearchError" class="alert alert-danger" style="display:none;"></div>
+        <div id="artistMbSearchResults"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="editTrackFromArtistModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-pencil-square"></i> Edit Track</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="editArtistTrackForm">
+                    <input type="hidden" id="editArtistTrackId" name="track_id">
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-12"><label class="form-label">Title</label><input type="text" class="form-control" id="editArtistTrackTitleField" required></div>
+                        <div class="col-md-6"><label class="form-label">Artist</label><input type="text" class="form-control" id="editArtistTrackArtistField"></div>
+                        <div class="col-md-6"><label class="form-label">Album</label><input type="text" class="form-control" id="editArtistTrackAlbumField"></div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="saveArtistEditedTrack()">Save Changes</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="editReleaseModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">Edit Release</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <input type="hidden" id="editReleaseArtist">
+        <input type="hidden" id="editReleaseOriginalTitle">
+        <input type="text" class="form-control mb-3" id="editReleaseTitle">
+        <input type="text" class="form-control mb-3" id="editReleaseYear" placeholder="Year">
+        <input type="text" class="form-control" id="editReleaseMbid" placeholder="MBID">
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="editReleaseSaveBtn">Save Changes</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="editTrackModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">Edit Title</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <input type="hidden" id="editTrackId">
+        <input type="hidden" id="editTrackCurrentField">
+        <input type="text" class="form-control" id="editTrackValue">
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-primary" onclick="saveEditedTrackFromArtistPage()">Save</button></div>
+    </div>
+  </div>
+</div>
