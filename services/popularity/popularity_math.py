@@ -184,7 +184,7 @@ def effective_album_ratio(effective_median: float, m_peak: float) -> float:
     """Return ``R_eff`` -- where the album sits on the artist's career curve."""
     if not m_peak or float(m_peak) <= 0:
         return 1.0
-    return min(1.0, max(0.0, float(effective_median) / float(m_peak))))
+    return min(1.0, max(0.0, float(effective_median) / float(m_peak)))
 
 
 # ---------------------------------------------------------------------------

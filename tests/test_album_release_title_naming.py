@@ -69,8 +69,12 @@ class TestArtistAlbumNameDiffEditionStripping:
             def fetchall(self):
                 return self._rows
 
-        import db.engine as db_engine
-        monkeypatch.setattr(db_engine, "db_session", lambda: _FakeSession())
+        import services.scanning.navidrome_import as ndi
+
+        # Patch the name as BOUND IN navidrome_import: it does
+        # `from db.engine import db_session` at import time, so patching
+        # db.engine.db_session would leave the already-bound reference alone.
+        monkeypatch.setattr(ndi, "db_session", lambda: _FakeSession())
 
         class _FakeClient:
             def fetch_artist_albums(self, artist_id):
@@ -105,8 +109,9 @@ class TestArtistAlbumNameDiffEditionStripping:
             def fetchall(self):
                 return self._rows
 
-        import db.engine as db_engine
-        monkeypatch.setattr(db_engine, "db_session", lambda: _FakeSession())
+        import services.scanning.navidrome_import as ndi
+
+        monkeypatch.setattr(ndi, "db_session", lambda: _FakeSession())
 
         class _FakeClient:
             def fetch_artist_albums(self, artist_id):

@@ -14,10 +14,31 @@ scan:
 
 from __future__ import annotations
 
+import pytest
+
 from db.engine import db_session
 from services.scanning.filters import should_skip_cached_album
 from services.scanning.navidrome_import import compute_artist_album_diff, scan_artist_to_db
 from sqlalchemy import text
+
+
+@pytest.fixture(autouse=True)
+def _isolated_tracks():
+    """Empty the shared in-memory ``tracks`` table around every test.
+
+    The test engine is a single StaticPool in-memory SQLite shared by the whole
+    suite (``db.engine``), so rows written by one test are visible to the next.
+    These tests assert on the COMPLETE set of track ids (``_db_track_ids``) and
+    seed fixed ids (g1/k1/...), so without isolation they collide on insert and
+    see each other's leftovers.
+    """
+    def _wipe() -> None:
+        with db_session() as session:
+            session.execute(text("DELETE FROM tracks"))
+
+    _wipe()
+    yield
+    _wipe()
 
 
 # ---------------------------------------------------------------------------
