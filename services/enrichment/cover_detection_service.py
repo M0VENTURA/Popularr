@@ -243,6 +243,40 @@ def detect_cover_song(
         logger.debug("Cover detected via title annotation", track=title)
         return True, "title_annotation"
 
+    # THE FIX: Engage the actual CoverDetector engine!
+    # If the track has MusicBrainz metadata, use the heavy detector to check
+    # the work-mbid and recording relations to find the true original artist.
+    if track_data and track_data.get("work_mbid"):
+        try:
+            # Create a mock track list for the detector
+            mock_track = {
+                "id": track_data.get("id") or "1",
+                "title": title,
+                "artist": artist,
+                "mbid": track_data.get("recording_mbid") or track_data.get("mbid"),
+                "isrc": track_data.get("isrc"),
+                "writer": track_data.get("writer") or writer,
+                "composer": composer,
+                "work_mbid": track_data.get("work_mbid"),
+            }
+            detector = CoverDetector()
+            
+            # Use the deep album detector logic which executes the MBID resolution
+            album_name = track_data.get("album") or "Unknown Album"
+            results = detector.detect_covers_for_album(
+                album=album_name, 
+                artist=artist, 
+                tracks=[mock_track], 
+                force=force
+            )
+            
+            if results and results[0].get("is_cover"):
+                logger.debug("Cover detected via MusicBrainz relations", track=title)
+                return True, "musicbrainz_work_relation"
+                
+        except Exception as exc:
+            logger.debug("CoverDetector engine failed", track=title, error=str(exc))
+
     # NOTE: a songwriter differing from the performer is normal for most
     # commercially released music (staff writers, producers, session
     # composers) and is not on its own sufficient to call a track a cover.
