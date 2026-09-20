@@ -55,6 +55,8 @@ from services.popularity.popularity_config import (
 # Provider aggregation helpers
 from services.popularity.popularity_matching import normalize_for_aggregation
 from services.popularity.popularity_sources import (
+    _is_alternate_performance_title,
+    album_recording_batch_key,
     get_aggregated_lastfm_popularity,
     get_aggregated_listenbrainz_popularity,
     get_search_aggregated_lastfm_popularity,
@@ -382,6 +384,41 @@ def _build_album_listener_distributions(
         album_lb_listens = None
 
     return album_lf_listeners, album_lb_listens, album_lf_lb_pairs
+
+
+def _album_recording_batch_keys(
+    *,
+    primary_artist: str,
+    primary_title: str,
+    batch_artist: str = "",
+    batch_title: str = "",
+    disc: Any = None,
+    track_number: Any = None,
+) -> list[str]:
+    """Candidate batch keys, MOST SPECIFIC FIRST.
+
+    The row-specific form (``artist::title::disc::track``) names exactly one
+    track, so it is tried before the legacy title-only form. Two rows of a
+    single album can share a title and still be DIFFERENT recordings on the
+    album's release — dArtagnan's "Helden X Hymnen" files the album's title track
+    AND its "(Unplugged Version)" rendition both as "Helden X Hymnen" — and only
+    the row-specific key keeps them apart.
+
+    Both forms are built through ``album_recording_batch_key`` so this consumer
+    and its producer (``scan_stage_runner._build_album_recording_batch``) cannot
+    drift out of step.
+    """
+    keys: list[str] = []
+    for _artist, _title in ((primary_artist, primary_title), (batch_artist, batch_title)):
+        if not _artist or not _title:
+            continue
+        for _key in (
+            album_recording_batch_key(_artist, _title, disc, track_number),
+            album_recording_batch_key(_artist, _title),
+        ):
+            if _key and _key not in keys:
+                keys.append(_key)
+    return keys
 
 
 def _album_edition_annotation(
@@ -752,18 +789,55 @@ def _resolve_track_mb_metadata(
 
     mb_data = None
     if title and artist:
-        if frozen_track or (_has_mbid and _has_genres and not _force_meta):
-            logger.debug("Skipping MB metadata lookup", track_id=track_id, reason="frozen or fully resolved")
-        else:
-            _batch_mb = options.get("mb_batch_metadata") or {}
-            mb_data = _batch_mb.get(f"{artist.lower()}::{title.lower()}")
-            if not mb_data and batch_artist and batch_title:
-                mb_data = _batch_mb.get(f"{batch_artist.lower()}::{batch_title.lower()}")
+        # The album-release identity is looked up BEFORE the "already fully
+        # resolved" short-circuit, so a stored MBID that is NOT the recording
+        # the album's own MusicBrainz release puts at this track can be
+        # corrected. Leaving it out of reach is what kept the unplugged tracks
+        # of dArtagnan's "Helden X Hymnen" on the STUDIO recordings for good:
+        # with a recording MBID and genres already present this function
+        # returned early and never consulted the batch at all.
+        _batch_mb = options.get("mb_batch_metadata") or {}
+        for _batch_key in _album_recording_batch_keys(
+            primary_artist=artist,
+            primary_title=title,
+            batch_artist=batch_artist,
+            batch_title=batch_title,
+            disc=track.get("disc_number"),
+            track_number=track.get("track_number"),
+        ):
+            mb_data = _batch_mb.get(_batch_key)
+            if mb_data:
+                break
 
-            mb_service = get_shared_mb_service()
+        _batch_mbid = _as_str((mb_data or {}).get("recording_mbid")).strip()
+        _stored_mbid = _as_str(
+            track.get("recording_mbid") or track.get("mbid") or track.get("musicbrainz_trackid")
+        ).strip()
+        _batch_corrects = bool(_batch_mbid) and _batch_mbid != _stored_mbid
+
+        if frozen_track or (
+            _has_mbid and _has_genres and not _force_meta and not _batch_corrects
+        ):
+            logger.debug("Skipping MB metadata lookup", track_id=track_id, reason="frozen or fully resolved")
+            mb_data = None
+        else:
+            if _batch_corrects:
+                logger.info(
+                    "[MB] album-release recording identity applied",
+                    track_id=track_id,
+                    title=title,
+                    stored_mbid=_stored_mbid or None,
+                    release_mbid=_batch_mbid,
+                )
+
             _from_batch = bool(mb_data)
 
             if not mb_data:
+                # Only resolved for the search below (and for the composer
+                # lookup it enables): a batch hit already carries the metadata a
+                # search would have fetched for the album's own recording, so it
+                # must not touch the MusicBrainz service at all.
+                mb_service = get_shared_mb_service()
                 # Pass the album being scanned so the recording is pinned to
                 # THAT album's release. Without it, MusicBrainz's arbitrary
                 # release ordering let a track adopt a live-tour album, a
@@ -1179,6 +1253,27 @@ def process_track(
                 or bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", str(raw_title or title).lower()))
             )
 
+            # A version-marked RENDITION the local title does not declare.
+            #
+            # MusicBrainz's own release tracklist is authoritative here: the
+            # album's release lists "Fur immer Dein (Unplugged Version)" while
+            # the library file is titled plainly, and the identity resolved from
+            # that release (``options["mb_batch_metadata"]``) carries the
+            # version-marked title through as ``musicbrainz_title``. Providers
+            # resolve by title+artist, so without this the plainly titled
+            # unplugged track absorbs the STUDIO recording's listeners -- the
+            # reported dArtagnan "Helden X Hymnen" inflation (7.5k Last.fm
+            # listeners on a track whose album-mates sit at 300-500, enough to
+            # lock it as an album 5-star top track).
+            #
+            # Deliberately NOT folded into ``is_live_release``: this is an
+            # alternate RENDITION, not a live recording, so it must not pick up
+            # the live weight penalty or the live star caps. Only the provider
+            # "alternate performance" test consumes it.
+            _alt_rendition = _is_alternate_performance_title(
+                _as_str(effective_track.get("musicbrainz_title") or "")
+            )
+
             if isrc.startswith("[") and isrc.endswith("]"):
                 from helpers.normalization_service import normalize_isrc
                 isrc = normalize_isrc(isrc)
@@ -1307,6 +1402,7 @@ def process_track(
                                     isrc=isrc or None,
                                     recording_mbid=recording_mbid or None,
                                     is_live_release=is_live_release,
+                                    target_is_alt_rendition=_alt_rendition,
                                 )
                                 if agg and (agg.get("listeners") or 0) > 0:
                                     lastfm_listeners = _as_int(agg.get("listeners") or 0)
@@ -1370,6 +1466,7 @@ def process_track(
                             _search_agg = get_search_aggregated_lastfm_popularity(
                                 artist, raw_title or title, lastfm_client=_lf2,
                                 is_live_release=is_live_release,
+                                target_is_alt_rendition=_alt_rendition,
                             ) or {}
                             _search_listeners = _as_int(_search_agg.get("listeners") or 0)
                             if _search_listeners > lastfm_listeners:

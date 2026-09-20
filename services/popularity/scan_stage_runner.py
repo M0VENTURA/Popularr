@@ -43,7 +43,6 @@ from helpers.normalization_service import (
 
 # API Clients & Services
 from api_clients.discogs import DiscogsClient
-from api_clients.musicbrainz_http import MusicBrainzHttpClient
 from api_clients.listenbrainz import get_recording_tags_batch
 
 # Popularity & Scan Services
@@ -69,8 +68,10 @@ from services.popularity.popularity_math import (
     reanchor_scores_to_album_relative,
 )
 from services.popularity.popularity_sources import (
+    album_recording_batch_key,
     get_lastfm_artist_max_listeners,
     get_listenbrainz_album_tracklist_with_release,
+    track_identity_key,
 )
 from services.popularity.progress_tracker import finish, start, update
 from services.popularity.release_cache_service import (
@@ -364,6 +365,135 @@ def _collapse_album_mb_batch(mb_batch: dict[str, dict[str, Any]], track_contexts
     for _meta in (mb_batch or {}).values():
         if _meta and str(_meta.get("album") or "").strip():
             _meta["album"] = canonical
+
+
+def _build_album_recording_batch(
+    *,
+    album: str,
+    track_dicts: list[dict[str, Any]],
+    prefetched_popularity: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """Per-track MusicBrainz recording identity, keyed as ``track_stage`` reads it.
+
+    The album's OWN MusicBrainz release is the authority for which RECORDING
+    each of its tracks is. Resolving that per track with a title+artist
+    recording SEARCH is ambiguous by construction: an album that carries a
+    version-marked rendition next to plainly titled tracks (dArtagnan's
+    "Helden X Hymnen" holds "Fur immer Dein (Unplugged Version)", "Herzblut
+    [Unplugged Version]", "Helden X Hymnen (Unplugged Version)" and "Farewell
+    [Unplugged Version]", while three of their library titles lost the marker)
+    resolves the plain ones to the STUDIO recording. The track then keeps the
+    wrong MBID and every figure read through it -- ListenBrainz listens, the
+    release-scoped Last.fm match, genres, writers -- belongs to the studio
+    version, which is the reported wrong-version popularity scoring.
+
+    ``get_listenbrainz_album_tracklist_with_release`` has already resolved the
+    release and matched its tracklist onto the library by normalised title or by
+    (disc, position) with a +/-5s duration guard, so its identity map is reused
+    here rather than fetched a second time.
+
+    Entries are keyed ``"<artist>::<title>"`` (both lowercased) because that is
+    exactly how ``track_stage._resolve_track_mb_metadata`` looks a batch entry
+    up. The call this replaces, ``search_releases(album)``, returned RELEASES
+    keyed by ALBUM title and could therefore never match, which left the batch
+    dead and every track paying for an ambiguous recording search on top of a
+    recording fetch and a composer fetch.
+
+    Records are fetched in bulk (one request per batch) so the returned entries
+    are the same shape a search produces -- writer, genres, ISRC, release
+    identity -- and no per-track enrichment is lost by taking this path.
+    """
+    identities: list[dict[str, Any]] = []
+    seen_mbids: list[str] = []
+
+    # Count the rows that share a normalised title. Two rows of one album can
+    # legitimately share a title and still be different recordings on the
+    # release, so a title-keyed identity must never be handed to one of them.
+    _title_counts: Counter = Counter()
+    for _t in track_dicts or []:
+        _title_key = normalize_for_aggregation(str(_t.get("title") or ""))
+        if _title_key:
+            _title_counts[_title_key] += 1
+
+    for _t in track_dicts or []:
+        title = str(_t.get("title") or "").strip()
+        artist = str(_t.get("artist") or "").strip()
+        if not title or not artist:
+            continue
+
+        _title_key = normalize_for_aggregation(title)
+        _disc = _t.get("disc_number")
+        _track_number = _t.get("track_number")
+
+        # The position-qualified alias first: it names THIS row's recording.
+        entry = (prefetched_popularity or {}).get(
+            track_identity_key(_title_key, _disc, _track_number)
+        ) or {}
+
+        if not entry.get("recording_mbid"):
+            if _title_counts.get(_title_key, 0) > 1:
+                # Same-titled siblings with no usable position to tell them
+                # apart: a title-keyed identity would pin one of them to the
+                # other's recording, so leave both to the existing per-track
+                # search rather than guess.
+                logger.debug(
+                    "Album recording identity skipped",
+                    reason="duplicate local title without a usable position",
+                    title=title,
+                    album=album,
+                )
+                continue
+            entry = (prefetched_popularity or {}).get(_title_key) or {}
+
+        recording_mbid = str(entry.get("recording_mbid") or "").strip()
+        if not recording_mbid:
+            continue
+
+        identities.append({
+            "recording_mbid": recording_mbid,
+            "release_track_title": str(entry.get("release_track_title") or "").strip(),
+            "artist": artist,
+            "title": title,
+            "disc": _disc,
+            "track_number": _track_number,
+            "title_is_unique": _title_counts.get(_title_key, 0) == 1,
+        })
+        if recording_mbid not in seen_mbids:
+            seen_mbids.append(recording_mbid)
+
+    if not identities:
+        return {}
+
+    metadata: dict[str, dict[str, Any]] = {}
+    try:
+        from services.enrichment.musicbrainz_service import get_shared_mb_service
+        metadata = get_shared_mb_service().lookup_recordings_by_mbid_bulk(
+            seen_mbids,
+            album_name=album,
+        ) or {}
+    except Exception as exc:
+        logger.debug("Bulk recording lookup for the album failed", album=album, error=str(exc))
+
+    batch: dict[str, dict[str, Any]] = {}
+    for identity in identities:
+        entry = dict(metadata.get(identity["recording_mbid"]) or {})
+        entry["recording_mbid"] = identity["recording_mbid"]
+        if identity["release_track_title"]:
+            # The RELEASE's own title for this position is what carries the
+            # version marker when the local file lost it, and it is what makes
+            # the provider "alternate performance" test recognise the track.
+            entry["title"] = identity["release_track_title"]
+
+        batch[album_recording_batch_key(
+            identity["artist"], identity["title"],
+            identity["disc"], identity["track_number"],
+        )] = entry
+        if identity["title_is_unique"]:
+            # Legacy title-only key, for a caller that has no track number for
+            # the row. Only written when the title identifies exactly one row —
+            # for a same-titled pair it would be a coin flip.
+            batch[album_recording_batch_key(identity["artist"], identity["title"])] = entry
+    return batch
 
 
 def _year_of_value(value: Any) -> int | None:
@@ -1673,7 +1803,16 @@ def run_scan(
                             if not _t.get("title"):
                                 continue
                             _entry = (prefetched_popularity or {}).get(normalize_for_aggregation(_t["title"])) or {}
-                            if _entry.get("source") != "album_tracklist":
+                            # ``recording_mbid`` is demanded as well as the source
+                            # marker: the popularity cache persists the source but
+                            # NOT the identity, so keying off the source alone
+                            # would skip this pass on every rescan and leave the
+                            # album's tracks on whatever recording a title+artist
+                            # SEARCH happened to pick. The pass itself costs no
+                            # MusicBrainz requests once the release MBID is known
+                            # (it is read from the tracks table), so paying for it
+                            # every time is what keeps the identity stable.
+                            if _entry.get("source") != "album_tracklist" or not _entry.get("recording_mbid"):
                                 _needs_album_lb = True
                                 break
 
@@ -1692,10 +1831,25 @@ def run_scan(
                             _key = normalize_for_aggregation(_t["title"])
                             _entry = _album_lb_by_title.get(_key)
                             _cur = prefetched_popularity.setdefault(_key, {})
+
+                            # IDENTITY first, and INDEPENDENT of the listen count.
+                            # ``recording_mbid``/``release_track_title`` come from
+                            # the album's OWN MusicBrainz release, position and
+                            # duration matched, which is the only unambiguous
+                            # answer to "which recording is this track" — a
+                            # title+artist search cannot separate a plainly
+                            # titled version-marked track from its studio
+                            # namesake. Reading them only when
+                            # ``listenbrainz_listens`` was non-zero is what left
+                            # the unplugged tracks on "Helden X Hymnen" holding
+                            # the studio recordings.
+                            if _entry and _entry.get("recording_mbid"):
+                                _cur["recording_mbid"] = _entry.get("recording_mbid")
+                                _cur["release_track_title"] = _entry.get("release_track_title") or ""
+
                             if _entry and _entry.get("listenbrainz_listens"):
                                 _cur["listenbrainz_listens"] = int(_entry["listenbrainz_listens"] or 0)
                                 _cur["listenbrainz_users"] = int(_entry.get("listenbrainz_users") or 0)
-                                _cur["recording_mbid"] = _entry.get("recording_mbid")
                                 _cur["_album_tracklist"] = True
                                 _cur["source"] = "album_tracklist"
                                 log_unified(f"[scan_runner] Album-tracklist LB match for '{_t.get('title')}' ({artist} - {album}): {_cur['listenbrainz_listens']} listens")
@@ -1739,42 +1893,31 @@ def run_scan(
             log_unified(f"[POPULARITY] Album {album_index}/{total_albums} ({scan_type}): {artist} - {album} ({album_count} tracks)")
 
             # -------------------------------------------------------------
-            # MusicBrainz batch metadata for tracks with no MBID.
+            # MusicBrainz recording identity for this album's tracks.
+            #
+            # ``track_stage`` consumes this as a batch: a hit supplies the
+            # recording MBID -- together with the metadata a search would have
+            # fetched for it -- so the ambiguous per-track recording SEARCH is
+            # skipped entirely. The map is built from the album's OWN
+            # MusicBrainz release (the identity the album-tracklist pass above
+            # just resolved, position and duration matched), because a
+            # title+artist search cannot tell a plainly titled version-marked
+            # track from its studio namesake.
             # -------------------------------------------------------------
             if not _singles_pass and not options.get("popularity_only"):
                 try:
-                    options["mb_batch_metadata"] = {}
-                    _mb_entries: list[tuple[str, str]] = []
-                    for _tc in track_contexts:
-                        if _tc.get("recording_mbid") or _tc.get("mbid") or _tc.get("musicbrainz_trackid"):
-                            continue
-                        _tt = _tc.get("title")
-                        _aa = _tc.get("artist")
-                        if _tt and _aa:
-                            _mb_entries.append((str(_tt), str(_aa)))
-
-                    if _mb_entries:
-                        _clean_album = _sanitize_release_name(album)
-                        try:
-                            _raw_mb_batch = MusicBrainzHttpClient().search_releases(str(_clean_album or ""), limit=10) or {}
-                        except Exception as e:
-                            logger.error(f"MB album batch failed for '{artist} - {_clean_album}': {e}")
-                            _raw_mb_batch = {}
-
-                        _mb_batch = {}
-                        if isinstance(_raw_mb_batch, list):
-                            for idx, item in enumerate(_raw_mb_batch):
-                                if isinstance(item, dict):
-                                    key = item.get("title") or item.get("recording_mbid") or str(idx)
-                                    _mb_batch[key] = item
-                        elif isinstance(_raw_mb_batch, dict):
-                            _mb_batch = _raw_mb_batch
-
-                        if _mb_batch:
-                            options["mb_batch_metadata"] = _mb_batch
-                            log_unified(f"[POPULARITY] MusicBrainz batch resolved metadata for {artist} - {album}")
+                    options["mb_batch_metadata"] = _build_album_recording_batch(
+                        album=album,
+                        track_dicts=track_dicts,
+                        prefetched_popularity=prefetched_popularity,
+                    )
+                    if options["mb_batch_metadata"]:
+                        log_unified(
+                            f"[POPULARITY] MusicBrainz recording identity from the album release "
+                            f"for {artist} - {album} ({len(options['mb_batch_metadata'])} track(s))"
+                        )
                 except Exception as exc:
-                    logger.debug("MusicBrainz album batch failed", artist=artist, album=album, error=str(exc))
+                    logger.debug("MusicBrainz album recording identity failed", artist=artist, album=album, error=str(exc))
 
             # -------------------------------------------------------------
             # ListenBrainz recording-tag batch (populates listenbrainz_genres,

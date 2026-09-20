@@ -77,8 +77,14 @@ def _is_featured_artist(artist_name: str) -> bool:
 
 
 _ALTERNATE_PERFORMANCE_RE = re.compile(
-    r"\([^)]*\b(?:live|unplugged|acoustic|orchestral|symphonic|demo|instrumental|"
-    r"karaoke|remix|alternate|alt|take|session|rehearsal|jam[- ]along)\b[^)]*\)"
+    # Both bracket styles: parentheses are what Last.fm/ListenBrainz titles
+    # normally use, but MusicBrainz's own release tracklists use SQUARE
+    # brackets ("Farewell [Unplugged Version]"). Matching only parentheses
+    # meant a release title taken straight from MusicBrainz never registered as
+    # an alternate performance, so a plainly titled unplugged track could still
+    # merge with its identically titled studio namesake.
+    r"[([][^)\]]*\b(?:live|unplugged|acoustic|orchestral|symphonic|demo|instrumental|"
+    r"karaoke|remix|alternate|alt|take|session|rehearsal|jam[- ]along)\b[^)\]]*[)\]]"
     r"|\s+-\s*(?:live|unplugged|acoustic|orchestral|symphonic|demo|instrumental|"
     r"karaoke|remix|alternate|alt|take|session|rehearsal|jam[- ]along)\s*$",
     re.IGNORECASE,
@@ -289,6 +295,63 @@ def _normalize_artist(name: str) -> str:
     return get_primary_artist_preserve_case(name).casefold().strip()
 
 
+def track_identity_key(local_title_key: str, disc: Any = None, position: Any = None) -> str:
+    """Position-qualified alias for a title-keyed album-tracklist entry.
+
+    A normalised TITLE cannot identify a row: dArtagnan's "Helden X Hymnen"
+    files both the album's title track AND its "(Unplugged Version)" rendition
+    under the same title "Helden X Hymnen", and those are two different
+    recordings on the release (positions 1 and 15). Keyed by title alone the
+    loop collapsed them onto whichever row it reached last, so one of the two
+    ended up with the other's recording — the reported "both rows report the
+    same score" duplication.
+
+    The release's own tracklist settles it by POSITION, so the position-matched
+    identity is also published under this alias while the plain title key keeps
+    its existing meaning for every current consumer.
+    """
+    try:
+        disc_i = int(str(disc if disc not in (None, "") else 1).split("/")[0].strip() or 1)
+    except (TypeError, ValueError):
+        disc_i = 1
+    try:
+        pos_i = int(str(position or "").split("/")[0].strip() or 0)
+    except (TypeError, ValueError):
+        pos_i = 0
+    if pos_i <= 0:
+        return str(local_title_key or "")
+    return f"{local_title_key}#{disc_i}:{pos_i}"
+
+
+def album_recording_batch_key(
+    artist: str,
+    title: str,
+    disc: Any = None,
+    track_number: Any = None,
+) -> str:
+    """Key for the per-album recording-identity batch ``track_stage`` consumes.
+
+    ``"<artist>::<title>"`` is the legacy title-only form; appending
+    ``"::<disc>::<track>"`` makes the key ROW-specific, which is what keeps two
+    same-titled rows of one album apart (see ``track_identity_key``). Both the
+    producer (``scan_stage_runner._build_album_recording_batch``) and the
+    consumer (``track_stage._resolve_track_mb_metadata``) build it through this
+    one function so the two formats cannot drift apart.
+    """
+    base = f"{str(artist or '').strip().lower()}::{str(title or '').strip().lower()}"
+    try:
+        disc_i = int(str(disc if disc not in (None, "") else 1).split("/")[0].strip() or 1)
+    except (TypeError, ValueError):
+        disc_i = 1
+    try:
+        track_i = int(str(track_number or "").split("/")[0].strip() or 0)
+    except (TypeError, ValueError):
+        track_i = 0
+    if track_i <= 0:
+        return base
+    return f"{base}::{disc_i}::{track_i}"
+
+
 def _index_release_tracklist(
     media: list[Any],
     titles_to_mbids: dict[str, dict[str, Any]],
@@ -337,6 +400,11 @@ def _index_release_tracklist(
                 pos_key = (disc_i, pos)
                 pos_entry = position_index.setdefault(pos_key, {
                     "key": key,
+                    # The release's OWN title for this position. It is the only
+                    # place a version marker survives when the local file is
+                    # titled plainly ("Farewell [Unplugged Version]" on the
+                    # release vs "Farewell (feat. Patty Gurdy)" in the library).
+                    "title": title,
                     "length_ms": trk.get("length"),
                     "mbids": [],
                 })
@@ -390,8 +458,12 @@ def get_listenbrainz_album_tracklist_with_release(
     try:
         counts = lb_get_recording_popularity_batch(recording_mbids) or {}
     except Exception as exc:
+        # A failed COUNT lookup must not cost us the IDENTITY: the release
+        # tracklist above already established which recording each position is,
+        # and that is what the caller uses to stop resolving the track with an
+        # ambiguous title+artist search. Counts simply come out as zero.
         logger.debug("Recording popularity batch failed", release_mbid=release_mbid, error=str(exc))
-        return {}, release_mbid
+        counts = {}
 
     def _sum_counts(mbids: list[str]) -> tuple[int, int]:
         total = 0
@@ -422,6 +494,12 @@ def get_listenbrainz_album_tracklist_with_release(
         if not local_key:
             continue
 
+        # A title match already answered for this key, so leave it alone — this
+        # pass only fills the gap for a track whose TITLE is not on the release
+        # at all (a plainly tagged rendition, whose release title carries the
+        # marker). The per-ROW identity is published separately below, under a
+        # position-qualified alias, and that is what disambiguates two rows of
+        # one album that share a title.
         if (out.get(local_key) or {}).get("listenbrainz_listens"):
             continue
 
@@ -456,14 +534,25 @@ def get_listenbrainz_album_tracklist_with_release(
             if abs(int(mb_len_ms) - local_dur * 1000) > 5000:
                 continue
 
+        # ``total`` is 0 for any recording nobody has scrobbled yet, which is
+        # NOT a reason to throw the match away: the POSITION (with the duration
+        # guard above) already established WHICH recording this track is, and
+        # that identity is what the caller needs in order to stop resolving the
+        # track with an ambiguous title+artist search. Emitting the entry with a
+        # zero count is safe — every consumer reads the counts under a
+        # truthiness guard — whereas emitting it only when ``total > 0`` is the
+        # reported dArtagnan "Helden X Hymnen" defect: the three unplugged
+        # tracks that have no ListenBrainz listens kept the STUDIO recording's
+        # MBID, so their Last.fm listeners came from the studio recording (7.5k
+        # on an album whose other tracks sit at 300-500) and they scored as the
+        # album's top tracks.
         total, users = _sum_counts(pos_entry["mbids"])
-        if total <= 0:
-            continue
 
         out[local_key] = {
             "listenbrainz_listens": total,
             "listenbrainz_users": users,
             "recording_mbid": pos_entry["mbids"][0],
+            "release_track_title": str(pos_entry.get("title") or ""),
         }
         used_pos_keys.add(pos_key)
         logger.info(
@@ -473,8 +562,69 @@ def get_listenbrainz_album_tracklist_with_release(
             track=local_pos,
             duration=local_dur,
             matched_key=pos_entry.get("key"),
+            release_track_title=pos_entry.get("title"),
             listens=total,
         )
+
+    # ------------------------------------------------------------------
+    # Per-ROW identity: the release's own tracklist, position matched.
+    #
+    # ``out`` above is keyed by normalised TITLE and therefore cannot identify a
+    # row — dArtagnan's "Helden X Hymnen" files the album's title track AND its
+    # "(Unplugged Version)" rendition under the same title "Helden X Hymnen",
+    # and those are two DIFFERENT recordings on the release (positions 1 and 15).
+    # Keyed by title alone whichever row the loop reached last won, which is why
+    # both rows reported an identical score in the scan results.
+    #
+    # The release settles it by POSITION, so every row that has a usable track
+    # number and passes the duration guard also publishes its own recording under
+    # a position-qualified alias. The title-keyed entries are left EXACTLY as
+    # they were, so listen-count behaviour is unchanged for every existing
+    # consumer; only a caller that knows the row's position can see (and prefer)
+    # the alias.
+    # ------------------------------------------------------------------
+    for t in tracks:
+        local_title = t.get("title")
+        if not local_title:
+            continue
+        local_key = normalize_for_aggregation(local_title)
+        if not local_key:
+            continue
+
+        try:
+            row_pos = int(str(t.get("track_number") or "").split("/")[0].strip() or 0)
+        except (TypeError, ValueError):
+            continue
+        if row_pos <= 0:
+            continue
+
+        try:
+            row_disc = int(str(t.get("disc_number") or 1).split("/")[0].strip() or 1)
+        except (TypeError, ValueError):
+            row_disc = 1
+
+        row_pos_entry = position_index.get((row_disc, row_pos))
+        if not row_pos_entry or not row_pos_entry["mbids"]:
+            continue
+
+        row_len_ms = row_pos_entry.get("length_ms")
+        try:
+            row_dur = float(t.get("duration") or 0)
+        except (TypeError, ValueError):
+            row_dur = 0.0
+        if row_len_ms and row_dur > 0:
+            if abs(int(row_len_ms) - row_dur * 1000) > 5000:
+                continue
+
+        row_total, row_users = _sum_counts(row_pos_entry["mbids"])
+        out[track_identity_key(local_key, row_disc, row_pos)] = {
+            "listenbrainz_listens": row_total,
+            "listenbrainz_users": row_users,
+            "recording_mbid": row_pos_entry["mbids"][0],
+            "release_track_title": str(row_pos_entry.get("title") or ""),
+            "local_disc_number": row_disc,
+            "local_track_number": row_pos,
+        }
 
     if out:
         logger.info(
@@ -616,6 +766,7 @@ def get_aggregated_lastfm_popularity(
     isrc: str | None = None,
     recording_mbid: str | None = None,
     is_live_release: bool = False,
+    target_is_alt_rendition: bool = False,
 ) -> dict[str, Any]:
     """Aggregate Last.fm listener counts for one track.
 
@@ -623,9 +774,24 @@ def get_aggregated_lastfm_popularity(
     Last.fm resolves by title+artist, so a plainly titled live track (e.g.
     every track on "S&M") otherwise matches the studio recording of the same
     name and absorbs its catalogue-wide listener count.
+
+    ``target_is_alt_rendition`` is the same guard for an alternate RENDITION
+    that is not a live recording -- an unplugged/acoustic/remix take whose own
+    library title does not say so. The caller learns it from the album's
+    MusicBrainz release tracklist (see
+    ``scan_stage_runner._build_album_recording_batch``), which is the only place
+    the marker survives once a library title has lost it. Both flags mean the
+    same thing to the lookup below -- "the target is an alternate performance,
+    so a differently-typed candidate must not be merged into it" -- and they are
+    kept separate because liveness ALSO drives the live weight penalty and the
+    live star caps, which a studio unplugged take must not incur.
     """
     if lastfm_client is None:
         return {"listeners": 0, "track_play": 0, "matched_tracks": []}
+
+    # The target is an alternate performance -> a plain studio namesake (and a
+    # differently-typed take) must not be summed into it.
+    target_is_alt = bool(is_live_release) or bool(target_is_alt_rendition)
 
     track_title = strip_cover_attribution(track_title) or track_title
     is_featured = (
@@ -678,9 +844,10 @@ def get_aggregated_lastfm_popularity(
         # Same normalized title can still be a live/remix/alternate take
         # (normalization strips punctuation, not performance-type markers) -
         # don't let it merge with a differently-typed target. Release-level
-        # liveness is folded in so a plainly titled live track does not match
-        # its studio namesake.
-        if not _alt_status_matches_ctx(track_title, item_title, target_is_live=is_live_release):
+        # liveness and the album release's own version marker are folded in so a
+        # plainly titled live/unplugged track does not match its studio
+        # namesake.
+        if not _alt_status_matches_ctx(track_title, item_title, target_is_live=target_is_alt):
             continue
         matched.append(item)
         listeners += int(item.get("listeners", 0) or 0)
@@ -718,7 +885,7 @@ def get_aggregated_lastfm_popularity(
                         if normalize_for_aggregation(item_title) != target:
                             continue
                         if not _alt_status_matches_ctx(
-                            track_title, item_title, target_is_live=is_live_release
+                            track_title, item_title, target_is_live=target_is_alt
                         ):
                             continue
                         matched.append(item)
@@ -733,6 +900,7 @@ def get_aggregated_lastfm_popularity(
             track_title,
             lastfm_client=lastfm_client,
             is_live_release=is_live_release,
+            target_is_alt_rendition=target_is_alt_rendition,
         )
         search_listeners = int(search.get("listeners") or 0)
         if search_listeners > listeners:
@@ -744,13 +912,16 @@ def get_aggregated_lastfm_popularity(
         return {"listeners": listeners, "track_play": playcount, "matched_tracks": matched}
 
     # Final fallback: a bare title+artist lookup. This CANNOT distinguish a
-    # live performance from its studio namesake, so it is skipped entirely on
-    # live releases rather than returning a known-contaminated count.
-    if is_live_release:
+    # live/unplugged/remix take from its studio namesake, so it is skipped
+    # entirely on a live release or a known alternate rendition rather than
+    # returning a known-contaminated count.
+    if target_is_alt:
         logger.debug(
-            "Skipping Last.fm title+artist fallback on live release",
+            "Skipping Last.fm title+artist fallback on alternate rendition",
             artist=artist,
             track=track_title,
+            live=bool(is_live_release),
+            alt_rendition=bool(target_is_alt_rendition),
         )
         return {"listeners": 0, "track_play": 0, "matched_tracks": []}
 
@@ -788,7 +959,10 @@ def get_aggregated_lastfm_popularity(
                         isrc,
                         title=track_title,
                         artist=artist,
-                        is_live_release=is_live_release,
+                        # ``target_is_alt``, not ``is_live_release``: the ISRC
+                        # arm must not resolve a plain studio ISRC for an
+                        # unplugged/acoustic take either.
+                        is_live_release=target_is_alt,
                     )
                 _arm_mbid = ((_isrc_rec or {}).get("recording_mbid") or recording_mbid)
                 _arm_artist = (_isrc_rec or {}).get("artist") or artist
@@ -832,16 +1006,21 @@ def get_search_aggregated_lastfm_popularity(
     track_title: str,
     lastfm_client: Any = None,
     is_live_release: bool = False,
+    target_is_alt_rendition: bool = False,
 ) -> dict[str, Any]:
     """Sum Last.fm listener counts across compatible title variants.
 
     ``is_live_release`` gates the alt-performance check the same way it does in
     ``get_aggregated_lastfm_popularity`` -- without it this function sums the
     studio recording into a live track's total, which is the single largest
-    source of cross-version contamination.
+    source of cross-version contamination. ``target_is_alt_rendition`` closes
+    the same hole for an unplugged/acoustic/remix take whose library title lost
+    its marker.
     """
     if lastfm_client is None:
         return {"listeners": 0, "track_play": 0, "matched_tracks": []}
+
+    target_is_alt = bool(is_live_release) or bool(target_is_alt_rendition)
 
     track_title = strip_cover_attribution(track_title) or track_title
     target = normalize_for_aggregation(track_title)
@@ -870,8 +1049,9 @@ def get_search_aggregated_lastfm_popularity(
             # A "compatible" title (e.g. same base song, different
             # bracketed suffix) can still be a live/remix/alternate take -
             # reject it unless it agrees with the target on that, with
-            # release-level liveness folded in.
-            if not _alt_status_matches_ctx(track_title, item_title, target_is_live=is_live_release):
+            # release-level liveness and the album release's own version
+            # marker folded in.
+            if not _alt_status_matches_ctx(track_title, item_title, target_is_live=target_is_alt):
                 continue
 
             _item_key = normalize_for_aggregation(item_title)
