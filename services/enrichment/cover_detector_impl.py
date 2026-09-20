@@ -440,10 +440,8 @@ class CoverDetector:
                     continue
                 fp = update.get("file_path")
                 if fp and Path(fp).exists():
-                    new_title = self._build_cover_title(
-                        update.get("title", ""), update.get("original_artist")
-                    )
-                    self._update_file_metadata(fp, new_title, ["Cover"])
+                    clean_title = update.get("title", "")
+                    self._update_file_metadata(fp, clean_title, ["Cover"])
 
         self._persist_checked(tracks, _fresh_skipped)
 
@@ -1249,9 +1247,14 @@ class CoverDetector:
     @staticmethod
     def _build_update(result: dict[str, Any], track: dict[str, Any]) -> dict[str, Any]:
         original_artist = result.get("original_artist", "")
+        
+        # Actively strip out the " (X Cover)" suffix if it was previously added by the scanner
+        raw_title = track.get("title", "")
+        clean_title = _COVER_SUFFIX_RE.sub("", raw_title).strip()
+        
         return {
             "track_id": result["track_id"],
-            "title": result.get("title", ""),
+            "title": clean_title,
             "original_artist": original_artist,
             "original_year": result.get("original_year"),
             "writer": result.get("writer", ""),
@@ -1263,14 +1266,6 @@ class CoverDetector:
                 f"originally by {original_artist or 'unknown'}"
             ),
         }
-
-    @staticmethod
-    def _build_cover_title(title: str, original_artist: str | None) -> str:
-        if _COVER_SUFFIX_RE.search(title or ""):
-            return title
-        if original_artist:
-            return f"{title} ({original_artist} Cover)"
-        return title
 
     @staticmethod
     def _update_file_metadata(
