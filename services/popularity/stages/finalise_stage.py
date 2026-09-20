@@ -879,12 +879,36 @@ def _assign_stars(
                 # (clearing every z-bound) while being internally flat — in
                 # which case its "top" track is only marginally ahead of the
                 # rest and is not a standout, however high its z-score.
-                _ratio_ok, _ratio_reason = _album_ratio_standout_ok(
-                    track,
-                    album_lf_listeners=album_lf_listeners,
-                    album_lb_listens=album_lb_listens,
-                    live=is_live,
-                )
+                
+                # THE FIX: Context-Aware Shape Gating
+                # We only apply the strict ratio test to older, unpopular albums to 
+                # prevent 14 vs 11 listen inflation. We bypass it for new releases 
+                # (<= 2 years old) or albums that are successful for this specific artist.
+                try:
+                    track_yr_raw = track.get("year") or track.get("release_year")
+                    if track_yr_raw:
+                        track_yr = int(str(track_yr_raw)[:4])
+                    else:
+                        track_yr = datetime.now().year
+                except (ValueError, TypeError):
+                    track_yr = datetime.now().year
+                    
+                album_age = datetime.now().year - track_yr
+                album_era = album_model.get("era", "peak") if album_model else "peak"
+                
+                # Apply test ONLY if album is > 2 years old AND is a "minor" (unpopular) release
+                if album_age > 2 and album_era == "minor":
+                    _ratio_ok, _ratio_reason = _album_ratio_standout_ok(
+                        track,
+                        album_lf_listeners=album_lf_listeners,
+                        album_lb_listens=album_lb_listens,
+                        live=is_live,
+                    )
+                else:
+                    # Bypass the test for successful albums (American Idiot) or new releases
+                    _ratio_ok = True
+                    _ratio_reason = f"bypassed_by_context(age={album_age}, era={album_era})"
+                    
                 track["_ratio_5star_reason"] = _ratio_reason
                 if _ratio_ok:
                     track["_global_5star_locked"] = True
@@ -1049,12 +1073,35 @@ def _assign_stars(
         # checks short-circuit first, and it is skipped once a track has
         # already been rejected for a cheaper reason.
         if five_star_eligible:
-            _ratio_ok, _ratio_reason = _album_ratio_standout_ok(
-                track,
-                album_lf_listeners=album_lf_listeners,
-                album_lb_listens=album_lb_listens,
-                live=is_live,
-            )
+            # THE FIX: Context-Aware Shape Gating
+            # We only apply the strict ratio test to older, unpopular albums to 
+            # prevent 14 vs 11 listen inflation. We bypass it for new releases 
+            # (<= 2 years old) or albums that are successful for this specific artist.
+            try:
+                track_yr_raw = track.get("year") or track.get("release_year")
+                if track_yr_raw:
+                    track_yr = int(str(track_yr_raw)[:4])
+                else:
+                    track_yr = datetime.now().year
+            except (ValueError, TypeError):
+                track_yr = datetime.now().year
+                
+            album_age = datetime.now().year - track_yr
+            album_era = album_model.get("era", "peak") if album_model else "peak"
+            
+            # Apply test ONLY if album is > 2 years old AND is a "minor" (unpopular) release
+            if album_age > 2 and album_era == "minor":
+                _ratio_ok, _ratio_reason = _album_ratio_standout_ok(
+                    track,
+                    album_lf_listeners=album_lf_listeners,
+                    album_lb_listens=album_lb_listens,
+                    live=is_live,
+                )
+            else:
+                # Bypass the test for successful albums (American Idiot) or new releases
+                _ratio_ok = True
+                _ratio_reason = f"bypassed_by_context(age={album_age}, era={album_era})"
+                
             track["_ratio_5star_reason"] = _ratio_reason
             if not _ratio_ok:
                 five_star_eligible = False
@@ -2762,6 +2809,9 @@ def post_album_star_ratings(
                 )
 
         # 2.5 Enforce 4-star percentage cap before persistence
+        # DISABLED: This was a hardcoded override that artificially crushed 4-star ratings.
+        # It has been commented out to respect your organic score distributions.
+        """
         if album_model.get("has_benchmark") and not is_compilation and not is_live_album:
             baseline_tracks = int(album_results[0].get("original_track_count") or 0)
             if baseline_tracks <= 0:
@@ -2797,6 +2847,7 @@ def post_album_star_ratings(
                         title=track.get("title"), cap=max_4star_slots,
                         baseline_tracks=baseline_tracks
                     )
+        """
 
         # 3. Persist calculated and capped ratings first
         _ratings_changed = False
