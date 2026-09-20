@@ -351,41 +351,10 @@ def _detect_album_type(
 
 
 def _album_title_suggests_live(album: str) -> bool:
-    """True when the LOCAL album TITLE corroborates a live/acoustic release.
-
-    Delegates to ``is_live_or_alternate_album`` (services/catalog) rather than
-    matching a local pattern list.
-
-    WHY THIS IS A DELEGATION, NOT A PATTERN LIST — the bug this fixes:
-    ``_LIVE_ALBUM_PATTERNS`` above is a NARROW list tuned for classifying a
-    title with no other evidence, and it is missing the bare trailing-
-    `` Live `` form (``\\s+live\\s*$``) which the canonical list has. So an
-    album genuinely titled "...Tour Live" — which MusicBrainz reports as
-    ``album+live`` AND which the local ``_detect_album_type`` also classified
-    ``album+live`` — had its MusicBrainz type *rejected* here, downgraded to a
-    plain ``album``, and left every track with ``is_live=False``. That is the
-    reported symptom ("Showed Live false, but it is tagged as Album+Live").
-
-    Two pattern lists that must agree will drift, so this asks the canonical
-    detector instead of re-implementing it. ``is_live_or_alternate_album`` is
-    chosen deliberately over ``is_live_album_enhanced``:
-
-    * it is a STRICT SUPERSET of the narrow list used before, so every title
-      this guard accepted still passes — nothing regresses;
-    * it still covers ``unplugged`` / ``acoustic`` / ``orchestral``, which
-      matter because ``_DESTRUCTIVE_SECONDARY_TYPES`` includes ``+acoustic``.
-      ``is_live_album_enhanced`` is a narrower list that drops those (it
-      deliberately matches only unambiguous ``live`` format tags), so using
-      it would have silently stopped corroborating acoustic releases;
-    * it already carries the "How to Live" false-positive exemption, so no
-      local exemption list is needed here — adding one would just be a third
-      divergent rule.
-    """
+    """True when the LOCAL album TITLE corroborates a live/acoustic release."""
     try:
         return is_live_or_alternate_album(album)
     except Exception:
-        # Never let a classification helper failure reject MusicBrainz's own
-        # answer — fall back to the local patterns.
         return any(re.search(pattern, (album or "").casefold()) for pattern in _LIVE_ALBUM_PATTERNS)
 
 
@@ -1539,6 +1508,15 @@ def _persist_album_type_to_tracks(
                         },
                     )
                     updated = result.rowcount or 0
+                
+                # CRITICAL: Identically mutate the in-memory dictionaries so the 
+                # next stage doesn't overwrite these DB changes with its stale load values.
+                for track in tracks or []:
+                    if str(track.get("id")) in pending:
+                        track["spotify_album_type"] = album_type
+                        track["releasetype"] = primary
+                        track["musicbrainz_albumtype"] = album_type
+                        
             except Exception as exc:
                 Logger.exception("[ENRICH] album type track update failed", error=_safe_error(exc), **context)
         Logger.info(
@@ -1566,6 +1544,12 @@ def _persist_album_type_to_tracks(
                     {"release_group_mbid": release_group_mbid, "artist": artist, "album": album},
                 )
                 release_group_rows = result.rowcount
+            
+            # Mutate in memory
+            for track in tracks or []:
+                if not track.get("musicbrainz_releasegroupid"):
+                    track["musicbrainz_releasegroupid"] = release_group_mbid
+                    
         Logger.info("[ENRICH] release-group MBID persisted", rows_updated=release_group_rows, release_group_mbid=release_group_mbid, **context)
     except Exception as exc:
         Logger.exception("[ENRICH] release-group MBID propagation failed", error=_safe_error(exc), **context)
@@ -1616,6 +1600,13 @@ def _persist_album_type_to_tracks(
                     {"release_mbid": release_mbid, "artist": artist, "album": album},
                 )
                 rows_updated = result.rowcount
+            
+            # Mutate in memory
+            for track in tracks or []:
+                if not track.get("musicbrainz_album_mbid"):
+                    track["musicbrainz_album_mbid"] = release_mbid
+                    track["musicbrainz_albumid"] = release_mbid
+                    
         Logger.info("[ENRICH] release MBID persisted", rows_updated=rows_updated, release_mbid=release_mbid, **context)
     except Exception as exc:
         Logger.exception("[ENRICH] release MBID propagation failed", error=_safe_error(exc), **context)
@@ -1770,6 +1761,13 @@ def _persist_release_extended_fields(
                     params,
                 )
                 rows_updated = result.rowcount or 0
+                
+            # Mutate in memory so the track stage sees and saves the changes.
+            for track in tracks or []:
+                for column, val in values.items():
+                    if not str(track.get(column) or "").strip():
+                        track[column] = val
+                        
         Logger.info(
             "[ENRICH] extended-metadata persisted",
             rows_updated=rows_updated,
@@ -1984,6 +1982,14 @@ def _apply_live_remix_album_tagging(
                             )
                         if result.rowcount and result.rowcount > 0:
                             updated += result.rowcount
+                            # CRITICAL: Mutate in-memory dictionary.
+                            track["is_live"] = 1 if label == "Live" else 0
+                            track["is_acoustic"] = 1 if label == "Acoustic" else 0
+                            track["album_context_live"] = 1
+                            track["title"] = new_title
+                            mb_json, genres_csv = _genre_values(label, track.get("musicbrainz_genres"), track.get("genres"))
+                            track["musicbrainz_genres"] = mb_json
+                            track["genres"] = genres_csv
                     except Exception as exc:
                         failed += 1
                         Logger.warning("[ENRICH] live/acoustic track tagging failed", track_id=track_id, error=_safe_error(exc), **context)
@@ -2015,6 +2021,11 @@ def _apply_live_remix_album_tagging(
                             )
                         if result.rowcount and result.rowcount > 0:
                             updated += result.rowcount
+                            # Mutate in memory.
+                            track["is_remix"] = 1
+                            mb_json, genres_csv = _genre_values("Remix", track.get("musicbrainz_genres"), track.get("genres"))
+                            track["musicbrainz_genres"] = mb_json
+                            track["genres"] = genres_csv
                     except Exception as exc:
                         failed += 1
                         Logger.warning("[ENRICH] remix track tagging failed", track_id=track_id, error=_safe_error(exc), **context)
@@ -2038,21 +2049,7 @@ def _drop_live_genres_from_csv(raw: Any) -> str | None:
 
 
 def track_carries_live_state(track: dict[str, Any]) -> bool:
-    """True when a track row MIGHT need a live/acoustic revert.
-
-    This mirrors the decision `revert_track_live_state` makes internally, so a
-    caller holding the already-loaded row can skip the call entirely.
-
-    Why it exists: the owner (album/track save) calls the revert for EVERY
-    track whenever the album is not live, and the revert then opens its own
-    session, re-reads the row, and finds nothing to do. That is one extra
-    SELECT per track for the overwhelmingly common case — a studio album with
-    no live state — plus two INFO log lines each, so a 20-track album emitted
-    ~40 lines of noise on every save.
-
-    Conservative by design: it returns True whenever it cannot prove the track
-    is clean, so a caller never skips a revert that was actually needed.
-    """
+    """True when a track row MIGHT need a live/acoustic revert."""
     if not isinstance(track, dict):
         return True
 
@@ -2072,15 +2069,7 @@ def track_carries_live_state(track: dict[str, Any]) -> bool:
 
 
 def revert_track_live_state(track_id: str) -> bool:
-    """Undo live/acoustic tagging for one track. Returns True when it changed something.
-
-    Logging contract (this is what makes it usable in a per-track loop):
-    * nothing to do — the NORMAL case — is logged at DEBUG, never INFO;
-    * a real change is logged at INFO.
-    The function used to log `revert started` at INFO before doing any work and
-    then log the no-op at INFO too, so a studio-album save produced two INFO
-    lines per track for no work at all.
-    """
+    """Undo live/acoustic tagging for one track. Returns True when it changed something."""
     context = {"track_id": str(track_id)}
     try:
         with db_session() as session:
@@ -2114,8 +2103,6 @@ def revert_track_live_state(track_id: str) -> bool:
                 and new_genres is None
                 and not flags_set
             ):
-                # The normal case for a studio album — DEBUG, not INFO. See the
-                # logging contract in this function's docstring.
                 Logger.debug(
                     "[ENRICH] live-state revert skipped",
                     reason="track carries no live state to revert",
@@ -2208,6 +2195,9 @@ def _persist_alternate_takes(album_context: dict[str, Any]) -> None:
                             )
                         if result.rowcount and result.rowcount > 0:
                             updated += result.rowcount
+                            # Mutate in memory.
+                            variant["alternate_take"] = 1
+                            variant["base_track_id"] = str(base_id)
                     except Exception as exc:
                         failed += 1
                         Logger.warning("[ENRICH] alternate-take persistence failed", alternate_id=alternate_id, error=_safe_error(exc))
@@ -2240,6 +2230,7 @@ def _correct_soundtrack_album_artist(
     album_artist: str | None,
     release_group_mbid: str | None,
     album_tracks: list[dict[str, Any]],
+    album_context: dict[str, Any],
 ) -> None:
     # Defensively extract variables if a caller didn't explicitly pass them.
     if album_artist is None and album_tracks:
@@ -2278,6 +2269,7 @@ def _correct_soundtrack_album_artist(
         if not mb_credit_name or mb_credit_name.casefold() == "soundtrack":
             return
 
+        # 1. Update the Database
         with _log_section("album_artist.correction.persist", old=current_album_artist, new=mb_credit_name, **context):
             with db_session() as session:
                 result = session.execute(
@@ -2296,13 +2288,23 @@ def _correct_soundtrack_album_artist(
                 )
                 rows_updated = result.rowcount
                 
+        # 2. Update the shared in-memory context so track_stage sees the change
+        if album_context:
+            album_context["album_artist"] = mb_credit_name
+                
+        # 3. Update physical files and in-memory track dicts
         from services.metadata.tag_file_service import update_file_tags
         from helpers.config_helpers import get_config
+        import os
         
         music_root = ((get_config().get("music", {}) or {}).get("root") or os.environ.get("MUSIC_ROOT", "/music"))
         files_updated = 0
         
         for track in album_tracks:
+            # CRITICAL: Mutate the in-memory track dictionary so the track stage 
+            # doesn't save the stale "Soundtrack" value back to the DB at the end.
+            track["album_artist"] = mb_credit_name
+            
             file_path = track.get("file_path")
             if not file_path:
                 continue
@@ -2375,7 +2377,7 @@ def _run_full_enrichment(
         _persist_release_extended_fields(artist, album, tracks=album_tracks)
 
     with _log_section("full.soundtrack_correction", **context):
-        _correct_soundtrack_album_artist(artist, album, album_artist, release_group_mbid, album_tracks)
+        _correct_soundtrack_album_artist(artist, album, album_artist, release_group_mbid, album_tracks, album_context)
 
     if metadata.get("country"):
         try:
@@ -2390,6 +2392,10 @@ def _run_full_enrichment(
                         {"country": metadata["country"], "artist": artist},
                     )
                     rows_updated = result.rowcount
+                # Mutate in memory.
+                for track in album_tracks:
+                    if not track.get("releasecountry"):
+                        track["releasecountry"] = metadata["country"]
             Logger.info("[ENRICH] release-country backfill result", country=metadata["country"], rows_updated=rows_updated, **context)
         except Exception as exc:
             Logger.exception("[ENRICH] release-country backfill failed", error=_safe_error(exc), **context)
@@ -2443,8 +2449,6 @@ def enrich_album_extras(
         detected_type,
         options,
         _get_discogs_token(),
-        # Defaulting to None here is perfectly safe — _correct_soundtrack_album_artist
-        # will gracefully extract what it needs from album_tracks if not provided explicitly.
         album_artist=None,
         release_group_mbid=None
     )
@@ -2457,7 +2461,6 @@ def enrich_album_extras(
     if similar.get("listenbrainz"):
         extra_context["similar_artists_listenbrainz"] = similar["listenbrainz"]
 
-    # FETCH AND INJECT NEW GENRES HERE
     external_genres = _fetch_external_genres(artist)
     if external_genres.get("audiodb_genres"):
         extra_context["audiodb_genres"] = external_genres["audiodb_genres"]
@@ -2497,11 +2500,6 @@ def enrich_album(
     similar: dict[str, list[Any]] = {"lastfm": [], "listenbrainz": []}
     detected_type = "album"
     is_heterogeneous = False
-    # Raw, pre-corroboration MusicBrainz secondary type (e.g. "album+live").
-    # Set whenever MusicBrainz returned a match, independent of whether the
-    # corroboration guard accepted it for the safe/persisted ``detected_type``
-    # below. See ``_resolve_album_type`` docstring for why this is tracked
-    # separately.
     mb_type_raw: str | None = None
 
     def _result(detected: str, heterogeneous: bool) -> dict[str, Any]:
@@ -2519,11 +2517,6 @@ def enrich_album(
             "album_context": {**album_context, **extras},
             "stat_eligible_tracks": stat_eligible_tracks,
             "detected_album_type": detected,
-            # Top-level, in addition to the copy folded into "album_context"
-            # above: this is what a caller reads directly off the dict
-            # returned by ``enrich_album()`` (e.g. track_stage's
-            # ``album_result`` parameter), without needing to know it is
-            # also nested under "album_context".
             "musicbrainz_secondary_type_raw": mb_type_raw,
             "is_heterogeneous": heterogeneous,
             "similar_artists": similar,
@@ -2555,6 +2548,9 @@ def enrich_album(
                             ),
                             {"artist": artist, "album": album},
                         )
+                    for track in album_tracks:
+                        if not track.get("is_compilation"):
+                            track["is_compilation"] = 1
 
             discogs_token = _get_discogs_token()
             if not popularity_pass and not singles_pass and not defer_full:
