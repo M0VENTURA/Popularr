@@ -833,6 +833,8 @@ def _resolve_track_mb_metadata(
             _from_batch = bool(mb_data)
 
             if not mb_data:
+                _track_mbid = _as_str(track.get("recording_mbid") or track.get("mbid") or track.get("musicbrainz_trackid")).strip()
+
                 # Only resolved for the search below (and for the composer
                 # lookup it enables): a batch hit already carries the metadata a
                 # search would have fetched for the album's own recording, so it
@@ -870,6 +872,7 @@ def _resolve_track_mb_metadata(
                     album=_album_anchor or None,
                     is_live_release=_is_live_release,
                     edition_annotation=edition_annotation,
+                    mbid=_track_mbid or None,
                 )
                 _from_batch = False
 
@@ -1948,6 +1951,8 @@ def process_track(
                     "is_cover": raw_track.get("is_cover") or track.get("is_cover"),
                     "original_cover_artist": raw_track.get("original_cover_artist") or "",
                     "cover_manual_override": raw_track.get("cover_manual_override") or track.get("cover_manual_override") or False,
+                    "writer": effective_track.get("writer"),
+                    "work_mbid": effective_track.get("work_mbid"),
                 }
                 force_cover = bool(options.get("force_cover_detection"))
                 is_cover, reason = detect_cover_song(
