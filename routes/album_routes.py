@@ -470,14 +470,22 @@ def api_album_library_tracks() -> Any:
 
 @album_bp.route("/missing-tracks", methods=["GET"])
 def api_album_missing_tracks() -> Any:
-    """Check which tracks are in the MusicBrainz release but missing from the library."""
+    """The album's missing tracks — read from the database only.
+
+    The MusicBrainz release fetch and the missing-set computation are done by
+    the SCAN (``scan_stage_runner`` refreshes ``missing_album_tracks`` per
+    album). This endpoint used to recompute on every request, and the artist
+    page requests it ONCE PER OWNED ALBUM on load, so opening an artist page
+    fired that many MusicBrainz calls — which queued behind the shared 1 req/s
+    throttle whenever a scan was running and froze the worker.
+    """
     artist = request.args.get("artist", "").strip()
     album = request.args.get("album", "").strip()
     if not artist or not album:
         return jsonify({"error": "artist and album required"}), 400
     try:
-        from services.metadata.album_missing_service import get_missing_tracks
-        result = get_missing_tracks(artist, album)
+        from services.metadata.album_missing_service import get_missing_tracks_from_db
+        result = get_missing_tracks_from_db(artist, album)
         return jsonify(result)
     except Exception as exc:
         logger.error("Failed to get missing tracks", error=str(exc))

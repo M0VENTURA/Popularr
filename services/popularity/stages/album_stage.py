@@ -52,7 +52,7 @@ import threading
 import time
 from collections import OrderedDict
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator, TypeVar
 
 import httpx
@@ -97,6 +97,30 @@ _HTTP_TIMEOUT = httpx.Timeout(
 )
 
 _MAX_ARTWORK_BYTES = int(os.getenv("ENRICHMENT_MAX_ARTWORK_BYTES", str(20 * 1024 * 1024)))
+
+# How long a cached MusicBrainz artist roster stays usable. Mirrors the window
+# the artist page used to apply itself before this moved into the scan: a
+# line-up can change, so the value is refreshed rather than frozen forever.
+_ARTIST_MEMBERS_TTL_DAYS = int(os.getenv("ARTIST_MEMBERS_TTL_DAYS", "7"))
+
+
+def _lookup_artist_members(artist: str, mb_client: Any) -> list[dict[str, Any]]:
+    """MusicBrainz members of an artist: search by name, then read relations.
+
+    Kept here (rather than in ``artist_metadata_service``) because the SCAN is
+    now the only caller — the artist page reads ``artists.members`` from the DB.
+    """
+    results = mb_client.search_artists(artist, limit=5)
+    if not results:
+        return []
+    preferred = next(
+        (a for a in results if (a.get("type") or "").lower() in {"group", "orchestra", "choir"}),
+        results[0],
+    )
+    artist_mbid = preferred.get("id")
+    if not artist_mbid:
+        return []
+    return mb_client.get_artist_members(artist_mbid) or []
 
 
 def _safe_error(exc: BaseException) -> str:
@@ -617,13 +641,19 @@ def _fetch_album_art_with_fallback(
 
 
 def _fetch_artist_metadata(artist: str) -> dict[str, Any]:
-    result: dict[str, Any] = {"country": None, "bio": None, "image_url": None}
+    result: dict[str, Any] = {
+        "country": None, "bio": None, "image_url": None,
+        "members": None, "members_last_updated": None,
+    }
     context = {"artist": artist}
 
     with _log_section("artist_metadata.database_read", **context):
         with db_session() as session:
             existing = session.execute(
-                text("SELECT country, bio, image_url FROM artists WHERE name = :artist"),
+                text(
+                    "SELECT country, bio, image_url, members, members_last_updated "
+                    "FROM artists WHERE name = :artist"
+                ),
                 {"artist": artist},
             ).mappings().first()
         if existing:
@@ -631,6 +661,8 @@ def _fetch_artist_metadata(artist: str) -> dict[str, Any]:
                 country=existing.get("country") or None,
                 bio=existing.get("bio") or None,
                 image_url=existing.get("image_url") or None,
+                members=existing.get("members") or None,
+                members_last_updated=existing.get("members_last_updated") or None,
             )
 
     if result["bio"]:
@@ -678,6 +710,53 @@ def _fetch_artist_metadata(artist: str) -> dict[str, Any]:
         except Exception as exc:
             Logger.warning("[ENRICH] artist image lookup failed", error=_safe_error(exc), **context)
 
+    # ------------------------------------------------------------------
+    # Line-up (members).
+    #
+    # Fetched HERE — once per artist per scan — instead of by the artist page,
+    # which called MusicBrainz on EVERY page load and blocked a hypercorn
+    # worker behind the shared 1 req/s throttle whenever a scan held the
+    # budget (the page then looked frozen for up to 40 s). The page is a
+    # read-only view of the scan's work; it never resolves metadata.
+    #
+    # The freshness window is the one the page used to apply, kept so a
+    # line-up change still lands without a manual refresh. A lookup that
+    # returns nothing leaves ``members_last_updated`` untouched, so it is
+    # retried on the next scan rather than caching the failure.
+    # ------------------------------------------------------------------
+    _members_fresh = False
+    if result.get("members") and result.get("members_last_updated"):
+        try:
+            _updated = datetime.fromisoformat(
+                str(result["members_last_updated"]).replace("Z", "+00:00")
+            )
+            if _updated.tzinfo is None:
+                _updated = _updated.replace(tzinfo=timezone.utc)
+            _members_fresh = (datetime.now(timezone.utc) - _updated) < timedelta(
+                days=max(1, _ARTIST_MEMBERS_TTL_DAYS)
+            )
+        except Exception:
+            _members_fresh = False
+
+    if _members_fresh:
+        Logger.info("[ENRICH] artist members lookup skipped", reason="fresh cache", **context)
+    else:
+        try:
+            members = _call_with_heartbeat(
+                "artist_metadata.members",
+                _lookup_artist_members,
+                artist,
+                get_shared_mb_client(),
+                log_context=context,
+            )
+            if members:
+                result["members"] = json.dumps(members, ensure_ascii=False)
+                result["members_last_updated"] = datetime.now(timezone.utc).isoformat()
+            else:
+                Logger.info("[ENRICH] artist members lookup returned nothing", **context)
+        except Exception as exc:
+            Logger.warning("[ENRICH] artist members lookup failed", error=_safe_error(exc), **context)
+
     if not any(result.values()):
         Logger.info("[ENRICH] artist metadata persistence skipped", reason="no values resolved", **context)
     else:
@@ -686,12 +765,14 @@ def _fetch_artist_metadata(artist: str) -> dict[str, Any]:
                 with db_session() as session:
                     session.execute(
                         text("""
-                            INSERT INTO artists (id, name, country, bio, image_url)
-                            VALUES (:artist, :artist, :country, :bio, :image_url)
+                            INSERT INTO artists (id, name, country, bio, image_url, members, members_last_updated)
+                            VALUES (:artist, :artist, :country, :bio, :image_url, :members, :members_last_updated)
                             ON CONFLICT (name) DO UPDATE SET
                                 country = COALESCE(excluded.country, artists.country),
                                 bio = COALESCE(excluded.bio, artists.bio),
-                                image_url = COALESCE(excluded.image_url, artists.image_url)
+                                image_url = COALESCE(excluded.image_url, artists.image_url),
+                                members = COALESCE(excluded.members, artists.members),
+                                members_last_updated = COALESCE(excluded.members_last_updated, artists.members_last_updated)
                         """),
                         {"artist": artist, **result},
                     )

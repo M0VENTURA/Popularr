@@ -216,6 +216,17 @@ class TestCoverWording:
 class TestCoverFlagIsCleared:
     """The reported "falsely created as a cover" must actually go away."""
 
+    class _Sink:
+        """``process_track`` pushes the effective row through
+        ``options['_deferred_persist']``. The production contract is ``.add(row)``
+        and a plain ``set`` cannot hold a dict, so this mirrors it."""
+
+        def __init__(self):
+            self.rows: list[dict] = []
+
+        def add(self, row):
+            self.rows.append(row)
+
     def _run(self, track_overrides, sink):
         from services.popularity.stages import track_stage
 
@@ -238,10 +249,10 @@ class TestCoverFlagIsCleared:
             album_result={},
             options={"metadata_only": True, "_deferred_persist": sink},
         )
-        return next(iter(sink))
+        return sink.rows[0]
 
     def test_a_false_cover_from_the_wording_is_cleared(self):
-        sink = set()
+        sink = self._Sink()
         result = self._run(
             {
                 "is_cover": 1,
@@ -257,7 +268,7 @@ class TestCoverFlagIsCleared:
         assert "Rock" in str(result.get("musicbrainz_genres") or "")
 
     def test_a_manual_override_is_never_cleared(self):
-        sink = set()
+        sink = self._Sink()
         result = self._run(
             {
                 "is_cover": 1,
@@ -270,7 +281,7 @@ class TestCoverFlagIsCleared:
         assert result["is_cover"] in (1, True)
 
     def test_an_unrelated_track_keeps_its_cover_verdict(self):
-        sink = set()
+        sink = self._Sink()
         result = self._run({"is_cover": 1, "original_cover_artist": "Disturbed"}, sink)
         assert result["is_cover"] in (1, True)
 
@@ -313,7 +324,9 @@ class TestRemasterMarkers:
             artist="Artist", title="Song (Remastered 2026)", album_artist="Artist",
         )
         assert "2026" not in result["title"]
-        assert not any(isinstance(v, int) for v in result.values())
+        # No field may smuggle the title's year through. (``isinstance(v, int)``
+        # is not usable here — ``bool`` is a subclass of ``int``.)
+        assert all("2026" not in str(v) for v in result.values())
 
     def test_stacked_markers_all_come_off(self):
         from helpers.normalization_service import normalise_scan_track_identity
@@ -494,7 +507,7 @@ class TestWritersKnowBothYearTags:
     def test_mp3_writer_routes_year_to_tdrc_and_the_original_to_txxx(self):
         from services.metadata import tag_file_service as tfs
 
-        assert tfs._ID3_FIELD_MAP.get("year") == "TDRC"
+        assert tfs._MP3_FRAME_FOR_FIELD.get("year") == "TDRC"
         # ``originalyear``/``originaldate`` reach the file through the canonical
         # registry, so pin that they are known names rather than invented here.
         from services.metadata.tag_names import CANONICAL_TAG_NAMES
@@ -523,20 +536,25 @@ class TestAlbumSortUsesTheOriginalYear:
 
     def test_the_album_listing_prefers_year_over_release_year(self):
         import inspect
-        import re
 
         from routes import ui_routes
 
         source = inspect.getsource(ui_routes)
-        # The album year key is built from ``year`` first, with release_year only
-        # as a fallback — the exact opposite would make a 2026 remaster sort as
-        # a 2026 album instead of its original year.
-        matches = re.findall(
-            r"NULLIF\(SUBSTRING\(COALESCE\(year[^)]*\),\s*''\),\s*''\),\s*"
-            r"NULLIF\(CAST\(release_year AS TEXT\),\s*''\)",
-            source,
+        # The album year key is built from ``year`` first, with ``release_year``
+        # only as a fallback — the opposite order would make a 2026 remaster
+        # sort as a 2026 album instead of by its original year. Checked by
+        # POSITION inside the query rather than by matching the SQL's exact
+        # formatting, which would break on any reformat.
+        marker = source.find("AS album_year")
+        assert marker != -1, "the album listing must derive an album_year"
+        window = source[max(0, marker - 800):marker]
+        year_at = window.find("COALESCE(year")
+        release_at = window.find("release_year")
+        assert year_at != -1, "the album year key must consider the year column"
+        assert release_at != -1, "the album year key must fall back to release_year"
+        assert year_at < release_at, (
+            "year (the ORIGINAL year) must be preferred over release_year"
         )
-        assert matches, "the album year key must take year before release_year"
 
     def test_the_scan_stores_the_edition_year_separately(self):
         from services.popularity.stages.track_stage import process_track  # noqa: F401

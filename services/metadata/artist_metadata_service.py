@@ -571,58 +571,35 @@ def get_main_tracks(artist: str) -> tuple[dict[str, Any], int]:
 
 
 def get_artist_members_cached(artist: str) -> list[dict[str, Any]]:
-    """Fetch artist members from DB cache, or MusicBrainz API if stale/missing."""
+    """An artist's line-up, from the DATABASE ONLY.
+
+    Populated by the SCAN — ``album_stage._fetch_artist_metadata`` reads
+    MusicBrainz once per artist per scan, honouring the same freshness window
+    this function used to apply. It is deliberately NOT resolved here any more:
+    resolving it made the artist page call MusicBrainz on EVERY load
+    (``search_artists`` + ``get_artist_members``), and because the shared
+    client throttles at ~1 req/s by *reserving* a future slot, a page load
+    during a scan queued behind it for tens of seconds and stalled the whole
+    hypercorn worker. A page must be a read-only view of what the scan has
+    already resolved.
+
+    Returns ``[]`` when the scan has not run for this artist yet — the page
+    simply renders no line-up until it has.
+    """
     import json
-    from datetime import datetime, timezone, timedelta
 
     try:
         with db_session() as session:
             row = session.execute(
-                text("SELECT members, members_last_updated FROM artists WHERE name = :artist"),
+                text("SELECT members FROM artists WHERE name = :artist"),
                 {"artist": artist},
             ).mappings().first()
-        now = datetime.now(timezone.utc)
 
-        if row:
-            members_raw = str(row.get("members") or "") if row else ""
-            updated_raw = str(row.get("members_last_updated") or "") if row else ""
-            if members_raw and updated_raw:
-                try:
-                    updated = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
-                    if updated.tzinfo is None:
-                        updated = updated.replace(tzinfo=timezone.utc)
-                    if (now - updated) < timedelta(days=7):
-                        return json.loads(members_raw)
-                except Exception:
-                    pass
-
-        # ✅ Use shared MusicBrainz client singleton
-        mb = get_shared_mb_client()
-        results = mb.search_artists(artist, limit=5)
-        if not results:
+        raw = str((row or {}).get("members") or "").strip()
+        if not raw:
             return []
-
-        preferred = next(
-            (a for a in results if (a.get("type") or "").lower() in {"group", "orchestra", "choir"}),
-            results[0],
-        )
-        artist_mbid = preferred.get("id")
-        if not artist_mbid:
-            return []
-
-        members = mb.get_artist_members(artist_mbid)
-        members_json = json.dumps(members)
-
-        with db_session() as session:
-            session.execute(
-                text(
-                    "INSERT INTO artists (id, name, members, members_last_updated) "
-                    "VALUES (:artist, :artist, :members_json, :now) "
-                    "ON CONFLICT (name) DO UPDATE SET members = EXCLUDED.members, members_last_updated = EXCLUDED.members_last_updated"
-                ),
-                {"artist": artist, "members_json": members_json, "now": now.isoformat()},
-            )
-        return members
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
     except Exception as exc:
         logger.debug("Get artist members failed", artist=artist, error=str(exc))
         return []

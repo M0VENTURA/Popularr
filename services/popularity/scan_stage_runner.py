@@ -52,6 +52,7 @@ from services.catalog.album_classification_service import (
     is_instrumental_track_title,
     should_exclude_track_from_stats,
 )
+from services.metadata.album_missing_service import get_missing_tracks
 from services.metadata.album_name_update_service import (
     apply_album_name_update,
     repair_album_annotations,
@@ -2148,6 +2149,35 @@ def run_scan(
                 except Exception as exc:
                     logger.warning("Failed to sync file tags", artist=artist, album=album, error=str(exc))
             # ---------------------
+
+            # --- MISSING-TRACK SNAPSHOT ---
+            # The artist page's per-album "N tracks missing" badge reads
+            # ``missing_album_tracks`` from the DATABASE (the endpoint no longer
+            # recomputes), so the scan is what keeps that table current. This is
+            # the same switch the file-tag sync above uses: metadata and combined
+            # passes refresh it, a popularity-only or singles-only pass never
+            # touches album identity.
+            #
+            # Cost note: by this point the album stage has resolved and
+            # persisted the album's MusicBrainz release, so the release-metadata
+            # fetch inside is normally a CACHE HIT. The previous arrangement paid
+            # that cost per PAGE LOAD per owned album instead — and the release
+            # SEARCH it falls back to when an album has no stored MBID was paid
+            # one-per-album every time the artist page was opened.
+            if not options.get("popularity_only") and not options.get("singles_detection_only"):
+                try:
+                    _missing = get_missing_tracks(artist=artist, album=album)
+                    if _missing and _missing.get("missing_count"):
+                        log_unified(
+                            f"[MISSING_TRACKS] {artist} - {album}: "
+                            f"{_missing.get('missing_count')} track(s) missing from the MB release"
+                        )
+                except Exception as exc:
+                    logger.debug(
+                        "Missing-track refresh failed",
+                        artist=artist, album=album, error=str(exc),
+                    )
+            # ------------------------------
 
             # Deferred album rename detection.
             if not _mode_singles:

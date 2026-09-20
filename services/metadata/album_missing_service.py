@@ -284,6 +284,60 @@ def get_missing_tracks(artist: str, album: str) -> dict[str, Any]:
     }
 
 
+def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
+    """The persisted missing-track list for one album — DATABASE ONLY.
+
+    ``get_missing_tracks`` above resolves the album's MusicBrainz release and
+    recomputes the set. That work now belongs to the SCAN (``scan_stage_runner``
+    refreshes it per album, where the release metadata is normally already a
+    cache hit), because the artist page requests this once PER OWNED ALBUM on
+    page load and every call was a MusicBrainz release fetch — plus a release
+    SEARCH when the album had no stored MBID. A page must be a read-only view of
+    what the scan has resolved.
+
+    ``mb_total`` is not stored per row; it is reported as the library count plus
+    the number of missing tracks, so the UI's totals still add up while never
+    claiming a release size the database does not know.
+    """
+    try:
+        with db_session() as session:
+            rows = session.execute(
+                text(
+                    "SELECT title, track_number, disc_number, track_artist, year, "
+                    "       release_id, recording_mbid, duration "
+                    "FROM missing_album_tracks "
+                    "WHERE LOWER(artist_name) = LOWER(:artist) "
+                    "  AND LOWER(album_name) = LOWER(:album) "
+                    "  AND COALESCE(ignored, FALSE) = FALSE "
+                    "ORDER BY COALESCE(disc_number, 1), COALESCE(track_number, '999')"
+                ),
+                {"artist": artist, "album": album},
+            ).mappings().all()
+
+            library_count = session.execute(
+                text(
+                    "SELECT COUNT(*) FROM tracks "
+                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                    "  AND LOWER(COALESCE(album, '')) = LOWER(:album)"
+                ),
+                {"artist": artist, "album": album},
+            ).scalar() or 0
+    except Exception as exc:
+        logger.error(
+            "Get persisted missing tracks failed",
+            artist=artist, album=album, error=str(exc),
+        )
+        return {"missing_tracks": [], "missing_count": 0, "mb_total": 0, "library_count": 0}
+
+    missing = [dict(r) for r in rows]
+    return {
+        "missing_tracks": missing,
+        "missing_count": len(missing),
+        "mb_total": int(library_count) + len(missing),
+        "library_count": int(library_count),
+    }
+
+
 def _missing_row_key(row: Any) -> tuple[str, int, str]:
     """Build the ``(track_number, disc_number, title_key)`` identity for a row.
 

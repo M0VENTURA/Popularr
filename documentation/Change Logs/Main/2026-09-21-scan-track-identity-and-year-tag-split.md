@@ -125,17 +125,48 @@ supplies as that same value.
 
 ## Verification
 
-`tests/test_scan_identity_and_year_tags.py` (new) covers all four behaviours, the
-reported examples, the key-stability rule and the ID3/Vorbis tag routing.
+`tests/test_scan_identity_and_year_tags.py` (new, 54 tests) covers all four
+behaviours, the reported examples, the key-stability rule and the ID3/Vorbis tag
+routing.
 
-A 50-check logic probe ran against the **real** helpers
-(`helpers.normalization_service` from a checkout, with only the edited regex
-monkeypatched) — **all passed**, including the edge cases that matter: "Cover Me"
-and "Me & You" untouched, `will.i.am` casing preserved, a credit-only title never
-emptied, `(Remastered Version)` now handled, stacked markers, and the year
-precedence in both tag services.
+**Probe (before the commit landed).** A 50-check logic probe ran against the
+**real** helpers (`helpers.normalization_service` from a checkout, with only the
+edited regex monkeypatched, so there is no copy drift) — **all passed**,
+including the edge cases that matter: "Cover Me" and "Me & You" untouched,
+`will.i.am` casing preserved, a credit-only title never emptied,
+`(Remastered Version)` now handled, stacked markers, and the year precedence in
+both tag services.
 
-⚠️ The pytest run of the new suite is pending the workspace commit (the virtual
-workspace had not committed this change set when the probe was run); the suite is
-written to be runnable as-is and is deliberately import-lazy so a reverted tree
-still collects it.
+**First full pytest run** (against `54997a39`): **48 passed / 6 failed**. All six
+were defects in the new test file, not the change — and the run captured the
+product behaviour working:
+
+```
+[info] [TRACK] false cover flag cleared detector_verdict=no_match title=Song
+[debug] Cover check skipped: manual override track=Song
+```
+
+| Test defect | Cause | Fix |
+|---|---|---|
+| 3 × `TestCoverFlagIsCleared` | the `_deferred_persist` sink was a `set`, and a dict is unhashable (`Deferred persist enqueue failed error=unhashable type: 'dict'`), so nothing was captured | list-backed sink implementing the real `.add(row)` contract |
+| `test_the_year_in_the_marker_is_discarded` | `isinstance(True, int)` is `True` — a flag looked like a year | assert no field's text contains the year |
+| `test_mp3_writer_routes_year_to_tdrc…` | the map is `_MP3_FRAME_FOR_FIELD`, not `_ID3_FIELD_MAP` | corrected (verified: `year` → `TDRC`) |
+| `test_the_album_listing_prefers_year_over_release_year` | the regex pinned the SQL's exact formatting | positional check instead (verified: `COALESCE(year` at 663 precedes `release_year` at 746) |
+
+**Regression check** — 8 suites around the changed files
+(`album_tag_sync_service`, `metadata_fanout_to_files`,
+`tag_name_standardisation`, `album_mb_tags_to_files`,
+`album_missing_and_disc_cleanup`, `async_routes_do_not_block_event_loop`,
+`no_python_syntax_errors`, `album_title_and_version_matching`):
+
+| Tree | Result |
+|---|---|
+| Before (`54997a39^` = `a432acac`) | **6 failed / 103 passed** |
+| After (`54997a39`) | **4 failed / 105 passed** |
+
+**0 new failures** — and the two disappeared ones are
+`test_album_tag_sync_service::test_db_tag_candidates_perfect_includes_mbids` and
+`…_imperfect_excludes_mbids`, the long-standing "signature drift" failures, which
+the new default arguments fix. The remaining 4 fail identically on both trees
+(pre-existing: a mutagen double without `delall`, and the album-id fan-out).
+
