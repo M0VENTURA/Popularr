@@ -1051,16 +1051,16 @@ class MusicBrainzService:
             return {}
 
     def _recording_to_metadata(self, recording: dict[str, Any], mbid: str, confidence: float, *, album_name: str | None = None, original_release_year: int | None = None, **kwargs: Any) -> dict[str, Any]:
-        """Convert a recording without adopting a specific release identity.
-
-        ``album_name`` and ``original_release_year`` are authoritative when
-        supplied. The specific release title and its date are retained only as
-        diagnostic fields.
-        """
+        """Convert a recording without adopting a specific release identity."""
         credits = recording.get("artist-credit") or []
+        
+        # THE FIX: Build the full string ("Schandmaul & dArtagnan") instead of dropping data
+        full_artist_string = build_artist_credit_string(credits)
+        
         first = credits[0] if credits else {}
         if isinstance(first, dict):
-            artist = str(first.get("name") or "").strip()
+            # Use the full string, fallback to the first name only if it's empty
+            artist = full_artist_string or str(first.get("name") or "").strip()
             artist_data = first.get("artist") or {}
             artist_mbid = (
                 str(artist_data.get("id") or "").strip()
@@ -1068,9 +1068,8 @@ class MusicBrainzService:
                 else ""
             )
         else:
-            artist = str(first or "").strip()
+            artist = full_artist_string or str(first or "").strip()
             artist_mbid = ""
-
         releases = recording.get("releases") or []
         authoritative_album = str(album_name or "").strip()
 
