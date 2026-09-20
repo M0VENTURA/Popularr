@@ -2409,8 +2409,7 @@ def resolve_release_id(release_id: str) -> str:
 
     A value that is already a concrete release id is returned unchanged; when
     the id is a group, the release with the most tracks (preferring official
-    releases) is chosen.  Falls back to the input so callers always get a
-    usable string.
+    releases) is chosen.  Falls back to the input so callers always get a usable string.
     """
     if not release_id:
         return release_id
@@ -2459,6 +2458,7 @@ def resolve_release_id(release_id: str) -> str:
 
     return release_id
 
+
 def _lookup_existing_mbid(Existing_mbid: str, Artist: str, Album: str) -> dict[str, Any] | None:
     """Resolve a stored MBID, accepting either a release or a release-group id.
 
@@ -2476,11 +2476,19 @@ def _lookup_existing_mbid(Existing_mbid: str, Artist: str, Album: str) -> dict[s
             "album.existing_release_get",
             Client.get_release,
             Existing_mbid,
-            inc="artist-credits+release-groups",
+            inc="artist-credits+release-groups+media",
             Log_context=Context,
         )
         if Data:
             Group = Data.get("release-group") or {}
+            
+            # Calculate the total track count of this release
+            mb_track_count = sum(
+                _as_int(m.get("track-count"), 0)
+                for m in (Data.get("media") or [])
+                if isinstance(m, dict)
+            )
+            
             return {
                 "mbid": Existing_mbid,
                 "title": Group.get("title") or Data.get("title", Album),
@@ -2493,6 +2501,7 @@ def _lookup_existing_mbid(Existing_mbid: str, Artist: str, Album: str) -> dict[s
                 "source": "musicbrainz",
                 "is_stored_mbid": True,
                 "mbid_type": "release",
+                "track_count": mb_track_count,
             }
     except Exception as exc:
         Logger.info("[MB] stored MBID was not a release", error=_error(exc), **Context)
@@ -2523,6 +2532,7 @@ def _lookup_existing_mbid(Existing_mbid: str, Artist: str, Album: str) -> dict[s
         Logger.exception("[MB] stored MBID lookup failed", error=_error(exc), **Context)
     return None
 
+
 def lookup_musicbrainz_album(Artist: str, Album: str, Existing_mbid: str = "") -> dict[str, Any]:
     """Find MusicBrainz release-groups for an album, stored MBID first.
 
@@ -2536,20 +2546,6 @@ def lookup_musicbrainz_album(Artist: str, Album: str, Existing_mbid: str = "") -
         Stored = _lookup_existing_mbid(Existing_mbid, Artist, Album)
         if Stored:
             # ── SANITY CHECK before a stored ID is allowed to win ────────
-            # This used to be appended with confidence 1.0 and AUTO-SELECTED
-            # ahead of every text candidate, with nothing comparing the ID's
-            # own title/artist against this album.  One bad ID left behind by
-            # an errant batch-tagging run therefore silently redirected the
-            # match — and the fan-out that follows it onto every track and
-            # audio file — to an unrelated record (the Metallica / d'Artagnan
-            # "66-track super album").
-            #
-            # A rejected ID is simply not offered and the text search below
-            # supplies the candidates instead; nothing is written.
-            #
-            # Imported lazily: ``services.metadata`` eagerly imports the album
-            # service, which imports this module, so a module-level import here
-            # would be circular.
             from services.metadata.album_mbid_guard import (
                 guard_album_mbid as Guard_album_mbid,
                 log_verdict as Log_mbid_verdict,
@@ -2561,6 +2557,18 @@ def lookup_musicbrainz_album(Artist: str, Album: str, Existing_mbid: str = "") -
                 mb_artist=str(Stored.get("artist") or ""),
                 mb_album=str(Stored.get("title") or ""),
             )
+
+            local_track_count = _get_local_track_count(Artist, Album)
+            stored_track_count = Stored.get("track_count") or 0
+
+            # If both counts are known, and the difference is 4 or more tracks, reject the MBID.
+            if Verdict["ok"] and local_track_count > 0 and stored_track_count > 0:
+                if abs(local_track_count - stored_track_count) >= 4:
+                    Verdict = {
+                        "ok": False,
+                        "reason": f"Track count mismatch (Local: {local_track_count}, MBID: {stored_track_count})"
+                    }
+
             if Verdict["ok"]:
                 Results.append(Stored)
                 Logger.info(
