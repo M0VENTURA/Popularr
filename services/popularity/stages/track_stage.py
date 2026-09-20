@@ -499,7 +499,7 @@ _ALBUM_TYPE_COLUMNS = frozenset({"musicbrainz_albumtype", "spotify_album_type", 
 _ALBUM_MBID_COLUMNS = frozenset({
     "musicbrainz_album_mbid", "musicbrainz_albumid", "musicbrainz_releasegroupid",
 })
-_STALE_PROTECTED_COLUMNS = frozenset({"title"}) | _ALBUM_TYPE_COLUMNS | _ALBUM_MBID_COLUMNS
+_STALE_PROTECTED_COLUMNS = frozenset({"title", "album_artist"}) | _ALBUM_TYPE_COLUMNS | _ALBUM_MBID_COLUMNS
 
 _MB_RG_GENRE_CACHE: dict[str, tuple[list, list]] = {}
 _MB_RECORDING_GENRE_CACHE: dict[str, tuple[list, list]] = {}
@@ -871,7 +871,7 @@ def _resolve_track_mb_metadata(
                     artist,
                     album=_album_anchor or None,
                     is_live_release=_is_live_release,
-                    edition_annotation=edition_annotation,
+                    edition_annotation=_album_annotation,
                     mbid=_track_mbid or None,
                 )
                 _from_batch = False
