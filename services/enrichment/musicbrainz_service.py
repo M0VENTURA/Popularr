@@ -80,6 +80,7 @@ from api_clients.musicbrainz_http import (
 )
 from helpers.normalization_service import (
     edition_annotations_compatible as Edition_annotations_compatible,
+    extract_edition_annotation as Extract_edition_annotation,
     normalize_string as Normalize_string,
     normalize_title_for_lookup as Normalize_title_for_lookup,
     normalize_title_for_lucene_query as Normalize_title_for_lucene_query,
@@ -523,6 +524,30 @@ def _release_album_identity(release: Any) -> str:
         (release.get("title") if isinstance(release, dict) else "") or ""
     ).strip()
 
+def _edition_title_matches(release_title: str, album_name: str) -> bool:
+    """True when a release's OWN title names the edition the album is.
+
+    The library's album name is the specific release title whenever the files
+    were tagged from an edition, so an exact-ish title match is the only
+    reliable way to recover WHICH edition the collection holds — the release
+    GROUP is the same for every edition, so group-level matching cannot.
+
+    Deliberately strict:
+      * the album must itself carry an edition annotation, so a plain album
+        name can never promote an arbitrary release to "the edition held"; and
+      * the two titles must be edition-annotation COMPATIBLE, so
+        "(Holiday Edition Deluxe)" can never match the plain release or a
+        DIFFERENT edition of the same album; and
+      * they must be ≥0.9 similar, so sharing a few words is not enough.
+    """
+    if not release_title or not album_name:
+        return False
+    if not Extract_edition_annotation(album_name):
+        return False
+    if not Edition_annotations_compatible(release_title, album_name):
+        return False
+    return _similarity(release_title, album_name) >= 0.9
+
 def _select_primary_release(releases: Any, album_name: str | None) -> dict[str, Any]:
     """Choose which of a recording's releases describes the album being scanned.
 
@@ -534,12 +559,18 @@ def _select_primary_release(releases: Any, album_name: str | None) -> dict[str, 
     folder shattered into a dozen one-track "albums".
 
     Selection order:
+    0. The EDITION the collection holds: a release whose own title names the
+       same edition as the local album name. Only reachable when the local
+       name carries an edition annotation.
     1. A release whose album identity matches ``album_name`` — this pins the
        track to the album actually being scanned.
     2. A canonical STUDIO release: primary type ``album`` (or untyped) with no
        live/compilation/remix secondary type. Prefers one that carries a
        release-group, so the name can never fall back to an edition title.
-    3. The earliest release date.
+    3. The earliest release date — but ONLY when no ``album_name`` was
+       supplied. With an anchor and no resemblance anywhere, nothing is
+       returned, because an unrelated release's title must never become the
+       track's ``release_title``.
 
     Every stage breaks ties on the release id, so the result is deterministic
     and does not depend on MusicBrainz's ordering.
@@ -548,14 +579,32 @@ def _select_primary_release(releases: Any, album_name: str | None) -> dict[str, 
     if not candidates:
         return {}
 
+    anchor = str(album_name or "").strip()
+
     if len(candidates) == 1:
         return candidates[0]
 
     def _sort_key(release: dict[str, Any]) -> tuple[Any, ...]:
         return (str(release.get("date") or "9999"), str(release.get("id") or ""))
 
+    # ── 0. The EDITION the collection actually holds ───────────────────────
+    # The local album name IS the specific release title when the files were
+    # tagged from one ("American Idiot (Holiday Edition Deluxe)"), so a release
+    # whose OWN title matches it IS the edition on disk. This has to be
+    # decided before stage 1, because stage 1 matches on release-GROUP identity
+    # — which is identical for every edition — and then tie-breaks on the
+    # EARLIEST date. It therefore returned the original 2004 release, and
+    # ``release_title`` came out as the plain album name instead of the edition
+    # held.
+    if anchor:
+        edition_matches = [
+            r for r in candidates
+            if _edition_title_matches(str(r.get("title") or ""), anchor)
+        ]
+        if edition_matches:
+            return min(edition_matches, key=_sort_key)
+
     # ── 1. The release matching the scanned album ──────────────────────────
-    anchor = str(album_name or "").strip()
     if anchor:
         matching = [
             r for r in candidates
@@ -564,6 +613,17 @@ def _select_primary_release(releases: Any, album_name: str | None) -> dict[str, 
         ]
         if matching:
             return min(matching, key=_sort_key)
+
+    # ── 2 & 3. No anchor, or nothing resembled it ──────────────────────────
+    # With an anchor and NO resemblance anywhere in this recording's release
+    # list, the recording itself is probably not the right one, so no release
+    # is nominated. Handing back an arbitrary release here used to write that
+    # release's title into the track's ``release_title`` — which is how an
+    # unrelated compilation named e.g. "Punk" became an album's Release Name.
+    # No release is better than a wrong one: the caller keeps the library's own
+    # album name, and ``album_artist`` from here is not consumed by any caller.
+    if anchor:
+        return {}
 
     # ── 2. A canonical studio release ──────────────────────────────────────
     def _is_studio(release: dict[str, Any]) -> bool:
@@ -718,16 +778,26 @@ class MusicBrainzService:
         self._maybe_flush_cache(force=True)
 
     @staticmethod
-    def _cache_key(title: str, artist: str, is_live: bool = False) -> str:
+    def _cache_key(title: str, artist: str, is_live: bool = False, annotation: str | None = None) -> str:
         """Cache key for an MBID lookup.
 
         ``is_live`` is part of the key because a plainly titled live track
         ("Enter Sandman" on S&M) and its studio namesake produce the SAME
         title+artist, so a shared key let whichever was scanned first resolve
         the other one too. The suffix keeps the two answers apart.
+
+        ``annotation`` extends that reasoning to every OTHER version marker. On
+        the unplugged edition of an album, a plainly tagged track ("Song") and
+        the studio song share title+artist AND are both non-live, so without
+        this they share a cache entry and one resolves to the other's
+        recording — the same class of bug as the live one.
         """
         base = f"{artist.casefold().strip()}::{title.casefold().strip()}"
-        return f"{base}::live" if is_live else base
+        if is_live:
+            base = f"{base}::live"
+        if annotation:
+            base = f"{base}::{annotation}"
+        return base
 
     def get_suggested_mbid(self, title: str, artist: str, limit: int = 5, **kwargs: Any) -> tuple[str, float]:
         """Return the best-matching recording MBID for ``(title, artist)``.
@@ -746,13 +816,24 @@ class MusicBrainzService:
         is set, candidates whose release-group secondary type says "live" are
         preferred; when it is clear, they are demoted. Candidates the response
         cannot classify are never treated as verified studio.
+
+        ``edition_annotation`` (keyword) is the album's own version annotation,
+        used when THIS track's title carries none. A release routinely marks
+        only some of its titles ("Song (Unplugged Version)" next to a bare
+        "Song"), and for the unmarked ones ``Edition_annotations_compatible``
+        rejects the annotated candidate and accepts the plain one — so the
+        track resolves to the identically titled STUDIO recording. Supplying
+        the album's annotation lets the matching candidate be recognised and
+        ranked above the plain one.
         """
         is_live_release = bool(kwargs.get("is_live_release"))
+        edition_annotation = str(kwargs.get("edition_annotation") or "").strip() or None
         context = {
             "artist": artist,
             "track": title,
             "limit": limit,
             "is_live_release": is_live_release,
+            "edition_annotation": edition_annotation,
         }
         if not self.enabled or not title or not artist:
             Logger.info(
@@ -762,7 +843,9 @@ class MusicBrainzService:
             )
             return "", 0.0
 
-        cache_key = self._cache_key(title, artist, is_live=is_live_release)
+        cache_key = self._cache_key(
+            title, artist, is_live=is_live_release, annotation=edition_annotation,
+        )
         now = time.time()
         with self._mem_lock:
             cached = self._mbid_cache.get(cache_key)
@@ -800,13 +883,25 @@ class MusicBrainzService:
                 Log_context=context,
             ) or []
             best_mbid, best_score = "", 0.0
-            best_rank: tuple[int, float] | None = None
+            best_rank: tuple[int, int, float] | None = None
             normalized_title = Normalize_title_for_mbid_match(title)
+            # The track's OWN annotation is authoritative. When it carries none
+            # but the ALBUM does (see ``album_version_annotation``), the album's
+            # is used to RECOGNISE — not to reject — the matching candidate: a
+            # candidate that carries it is admitted even though
+            # ``Edition_annotations_compatible`` answers "no", because the plain
+            # local title is exactly what made that check fail. Candidates that
+            # do NOT carry it stay eligible, so the track still resolves when
+            # MusicBrainz holds no such version at all.
+            track_annotation = Extract_edition_annotation(title)
+            album_annotation = edition_annotation if track_annotation is None else None
             for recording in recordings:
                 if not isinstance(recording, dict):
                     continue
                 candidate_title = str(recording.get("title") or "")
-                if not Edition_annotations_compatible(title, candidate_title):
+                candidate_annotation = Extract_edition_annotation(candidate_title)
+                annotation_ok = bool(album_annotation) and candidate_annotation == album_annotation
+                if not annotation_ok and not Edition_annotations_compatible(title, candidate_title):
                     continue
                 score = _mbid_similarity(
                     normalized_title,
@@ -815,19 +910,20 @@ class MusicBrainzService:
                 if score <= 0:
                     continue
 
-                # Rank: liveness agreement FIRST, then text similarity. A
-                # plainly titled live track and its studio namesake both score
-                # 1.0, so similarity alone cannot separate them — the
-                # release-group secondary type is the only signal that can.
-                # Unknown candidates (no release data) sit in the middle so a
-                # live lookup is never satisfied by an unclassifiable hit, and
-                # a studio lookup is never blocked by one either.
+                # Rank: liveness agreement, then the album-version annotation,
+                # then text similarity. A plainly titled live/unplugged/acoustic
+                # track and its studio namesake both score 1.0, so similarity
+                # alone cannot separate them — the release data is the only
+                # signal that can. Unknown liveness (no release data) sits in
+                # the middle so a live lookup is never satisfied by an
+                # unclassifiable hit, and a studio lookup is never blocked by
+                # one either.
                 _affinity = _recording_live_affinity(recording)
                 if _affinity is None:
                     _live_rank = 1
                 else:
                     _live_rank = 2 if _affinity == is_live_release else 0
-                _rank = (_live_rank, score)
+                _rank = (_live_rank, 1 if annotation_ok else 0, score)
 
                 if best_rank is None or _rank > best_rank:
                     best_rank = _rank
@@ -850,7 +946,7 @@ class MusicBrainzService:
             Logger.exception("[MB] recording suggestion failed", error=_error(exc), **context)
             return "", 0.0
 
-    def lookup_recording_metadata(self, title: str, artist: str, *, album: str | None = None, is_live_release: bool = False, **kwargs: Any) -> dict[str, Any]:
+    def lookup_recording_metadata(self, title: str, artist: str, *, album: str | None = None, is_live_release: bool = False, edition_annotation: str | None = None, **kwargs: Any) -> dict[str, Any]:
         """Resolve a recording's full metadata via search-then-fetch.
 
         ``album`` is the album being scanned. Supplying it pins the recording
@@ -863,19 +959,27 @@ class MusicBrainzService:
         it the live track inherits the studio recording's MBID and therefore
         its ListenBrainz/Last.fm popularity — the reason live albums were
         scoring like studio albums.
+
+        ``edition_annotation`` does the same job for every OTHER version
+        marker (unplugged, acoustic, expanded …) when this track's own title
+        carries none. See ``helpers.normalization_service.album_version_annotation``.
         """
         context = {
             "title": title,
             "artist": artist,
             "album": album,
             "is_live_release": bool(is_live_release),
+            "edition_annotation": edition_annotation,
         }
         if not title or not artist:
             Logger.info("[MB] recording metadata skipped", reason="incomplete input", **context)
             return {}
         try:
             mbid, confidence = self.get_suggested_mbid(
-                title, artist, is_live_release=is_live_release
+                title,
+                artist,
+                is_live_release=is_live_release,
+                edition_annotation=edition_annotation,
             )
             if not mbid:
                 return {}
@@ -2076,10 +2180,15 @@ def lookup_recording_metadata(
     *,
     album: str | None = None,
     is_live_release: bool = False,
+    edition_annotation: str | None = None,
 ) -> dict[str, Any]:
     """Module-level wrapper. See ``MusicBrainzService.lookup_recording_metadata``."""
     return _get_service().lookup_recording_metadata(
-        title, artist, album=album, is_live_release=is_live_release
+        title,
+        artist,
+        album=album,
+        is_live_release=is_live_release,
+        edition_annotation=edition_annotation,
     )
 
 def merge_metadata(base: dict[str, Any], mb: dict[str, Any], overrides: dict[str, Any] | None = None) -> dict[str, Any]:

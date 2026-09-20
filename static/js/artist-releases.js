@@ -175,14 +175,33 @@
     var artist = summary.getAttribute('data-artist') || '';
     var album = summary.getAttribute('data-album') || '';
     var mbid = summary.getAttribute('data-mbid') || '';
+    var releaseId = summary.getAttribute('data-release-id') || '';
     var isMissing = item.getAttribute('data-status') === 'missing';
 
     contentEl.innerHTML = '<div class="text-center py-2"><span class="spinner-border spinner-border-sm"></span> Loading tracks...</div>';
 
-    // Missing releases have no local tracks — ask MusicBrainz via the
-    // release-tracks route, which is what the release picker uses.
+    /*
+      OWNED albums read the `tracks` table, which is the source of truth for
+      the collection: /api/album/tracklist keys on (artist, album) and the
+      repository compares CASE-INSENSITIVELY, because this page selected the
+      album with a LOWER() match on the album artist.
+
+      MISSING releases have no `tracks` rows at all, so they must come from
+      MusicBrainz — via /api/artist/release/tracklist, which serves the CACHED
+      missing_releases.tracklist first (filled in the background) and only
+      reaches the API when that cache is empty.
+
+      The URL used to be '/api/musicbrainz/release/tracks?mbid=&release_id='.
+      No such route exists — the only match is
+      POST /api/album/musicbrainz/release/tracks, a different blueprint, method
+      and argument name — so EVERY missing release 404'd. It also read
+      data-release-id off the SUMMARY while the attribute only existed on the
+      Import button, so the id was always undefined even had the path been
+      right. Both are fixed: the attribute is now emitted on the summary (see
+      components/_release_section.html) and read here.
+    */
     var url = isMissing
-      ? '/api/musicbrainz/release/tracks?mbid=' + encodeURIComponent(mbid) + '&release_id=' + encodeURIComponent(summary.getAttribute('data-release-id') || '')
+      ? '/api/artist/release/tracklist?release_id=' + encodeURIComponent(releaseId) + '&artist=' + encodeURIComponent(artist)
       : '/api/album/tracklist?artist=' + encodeURIComponent(artist) + '&album=' + encodeURIComponent(album) + '&mbid=' + encodeURIComponent(mbid);
 
     getJson(url)

@@ -240,7 +240,26 @@ _ALBUM_EDITION_STRIP_RE = re.compile(
     r"(?:\d[\d,]*\s*枚限定生産特装盤|限定生産|完全生産限定|初回限定|"
     r"完全受注生産|數量限定|期間限定|予約限定|"
     r"limited\s+production(?:\s+edition)?|first\s+press(?:\s+edition)?|"
-    r"premium\s+edition|special\s+price))"
+    r"premium\s+edition|special\s+price|"
+    # A modifier-prefixed edition marker. Every alternative above pins the
+    # WHOLE parenthetical, so real product names that put words BEFORE the
+    # keyword never matched and the edition survived into the album name AND
+    # every lookup key built from it:
+    #     "American Idiot (Holiday Edition Deluxe)"       -> unchanged
+    #     "Some Album (20th Anniversary Deluxe Edition)"  -> unchanged
+    # This form matches when the parenthetical CONTAINS an unambiguous
+    # edition/pressing word, in any order.
+    #
+    # The leading lookahead is the load-bearing part: markers naming a FORM
+    # ("Live", "Remix", "Acoustic", "Unplugged", "Instrumental", "Demo",
+    # "Karaoke") are deliberately PRESERVED — they distinguish different
+    # RECORDINGS, not different pressings of the same one. A bare "version" is
+    # deliberately NOT a keyword for the same reason: "(Acoustic Version)" and
+    # "(Boogie Version)" must survive.
+    r"(?![^)\]]*\b(?:live|remix|acoustic|unplugged|instrumental|demo|karaoke)\b)"
+    r"[^)\]]*?\b(?:edition|deluxe|anniversary|expanded|extended|limited|"
+    r"special|bonus|collector(?:'s)?|ultimate|standard|digital|premium|reissue)\b"
+    r"[^)\]]*))"
     r"\s*[\)\]]\s*$",
     re.IGNORECASE,
 )
@@ -610,6 +629,64 @@ def edition_annotations_compatible(title_a: str, title_b: str) -> bool:
     if ann_a is None or ann_b is None:
         return False
     return ann_a == ann_b
+
+
+#: How many of an album's titles must carry the same annotation before it is
+#: treated as the album's version. Two, so a single stray marker cannot
+#: redefine the whole album, and a plain majority so a release whose titles
+#: only PARTLY carry the marker still resolves all of them consistently.
+_ALBUM_ANNOTATION_MIN_TRACKS = 2
+
+
+def album_version_annotation(
+    album_name: str = "",
+    track_titles: Any = None,
+) -> str | None:
+    """The version annotation an ALBUM's titles agree on, or None.
+
+    WHY THIS EXISTS — the reported "Helden X Hymnen" defect. A release's
+    titles routinely carry the version marker on only SOME tracks: on the
+    unplugged edition of an album, most titles read "Song (Unplugged
+    Version)" but a few are tagged plainly as "Song". Every per-title check
+    then goes wrong for exactly those tracks:
+
+        edition_annotations_compatible("Song", "Song (Unplugged Version)")
+            -> False   (local has no annotation, candidate has one)
+        edition_annotations_compatible("Song", "Song")
+            -> True    (both plain)
+
+    so the recording search SKIPS the unplugged recording and takes the
+    identically titled STUDIO one. The track then carries the studio
+    recording's MBID, and every popularity figure read through it
+    (ListenBrainz listens by MBID, Last.fm via the release-scoped match) is
+    the studio recording's — the reported "used the wrong version of the
+    tracks when doing the popularity scoring".
+
+    The album's OWN annotation is the missing context, so it is derived here
+    and used as the fallback for a title that carries none.
+
+    The album NAME is checked first (cheap and authoritative when present,
+    e.g. "... (Unplugged)"), then the album's track titles BY MAJORITY.
+    """
+    from_album = extract_edition_annotation(album_name)
+    if from_album:
+        return from_album
+
+    counts: dict[str, int] = {}
+    for raw in (track_titles or []):
+        annotation = extract_edition_annotation(str(raw or ""))
+        if annotation:
+            counts[annotation] = counts.get(annotation, 0) + 1
+    if not counts:
+        return None
+
+    # Deterministic tie-break on the annotation text so two equal counts
+    # cannot resolve differently between runs.
+    annotation, hits = max(counts.items(), key=lambda item: (item[1], item[0]))
+    total = sum(counts.values())
+    if hits < _ALBUM_ANNOTATION_MIN_TRACKS or hits * 2 < total:
+        return None
+    return annotation
 
 
 def is_compilation_artist(artist: str | None) -> bool:

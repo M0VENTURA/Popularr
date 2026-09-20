@@ -83,7 +83,13 @@
   server cannot know which rows will collide.
 -#}
 <div class="release-item" data-status="{{ 'missing' if is_missing else 'library' }}" data-year="{{ year or 0 }}" data-title="{{ title|e }}" data-mbid="{{ mbid|e }}">
-  <div class="release-summary" role="button" tabindex="0" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}">
+  {#-
+    ``data-release-id`` is what /api/artist/release/tracklist keys on for a
+    MISSING release — the expander reads it from the SUMMARY element, and it
+    used to exist only on the Import button inside ``.release-actions``, so the
+    id was always undefined and the request went out with an empty id.
+  -#}
+  <div class="release-summary" role="button" tabindex="0" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-release-id="{{ album.release_id|e }}">
     {% if cover %}
     <img class="release-art" src="{{ cover }}" alt="{{ title|e }}" loading="lazy"
          onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">

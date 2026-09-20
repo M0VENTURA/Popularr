@@ -384,6 +384,43 @@ def _build_album_listener_distributions(
     return album_lf_listeners, album_lb_listens, album_lf_lb_pairs
 
 
+def _album_edition_annotation(
+    album_context: dict[str, Any] | None,
+    album_tracks: list[dict[str, Any]] | None = None,
+) -> str | None:
+    """The version annotation the album being scanned agrees on, or None.
+
+    WHY: a release routinely marks only SOME of its titles — on the unplugged
+    edition of an album most read "Song (Unplugged Version)" while a few are
+    tagged plainly as "Song". Every per-title check then fails for exactly
+    those tracks, because ``edition_annotations_compatible("Song", "Song
+    (Unplugged Version)")`` is False while ``("Song", "Song")`` is True — so
+    the recording search skips the unplugged recording and takes the
+    identically titled STUDIO one. The track then carries the studio
+    recording's MBID and every popularity figure read through it is the studio
+    version's, which is the reported "used the wrong version of the tracks
+    when doing the popularity scoring".
+
+    Resolved from the album NAME first, then by majority across the album's
+    track titles. See ``helpers.normalization_service.album_version_annotation``.
+    """
+    context = album_context if isinstance(album_context, dict) else {}
+    album_name = _as_str(context.get("album"))
+
+    titles: list[str] = []
+    for source in (album_tracks, context.get("tracks")):
+        for entry in (source or []):
+            if isinstance(entry, dict):
+                titles.append(_as_str(entry.get("title")))
+
+    try:
+        from helpers.normalization_service import album_version_annotation
+        return album_version_annotation(album_name, titles)
+    except Exception as exc:
+        logger.debug("Album version annotation lookup failed", error=str(exc))
+        return None
+
+
 _GENRE_SOURCE_COLUMNS = (
     "musicbrainz_genres",
     "discogs_genres",
@@ -700,6 +737,7 @@ def _resolve_track_mb_metadata(
     batch_title: str = "",
     album_context: dict[str, Any] | None = None,
     album_result: dict[str, Any] | None = None,
+    edition_annotation: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     title = _as_str(track_title or "")
@@ -748,11 +786,16 @@ def _resolve_track_mb_metadata(
                     _album_type_indicates_live(track, album_context, album_result)
                     or is_live_or_alternate_track_title(title)
                 )
+                # The album's own version annotation, for a title that carries
+                # none: without it a plainly tagged track on an unplugged (or
+                # acoustic) album resolves to the STUDIO recording. See
+                # ``_album_edition_annotation``.
                 mb_data = mb_service.lookup_recording_metadata(
                     title,
                     artist,
                     album=_album_anchor or None,
                     is_live_release=_is_live_release,
+                    edition_annotation=edition_annotation,
                 )
                 _from_batch = False
 
@@ -1039,6 +1082,12 @@ def process_track(
         except Exception as _il_exc:
             logger.debug("Interlude LB stored-outlier check failed", track_id=track_id, error=str(_il_exc))
 
+    # The album's version annotation, for any track whose OWN title lacks it.
+    # Computed once because BOTH recording lookups below need it — the MB
+    # metadata pass and the ListenBrainz MBID fallback. See
+    # ``_album_edition_annotation`` for the reported failure it prevents.
+    _album_annotation = _album_edition_annotation(album_context, album_tracks)
+
     _mb_meta = None
     _genre_lookup_artist = None
     _genre_lookup_title = None
@@ -1056,6 +1105,7 @@ def process_track(
                 batch_title=_as_str(track_context.get("title") or track.get("title")),
                 album_context=album_context,
                 album_result=album_result,
+                edition_annotation=_album_annotation,
             )
         except Exception as exc:
             logger.debug("MB pre-resolution failed", track_id=track_id, error=str(exc))
@@ -1374,11 +1424,14 @@ def process_track(
                                         # the ListenBrainz count fetched for that
                                         # MBID is the STUDIO recording's — which
                                         # is how a live album scored like a studio
-                                        # album.
+                                        # album. ``edition_annotation`` extends the
+                                        # same protection to every other version
+                                        # marker (unplugged, acoustic, ...).
                                         recording_mbid, _conf = get_shared_mb_service().get_suggested_mbid(
                                             raw_title or title,
                                             artist,
                                             is_live_release=is_live_release,
+                                            edition_annotation=_album_annotation,
                                         )
 
                                 if recording_mbid:

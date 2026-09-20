@@ -282,7 +282,7 @@
         <div class="row g-3">
           {# Keys that moved to dedicated cards (Scan Behaviour / Single Detection) — never shown here #}
           {% set moved_feature_keys = ['album_skip_days', 'popularity_skip_days', 'singles_skip_days', 'metadata_skip_days', 'album_skip_min_tracks', 'skip_unchanged_albums', 'run_singles_on_skipped_albums', 'cover_detection_enabled', 'mature_track_min_age_years',
-            'old_album_age_months', 'album_old_album_skip_days', 'popularity_old_album_skip_days', 'singles_old_album_skip_days', 'metadata_old_album_skip_days',
+            'old_album_age_months', 'album_old_album_skip_days', 'popularity_old_album_skip_days', 'singles_old_album_skip_days', 'metadata_old_album_skip_days', 'missing_release_tracklist_limit',
             'deep_genre_search', 'use_test_site',
             'source_discogs_confidence', 'source_musicbrainz_confidence', 'source_musicbrainz_compilation_confidence',
             'source_discogs_video_confidence', 'source_lastfm_confidence', 'source_radio_edit_confidence'] %}
@@ -1539,6 +1539,11 @@
           <label class="form-label form-label-sm">Metadata Old-Album Window (days)</label>
           <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_metadata_old_album_skip_days" value="{{ config.get('features', {}).get('metadata_old_album_skip_days', 30) }}">
           <small class="form-text text-muted">Old albums whose <strong>Metadata</strong> scan ran for this many days. Default: <strong>30</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm">Missing-Release Tracklists per Artist</label>
+          <input type="number" step="1" min="0" max="200" class="form-control form-control-sm feature-field" name="feature_missing_release_tracklist_limit" value="{{ config.get('features', {}).get('missing_release_tracklist_limit', 10) }}">
+          <small class="form-text text-muted">Missing releases per artist whose <strong>tracklist</strong> is fetched and cached in the background by the missing-releases sweep, so the artist page's expander loads them instantly. The sweep already pauses whenever a popularity scan is running. Each tracklist costs up to <strong>3 MusicBrainz requests</strong> against the shared 1&nbsp;req/s budget. Set to <strong>0 to disable</strong>. Default: <strong>10</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
           <label class="form-label form-label-sm">Minimum Tracks for Album Skip Check</label>

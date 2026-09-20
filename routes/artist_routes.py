@@ -22,6 +22,7 @@ from services.metadata.artist_scan_service import (
     import_release as scan_import_release,
     scan_all_missing_releases as scan_all_missing,
     add_artist as scan_add_artist,
+    fetch_missing_release_tracklist,
 )
 from services.metadata import artist_metadata_service as metadata
 from services.enrichment.musicbrainz_service import get_shared_mb_client
@@ -160,6 +161,64 @@ def api_cached_missing_releases() -> Any:
     artist = request.args.get("artist", "").strip()
     data, code = get_cached_missing_releases(artist)
     return jsonify(data), code
+
+
+@artist_bp.route("/api/artist/release/tracklist")
+def api_missing_release_tracklist() -> Any:
+    """Tracklist for one MISSING release, for the artist page's expander.
+
+    ── WHY THIS ENDPOINT EXISTS ────────────────────────────────────────────
+    The artist page's tracklist expander called
+
+        GET /api/musicbrainz/release/tracks?mbid=…&release_id=…
+
+    which does not exist. The only route on that path is
+    ``POST /api/album/musicbrainz/release/tracks`` — a different blueprint,
+    a different HTTP method, and its argument arrives as ``release_mbid`` in a
+    JSON body. So every missing release on every artist page failed with a 404
+    and rendered "Error loading tracks."
+
+    Serving it here rather than from the MusicBrainz blueprint is deliberate:
+    the tracklist is CACHED in ``missing_releases.tracklist`` (filled by the
+    background backfill, for free), so the common case costs one indexed SELECT
+    and no MusicBrainz request at all. Only an unfilled row reaches the API.
+    """
+    artist = request.args.get("artist", "").strip()
+    release_id = (
+        request.args.get("release_id", "").strip()
+        or request.args.get("mbid", "").strip()
+    )
+
+    if not release_id:
+        return jsonify({"success": False, "error": "release_id is required"}), 400
+
+    try:
+        titles = fetch_missing_release_tracklist(release_id, artist)
+    except Exception as exc:
+        logger.warning(
+            "Missing-release tracklist lookup failed",
+            artist=artist,
+            release_id=release_id,
+            error=str(exc),
+        )
+        titles = []
+
+    if not titles:
+        # A distinct 200-with-empty-list rather than a 404: the release may
+        # simply have no cached list yet and MusicBrainz may have no reachable
+        # release for a synthetic id. The page renders "No tracks found.",
+        # which is truer than an error the user can do nothing about.
+        return jsonify({
+            "success": True,
+            "release_id": release_id,
+            "tracklist": [],
+        })
+
+    return jsonify({
+        "success": True,
+        "release_id": release_id,
+        "tracklist": titles,
+    })
 
 
 @artist_bp.route("/api/artist/cleanup-false-positive-missing", methods=["POST"])

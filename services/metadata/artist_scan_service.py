@@ -20,6 +20,7 @@ Concurrency and outage behaviour:
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
@@ -35,6 +36,7 @@ from db.repositories.metadata import (
     fetch_artist_albums,
     fetch_artist_mbid,
 )
+from helpers.config_helpers import get_feature
 from helpers.normalization_service import normalize_title_for_lookup
 from helpers.musicbrainz_helpers import normalize_single_mbid
 from services.enrichment.musicbrainz_service import get_shared_mb_client
@@ -323,33 +325,303 @@ def _persist_missing_releases(artist: str, missing_items: list[dict[str, Any]]) 
     Callers must only reach this after a SUCCESSFUL MusicBrainz lookup. The
     delete is unconditional, so calling it with an empty list after a failed
     lookup silently wipes the artist's cached rows.
+
+    ── WHY THE EXISTING TRACKLISTS ARE CARRIED OVER ────────────────────────
+    This is a DELETE + INSERT of the same release rows on every sweep, and the
+    tracklist column is the one expensive thing attached to them: filling it
+    costs up to three MusicBrainz calls per release (see
+    ``backfill_missing_release_tracklists``). Re-inserting without it threw
+    that work away on every scan, so the cache could never reach a state where
+    a tracklist was already present — ``populate_missing_release_tracklists``
+    only ever selects rows whose tracklist is NULL/empty, so it re-fetched the
+    same releases forever and the artist page never had a cached list to serve.
     """
     if not artist:
         return
+
+    preserved: dict[str, str] = {}
+    try:
+        with db_session() as session:
+            rows = session.execute(
+                text("""
+                    SELECT release_id, tracklist
+                    FROM missing_releases
+                    WHERE LOWER(artist) = LOWER(:artist)
+                      AND tracklist IS NOT NULL
+                      AND tracklist <> ''
+                      AND tracklist <> '[]'
+                """),
+                {"artist": artist},
+            ).fetchall() or []
+        preserved = {
+            str(r[0]): str(r[1])
+            for r in rows
+            if r[0] and r[1]
+        }
+    except Exception as exc:
+        logger.debug("Could not read existing tracklists", artist=artist, error=str(exc))
+
     with db_session() as session:
         session.execute(
             text("DELETE FROM missing_releases WHERE LOWER(artist) = LOWER(:artist)"),
             {"artist": artist},
         )
         for item in missing_items:
+            release_id = str(item.get("id", "") or "")
             session.execute(
                 text("""
                     INSERT INTO missing_releases
                         (artist, release_id, title, primary_type, first_release_date,
-                         cover_art_url, category, last_checked)
+                         cover_art_url, category, tracklist, last_checked)
                     VALUES (:artist, :release_id, :title, :primary_type,
-                            :first_release_date, :cover_art_url, :category, CURRENT_TIMESTAMP)
+                            :first_release_date, :cover_art_url, :category,
+                            :tracklist, CURRENT_TIMESTAMP)
                 """),
                 {
                     "artist": artist,
-                    "release_id": item.get("id", ""),
+                    "release_id": release_id,
                     "title": item.get("title", ""),
                     "primary_type": item.get("primary_type", "Album"),
                     "first_release_date": item.get("first_release_date", ""),
                     "cover_art_url": item.get("cover_art_url", ""),
                     "category": item.get("category", "Album"),
+                    "tracklist": preserved.get(release_id),
                 },
             )
+
+
+# ---------------------------------------------------------------------------
+# Missing-release tracklists
+#
+# The artist page's per-release tracklist is served from the cached
+# ``missing_releases.tracklist`` column whenever it is populated, and only hits
+# MusicBrainz when it is not. Filling that cache is deliberately BACKGROUND work
+# rather than part of the artist scan, for the reason measured below.
+# ---------------------------------------------------------------------------
+
+#: How many missing releases per artist the sweep will fill a tracklist for.
+#: 0 disables the backfill entirely. Config: features.missing_release_tracklist_limit
+_DEFAULT_TRACKLIST_BACKFILL_LIMIT = 10
+
+
+def get_tracklist_backfill_limit() -> int:
+    """Per-artist cap on tracklist backfill work. 0 disables it."""
+    try:
+        raw = get_feature("missing_release_tracklist_limit", _DEFAULT_TRACKLIST_BACKFILL_LIMIT)
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = _DEFAULT_TRACKLIST_BACKFILL_LIMIT
+    return max(0, min(200, value))
+
+
+def _tracklist_titles_from_release(release: dict[str, Any]) -> list[str]:
+    """Flatten a MusicBrainz release payload into a list of track titles."""
+    titles: list[str] = []
+    for medium in (release.get("media") or []):
+        if not isinstance(medium, dict):
+            continue
+        for track in (medium.get("tracks") or []):
+            if not isinstance(track, dict):
+                continue
+            recording = track.get("recording") if isinstance(track.get("recording"), dict) else {}
+            title = str(
+                recording.get("title") or track.get("title") or ""
+            ).strip()
+            if title:
+                titles.append(title)
+    return titles
+
+
+def _cache_missing_release_tracklist(artist: str, release_id: str, titles: list[str]) -> None:
+    if not release_id or not titles:
+        return
+    try:
+        with db_session() as session:
+            session.execute(
+                text("""
+                    UPDATE missing_releases
+                    SET tracklist = :tracklist, last_checked = CURRENT_TIMESTAMP
+                    WHERE release_id = :release_id
+                      AND (:artist = '' OR LOWER(artist) = LOWER(:artist))
+                """),
+                {
+                    "tracklist": json.dumps(titles, ensure_ascii=False),
+                    "release_id": release_id,
+                    "artist": artist or "",
+                },
+            )
+    except Exception as exc:
+        logger.debug(
+            "Could not cache missing-release tracklist",
+            release_id=release_id,
+            error=str(exc),
+        )
+
+
+def fetch_missing_release_tracklist(
+    release_id: str,
+    artist: str = "",
+) -> list[str]:
+    """Track titles for one cached missing release — DB cache first.
+
+    ``missing_releases.release_id`` holds a MusicBrainz **release-GROUP** id
+    (``_build_missing_release_items`` stores ``rg["id"]``), NOT a release id.
+    A bare ``get_release(release_group_id)`` therefore 404s, which is why the
+    previous cache-filler silently fetched nothing: every fetch raised, was
+    swallowed, and left the row's tracklist NULL forever. Resolution goes via
+    ``_resolve_mb_release``, which tries the id directly and then falls back to
+    browsing the group's releases.
+
+    Returns an empty list when there is no cached list AND MusicBrainz cannot be
+    reached — never raises, so a page render is never broken by a dead API.
+    """
+    release_id = str(release_id or "").strip()
+    if not release_id:
+        return []
+
+    # 1. Cached tracklist — free, and the normal path once the backfill ran.
+    try:
+        with db_session() as session:
+            row = session.execute(
+                text("""
+                    SELECT tracklist
+                    FROM missing_releases
+                    WHERE release_id = :release_id
+                      AND (:artist = '' OR LOWER(artist) = LOWER(:artist))
+                    LIMIT 1
+                """),
+                {"release_id": release_id, "artist": artist or ""},
+            ).fetchone()
+        raw = row[0] if row else None
+        if raw:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            titles = [str(t).strip() for t in (parsed or []) if str(t).strip()]
+            if titles:
+                return titles
+    except Exception as exc:
+        logger.debug(
+            "Missing-release tracklist cache miss",
+            release_id=release_id,
+            error=str(exc),
+        )
+
+    # 2. Live lookup. A synthetic release_id (the builder falls back to
+    #    "{normalised-title}-{category}" when MusicBrainz returned no id) can
+    #    never resolve, so it is not worth a request.
+    if not re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        release_id,
+        re.IGNORECASE,
+    ):
+        return []
+
+    if not _musicbrainz_available():
+        return []
+
+    try:
+        client = get_shared_mb_client()
+        release, _resolved = _resolve_mb_release(client, release_id)
+        titles = _tracklist_titles_from_release(release or {})
+        if titles:
+            _cache_missing_release_tracklist(artist, release_id, titles)
+        return titles
+    except Exception as exc:
+        logger.debug(
+            "Missing-release tracklist fetch failed",
+            release_id=release_id,
+            error=str(exc),
+        )
+        return []
+
+
+def backfill_missing_release_tracklists(
+    artist: str,
+    *,
+    limit: int | None = None,
+    should_stop: Any = None,
+) -> int:
+    """Populate cached tracklists for this artist's missing releases.
+
+    ── WHY THIS IS BACKGROUND WORK, NOT PART OF THE ARTIST SCAN ────────────
+    ``missing_releases.release_id`` is a release-GROUP id, so one tracklist
+    costs up to THREE MusicBrainz requests per release:
+
+      1. ``get_release(<group-id>)``      → 404, wasted
+      2. ``get("release", release-group=…)`` → 1 concrete release id
+      3. ``get_release(<release-id>, inc=recordings)``
+
+    MusicBrainz is globally throttled to ~1 req/s
+    (``api_clients/musicbrainz_http.py::_strict_throttle``), so a 20-release
+    backfill is ~60s of the *shared* budget. Doing that inline in the
+    popularity scan would push the scan's own MusicBrainz calls behind it by
+    that much per artist — the same "the scan looks stuck" failure the
+    page-load probe storm caused.
+
+    So it runs in the missing-releases sweep instead, which:
+      * is already a background daemon thread,
+      * already refuses to start while a popularity scan is running, and
+      * already pauses mid-sweep (``_wait_while(_popularity_scan_active, …)``).
+
+    The extra guard below makes each artist's backfill stop at the first sign
+    of a scan rather than merely pausing, so the sweep's artist budget is not
+    consumed by tracklist work while a scan wants the rate budget.
+    """
+    artist = str(artist or "").strip()
+    if not artist:
+        return 0
+
+    limit = get_tracklist_backfill_limit() if limit is None else int(limit)
+    if limit <= 0:
+        return 0
+
+    try:
+        with db_session() as session:
+            rows = session.execute(
+                text("""
+                    SELECT release_id
+                    FROM missing_releases
+                    WHERE LOWER(artist) = LOWER(:artist)
+                      AND release_id IS NOT NULL AND TRIM(release_id) <> ''
+                      AND (tracklist IS NULL OR tracklist = '' OR tracklist = '[]')
+                    ORDER BY last_checked ASC NULLS FIRST, first_release_date DESC NULLS LAST
+                    LIMIT :limit
+                """),
+                {"artist": artist, "limit": limit},
+            ).fetchall() or []
+        release_ids = [str(r[0]) for r in rows if r[0]]
+    except Exception as exc:
+        logger.debug("Tracklist backfill query failed", artist=artist, error=str(exc))
+        return 0
+
+    filled = 0
+    for release_id in release_ids:
+        # Stand down immediately — see the docstring. The sweep retries this
+        # artist on its next pass, so nothing is lost by stopping here.
+        if should_stop is not None and should_stop():
+            break
+        if _popularity_scan_active():
+            logger.info(
+                "Missing-release tracklist backfill halted",
+                reason="a popularity scan started",
+                artist=artist,
+                filled=filled,
+            )
+            break
+        if not _musicbrainz_available():
+            break
+
+        titles = fetch_missing_release_tracklist(release_id, artist)
+        if titles:
+            filled += 1
+
+    if filled:
+        logger.info(
+            "Missing-release tracklists backfilled",
+            artist=artist,
+            filled=filled,
+            attempted=len(release_ids),
+        )
+    return filled
 
 
 def _cleanup_imported_releases() -> int:
@@ -745,6 +1017,24 @@ def _run_missing_releases_scan() -> None:
                 # should be cleared.
                 _persist_missing_releases(artist, missing_items)
                 total_missing += len(missing_items)
+
+                # Fill a few cached tracklists for the releases just written,
+                # so the artist page's expandable tracklist is served from the
+                # DB instead of costing up to three MusicBrainz calls on
+                # click. Bounded per artist and halted the moment a popularity
+                # scan starts — see the function's docstring for the cost.
+                try:
+                    backfill_missing_release_tracklists(
+                        artist,
+                        should_stop=_should_stop,
+                    )
+                    _write_progress("running", current_artist=artist)
+                except Exception as exc:
+                    logger.debug(
+                        "Tracklist backfill failed",
+                        artist=artist,
+                        error=str(exc),
+                    )
             except Exception as exc:
                 logger.error("Error scanning artist", artist=artist, error=str(exc))
                 continue

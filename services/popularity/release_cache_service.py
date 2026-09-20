@@ -20,6 +20,10 @@ from sqlalchemy import text
 
 from api_clients.musicbrainz_http import MusicBrainzHttpClient, escape_lucene_special_chars
 from db.engine import db_session
+# Imported as a MODULE (not ``from … import fetch_missing_release_tracklist``) so
+# the name is resolved at call time: a test can patch the module attribute, and
+# a future move of the function does not need this binding updated.
+from services.metadata import artist_scan_service
 
 logger = structlog.get_logger(__name__)
 
@@ -673,37 +677,22 @@ def populate_missing_release_tracklists(artist: str, limit: int = 5) -> dict[str
         release_id = str(row.get("release_id") or "").strip()
         if not release_id:
             continue
-        try:
-            from api_clients.musicbrainz_http import MusicBrainzHttpClient
-            client = MusicBrainzHttpClient(enabled=True)
-            detail: dict[str, Any] = client.get_release(release_id, inc="recordings") or {}
-            tracklist: list[str] = []
-            media_list: list[dict[str, Any]] = detail.get("media") or []
-            for medium in media_list:
-                tracks: list[dict[str, Any]] = medium.get("tracks") or []
-                for track_obj in tracks:
-                    title = str(track_obj.get("title") or "").strip()
-                    if title:
-                        tracklist.append(title)
-            if tracklist:
-                import json
-                tracklist_json = json.dumps(tracklist)
-                with db_session() as session:
-                    session.execute(
-                        text("""
-                            UPDATE missing_releases
-                            SET tracklist = :tracklist, last_checked = CURRENT_TIMESTAMP
-                            WHERE release_id = :release_id AND LOWER(artist) = LOWER(:artist)
-                        """),
-                        {"tracklist": tracklist_json, "release_id": release_id, "artist": artist},
-                    )
-                fetched += 1
-        except Exception as exc:
-            logger.debug(
-                "[RELEASE_CACHE] Tracklist fetch failed",
-                artist=artist,
-                release_id=release_id,
-                error=str(exc),
-            )
+        # Delegated to the artist-scan service, which owns the missing-releases
+        # table and knows that ``release_id`` holds a release-GROUP id.
+        #
+        # This loop used to call ``get_release(release_id, inc="recordings")``
+        # directly on a freshly-constructed MusicBrainzHttpClient. Two problems,
+        # both silent:
+        #   1. a release-GROUP id 404s ``get_release``, so EVERY fetch raised,
+        #      was caught, and left the row's tracklist NULL — the cache could
+        #      never fill; and
+        #   2. the raw client bypassed ``get_shared_mb_client()``, so these
+        #      requests carried their own HTTP session (they still shared the
+        #      module-level 1 req/s throttle, but nothing else).
+        # ``fetch_missing_release_tracklist`` resolves the group via
+        # ``_resolve_mb_release``, caches the result, and uses the shared client.
+        titles = artist_scan_service.fetch_missing_release_tracklist(release_id, artist)
+        if titles:
+            fetched += 1
 
     return {"fetched": fetched}

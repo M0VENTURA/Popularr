@@ -89,12 +89,29 @@ def save_album_art_db(conn: Any = None, artist: str = "", album: str = "",
 
 
 def fetch_album_tracklist(conn: Any = None, artist: str = "", album: str = ""):
+    """Every track of one album, for the artist page's expandable tracklist.
+
+    The comparison is CASE-INSENSITIVE on both keys, and it has to be: the
+    caller (``routes/ui_routes.py::_build_artist_detail_payload``) selected the
+    album in the first place with
+
+        WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:name)
+
+    so the album is guaranteed to be this artist's only up to case. Feeding the
+    URL's spelling of the artist back in as an EXACT match returns nothing
+    whenever the two differ (e.g. ``/artist/dArtagnan`` against a stored
+    ``dArtagnan`` vs ``DARTAGNAN``), and the artist page then reports
+    "Tracks not found" for an album it is simultaneously listing as owned.
+
+    ``LOWER(COALESCE(album, ''))`` mirrors the album-detail page's own lookup,
+    so the two surfaces agree on what "the same album" means.
+    """
     with db_session() as session:
         result = session.execute(text("""
             SELECT id, title, track_number, duration, artist
             FROM tracks
-            WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
-              AND album = :album
+            WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+              AND LOWER(COALESCE(album, '')) = LOWER(:album)
             ORDER BY COALESCE(disc_number, '1'),
                      COALESCE(track_number, '999'),
                      title
