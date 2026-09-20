@@ -93,6 +93,11 @@ def _read_file_values(file_path: str) -> dict[str, str]:
                 "musicbrainz_releasegroupid": "musicbrainzreleasegroupid",
                 "musicbrainz_releasetrackid": "musicbrainzreleasetrackid",
                 "musicbrainz_workid": "musicbrainzworkid",
+                # The original-year pair. Without these the sync could not see
+                # whether a file already carries them (fill-if-missing would
+                # rewrite them every scan) nor compare them against DATE.
+                "originalyear": "originalyear",
+                "originaldate": "originaldate",
             }
             for key, desc_norm in _TXXX_DESC.items():
                 for f in tag_obj.getall("TXXX"):
@@ -117,8 +122,9 @@ def _read_file_values(file_path: str) -> dict[str, str]:
                 "musicbrainz_albumartistid": "musicbrainz_albumartistid",
                 "musicbrainz_releasegroupid": "musicbrainzreleasegroupid",
                 "musicbrainz_releasetrackid": "musicbrainz_releasetrackid",
-                "musicbrainz_workid": "musicbrainz_workid",
-            }
+                "musicbrainz_workid": "musicbrainz_workid",                # Vorbis twins of the MP3 original-year pair above.
+                "originalyear": "originalyear",
+                "originaldate": "originaldate",            }
             for key, vkey in _VORBIS_KEY.items():
                 vals = audio.get(vkey) or audio.get(vkey.upper()) or []
                 joined = ", ".join(str(v).strip() for v in vals if str(v).strip())
@@ -218,7 +224,13 @@ def _fetch_artist_genres(artist: str) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 def _resolve_album_year(tracks: list[dict[str, Any]]) -> str:
-    """Determine a single unified release year for the entire album group."""
+    """The album's ORIGINAL year — the value most tracks agree on.
+
+    Determines a single unified ORIGINAL year for the entire album group, from
+    the ``year`` column (which the scan stores as the release GROUP's first
+    release year). This is the year that belongs in ORIGINALYEAR/ORIGINALDATE,
+    never in the file's DATE tag — see ``_resolve_album_edition_year``.
+    """
     years = []
     for t in tracks:
         y = str(t.get("year") or "").strip()
@@ -234,8 +246,49 @@ def _resolve_album_year(tracks: list[dict[str, Any]]) -> str:
     return best_year
 
 
-def _db_tag_candidates(track: dict[str, Any], album_year: str, perfect: bool, include_lyrics: bool, artist_genres: dict[str, int]) -> dict[str, str]:
-    """Map a track's fresh DB values to file-tag keys (empty values omitted)."""
+def _resolve_album_edition_year(tracks: list[dict[str, Any]]) -> str:
+    """The album's EDITION (re-release/remaster) year, or "".
+
+    Read from ``release_year`` — the year of the specific release held in the
+    collection, which the scan resolves per album (see
+    ``scan_stage_runner._resolve_album_authoritative_year``).
+
+    This is the year the file's DATE/YEAR tag must carry: DATE describes the
+    release the FILE is from, so a 2026 remaster of a 1995 album is dated 2026
+    and carries 1995 as its original year. Writing the ORIGINAL year into DATE
+    (what this service did) made every remaster claim to be the original
+    release, which is the reported problem.
+
+    Empty when no track knows an edition year — the caller then falls back to
+    the original year so a file is never left without a DATE.
+    """
+    years = []
+    for t in tracks:
+        raw = str(t.get("release_year") or "").strip()
+        match = re.search(r"(19|20)\d{2}", raw)
+        if match:
+            years.append(match.group(0))
+
+    if not years:
+        return ""
+
+    counts = Counter(years)
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+
+def _db_tag_candidates(
+    track: dict[str, Any],
+    album_year: str = "",
+    perfect: bool = False,
+    include_lyrics: bool = False,
+    artist_genres: dict[str, int] | None = None,
+    edition_year: str = "",
+) -> dict[str, str]:
+    """Map a track's fresh DB values to file-tag keys (empty values omitted).
+
+    ``album_year`` is the ORIGINAL year and ``edition_year`` this release's; see
+    the two resolvers above for why the DATE tag takes the edition year.
+    """
     out: dict[str, str] = {}
 
     def _put(key: str, value: Any) -> None:
@@ -248,7 +301,24 @@ def _db_tag_candidates(track: dict[str, Any], album_year: str, perfect: bool, in
     _put("album", track.get("album"))
     album_artist = str(track.get("album_artist") or "").strip() or str(track.get("artist") or "").strip()
     _put("album_artist", album_artist)
-    _put("year", album_year)
+
+    # ---- years ---------------------------------------------------------- 
+    # DATE/YEAR = the EDITION's year (falling back to the original when no
+    # edition is known, so the tag is never left empty); the album's ORIGINAL
+    # year goes to the ORIGINALYEAR/ORIGINALDATE pair, which is what Navidrome
+    # and Picard read for "when was this song first released".
+    _original_year = str(track.get("originalyear") or "").strip()
+    _original_match = re.search(r"(19|20)\d{2}", _original_year or album_year or "")
+    _original = _original_match.group(0) if _original_match else ""
+    _edition_match = re.search(r"(19|20)\d{2}", edition_year or "")
+    _edition = _edition_match.group(0) if _edition_match else ""
+
+    _put("year", _edition or _original or album_year)
+    _put("originalyear", _original or album_year)
+    # A full original DATE is kept verbatim when the track carries one; a bare
+    # year is a valid Vorbis/ID3 original date and is what we fall back to.
+    _put("originaldate", track.get("originaldate") or _original or album_year)
+
     _put("track_number", track.get("track_number"))
     _put("disc_number", track.get("disc_number"))
     _put("isrc", track.get("isrc"))
@@ -425,20 +495,31 @@ def sync_album_file_tags(artist: str, album: str) -> dict[str, Any]:
     # -------------------------------------------------------------------------
 
     artist_genres = _fetch_artist_genres(artist)
+    # ``year`` is the album's ORIGINAL year and ``release_year`` this EDITION's;
+    # see the two resolvers for why the DATE tag takes the edition.
     album_year = _resolve_album_year(tracks)
+    album_edition_year = _resolve_album_edition_year(tracks)
     
     release_mbid, mb_index, mb_count = _resolve_mb_release(tracks)
     perfect = bool(release_mbid) and _is_perfect_match(tracks, mb_index, mb_count)
 
     files_updated = 0
     corrections_recorded = 0
+    _date_needs_correction = bool(
+        album_edition_year
+        and album_year
+        and _norm(album_edition_year) != _norm(album_year)
+    )
     for track in tracks:
         file_path = str(track.get("file_path") or "").strip()
         if not file_path or not os.path.exists(file_path):
             continue
             
         file_values = _read_file_values(file_path)
-        db_candidates = _db_tag_candidates(track, album_year, perfect, include_lyrics, artist_genres)
+        db_candidates = _db_tag_candidates(
+            track, album_year, perfect, include_lyrics, artist_genres,
+            edition_year=album_edition_year,
+        )
 
         fill: dict[str, str] = {}
         for k, v in db_candidates.items():
@@ -447,6 +528,13 @@ def sync_album_file_tags(artist: str, album: str) -> dict[str, Any]:
                 # Always force overwrite genres if the tag has structurally changed
                 if _norm(file_val) != _norm(v):
                     fill[k] = v
+            elif k == "year" and _date_needs_correction and _norm(file_val) == _norm(album_year):
+                # The file's DATE holds the album's ORIGINAL year while the DB
+                # knows a different EDITION year: that is the inverted pairing
+                # the previous writer produced, not a user edit. Correct it —
+                # fill-if-missing could never fix it, so a remaster would keep
+                # claiming to BE the original release forever.
+                fill[k] = v
             else:
                 # Other metadata is strictly fill-if-missing
                 if not file_val:
@@ -482,18 +570,32 @@ def sync_album_file_tags(artist: str, album: str) -> dict[str, Any]:
 
 
 def _load_fresh_tracks(artist: str, album: str) -> list[dict[str, Any]]:
+    from helpers.normalization_service import album_artist_key_variants
+
+    # The scan relocates a featured credit from a track's TITLE onto its ARTIST
+    # field, and the album key used everywhere is
+    # COALESCE(NULLIF(album_artist, ''), artist) — so one album can be keyed
+    # under both "X" and "X feat. Y" during a single scan. Matching every
+    # spelling is what stops this lookup from silently returning nothing for
+    # exactly the albums the relocation touched.
+    raw_keys = album_artist_key_variants(artist)
+    if not raw_keys:
+        return []
+    placeholders = ", ".join(f":k{i}" for i in range(len(raw_keys)))
+    params: dict[str, Any] = {f"k{i}": key.lower() for i, key in enumerate(raw_keys)}
+    params["album"] = album
     try:
         from sqlalchemy import text as _text
         from db.engine import db_session as _db_session
         with _db_session() as session:
             rows = session.execute(
-                _text("""
+                _text(f"""
                     SELECT * FROM tracks
-                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) IN ({placeholders})
                       AND LOWER(COALESCE(album, '')) = LOWER(:album)
                     ORDER BY COALESCE(disc_number, '1'), COALESCE(track_number, '999')
                 """),
-                {"artist": artist, "album": album},
+                params,
             ).mappings().all() or []
         return [dict(r) for r in rows]
     except Exception as exc:

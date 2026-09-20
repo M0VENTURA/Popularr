@@ -826,6 +826,23 @@ def build_tag_updates(payload: dict[str, Any]) -> dict[str, Any]:
         value = payload.get(column_name)
         if value is not None and str(value).strip() != "":
             tags[tag_name] = value
+
+    # ---- years ---------------------------------------------------------
+    # The DATE/YEAR tag describes the RELEASE THE FILE IS FROM, so a 2026
+    # remaster of a 1995 album is dated 2026; the album's ORIGINAL year belongs
+    # in the ORIGINALYEAR/ORIGINALDATE pair. ``year`` here is the album's
+    # ORIGINAL year (the scan stores the release group's first release year),
+    # so it must NOT reach the DATE tag when an edition year is known — which
+    # is what it did, making every remaster claim to be the original release.
+    _edition_year = str(payload.get("release_year") or "").strip()
+    _original_year = str(payload.get("year") or "").strip()
+    if _edition_year:
+        tags["year"] = _edition_year
+        if _original_year and _original_year != _edition_year:
+            # Only a FALLBACK: an explicit ``originalyear``/``originaldate`` on
+            # the payload (the MusicBrainz value) stays authoritative.
+            tags.setdefault("originalyear", _original_year)
+            tags.setdefault("originaldate", _original_year)
     return tags
 
 
@@ -863,8 +880,19 @@ def update_file_metadata(file_path: str, metadata: Dict[str, Any]) -> bool:
         "album_artist": metadata.get("album_artist"),
         "track_number": metadata.get("track_number"),
         "disc_number": metadata.get("disc_number"),
-        "year": metadata.get("year"),
+        # DATE/YEAR = the EDITION's year when the caller knows one, else the
+        # original (see ``build_tag_updates`` for why). ``originalyear`` /
+        # ``originaldate`` are written below when supplied.
+        "year": metadata.get("release_year") or metadata.get("year"),
     }
+
+    if metadata.get("originalyear"):
+        tag_updates["originalyear"] = metadata.get("originalyear")
+    elif metadata.get("release_year") and metadata.get("year"):
+        tag_updates["originalyear"] = metadata.get("year")
+
+    if metadata.get("originaldate"):
+        tag_updates["originaldate"] = metadata.get("originaldate")
 
     if metadata.get("recording_mbid"):
         tag_updates["musicbrainz_trackid"] = metadata.get("recording_mbid")

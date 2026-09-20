@@ -194,7 +194,12 @@ SINGLE_RELEASE_SUFFIX_RE = re.compile(
 )
 
 REMASTER_SUFFIX_RE = re.compile(
-    r"\s*(?:-|\(|\[)?\s*(?:\d{4}\s*)?remaster(?:ed)?(?:\s*\d{4})?\s*(?:\)|\])?\s*$",
+    # "Remastered", "Remastered 2026", "2026 Remaster", "Remastered Version"
+    # and the bracketed/dashed forms of each. The trailing ``version`` is
+    # optional and common in the wild ("Song (Remastered Version)") while
+    # being invisible to the previous pattern, which silently left the marker
+    # in place.
+    r"\s*(?:-|\(|\[)?\s*(?:\d{4}\s*)?remaster(?:ed)?(?:\s*\d{4})?(?:\s+version)?\s*(?:\)|\])?\s*$",
     re.IGNORECASE,
 )
 
@@ -859,11 +864,22 @@ normalize = normalize_title_for_lookup
 # =============================================================================
 
 def detect_cover_and_normalize_title(title: str) -> tuple[bool, str]:
+    """Deprecated-lite title probe: is this a COVER, and its lookup form.
+
+    The cover verdict is deliberately ATTRIBUTION-shaped: only a trailing
+    bracketed "(X Cover)" / "[Cover Version]" counts. The previous test was a
+    bare ``"cover" in title.lower()``, which flagged every song merely
+    CONTAINING the word — "Cover Me" was reported as a cover, and a track
+    titled "Song (Disturbed Cover)" was too. A falsely flagged cover then had
+    its title stripped and its cover flag stored, which is the reported
+    "falsely created as a cover". Use ``normalise_scan_track_identity`` when
+    you also need the CLEANED title; this function never rewrites the title.
+    """
     if not title:
         return False, ""
 
     normalized = normalize_title_for_lookup(title)
-    is_cover = "cover" in title.lower()
+    is_cover = bool(_COVER_ATTRIBUTION_RE.search(title))
 
     return is_cover, normalized
 
@@ -1220,3 +1236,209 @@ def is_valid_version(track_title: str, allow_live_remix: bool = False) -> bool:
     if any(b in title for b in blacklist) and not any(w in title for w in whitelist):
         return False
     return True
+
+
+# =============================================================================
+# SCAN-TIME TRACK IDENTITY
+#
+# One pass that decides what a track IS, from the messy shapes a library
+# carries, and returns the canonical fields the scan persists:
+#
+#   artist        "Evanescence feat. 12 Stones"
+#                 — a featured credit found in the TITLE is MOVED onto the
+#                   artist ("Bring Me To Life feat 12 stones" -> artist gains
+#                   "feat. 12 Stones", title becomes "Bring Me To Life").
+#   title         "Bring Me To Life"
+#                 — the credit, a "(X Cover)" attribution and a remaster
+#                   marker are all removed.
+#   album_artist  "Evanescence"
+#                 — the PRIMARY artist; never replaced by the track artist, and
+#                   left completely alone for a various-artists compilation.
+#
+# Applied by the SCAN only (``services.popularity.scan_hooks``), which is where
+# the reported problem lives: a Navidrome import stores whatever the file says,
+# and the scan is what decides the canonical record the DB and the file tags
+# then share.
+# =============================================================================
+
+# feat./ft./featuring ONLY. "with", "w/" and "&" are deliberately excluded from
+# TITLES: "Me & You" and "Dance with the Devil" are song titles, not credits.
+# (``strip_featured_artist`` must stay permissive on the ARTIST field, where
+# "X & Y" really is a second credited artist.)
+TITLE_FEATURED_CREDIT_RE = re.compile(
+    r"""
+    \s*
+    (?:\[|\()?\s*
+    (?:feat\.?|ft\.?|featuring)
+    \s+
+    (?P<guest>[^\]\)\[]+?)
+    \s*
+    (?:\]|\))?
+    \s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# A featured credit ALREADY on the artist field — narrow on purpose (see above),
+# and used only to decide whether appending a guest would double it up.
+_ARTIST_FEATURED_RE = re.compile(r"\b(?:feat\.?|ft\.?|featuring)\s+\S", re.IGNORECASE)
+
+FEATURED_JOIN = "feat."
+
+
+def _clean_featured_name(name: str) -> str:
+    """Tidy a guest name lifted out of a title."""
+    text = re.sub(r"\s+", " ", str(name or "").strip()).strip(" .,;:-–—")
+    if not text:
+        return ""
+    # Capitalise ONLY an entirely lower-case credit ("12 stones" -> "12 Stones").
+    # Casing is otherwise preserved, because ``str.title()`` destroys names like
+    # "MC Solaar" and "will.i.am" — the guard below skips any credit holding a
+    # character other than a word character, space, apostrophe or hyphen, and
+    # "will.i.am" carries dots.
+    if text == text.lower() and not re.search(r"[^\w\s'\-]", text):
+        text = text.title()
+    return text
+
+
+def extract_featured_credit(title: str) -> tuple[str, str]:
+    """Split a trailing "feat. X" credit off a TITLE.
+
+    Returns ``(title_without_credit, guest)``; ``guest`` is "" when the title
+    carries no credit, and the title is NEVER emptied — a title that is nothing
+    but a credit is returned unchanged.
+    """
+    text = str(title or "").strip()
+    if not text:
+        return "", ""
+    match = TITLE_FEATURED_CREDIT_RE.search(text)
+    if not match:
+        return text, ""
+    guest = _clean_featured_name(match.group("guest"))
+    cleaned = text[: match.start()].strip().rstrip("-–—,;:")
+    if not guest or not cleaned.strip():
+        return text, ""
+    return cleaned.strip(), guest
+
+
+def build_featured_artist(artist: str, guest: str) -> str:
+    """Append a featured credit to an artist, never duplicating one."""
+    base = str(artist or "").strip()
+    guest = str(guest or "").strip()
+    if not guest:
+        return base
+    if not base:
+        return f"{FEATURED_JOIN} {guest}"
+    if _ARTIST_FEATURED_RE.search(base):
+        return base
+    return f"{base} {FEATURED_JOIN} {guest}"
+
+
+def normalise_scan_track_identity(
+    *,
+    artist: str,
+    title: str,
+    album_artist: str = "",
+    is_va_compilation: bool = False,
+) -> dict[str, Any]:
+    """Canonical ``title`` / ``artist`` / ``album_artist`` for one scanned track.
+
+    Reported cases this covers:
+
+    * ``"Evanescence - Bring Me To Life feat 12 stones"`` becomes artist
+      ``"Evanescence feat. 12 Stones"`` with title ``"Bring Me To Life"``, while
+      the album artist stays ``"Evanescence"``.
+    * a title falsely carrying a cover attribution — ``"Song (Disturbed
+      Cover)"`` — loses the wording, and the flag it caused is reported back so
+      the caller can clear a verdict that came from it.
+    * ``"Song (Remastered)"`` / ``"Song (Remastered 2026)"`` /
+      ``"Song - 2026 Remastered"`` lose the marker. Per the agreed rule the year
+      inside the marker is DISCARDED — the track's years come from
+      MusicBrainz, never from a title.
+
+    ``album_artist`` is only ever the PRIMARY artist: an existing album artist
+    keeps its own value (a featured credit on it is stripped), and it is filled
+    from the primary track artist only when it was empty. A various-artists
+    compilation keeps whatever album artist it has — a compilation's album
+    artist is the compilation's, never the track's.
+    """
+    original_title = str(title or "").strip()
+    original_artist = str(artist or "").strip()
+    original_album_artist = str(album_artist or "").strip()
+
+    clean_title = original_title
+    had_cover = False
+    had_remaster = False
+    # Bounded loop: "Song (Disturbed Cover) (2011 Remastered)" is two trailing
+    # markers, and stripping one exposes the next. Neither stripper can empty a
+    # title (each returns its input when the result would be blank), so a
+    # degenerate title like "(Remastered)" survives untouched.
+    for _ in range(4):
+        before = clean_title
+        stripped = strip_remaster_suffix(clean_title)
+        if stripped and stripped != clean_title:
+            clean_title = stripped
+            had_remaster = True
+        stripped = strip_cover_attribution(clean_title)
+        if stripped and stripped != clean_title:
+            clean_title = stripped
+            had_cover = True
+        if clean_title == before:
+            break
+    clean_title = clean_title or original_title
+
+    title_without_credit, guest = extract_featured_credit(clean_title)
+    if guest:
+        clean_title = title_without_credit
+
+    new_artist = build_featured_artist(original_artist, guest)
+    primary_artist = strip_featured_artist(new_artist).strip() or new_artist
+
+    if is_va_compilation:
+        final_album_artist = original_album_artist
+    elif original_album_artist:
+        final_album_artist = (
+            strip_featured_artist(original_album_artist).strip() or primary_artist
+        )
+    else:
+        final_album_artist = primary_artist
+
+    return {
+        "title": clean_title,
+        "artist": new_artist,
+        "album_artist": final_album_artist,
+        "featured_artist": guest,
+        "title_had_featured_credit": bool(guest),
+        # True when the artist ALREADY carried a featured credit. Callers that
+        # write ``album_artist`` must not act on it in that case: the album key
+        # is ``COALESCE(NULLIF(album_artist,''), artist)``, so changing the
+        # artist spelling (or filling an empty album artist) for a credit-laden
+        # artist would move the whole album to a different key mid-scan.
+        "artist_already_had_credit": bool(_ARTIST_FEATURED_RE.search(original_artist)),
+        # True when a cover ATTRIBUTION was removed from the title — the caller
+        # uses it to clear a cover verdict that wording had caused.
+        "title_had_cover_wording": had_cover,
+        "title_had_remaster_wording": had_remaster,
+    }
+
+
+def album_artist_key_variants(artist: str) -> list[str]:
+    """Album-key spellings that must ALL be honoured for one artist.
+
+    The album key used throughout the app is
+    ``COALESCE(NULLIF(album_artist, ''), artist)``, and the scan RELOCATES a
+    featured credit from the title onto ``artist``. For a row whose
+    ``album_artist`` is empty that changes the key from "X feat. Y" to "X", so
+    an album-scoped lookup issued with the pre-move spelling would silently find
+    NOTHING for exactly the albums the relocation touched — no file-tag sync, no
+    release MBID, no extended metadata. Callers therefore match against every
+    spelling this returns.
+    """
+    keys: list[str] = []
+    for candidate in (
+        str(artist or "").strip(),
+        strip_featured_artist(str(artist or "")).strip(),
+    ):
+        if candidate and candidate not in keys:
+            keys.append(candidate)
+    return keys

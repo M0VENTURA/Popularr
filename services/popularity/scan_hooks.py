@@ -29,6 +29,7 @@ from services.catalog.album_classification_service import (
 from helpers.normalization_service import (
     detect_cover_and_normalize_title,
     is_remastered_only_variant,
+    normalise_scan_track_identity,
     normalize_title_for_lastfm,
     normalize_title_for_lookup,
     strip_remaster_suffix,
@@ -126,6 +127,81 @@ def prepare_track_context(
     )
     album = track.get("album") or album_context.get("album") or ""
 
+    # ---------------------------------------------------------------------
+    # Canonicalise WHO this track is by, BEFORE anything reads the identity.
+    #
+    # A featured credit found in the TITLE is moved onto the artist
+    # ("Bring Me To Life feat 12 stones" -> "Evanescence feat. 12 Stones" /
+    # "Bring Me To Life"), a false "(X Cover)" attribution and a remaster
+    # marker are stripped from the title, and the album artist is pinned to the
+    # PRIMARY artist. See
+    # ``helpers.normalization_service.normalise_scan_track_identity``.
+    #
+    # The result is written back onto the RAW track dict — the same object
+    # ``track_dicts`` / ``album_tracks`` reference in the scan runner — so the
+    # persisted row and every downstream lookup agree. This is the same reason
+    # ``exclude_from_stats`` is written back below: without it the popularity
+    # lookups would keep querying Last.fm/ListenBrainz with the featured credit
+    # glued to the artist or the marker glued to the title.
+    #
+    # Scan-only by design: a Navidrome import stores what the file says, and a
+    # manual edit keeps what the user typed; the scan is what decides the
+    # canonical record.
+    # ---------------------------------------------------------------------
+    _identity = normalise_scan_track_identity(
+        artist=artist,
+        title=title,
+        album_artist=str(track.get("album_artist") or album_context.get("album_artist") or ""),
+        is_va_compilation=bool(album_context.get("is_va_compilation")),
+    )
+    title = _identity["title"] or title
+    artist = _identity["artist"] or artist
+    # ``album_artist`` is filled ONLY when the row had none AND the incoming
+    # artist carried no featured credit of its own. Both conditions exist to keep
+    # the album key STABLE: that key is
+    # ``COALESCE(NULLIF(album_artist, ''), artist)``, so
+    #
+    #   * filling an empty album artist with the PRIMARY artist leaves the key
+    #     untouched whenever the artist was feat.-free ("Evanescence" before the
+    #     move from the title, "Evanescence" after) — which is the case this
+    #     whole pass exists for; and
+    #   * for an artist that ALREADY carried a credit, filling (or stripping) it
+    #     WOULD move the album to a new key mid-scan, and every album-scoped
+    #     lookup issued with the old spelling (file-tag sync, release MBID,
+    #     extended metadata) would silently find nothing. Nothing is written, so
+    #     the album behaves exactly as it did before this pass — and shows the
+    #     same credit-laden artist name it always did.
+    #
+    # A populated album artist is the user's (or Navidrome's) and outranks
+    # anything derivable here — ``track_stage`` even protects the column from a
+    # stale overwrite.
+    _album_artist_was_empty = not str(track.get("album_artist") or "").strip()
+    _write_album_artist = bool(
+        _album_artist_was_empty and not _identity["artist_already_had_credit"]
+    )
+    _scan_album_artist = _identity["album_artist"] if _write_album_artist else ""
+    for _field, _value in (
+        ("title", title),
+        ("artist", artist),
+        # ``album_artist`` is protected from stale overwrites in track_stage, so
+        # the flag is what makes this single, deliberate write persist.
+        ("album_artist", _scan_album_artist),
+        ("album_artist_from_scan_identity", bool(_scan_album_artist)),
+        ("featured_artist", _identity["featured_artist"]),
+        # Flags consumed by ``track_stage`` (cover verdict + logging). Not
+        # ``tracks`` columns — the DB writer drops unknown keys.
+        ("title_had_cover_wording", _identity["title_had_cover_wording"]),
+        ("title_had_featured_credit", _identity["title_had_featured_credit"]),
+        ("title_had_remaster_wording", _identity["title_had_remaster_wording"]),
+    ):
+        if _field == "album_artist" and not _value:
+            # Never blank an existing album artist.
+            continue
+        try:
+            track[_field] = _value
+        except Exception:
+            pass
+
     is_cover, cover_normalized_title = detect_cover_and_normalize_title(title)
 
     lookup_title = normalize_title_for_lookup(title)
@@ -177,6 +253,10 @@ def prepare_track_context(
 
         "is_cover": is_cover,
         "is_remastered_only_variant": remastered_only,
+        "title_had_cover_wording": bool(_identity["title_had_cover_wording"]),
+        "title_had_featured_credit": bool(_identity["title_had_featured_credit"]),
+        "title_had_remaster_wording": bool(_identity["title_had_remaster_wording"]),
+        "featured_artist": _identity["featured_artist"],
         "exclude_from_stats": exclude_from_stats,
         "album_context_live": album_context_live,
 

@@ -866,12 +866,18 @@ def _resolve_track_mb_metadata(
                 # none: without it a plainly tagged track on an unplugged (or
                 # acoustic) album resolves to the STUDIO recording. See
                 # ``_album_edition_annotation``.
+                #
+                # ``edition_annotation`` IS that value here: ``process_track``
+                # computes it once and passes it in. Referring to the caller's
+                # local (``_album_annotation``) from inside this function would
+                # raise NameError — swallowed by the caller's debug-level
+                # handler — and silently turn per-track MB resolution off.
                 mb_data = mb_service.lookup_recording_metadata(
                     title,
                     artist,
                     album=_album_anchor or None,
                     is_live_release=_is_live_release,
-                    edition_annotation=_album_annotation,
+                    edition_annotation=edition_annotation,
                     mbid=_track_mbid or None,
                 )
                 _from_batch = False
@@ -1955,6 +1961,29 @@ def process_track(
                     "work_mbid": effective_track.get("work_mbid"),
                 }
                 force_cover = bool(options.get("force_cover_detection"))
+
+                # A title that carried a "(X Cover)" ATTRIBUTION had that
+                # wording removed by the scan's identity pass — and the wording
+                # was what made this detector fire in the first place, storing a
+                # cover verdict for a track that is not one ("falsely created as
+                # a cover"). Two consequences:
+                #
+                #   * the verdict must be RE-EVALUATED, not read from the cache:
+                #     ``detect_cover_song`` short-circuits on an existing
+                #     "already confirmed" verdict, so ``force`` is set when the
+                #     wording was removed; and
+                #   * a negative verdict must be WRITTEN. This block only ever
+                #     wrote a positive result, because writing nothing leaves a
+                #     confirmed verdict alone — which means clearing a false one
+                #     is impossible without an explicit False.
+                #
+                # ``cover_manual_override`` still wins: that flag records a
+                # decision the USER made, and nothing here may undo it.
+                _cover_wording_removed = bool(track.get("title_had_cover_wording"))
+                _cover_manual_override = bool(cover_data.get("cover_manual_override"))
+                if _cover_wording_removed and not _cover_manual_override:
+                    force_cover = True
+
                 is_cover, reason = detect_cover_song(
                     title, track_artist,
                     track_data=cover_data,
@@ -1971,6 +2000,28 @@ def process_track(
                             _mbg = []
                     _cover_list = ["Cover"] + [g for g in _mbg if g != "Cover"]
                     update_payload["musicbrainz_genres"] = json.dumps(_cover_list, ensure_ascii=False)
+                elif _cover_wording_removed and not _cover_manual_override:
+                    update_payload["is_cover"] = False
+                    update_payload["is_cover_reason"] = "cover attribution removed from title"
+                    # Drop the "Cover" genre the false verdict had added, or the
+                    # genre playlists would keep filing the track as a cover.
+                    _mbg = update_payload.get("musicbrainz_genres")
+                    if _mbg is None:
+                        _mbg = track.get("musicbrainz_genres")
+                    if isinstance(_mbg, str):
+                        try:
+                            _mbg = json.loads(_mbg)
+                        except Exception:
+                            _mbg = []
+                    if isinstance(_mbg, list):
+                        _mbg = [g for g in _mbg if str(g).strip().lower() != "cover"]
+                        update_payload["musicbrainz_genres"] = json.dumps(_mbg, ensure_ascii=False)
+                    logger.info(
+                        "[TRACK] false cover flag cleared",
+                        track_id=track_id,
+                        title=title,
+                        detector_verdict=reason,
+                    )
         except Exception as e:
             logger.debug("Cover detection failed", track_id=track_id, error=str(e))
 
@@ -2116,6 +2167,16 @@ def process_track(
     # -------------------------------------------------------------------------
     # 6. PERSISTENCE
     # -------------------------------------------------------------------------
+    # ``album_artist`` sits in ``_STALE_PROTECTED_COLUMNS``, so a value the
+    # scan's identity pass decided is DROPPED here unless it is declared in the
+    # payload. The flag is set by ``scan_hooks.prepare_track_context`` only when
+    # it actually filled an empty album artist, so a populated one is still
+    # never overwritten by a pass that knows less than the user does.
+    if track.get("album_artist_from_scan_identity"):
+        _scan_album_artist = _as_str(track.get("album_artist")).strip()
+        if _scan_album_artist:
+            update_payload.setdefault("album_artist", _scan_album_artist)
+
     effective_track = _strip_album_type_columns(track, update_payload)
 
     _jsonb_fields = [
