@@ -22,11 +22,22 @@ def initialize_app_services(app=None, is_leader=None):
     runtime state so the config page shows Running after boot.
 
     Guarded by leader status to prevent duplicate scheduling across multi-worker deployments.
+
+    ⚠️ THE GUARD IS A REAL ELECTION, NOT AN ENV FLAG.  ``ENABLE_BACKGROUND_WORKERS``
+    defaults to "true" and is the SAME value in every worker of a container, so a
+    multi-worker deployment (``entrypoint.sh`` runs hypercorn with 4 workers)
+    used to start FOUR schedulers — four copies of every periodic job, each
+    making its own external API calls with its own in-process rate limiter.
+    See ``helpers/leader_lock.py``.
     """
-    # If leader status isn't explicitly passed, check environment variable guard 
-    # to prevent secondary worker processes from spawning overlapping background loops.
     if is_leader is None:
-        is_leader = os.environ.get("ENABLE_BACKGROUND_WORKERS", "true").lower() == "true"
+        try:
+            from helpers.leader_lock import acquire_background_worker_leadership
+
+            is_leader = acquire_background_worker_leadership()
+        except Exception as exc:  # never let the election break startup
+            logger.warning("[TASK_MANAGER] Leader election failed, assuming leader: %s", exc)
+            is_leader = True
 
     if not is_leader:
         logger.debug("[TASK_MANAGER] Skipping background services initialization on non-leader worker.")

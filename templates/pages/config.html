@@ -1672,6 +1672,46 @@
           <small class="form-text text-muted">Which fields the scan writes to the audio FILES (the database is always updated during the scan). When a field is off, file tags are left untouched for that field.</small>
         </div>
       </div>
+
+      <!-- Album MBID sanity guard -->
+      {% set mbid_guard = (config.get('metadata_update', {}) or {}).get('album_mbid_guard', {}) %}
+      <div class="row g-3 mt-1 pt-3 border-top">
+        <div class="col-12">
+          <label class="form-label form-label-sm mb-1">MusicBrainz Album ID Guard</label>
+          <small class="form-text text-muted d-block mb-2">
+            Before an album MusicBrainz ID is written to the tracks or the audio files, the ID's own artist and title
+            are compared with this album's text. A mismatch is refused and the ID is discarded — the normal text search
+            is used instead. This is what stops one bad ID (from an errant batch-tagging run) from merging unrelated
+            albums into a single release. If the ID cannot be looked up (MusicBrainz unreachable) there is nothing to
+            compare, so the update proceeds and is logged as unverified — an outage must not silently break the action.
+          </small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm">Guard</label>
+          <select class="form-select form-select-sm" id="metadata_update_mbid_guard_enabled">
+            <option value="true" {% if mbid_guard.get('enabled', true) %}selected{% endif %}>Enabled (recommended)</option>
+            <option value="false" {% if not mbid_guard.get('enabled', true) %}selected{% endif %}>Disabled</option>
+          </select>
+          <small class="form-text text-muted">Disabling restores the old behaviour: a stored MusicBrainz ID is trusted as-is, with nothing checked against the album's own tags.</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm">Minimum Similarity</label>
+          <input type="number" class="form-control form-control-sm" id="metadata_update_mbid_guard_min_similarity"
+                 min="0.05" max="1" step="0.05" value="{{ mbid_guard.get('min_similarity', 0.65) }}">
+          <small class="form-text text-muted">
+            0.65 keeps legitimate variation matching — edition markers, "&amp;"/"feat." credits, "Vol. 1" vs
+            "Volume 1", punctuation and case are all normalised away first. Lower it only if real albums are refused.
+          </small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm">Multi-Folder Albums</label>
+          <select class="form-select form-select-sm" id="metadata_update_mbid_guard_allow_disc_folders">
+            <option value="true" {% if mbid_guard.get('allow_disc_folders', true) %}selected{% endif %}>Allow for disc folders only (CD1, Disc 2)</option>
+            <option value="false" {% if not mbid_guard.get('allow_disc_folders', true) %}selected{% endif %}>Never — one folder per album</option>
+          </select>
+          <small class="form-text text-muted">An album may span several folders only when every extra folder is a disc folder of the same parent (a genuine multi-disc release). Any other multi-folder album is two albums sharing a name, and unifying them is refused.</small>
+        </div>
+      </div>
       <div class="alert alert-secondary mb-0 mt-3 py-2">
         <small class="text-muted">
           <strong>How it works:</strong> the popularity scan cleans the album name with the configured source and

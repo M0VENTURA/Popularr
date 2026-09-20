@@ -99,10 +99,28 @@ def _similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, _normalise(a), _normalise(b)).ratio()
 
 
+# Track-number prefix used when the basename carries no " - " separator:
+# "01. Title", "01.Title", "01 Title", "07 - 12 Title" all mean the same thing.
+# A separator (dash/dot/bracket) or whitespace MUST follow the number, so a
+# title that merely starts with digits ("1999") is never truncated to "9".
+_TRACK_NUMBER_PREFIX_RE = re.compile(r"^\s*\d{1,3}(?:\s*-\s*\d{1,3})?\s*(?:[-\.\)]\s*|\s+)")
+
+# Dash variants used as the artist/title separator.  Only a WHITESPACE-FLANKED
+# dash is a separator: a bare en dash inside a title ("1999–2000") must not
+# split the basename in two.
+_UNICODE_DASH_SEPARATOR_RE = re.compile(r"\s+[\u2010\u2011\u2012\u2013\u2014\u2015]+\s+")
+
+
 def _parse_filename_parts(filename: str) -> dict[str, str | None]:
     """Try to extract artist, album, title, bitrate, and format from a Soulseek filename."""
     name = filename.replace("\\", "/").rsplit("/", 1)[-1]
     name = name.rsplit(".", 1)[0] if "." in name else name
+
+    # Normalise the dash characters peers actually use as the separator
+    # ("Artist – Title", "Artist — Title") to the ASCII " - " the split below
+    # understands.  Without this the ENTIRE basename fell through to
+    # ``title = None`` and the hard title gate rejected the candidate.
+    name = _UNICODE_DASH_SEPARATOR_RE.sub(" - ", name)
 
     result: dict[str, str | None] = {
         "artist": None,
@@ -148,6 +166,24 @@ def _parse_filename_parts(filename: str) -> dict[str, str | None]:
         if fallback:
             result["title"] = fallback.group(2).strip()
             result["has_track_number"] = True
+
+    # Nothing matched a structured layout, so the basename IS the title.
+    #
+    # WHY THIS MATTERS: with the artist and album living in the FOLDERS
+    # ("Artist/Album/Song.flac") the basename is often just the track name,
+    # with the track number either absent or dot-separated ("01. Song").  The
+    # structured branches above only understand a " - " separator, so ``title``
+    # stayed None for every one of those layouts — and ``_score_result``'s HARD
+    # TITLE GATE reads exactly that field, so each candidate scored 0.0 and was
+    # rejected even though the artist gate would have accepted it.  In the old
+    # pipeline these matched fine, which is the reported regression.
+    if not result["title"]:
+        _tail = _TRACK_NUMBER_PREFIX_RE.sub("", name).strip()
+        if _tail and _tail != name.strip():
+            result["title"] = _tail
+            result["has_track_number"] = True
+        else:
+            result["title"] = name.strip() or None
 
     # Album from the parent folder when the basename has no album segment
     # (e.g. "music/The Eternal [AUS]/2013 - When The Circle Of Light Begins
@@ -478,10 +514,25 @@ def _score_result(
     if expected_album:
         expected_album = _sanitize_slskd_query(expected_album) or expected_album
 
-    art_score = _similarity(str(parts.get("artist") or ""), expected_artist)
+    # Score the SAME artist credit the evidence gate below trusts.
+    #
+    # The queue artist routinely carries a featured guest ("KNEECAP feat.
+    # Fawzi") that peers never put in the filename.  The gate strips that
+    # suffix before deciding a candidate is acceptable — but the bonus used the
+    # RAW credit, so a candidate the gate had just ACCEPTED still earned 0
+    # artist points and fell under the accept floor anyway:
+    #   "KNEECAP - Better Way To Live.mp3"  ->  25.0  (artist 0 + title 25)
+    #   old pipeline: 1.00 -> accepted.
+    # One derivation, used by both, so the gate and the score can never
+    # disagree about who the artist is.
+    from helpers.config_helpers import _FEAT_SUFFIX_RE
+
+    credit_artist = _FEAT_SUFFIX_RE.sub("", expected_artist or "").strip() or expected_artist
+
+    art_score = _similarity(str(parts.get("artist") or ""), credit_artist)
     if art_score > 0.7:
         score += 30 * min(1.0, art_score)
-    elif _normalise(expected_artist) in _normalise(filename):
+    elif _normalise(credit_artist) in _normalise(filename):
         score += 20
 
     # ── Hangul / CJK artist evidence fix ─────────────────────────────────
@@ -524,8 +575,8 @@ def _score_result(
     if expected_artist and expected_artist.lower() not in {
         "unknown", "unidentified", "unidentified artist", "various", "various artists", "-",
     }:
-        from helpers.config_helpers import _FEAT_SUFFIX_RE
-        gate_artist = _FEAT_SUFFIX_RE.sub("", expected_artist).strip()
+        # Same derivation as the score bonus above — see the comment there.
+        gate_artist = credit_artist
         norm_gate = _normalise(gate_artist)
         
         norm_filename = _normalise(filename)

@@ -954,6 +954,74 @@ def get_metadata_update_config() -> dict[str, Any]:
 
 
 # -----------------------------------------------------------------------------
+# Album MBID sanity guard
+# -----------------------------------------------------------------------------
+# Before an album MusicBrainz ID is trusted, the LOCAL artist/album text is
+# compared against the ID's own resolved text.  A stored ID used to be applied
+# to every track and every audio file with NO check at all, so one bad ID from
+# an errant batch-tagging run could merge two unrelated albums into a single
+# release (the reported Metallica / d'Artagnan "66-track super album").
+#
+#   min_similarity      0.65 keeps legitimate variation matching — edition
+#                       markers, "&"/"feat." credits, "Vol. 1" vs "Volume 1",
+#                       punctuation and case are normalised away before the
+#                       comparison — while rejecting a genuinely different
+#                       record.  Lower it only if real albums are refused.
+#   allow_disc_folders  an album may span several folders ONLY when every extra
+#                       folder is a disc folder ("CD1", "Disc 2") of the same
+#                       parent.  Any other multi-folder album is two albums
+#                       sharing a name, and the fan-out is refused.
+_DEFAULT_ALBUM_MBID_GUARD: dict[str, Any] = {
+    "enabled": True,
+    "min_similarity": 0.65,
+    "allow_disc_folders": True,
+}
+
+
+def get_album_mbid_guard_config() -> dict[str, Any]:
+    """Get the album-MBID sanity-guard config block.
+
+    Config section: ``metadata_update.album_mbid_guard`` in config.yaml
+
+    ```yaml
+    metadata_update:
+      album_mbid_guard:
+        enabled: true
+        min_similarity: 0.65
+        allow_disc_folders: true
+    ```
+
+    Merged the same way as every other nested block: the block is ALWAYS
+    present and a partial user block overrides only the keys it names, so a
+    value saved on the Config page can never silently revert to a default.
+    """
+    cfg = get_config() or {}
+    block = (cfg.get("metadata_update") or {}).get("album_mbid_guard")
+
+    guard = dict(_DEFAULT_ALBUM_MBID_GUARD)
+    if isinstance(block, dict):
+        if "enabled" in block:
+            try:
+                guard["enabled"] = bool(block.get("enabled"))
+            except Exception:
+                pass
+        if "allow_disc_folders" in block:
+            try:
+                guard["allow_disc_folders"] = bool(block.get("allow_disc_folders"))
+            except Exception:
+                pass
+        try:
+            value = float(block.get("min_similarity"))
+        except (TypeError, ValueError):
+            value = None
+        if value is not None:
+            # Clamp to a sane band: 0 would disable the guard silently, and
+            # anything above 1 could never match.
+            guard["min_similarity"] = max(0.05, min(1.0, value))
+    return guard
+
+
+# -----------------------------------------------------------------------------
 # Playlist Configuration
 # -----------------------------------------------------------------------------
 

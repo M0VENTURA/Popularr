@@ -27,6 +27,13 @@ from db.repositories.metadata import (
     fetch_cached_missing_releases,
     update_album_mbid_fields,
 )
+from services.metadata.album_mbid_guard import (
+    guard_album_mbid,
+    is_album_mbid_guard_enabled,
+    log_verdict,
+    rejection_payload,
+    resolve_mbid_text,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -90,7 +97,12 @@ def get_cached_missing(artist: str) -> tuple[dict[str, Any], int]:
 
 
 def apply_album_mbid(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """Apply album MBID to all tracks for an artist/album and sync file tags."""
+    """Apply album MBID to all tracks for an artist/album and sync file tags.
+
+    Guarded by the same sanity check as the album page's apply action: this is
+    a fan-out to the DB columns AND the file tags of every track, so an ID
+    whose own title/artist disagrees with the album must not be forced on.
+    """
     artist_name = str(payload.get("artist") or "").strip()
     album_name = str(payload.get("album") or "").strip()
     album_mbid = str(payload.get("mbid") or "").strip()
@@ -98,6 +110,35 @@ def apply_album_mbid(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
 
     if not artist_name or not album_name or not album_mbid:
         return {"success": False, "error": "artist, album, and mbid are required"}, 400
+
+    if is_album_mbid_guard_enabled():
+        try:
+            with db_session() as session:
+                rows = session.execute(text("""
+                    SELECT file_path FROM tracks
+                    WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist AND album = :album
+                """), {"artist": artist_name, "album": album_name}).fetchall() or []
+            file_paths = [str(r[0] or "") for r in rows]
+        except Exception:
+            file_paths = []
+
+        mb_text = resolve_mbid_text(mbid=album_mbid, rg_mbid=release_group_mbid)
+        verdict = guard_album_mbid(
+            artist=artist_name,
+            album=album_name,
+            mb_artist=mb_text.get("artist", ""),
+            mb_album=mb_text.get("title", ""),
+            file_paths=file_paths or None,
+        )
+        if not verdict["ok"]:
+            log_verdict(verdict, artist=artist_name, album=album_name, mbid=album_mbid, rg_mbid=release_group_mbid)
+            return rejection_payload(
+                verdict,
+                artist=artist_name,
+                album=album_name,
+                mbid=album_mbid,
+                rg_mbid=release_group_mbid,
+            ), 409
 
     rows_updated = update_album_mbid_fields(None, artist_name, album_name, album_mbid, release_group_mbid, None)
 

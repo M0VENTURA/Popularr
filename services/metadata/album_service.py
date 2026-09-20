@@ -40,8 +40,38 @@ from services.enrichment.album_art_service import (
     get_or_fetch_album_art as _fetch_art_canonical,
 )
 from services.enrichment.musicbrainz_service import get_shared_mb_client
+from services.metadata.album_mbid_guard import (
+    guard_album_mbid,
+    is_album_mbid_guard_enabled,
+    log_verdict,
+    rejection_payload,
+    resolve_mbid_text,
+)
 
 logger = structlog.get_logger(__name__)
+
+
+def _album_file_paths(artist: str, album: str) -> list[str]:
+    """Every on-disk path for an album, for the physical-boundary check.
+
+    Paths may be stored RELATIVE (Navidrome imports "Artist/Album/01 - x.mp3"),
+    which is fine: the guard only COMPARES folders with each other, so it never
+    needs to resolve them against MUSIC_ROOT.
+    """
+    try:
+        with db_session() as session:
+            rows = session.execute(
+                text("""
+                    SELECT file_path FROM tracks
+                    WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
+                      AND album = :album
+                """),
+                {"artist": artist, "album": album},
+            ).fetchall() or []
+        return [str(r[0] or "") for r in rows]
+    except Exception as exc:
+        logger.debug("Album guard could not load file paths", artist=artist, album=album, error=str(exc))
+        return []
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -554,7 +584,29 @@ def apply_mbid_to_album(artist: str, album: str, mbid: str, rg_mbid: str, cover_
     the cover art is DOWNLOADED from Cover Art Archive and embedded into every
     track file (and stored in the album_art table) — the reported gap where a
     MusicBrainz lookup "updated the metadata but not the cover art".
+
+    BEFORE any of that, the ID is sanity-checked against the album's OWN text
+    (and its physical folders).  A stored ID used to be written to every track
+    and file with no comparison at all, so one bad ID from an errant
+    batch-tagging run could merge two unrelated albums into a single release
+    (the Metallica / d'Artagnan "66-track super album").  On refusal nothing is
+    written and the response carries TEXT-SEARCH candidates instead.
     """
+    file_paths = _album_file_paths(artist, album)
+
+    if is_album_mbid_guard_enabled():
+        mb_text = resolve_mbid_text(mbid=mbid, rg_mbid=rg_mbid)
+        verdict = guard_album_mbid(
+            artist=artist,
+            album=album,
+            mb_artist=mb_text.get("artist", ""),
+            mb_album=mb_text.get("title", ""),
+            file_paths=file_paths or None,
+        )
+        if not verdict["ok"]:
+            log_verdict(verdict, artist=artist, album=album, mbid=mbid, rg_mbid=rg_mbid)
+            return rejection_payload(verdict, artist=artist, album=album, mbid=mbid, rg_mbid=rg_mbid)
+
     rows = update_album_mbid_fields(
         artist=artist, album=album, mbid=mbid, rg_mbid=rg_mbid, cover_url=cover_url,
     )

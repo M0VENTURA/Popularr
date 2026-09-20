@@ -247,7 +247,7 @@ def extract_track_metadata(
         "r128_track_gain": get_tag_value("r128_track_gain") or "",
         "r128_album_gain": get_tag_value("r128_album_gain") or "",
         "releasedate": get_tag_value("releasedate", "originalreleasedate", "release_date") or "",
-        "originalyear": get_tag_value("originalyear", "original_year", "originalreleaseyear") or None,
+        "originalyear": get_tag_value("originalyear", "original_year", "originalreleaseyear", "origyear") or None,
         "originaldate": get_tag_value("originaldate", "original_date", "originalreleasedate") or None,
         "copyright": get_tag_value("copyright") or "",
         "barcode": get_tag_value("barcode", "ean", "upc") or "",

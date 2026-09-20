@@ -188,5 +188,10 @@ def test_mp3_writer_frame_map_has_new_frames():
     assert tfs._MP3_FRAME_FOR_FIELD["musicbrainz_artistid"] == "TXXX"
     assert tfs._MP3_FRAME_FOR_FIELD["musicbrainz_releasetrackid"] == "TXXX"
     assert tfs._MP3_FRAME_FOR_FIELD["musicbrainz_workid"] == "TXXX"
-    # TXXX frames must be description-aware in the fill-missing pre-check.
-    assert tfs._MB_TXXX_DESC["musicbrainz_releasegroupid"] == "MUSICBRAINZ RELEASE GROUP ID"
+    # TXXX frames must be description-aware in the fill-missing pre-check, and
+    # the description must be the CANONICAL name (services.metadata.tag_names)
+    # — a hand-written desc here is how one field acquired two spellings.
+    from services.metadata.tag_names import canonical_tag_name as _canonical_tag_name
+
+    assert tfs._MB_TXXX_DESC["musicbrainz_releasegroupid"] == _canonical_tag_name("musicbrainz_releasegroupid")
+    assert tfs._MB_TXXX_DESC["musicbrainz_releasegroupid"] == "MUSICBRAINZ_RELEASEGROUPID"

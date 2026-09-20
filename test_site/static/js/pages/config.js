@@ -521,6 +521,15 @@
         {
           album_name_source: getValue('metadata_update_album_name_source', 'dedupe'),
           album_name_update_target: getValue('metadata_update_album_name_target', 'db'),
+          album_mbid_guard: Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.metadata_update && global.pageConfig.metadata_update.album_mbid_guard) || {}),
+            {
+              enabled: getValue('metadata_update_mbid_guard_enabled', 'true') !== 'false',
+              min_similarity: parseFloat(getValue('metadata_update_mbid_guard_min_similarity', '0.65')) || 0.65,
+              allow_disc_folders: getValue('metadata_update_mbid_guard_allow_disc_folders', 'true') !== 'false'
+            }
+          ),
           update_on_files: Object.assign(
             {},
             ((global.pageConfig && global.pageConfig.metadata_update && global.pageConfig.metadata_update.update_on_files) || {}),

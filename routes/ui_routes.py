@@ -2674,7 +2674,7 @@ def _sanitize_config_sections(config: dict) -> dict:
         "queue": ("matching",),
         "popularity": ("weights",),
         "genres": ("weights", "synonyms"),
-        "metadata_update": ("update_on_files",),
+        "metadata_update": ("update_on_files", "album_mbid_guard"),
     }
     
     for parent, children in nested_children.items():

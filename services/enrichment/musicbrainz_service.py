@@ -2426,14 +2426,50 @@ def lookup_musicbrainz_album(Artist: str, Album: str, Existing_mbid: str = "") -
     if Existing_mbid:
         Stored = _lookup_existing_mbid(Existing_mbid, Artist, Album)
         if Stored:
-            Results.append(Stored)
-            Logger.info(
-                "[MB] stored MBID resolved",
-                mbid_type=Stored["mbid_type"],
-                mbid=Existing_mbid,
-                title=Stored["title"],
-                artist=Stored["artist"],
+            # ── SANITY CHECK before a stored ID is allowed to win ────────
+            # This used to be appended with confidence 1.0 and AUTO-SELECTED
+            # ahead of every text candidate, with nothing comparing the ID's
+            # own title/artist against this album.  One bad ID left behind by
+            # an errant batch-tagging run therefore silently redirected the
+            # match — and the fan-out that follows it onto every track and
+            # audio file — to an unrelated record (the Metallica / d'Artagnan
+            # "66-track super album").
+            #
+            # A rejected ID is simply not offered and the text search below
+            # supplies the candidates instead; nothing is written.
+            #
+            # Imported lazily: ``services.metadata`` eagerly imports the album
+            # service, which imports this module, so a module-level import here
+            # would be circular.
+            from services.metadata.album_mbid_guard import (
+                guard_album_mbid as Guard_album_mbid,
+                log_verdict as Log_mbid_verdict,
             )
+
+            Verdict = Guard_album_mbid(
+                artist=Artist,
+                album=Album,
+                mb_artist=str(Stored.get("artist") or ""),
+                mb_album=str(Stored.get("title") or ""),
+            )
+            if Verdict["ok"]:
+                Results.append(Stored)
+                Logger.info(
+                    "[MB] stored MBID resolved",
+                    mbid_type=Stored["mbid_type"],
+                    mbid=Existing_mbid,
+                    title=Stored["title"],
+                    artist=Stored["artist"],
+                )
+            else:
+                Log_mbid_verdict(Verdict, artist=Artist, album=Album, mbid=Existing_mbid)
+                Logger.info(
+                    "[MB] stored MBID discarded — falling back to a text search",
+                    mbid=Existing_mbid,
+                    title=Stored.get("title"),
+                    artist=Stored.get("artist"),
+                    reason=Verdict.get("reason"),
+                )
 
     Query = (
         f'release:"{Escape_lucene_special_chars(Album)}" '

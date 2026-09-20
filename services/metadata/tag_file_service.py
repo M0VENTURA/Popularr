@@ -39,6 +39,12 @@ else:
 # =============================================================================
 
 from db.repositories.tag_repository import get_track_tags
+from services.metadata.tag_names import (
+    canonical_tag_name,
+    clear_id3_variants,
+    clear_vorbis_variants,
+    normalise_tag_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,16 +102,42 @@ _MP3_FRAME_FOR_FIELD = {
     "musicbrainz_workid": "TXXX",
 }
 
-# TXXX descriptions for the MusicBrainz ID frames (case-insensitive).
+# MusicBrainz entity IDs — the ONLY fields with a dedicated TXXX branch.
+# Every name comes from the canonical registry; never hand-write a desc here.
+_MB_ID_FIELDS = (
+    "mbid",
+    "musicbrainz_trackid",
+    "musicbrainz_album_mbid",
+    "musicbrainz_albumid",
+    "musicbrainz_artistid",
+    "musicbrainz_artist_id",
+    "musicbrainz_albumartistid",
+    "musicbrainz_releasegroupid",
+    "musicbrainz_releasetrackid",
+    "musicbrainz_workid",
+)
+_MB_ID_CANONICAL = {name for name in (canonical_tag_name(f) for f in _MB_ID_FIELDS) if name}
+
+# Album-extended fields the SCAN may write to FILES.  Kept as an explicit
+# allow-list (an arbitrary DB column must never become a tag) but the NAMES now
+# come from the canonical registry, so this list can no longer drift from what
+# the readers and the FLAC writer use.
+_EXTENDED_ALBUM_TAG_FIELDS = frozenset({
+    "releasetype", "releasestatus", "releasecountry",
+    "musicbrainz_albumtype", "musicbrainz_albumstatus", "musicbrainz_releasecountry",
+    "originalyear", "originaldate",
+    "tracktotal", "disctotal", "media", "label", "recordlabel",
+    "catalognumber", "catalog", "barcode", "asin", "script", "discsubtitle",
+    "copyright", "language", "explicitstatus",
+    "is_cover", "original_cover_artist", "musicbrainz_genres",
+    "iswc", "original_title", "lyricist",
+})
+
+# TXXX descriptions for the MusicBrainz ID frames.  DERIVED from the canonical
+# registry — a hand-written desc here is how one field silently acquired two
+# spellings (MUSICBRAINZ ALBUM ID *and* MUSICBRAINZ_ALBUMID on the same track).
 _MB_TXXX_DESC = {
-    "musicbrainz_artistid": "MUSICBRAINZ ARTIST ID",
-    "musicbrainz_artist_id": "MUSICBRAINZ ARTIST ID",
-    "musicbrainz_albumartistid": "MUSICBRAINZ ALBUM ARTIST ID",
-    "musicbrainz_trackid": "MUSICBRAINZ TRACK ID",
-    "musicbrainz_albumid": "MUSICBRAINZ ALBUM ID",
-    "musicbrainz_releasegroupid": "MUSICBRAINZ RELEASE GROUP ID",
-    "musicbrainz_releasetrackid": "MUSICBRAINZ RELEASE TRACK ID",
-    "musicbrainz_workid": "MUSICBRAINZ WORK ID",
+    field: name for field, name in ((f, canonical_tag_name(f)) for f in _MB_ID_FIELDS) if name
 }
 
 
@@ -123,10 +155,14 @@ def _existing_non_empty_fields(file_path: str, tags: Dict[str, Any]) -> set[str]
                 if frame_id == "TXXX":
                     # TXXX-based MBID frames: presence depends on the specific
                     # description, not on any TXXX frame existing at all.
+                    # Compared with normalise_tag_name so a file still carrying a
+                    # LEGACY spelling counts as populated — fill_missing_only is
+                    # the user asking us not to touch existing values, and a
+                    # variant of the field IS that value.
                     desc = _MB_TXXX_DESC.get(field)
                     if desc and any(
                         getattr(f, "text", None)
-                        and str(getattr(f, "desc", "") or "").strip().upper() == desc
+                        and normalise_tag_name(getattr(f, "desc", "")) == normalise_tag_name(desc)
                         for f in tag_obj.getall("TXXX")
                     ):
                         present.add(field)
@@ -327,12 +363,15 @@ def _set_text_frame(tag_obj: ID3Type, frame_id: str, frame_cls, value: Any) -> N
 
 
 def _clear_txxx_variants(tag_obj: ID3Type, normalized_target: str) -> None:
-    def norm(desc: str) -> str:
-        return desc.lower().replace(" ", "").replace("_", "").replace("-", "")
+    """Delete every TXXX frame whose desc normalises to *normalized_target*.
 
-    for key in list(tag_obj.keys()):
-        if key.startswith("TXXX:") and norm(key[5:]) == normalized_target:
-            tag_obj.delall(key)
+    Delegates to the canonical registry (``services.metadata.tag_names``): the
+    comparison must be case- AND separator-insensitive, because
+    ``ID3.delall("TXXX:ORIGNALYEAR")`` does not remove a frame stored as
+    ``TXXX:orignalyear`` — which is exactly how duplicate frames survived an
+    overwrite.
+    """
+    clear_id3_variants(tag_obj, normalized_target)
 
 
 # =============================================================================
@@ -428,17 +467,14 @@ def write_id3_tags(file_path: str, tags: Dict[str, Any]) -> bool:
                     count=0,
                 ))
 
-            elif field in {"mbid", "musicbrainz_trackid"}:
-                _clear_txxx_variants(tag_obj, "musicbrainztrackid")
+            elif (canonical_tag_name(field) or "") in _MB_ID_CANONICAL:
+                # ONE canonical desc per field, and every spelling of it removed
+                # first — so a track written by the old space-form code and the
+                # new underscore form ends up with a single frame.
+                _canonical = clear_id3_variants(tag_obj, field)
 
                 if value:
-                    tag_obj.add(TXXX(encoding=3, desc="MUSICBRAINZ TRACK ID", text=[str(value)]))
-
-            elif field in {"musicbrainz_album_mbid", "musicbrainz_albumid"}:
-                _clear_txxx_variants(tag_obj, "musicbrainzalbumid")
-
-                if value:
-                    tag_obj.add(TXXX(encoding=3, desc="MUSICBRAINZ ALBUM ID", text=[str(value)]))
+                    tag_obj.add(TXXX(encoding=3, desc=_canonical, text=[str(value)]))
 
             elif field == "isrc":
                 tag_obj.delall("TSRC")
@@ -451,36 +487,6 @@ def write_id3_tags(file_path: str, tags: Dict[str, Any]) -> bool:
 
                 if value:
                     tag_obj.add(USLT(encoding=3, lang="eng", desc="", text=[str(value)]))
-
-            elif field in {"musicbrainz_artistid", "musicbrainz_artist_id"}:
-                _clear_txxx_variants(tag_obj, "musicbrainzartistid")
-
-                if value:
-                    tag_obj.add(TXXX(encoding=3, desc="MUSICBRAINZ ARTIST ID", text=[str(value)]))
-
-            elif field == "musicbrainz_albumartistid":
-                _clear_txxx_variants(tag_obj, "musicbrainzalbumartistid")
-
-                if value:
-                    tag_obj.add(TXXX(encoding=3, desc="MUSICBRAINZ ALBUM ARTIST ID", text=[str(value)]))
-
-            elif field == "musicbrainz_releasegroupid":
-                _clear_txxx_variants(tag_obj, "musicbrainzreleasegroupid")
-
-                if value:
-                    tag_obj.add(TXXX(encoding=3, desc="MUSICBRAINZ RELEASE GROUP ID", text=[str(value)]))
-
-            elif field == "musicbrainz_releasetrackid":
-                _clear_txxx_variants(tag_obj, "musicbrainzreleasetrackid")
-
-                if value:
-                    tag_obj.add(TXXX(encoding=3, desc="MUSICBRAINZ RELEASE TRACK ID", text=[str(value)]))
-
-            elif field == "musicbrainz_workid":
-                _clear_txxx_variants(tag_obj, "musicbrainzworkid")
-
-                if value:
-                    tag_obj.add(TXXX(encoding=3, desc="MUSICBRAINZ WORK ID", text=[str(value)]))
 
             elif field == "writer":
                 # TXXX:WRITER — the tag config's writer aliases
@@ -507,32 +513,24 @@ def write_id3_tags(file_path: str, tags: Dict[str, Any]) -> bool:
                 )
 
             else:
-                # ── Generic TXXX fallback ──────────────────────────────────
+                # ── Album-extended fields ───────────────────────────────────
                 # Standard MusicBrainz / album fields that have no native ID3
-                # frame (releasetype, releasestatus, releasecountry,
-                # originalyear, originaldate, tracktotal, disctotal, media,
-                # label, catalog, barcode, asin, script, discsubtitle, ...)
-                # must be written as TXXX frames — Navidrome reads these
-                # back and uses them to group/merge albums.  Previously they
-                # were SILENTLY DROPPED for MP3 files, so tracks that never
-                # received MB enrichment stayed missing the album-level tags
-                # and Navidrome split the album.  Write them under their
-                # canonical MusicBrainz TXXX description (uppercase, spaces).
-                _generic_txxx = str(field).replace("_", " ").upper()
-                if _generic_txxx in {
-                    "RELEASETYPE", "RELEASESTATUS", "RELEASECOUNTRY",
-                    "ORIGINALYEAR", "ORIGINALDATE", "TRACKTOTAL", "DISCTOTAL",
-                    "MEDIA", "LABEL", "CATALOG", "CATALOGNUMBER", "BARCODE",
-                    "ASIN", "SCRIPT", "DISCSUBTITLE", "COPYRIGHT", "LANGUAGE",
-                    "EXPLICITSTATUS", "MUSICBRAINZ ALBUMTYPE",
-                    "MUSICBRAINZ ALBUMSTATUS", "MUSICBRAINZ RELEASECOUNTRY",
-                    "IS COVER", "ORIGINAL COVER ARTIST", "MUSICBRAINZ WORK ID",
-                    "MUSICBRAINZ GENRES",
-                    "ISWC", "ORIGINAL TITLE", "LYRICIST",
-                }:
-                    _clear_txxx_variants(tag_obj, _generic_txxx)
+                # frame (release type/status/country, originalyear, totals,
+                # media, label, barcode, cover markers, ...) must be written as
+                # TXXX frames — Navidrome reads these back and uses them to
+                # group/merge albums.  They used to be SILENTLY DROPPED for MP3
+                # files, so tracks that never received MB enrichment stayed
+                # missing the album-level tags and Navidrome split the album.
+                #
+                # The NAME now comes from the canonical registry, and every
+                # spelling of it is cleared first, so one field can never occupy
+                # two frames.  Fields outside the allow-list are ignored: an
+                # arbitrary DB column must not become a tag.
+                if field in _EXTENDED_ALBUM_TAG_FIELDS:
+                    _canonical = canonical_tag_name(field) or str(field).replace("_", " ").upper()
+                    clear_id3_variants(tag_obj, _canonical)
                     if value is not None and str(value).strip() != "":
-                        tag_obj.add(TXXX(encoding=3, desc=_generic_txxx, text=[str(value)]))
+                        tag_obj.add(TXXX(encoding=3, desc=_canonical, text=[str(value)]))
 
         save()
         return True
@@ -559,23 +557,11 @@ _VORBIS_FIELD_MAP: Dict[str, str] = {
     "year": "date",
     "genres": "genre",
     "genre": "genre",
-    "musicbrainz_albumid": "MUSICBRAINZ_ALBUMID",
-    "musicbrainz_album_mbid": "MUSICBRAINZ_ALBUMID",
-    "musicbrainz_releaseid": "MUSICBRAINZ_ALBUMID",
-    "musicbrainz_artistid": "MUSICBRAINZ_ARTISTID",
-    "musicbrainz_artist_id": "MUSICBRAINZ_ARTISTID",
-    "musicbrainz_albumartistid": "MUSICBRAINZ_ALBUMARTISTID",
-    "musicbrainz_trackid": "MUSICBRAINZ_TRACKID",
-    "mbid": "MUSICBRAINZ_TRACKID",
-    "beets_mbid": "MUSICBRAINZ_TRACKID",
-    "musicbrainz_releasegroupid": "MUSICBRAINZ_RELEASEGROUPID",
-    "musicbrainz_releasetrackid": "MUSICBRAINZ_RELEASETRACKID",
-    "musicbrainz_workid": "MUSICBRAINZ_WORKID",
-    "musicbrainz_albumtype": "RELEASETYPE",
-    "musicbrainz_albumstatus": "RELEASESTATUS",
+    # MusicBrainz and album-extended names are NOT listed here — they come from
+    # the canonical registry (``services.metadata.tag_names``), applied ahead of
+    # this map in ``write_flac_tags``.  Only Vorbis-standard RENAMES belong in
+    # this table; two tables for the same name is how MP3 and FLAC drifted.
     "musicbrainz_genres": "GENRE",
-    "original_cover_artist": "ORIGINAL_COVER_ARTIST",
-    "is_cover": "IS_COVER",
 }
 
 
@@ -588,7 +574,18 @@ def write_flac_tags(file_path: str, tags: Dict[str, Any]) -> bool:
         audio = cast(FLACType, FLAC(file_path))
 
         for field, value in tags.items():
-            field = _VORBIS_FIELD_MAP.get(field, field)
+            # ONE name per field: the canonical registry decides for every
+            # MusicBrainz/album-extended tag, and all of its spellings are
+            # removed first.  Vorbis lookups are case-insensitive on READ but
+            # mutagen stores the case it was given, so assigning
+            # ``audio["musicbrainz_albumid"]`` ADDS a second key when the file
+            # already holds ``MUSICBRAINZ_ALBUMID`` — the FLAC twin of the
+            # duplicate-TXXX problem.
+            _canonical = canonical_tag_name(field)
+            if _canonical:
+                field = clear_vorbis_variants(audio, _canonical)
+            else:
+                field = _VORBIS_FIELD_MAP.get(field, field)
             if value is None or str(value).strip() == "":
                 # Empty value = explicit "clear this field" request (mirrors
                 # the MP3 writer, where empty deletes the frame) — e.g. the
