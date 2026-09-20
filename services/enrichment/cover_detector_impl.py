@@ -407,17 +407,29 @@ class CoverDetector:
             if (track.get("original_cover_artist") or "").strip():
                 continue
 
-            mbid = self._resolve_recording_mbid(track, artist, album)
-            if not mbid:
-                continue
-            track["mbid"] = mbid
-            original = self._find_original_via_work_lookup(
-                mbid, track.get("title", ""), artist
-            )
+            work_mbid = str(track.get("work_mbid") or "").strip()
+            if work_mbid:
+                logger.debug("Using pre-fetched work_mbid for cover fallback", track=track.get("title"), work_mbid=work_mbid)
+                original = self._earliest_work_recording(
+                    work_ids={work_mbid},
+                    search_title=canonical_track_title(track.get("title", "")) or track.get("title", ""),
+                    exclude_mbid=str(track.get("mbid") or track.get("recording_mbid") or ""),
+                    album_artist=artist,
+                    confidence="medium",
+                )
+            else:
+                mbid = self._resolve_recording_mbid(track, artist, album)
+                if not mbid:
+                    continue
+                track["mbid"] = mbid
+                original = self._find_original_via_work_lookup(
+                    mbid, track.get("title", ""), artist
+                )
+                
             if not original:
                 continue
 
-            logger.debug("Cover detected via work fallback", track=track.get("title"), mbid=mbid)
+            logger.debug("Cover detected via work fallback", track=track.get("title"))
             _record(self._result(tid, track.get("title", ""), original), track)
 
         if pending_updates:
