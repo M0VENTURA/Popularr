@@ -50,8 +50,7 @@
           <input type="text" id="navSearchInput" class="form-control bg-dark text-light border-secondary shadow-none"
                  placeholder="Search library or MusicBrainz…" autocomplete="off" aria-label="Search library or MusicBrainz"
                  onfocus="openUnifiedSearch();this.select();"
-                 oninput="syncNavSearchQuery()"
-                 onkeydown="if(event.key==='Enter'){event.preventDefault();syncNavSearchQuery();}">
+                 oninput="syncNavSearchQuery()">
           <button class="btn btn-outline-secondary btn-sm" type="button" title="Search" aria-label="Search" onclick="openUnifiedSearch()">
             <i class="bi bi-search"></i>
           </button>

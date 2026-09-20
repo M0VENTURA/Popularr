@@ -975,6 +975,61 @@
 
     input.addEventListener('focus', function () { this.select(); });
 
+    // ------------------------------------------------------------------
+    // Enter must START a search from the BANNER box, not merely mirror text.
+    //
+    // The banner input (#navSearchInput) is where the typing actually happens:
+    // openUnifiedSearch focuses it back, so the flyout's own input — whose Enter
+    // handler is right above and works — rarely holds focus. The banner's inline
+    // handler only called syncNavSearchQuery(), which copies the text across and
+    // nothing else, and runSearch is private to this closure, so the markup had
+    // no way to reach it. The symptom was exactly that: a query ran only after
+    // clicking a Library/All/External tab, because THAT click called runSearch.
+    // ------------------------------------------------------------------
+    function getQuerySource() {
+      // Whichever box the user is typing in owns the query. Only the flyout's
+      // own input is ever overwritten, and only when a different box was the
+      // active one, so an edit made in the flyout cannot be clobbered.
+      const active = document.activeElement;
+      const boxes = [
+        document.getElementById('navSearchInput'),
+        document.getElementById('dashboardTopSearchInput'),
+        getInputEl()
+      ];
+      for (let i = 0; i < boxes.length; i += 1) {
+        if (boxes[i] && boxes[i] === active) return boxes[i];
+      }
+      // Nothing focused (e.g. the magnifier button took focus): the banner box
+      // mirrors the flyout, so prefer it.
+      return document.getElementById('navSearchInput') || getInputEl();
+    }
+
+    global.submitUnifiedSearch = function () {
+      const flyoutInput = getInputEl();
+      const source = getQuerySource();
+      if (flyoutInput && source && source !== flyoutInput && flyoutInput.value !== source.value) {
+        flyoutInput.value = source.value;
+      }
+      // Bypass openUnifiedSearch's "same query as last time" short-circuit:
+      // pressing Enter is an explicit instruction to search, so it always runs —
+      // including when the user re-submits the same text.
+      runSearch();
+      setAdvancedFiltersVisible(false);
+    };
+
+    // Bind Enter on every box the banner wires to the flyout. Done here rather
+    // than inline in the markup because runSearch is private to this closure.
+    ['navSearchInput', 'dashboardTopSearchInput'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter') return;
+        // Also stops any surrounding form from submitting the page.
+        e.preventDefault();
+        global.submitUnifiedSearch();
+      });
+    });
+
     document.querySelectorAll('#unifiedAdvancedFilters input, #unifiedSearchType')
       .forEach((el) => {
         el.addEventListener('focus', function () {

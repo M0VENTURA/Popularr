@@ -840,6 +840,62 @@
 
     input.addEventListener('focus', function () { this.select(); });
 
+    // ------------------------------------------------------------------
+    // Enter must START a search from the BANNER box, not merely mirror text.
+    //
+    // The banner input (``#navSearchInput``) is where the typing actually
+    // happens: ``openUnifiedSearch`` focuses it back, so the flyout's own input
+    // — whose Enter handler is right above and works — rarely holds focus. The
+    // banner's inline handler only called ``syncNavSearchQuery()``, which copies
+    // the text across and nothing else, and ``runSearch`` is local to this IIFE,
+    // so the inline markup had no way to reach it. The reported symptom was
+    // exactly that: a query ran only after clicking a Library/All/External tab
+    // (that click is what called ``runSearch``).
+    // ------------------------------------------------------------------
+    function getQuerySource() {
+      // Whichever box the user is typing in owns the query. Only the flyout's
+      // own input is ever overwritten, and only when a DIFFERENT box was the
+      // active one, so an edit made in the flyout can never be clobbered.
+      var active = document.activeElement;
+      var boxes = [
+        document.getElementById('navSearchInput'),
+        document.getElementById('dashboardTopSearchInput'),
+        getInputEl()
+      ];
+      for (var i = 0; i < boxes.length; i++) {
+        if (boxes[i] && boxes[i] === active) return boxes[i];
+      }
+      // Nothing focused (e.g. the click landed on the magnifier button, which
+      // takes focus): the banner box mirrors the flyout, so prefer it.
+      return document.getElementById('navSearchInput') || getInputEl();
+    }
+
+    window.submitUnifiedSearch = function () {
+      var flyoutInput = getInputEl();
+      var source = getQuerySource();
+      if (flyoutInput && source && source !== flyoutInput && flyoutInput.value !== source.value) {
+        flyoutInput.value = source.value;
+      }
+      // Bypass ``openUnifiedSearch``'s "same query as last time" short-circuit:
+      // pressing Enter is an explicit instruction to search, so it must always
+      // run — including when the user re-submits the same text.
+      runSearch();
+      setAdvancedFiltersVisible(false);
+    };
+
+    // Bind Enter on every box the banner wires to the flyout. Done here rather
+    // than inline in the markup because ``runSearch`` is private to this module.
+    ['navSearchInput', 'dashboardTopSearchInput'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter') return;
+        // Also stops any surrounding form from submitting the page.
+        e.preventDefault();
+        window.submitUnifiedSearch();
+      });
+    });
+
     var filterInputs = document.querySelectorAll('#unifiedAdvancedFilters input, #unifiedSearchType');
     for (var i = 0; i < filterInputs.length; i++) {
       filterInputs[i].addEventListener('focus', function () {
