@@ -2234,6 +2234,109 @@ def _get_discogs_token() -> str | None:
         return None
 
 
+def _correct_soundtrack_album_artist(
+    artist: str,
+    album: str,
+    album_artist: str | None,
+    release_group_mbid: str | None,
+    album_tracks: list[dict[str, Any]],
+) -> None:
+    # Defensively extract variables if a caller didn't explicitly pass them.
+    if album_artist is None and album_tracks:
+        album_artist = next((str(t.get("album_artist") or "") for t in album_tracks if t.get("album_artist")), "")
+        
+    current_album_artist = (album_artist or "").strip()
+    if current_album_artist.casefold() != "soundtrack":
+        return
+        
+    if not release_group_mbid and album_tracks:
+        release_group_mbid = next((str(t.get("musicbrainz_releasegroupid") or "") for t in album_tracks if t.get("musicbrainz_releasegroupid")), "")
+        
+    if not release_group_mbid:
+        return
+
+    context = {"artist": artist, "album": album, "release_group_mbid": release_group_mbid}
+    
+    try:
+        service = get_shared_mb_service()
+        rg_data = _call_with_heartbeat(
+            "album_artist.musicbrainz.fetch_credits",
+            service.get_release_group_by_id,
+            release_group_mbid,
+            includes=["artist-credits"],
+            log_context=context,
+        )
+        
+        if not rg_data or "artist-credit" not in rg_data:
+            return
+
+        mb_credit_name = "".join(
+            credit.get("name", "") + credit.get("joinphrase", "")
+            for credit in rg_data["artist-credit"]
+        ).strip()
+
+        if not mb_credit_name or mb_credit_name.casefold() == "soundtrack":
+            return
+
+        with _log_section("album_artist.correction.persist", old=current_album_artist, new=mb_credit_name, **context):
+            with db_session() as session:
+                result = session.execute(
+                    text("""
+                        UPDATE tracks
+                        SET album_artist = :new_album_artist
+                        WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
+                          AND album = :album
+                          AND album_artist ILIKE 'soundtrack'
+                    """),
+                    {
+                        "new_album_artist": mb_credit_name,
+                        "artist": artist,
+                        "album": album
+                    },
+                )
+                rows_updated = result.rowcount
+                
+        from services.metadata.tag_file_service import update_file_tags
+        from helpers.config_helpers import get_config
+        
+        music_root = ((get_config().get("music", {}) or {}).get("root") or os.environ.get("MUSIC_ROOT", "/music"))
+        files_updated = 0
+        
+        for track in album_tracks:
+            file_path = track.get("file_path")
+            if not file_path:
+                continue
+                
+            resolved = str(file_path)
+            if not os.path.isabs(resolved):
+                resolved = os.path.join(music_root, resolved)
+                
+            if os.path.exists(resolved):
+                try:
+                    _call_with_heartbeat(
+                        "album_artist.correction.file_tag_write",
+                        update_file_tags,
+                        resolved,
+                        {"album_artist": mb_credit_name},
+                        log_context=context,
+                    )
+                    files_updated += 1
+                except Exception as exc:
+                    Logger.warning("[ENRICH] Soundtrack file tag write failed", track_id=track.get("id"), error=_safe_error(exc), **context)
+
+        Logger.info(
+            "[ENRICH] Soundtrack album_artist corrected", 
+            old_artist=current_album_artist, 
+            new_artist=mb_credit_name, 
+            db_rows_updated=rows_updated, 
+            files_updated=files_updated,
+            **context
+        )
+        
+    except Exception as exc:
+        Logger.warning("[ENRICH] Soundtrack album_artist correction failed", error=_safe_error(exc), **context)
+
+
 def _run_full_enrichment(
     artist: str,
     album: str,
@@ -2242,6 +2345,8 @@ def _run_full_enrichment(
     detected_type: str,
     options: dict[str, Any],
     discogs_token: str | None,
+    album_artist: str | None = None,
+    release_group_mbid: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, list[Any]]]:
     start = time.monotonic()
     context = {"artist": artist, "album": album, "detected_type": detected_type}
@@ -2268,6 +2373,9 @@ def _run_full_enrichment(
     # an earlier scan.
     with _log_section("full.release_extended_fields", **context):
         _persist_release_extended_fields(artist, album, tracks=album_tracks)
+
+    with _log_section("full.soundtrack_correction", **context):
+        _correct_soundtrack_album_artist(artist, album, album_artist, release_group_mbid, album_tracks)
 
     if metadata.get("country"):
         try:
@@ -2335,6 +2443,10 @@ def enrich_album_extras(
         detected_type,
         options,
         _get_discogs_token(),
+        # Defaulting to None here is perfectly safe — _correct_soundtrack_album_artist
+        # will gracefully extract what it needs from album_tracks if not provided explicitly.
+        album_artist=None,
+        release_group_mbid=None
     )
     
     extra_context: dict[str, Any] = {}
@@ -2447,7 +2559,8 @@ def enrich_album(
             discogs_token = _get_discogs_token()
             if not popularity_pass and not singles_pass and not defer_full:
                 metadata, similar = _run_full_enrichment(
-                    artist, album, album_context, album_tracks, detected_type, options, discogs_token
+                    artist, album, album_context, album_tracks, detected_type, options, discogs_token,
+                    album_artist=album_artist or None, release_group_mbid=release_group_mbid
                 )
         except Exception as exc:
             Logger.exception("[ENRICH] album scan failed", error=_safe_error(exc), **context)
