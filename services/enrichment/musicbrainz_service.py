@@ -1153,7 +1153,7 @@ class MusicBrainzService:
             "artist_mbid": artist_mbid or None,
             # Library album name wins over the specific release title.
             "album": effective_album,
-            "album_artist": primary_album_artist(specific_release.get("artist-credit") or []),
+            "album_artist": primary_album_artist(specific_release.get("artist-credit") or recording.get("artist-credit") or []),
             "isrc": _first_isrc(recording),
             # Original release-group year wins over the version's year.
             "year": effective_year,
@@ -3251,10 +3251,18 @@ def compare_musicbrainz_release(
 def _update_track_fields(track_id: str, fields: dict[str, Any]) -> None:
     if not track_id or not fields:
         return
+    
+    # Actually enforce the whitelists defined at the top of the file
+    allowed_columns = _ALIGN_WRITABLE_FIELDS + _LINK_WRITABLE_FIELDS
+    safe_fields = {k: v for k, v in fields.items() if k in allowed_columns}
+    
+    if not safe_fields:
+        return
+
     from db.engine import db_session
     from sqlalchemy import text
-    Set_clause = ", ".join(f"{column} = :{column}" for column in fields)
-    Params = dict(fields)
+    Set_clause = ", ".join(f"{column} = :{column}" for column in safe_fields)
+    Params = dict(safe_fields)
     Params["id"] = track_id
     with db_session() as session:
         session.execute(text(f"UPDATE tracks SET {Set_clause} WHERE id = :id"), Params)
