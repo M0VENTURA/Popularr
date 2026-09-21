@@ -477,11 +477,35 @@ def get_listenbrainz_album_tracklist_with_release(
     out: dict[str, dict[str, int | None]] = {}
     for key, entry in titles_to_mbids.items():
         total, users = _sum_counts(entry["mbids"])
-        if total > 0:
+        # IDENTITY is emitted even at ZERO listens, provided the release puts
+        # this title at exactly one position. The count is not what identifies
+        # the track — the album's own release is — and requiring ``total > 0``
+        # is what left five of the twelve "Little Nicky" tracks (Cave, Take a
+        # Picture, Natural High, Nothing, When Worlds Collide) still reading
+        # "Various Artists". Their release recordings have no ListenBrainz
+        # scrobbles, so they received no identity, so ``track_stage`` fell
+        # through to the ambiguous per-track search, which asked MusicBrainz
+        # for ``artist:"Various Artists" AND recording:"<title>"`` and matched
+        # nothing at all (the scan log's ``candidate_count=0`` / ``mbid=None``).
+        # The release already answered which recording each position is.
+        #
+        # ⚠️ Uniqueness is load-bearing. When several release tracks share a
+        # normalised title (dArtagnan's "Helden X Hymnen" is positions 1 AND
+        # 15) ``entry["mbids"][0]`` is merely whichever row the index reached
+        # first, so a title-keyed identity would pin BOTH local rows to the
+        # same recording — the exact coin flip the position alias exists to
+        # avoid. Those rows are answered by the position-qualified alias
+        # emitted below, and by the alias-first read in the consumer.
+        _title_is_unique = len(entry["mbids"]) == 1
+        if total > 0 or _title_is_unique:
             out[key] = {
                 "listenbrainz_listens": total,
                 "listenbrainz_users": users,
                 "recording_mbid": entry["mbids"][0] if entry["mbids"] else None,
+                # Consumed by the POSITION pass below, so it can tell a
+                # title-derived identity it must not overwrite from an
+                # arbitrary mbids[0] pick on a same-titled pair.
+                "title_is_unique": _title_is_unique,
             }
 
     used_pos_keys: set[tuple[int, int]] = set()
@@ -500,7 +524,21 @@ def get_listenbrainz_album_tracklist_with_release(
         # marker). The per-ROW identity is published separately below, under a
         # position-qualified alias, and that is what disambiguates two rows of
         # one album that share a title.
-        if (out.get(local_key) or {}).get("listenbrainz_listens"):
+        #
+        # ⚠️ The guard is on the IDENTITY, not the listen count. Gating it on
+        # ``listenbrainz_listens`` let this pass overwrite a correct
+        # title-derived identity with a positional guess for every
+        # zero-listen track, and position is exactly what cannot be trusted
+        # here: a library holding a 12-track SUBSET of a 16-track release
+        # numbers its files 1..12 while those recordings sit at release
+        # positions 2..13, so local#N is a DIFFERENT song than release#N
+        # ("Little Nicky: Cave/Take a Picture/Natural High/Nothing/When Worlds
+        # Collide still read Various Artists"). Only a title-derived identity
+        # that is itself UNIQUE is protected — a same-titled pair still falls
+        # through to the position pass, which is the only thing that can tell
+        # those two rows apart.
+        _existing = out.get(local_key) or {}
+        if _existing.get("recording_mbid") and _existing.get("title_is_unique"):
             continue
 
         try:

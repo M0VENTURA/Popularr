@@ -19,11 +19,6 @@ from db.engine import db_session
 from services.enrichment.artist_bio_service import get_artist_biography
 from services.enrichment.musicbrainz_service import get_shared_mb_client
 
-try:
-    from api_clients.audiodb import get_artist_fanart
-except Exception:  # pragma: no cover - import guard
-    get_artist_fanart = None
-
 logger = structlog.get_logger(__name__)
 
 
@@ -151,17 +146,52 @@ def artist_favourite(request: Any) -> tuple[dict[str, Any], int]:
 _artist_image_cache: dict[str, tuple[str, float]] = {}
 _CACHE_LOCK = threading.Lock()
 _ARTIST_IMAGE_CACHE_TTL_SECONDS = 6 * 3600
-_ARTIST_IMAGE_NEGATIVE_TTL_SECONDS = 30 * 60
+# ⚠️ Deliberately SHORT (1 min), unlike the positive TTL above.
+#
+# A "no image" answer is only true until the artist's next SCAN writes
+# ``artists.image_url`` — and the user's requirement is that an artist image
+# appears once that scan runs ("show an empty spot until it's scanned in").
+# A long negative TTL breaks exactly that: the page would keep serving the
+# cached emptiness for the rest of the window even though the scan had already
+# filled the image. This cache is per-process (each hypercorn worker has its
+# own), so there is no reliable hook to invalidate the other workers when a
+# scan lands — a short window is what bounds the staleness instead.
+# Long enough to protect the DB from a burst of pagination requests, short
+# enough that a completed scan shows up on the next reload.
+_ARTIST_IMAGE_NEGATIVE_TTL_SECONDS = 60
 _ARTIST_IMAGE_CACHE_MAX_ENTRIES = 5000
 
 
 def get_artist_image(artist: str) -> tuple[dict[str, Any], int]:
-    """Get artist image URL from database, with AudioDB fallback."""
+    """Get the artist's image URL from the DATABASE ONLY.
+
+    Resolution order (all local):
+
+    1. ``artists.image_url`` — written by the SCAN
+       (``album_stage._fetch_artist_metadata`` resolves it once per artist per
+       scan, together with country/bio/members).
+    2. ``artist_images.image_url`` — a manually chosen image.
+    3. the artist's own ALBUM art from ``album_art``, served through the
+       existing ``/api/album/<artist>/<album>/art`` endpoint — "use an album
+       image when the artist has none".
+
+    Returns ``image_url: ""`` when none of those exist, so an artist that has
+    not been scanned yet shows an EMPTY spot.
+
+    ⚠️ There is deliberately NO AudioDB (or any other network) fallback here.
+    This is read on every artists-page load, once per artist, and the shared
+    clients throttle by reserving a future slot and sleeping — so an unprefetched
+    artist made a page load queue behind whatever else held the budget (the same
+    class of freeze the artist page itself had). The image is the SCAN's job; a
+    page must only read what the scan already resolved.
+    """
     if not artist:
         return {"success": False, "error": "name required"}, 400
 
     def _is_valid_url(url: str) -> bool:
-        return bool(url) and url.startswith(("http://", "https://"))
+        # A same-origin PATH is valid too: the album-art fallback below is served
+        # by this app's own ``/api/album/<artist>/<album>/art`` route.
+        return bool(url) and url.startswith(("http://", "https://", "/"))
 
     key = artist.strip().lower()
     if not key:
@@ -209,27 +239,37 @@ def get_artist_image(artist: str) -> tuple[dict[str, Any], int]:
                 except Exception:
                     url = ""
 
-            if not _is_valid_url(url) and get_artist_fanart is not None:
+            # Fallback 3: the artist's own ALBUM art, straight from the local
+            # ``album_art`` table (filled by the album-art pipeline during the
+            # scan) and served by this app's album-art route. Used when the
+            # artist has no image of its own — no network involved.
+            if not _is_valid_url(url):
                 try:
-                    img = get_artist_fanart(artist, enabled=True)
-                    if _is_valid_url(str(img or "")):
-                        url = str(img).strip()
-                        try:
-                            session.execute(
-                                text(
-                                    "INSERT INTO artist_images (artist_name, image_url, updated_at) "
-                                    "VALUES (:artist, :url, CURRENT_TIMESTAMP) "
-                                    "ON CONFLICT (artist_name) DO UPDATE SET "
-                                    "image_url = EXCLUDED.image_url, updated_at = CURRENT_TIMESTAMP"
-                                ),
-                                {"artist": artist, "url": url},
-                            )
-                        except Exception:
-                            pass
-                    else:
-                        url = ""
+                    art_row = session.execute(
+                        text(
+                            "SELECT album_name FROM album_art "
+                            "WHERE LOWER(artist_name) = LOWER(:artist) "
+                            "  AND image_data IS NOT NULL "
+                            "ORDER BY downloaded_at DESC NULLS LAST, LOWER(album_name) ASC "
+                            "LIMIT 1"
+                        ),
+                        {"artist": artist},
+                    ).mappings().first()
+                    _album_for_art = str((art_row or {}).get("album_name") or "").strip()
+                    if _album_for_art:
+                        from urllib.parse import quote as _quote
+
+                        url = "/api/album/{artist}/{album}/art".format(
+                            artist=_quote(artist, safe=""),
+                            album=_quote(_album_for_art, safe=""),
+                        )
+                        logger.debug(
+                            "Artist image served from album art",
+                            artist=artist,
+                            album=_album_for_art,
+                        )
                 except Exception as exc:
-                    logger.debug("AudioDB artist image fallback failed", artist=artist, error=str(exc))
+                    logger.debug("Album-art fallback failed", artist=artist, error=str(exc))
 
         with _CACHE_LOCK:
             if _is_valid_url(url):

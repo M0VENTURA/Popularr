@@ -159,6 +159,125 @@ class TestScanOwnsTheMembersLookup:
         # Freshness window preserved from the page's old rule.
         assert "_ARTIST_MEMBERS_TTL_DAYS" in source or "timedelta" in source
 
+    def test_the_artist_metadata_step_also_resolves_the_image(self):
+        """The artists-page image must be filled by the SCAN, not by the page."""
+        from services.popularity.stages import album_stage
+
+        source = inspect.getsource(album_stage._fetch_artist_metadata)
+        assert "get_artist_fanart" in source
+        assert "image_url" in source
+
+
+# ---------------------------------------------------------------------------
+# Artist images
+# ---------------------------------------------------------------------------
+
+class TestArtistImageReaderIsDatabaseOnly:
+    """``get_artist_image`` served one image per artist on every list load.
+
+    Reported: "are they getting them from the database or doing a lookup when it
+    loads? The artist images should be updating during a scan for that artist
+    (or album if the artist has no image). Prior to that, it should show an
+    empty spot until it's scanned in."
+
+    It was DB-first but NOT DB-only: on a cache miss it fell through to a live
+    AudioDB ``get_artist_fanart`` call and wrote the result into
+    ``artist_images``. With one request per artist on the list, an unscanned
+    library produced a burst of AudioDB calls per page load, each able to queue
+    behind the shared throttle and stall a hypercorn worker.
+    """
+
+    def _reset(self, svc):
+        with svc._CACHE_LOCK:
+            svc._artist_image_cache.clear()
+
+    def test_it_cannot_reach_audiodb_from_the_page_path(self):
+        from services.metadata import artist_metadata_service as svc
+
+        code_only = _strip_string_literals(inspect.getsource(svc.get_artist_image))
+        for forbidden in ("get_artist_fanart", "http", "requests", "session.get"):
+            assert forbidden not in code_only, f"the page path must not perform a network call ({forbidden})"
+
+    def test_the_module_no_longer_imports_the_fanart_helper(self):
+        """The import went with the fallback; a stale import is dead code."""
+        import services.metadata.artist_metadata_service as svc
+
+        assert not hasattr(svc, "get_artist_fanart")
+
+    def test_it_prefers_the_scans_image(self, monkeypatch):
+        from services.metadata import artist_metadata_service as svc
+
+        self._reset(svc)
+        _patch_session(monkeypatch, svc, _FakeSession([{"image_url": "https://cdn.example/a.jpg"}]))
+        data, code = svc.get_artist_image("Artist")
+        assert code == 200
+        assert data["success"] is True
+        assert data["image_url"] == "https://cdn.example/a.jpg"
+
+    def test_it_falls_back_to_the_artists_album_art(self, monkeypatch):
+        """'Or album if the artist has no image' — from the LOCAL album_art table."""
+        from services.metadata import artist_metadata_service as svc
+
+        self._reset(svc)
+        session = _patch_session(monkeypatch, svc, _FakeSession([None, None, {"album_name": "Some Album"}]))
+        data, code = svc.get_artist_image("Artist")
+        assert code == 200
+        assert data["success"] is True
+        assert data["image_url"] == "/api/album/Artist/Some%20Album/art"
+        # The fallback must READ album_art, not merely look like it does.
+        assert any("album_art" in s for s in session.statements)
+
+    def test_the_album_art_fallback_url_is_a_same_origin_path(self):
+        """``_is_valid_url`` must accept a PATH, or the fallback is treated as a miss."""
+        from services.metadata import artist_metadata_service as svc
+
+        source = inspect.getsource(svc.get_artist_image)
+        assert '"/"' in source or "'/'" in source
+
+    def test_no_image_anywhere_is_an_empty_spot(self, monkeypatch):
+        """Not a grey square, not an exception — simply nothing to show yet."""
+        from services.metadata import artist_metadata_service as svc
+
+        self._reset(svc)
+        _patch_session(monkeypatch, svc, _FakeSession([None, None, None]))
+        data, code = svc.get_artist_image("Unscanned Artist")
+        assert code == 200
+        assert data["image_url"] == ""
+
+    def test_an_empty_name_is_rejected(self):
+        from services.metadata import artist_metadata_service as svc
+
+        data, code = svc.get_artist_image("")
+        assert code == 400
+
+
+class TestArtistImageNegativeCacheExpiresQuickly:
+    """The negative cache must not outlive the scan that fills the image.
+
+    ``_artist_image_cache`` is per-process, so when a scan writes
+    ``artists.image_url`` there is no reliable way to invalidate the other
+    hypercorn workers' caches. A long negative TTL therefore defeats the whole
+    point: the page keeps serving "no image" for the rest of the window even
+    though the scan already resolved one.
+    """
+
+    def test_the_negative_ttl_is_short(self):
+        from services.metadata import artist_metadata_service as svc
+
+        assert svc._ARTIST_IMAGE_NEGATIVE_TTL_SECONDS <= 300
+        # And strictly shorter than the positive TTL, so a real image is not
+        # re-fetched more often than an absent one is re-checked.
+        assert svc._ARTIST_IMAGE_NEGATIVE_TTL_SECONDS < svc._ARTIST_IMAGE_CACHE_TTL_SECONDS
+
+    def test_the_route_shows_a_transparent_svg_not_a_grey_square(self):
+        """A miss must render as an empty spot, not as a failed image."""
+        from routes import artist_routes
+
+        source = inspect.getsource(artist_routes.api_artist_image)
+        assert "image/svg+xml" in source
+        # The old placeholder painted a dark grey rect, which reads as "broken".
+        assert "#2a2a2a" not in source
+
     def test_a_stale_roster_is_refreshed(self):
         from services.popularity.stages import album_stage
 

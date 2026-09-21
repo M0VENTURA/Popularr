@@ -399,6 +399,295 @@ class TestBatchBuilderCarriesTheIdentity:
         ) == {}
 
 
+class TestZeroListenTracksStillGetTheirIdentity:
+    """Reported (Various Artists — "Little Nicky"): 7 of 12 tracks were still
+    reading "Various Artists" after the album-release identity pass.
+
+    The seven that DID resolve were exactly the ones with ListenBrainz listens.
+    The five that did not — Cave, Take a Picture, Natural High, Nothing, When
+    Worlds Collide — are all on the album's own release at an exact title match,
+    but their recordings carry ZERO ListenBrainz scrobbles.
+
+    Two independent gates dropped them, and BOTH had to go:
+
+    1. the TITLE pass emitted an identity only ``if total > 0``; and
+    2. the POSITION pass then overwrote the title-derived identity for every
+       zero-listen track, because it was guarded on ``listenbrainz_listens``
+       rather than on the identity — and position cannot be trusted for a
+       library that holds a SUBSET of the release.
+
+    This album is exactly that case: the library holds twelve of the release's
+    sixteen tracks, numbered 1..12, while those same recordings sit at release
+    positions 2..13. So ``local#N`` is a DIFFERENT song than ``release#N`` —
+    local#5 is "Natural High" (release #6), and the +/-5s duration guard then
+    rejects the pairing outright. The per-track search that ran instead asked
+    for ``artist:"Various Artists" AND recording:"<title>"`` and matched
+    nothing, which is the scan log's ``mbid=None score=0.0 candidate_count=0``.
+
+    The count is not what identifies a track. The album's release is.
+    """
+
+    def _patch(self, monkeypatch, counts=None):
+        from services.popularity import popularity_sources as ps
+
+        monkeypatch.setattr(ps, "_resolve_release_mbid", lambda artist, album, tracks: "rel-1")
+        monkeypatch.setattr(
+            ps, "lb_get_release_metadata_batch",
+            lambda mbids: {"rel-1": {"media": _media_payload()}},
+        )
+        # No recording has any ListenBrainz scrobble at all.
+        monkeypatch.setattr(ps, "lb_get_recording_popularity_batch", lambda mbids: counts or {})
+        return ps
+
+    def test_a_zero_listen_recording_is_still_identified(self, monkeypatch):
+        ps = self._patch(monkeypatch)
+
+        out, _release = ps.get_listenbrainz_album_tracklist_with_release(
+            "DArtagnan", "Helden X Hymnen", LOCAL_TRACKS
+        )
+
+        # "Crazy Train" is position 4 and the release titles it plainly, so its
+        # title key is the one the consumer looks up.
+        entry = out.get(_norm_key("Crazy Train")) or {}
+        assert entry.get("recording_mbid") == "8f38ab16-5274-4a51-bdd4-1722315d748b"
+        assert entry.get("listenbrainz_listens") == 0
+
+    def test_a_unique_title_is_marked_unambiguous(self, monkeypatch):
+        """The flag the POSITION pass reads to decide whether it may overwrite."""
+        ps = self._patch(monkeypatch)
+
+        out, _release = ps.get_listenbrainz_album_tracklist_with_release(
+            "DArtagnan", "Helden X Hymnen", LOCAL_TRACKS
+        )
+        assert out[_norm_key("Crazy Train")]["title_is_unique"] is True
+
+    def test_a_release_that_reuses_a_title_is_not_marked_unambiguous(self, monkeypatch):
+        """Two release tracks sharing one normalised title are a coin flip.
+
+        ``mbids[0]`` is then merely whichever row the index reached first, so the
+        entry must NOT claim to be unambiguous — otherwise the position pass
+        would refuse to correct it and the coin flip would stick.
+        """
+        ps = self._patch(monkeypatch)
+        monkeypatch.setattr(
+            ps, "lb_get_release_metadata_batch",
+            lambda mbids: {"rel-1": {"media": [{"position": 1, "tracks": [
+                {"position": 1, "number": "1", "title": "Same Song", "length": 201000,
+                 "recording": {"id": "rec-a"}},
+                {"position": 2, "number": "2", "title": "Same Song", "length": 202000,
+                 "recording": {"id": "rec-b"}},
+            ]}]}},
+        )
+        tracks = [
+            {"title": "Same Song", "artist": "DArtagnan",
+             "disc_number": 1, "track_number": 1, "duration": 201},
+            {"title": "Same Song", "artist": "DArtagnan",
+             "disc_number": 1, "track_number": 2, "duration": 202},
+        ]
+
+        out, _release = ps.get_listenbrainz_album_tracklist_with_release(
+            "DArtagnan", "Helden X Hymnen", tracks
+        )
+
+        assert not (out.get(_norm_key("Same Song")) or {}).get("title_is_unique")
+        assert _identity(out, "Same Song", 1)["recording_mbid"] == "rec-a"
+        assert _identity(out, "Same Song", 2)["recording_mbid"] == "rec-b"
+
+
+class TestPositionPassDoesNotOverwriteATitleIdentity:
+    """A SUBSET library makes the positional pairing wrong, not just redundant.
+
+    The position pass exists as a FALLBACK for a track whose title is not on the
+    release at all (a plainly tagged rendition). It was skipped only when the
+    title-keyed entry already carried a listen COUNT, so for a zero-listen track
+    it ran and replaced a correct, title-derived identity with a positional
+    guess — and on a 12-of-16 subset the guess is a different song entirely.
+
+    The guard must key off the IDENTITY being unambiguous, not off the count.
+    """
+
+    def _patch(self, monkeypatch, counts=None):
+        from services.popularity import popularity_sources as ps
+
+        monkeypatch.setattr(ps, "_resolve_release_mbid", lambda artist, album, tracks: "rel-1")
+        monkeypatch.setattr(
+            ps, "lb_get_release_metadata_batch",
+            lambda mbids: {"rel-1": {"media": _media_payload()}},
+        )
+        monkeypatch.setattr(ps, "lb_get_recording_popularity_batch", lambda mbids: counts or {})
+        return ps
+
+    def test_a_unique_title_keeps_its_recording_over_a_positional_guess(self, monkeypatch):
+        """The exact "Little Nicky" mechanism, in miniature.
+
+        The release puts a DECOY at position 2 (same length, so the +/-5s
+        duration guard cannot save us) and the real recording at position 5.
+        The library's file is numbered 2 — as a subset library's numbering can
+        be — and its recording has ZERO listens.
+
+        * unpatched: no title-derived identity survives, so the position pass
+          pairs local#2 with release#2 and stamps the DECOY onto the track;
+        * patched: the unique title already identified it, and the position
+          pass leaves that alone.
+        """
+        ps = self._patch(monkeypatch)
+        monkeypatch.setattr(
+            ps, "lb_get_release_metadata_batch",
+            lambda mbids: {"rel-1": {"media": [{"position": 1, "tracks": [
+                {"position": 2, "number": "2", "title": "Decoy", "length": 200000,
+                 "recording": {"id": "rec-decoy"}},
+                {"position": 5, "number": "5", "title": "Target", "length": 200000,
+                 "recording": {"id": "rec-target"}},
+            ]}]}},
+        )
+        tracks = [
+            {"title": "Target", "artist": "DArtagnan",
+             "disc_number": 1, "track_number": 2, "duration": 200},
+        ]
+
+        out, _release = ps.get_listenbrainz_album_tracklist_with_release(
+            "DArtagnan", "Helden X Hymnen", tracks
+        )
+
+        assert out[_norm_key("Target")]["recording_mbid"] == "rec-target"
+
+    def test_the_identity_is_marked_unambiguous(self, monkeypatch):
+        """The flag the position pass reads."""
+        ps = self._patch(monkeypatch)
+        out, _release = ps.get_listenbrainz_album_tracklist_with_release(
+            "DArtagnan", "Helden X Hymnen", LOCAL_TRACKS
+        )
+
+        assert out[_norm_key("Für immer Dein")]["title_is_unique"] is True
+        # A title the release uses twice must NOT claim to be unambiguous.
+        # It also gets no title-keyed identity at all (see the class below).
+        assert _norm_key("Helden X Hymnen") not in out
+
+    def test_a_same_titled_pair_still_uses_position(self, monkeypatch):
+        """Positions 1 and 15 share a title, so ONLY position separates them.
+
+        The guard must not protect these rows, or the dArtagnan duplicate
+        returns.
+        """
+        ps = self._patch(monkeypatch)
+        out, _release = ps.get_listenbrainz_album_tracklist_with_release(
+            "DArtagnan", "Helden X Hymnen", LOCAL_TRACKS
+        )
+
+        assert _identity(out, "Helden X Hymnen", 1)["recording_mbid"] == HELDEN_STUDIO
+        assert _identity(out, "Helden X Hymnen", 15)["recording_mbid"] == HELDEN_UNPLUGGED
+
+
+class TestSubsetLibraryGetsEveryIdentity:
+    """The reported album, faithfully: 12 local tracks vs a 16-track release.
+
+    Local files are numbered 1..12; the recordings sit at release positions
+    2..13. Only seven of the recordings have ListenBrainz scrobbles. Every
+    local track must still come out with an identity, because an identity the
+    per-track batch cannot read is what sends ``track_stage`` to the ambiguous
+    search (``candidate_count=0``) for the other five.
+
+    Real data: MusicBrainz release ``e8f61cab-d2af-4b63-a336-8e83d460fb0c``.
+    """
+
+    RELEASE: list[tuple[int, str, int]] = [
+        (1, "Running With the Devil", 218746),
+        (2, "School of Hard Knocks", 246666),
+        (3, "Pardon Me", 227106),
+        (4, "Change (In the House of Flies)", 299826),
+        (5, "(Rock) Superstar", 279346),
+        (6, "Natural High", 202240),
+        (7, "Points of Authority", 202986),
+        (8, "Stupify (Fu's Forbidden Little Nicky remix)", 310146),
+        (9, "Nothing", 162893),
+        (10, "When Worlds Collide", 179400),
+        (11, "Cave", 188280),
+        (12, "Take a Picture", 365866),
+        (13, "Be Quiet and Drive (Far Away) (acoustic)", 276160),
+        (14, "Southtown", 271933),
+        (15, "Everlong (acoustic)", 253120),
+        (16, "Highway to Hell", 207280),
+    ]
+    HELD = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+    WITH_LISTENS = [2, 3, 4, 5, 7, 8, 13]
+    # Exactly the five the user's log shows still reading "Various Artists".
+    REPORTED = ["Cave", "Take a Picture", "Natural High", "Nothing",
+                "When Worlds Collide"]
+
+    def _local(self) -> list[dict]:
+        by_pos = {pos: (t, ln) for pos, t, ln in self.RELEASE}
+        out = []
+        for i, rel_pos in enumerate(self.HELD, start=1):
+            title, length = by_pos[rel_pos]
+            out.append({"title": title, "artist": "Various Artists",
+                        "disc_number": 1, "track_number": i,
+                        "duration": length / 1000.0})
+        return out
+
+    def _patch(self, monkeypatch):
+        from services.popularity import popularity_sources as ps
+
+        media = [{"position": 1, "tracks": [
+            {"position": pos, "number": str(pos), "title": title,
+             "length": length, "recording": {"id": "rec-%02d" % pos}}
+            for pos, title, length in self.RELEASE
+        ]}]
+        monkeypatch.setattr(ps, "_resolve_release_mbid", lambda a, b, t: "rel-1")
+        monkeypatch.setattr(ps, "lb_get_release_metadata_batch",
+                            lambda m: {"rel-1": {"media": media}})
+        monkeypatch.setattr(
+            ps, "lb_get_recording_popularity_batch",
+            lambda m: {"rec-%02d" % p: {"total_listen_count": 1000,
+                                         "total_user_count": 50}
+                       for p in self.WITH_LISTENS},
+        )
+        return ps
+
+    def _has_identity(self, out: dict, track: dict) -> bool:
+        key = _norm_key(track["title"])
+        for candidate in (out.get(key),
+                          out.get(_identity_key(key, 1, track["track_number"]))):
+            if (candidate or {}).get("recording_mbid"):
+                return True
+        return False
+
+    def test_all_twelve_tracks_resolve_not_just_the_scrobbled_seven(self, monkeypatch):
+        ps = self._patch(monkeypatch)
+        local = self._local()
+        out, _release = ps.get_listenbrainz_album_tracklist_with_release(
+            "Various Artists", "Little Nicky", local
+        )
+
+        unresolved = [t["title"] for t in local if not self._has_identity(out, t)]
+        assert unresolved == [], (
+            f"these tracks get no identity, so the ambiguous search runs for them: {unresolved}"
+        )
+
+    def test_the_five_reported_titles_are_identified(self, monkeypatch):
+        ps = self._patch(monkeypatch)
+        local = self._local()
+        out, _release = ps.get_listenbrainz_album_tracklist_with_release(
+            "Various Artists", "Little Nicky", local
+        )
+
+        by_title = {t["title"]: t for t in local}
+        for title in self.REPORTED:
+            assert self._has_identity(out, by_title[title]), f"{title!r} has no identity"
+
+    def test_a_zero_listen_track_keeps_its_own_release_recording(self, monkeypatch):
+        """Local #5 is "Natural High"; its recording is release position 6.
+
+        The positional guess would give it release position 5 — "(Rock)
+        Superstar" — which is the wrong song.
+        """
+        ps = self._patch(monkeypatch)
+        out, _release = ps.get_listenbrainz_album_tracklist_with_release(
+            "Various Artists", "Little Nicky", self._local()
+        )
+
+        assert out[_norm_key("Natural High")]["recording_mbid"] == "rec-06"
+
+
 class TestTrackStageAppliesTheReleaseIdentity:
     def test_a_wrong_stored_mbid_is_corrected_from_the_release(self, monkeypatch):
         from services.popularity.stages import track_stage

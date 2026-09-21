@@ -48,6 +48,14 @@
     
     <!-- Tab 3: Active Queue & Stats -->
     <div class="tab-pane fade" id="queueMonitor" role="tabpanel" aria-labelledby="queue-tab">
+       {#
+         Suppress the Completed queue card here: "Matched & Unmatched Folders"
+         below is the single place finished folders are handled, and it is the
+         only one that can delete a folder from disk, match/change its release,
+         or confirm the match to write tags and move it into the library.
+         Rendering both listed every finished folder twice.
+       #}
+       {% set hide_completed_queue_card = true %}
        {% include 'components/search/_queue_status.html' %}
 
        <!-- Unmatched Folders Section -->

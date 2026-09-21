@@ -189,6 +189,20 @@
   </div>
 </div>
 
+{#
+  The Completed card is the queue page's per-ROW view of finished downloads.
+
+  On /downloads/monitor it duplicates "Matched & Unmatched Folders": that
+  section lists the same downloads folders, marks them ``matched`` once all
+  their audio is imported (which is what "completed" means there), and — unlike
+  this card — can DELETE the folder from disk, MATCH or CHANGE its release and
+  CONFIRM the match to write tags and move it into the library. Rendering both
+  showed every finished folder twice, with the weaker actions on display in one
+  of them, so the monitor page sets ``hide_completed_queue_card`` and this card
+  steps aside. The queue page leaves the flag unset and keeps this view, where
+  the queue rows (retry / cancel / manual search) are the thing being managed.
+#}
+{% if not hide_completed_queue_card %}
 <!-- Completed & Ready to Organize -->
 <div class="card mb-4" id="completedQueueCard">
   <div class="card-header d-flex justify-content-between align-items-center">
@@ -226,6 +240,7 @@
     #}
   </div>
 </div>
+{% endif %}
 
 <!-- Failed Queue -->
 <div class="card mb-4" id="failedQueueCard">

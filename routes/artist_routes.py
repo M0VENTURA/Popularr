@@ -263,8 +263,13 @@ def api_artist_image() -> Any:
     if data.get("success") and data.get("image_url"):
         return quart_redirect(data["image_url"])
     from quart import Response
+    # An artist whose image has not been resolved by a scan yet shows an EMPTY
+    # spot (a transparent 200), not a dark grey square that reads as "image
+    # failed" and not a 404 that renders as a broken-image icon. The scan fills
+    # ``artists.image_url`` for the artist, falling back to the artist's album
+    # art; until then there is simply nothing to show.
     return Response(
-        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect fill="#2a2a2a" width="200" height="200"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"></svg>',
         mimetype="image/svg+xml",
         status=200,
     )
