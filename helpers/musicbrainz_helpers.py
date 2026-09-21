@@ -44,7 +44,6 @@ def get_mbid_from_metadata(metadata: dict[str, Any], *keys: str) -> str:
 def fetch_writer_credits(title: str, artist: str) -> dict[str, list[str]]:
     """Fetch composer/writer/lyricist credits from MusicBrainz for a track."""
     try:
-        # ✅ Use shared MusicBrainz client singleton
         mb = get_shared_mb_client()
         recordings = mb.search_recordings(f'artist:"{artist}" recording:"{title}"', limit=5)
         if not recordings:
@@ -61,14 +60,17 @@ def fetch_writer_credits(title: str, artist: str) -> dict[str, list[str]]:
         writers: list[str] = []
         lyricists: list[str] = []
 
-        for rel in data.get("relations", []):
+        # Check both modern 'relations' and legacy list keys
+        all_rels = (data.get("relations", []) or []) + (data.get("work-relation-list", []) or [])
+        for rel in all_rels:
             target_type = (rel.get("target-type") or "").lower()
             if target_type != "work":
                 continue
             work = rel.get("work", {})
-            for work_rel in work.get("relations", []):
+            work_rels = (work.get("relations", []) or []) + (work.get("artist-relation-list", []) or [])
+            for work_rel in work_rels:
                 wtype = (work_rel.get("type") or "").lower()
-                ac = work_rel.get("artist-credit", [])
+                ac = work_rel.get("artist-credit", []) or []
                 for credit in ac:
                     name = credit.get("name") or (credit.get("artist") or {}).get("name") or ""
                     if name:
@@ -144,32 +146,41 @@ def year_from_recording(rec: dict[str, Any]) -> int | None:
 
 
 def extract_work_ids(recording: dict[str, Any]) -> set[str]:
-    """Extract all work IDs from a recording's work-relation-list."""
+    """Extract all work IDs from a recording's relations."""
     ids: set[str] = set()
-    for rel in recording.get("work-relation-list", []) or []:
+    all_rels = (recording.get("relations", []) or []) + (recording.get("work-relation-list", []) or [])
+    for rel in all_rels:
         if not isinstance(rel, dict):
             continue
-        wid = (rel.get("work") or {}).get("id")
+        work = rel.get("work") or (rel.get("target") if rel.get("target-type") == "work" else {})
+        wid = work.get("id") if isinstance(work, dict) else None
         if wid:
             ids.add(wid)
     return ids
 
 
 def extract_cover_work_ids(recording: dict[str, Any]) -> set[str]:
-    """Extract work IDs linked by MB 'performance (cover)' relations."""
+    """Extract work IDs linked by MB 'performance (cover)' or 'cover' relations."""
     ids: set[str] = set()
-    for rel in recording.get("work-relation-list", []) or []:
+    all_rels = (recording.get("relations", []) or []) + (recording.get("work-relation-list", []) or [])
+    for rel in all_rels:
         if not isinstance(rel, dict):
             continue
-        if str(rel.get("type", "")).strip().lower() != "performance":
-            continue
+            
+        rel_type = str(rel.get("type", "")).strip().lower()
         attrs = rel.get("attributes") or rel.get("attribute-list") or []
-        if not any(str(a).lower() == "cover" for a in attrs):
+        is_performance_cover = (rel_type == "performance" and any(str(a).lower() == "cover" for a in attrs))
+        is_cover_rel = (rel_type == "cover")
+        
+        if not is_performance_cover and not is_cover_rel:
             continue
+            
         direction = str(rel.get("direction", "")).strip().lower()
         if direction and direction != "forward":
             continue
-        wid = (rel.get("work") or {}).get("id")
+            
+        work = rel.get("work") or (rel.get("target") if rel.get("target-type") == "work" else {})
+        wid = work.get("id") if isinstance(work, dict) else None
         if wid:
             ids.add(wid)
     return ids
