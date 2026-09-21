@@ -263,6 +263,23 @@ class CoverDetector:
         track_writers = self._collect_track_writers(tracks, artist, seen_track_ids)
 
         def _record(result: dict[str, Any], track: dict[str, Any]) -> None:
+            # A track is never a cover OF ITS OWN performer. On a Various
+            # Artists compilation the album artist is the placeholder
+            # "Various Artists", which matches no real credit, so an
+            # album-artist comparison concluded that e.g. P.O.D. was the
+            # "original artist" of P.O.D.'s own recording and renamed nine of
+            # "Little Nicky"'s twelve tracks to "<title> (P.O.D. Cover)".
+            # Checked here, at the single funnel every detection path goes
+            # through, so no path can reintroduce it.
+            _orig = str(result.get("original_artist") or "").strip()
+            _performer = str(track.get("artist") or "").strip()
+            if _orig and _performer and names_match(_orig, _performer):
+                logger.debug(
+                    "Cover result discarded: original equals the track's own artist",
+                    track=track.get("title"),
+                    artist=_performer,
+                )
+                return
             cover_results.append(result)
             seen_track_ids.add(result["track_id"])
             pending_updates.append(self._build_update(result, track))
@@ -279,6 +296,7 @@ class CoverDetector:
                 isrc=isrc,
                 title=track.get("title", ""),
                 album_artist=artist,
+                track_artist=str(track.get("artist") or "").strip(),
             )
             if core:
                 logger.debug("Cover detected via ISRC", track=track.get("title"), isrc=isrc)
@@ -508,13 +526,22 @@ class CoverDetector:
         isrc: str,
         title: str,
         album_artist: str,
+        track_artist: str = "",
     ) -> dict[str, Any] | None:
         """Resolve an original via recordings sharing the track's ISRC.
 
         An ISRC identifies one specific recording, so a differently-credited
         recording sharing it is weaker evidence than a modelled cover
         relation. Confidence is capped at medium and a known year is required.
+
+        ⚠️ The credit to compare against is the TRACK's own performer, not the
+        album artist. On a Various Artists compilation the album artist is the
+        placeholder "Various Artists", which matches no real credit — so the
+        comparison always passed, and every ISRC-bearing track on "Little
+        Nicky" was reported as a cover of its own artist (P.O.D., Incubus,
+        Deftones, ...), renaming 9 of 12 tracks to "<title> (P.O.D. Cover)".
         """
+        performer = str(track_artist or "").strip() or str(album_artist or "").strip()
         try:
             recordings = self.mb.lookup_by_isrc(
                 isrc, inc="artist-credits+releases+work-rels+recording-rels"
@@ -529,7 +556,7 @@ class CoverDetector:
                 if not rec.get("id"):
                     continue
                 rec_artist = artist_from_credit(rec.get("artist-credit", []))
-                if not rec_artist or names_match(rec_artist, album_artist):
+                if not rec_artist or names_match(rec_artist, performer):
                     continue
                 # Skip candidates that are themselves annotated as covers.
                 if _has_cover_annotation(str(rec.get("title") or "")):

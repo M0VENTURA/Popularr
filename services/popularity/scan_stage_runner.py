@@ -1354,7 +1354,19 @@ def run_scan(
                 logger.debug("Popularity marking persist skipped", artist=artist, error=str(exc))
 
         try:
-            _outcome = post_album_star_ratings(album_results=album_results, artist=artist, artist_scores=artist_scores, options=options)
+            _outcome = post_album_star_ratings(
+                album_results=album_results,
+                artist=artist,
+                artist_scores=artist_scores,
+                options=options,
+                # Only this layer still holds the album CONTEXT, so the
+                # compilation verdict is passed DOWN. Re-deriving it inside
+                # the finalise stage read ``album_results[0]["album_type"]``,
+                # a key the track stage never writes, so it always came back
+                # empty and every compilation was rated as a studio album.
+                is_compilation=bool(is_compilation),
+                is_va_compilation=bool(is_va_compilation),
+            )
             if int(_outcome.get("star_ratings") or 0) > 0:
                 _per_album_posted_keys.add((artist, str(album_results[0].get("album") or "")))
                 return True

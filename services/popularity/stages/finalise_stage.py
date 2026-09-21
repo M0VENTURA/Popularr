@@ -683,6 +683,74 @@ def _compilation_track_artist(track: dict[str, Any]) -> str:
     return str(track.get("artist") or track.get("album_artist") or "").strip()
 
 
+#: Album-artist values that mean "this folder is a compilation", independent
+#: of any type tag or title keyword.
+_VA_ALBUM_ARTIST_NAMES = frozenset({
+    "various artists", "various", "va", "v/a",
+    "compilation", "soundtrack", "soundtracks",
+})
+
+
+def _resolve_compilation_flags(
+    *,
+    album_results: list[dict[str, Any]],
+    artist: str,
+    album: str,
+) -> tuple[bool, bool]:
+    """Best-effort ``(is_compilation, is_va_compilation)`` from local data.
+
+    FALLBACK ONLY, for a caller that has no album context to hand (the
+    ``finalise_scan`` grouping path). The scan runner passes the flags down
+    explicitly, because it is the layer that still holds the album context.
+
+    Two sources, in order of authority:
+
+    1. ``classify_compilation_category`` when the track rows carry a type tag
+       — a MusicBrainz/Spotify "compilation" classification plus a folder
+       filed under a generic name is a VA compilation.
+    2. The credited ARTIST alone. ``is_compilation_album`` reads only the type
+       tag and the TITLE, so a folder named "Little Nicky" filed under
+       "Various Artists" returns False from it — the reported reason a real
+       compilation was rated as a studio album.
+    """
+    row = album_results[0] if album_results else {}
+    type_text = str(
+        row.get("spotify_album_type")
+        or row.get("musicbrainz_album_type")
+        or row.get("album_type")
+        or row.get("detected_album_type")
+        or ""
+    ).strip()
+    album_artist = str(row.get("album_artist") or artist or "").strip()
+    generic_artist = album_artist.casefold() in _VA_ALBUM_ARTIST_NAMES
+
+    try:
+        from services.catalog.album_classification_service import (
+            classify_compilation_category,
+        )
+
+        category = classify_compilation_category(
+            artist=artist,
+            album=album,
+            tracks=album_results,
+            album_artist=album_artist,
+            musicbrainz_album_type=type_text,
+        ) or ""
+        if category:
+            return True, category == "va"
+        if generic_artist:
+            # A folder filed under "Various Artists" (etc.) is a compilation
+            # whatever the type tag and title say.
+            return True, True
+        return False, False
+    except Exception as exc:
+        logger.debug(
+            "Compilation classification failed",
+            artist=artist, album=album, error=str(exc),
+        )
+        return (True, True) if generic_artist else (False, False)
+
+
 def compute_track_artist_scores(
     track_artist: str,
     scan_results: list[dict[str, Any]],
@@ -2528,8 +2596,25 @@ def post_album_star_ratings(
     artist: str,
     artist_scores: list[float],
     options: dict[str, Any],
+    is_compilation: bool | None = None,
+    is_va_compilation: bool = False,
 ) -> dict[str, int]:
-    """Assign, persist, log and sync star ratings for ONE album."""
+    """Assign, persist, log and sync star ratings for ONE album.
+
+    ``is_compilation``/``is_va_compilation`` are passed in by the scan runner,
+    which is the only layer that still holds the album CONTEXT (artist, title,
+    MusicBrainz types). They used to be re-derived here, from
+    ``album_results[0]["album_type"]`` — a key the track stage never sets — so
+    the value always collapsed to ``""`` and every compilation was then rated
+    as a studio album. The reported symptom: a "Various Artists - Little
+    Nicky" compilation whose tracks were scored against the compilation's own
+    shared pool instead of each credited artist's catalogue, with the scan log
+    printing a plain ``Z-SCORE`` header instead of ``CAT-Z`` and
+    ``[COMPILATION: per-track-artist rating]``.
+
+    When the caller has no context (the ``finalise_scan`` grouping path),
+    ``None`` falls back to the local title/artist heuristics.
+    """
     album = (
         str(
             album_results[0].get("album")
@@ -2546,23 +2631,26 @@ def post_album_star_ratings(
     navidrome_synced = 0
 
     try:
-        try:
-            from services.enrichment.single_detection_service import is_compilation_album
-            _album_type = str(
-                album_results[0].get("album_type")
-                or album_results[0].get("detected_album_type")
-                or ""
-            )
-            is_compilation = bool(is_compilation_album(_album_type, album))
-        except Exception as exc:
-            logger.debug("Compilation detection failed", artist=artist, album=album, error=str(exc))
-            is_compilation = False
+        generic_compilation_artist = (
+            str(artist or "").strip().casefold() in _VA_ALBUM_ARTIST_NAMES
+        )
 
-        _GENERIC_COMPILATION_ARTISTS = frozenset({
-            "various artists", "various", "va", "v/a",
-            "compilation", "soundtrack", "soundtracks",
-        })
-        generic_compilation_artist = str(artist or "").strip().casefold() in _GENERIC_COMPILATION_ARTISTS
+        if is_compilation is None:
+            is_compilation, is_va_compilation = _resolve_compilation_flags(
+                album_results=album_results,
+                artist=artist,
+                album=album,
+            )
+        else:
+            is_compilation = bool(is_compilation or is_va_compilation)
+
+        if is_compilation:
+            logger.info(
+                "Compilation detected — rating on per-track-artist catalogues",
+                artist=artist,
+                album=album,
+                va_compilation=bool(is_va_compilation),
+            )
 
         is_live_album = _detect_live_album(album_results)
         if is_live_album:
