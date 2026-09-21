@@ -752,6 +752,60 @@ def _as_truthy(value: Any) -> bool:
     return bool(value)
 
 
+#: Songs shorter than ``max_duration_seconds`` are capped at ``max_stars``.
+#: A 50-second track is a skit, an interlude or a hidden-track joke — Last.fm
+#: and ListenBrainz count these as full "listens", so a short track riding a
+#: popular album can out-score the album's real songs on raw play counts and
+#: land 4★/5★.  The cap is a FINAL clamp applied after every other star path
+#: (era slots, live-album caps, single-driven floors) so nothing restores the
+#: rating.  Algorithmic ratings only — a user override or a heart still wins.
+_DEFAULT_SHORT_TRACK_STAR_CAP: dict[str, Any] = {
+    "enabled": 1,
+    "max_duration_seconds": 70.0,
+    "max_stars": 2,
+}
+
+
+def get_short_track_star_cap_config(config: dict | None = None) -> dict[str, Any]:
+    """Return the short-track star cap settings.
+
+    Reads ``statistics.short_track_star_cap`` keys:
+    - ``enabled`` (default True) — master switch
+    - ``max_duration_seconds`` (default 70) — tracks shorter than this are capped
+    - ``max_stars`` (default 2) — the ceiling applied to those tracks
+
+    Merged over the defaults so every key is always present, even with no
+    config file (a partial user block overrides only the keys it names).
+    ``0`` disables: a zero duration threshold or a star cap of 0/1 means the
+    caller should skip the clamp entirely.
+    """
+    cfg = config if isinstance(config, dict) else get_config()
+    stats = cfg.get("statistics", {}) if isinstance(cfg, dict) else {}
+    block = stats.get("short_track_star_cap") if isinstance(stats, dict) else None
+
+    rules = dict(_DEFAULT_SHORT_TRACK_STAR_CAP)
+    if isinstance(block, dict):
+        rules.update(block)
+
+    out: dict[str, Any] = {"enabled": 1 if _as_truthy(rules.get("enabled", 1)) else 0}
+
+    try:
+        out["max_duration_seconds"] = float(
+            rules.get("max_duration_seconds", _DEFAULT_SHORT_TRACK_STAR_CAP["max_duration_seconds"]) or 0
+        )
+    except (TypeError, ValueError):
+        out["max_duration_seconds"] = float(_DEFAULT_SHORT_TRACK_STAR_CAP["max_duration_seconds"])
+
+    try:
+        out["max_stars"] = int(
+            rules.get("max_stars", _DEFAULT_SHORT_TRACK_STAR_CAP["max_stars"]) or 0
+        )
+    except (TypeError, ValueError):
+        out["max_stars"] = int(_DEFAULT_SHORT_TRACK_STAR_CAP["max_stars"])
+
+    return out
+
+
 def get_standout_config() -> dict[str, Any]:
     """Get standout track detection and star rating configuration.
 

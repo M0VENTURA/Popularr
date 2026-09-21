@@ -130,7 +130,7 @@ def _safe_error(exc: BaseException) -> str:
 @contextmanager
 def _log_section(section: str, **context: Any) -> Iterator[None]:
     start = time.monotonic()
-    Logger.info("[ENRICH] section started", section=section, **context)
+    Logger.debug("[ENRICH] section started", section=section, **context)
     try:
         yield
     except Exception as exc:
@@ -143,7 +143,7 @@ def _log_section(section: str, **context: Any) -> Iterator[None]:
         )
         raise
     else:
-        Logger.info(
+        Logger.debug(
             "[ENRICH] section completed",
             section=section,
             elapsed_s=round(time.monotonic() - start, 3),
@@ -220,7 +220,7 @@ def _call_with_heartbeat(
             "next_warn": start + _SLOW_CALL_HEARTBEAT_SECONDS,
         }
 
-    Logger.info("[ENRICH] call started", section=section, **context)
+    Logger.debug("[ENRICH] call started", section=section, **context)
     try:
         result = func(*args, **kwargs)
     except Exception as exc:
@@ -233,7 +233,7 @@ def _call_with_heartbeat(
         )
         raise
     else:
-        Logger.info(
+        Logger.debug(
             "[ENRICH] call completed",
             section=section,
             elapsed_s=round(time.monotonic() - start, 3),

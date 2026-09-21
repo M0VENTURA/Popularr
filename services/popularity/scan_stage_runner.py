@@ -157,7 +157,7 @@ def _bounded_call_report(
         context.setdefault("label", label)
 
     start_ts = time.monotonic()
-    logger.info("[SCAN] section started", section=section, **context)
+    logger.debug("[SCAN] section started", section=section, **context)
 
     if seconds is None:
         try:
@@ -172,7 +172,7 @@ def _bounded_call_report(
             )
             return {}
         else:
-            logger.info(
+            logger.debug(
                 "[SCAN] section completed",
                 section=section,
                 elapsed_s=round(time.monotonic() - start_ts, 3),
@@ -1182,9 +1182,26 @@ def run_scan(
     else:
         _banner_title = "LIBRARY SCAN"
 
-    log_unified("=" * 80)
-    log_unified(f"🚀 {_banner_title} ({total_albums} Album(s) Queued)")
-    log_unified("=" * 80)
+    # Readable section report framing. The detailed per-call instrumentation
+    # ([MB] call started/completed, [ENRICH]/[SCAN] section tracing) is
+    # debug-gated, so at the default log level this banner plus the per-stage
+    # sections below are the whole scan narrative.
+    _scan_mode_label = "Forced Scan" if force else ("Singles Pass" if _singles_pass else "Normal Scan")
+    if _banner_album:
+        _scan_mode_label += " (single album)"
+    try:
+        from helpers.scan_report import scan_started as _report_started
+
+        _report_started(
+            artist=_banner_artist,
+            albums=total_albums,
+            mode=_scan_mode_label,
+        )
+    except Exception as exc:
+        logger.debug("Scan report banner failed", error=str(exc))
+        log_unified("=" * 80)
+        log_unified(f"🚀 {_banner_title} ({total_albums} Album(s) Queued)")
+        log_unified("=" * 80)
 
     try:
         prune_genre_playlists_for_deletion()
@@ -1431,11 +1448,51 @@ def run_scan(
                 is_compilation=bool(_pending.get("is_compilation")),
                 is_va_compilation=bool(_pending.get("is_va_compilation")),
             )
+            if _posted:
+                _report_album_summary(_pending.get("report") or {}, _album_results_this)
             if _posted and total_albums <= 1:
                 try:
                     refresh_genre_playlists_for_album(artist, str(_pending.get("album") or ""))
                 except Exception as exc:
                     logger.debug("Genre playlist refresh failed", artist=artist, error=str(exc))
+
+    def _report_album_summary(report: dict[str, Any], album_results: list[dict[str, Any]]) -> None:
+        """Emit the closing ALBUM SUMMARY block for one album.
+
+        Called right after the album's star ratings are assigned, so the
+        Ratings block reflects what was actually persisted. Every field falls
+        back to a safe default: the report must never raise into a scan.
+        """
+        if not report:
+            return
+        try:
+            from helpers.scan_report import album_summary
+
+            _star_counts: dict[int, int] = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+            for _r in album_results:
+                try:
+                    _s = int(_r.get("stars") or 0)
+                except (TypeError, ValueError):
+                    _s = 0
+                if 1 <= _s <= 5:
+                    _star_counts[_s] += 1
+
+            _started = report.get("started_at")
+            _duration = (time.monotonic() - _started) if isinstance(_started, (int, float)) else None
+
+            album_summary(
+                album=str(report.get("album") or ""),
+                tracks_processed=int(report.get("tracks_processed") or 0),
+                metadata_corrections=int(report.get("metadata_corrections") or 0),
+                genres_added=int(report.get("genres_added") or 0),
+                genres_removed=int(report.get("genres_removed") or 0),
+                singles_detected=int(report.get("singles_detected") or 0),
+                star_counts=_star_counts,
+                playlists_updated=int(report.get("playlists_updated") or 0),
+                duration_s=_duration,
+            )
+        except Exception as exc:
+            logger.debug("Album summary report failed", error=str(exc))
 
     def _close_artist_section(artist_name: str | None) -> None:
         nonlocal _essential_featured_rows, _essential_playlists_done
@@ -1558,6 +1615,23 @@ def run_scan(
         album = album_row.get("album") or ""
         tracks = album_row.get("tracks") or []
         _album_start = len(results)
+        # Report accumulator for this album's closing ALBUM SUMMARY block.
+        # Populated as each stage completes; emitted when the album's star
+        # ratings are assigned (see _flush_artist_star_ratings).
+        _album_report: dict[str, Any] = {
+            "album": album,
+            "artist": artist,
+            "tracks_processed": len(tracks or []),
+            "metadata_corrections": 0,
+            "genres_added": 0,
+            "genres_removed": 0,
+            "singles_detected": 0,
+            "playlists_updated": 0,
+            "started_at": time.monotonic(),
+            "release_year": None,
+            "album_type": "",
+            "release_mbid_found": False,
+        }
 
         _first = (artist or " ")[0].upper()
         _letter = "#" if not _first.isalpha() else _first
@@ -1935,6 +2009,12 @@ def run_scan(
 
             album_count = len(track_contexts)
             log_unified(f"[POPULARITY] Album {album_index}/{total_albums} ({scan_type}): {artist} - {album} ({album_count} tracks)")
+            try:
+                from helpers.scan_report import album_started as _report_album
+
+                _report_album(index=album_index, total=total_albums, album=f"{artist} — {album}")
+            except Exception as exc:
+                logger.debug("Album report header failed", error=str(exc))
 
             # -------------------------------------------------------------
             # MusicBrainz recording identity for this album's tracks.
@@ -1956,9 +2036,11 @@ def run_scan(
                         prefetched_popularity=prefetched_popularity,
                     )
                     if options["mb_batch_metadata"]:
-                        log_unified(
-                            f"[POPULARITY] MusicBrainz recording identity from the album release "
-                            f"for {artist} - {album} ({len(options['mb_batch_metadata'])} track(s))"
+                        logger.debug(
+                            "[POPULARITY] MusicBrainz recording identity from the album release",
+                            artist=artist,
+                            album=album,
+                            tracks=len(options["mb_batch_metadata"]),
                         )
                 except Exception as exc:
                     logger.debug("MusicBrainz album recording identity failed", artist=artist, album=album, error=str(exc))
@@ -2207,11 +2289,16 @@ def run_scan(
                     log_unified(f"[TAG_SYNC] Syncing cleaned metadata to audio files for '{album}'...")
                     _tag_sync = sync_album_file_tags(artist=artist, album=album)
                     if _tag_sync and (_tag_sync.get("files_updated") or _tag_sync.get("corrections_recorded")):
-                        log_unified(
-                            f"[ALBUM_TAG_SYNC] {artist} - {album}: filled "
-                            f"{_tag_sync.get('files_updated', 0)} file(s), recorded "
-                            f"{_tag_sync.get('corrections_recorded', 0)} correction(s)"
-                            f"{' (perfect MB match)' if _tag_sync.get('perfect_match') else ''}"
+                        _album_report["metadata_corrections"] = int(_tag_sync.get("corrections_recorded") or 0)
+                        # The per-album file-tag result is DETAIL; the section
+                        # report's TAG SYNCHRONISATION block carries the totals.
+                        logger.debug(
+                            "[ALBUM_TAG_SYNC] album file tags written",
+                            artist=artist,
+                            album=album,
+                            files_updated=_tag_sync.get("files_updated", 0),
+                            corrections_recorded=_tag_sync.get("corrections_recorded", 0),
+                            perfect_match=bool(_tag_sync.get("perfect_match")),
                         )
                 except Exception as exc:
                     logger.warning("Failed to sync file tags", artist=artist, album=album, error=str(exc))
@@ -2235,9 +2322,11 @@ def run_scan(
                 try:
                     _missing = get_missing_tracks(artist=artist, album=album)
                     if _missing and _missing.get("missing_count"):
-                        log_unified(
-                            f"[MISSING_TRACKS] {artist} - {album}: "
-                            f"{_missing.get('missing_count')} track(s) missing from the MB release"
+                        logger.debug(
+                            "[MISSING_TRACKS] album missing tracks refreshed",
+                            artist=artist,
+                            album=album,
+                            missing_count=_missing.get("missing_count"),
                         )
                 except Exception as exc:
                     logger.debug(
@@ -2289,6 +2378,9 @@ def run_scan(
                 logger.debug("record_scan(completed) failed", artist=artist, album=album, error=str(exc))
 
             _album_results_this = results[_album_start:]
+            _album_report["singles_detected"] = sum(
+                1 for _r in _album_results_this if isinstance(_r, dict) and bool(_r.get("is_single"))
+            )
             if _album_results_this:
                 _artist_scan_results.setdefault(artist, []).extend(_album_results_this)
                 _artist_pending_albums.setdefault(artist, []).append({
@@ -2296,6 +2388,12 @@ def run_scan(
                     "is_compilation": bool(album_context.get("is_compilation")),
                     "is_va_compilation": bool(album_context.get("is_va_compilation")),
                     "album": album,
+                    # Report metadata for the closing ALBUM SUMMARY. Carried
+                    # here because the star ratings this summary reports are
+                    # only assigned when the artist's pending albums are
+                    # flushed (``_flush_artist_star_ratings``), which happens
+                    # after the album loop moves on.
+                    "report": _album_report,
                 })
 
         except Exception as _album_exc:

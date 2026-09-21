@@ -2730,6 +2730,123 @@ def _apply_live_album_slot_caps(
         )
 
 
+def _apply_short_track_star_cap(
+    album_results: list[dict[str, Any]],
+    *,
+    durations: dict[str, float] | None = None,
+    artist: str = "",
+    album: str = "",
+) -> int:
+    """Clamp very short tracks to at most ``max_stars``.
+
+    A 50-second track is a skit, an interlude or a hidden-track joke.  Last.fm
+    and ListenBrainz count those as full "listens", so on a popular album a
+    short track's raw play counts can out-rank the album's real songs and land
+    4★/5★.  ``statistics.short_track_star_cap`` (default: enabled, 70s, 2★)
+    is a FINAL clamp applied after every other star path — era slots, the
+    live-album caps and the single-driven floors — so nothing restores the
+    rating afterwards.
+
+    Algorithmic ratings only: a user override (``single_confidence == "user"``),
+    a global 5★ lock, a forced floor or a hearted track is an explicit
+    instruction and is never clamped. Note that hearts are ALSO protected
+    downstream — ``apply_favourite_rating_floor`` runs after persistence and
+    raises hearted tracks back to the configured floor, so a heart wins even
+    when this clamp could not see the flag.
+
+    Returns the number of tracks whose rating was lowered.
+    """
+    try:
+        from helpers.config_helpers import get_short_track_star_cap_config
+        _cfg = get_short_track_star_cap_config()
+    except Exception as exc:
+        logger.debug("Short-track cap config read failed", error=str(exc))
+        return 0
+
+    if not _cfg.get("enabled"):
+        return 0
+    max_duration = float(_cfg.get("max_duration_seconds") or 0)
+    max_stars = int(_cfg.get("max_stars") or 0)
+    # A zero threshold or a ceiling below 1★ would silence music rather than
+    # cap it — treat both as "disabled".
+    if max_duration <= 0 or max_stars < 1 or max_stars >= 5:
+        return 0
+
+    _durations = durations or {}
+    capped = 0
+    for track in album_results:
+        if int(track.get("stars") or 0) <= max_stars:
+            continue
+        if _short_track_cap_is_protected(track):
+            continue
+
+        duration = _track_duration_seconds(track, _durations)
+        if duration is None or duration >= max_duration:
+            continue
+
+        _previous = int(track.get("stars") or 0)
+        track["stars"] = max_stars
+        # These flags claim a 5★/4★ award that no longer holds; leaving them
+        # set would let a downstream slot-cap pass treat the track as
+        # protected and keep it above the clamp.
+        track["_era_5star"] = False
+        _force = int(track.get("_force_floor") or 0)
+        if _force > max_stars:
+            track["_force_floor"] = max_stars
+        capped += 1
+        logger.info(
+            "Short track cap applied",
+            artist=artist, album=album, title=track.get("title"),
+            duration_s=round(duration, 1), stars=f"{_previous}★ → {max_stars}★",
+            max_duration_s=max_duration,
+        )
+
+    if capped:
+        log_unified(
+            f"⏱ SHORT TRACK CAP: {capped} track(s) under {max_duration:.0f}s "
+            f"capped at {max_stars}★ — {str(album or '').strip()}"
+        )
+    return capped
+
+
+def _short_track_cap_is_protected(track: dict[str, Any]) -> bool:
+    """True when a track's rating is an explicit instruction, not a guess."""
+    if bool(track.get("_global_5star_locked")):
+        return True
+    if str(track.get("single_confidence") or "").strip().casefold() == "user":
+        return True
+    if bool(track.get("is_favourite")) or bool(track.get("favourite")):
+        return True
+    return False
+
+
+def _track_duration_seconds(
+    track: dict[str, Any],
+    durations: dict[str, float],
+) -> float | None:
+    """Best-effort track duration in seconds from the row or the DB lookup.
+
+    Normalises milliseconds to seconds: some sources store duration in ms, and
+    a raw ms value compared against a seconds threshold would silently exempt
+    every track from the cap.  The division only fires above one hour, so a
+    genuine long track (an 11-minute epic at 700s) is never misread as 0.7s
+    and wrongly capped.
+    """
+    raw = track.get("duration")
+    if raw in (None, ""):
+        track_id = str(track.get("track_id") or "").strip()
+        raw = durations.get(track_id) if track_id else None
+    try:
+        duration = float(raw or 0)
+    except (TypeError, ValueError):
+        return None
+    if duration <= 0:
+        return None
+    if duration > 3600:
+        duration = duration / 1000.0
+    return duration if duration > 0 else None
+
+
 def post_album_star_ratings(
     *,
     album_results: list[dict[str, Any]],
@@ -2875,6 +2992,7 @@ def post_album_star_ratings(
 
         _stored_stars: dict[str, int] = {}
         _stored_paths: dict[str, str] = {}
+        _stored_durations: dict[str, float] = {}
         try:
             _album_ids = [
                 str(t.get("track_id") or "").strip()
@@ -2885,8 +3003,8 @@ def post_album_star_ratings(
                 with db_session() as _sess:
                     _rows = _sess.execute(
                         text(
-                            "SELECT id, COALESCE(stars, star_rating, 0) AS stars, file_path FROM tracks "
-                            "WHERE CAST(id AS TEXT) IN :ids"
+                            "SELECT id, COALESCE(stars, star_rating, 0) AS stars, file_path, duration "
+                            "FROM tracks WHERE CAST(id AS TEXT) IN :ids"
                         ).bindparams(bindparam("ids", expanding=True)),
                         {"ids": _album_ids},
                     ).fetchall() or []
@@ -2896,6 +3014,12 @@ def post_album_star_ratings(
                     _p = str(_m.get("file_path") or "").strip()
                     if _p:
                         _stored_paths[str(_m.get("id"))] = _p
+                    try:
+                        _d = float(_m.get("duration") or 0)
+                    except (TypeError, ValueError):
+                        _d = 0.0
+                    if _d > 0:
+                        _stored_durations[str(_m.get("id"))] = _d
         except Exception as exc:
             logger.debug("Album rating/path batch load failed", artist=artist, album=album, error=str(exc))
 
@@ -3076,6 +3200,20 @@ def post_album_star_ratings(
                         baseline_tracks=baseline_tracks
                     )
         """
+
+        # 2.9 Clamp very short tracks (skits / interludes / jokes).
+        # This is deliberately the LAST rating pass: the era and live-album
+        # caps above can write 4★ to a demoted 5★, so a clamp applied before
+        # them would be undone. Applying it here means nothing downstream
+        # restores a 4★/5★ on a track the config says is too short to earn
+        # one. User overrides and hearts are exempt (see the helper). Any
+        # resulting change from the stored rating is picked up below.
+        _apply_short_track_star_cap(
+            album_results,
+            durations=_stored_durations,
+            artist=artist,
+            album=album,
+        )
 
         # 3. Persist calculated and capped ratings first
         _ratings_changed = False

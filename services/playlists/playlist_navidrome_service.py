@@ -292,7 +292,11 @@ def sync_playlist_by_name(
             result["updated"] = bool(ok)
             result["success"] = bool(ok)
             if ok:
-                logger.info(
+                # One line per genre playlist per scan meant a finalise pass
+                # emitted ~45 of these. The section report's PLAYLIST
+                # PROCESSING block carries the count; the per-playlist detail
+                # is debug-only.
+                logger.debug(
                     "[PLAYLISTS] Updated Navidrome playlist in place",
                     name=name,
                     playlist_id=primary_id,

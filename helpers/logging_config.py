@@ -123,6 +123,33 @@ def log_unified(message: str, **kwargs: Any) -> None:
     logging.getLogger("popularr.unified").info(rendered)
 
 
+def debug_enabled() -> bool:
+    """True when the configured log level is DEBUG.
+
+    The single gate for "detail" output. ``logging.level: debug`` in config.yaml
+    (or ``LOG_LEVEL=DEBUG``) turns it on; anything else keeps the scan log to
+    the readable section report only.
+    """
+    try:
+        return _resolve_log_level() == "DEBUG"
+    except Exception:
+        return False
+
+
+def log_scan_detail(message: str, **kwargs: Any) -> None:
+    """Write a scan DETAIL line — emitted only when debug logging is enabled.
+
+    Used for the high-volume per-call instrumentation (MusicBrainz request
+    tracing, enrichment section timings, per-track stage transitions). At the
+    default ``info`` level these are dropped entirely so the unified scan log
+    keeps the section report the operator actually reads; at ``debug`` they are
+    emitted inline so a stalled or mis-scoring scan can still be traced.
+    """
+    if not debug_enabled():
+        return
+    log_unified(message, **kwargs)
+
+
 def log_queue(message: str, **kwargs: Any) -> None:
     """Write a download-queue event to ``queue.log``."""
     if kwargs:

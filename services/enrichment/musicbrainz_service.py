@@ -196,7 +196,7 @@ def _as_int(value: Any, default: int = 0) -> int:
 @contextmanager
 def _logged_section(section: str, **context: Any) -> Iterator[None]:
     Started = time.monotonic()
-    Logger.info("[MB] section started", section=section, **context)
+    Logger.debug("[MB] section started", section=section, **context)
     try:
         yield
     except Exception as exc:
@@ -209,7 +209,7 @@ def _logged_section(section: str, **context: Any) -> Iterator[None]:
         )
         raise
     else:
-        Logger.info(
+        Logger.debug(
             "[MB] section completed",
             Section=section,
             Elapsed_s=round(time.monotonic() - Started, 3),
@@ -281,7 +281,7 @@ def _call_with_heartbeat(
             "next_warn": Started + _HEARTBEAT_SECONDS,
         }
 
-    Logger.info("[MB] call started", section=Section, **Context)
+    Logger.debug("[MB] call started", section=Section, **Context)
     try:
         Result = Func(*args, **kwargs)
     except Exception as exc:
@@ -294,7 +294,7 @@ def _call_with_heartbeat(
         )
         raise
     else:
-        Logger.info(
+        Logger.debug(
             "[MB] call completed",
             Section=Section,
             Elapsed_s=round(time.monotonic() - Started, 3),

@@ -2200,6 +2200,35 @@
             variance, dragging real tracks down).  Default: <strong>60</strong> (1:00).  <code>0</code> disables.
           </small>
         </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm">Short Track Star Cap</label>
+          <div class="form-check mb-1">
+            <input class="form-check-input" type="checkbox" id="short_track_star_cap_enabled"
+                   {% if config.get('statistics', {}).get('short_track_star_cap', {}).get('enabled', True) %}checked{% endif %}>
+            <label class="form-check-label" for="short_track_star_cap_enabled">Enable short-track cap</label>
+          </div>
+          <div class="row g-2">
+            <div class="col-6">
+              <input type="number" step="5" min="0" class="form-control form-control-sm"
+                     id="short_track_star_cap_max_duration_seconds" placeholder="70"
+                     value="{{ config.get('statistics', {}).get('short_track_star_cap', {}).get('max_duration_seconds', 70) }}">
+              <small class="form-text text-muted">Max length (s)</small>
+            </div>
+            <div class="col-6">
+              <input type="number" step="1" min="1" max="4" class="form-control form-control-sm"
+                     id="short_track_star_cap_max_stars" placeholder="2"
+                     value="{{ config.get('statistics', {}).get('short_track_star_cap', {}).get('max_stars', 2) }}">
+              <small class="form-text text-muted">Max stars</small>
+            </div>
+          </div>
+          <small class="form-text text-muted">
+            Tracks shorter than this can never rate above the ceiling (skits, interludes,
+            hidden-track jokes — Last.fm and ListenBrainz count them as full listens, so a
+            50-second track can out-score the album's real songs).  <code>0</code> seconds
+            disables.  Algorithmic ratings only — a manual override or a hearted track is
+            never lowered.
+          </small>
+        </div>
         <div class="col-12 col-sm-6 col-lg-8">
           <label class="form-label form-label-sm">Exclude Intro / Interlude Title Regex</label>
           <input type="text" class="form-control form-control-sm" id="statistics_exclude_title_regex"

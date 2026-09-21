@@ -96,7 +96,44 @@ function showToastMsg(message, isError) {
   }
 }
 
-window.mbDerivedCategory = function (release) {
+// ============================================================================
+// MUSICBRAINZ PICKER OWNERSHIP GUARD
+// ============================================================================
+//
+// This file and the Test-Site picker (test_site/static/js/services/
+// musicbrainz-picker.js) each ship a COMPLETE MusicBrainz search pipeline.
+// They are NOT interchangeable: the picker renders its result buttons with
+// `data-index` and binds listeners, while this file renders inline
+// `onclick="handleGlobalMbSelect('<encoded>')"` and decodes the payload with
+// decodeInlineArg(). Mixing one file's markup with the other's handler cannot
+// work.
+//
+// Load order decides the winner, and on the Test Site this file ALWAYS lost
+// the race in the wrong direction: base.html (which loads the picker) runs
+// BEFORE a page's `{% block scripts %}` (which loads this file), so this
+// file's pipeline silently replaced the picker's. The two then disagreed about
+// where the pending selection lives — the picker keeps it in MODULE scope
+// (`pendingRelease`/`selectionCallback`), this file reads
+// `window._mbPendingRelease` — so clicking "Apply Match" hit
+// `if (!release) return` and did nothing at all, with no error.
+//
+// The picker publishes `window.mbSearch`, so its presence is the reliable
+// test (it is the picker's own public API surface, not an accidental global).
+// When the picker is present this file stands down from every MB global; when
+// it is absent — the cutover-off tree, which has no static/js/services/ or
+// utils/ at all, so the picker CANNOT load there — this file still provides a
+// working pipeline.
+//
+// `var`, not `const`: this is a classic top-level script, so a second include
+// of the same file would throw "already been declared" on a const binding.
+// Redeclaring a var is harmless and re-evaluates to the same value.
+var _pickerOwnsMbGlobals = !!(
+  typeof window.mbSearch === 'object'
+  && window.mbSearch
+  && typeof window.mbSearch.confirm === 'function'
+);
+
+if (!_pickerOwnsMbGlobals) window.mbDerivedCategory = function (release) {
   const secondary = (release.secondary_types || []).map(s => String(s).toLowerCase());
   const secondaryFirst = ['compilation', 'live', 'remix', 'soundtrack', 'dj-mix', 'mixtape', 'demo', 'spokenword', 'interview', 'audiobook'];
   for (let i = 0; i < secondaryFirst.length; i++) {
@@ -176,7 +213,11 @@ function normalizeSoulseekQuery(value) {
 // and then define it again, unguarded, right here. The `||` guard was
 // meaningless — the second assignment always won — and the two bodies were
 // not equivalent: only this one falls back to reading the lookup form fields.
-window.doLookup = function (artist, album, track, year, callback) {
+//
+// ⚠️ Guarded: the Test-Site picker owns these globals when it is loaded (see
+// _pickerOwnsMbGlobals above). Running BOTH pipelines is what broke
+// "Apply Match" on the downloads page.
+if (!_pickerOwnsMbGlobals) window.doLookup = function (artist, album, track, year, callback) {
   if (!artist && !album && !track && !year) {
     artist = document.getElementById('lookupArtist')?.value?.trim() || document.getElementById('mbSearchArtist')?.value?.trim() || '';
     album = document.getElementById('lookupAlbum')?.value?.trim() || document.getElementById('mbSearchAlbum')?.value?.trim() || '';
@@ -203,7 +244,7 @@ window.doLookup = function (artist, album, track, year, callback) {
   }
 };
 
-window.clearLookup = function () {
+if (!_pickerOwnsMbGlobals) window.clearLookup = function () {
   ['lookupArtist', 'lookupAlbum', 'lookupTrack', 'lookupYear', 'mbSearchArtist', 'mbSearchAlbum', 'mbSearchTrack', 'mbSearchYear'].forEach(function (id) {
     var el = document.getElementById(id);
     if (el) el.value = '';
@@ -214,7 +255,7 @@ window.clearLookup = function () {
 // MUSICBRAINZ SEARCH & RESULTS CORE
 // ============================================================================
 
-window.performMbSearch = async function () {
+if (!_pickerOwnsMbGlobals) window.performMbSearch = async function () {
   let artist = document.getElementById('mbSearchArtist')?.value.trim() || '';
   const album = document.getElementById('mbSearchAlbum')?.value.trim() || '';
   const track = document.getElementById('mbSearchTrack')?.value.trim() || '';
@@ -356,7 +397,7 @@ window.performMbSearch = async function () {
 // Clears the shared MusicBrainz search form. The component's eraser button
 // calls this via onclick, but it was defined nowhere — clicking it threw
 // ReferenceError and the form never cleared.
-window.clearMbSearch = function () {
+if (!_pickerOwnsMbGlobals) window.clearMbSearch = function () {
   ['mbSearchArtist', 'mbSearchAlbum', 'mbSearchTrack', 'mbSearchYear', 'mbSearchInput'].forEach(function (id) {
     const el = document.getElementById(id);
     if (el) el.value = '';
@@ -383,7 +424,8 @@ window.clearMbSearch = function () {
 
 // Holds the release the user picked via "Select Match", awaiting confirmation
 // via the "Apply Match" button (#mbSelectedRelease / confirmReleaseSelection).
-window._mbPendingRelease = null;
+// Only meaningful to this file's pipeline, so the picker owns its own copy.
+if (!_pickerOwnsMbGlobals) window._mbPendingRelease = null;
 
 // Called when a result card's "Select Match" button is clicked (only rendered
 // when window._mbSearchCallback is set — i.e. a caller like
@@ -396,7 +438,7 @@ window._mbPendingRelease = null;
 // which is also why that function was never written). Now it stages the pick
 // and shows the summary panel; confirmReleaseSelection() below fires the
 // callback once the user reviews and clicks "Apply Match".
-window.handleGlobalMbSelect = function (releaseEnc) {
+if (!_pickerOwnsMbGlobals) window.handleGlobalMbSelect = function (releaseEnc) {
   const release = decodeInlineArg(releaseEnc);
   if (!release) return;
 
@@ -421,7 +463,7 @@ window.handleGlobalMbSelect = function (releaseEnc) {
 // applyAlbumMbid()) with the release staged by handleGlobalMbSelect(), then
 // closes the modal. Previously undefined — the button existed in the markup
 // but had no handler anywhere in the codebase.
-window.confirmReleaseSelection = function () {
+if (!_pickerOwnsMbGlobals) window.confirmReleaseSelection = function () {
   const release = window._mbPendingRelease;
   if (!release) return;
 
@@ -441,7 +483,7 @@ window.confirmReleaseSelection = function () {
   }
 };
 
-window.performMbDownloadSearch = window.performMbSearch;
+if (!_pickerOwnsMbGlobals) window.performMbDownloadSearch = window.performMbSearch;
 
 // ============================================================================
 // UPCOMING RELEASES

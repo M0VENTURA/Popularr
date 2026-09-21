@@ -979,15 +979,15 @@ def process_track(
         or is_live_or_alternate_track_title(track_title)
     )
 
-    from helpers.logging_config import log_unified
+    from helpers.logging_config import log_scan_detail, log_unified
     _track_started = time.monotonic()
-    try:
-        log_unified(
-            f"[TRACK] ▶ Processing: \"{str(track_title or '').strip()}\" "
-            f"({str(track_artist or '').strip()})"
-        )
-    except Exception:
-        pass
+    # Per-track progress chatter. One line per track per stage meant a 13-track
+    # album produced ~26 of these before any result was visible; the section
+    # report shows the album's outcome instead. Available at debug level.
+    log_scan_detail(
+        f"[TRACK] ▶ Processing: \"{str(track_title or '').strip()}\" "
+        f"({str(track_artist or '').strip()})"
+    )
 
     try:
         from helpers.config_helpers import get_config
@@ -1632,13 +1632,11 @@ def process_track(
 
             if _sd_eligible and not _sd_manual_override:
                 _sd_start = time.monotonic()
-                try:
-                    log_unified(
-                        f"[TRACK] ▶ Singles detection: \"{str(sd_title or '').strip()}\" "
-                        f"({str(sd_artist or '').strip()}) — Discogs/MusicBrainz/Last.fm…"
-                    )
-                except Exception:
-                    pass
+                from helpers.logging_config import log_scan_detail as _log_sd_detail
+                _log_sd_detail(
+                    f"[TRACK] ▶ Singles detection: \"{str(sd_title or '').strip()}\" "
+                    f"({str(sd_artist or '').strip()}) — Discogs/MusicBrainz/Last.fm…"
+                )
 
                 sd_result = detect_single_for_track(
                     title=sd_title,
@@ -1684,7 +1682,7 @@ def process_track(
                         for s in (sd_result or {}).get("sources") or []
                         if isinstance(s, dict) and bool(s.get("matched"))
                     ) or "none"
-                    log_unified(
+                    _log_sd_detail(
                         f"[TRACK] ✓ Singles detection done: \"{str(sd_title or '').strip()}\" "
                         f"→ {_sd_conf_log} ({_sd_srcs_log}) in {_sd_elapsed:.1f}s"
                     )
@@ -2094,6 +2092,10 @@ def process_track(
     if metadata_only:
         logger.debug(_consolidated)
     else:
+        # The per-track SCORE line stays in the regular log — it is what the
+        # operator reads to see how one song was rated (score, LF/LB listens,
+        # ISRC, single verdict). Only the progress WRAPPER lines
+        # ("▶ Processing", "▶/✓ Singles detection") are debug-gated.
         try:
             from helpers.logging_config import log_unified
             log_unified(_consolidated)
