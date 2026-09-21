@@ -45,6 +45,7 @@ from helpers.config_helpers import get_lastfm_config
 from helpers.normalization_service import (
     FEAT_SUFFIX_RE,
     strip_cover_attribution,
+    strip_diacritics,
     strip_featured_guest_suffix,
 )
 
@@ -282,6 +283,13 @@ class LastFmService:
             value,
             flags=re.IGNORECASE,
         )
+        # Fold diacritics BEFORE comparing.  Last.fm's catalogue indexes an
+        # accented artist under its ASCII spelling ("Lïve" -> "Live",
+        # "Motörhead" -> "Motorhead"), so a comparison that keeps the accent
+        # scores the correct global row at 0 and the caller discards it as a
+        # mismatch — which is how a track with millions of global listeners
+        # ended up scored from a few hundred.
+        value = strip_diacritics(value)
         return cls.clean_spaces(value)
 
     @classmethod
@@ -304,6 +312,12 @@ class LastFmService:
         primary = cls.strip_featured_artist(artist)
         add(original)
         add(primary)
+        # The ASCII-folded spelling is queried as its own candidate: providers
+        # that index the canonical form ("Live") return nothing at all for the
+        # accented query, so a folded retry is the difference between the
+        # global catalogue and an empty result.
+        add(strip_diacritics(original))
+        add(strip_diacritics(primary))
         add(
             re.sub(
                 r"\s*(?:\+|&|/|×|\bx\b|\bvs\b|\bwith\b)\s*",
@@ -316,9 +330,11 @@ class LastFmService:
         no_brackets = cls._strip_bracketed_content(artist)
         if no_brackets:
             add(no_brackets)
+            add(strip_diacritics(no_brackets))
             no_brackets_primary = cls.strip_featured_artist(no_brackets)
             if no_brackets_primary:
                 add(no_brackets_primary)
+                add(strip_diacritics(no_brackets_primary))
 
         return candidates
 
@@ -348,19 +364,41 @@ class LastFmService:
     def get_artist_top_tracks(self, artist: str, limit: int = 100) -> list[dict[str, Any]]:
         if not self.api_key or not artist:
             return []
-        try:
-            data = self.http.get_json(
-                "artist.getTopTracks",
-                artist=artist,
-                limit=max(1, min(int(limit), 200)),
-            )
-            tracks = (data.get("toptracks") or {}).get("track") or []
-            if isinstance(tracks, dict):
-                tracks = [tracks]
-            return [t for t in tracks if isinstance(t, dict)]
-        except Exception as exc:
-            logger.debug("Artist top tracks failed", artist=artist, error=str(exc))
-            return []
+
+        # This is the single source of an artist's global listener counts, so a
+        # lookup that silently returns nothing costs EVERY track on the album
+        # its real popularity.  Last.fm indexes an accented artist under its
+        # ASCII spelling ("Lïve" -> "Live"), so retry the folded spelling when
+        # the verbatim query yields nothing ("autocorrect" does not cover it).
+        _spellings: list[str] = []
+        for _candidate in (artist, strip_diacritics(artist)):
+            _clean = self.clean_spaces(_candidate)
+            if _clean and _clean not in _spellings:
+                _spellings.append(_clean)
+
+        for _index, _spelling in enumerate(_spellings):
+            try:
+                data = self.http.get_json(
+                    "artist.getTopTracks",
+                    artist=_spelling,
+                    limit=max(1, min(int(limit), 200)),
+                )
+                tracks = (data.get("toptracks") or {}).get("track") or []
+                if isinstance(tracks, dict):
+                    tracks = [tracks]
+                usable = [t for t in tracks if isinstance(t, dict)]
+                if usable:
+                    if _index:
+                        logger.info(
+                            "artist.getTopTracks resolved via folded spelling",
+                            queried=artist, matched_spelling=_spelling, tracks=len(usable),
+                        )
+                    return usable
+            except Exception as exc:
+                logger.debug(
+                    "Artist top tracks failed", artist=_spelling, error=str(exc)
+                )
+        return []
 
     # -- track info -------------------------------------------------------
 

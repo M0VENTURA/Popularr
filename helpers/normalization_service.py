@@ -83,6 +83,31 @@ def normalize_isrc(value: Any) -> str:
     return re.sub(r"[{}]", "", raw).strip().upper()
 
 
+def strip_diacritics(value: str) -> str:
+    """Fold accented characters to their ASCII base letters.
+
+    ``"Lïve"`` → ``"Live"``, ``"Motörhead"`` → ``"Motorhead"``, ``"Björk"`` →
+    ``"Bjork"``.
+
+    Providers require the caller to supply the *canonical* spelling.  Last.fm
+    keys ``Lïve`` under ``Live``, MusicBrainz credits ``Motörhead`` as
+    ``Motörhead`` but Last.fm's catalogue holds ``Motorhead``, and so on — so a
+    lookup that passes the accented library spelling through verbatim can miss
+    the real global row entirely and fall back to whatever near-empty local
+    object the provider returns.  Folding before comparing (and as an extra
+    lookup candidate) is what lets the accented and unaccented spellings reach
+    the same data.
+
+    Casing and punctuation are left untouched — this only removes combining
+    marks, so it is safe to apply ahead of any other comparison.  Callers that
+    also want case/punctuation folding should run ``normalize_string`` after.
+    """
+    if not value:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", str(value))
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
 def normalize_string(value: str) -> str:
     """Canonical normalization: lowercase, remove accents, remove punctuation, collapse whitespace."""
     if not value:
@@ -91,8 +116,7 @@ def normalize_string(value: str) -> str:
     value = value.lower().strip()
     value = normalize_unicode_punctuation(value)
 
-    value = unicodedata.normalize("NFKD", value)
-    value = "".join(c for c in value if not unicodedata.combining(c))
+    value = strip_diacritics(value)
 
     value = re.sub(r"[^\w\s]", " ", value)
 

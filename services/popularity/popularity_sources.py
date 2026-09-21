@@ -26,7 +26,7 @@ from api_clients.listenbrainz import (
     get_listenbrainz_score as lb_get_listenbrainz_score,
     get_release_metadata_batch as lb_get_release_metadata_batch,
 )
-from helpers.normalization_service import strip_cover_attribution
+from helpers.normalization_service import strip_cover_attribution, strip_diacritics
 from services.popularity.popularity_matching import (
     ARTIST_JOIN_RE,
     choose_best_provider_counts,
@@ -958,7 +958,10 @@ def get_aggregated_lastfm_popularity(
     )
 
     primary_artist = get_primary_artist_preserve_case(artist)
-    artist_key = primary_artist.casefold().strip()
+    # Fold the cache key so "Lïve" and "Live" share ONE catalogue bucket
+    # instead of splitting it — the provider indexes only one of them, so two
+    # buckets would mean one spelling silently reads an empty catalogue.
+    artist_key = strip_diacritics(primary_artist).casefold().strip()
     catalog = []
 
     try:

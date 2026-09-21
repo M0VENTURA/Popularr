@@ -5,7 +5,11 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from helpers.normalization_service import FEAT_SUFFIX_RE, strip_cover_attribution
+from helpers.normalization_service import (
+    FEAT_SUFFIX_RE,
+    strip_cover_attribution,
+    strip_diacritics,
+)
 
 ARTIST_JOIN_RE = re.compile(
     r"""
@@ -133,6 +137,10 @@ def make_artist_match_key(artist: str) -> str:
     artist = get_primary_artist_preserve_case(artist)
     artist = unicodedata.normalize("NFKC", artist)
     artist = artist.casefold()
+    # NFKC alone does NOT remove combining marks, so "Lïve" kept its umlaut and
+    # produced a different key from "Live" — the two spellings then occupied
+    # separate cache buckets and each missed the other's data.
+    artist = strip_diacritics(artist)
     return re.sub(r"\s+", " ", artist).strip()
 
 
@@ -140,6 +148,7 @@ def make_track_match_key(artist: str, title: str) -> str:
     """Canonical key for combining variants of the same song."""
     artist_key = make_artist_match_key(artist)
     title_key = unicodedata.normalize("NFKC", title or "").casefold()
+    title_key = strip_diacritics(title_key)
     title_key = re.sub(r"\s+", " ", title_key).strip()
     return f"{artist_key}::{title_key}"
 
@@ -147,6 +156,12 @@ def make_track_match_key(artist: str, title: str) -> str:
 def normalize_for_aggregation(title: str) -> str:
     """Aggressively normalise title for local provider-count aggregation."""
     value = str(title or "").lower()
+    # Fold diacritics FIRST.  Without this the ``[^a-z0-9]+`` sweep below turns
+    # the combining mark into a SPACE and splits the word: "Café" -> "caf ",
+    # "Hoppípolla" -> "hopp polla".  The provider's catalogue holds the ASCII
+    # spelling, so neither key could ever match and the track silently fell
+    # through to a low-count fallback.
+    value = strip_diacritics(value)
     # Strip trailing cover attributions ("(PSY Cover)", "[Foo Cover]") so a
     # cover track correlates with its canonical Last.fm row — the popular
     # "Gangnam Style" single vs the low-listen "Gangnam Style (PSY Cover)"

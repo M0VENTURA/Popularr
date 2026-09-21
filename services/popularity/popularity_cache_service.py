@@ -17,6 +17,7 @@ from typing import Any
 import structlog
 
 from db.repositories import popularity_cache as cache_repo
+from helpers.normalization_service import strip_diacritics
 from services.popularity.popularity_matching import (
     get_primary_artist_preserve_case,
     normalize_for_aggregation,
@@ -131,7 +132,9 @@ def _lf_top_tracks_map(lastfm_client: Any, artist: str) -> dict[str, dict[str, i
     """One ``artist.getTopTracks`` call -> {normalized title: listeners/playcount}."""
     try:
         primary = get_primary_artist_preserve_case(artist) or artist
-        cache_key = primary.casefold().strip() or artist
+        # Folded so an accented spelling ("Lïve") and its ASCII form ("Live")
+        # resolve to the SAME cache entry rather than fetching twice.
+        cache_key = strip_diacritics(primary).casefold().strip() or artist
         
         with _CACHE_LOCK:
             if cache_key in _lf_top_tracks_cache:
@@ -239,7 +242,9 @@ def prefetch_artist_popularity(
             for t in tracks if t.get("title")
         )
 
-    _lf_cache_key = (get_primary_artist_preserve_case(artist) or artist).casefold().strip() or artist
+    _lf_cache_key = strip_diacritics(
+        get_primary_artist_preserve_case(artist) or artist
+    ).casefold().strip() or artist
 
     # 2. Last.fm: one bulk call, only when some title lacks LF data.
     if lastfm_client is not None and _missing("lastfm_listeners"):
