@@ -256,8 +256,21 @@ start_web_app() {
     # Hypercorn writes access/error logs directly (no built-in rotation), so a
     # long-running instance can grow access.log without bound.  Run a small
     # background rotator that copytruncates oversized files and keeps a few
-    # numbered backups.  copytruncate is safe here because hypercorn keeps the
-    # file descriptor open across truncation.
+    # numbered backups.  copytruncate is safe here because the writers open these
+    # files in APPEND mode (hypercorn's file handler, and client.log which is
+    # reopened on every write), so truncating simply moves the next write back to
+    # offset 0.
+    #
+    # The cap MATCHES helpers/logging_config._LOG_MAX_BYTES (5 MB), which every
+    # log the app owns already rotates at.  It used to default to 50 MB — TEN
+    # times the app's own limit — which made access.log the one file that looked
+    # like it grew without bound (reported at 26.8 MB and still climbing).
+    #
+    # Deliberately NOT rotated: queue_processor.log.  It is a SHELL REDIRECT
+    # (``> file``), so its writer keeps its byte offset across a truncation and
+    # the file would go sparse, padded with NUL bytes.  It stays near-empty
+    # anyway: the queue worker calls setup_logging() and writes through the
+    # rotating queue.log, so only bare prints reach the redirect.
     _rotate_log_if_large() {
         local file="$1" max_bytes="$2" keep="$3"
         [ -f "$file" ] || return 0
@@ -276,13 +289,24 @@ start_web_app() {
         fi
     }
     start_log_rotation() {
-        local max_bytes="${SPTNR_ACCESS_LOG_MAX_SIZE:-52428800}"
+        local max_bytes="${SPTNR_ACCESS_LOG_MAX_SIZE:-5242880}"
         local keep="${SPTNR_ACCESS_LOG_BACKUPS:-3}"
+        local _log_dir
+        _log_dir="$(dirname "${SPTNR_ACCESS_LOG:-/config/access.log}")"
+
+        _rotate_all_logs() {
+            _rotate_log_if_large "${SPTNR_ACCESS_LOG:-/config/access.log}" "$max_bytes" "$keep"
+            _rotate_log_if_large "${SPTNR_ERROR_LOG:-/config/error.log}" "$max_bytes" "$keep"
+            _rotate_log_if_large "${_log_dir}/client.log" "$max_bytes" "$keep"
+        }
+
         (
+            # Housekeeping FIRST, then every 5 minutes: a file left oversized by a
+            # previous run is trimmed at boot instead of after the first sleep.
+            _rotate_all_logs
             while true; do
                 sleep 300
-                _rotate_log_if_large "${SPTNR_ACCESS_LOG:-/config/access.log}" "$max_bytes" "$keep"
-                _rotate_log_if_large "${SPTNR_ERROR_LOG:-/config/error.log}" "$max_bytes" "$keep"
+                _rotate_all_logs
             done
         ) &
     }

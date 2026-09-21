@@ -864,27 +864,20 @@ class MusicBrainzService:
                     return mbid, round(score, 3)
 
         query_title = Normalize_title_for_lucene_query(Strip_search_keywords(title))
-        # A compilation's album-level placeholder is not a track artist, and
-        # constraining the search to it makes MusicBrainz answer NOTHING: every
-        # track of a Various Artists album was searched as
-        # ``artist:"Various Artists"`` and came back with ``candidate_count=0``,
-        # so the recording — and with it the song's real artist — was never
-        # resolved (the reported "track artist is still not updating for a
-        # compilation during a scan"). Those titles are searched on their own.
-        _compilation_placeholder = False
-        try:
-            from helpers.normalization_service import is_track_artist_placeholder
-
-            _compilation_placeholder = is_track_artist_placeholder(artist)
-        except Exception:
-            _compilation_placeholder = False
-
-        _artist_clause = (
-            ""
-            if _compilation_placeholder
-            else f' AND artist:"{Escape_lucene_special_chars(artist)}"'
+        # ⚠️ A compilation's album-level placeholder ("Various Artists") is
+        # deliberately KEPT in the query. Dropping it looks like the fix for
+        # "the artist never resolves", but a title-only search matches ANY
+        # recording of that title: on "Little Nicky" it bound "Cave" to Kroke,
+        # "Natural High" to Jonathan Maron, "Nothing" to Paradise Now! and "When
+        # Worlds Collide" to Distorted — all wrong (the performers are Muse,
+        # ..., ..., Powerman 5000). A placeholder therefore yields NO match,
+        # which is the SAFE outcome: a compilation's tracks must be resolved
+        # from the ALBUM's own release tracklist, where the title a release
+        # actually lists disambiguates it from a covers/tribute recording.
+        query = (
+            f'recording:"{Escape_lucene_special_chars(query_title)}" '
+            f'AND artist:"{Escape_lucene_special_chars(artist)}"'
         )
-        query = f'recording:"{Escape_lucene_special_chars(query_title)}"{_artist_clause}'
         try:
             recordings = _call_with_heartbeat(
                 "recording.search",

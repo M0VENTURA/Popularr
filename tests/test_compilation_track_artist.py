@@ -61,29 +61,41 @@ class TestThePlaceholderTest:
         assert is_track_artist_placeholder(None) is False
 
 
-class TestTheRecordingSearchDropsTheArtistConstraint:
-    def test_a_placeholder_is_not_used_to_constrain_the_search(self):
+class TestTheRecordingSearchKeepsTheArtistConstraint:
+    """A title-only search is NOT the fix — it binds the wrong artist.
+
+    Measured on the reported album once the constraint was dropped:
+    ``Cave`` -> Kroke, ``Natural High`` -> Jonathan Maron, ``Nothing`` ->
+    Paradise Now!, ``When Worlds Collide`` -> Distorted. All are covers/tribute
+    recordings of the right title by the wrong artist, so the placeholder must
+    keep producing NO match and the identity must come from the album's OWN
+    release tracklist instead.
+    """
+
+    def test_a_placeholder_still_constrains_the_search(self):
         import inspect
 
         from services.enrichment import musicbrainz_service as mbs
 
         source = inspect.getsource(mbs.MusicBrainzService.get_suggested_mbid)
-        assert "is_track_artist_placeholder" in source, (
-            "a placeholder artist must not constrain the recording search — that "
-            "is why every compilation track came back candidate_count=0"
+        assert "is_track_artist_placeholder" not in source, (
+            "dropping the artist for a placeholder binds unrelated recordings of "
+            "the same title"
         )
-        assert "_artist_clause" in source
-        # The clause must be conditional, not always appended.
-        assert 'f\' AND artist:"{Escape_lucene_special_chars(artist)}"\'' in source
+        assert "_artist_clause" not in source
+        # The artist clause is unconditional again.
+        assert 'f\'AND artist:"{Escape_lucene_special_chars(artist)}"\'' in source
 
-    def test_a_real_artist_still_constrains_the_search(self):
-        """The fix must not turn every lookup into a title-only search."""
+    def test_the_reason_is_recorded_in_the_code(self):
         import inspect
 
         from services.enrichment import musicbrainz_service as mbs
 
         source = inspect.getsource(mbs.MusicBrainzService.get_suggested_mbid)
-        assert "if _compilation_placeholder" in source
+        assert "Kroke" in source and "Powerman 5000" in source, (
+            "the concrete wrong bindings must stay documented so nobody 'fixes' "
+            "this by dropping the constraint again"
+        )
 
 
 class TestThePlaceholderArtistIsReplacedFromMusicBrainz:
