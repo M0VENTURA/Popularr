@@ -2208,9 +2208,15 @@ async function renderQueuePage() {
 
     const items = (data && data.queue) || [];
     const completed = (data && data.completed) || [];
+    // Prefer the server's dedicated failed list; it matches the count above.
+    // Deriving it from ``items`` disagreed with that count, because the
+    // active-queue query EXCLUDES ``source IN ('local','discovered')`` rows
+    // (disk folders) and is capped at 500 oldest-first — so a failed disk
+    // folder, or a failed row past the cap, was counted but never rendered.
+    const failed = (data && data.failed) || items.filter(i => i.status === 'failed');
     renderQueueList('active', items.filter(i => i.status !== 'failed' && i.status !== 'completed'));
     renderQueueList('completed', completed.filter(i => (i.status || 'completed') !== 'failed'));
-    renderQueueList('failed', items.filter(i => i.status === 'failed'));
+    renderQueueList('failed', failed);
 
     const retryAllBtn = document.getElementById('retryAllBtn');
     if (retryAllBtn) retryAllBtn.style.display = Number(statusCounts.failed || 0) > 0 ? 'inline-block' : 'none';

@@ -430,7 +430,21 @@ def _resolve_folder_match(
 
 
 def get_unmatched_folders() -> dict[str, Any]:
-    """List folders under the downloads directory that are NOT tracked."""
+    """List the download folders shown by "Matched & Unmatched Folders".
+
+    ⚠️ TRACKED (matched) folders MUST be included, flagged ``status="matched"``.
+
+    They used to be ``continue``-d past, on the assumption that the
+    ``/api/downloads/folder-groups`` endpoint listed them separately. It does
+    not reach the UI: ``monitor.js`` never fetches it, and the served monitor
+    template has no ``#folderGroupsSection`` for it to render into (the live
+    page renders ``#unmatchedFoldersSection``). So a folder belonging to an
+    ACTIVE MusicBrainz release was excluded from the only list the page reads
+    and drawn nowhere else — invisible in a section whose name promises
+    matched folders. That is the reported "I downloaded a new album yesterday
+    but it's not showing it under the list": a release-tracked folder is
+    exactly what a new download becomes.
+    """
     try:
         downloads_dir = resolve_downloads_dir()
         if not os.path.isdir(downloads_dir):
@@ -439,6 +453,17 @@ def get_unmatched_folders() -> dict[str, Any]:
         archive_dir = resolve_original_archive_dir()
         tracked = _tracked_monitoring_folders()
         imported = _imported_source_paths()
+
+        # Folder -> release metadata, so a tracked folder can be described
+        # (artist/album/year) rather than only flagged.
+        tracked_releases: dict[str, dict[str, Any]] = {}
+        try:
+            for release in get_active_releases_with_progress():
+                folder = release.get("monitoring_folder_path") or release.get("monitoring_folder")
+                if folder:
+                    tracked_releases[os.path.normpath(str(folder))] = release
+        except Exception as exc:
+            logger.debug("Tracked-release detail load failed", error=str(exc))
 
         try:
             from db.repositories.folder_match_repository import get_all_folder_matches
@@ -452,8 +477,12 @@ def get_unmatched_folders() -> dict[str, Any]:
 
         folders = []
         for full, entry in _iter_matched_folder_candidates(downloads_dir, archive_dir):
-            if os.path.normpath(full) in tracked:
-                continue
+            _norm_full = os.path.normpath(full)
+            _tracked_release = tracked_releases.get(_norm_full)
+            # Tracked means "this folder belongs to an active release". It is
+            # still a folder the user must be able to see, match and organise —
+            # only its default STATUS differs.
+            _is_tracked = _norm_full in tracked
 
             files = _get_files_in_folder(full)
             for f in files:
@@ -467,10 +496,23 @@ def get_unmatched_folders() -> dict[str, Any]:
                 os.path.normpath(os.path.join(full, f["name"])) in imported
                 for f in audio
             ) if audio else False
-            
+
             group = _derive_folder_group(entry, files)
             stored = _resolve_folder_match(full, match_rows=match_rows)
-            
+
+            # A tracked folder's own release supplies artist/album when the
+            # files do not carry usable tags.
+            if _tracked_release and not (group.get("artist") and group.get("album")):
+                group = {
+                    "artist": str(_tracked_release.get("artist") or ""),
+                    "album": str(
+                        _tracked_release.get("release_title")
+                        or _tracked_release.get("title")
+                        or ""
+                    ),
+                    "group_key": group.get("group_key") or entry,
+                }
+
             folders.append({
                 "type": "unmatched",
                 "name": full,
@@ -479,9 +521,21 @@ def get_unmatched_folders() -> dict[str, Any]:
                 "audio_count": len(audio),
                 "file_count": len(files),
                 "total_size": sum(f.get("size", 0) for f in files),
-                "status": "matched" if (matched or stored) else "unmatched",
+                "status": "matched" if (_is_tracked or matched or stored) else "unmatched",
+                "tracked": _is_tracked,
                 "match": stored,
-                "release_mbid": (stored or {}).get("release_mbid"),
+                # ``musicbrainz_releases.release_id`` IS a MusicBrainz release
+                # id, so a tracked folder can offer "Confirm Match" against the
+                # release it already belongs to. A stored explicit match still
+                # wins, because that is the user's own choice.
+                "release_mbid": (
+                    (stored or {}).get("release_mbid")
+                    or (_tracked_release or {}).get("release_id")
+                ),
+                "release_id": (
+                    (_tracked_release or {}).get("release_id")
+                    or (stored or {}).get("release_id")
+                ),
                 "artist": group["artist"],
                 "album": group["album"],
                 "group_key": group["group_key"],

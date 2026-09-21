@@ -2238,6 +2238,29 @@ def process_track(
         or track_artist
     )
 
+    # The artist this track is actually BY, as RESOLVED during this pass.
+    #
+    # ``track_artist`` was captured at function entry from the raw DB row, so
+    # on a Various Artists compilation it still reads the album-level
+    # PLACEHOLDER ("Various Artists") even after the metadata pass replaced it
+    # (see the "Compilation placeholder artist replaced from MusicBrainz"
+    # write into ``update_payload["artist"]``). Returning that stale value made
+    # ``finalise_stage._compilation_track_artist`` — which reads
+    # ``result["artist"]`` — see the SAME placeholder for every track, so all
+    # of them were rated against one shared catalogue: identical
+    # ``catalogue_n`` for the whole album and z-scores that rank tracks against
+    # the compilation instead of each performer's own catalogue. That is the
+    # reported "popularity scoring is way off" on compilations, where a big
+    # song by its artist scored 1★.
+    #
+    # ``update_payload`` carries the resolved credit; fall back to the raw
+    # value only when nothing resolved.
+    _resolved_track_artist = _as_str(
+        update_payload.get("artist")
+        or effective_track.get("artist")
+        or track_artist
+    ).strip() or track_artist
+
     if not _single_summary:
         _stored_conf = str(update_payload.get("single_confidence") or track.get("single_confidence") or "low").upper()
         _single_summary = f"Single: {_stored_conf} (stored)"
@@ -2295,7 +2318,7 @@ def process_track(
 
     return {
         "track_id": track_id,
-        "artist": track_artist,
+        "artist": _resolved_track_artist,
         "album_artist": _album_artist,
         "album": track.get("album") or effective_track.get("album", ""),
         "title": track.get("title") or effective_track.get("title") or "",

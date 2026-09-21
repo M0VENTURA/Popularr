@@ -271,9 +271,15 @@ def _tail_queue_log(limit: int = 100) -> list[dict[str, Any]]:
 def _within_last_hour(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep only events whose timestamp falls within the last 60 minutes.
 
-    The monitor page labels these exports "Download Last Hour" — enforce the
-    window here so the live viewer never silently shows older history.  The
-    full history remains available under the /logs page.
+    ⚠️ This belongs to the LOG-EXPORT buttons, whose labels really do say
+    "Download Last Hour". It must NOT gate the monitor page's events viewer.
+
+    It used to be applied to ``queue_events()`` as well — the endpoint the
+    viewer reads — so an idle queue rendered as "No queue events yet" even
+    though ``queue.log`` still held the history, while the card header
+    advertised "(Last 50 events)", a COUNT. A queue only has to be quiet for
+    an hour for the log to look broken, which is the reported "Download Queue
+    Events Log is empty".
     """
     if not events:
         return events
@@ -327,8 +333,12 @@ def queue_events(
         if not events:
             events = _tail_queue_log(limit=limit)
 
-        events = _within_last_hour(events)
-
+        # ⚠️ NO time-window filter here — this endpoint backs the monitor's
+        # "Download Queue Events Log", whose header promises "(Last 50
+        # events)", a COUNT. Applying ``_within_last_hour`` emptied that viewer
+        # whenever the queue had been quiet for an hour, hiding events that
+        # ``queue.log`` still held. The window is for the log-EXPORT buttons
+        # ("Download Last Hour"), which call ``_within_last_hour`` directly.
         return _ok(
             events=events,
             total=len(events),

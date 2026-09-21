@@ -22,6 +22,7 @@ from db.engine import db_session
 from db.repositories.queue import (
     get_active_queue,
     get_completed_queue,
+    get_failed_queue,
     get_queue_status_counts,
     insert_queue_item,
     update_queue_item,
@@ -389,10 +390,19 @@ def api_queue() -> Any:
             items = items[:limit]
             
         completed = get_completed_queue(limit=min(limit, 50))
+        # The Failed Downloads card shows a COUNT from ``status_counts`` and a
+        # LIST built by the client. Feeding the list from ``items`` made the two
+        # disagree, because ``get_active_queue`` deliberately EXCLUDES
+        # ``source IN ('local','discovered')`` rows and is capped at 500 rows
+        # ordered OLDEST-first — so a failed disk-folder row, or a failed row
+        # beyond the cap, was counted but never listed. Serve the list from its
+        # own query with the same breadth as the count.
+        failed = get_failed_queue(limit=min(limit, 100))
         return jsonify({
             "success": True,
             "queue": items,
             "completed": completed,
+            "failed": failed,
             "status_counts": status_counts or {},
             "total": sum(status_counts.values()) if status_counts else 0,
             "limit": limit,
