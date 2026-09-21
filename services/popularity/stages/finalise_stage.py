@@ -692,6 +692,76 @@ _VA_ALBUM_ARTIST_NAMES = frozenset({
 })
 
 
+def _online_catalogue_stars(
+    *,
+    credited_artist: str,
+    track_title: str,
+    rules: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    """Rate a compilation track by its RANK in the artist's ONLINE catalogue.
+
+    ``compute_track_artist_scores`` can only rank a track against the songs
+    this library actually owns. For a compilation that is frequently one or two
+    songs per artist, so the artist's genuine global hit cannot be recognised
+    -- its own #1 is ranked against a two-entry distribution and lands in the
+    thin-catalogue fallback.
+
+    ``artist.getTopTracks`` returns the artist's real discography ordered by
+    global playcount, so a track's POSITION in that list is exactly "how popular
+    is this song for this artist, worldwide".  Because Last.fm reports
+    ``listeners`` on both sides from the same dataset, the rank is directly
+    usable with no scale conversion.
+
+    Returns ``(stars, detail)``; ``stars`` is 0 when the lookup produced nothing
+    usable, and callers MUST treat that as "unknown" rather than "unpopular" so
+    a network miss can never demote a track.
+    """
+    detail: dict[str, Any] = {"source": "none"}
+    if not bool(rules.get("enabled", 1)):
+        return 0, detail
+
+    try:
+        from services.popularity.popularity_sources import get_online_artist_track_rank
+        rank_info = get_online_artist_track_rank(credited_artist, track_title)
+    except Exception as exc:
+        logger.debug(
+            "Online catalogue rank lookup failed",
+            artist=credited_artist, title=track_title, error=str(exc),
+        )
+        return 0, detail
+
+    total = int(rank_info.get("total") or 0)
+    rank = int(rank_info.get("rank") or 0)
+    detail = dict(rank_info)
+
+    # A catalogue too small to rank meaningfully is no better than the local
+    # thin-catalogue fallback -- let the caller keep its existing behaviour.
+    if rank <= 0 or total < int(rules.get("min_catalogue_size", 5)):
+        return 0, detail
+
+    percentile = float(rank_info.get("percentile") or 1.0)
+
+    # The artist's single most popular song is 5★ by definition. This is not
+    # just a convenience: a percentile cut-off is a FRACTION of the catalogue,
+    # so on a 20-song discography a 2% band covers only the top 0.4 songs and
+    # is mathematically unreachable by any track. Special-casing rank #1 keeps
+    # the configured percentages meaningful for the tiers below it without
+    # making the top tier impossible for a short catalogue.
+    if rank == 1 or percentile <= float(rules.get("rank_percentile_5star", 0.02)):
+        stars = 5
+    elif percentile <= float(rules.get("rank_percentile_4star", 0.10)):
+        stars = 4
+    elif percentile <= float(rules.get("rank_percentile_3star", 0.35)):
+        stars = 3
+    elif percentile <= float(rules.get("rank_percentile_2star", 0.65)):
+        stars = 2
+    else:
+        stars = 1
+
+    detail["stars"] = stars
+    return stars, detail
+
+
 def _resolve_compilation_flags(
     *,
     album_results: list[dict[str, Any]],
@@ -1073,10 +1143,51 @@ def _assign_stars(
             track["_compilation_rating_mode"] = "track_artist_catalogue"
             track["_compilation_artist_z"] = catalogue_z
         else:
-            # Thin-catalogue fallback: fewer than 5 usable scores for the
-            # credited artist means a robust z-score cannot be computed, so
-            # fall back to absolute popularity thresholds.
-            if is_verified_single and not popularity_only:
+            # Thin LOCAL catalogue: fewer than 5 usable scores for the credited
+            # artist means a robust z-score cannot be computed. Rather than
+            # falling straight to absolute thresholds -- which cannot tell an
+            # artist's global #1 from filler, because the library only owns one
+            # or two of their songs -- consult the artist's ONLINE catalogue and
+            # rate by the track's real-world rank within it.
+            _online_stars = 0
+            _online_detail: dict[str, Any] = {"source": "none"}
+            try:
+                from helpers.config_helpers import get_compilation_online_catalogue_config
+                _online_rules = get_compilation_online_catalogue_config()
+                _online_stars, _online_detail = _online_catalogue_stars(
+                    credited_artist=_compilation_track_artist(track),
+                    track_title=str(track.get("title") or ""),
+                    rules=_online_rules,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Online catalogue rating failed",
+                    artist=_compilation_track_artist(track),
+                    title=track.get("title"), error=str(exc),
+                )
+
+            if _online_stars > 0:
+                comp_stars = _online_stars
+                track["_compilation_rating_mode"] = "track_artist_online_catalogue"
+                track["_compilation_artist_z"] = None
+                track["_compilation_online_rank"] = int(_online_detail.get("rank") or 0)
+                track["_compilation_online_total"] = int(_online_detail.get("total") or 0)
+                track["_compilation_online_percentile"] = float(
+                    _online_detail.get("percentile") or 0.0
+                )
+                track["_compilation_online_source"] = str(_online_detail.get("source") or "")
+                logger.info(
+                    "Compilation track rated on artist's online catalogue",
+                    title=track.get("title"),
+                    artist=_compilation_track_artist(track),
+                    rank=int(_online_detail.get("rank") or 0),
+                    total=int(_online_detail.get("total") or 0),
+                    percentile=round(float(_online_detail.get("percentile") or 0.0), 4),
+                    stars=comp_stars,
+                )
+            # Absolute popularity thresholds, used only when the credited
+            # artist's online catalogue is unavailable or too small to rank.
+            elif is_verified_single and not popularity_only:
                 if score >= 55.0 or raw_lf >= 1_000_000:
                     comp_stars = 5
                 elif score >= 45.0 or raw_lf >= 250_000:
@@ -1099,8 +1210,9 @@ def _assign_stars(
                 else:
                     comp_stars = 1
 
-            track["_compilation_rating_mode"] = "absolute_thin_catalogue_fallback"
-            track["_compilation_artist_z"] = None
+            if _online_stars <= 0:
+                track["_compilation_rating_mode"] = "absolute_thin_catalogue_fallback"
+                track["_compilation_artist_z"] = None
 
         track["_compilation_catalogue_size"] = len(valid_catalogue_scores)
 
@@ -3087,11 +3199,24 @@ def post_album_star_ratings(
                 _credited_artist_for_log = _compilation_track_artist(track) or artist
                 _catalogue_n = int(track.get("_rating_catalogue_size") or 0)
                 _rating_mode = str(track.get("_compilation_rating_mode") or "unknown")
-                _comparison_part = (
-                    f"track_artist={_credited_artist_for_log}, "
-                    f"catalogue_z={_artist_z:.2f}, catalogue_n={_catalogue_n}, "
-                    f"mode={_rating_mode}"
-                )
+                # When the rating came from the artist's ONLINE catalogue,
+                # show the real-world rank (#1 of 47) instead of a z-score
+                # that was never computed against the local library.
+                if _rating_mode == "track_artist_online_catalogue":
+                    _rank = int(track.get("_compilation_online_rank") or 0)
+                    _total = int(track.get("_compilation_online_total") or 0)
+                    _pct = float(track.get("_compilation_online_percentile") or 0.0)
+                    _comparison_part = (
+                        f"track_artist={_credited_artist_for_log}, "
+                        f"online_rank=#{_rank}/{_total} (top {_pct * 100:.0f}%), "
+                        f"mode={_rating_mode}"
+                    )
+                else:
+                    _comparison_part = (
+                        f"track_artist={_credited_artist_for_log}, "
+                        f"catalogue_z={_artist_z:.2f}, catalogue_n={_catalogue_n}, "
+                        f"mode={_rating_mode}"
+                    )
             else:
                 _comparison_part = f"album_z={_album_z:.2f}, artist_z={_artist_z:.2f}"
 

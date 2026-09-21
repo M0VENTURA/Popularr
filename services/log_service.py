@@ -300,10 +300,19 @@ def _scan_activity_filter() -> re.Pattern:
     Soulseek Search logs, not the dashboard's scanning panel.
     """
     return re.compile(
-        r'\[POPULARITY\]|\[TRACK_STAGE\]|\[TRACK\]|\[TRACK_RESULT\]|'
+        r'\[POPULARITY\]|\[POPULARITY_PIPELINE\]|'
+        r'\[TRACK_STAGE\]|\[TRACK\]|\[TRACK_RESULT\]|'
         r'\[ALBUM_STAGE\]|\[FINALISE_STAGE\]|\[LOAD_STAGE\]|'
         r'\[FULL_SCAN\]|\[SCAN_PIPELINE\]|'
         r'\[scan_runner\]|\[LIBRARY_SYNC\]|'
+        # The Navidrome import phase emits bracketed prefixes that do NOT
+        # contain the words "Navidrome Import" (they use underscores), so the
+        # old `Navidrome Import` alternative alone silently dropped them.
+        # The user then saw "Step 1/3: Navidrome import for album '...'" and
+        # nothing afterwards, which is indistinguishable from a hung scan.
+        # `Step \d+/\d+:` covers the album pipeline's step narrative too —
+        # step 3/3 ("Auto-detecting album type") matched NO other keyword.
+        r'\[NAVIDROME_IMPORT\]|\[NAVIDROME_SCAN\]|Step \d+/\d+:|'
         r'\[SINGLE\]|Navidrome Import|Artist scan|'
         r'popularity scan|Popularity |popularity_scan|'
         r'Full library scan|Boot scan|Scan complete|Scan failed|'

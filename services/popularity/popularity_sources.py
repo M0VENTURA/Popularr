@@ -797,6 +797,126 @@ def get_lastfm_artist_max_listeners(
         return 0
 
 
+_ONLINE_CATALOGUE_CACHE: dict[str, list[tuple[str, int]]] = {}
+
+
+def get_online_artist_catalogue(
+    artist: str,
+    lastfm_client: Any = None,
+    limit: int = 200,
+) -> list[tuple[str, int]]:
+    """Return ``[(normalized_title, listeners)]`` for an artist's GLOBAL catalogue.
+
+    This is the ONLINE counterpart to ``finalise_stage.compute_track_artist_scores``,
+    which can only read the LOCAL database. For an artist the library holds one
+    or two songs by (the common compilation/soundtrack case) the local DB has no
+    catalogue to rank against at all, so a genuinely huge song can never be
+    recognised as such.
+
+    ``artist.getTopTracks`` returns the artist's discography ordered by global
+    playcount, so the returned position IS the artist's real-world popularity
+    ranking for that song.  ``listeners`` is the same metric the scan already
+    records on each track as ``lastfm_listeners``, which means a track can be
+    compared against this list directly -- no scale conversion, no inference.
+
+    Results are cached per artist for the process lifetime (mirroring
+    ``_lastfm_artist_max_cache``) so a multi-disc compilation only ever pays for
+    one request per credited artist.
+    """
+    artist_key = str(artist or "").casefold().strip()
+    if not artist_key:
+        return []
+
+    with _CACHE_LOCK:
+        cached = _ONLINE_CATALOGUE_CACHE.get(artist_key)
+    if cached is not None:
+        return cached
+
+    entries: list[tuple[str, int]] = []
+    try:
+        if lastfm_client is None:
+            from helpers.config_helpers import get_config
+            api_key = (get_config().get("api_integrations", {}) or {}).get("lastfm", {}).get("api_key", "")
+            if api_key:
+                from api_clients.lastfm import LastFmClient
+                lastfm_client = LastFmClient(api_key=api_key)
+
+        if lastfm_client is not None:
+            from services.popularity.popularity_cache_service import get_artist_top_tracks_map
+            _map = get_artist_top_tracks_map(lastfm_client, artist) or {}
+            for norm_title, counts in _map.items():
+                listeners = int((counts or {}).get("lastfm_listeners") or 0)
+                if norm_title and listeners > 0:
+                    entries.append((str(norm_title), listeners))
+    except Exception as exc:
+        logger.debug("Online artist catalogue fetch failed", artist=artist, error=str(exc))
+        entries = []
+
+    entries.sort(key=lambda item: item[1], reverse=True)
+
+    with _CACHE_LOCK:
+        _ONLINE_CATALOGUE_CACHE[artist_key] = entries
+    return entries
+
+
+def get_online_artist_track_rank(
+    artist: str,
+    track_title: str,
+    lastfm_client: Any = None,
+) -> dict[str, Any]:
+    """Locate ``track_title`` in the artist's GLOBAL catalogue.
+
+    Returns ``{"rank", "total", "percentile", "listeners", "top_listeners",
+    "source"}`` where ``rank`` is 1-based (1 = the artist's most popular song
+    worldwide) and ``percentile`` is ``rank / total`` (0.02 = top 2%).
+
+    ``rank``/``total`` are ``0``/``0`` when the artist has no online catalogue
+    or the title is not in it -- callers must treat that as "unknown", never as
+    "unpopular", so a lookup miss cannot demote a track.
+    """
+    empty = {
+        "rank": 0, "total": 0, "percentile": 0.0,
+        "listeners": 0, "top_listeners": 0, "source": "none",
+    }
+    target = normalize_for_aggregation(track_title)
+    if not target:
+        return empty
+
+    catalogue = get_online_artist_catalogue(artist, lastfm_client=lastfm_client)
+    if not catalogue:
+        return empty
+
+    for index, (norm_title, listeners) in enumerate(catalogue, start=1):
+        if norm_title == target:
+            return {
+                "rank": index,
+                "total": len(catalogue),
+                # MID-RANK percentile. A plain ``rank / total`` would put the
+                # artist's #1 song at 1/47 = 2.1%, just OUTSIDE a 2% 5★ cut-off
+                # -- so the most popular song the artist ever released could
+                # never reach the top band on a catalogue of more than 50
+                # entries. The midpoint of the rank's interval keeps rank #1
+                # inside the top band for any catalogue size while preserving
+                # the ordering for every other rank.
+                "percentile": (index - 0.5) / len(catalogue),
+                "listeners": listeners,
+                "top_listeners": int(catalogue[0][1]),
+                "source": "lastfm_artist_top_tracks",
+            }
+
+    # Not found: the artist HAS a catalogue but this title is not among its
+    # charted tracks. Report it as a long-tail track rather than a miss, so it
+    # lands at the bottom of the ladder instead of being skipped entirely.
+    return {
+        "rank": len(catalogue) + 1,
+        "total": len(catalogue),
+        "percentile": 1.0,
+        "listeners": 0,
+        "top_listeners": int(catalogue[0][1]),
+        "source": "lastfm_artist_top_tracks_beyond",
+    }
+
+
 def get_aggregated_lastfm_popularity(
     artist: str,
     track_title: str,

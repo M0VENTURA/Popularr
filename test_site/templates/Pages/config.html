@@ -1950,6 +1950,62 @@
       </div>
 
       <hr class="my-3">
+      <h6 class="mb-3">2b · Compilation Online Catalogue</h6>
+      <p class="text-muted small mb-3">
+        A compilation (<strong>Various Artists</strong>) groups many different recording artists in one
+        folder. Each track is rated against the artist credited on that song &mdash; but the local
+        database only knows the songs <strong>this library owns</strong>, which for a soundtrack is often
+        one or two per artist. With nothing to rank against, an artist's genuine global #1 could not be
+        told apart from album filler.
+        <br><br>
+        When the local catalogue for a credited artist is too thin, the artist's
+        <strong>online catalogue</strong> is consulted instead (Last.fm <code>artist.getTopTracks</code>,
+        ordered by global playcount) and the track is rated by its real-world
+        <strong>rank</strong> among that artist's songs. A track in the artist's top 2% worldwide is
+        their signature song.
+      </p>
+      <div class="row g-3">
+        <div class="col-12 col-sm-6 col-lg-3 d-flex align-items-end">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="compilation_online_catalogue_enabled" {% if config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('enabled', 1) %}checked{% endif %}>
+            <label class="form-check-label form-label-sm" for="compilation_online_catalogue_enabled">Enabled</label>
+          </div>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm">Min Local Catalogue</label>
+          <input type="number" step="1" min="0" max="100" class="form-control form-control-sm" id="compilation_online_min_local_catalogue" placeholder="5" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('min_local_catalogue', 5) }}">
+          <small class="form-text text-muted">Owned songs needed before the local catalogue is trusted instead. Default: <strong>5</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm">Min Online Catalogue Size</label>
+          <input type="number" step="1" min="1" max="200" class="form-control form-control-sm" id="compilation_online_min_catalogue_size" placeholder="5" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('min_catalogue_size', 5) }}">
+          <small class="form-text text-muted">Artist songs needed online to rank meaningfully. Default: <strong>5</strong></small>
+        </div>
+      </div>
+      <div class="row g-3 mt-1">
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm">5★ Rank Percentile</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="compilation_online_rank_percentile_5star" placeholder="0.02" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('rank_percentile_5star', 0.02) }}">
+          <small class="form-text text-muted">Top 2% of the artist's catalogue. Default: <strong>0.02</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm">4★ Rank Percentile</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="compilation_online_rank_percentile_4star" placeholder="0.10" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('rank_percentile_4star', 0.10) }}">
+          <small class="form-text text-muted">Top 10%. Default: <strong>0.10</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm">3★ Rank Percentile</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="compilation_online_rank_percentile_3star" placeholder="0.35" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('rank_percentile_3star', 0.35) }}">
+          <small class="form-text text-muted">Top 35%. Default: <strong>0.35</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm">2★ Rank Percentile</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="compilation_online_rank_percentile_2star" placeholder="0.65" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('rank_percentile_2star', 0.65) }}">
+          <small class="form-text text-muted">Top 65%. Below this is 1★. Default: <strong>0.65</strong></small>
+        </div>
+      </div>
+
+      <hr class="my-3">
       <h6 class="mb-3">3 · Score Adjustments</h6>
       <div class="row g-3">
         <div class="col-12 col-sm-6 col-lg-3">

@@ -686,6 +686,72 @@ _DEFAULT_LIVE_ALBUM_SCALING: dict[str, Any] = {
 }
 
 
+# Compilation rating against the artist's ONLINE global catalogue.
+#
+# A compilation ("Various Artists") groups many credited recording artists
+# under one shared folder. Each track must be rated against ITS OWN artist's
+# catalogue -- but the local database only knows the songs this library
+# happens to own, which for a soundtrack/compilation is often one or two per
+# artist. With no local distribution to rank against, a genuinely huge song
+# (the artist's global #1) cannot be distinguished from filler.
+#
+# This block lets the compilation rater consult the artist's catalogue ONLINE
+# (Last.fm ``artist.getTopTracks``, ordered by global playcount) and score the
+# track by its RANK within it. ``rank_percentile_5star`` is the cut-off: a
+# track inside the artist's top 2% worldwide is their signature song.
+#
+# ``min_local_catalogue`` mirrors the existing thin-catalogue threshold: when
+# the local catalogue already has this many usable scores it is trusted and the
+# online lookup is skipped, so a well-represented artist's ratings do not
+# change.
+_DEFAULT_COMPILATION_ONLINE_CATALOGUE: dict[str, Any] = {
+    "enabled": 1,
+    "min_local_catalogue": 5,
+    "rank_percentile_5star": 0.02,
+    "rank_percentile_4star": 0.10,
+    "rank_percentile_3star": 0.35,
+    "rank_percentile_2star": 0.65,
+    "min_catalogue_size": 5,
+}
+
+
+def get_compilation_online_catalogue_config(config: dict | None = None) -> dict[str, Any]:
+    """Return the online-catalogue settings for compilation star rating.
+
+    Merged over the defaults so every key is always present, even with no
+    config file (a partial user block overrides only the keys it names).
+    """
+    cfg = config if isinstance(config, dict) else get_config()
+    sd = cfg.get("single_detection", {}) if isinstance(cfg, dict) else {}
+    block = sd.get("compilation_online_catalogue") if isinstance(sd, dict) else None
+
+    rules = dict(_DEFAULT_COMPILATION_ONLINE_CATALOGUE)
+    if isinstance(block, dict):
+        rules.update(block)
+
+    out: dict[str, Any] = {"enabled": 1 if _as_truthy(rules.get("enabled", 1)) else 0}
+    for key in (
+        "min_local_catalogue",
+        "rank_percentile_5star",
+        "rank_percentile_4star",
+        "rank_percentile_3star",
+        "rank_percentile_2star",
+        "min_catalogue_size",
+    ):
+        try:
+            out[key] = float(rules.get(key, _DEFAULT_COMPILATION_ONLINE_CATALOGUE[key]))
+        except (TypeError, ValueError):
+            out[key] = float(_DEFAULT_COMPILATION_ONLINE_CATALOGUE[key])
+    return out
+
+
+def _as_truthy(value: Any) -> bool:
+    """Interpret config booleans/ints/strings the way the Config page writes them."""
+    if isinstance(value, str):
+        return value.strip().casefold() not in ("", "0", "false", "no", "off")
+    return bool(value)
+
+
 def get_standout_config() -> dict[str, Any]:
     """Get standout track detection and star rating configuration.
 

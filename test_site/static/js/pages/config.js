@@ -512,6 +512,19 @@
             live_median_min: parseFloat(getValue('album_ratio_live_median_min', '2.0')) || 2.0,
             live_floor_min: parseFloat(getValue('album_ratio_live_floor_min', '5.0')) || 5.0,
             live_min_passed: parseInt(getValue('album_ratio_live_min_passed', '2'), 10) || 2
+          },
+          // Compilation rating against the artist's ONLINE catalogue. Used only
+          // when the local library is too thin to rank a credited artist's
+          // tracks (the soundtrack / Various Artists case), where an artist's
+          // global #1 otherwise cannot be told apart from filler.
+          compilation_online_catalogue: {
+            enabled: getChecked('compilation_online_catalogue_enabled', true),
+            min_local_catalogue: parseInt(getValue('compilation_online_min_local_catalogue', '5'), 10) || 5,
+            min_catalogue_size: parseInt(getValue('compilation_online_min_catalogue_size', '5'), 10) || 5,
+            rank_percentile_5star: parseFloat(getValue('compilation_online_rank_percentile_5star', '0.02')) || 0.02,
+            rank_percentile_4star: parseFloat(getValue('compilation_online_rank_percentile_4star', '0.10')) || 0.10,
+            rank_percentile_3star: parseFloat(getValue('compilation_online_rank_percentile_3star', '0.35')) || 0.35,
+            rank_percentile_2star: parseFloat(getValue('compilation_online_rank_percentile_2star', '0.65')) || 0.65
           }
         }
       ),

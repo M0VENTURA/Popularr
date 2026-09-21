@@ -18,6 +18,7 @@ Architecture:
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import structlog
@@ -287,6 +288,7 @@ def scan_artist_to_db(
     active_client = client
 
     try:
+        _phase_started = time.monotonic()
         state = prefetch_artist_state(canonical_artist_name=canonical_artist_name)
 
         existing_track_ids = state["existing_track_ids"]
@@ -295,14 +297,36 @@ def scan_artist_to_db(
         existing_album_artists = state["existing_album_artists"]
         albums_needing_reimport = state["albums_needing_reimport"]
 
+        # The import preamble below is silent by design (it only logs when it
+        # actually changes rows), so a large catalogue made the dashboard show
+        # "Step 1/3: Navidrome import ..." and then nothing for minutes — which
+        # looks identical to a hung scan.  Emit a phase line per step so the
+        # operator can tell a slow import from a stuck one.
+        log_unified(
+            f"[NAVIDROME_IMPORT] Prefetch complete for '{artist_name}' in "
+            f"{time.monotonic() - _phase_started:.1f}s — "
+            f"{len(existing_track_ids)} known track(s), "
+            f"{len(existing_album_tracks)} known album(s) in DB"
+        )
+
+        _phase_started = time.monotonic()
         normalize_existing_artist_rows_safe(
             artist_name=artist_name,
             canonical_artist_name=canonical_artist_name,
         )
         sanitize_artist_rows_safe(canonical_artist_name=canonical_artist_name)
+        log_unified(
+            f"[NAVIDROME_IMPORT] Normalised local rows for '{artist_name}' in "
+            f"{time.monotonic() - _phase_started:.1f}s"
+        )
 
         # Single fetch for artist albums from Navidrome
+        _phase_started = time.monotonic()
         albums = fetch_artist_albums(artist_id, client=active_client) or []
+        log_unified(
+            f"[NAVIDROME_IMPORT] Fetched {len(albums)} album(s) for '{artist_name}' "
+            f"from Navidrome in {time.monotonic() - _phase_started:.1f}s"
+        )
 
         if not albums:
             log_unified(
@@ -338,6 +362,7 @@ def scan_artist_to_db(
 
         navi_client = active_client or _get_fallback_client()
 
+        _albums_matched_filter = 0
         for album_index, album in enumerate(albums, 1):
             album_name = strip_album_edition_marker(album.get("name") or "")
 
@@ -359,6 +384,7 @@ def scan_artist_to_db(
             if not album_id:
                 continue
 
+            _albums_matched_filter += 1
             logger.info(
                 "Importing album",
                 album_index=album_index,
@@ -455,6 +481,22 @@ def scan_artist_to_db(
                     cached_ids_for_album=cached_ids_for_album,
                     navidrome_tracks=tracks,
                 )
+
+        # An album_filter that matches nothing used to return silently, so the
+        # callers (album pipeline step 1/3) moved on to the popularity scan
+        # with no import having happened and no explanation in the log.
+        if album_filter and not filter_missing and _albums_matched_filter == 0:
+            log_unified(
+                f"[NAVIDROME_IMPORT] No album matched the filter '{album_filter}' "
+                f"for '{artist_name}' — Navidrome returned {len(albums)} album(s), "
+                "none of which matched by name. Nothing was imported."
+            )
+            logger.warning(
+                "[NAVIDROME_IMPORT] Album filter matched no Navidrome album",
+                artist=artist_name,
+                album_filter=album_filter,
+                navidrome_album_count=len(albums),
+            )
 
         if not filter_missing and not album_filter and not diff_mode:
             if navidrome_track_ids:
