@@ -739,23 +739,6 @@ def enrich_genres_aggressively(artist_name: str, conn: Any = None, verbose: bool
         logger.debug("AudioDB genre lookup failed", artist=artist_name, error=str(e))
 
     try:
-        from services.enrichment.musicbrainz_service import get_shared_mb_client
-        from api_clients.musicbrainz_http import escape_lucene_special_chars
-
-        client = get_shared_mb_client()
-        query = f'artist:"{escape_lucene_special_chars(artist_name)}"'
-        search_results = client.search_artists(query, limit=1)
-
-        if search_results and search_results[0].get("id"):
-            artist_mbid = search_results[0]["id"]
-            artist_data = client.get_artist(artist_mbid, inc="genres")
-            if artist_data and artist_data.get("genres"):
-                mb_genres = [str(g.get("name") or "").strip() for g in artist_data["genres"]]
-                _add_clean([g for g in mb_genres if g], "MusicBrainz")
-    except Exception as e:
-        logger.debug("MusicBrainz genre lookup failed", artist=artist_name, error=str(e))
-
-    try:
         from helpers.config_helpers import get_config
         lastfm_config = (get_config().get("api_integrations", {}) or {}).get("lastfm", {}) or {}
         api_key = str(lastfm_config.get("api_key") or "")
