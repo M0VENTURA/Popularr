@@ -83,6 +83,7 @@ from helpers.normalization_service import (
     edition_annotations_compatible,
     safe_int,
     safe_str,
+    is_track_artist_placeholder,
 )
 
 # Re-fetch threshold provider
@@ -395,19 +396,6 @@ def _album_recording_batch_keys(
     disc: Any = None,
     track_number: Any = None,
 ) -> list[str]:
-    """Candidate batch keys, MOST SPECIFIC FIRST.
-
-    The row-specific form (``artist::title::disc::track``) names exactly one
-    track, so it is tried before the legacy title-only form. Two rows of a
-    single album can share a title and still be DIFFERENT recordings on the
-    album's release — dArtagnan's "Helden X Hymnen" files the album's title track
-    AND its "(Unplugged Version)" rendition both as "Helden X Hymnen" — and only
-    the row-specific key keeps them apart.
-
-    Both forms are built through ``album_recording_batch_key`` so this consumer
-    and its producer (``scan_stage_runner._build_album_recording_batch``) cannot
-    drift out of step.
-    """
     keys: list[str] = []
     for _artist, _title in ((primary_artist, primary_title), (batch_artist, batch_title)):
         if not _artist or not _title:
@@ -425,22 +413,6 @@ def _album_edition_annotation(
     album_context: dict[str, Any] | None,
     album_tracks: list[dict[str, Any]] | None = None,
 ) -> str | None:
-    """The version annotation the album being scanned agrees on, or None.
-
-    WHY: a release routinely marks only SOME of its titles — on the unplugged
-    edition of an album most read "Song (Unplugged Version)" while a few are
-    tagged plainly as "Song". Every per-title check then fails for exactly
-    those tracks, because ``edition_annotations_compatible("Song", "Song
-    (Unplugged Version)")`` is False while ``("Song", "Song")`` is True — so
-    the recording search skips the unplugged recording and takes the
-    identically titled STUDIO one. The track then carries the studio
-    recording's MBID and every popularity figure read through it is the studio
-    version's, which is the reported "used the wrong version of the tracks
-    when doing the popularity scoring".
-
-    Resolved from the album NAME first, then by majority across the album's
-    track titles. See ``helpers.normalization_service.album_version_annotation``.
-    """
     context = album_context if isinstance(album_context, dict) else {}
     album_name = _as_str(context.get("album"))
 
@@ -470,7 +442,6 @@ _GENRE_SOURCE_COLUMNS = (
 
 
 def _has_real_genres(track: dict[str, Any]) -> bool:
-    """Returns True if the track has any valid genre arrays/dicts populated."""
     for column in _GENRE_SOURCE_COLUMNS:
         raw = track.get(column)
         if not raw:
@@ -486,7 +457,6 @@ def _has_real_genres(track: dict[str, Any]) -> bool:
 
 
 def _track_needs_metadata_enrichment(track: dict[str, Any]) -> bool:
-    """Determines if a track is missing core MBIDs or Genres, overriding the cache."""
     mbid = _as_str(track.get("recording_mbid") or track.get("mbid") or track.get("musicbrainz_trackid")).strip()
     if not mbid:
         return True
@@ -531,7 +501,6 @@ def _strip_album_type_columns(
 
 
 def _looks_like_json_fragment(value: str) -> bool:
-    """True if a string still looks like it holds JSON syntax rather than a plain name."""
     stripped = value.strip()
     if not stripped:
         return False
@@ -545,7 +514,6 @@ def _looks_like_json_fragment(value: str) -> bool:
 
 
 def _coerce_writer_list(raw: Any) -> list[str]:
-    """Safely coerce a writer value into a clean list of plain strings."""
     value: Any = raw
 
     for _ in range(5):
@@ -789,13 +757,6 @@ def _resolve_track_mb_metadata(
 
     mb_data = None
     if title and artist:
-        # The album-release identity is looked up BEFORE the "already fully
-        # resolved" short-circuit, so a stored MBID that is NOT the recording
-        # the album's own MusicBrainz release puts at this track can be
-        # corrected. Leaving it out of reach is what kept the unplugged tracks
-        # of dArtagnan's "Helden X Hymnen" on the STUDIO recordings for good:
-        # with a recording MBID and genres already present this function
-        # returned early and never consulted the batch at all.
         _batch_mb = options.get("mb_batch_metadata") or {}
         for _batch_key in _album_recording_batch_keys(
             primary_artist=artist,
@@ -834,44 +795,14 @@ def _resolve_track_mb_metadata(
 
             if not mb_data:
                 _track_mbid = _as_str(track.get("recording_mbid") or track.get("mbid") or track.get("musicbrainz_trackid")).strip()
-
-                # Only resolved for the search below (and for the composer
-                # lookup it enables): a batch hit already carries the metadata a
-                # search would have fetched for the album's own recording, so it
-                # must not touch the MusicBrainz service at all.
                 mb_service = get_shared_mb_service()
-                # Pass the album being scanned so the recording is pinned to
-                # THAT album's release. Without it, MusicBrainz's arbitrary
-                # release ordering let a track adopt a live-tour album, a
-                # compilation or a single as its album — splitting one folder
-                # into many and titling it with the wrong release group.
                 _album_anchor = _as_str(
                     album_context.get("album") if isinstance(album_context, dict) else ""
                 ).strip()
-                # Release-level liveness. A live album routinely ships PLAINLY
-                # TITLED tracks ("Enter Sandman" on S&M is titled exactly as
-                # its studio original), so the studio and live recordings score
-                # an identical title match and the studio one wins by relevance
-                # order. The track then carries the STUDIO recording's MBID,
-                # and every popularity figure read from it (ListenBrainz
-                # listens via that MBID, Last.fm via the release-scoped match)
-                # is the studio recording's — which is why live albums were
-                # scoring like studio albums. Passing the flag lets the search
-                # prefer the live recording.
                 _is_live_release = bool(
                     _album_type_indicates_live(track, album_context, album_result)
                     or is_live_or_alternate_track_title(title)
                 )
-                # The album's own version annotation, for a title that carries
-                # none: without it a plainly tagged track on an unplugged (or
-                # acoustic) album resolves to the STUDIO recording. See
-                # ``_album_edition_annotation``.
-                #
-                # ``edition_annotation`` IS that value here: ``process_track``
-                # computes it once and passes it in. Referring to the caller's
-                # local (``_album_annotation``) from inside this function would
-                # raise NameError — swallowed by the caller's debug-level
-                # handler — and silently turn per-track MB resolution off.
                 mb_data = mb_service.lookup_recording_metadata(
                     title,
                     artist,
@@ -891,6 +822,9 @@ def _resolve_track_mb_metadata(
                 payload["mbid"] = recording_mbid
             if confidence is not None:
                 payload["musicbrainz_confidence"] = confidence
+
+            if mb_data.get("work_mbid"):
+                payload["work_mbid"] = mb_data["work_mbid"]
 
             if recording_mbid and not _from_batch:
                 _raw_existing_writer = track.get("writer")
@@ -929,10 +863,6 @@ def _resolve_track_mb_metadata(
             if _mb_isrc and not _as_str(track.get("isrc") or "").strip():
                 payload["isrc"] = _mb_isrc
 
-            # STRICT ALBUM COHESION GUARD:
-            # Never allow a track-level recording match to rename an existing album.
-            # Recordings map to many releases (compilations, live bootlegs), which
-            # shatters album grouping. Only fill if completely missing.
             _existing_album = _as_str(track.get("album") or "").strip()
             _mb_album = _as_str(mb_data.get("album") or "").strip()
             if _mb_album and not _existing_album:
@@ -946,15 +876,6 @@ def _resolve_track_mb_metadata(
                     normalize_artist,
                 )
 
-                # An album-level placeholder ("Various Artists") in the ARTIST
-                # column is not a track artist, so replacing it with the
-                # recording's own artist credit is a CORRECTION and needs no
-                # forced metadata pass. Without this a compilation kept
-                # "Various Artists" for every track the batch/MB resolved — the
-                # reported "track artist is still not updating for a compilation
-                # during a scan" — and those tracks were then reported as
-                # COVERS, because the original artist (from the ISRC) can never
-                # match a placeholder.
                 if is_track_artist_placeholder(_existing_artist) and normalize_artist(
                     _mb_artist
                 ) != normalize_artist(_existing_artist):
@@ -993,15 +914,6 @@ def _resolve_track_mb_metadata(
                 if _should_update_year:
                     payload["year"] = _mb_year
 
-            # Release (edition) identity.  ``album`` holds the release GROUP
-            # name; the SPECIFIC edition's name and its own year are stored
-            # separately so the album page can show an edition tagline
-            # ("Experience: Expanded (Remixes and B-Sides)").
-            #
-            # ``year`` is the album's ORIGINAL year (handled above), so
-            # ``release_year`` is the ONLY place the edition's year lives.
-            # Both respect an existing value unless this is a forced metadata
-            # pass, so a manual edit is never silently clobbered.
             _mb_release_title = _as_str(mb_data.get("release_title") or "").strip()
             if _mb_release_title and (
                 _force_meta or not _as_str(track.get("release_title") or "").strip()
@@ -1024,7 +936,6 @@ def _resolve_track_mb_metadata(
     return {
         "mb_data": mb_data,
         "payload": payload,
-        # Use the MusicBrainz-corrected identity downstream.
         "artist": _as_str(payload.get("artist") or artist),
         "title": _as_str(
             payload.get("musicbrainz_title")
@@ -1060,7 +971,6 @@ def process_track(
     track_title = _as_str(track.get("title"))
     track_artist = _as_str(track.get("artist"))
 
-    # Carry release-level/current-pass liveness through to finalisation.
     _resolved_is_live = bool(
         track.get("is_live")
         or track.get("album_context_live")
@@ -1188,10 +1098,6 @@ def process_track(
         except Exception as _il_exc:
             logger.debug("Interlude LB stored-outlier check failed", track_id=track_id, error=str(_il_exc))
 
-    # The album's version annotation, for any track whose OWN title lacks it.
-    # Computed once because BOTH recording lookups below need it — the MB
-    # metadata pass and the ListenBrainz MBID fallback. See
-    # ``_album_edition_annotation`` for the reported failure it prevents.
     _album_annotation = _album_edition_annotation(album_context, album_tracks)
 
     _mb_meta = None
@@ -1221,7 +1127,6 @@ def process_track(
             _genre_lookup_title = _mb_meta.get("title")
             update_payload.update(_mb_meta.get("payload") or {})
             
-        # Inherit new external genres from the album-level fetch
         if album_context.get("audiodb_genres"):
             update_payload["audiodb_genres"] = album_context["audiodb_genres"]
         if album_context.get("wikidata_genres"):
@@ -1237,7 +1142,27 @@ def process_track(
     ):
         try:
             effective_track = _build_effective_track(track, update_payload)
-            artist = _as_str(track_context.get("artist") or effective_track.get("artist"))
+            
+            from helpers.normalization_service import is_track_artist_placeholder
+            
+            _cand_track_art = _as_str(
+                update_payload.get("artist") 
+                or effective_track.get("artist") 
+                or track.get("artist")
+            ).strip()
+            
+            _cand_album_art = _as_str(
+                effective_track.get("album_artist") 
+                or album_context.get("album_artist")
+            ).strip()
+
+            if _cand_track_art and not is_track_artist_placeholder(_cand_track_art):
+                artist = _cand_track_art
+            elif _cand_album_art and not is_track_artist_placeholder(_cand_album_art):
+                artist = _cand_album_art
+            else:
+                artist = _cand_track_art or _cand_album_art
+
             raw_title = _as_str(effective_track.get("title") or track.get("title"))
             title = _as_str(track_context.get("lastfm_title") or raw_title)
             release_date = _as_str(effective_track.get("year") or effective_track.get("release_year"))
@@ -1248,35 +1173,6 @@ def process_track(
             )
             isrc = _as_str(effective_track.get("isrc") or "").strip()
 
-            # Release-level liveness, resolved once up-front so it can gate
-            # the Last.fm aggregation calls below. A live release frequently
-            # ships plainly-titled tracks (e.g. every track on Metallica's
-            # "S&M" is titled exactly as its studio original), so Last.fm's
-            # title+artist matching would otherwise merge the STUDIO
-            # recording's catalogue-wide listener count into the live
-            # track's popularity data -- the count is real, it's just for
-            # the wrong recording. ListenBrainz is unaffected because it
-            # matches on recording MBID, not title.
-            #
-            # This mirrors the OR-of-conditions used later for
-            # ``is_live_flag`` (title-marker regex + explicit flags), minus
-            # the tag-based check, which depends on genre columns that are
-            # not populated in ``update_payload`` until the metadata section
-            # further down -- checking it here would never find anything,
-            # same as it effectively never did in the original later-computed
-            # flag before this fix.
-            #
-            # ``album_context.get("is_live_album")`` alone is NOT sufficient:
-            # the album stage can reject a MusicBrainz "album+live" secondary
-            # type when track titles don't corroborate it (e.g. every track
-            # on Metallica's "S&M" is titled exactly as its studio original),
-            # which leaves ``is_live_album`` False even though MusicBrainz
-            # classified the release as live. ``_album_type_indicates_live``
-            # checks the raw album-type fields directly -- across the track
-            # row, the effective (post-metadata-merge) track, album_context,
-            # and album_result -- so a "album+live" classification is honoured
-            # here regardless of whether that title-corroboration heuristic
-            # accepted or rejected it.
             is_live_release = bool(
                 effective_track.get("is_live")
                 or effective_track.get("album_context_live")
@@ -1285,23 +1181,6 @@ def process_track(
                 or bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", str(raw_title or title).lower()))
             )
 
-            # A version-marked RENDITION the local title does not declare.
-            #
-            # MusicBrainz's own release tracklist is authoritative here: the
-            # album's release lists "Fur immer Dein (Unplugged Version)" while
-            # the library file is titled plainly, and the identity resolved from
-            # that release (``options["mb_batch_metadata"]``) carries the
-            # version-marked title through as ``musicbrainz_title``. Providers
-            # resolve by title+artist, so without this the plainly titled
-            # unplugged track absorbs the STUDIO recording's listeners -- the
-            # reported dArtagnan "Helden X Hymnen" inflation (7.5k Last.fm
-            # listeners on a track whose album-mates sit at 300-500, enough to
-            # lock it as an album 5-star top track).
-            #
-            # Deliberately NOT folded into ``is_live_release``: this is an
-            # alternate RENDITION, not a live recording, so it must not pick up
-            # the live weight penalty or the live star caps. Only the provider
-            # "alternate performance" test consumes it.
             _alt_rendition = _is_alternate_performance_title(
                 _as_str(effective_track.get("musicbrainz_title") or "")
             )
@@ -1393,20 +1272,6 @@ def process_track(
                     or lastfm_listeners == 0
                     or (lastfm_listeners < 25 and listenbrainz_listens < 25)
                 ):
-                    # FIXED: ``_prefetch_entry`` is populated once per ARTIST by
-                    # prefetch_artist_popularity(), keyed only by normalised
-                    # title -- it cannot distinguish a live recording from its
-                    # studio namesake, so its ``lastfm_listeners`` is exactly
-                    # the catalogue-wide contaminated count this whole
-                    # is_live_release mechanism exists to avoid. The
-                    # ``_album_tracklist`` flag below marks the entry as
-                    # touched by the release-scoped ListenBrainz backfill, but
-                    # that flag lives on the SAME dict as the unrelated,
-                    # still-contaminated ``lastfm_listeners`` field, so it
-                    # does not make the LF value release-scoped -- only the LB
-                    # fields it was set for. On a live release, skip this
-                    # cached value entirely and fall through to the direct,
-                    # ``is_live_release``-aware aggregation call below instead.
                     if (
                         _prefetch_entry
                         and _prefetch_entry.get("lastfm_listeners")
@@ -1456,12 +1321,6 @@ def process_track(
                                         if _agg_tags:
                                             update_payload["lastfm_tags"] = json.dumps(_agg_tags, ensure_ascii=False)
                                 elif is_live_release:
-                                    # A live release with no aggregated match must NOT
-                                    # fall through to the bare title+artist lookup below
-                                    # -- that lookup cannot distinguish the live
-                                    # performance from its studio namesake and would
-                                    # silently reintroduce the contamination this fix
-                                    # exists to prevent.
                                     lastfm_listeners = 0
                                     lastfm_playcount = 0
                                 else:
@@ -1546,16 +1405,6 @@ def process_track(
                                     if _mb_entry and _mb_entry.get("recording_mbid"):
                                         recording_mbid = _mb_entry["recording_mbid"]
                                     else:
-                                        # ``is_live_release`` matters here for the
-                                        # same reason it does in the metadata
-                                        # lookup: a plainly titled live track must
-                                        # not resolve to its studio namesake, or
-                                        # the ListenBrainz count fetched for that
-                                        # MBID is the STUDIO recording's — which
-                                        # is how a live album scored like a studio
-                                        # album. ``edition_annotation`` extends the
-                                        # same protection to every other version
-                                        # marker (unplugged, acoustic, ...).
                                         recording_mbid, _conf = get_shared_mb_service().get_suggested_mbid(
                                             raw_title or title,
                                             artist,
@@ -1585,12 +1434,6 @@ def process_track(
                     update_payload["listenbrainz_users"] = listenbrainz_users
                     update_payload["listenbrainz_last_updated"] = now_ts
 
-                # ``is_live_flag`` folds in the tag-based check (which needs
-                # ``update_payload`` as populated by the LF/LB fetches above)
-                # on top of the release-level ``is_live_release`` resolved
-                # up-front for the Last.fm calls. Recomputing the title/flag
-                # portion here would be redundant with ``is_live_release``,
-                # so it is reused directly.
                 is_live_flag = bool(
                     is_live_release
                     or _has_safe_live_recording_tag(update_payload)
@@ -1693,7 +1536,17 @@ def process_track(
 
             effective_track = _build_effective_track(track, update_payload)
             sd_title = _as_str(effective_track.get("title") or "")
-            sd_artist = _as_str(effective_track.get("artist") or "")
+            
+            from helpers.normalization_service import is_track_artist_placeholder
+            _t_art = _as_str(effective_track.get("artist") or track.get("artist")).strip()
+            _a_art = _as_str(effective_track.get("album_artist") or album_context.get("album_artist")).strip()
+            if _t_art and not is_track_artist_placeholder(_t_art):
+                sd_artist = _t_art
+            elif _a_art and not is_track_artist_placeholder(_a_art):
+                sd_artist = _a_art
+            else:
+                sd_artist = _t_art or _a_art
+
             sd_album = _as_str(album_context.get("album") or track.get("album") or "")
             sd_album_type = _as_str(album_result.get("detected_album_type") or options.get("album_type") or "")
             sd_popularity = float(
@@ -1840,10 +1693,6 @@ def process_track(
             else:
                 sd_result = None
 
-            # Persist only source-backed single evidence. Popularity is not
-            # proof of a single release, and generic code must not contain
-            # artist-specific title safeguards. Curated exceptions belong in
-            # single_manual_override or an ISRC/MBID-backed override store.
             if sd_result:
                 update_payload["is_single"] = bool(sd_result.get("is_single", False))
                 update_payload["single_confidence"] = sd_result.get("confidence", "low")
@@ -1975,6 +1824,16 @@ def process_track(
             effective_track = _build_effective_track(track, update_payload)
             title = _as_str(effective_track.get("title") or track.get("title") or "")
             if title:
+                from helpers.normalization_service import is_track_artist_placeholder
+                _t_art = _as_str(effective_track.get("artist") or track.get("artist")).strip()
+                _a_art = _as_str(effective_track.get("album_artist") or album_context.get("album_artist")).strip()
+                if _t_art and not is_track_artist_placeholder(_t_art):
+                    cover_artist = _t_art
+                elif _a_art and not is_track_artist_placeholder(_a_art):
+                    cover_artist = _a_art
+                else:
+                    cover_artist = _t_art or _a_art
+                    
                 raw_track = track_context.get("track", {}) if isinstance(track_context, dict) else {}
                 cover_data = {
                     "is_cover": raw_track.get("is_cover") or track.get("is_cover"),
@@ -1985,30 +1844,13 @@ def process_track(
                 }
                 force_cover = bool(options.get("force_cover_detection"))
 
-                # A title that carried a "(X Cover)" ATTRIBUTION had that
-                # wording removed by the scan's identity pass — and the wording
-                # was what made this detector fire in the first place, storing a
-                # cover verdict for a track that is not one ("falsely created as
-                # a cover"). Two consequences:
-                #
-                #   * the verdict must be RE-EVALUATED, not read from the cache:
-                #     ``detect_cover_song`` short-circuits on an existing
-                #     "already confirmed" verdict, so ``force`` is set when the
-                #     wording was removed; and
-                #   * a negative verdict must be WRITTEN. This block only ever
-                #     wrote a positive result, because writing nothing leaves a
-                #     confirmed verdict alone — which means clearing a false one
-                #     is impossible without an explicit False.
-                #
-                # ``cover_manual_override`` still wins: that flag records a
-                # decision the USER made, and nothing here may undo it.
                 _cover_wording_removed = bool(track.get("title_had_cover_wording"))
                 _cover_manual_override = bool(cover_data.get("cover_manual_override"))
                 if _cover_wording_removed and not _cover_manual_override:
                     force_cover = True
 
                 is_cover, reason = detect_cover_song(
-                    title, track_artist,
+                    title, cover_artist,
                     track_data=cover_data,
                     force=force_cover,
                 )
@@ -2026,8 +1868,6 @@ def process_track(
                 elif _cover_wording_removed and not _cover_manual_override:
                     update_payload["is_cover"] = False
                     update_payload["is_cover_reason"] = "cover attribution removed from title"
-                    # Drop the "Cover" genre the false verdict had added, or the
-                    # genre playlists would keep filing the track as a cover.
                     _mbg = update_payload.get("musicbrainz_genres")
                     if _mbg is None:
                         _mbg = track.get("musicbrainz_genres")
@@ -2082,24 +1922,6 @@ def process_track(
 
     # -------------------------------------------------------------------------
     # 5.5 ALBUM YEAR UNIFICATION
-    #
-    # BOTH year columns are pinned to ONE album-level verdict.  They used to
-    # be written per track, and because MusicBrainz resolves each recording to
-    # whichever release lists it first, a multi-edition album picked up a
-    # different ``release_year`` on different tracks of the SAME folder.
-    #
-    # That split the album, because the UI groups albums on (name, year) and
-    # falls back to ``release_year`` when ``year`` is empty:
-    #   routes/ui_routes.py   album_key = f"{album.lower()}::{track_year}"
-    #   dashboard SQL         GROUP BY ..., COALESCE(year, release_year)
-    #
-    # ``year`` is the album's ORIGINAL year (the release group); ``release_year``
-    # is THIS edition's year and is a property of the release, not of the
-    # individual recording — so every track of the folder must agree on it.
-    #
-    # The scan runner resolves the authoritative pair once per album and
-    # supplies it via ``album_context``; the album-wide scan below is the
-    # fallback for direct callers (and for tests) that pass no album_context.
     # -------------------------------------------------------------------------
     if not popularity_only and not singles_detection_only:
         try:
@@ -2129,7 +1951,6 @@ def process_track(
                 except ValueError:
                     pass
 
-            # ── Original year ────────────────────────────────────────────
             if _auth_year is not None:
                 _year_target = int(str(_auth_year)[:4])
             else:
@@ -2151,11 +1972,6 @@ def process_track(
                 if _update_needed:
                     update_payload["year"] = str(_year_target)
 
-            # ── Edition year ─────────────────────────────────────────────
-            # Majority verdict: the edition year belongs to the RELEASE, so the
-            # value most tracks carry is the release's.  Ties go to the earlier
-            # year so the outcome is deterministic.  Only written when known —
-            # never clobbered to NULL, and never invented from the original.
             if _auth_edition_year is not None:
                 _edition_target = int(str(_auth_edition_year)[:4])
             elif _album_edition_years:
@@ -2190,11 +2006,6 @@ def process_track(
     # -------------------------------------------------------------------------
     # 6. PERSISTENCE
     # -------------------------------------------------------------------------
-    # ``album_artist`` sits in ``_STALE_PROTECTED_COLUMNS``, so a value the
-    # scan's identity pass decided is DROPPED here unless it is declared in the
-    # payload. The flag is set by ``scan_hooks.prepare_track_context`` only when
-    # it actually filled an empty album artist, so a populated one is still
-    # never overwritten by a pass that knows less than the user does.
     if track.get("album_artist_from_scan_identity"):
         _scan_album_artist = _as_str(track.get("album_artist")).strip()
         if _scan_album_artist:
@@ -2238,23 +2049,6 @@ def process_track(
         or track_artist
     )
 
-    # The artist this track is actually BY, as RESOLVED during this pass.
-    #
-    # ``track_artist`` was captured at function entry from the raw DB row, so
-    # on a Various Artists compilation it still reads the album-level
-    # PLACEHOLDER ("Various Artists") even after the metadata pass replaced it
-    # (see the "Compilation placeholder artist replaced from MusicBrainz"
-    # write into ``update_payload["artist"]``). Returning that stale value made
-    # ``finalise_stage._compilation_track_artist`` — which reads
-    # ``result["artist"]`` — see the SAME placeholder for every track, so all
-    # of them were rated against one shared catalogue: identical
-    # ``catalogue_n`` for the whole album and z-scores that rank tracks against
-    # the compilation instead of each performer's own catalogue. That is the
-    # reported "popularity scoring is way off" on compilations, where a big
-    # song by its artist scored 1★.
-    #
-    # ``update_payload`` carries the resolved credit; fall back to the raw
-    # value only when nothing resolved.
     _resolved_track_artist = _as_str(
         update_payload.get("artist")
         or effective_track.get("artist")
