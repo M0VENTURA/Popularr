@@ -941,10 +941,33 @@ def _resolve_track_mb_metadata(
             _existing_artist = _as_str(track.get("artist") or "").strip()
             _mb_artist = _as_str(mb_data.get("artist") or "").strip()
             if _mb_artist:
-                if not _existing_artist:
+                from helpers.normalization_service import (
+                    is_track_artist_placeholder,
+                    normalize_artist,
+                )
+
+                # An album-level placeholder ("Various Artists") in the ARTIST
+                # column is not a track artist, so replacing it with the
+                # recording's own artist credit is a CORRECTION and needs no
+                # forced metadata pass. Without this a compilation kept
+                # "Various Artists" for every track the batch/MB resolved — the
+                # reported "track artist is still not updating for a compilation
+                # during a scan" — and those tracks were then reported as
+                # COVERS, because the original artist (from the ISRC) can never
+                # match a placeholder.
+                if is_track_artist_placeholder(_existing_artist) and normalize_artist(
+                    _mb_artist
+                ) != normalize_artist(_existing_artist):
+                    payload["artist"] = _mb_artist
+                    logger.info(
+                        "Compilation placeholder artist replaced from MusicBrainz",
+                        track_id=track_id,
+                        old=_existing_artist,
+                        new=_mb_artist,
+                    )
+                elif not _existing_artist:
                     payload["artist"] = _mb_artist
                 elif _force_meta and _mb_artist != _existing_artist:
-                    from helpers.normalization_service import normalize_artist
                     if normalize_artist(_mb_artist) != normalize_artist(_existing_artist):
                         payload["artist"] = _mb_artist
                         logger.info(

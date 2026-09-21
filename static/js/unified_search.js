@@ -374,18 +374,32 @@
     return norm(artist) + '::' + norm(title);
   }
 
+  // Every bucket the LOCAL payload can carry. The server files each album under
+  // the bucket its TYPE maps to (``/api/search`` returns ``albums``,
+  // ``compilations``, ``live_albums``, ``eps`` and ``singles``), so reading only
+  // ``local.albums`` silently dropped every local compilation, live album, EP and
+  // single while the result counts — which sum all five — still counted them.
+  // That is the reported "Library 2 but only the track is showing" for a Various
+  // Artists album, whose bucket is ``compilations``.
+  var LOCAL_RELEASE_BUCKETS = ['albums', 'compilations', 'live_albums', 'eps', 'singles'];
+
   function buildBuckets(local, mbReleases) {
     var buckets = { albums: [], compilations: [], live_albums: [], eps: [], singles: [] };
     var owned = {};
 
-    (local.albums || []).forEach(function (al) {
-      var bucket = buckets[al.type] ? al.type : 'albums';
-      buckets[bucket].push({
-        title: al.album, artist: al.artist, year: al.year || null,
-        typeLabel: al.type_label || 'Album', local: true,
-        track_count: al.track_count || null, duration_total: al.duration_total || null
+    LOCAL_RELEASE_BUCKETS.forEach(function (key) {
+      (local[key] || []).forEach(function (al) {
+        // Prefer the item's own type; fall back to the bucket it was filed in
+        // rather than to 'albums', so an unexpected type can never mis-file a
+        // compilation as a studio album.
+        var bucket = buckets[al.type] ? al.type : (buckets[key] ? key : 'albums');
+        buckets[bucket].push({
+          title: al.album, artist: al.artist, year: al.year || null,
+          typeLabel: al.type_label || 'Album', local: true,
+          track_count: al.track_count || null, duration_total: al.duration_total || null
+        });
+        owned[_ownedKey(al.artist, al.album)] = true;
       });
-      owned[_ownedKey(al.artist, al.album)] = true;
     });
 
     (mbReleases || []).forEach(function (r) {

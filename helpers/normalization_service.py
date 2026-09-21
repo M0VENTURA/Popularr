@@ -694,6 +694,30 @@ def album_version_annotation(
     return annotation
 
 
+# Album-level artist placeholders that are never a TRACK artist. Kept as a fixed
+# list on purpose: these values are wrong in the ARTIST column whatever the
+# compilation-detection settings say, so the behaviour must not depend on config.
+TRACK_ARTIST_PLACEHOLDERS = frozenset({
+    "various artists", "various", "va", "v/a", "v.a.", "soundtrack", "unknown artist",
+})
+
+
+def is_track_artist_placeholder(value: str | None) -> bool:
+    """True when an ARTIST value is an album-level placeholder, not a performer.
+
+    A compilation's tracks are by the individual performers, so "Various Artists"
+    is the ALBUM's artist, never the track's. Two consequences this exists for:
+
+    * a MusicBrainz recording search constrained to such an artist returns
+      NOTHING — every track of "Little Nicky" was searched as
+      ``artist:"Various Artists"`` and came back with ``candidate_count=0``, so
+      the recording (and with it the song's real artist) was never found; and
+    * when a match IS made by another route, the placeholder must be replaceable
+      without a forced metadata pass, because it is not a user edit.
+    """
+    return str(value or "").strip().casefold() in TRACK_ARTIST_PLACEHOLDERS
+
+
 def is_compilation_artist(artist: str | None) -> bool:
     """Determine whether an artist string represents a compilation/various-artists release."""
     if not artist:

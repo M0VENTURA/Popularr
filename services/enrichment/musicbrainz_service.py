@@ -864,10 +864,27 @@ class MusicBrainzService:
                     return mbid, round(score, 3)
 
         query_title = Normalize_title_for_lucene_query(Strip_search_keywords(title))
-        query = (
-            f'recording:"{Escape_lucene_special_chars(query_title)}" '
-            f'AND artist:"{Escape_lucene_special_chars(artist)}"'
+        # A compilation's album-level placeholder is not a track artist, and
+        # constraining the search to it makes MusicBrainz answer NOTHING: every
+        # track of a Various Artists album was searched as
+        # ``artist:"Various Artists"`` and came back with ``candidate_count=0``,
+        # so the recording — and with it the song's real artist — was never
+        # resolved (the reported "track artist is still not updating for a
+        # compilation during a scan"). Those titles are searched on their own.
+        _compilation_placeholder = False
+        try:
+            from helpers.normalization_service import is_track_artist_placeholder
+
+            _compilation_placeholder = is_track_artist_placeholder(artist)
+        except Exception:
+            _compilation_placeholder = False
+
+        _artist_clause = (
+            ""
+            if _compilation_placeholder
+            else f' AND artist:"{Escape_lucene_special_chars(artist)}"'
         )
+        query = f'recording:"{Escape_lucene_special_chars(query_title)}"{_artist_clause}'
         try:
             recordings = _call_with_heartbeat(
                 "recording.search",
