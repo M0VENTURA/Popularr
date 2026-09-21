@@ -255,101 +255,6 @@ def _ensure_monitor() -> None:
         return
     with _INIT_LOCK:
         if _MONITOR_THREAD is None or not _MONITOR_THREAD.is_alive():
-            # threading.Thread is stdlib — its kwargs are lowercase
-            # (target/name/daemon). The previous Target=/Name=/Daemon= call
-            # raised TypeError on the very first MusicBrainz request made
-            # through _call_with_heartbeat (i.e. almost every call this
-            # service makes), which the broad except-Exception callers
-            # silently turned into a generic "success: False" error.
-            _MONITOR_THREAD = threading.Thread(
-                target=_monitor_loop,
-                name="mb-heartbeat-monitor",
-                daemon=True,
-            )
-            _MONITOR_THREAD.start()
-
-def _call_with_heartbeat(
-    Section: str,
-    Func: Callable[..., T],
-    *args: Any,
-    Log_context: dict[str, Any] | None = None,
-    **kwargs: Any,
-) -> T:
-    Context = dict(Log_context or {})
-    Started = time.monotonic()
-    _ensure_monitor()
-    Call_id = next(_INFLIGHT_IDS)
-    with _INFLIGHT_LOCK:
-        _INFLIGHT[Call_id] = {
-            "section": Section,
-            "started": Started,
-            "context": Context,
-            "next_warn": Started + _HEARTBEAT_SECONDS,
-        }
-
-    Logger.info("[MB] call started", section=Section, **Context)
-    try:
-        Result = Func(*args, **kwargs)
-    except Exception as exc:
-        Logger.exception(
-            "[MB] call failed",
-            Section=Section,
-            Elapsed_s=round(time.monotonic() - Started, 3),
-            Error=_error(exc),
-            **Context,
-        )
-        raise
-    else:
-        Logger.info(
-            "[MB] call completed",
-            Section=Section,
-            Elapsed_s=round(time.monotonic() - Started, 3),
-            **Context,
-        )
-        return Result
-    finally:
-        with _INFLIGHT_LOCK:
-            _INFLIGHT.pop(Call_id, None)
-
-# ---------------------------------------------------------------------------
-# Shared heartbeat monitor
-# ---------------------------------------------------------------------------
-
-_INFLIGHT_LOCK = threading.Lock()
-_INFLIGHT: "OrderedDict[int, dict[str, Any]]" = OrderedDict()
-_INFLIGHT_IDS = itertools.count()
-_MONITOR_THREAD: threading.Thread | None = None
-
-def _monitor_loop() -> None:
-    while True:
-        time.sleep(_MONITOR_TICK_SECONDS)
-        Now = time.monotonic()
-        Due: list[dict[str, Any]] = []
-        with _INFLIGHT_LOCK:
-            for entry in _INFLIGHT.values():
-                if Now >= entry["next_warn"]:
-                    entry["next_warn"] = Now + _HEARTBEAT_SECONDS
-                    Due.append(
-                        {
-                            "section": entry["section"],
-                            "elapsed_s": round(Now - entry["started"], 1),
-                            "context": entry["context"],
-                        }
-                    )
-        for item in Due:
-            Logger.warning(
-                "[MB] call still running",
-                Section=item["section"],
-                Elapsed_s=item["elapsed_s"],
-                **item["context"],
-            )
-
-def _ensure_monitor() -> None:
-    global _MONITOR_THREAD
-    if _MONITOR_THREAD is not None and _MONITOR_THREAD.is_alive():
-        return
-    with _INIT_LOCK:
-        if _MONITOR_THREAD is None or not _MONITOR_THREAD.is_alive():
             _MONITOR_THREAD = threading.Thread(
                 target=_monitor_loop,
                 name="mb-heartbeat-monitor",
@@ -564,26 +469,14 @@ def _release_track_count(release: Any) -> int:
         if isinstance(medium, dict)
     )
 
-# Secondary release-group types that mean the release is NOT the canonical
-# studio album. A track that also appears on a live tour album, a various-
-# artists compilation or a remix collection must not adopt THAT release's
-# identity as its album.
 _NON_STUDIO_SECONDARY_TYPES = frozenset({
     "live", "compilation", "remix", "soundtrack", "spokenword", "demo",
     "dj-mix", "mixtape", "interview", "audiobook",
 })
 
-# How closely a release's album identity must match the album being scanned
-# before it is treated as the same album. Matches the floor used by
-# ``_recording_matches_album`` so both paths agree on "same album".
 _ALBUM_IDENTITY_MATCH_FLOOR = 0.6
 
 def _release_group_title_of(release: Any) -> str:
-    """The release GROUP's title for a release, or "".
-
-    This is the album's identity. The release's own ``title`` is the
-    EDITION ("72 Seasons (Live at ...)"), so it must never win over this.
-    """
     if not isinstance(release, dict):
         return ""
     group = release.get("release-group") or {}
@@ -608,27 +501,11 @@ def _release_group_secondary_types_of(release: Any) -> list[str]:
     return _parse_secondary_types(group.get("secondary-types") or group.get("secondary_types"))
 
 def _release_album_identity(release: Any) -> str:
-    """The album name a release declares: its release-GROUP title, else its title."""
     return _release_group_title_of(release) or str(
         (release.get("title") if isinstance(release, dict) else "") or ""
     ).strip()
 
 def _edition_title_matches(release_title: str, album_name: str) -> bool:
-    """True when a release's OWN title names the edition the album is.
-
-    The library's album name is the specific release title whenever the files
-    were tagged from an edition, so an exact-ish title match is the only
-    reliable way to recover WHICH edition the collection holds — the release
-    GROUP is the same for every edition, so group-level matching cannot.
-
-    Deliberately strict:
-      * the album must itself carry an edition annotation, so a plain album
-        name can never promote an arbitrary release to "the edition held"; and
-      * the two titles must be edition-annotation COMPATIBLE, so
-        "(Holiday Edition Deluxe)" can never match the plain release or a
-        DIFFERENT edition of the same album; and
-      * they must be ≥0.9 similar, so sharing a few words is not enough.
-    """
     if not release_title or not album_name:
         return False
     if not Extract_edition_annotation(album_name):
@@ -638,32 +515,6 @@ def _edition_title_matches(release_title: str, album_name: str) -> bool:
     return _similarity(release_title, album_name) >= 0.9
 
 def _select_primary_release(releases: Any, album_name: str | None) -> dict[str, Any]:
-    """Choose which of a recording's releases describes the album being scanned.
-
-    WHY THIS EXISTS: a recording lists every release it appears on, and
-    MusicBrainz returns them in NO meaningful order. A Metallica track from
-    "72 Seasons" that was also played live on the M72 tour is listed on the
-    tour album too, so ``releases[0]`` is frequently a LIVE release — the
-    track then adopted the tour release-group's name as its album and the
-    folder shattered into a dozen one-track "albums".
-
-    Selection order:
-    0. The EDITION the collection holds: a release whose own title names the
-       same edition as the local album name. Only reachable when the local
-       name carries an edition annotation.
-    1. A release whose album identity matches ``album_name`` — this pins the
-       track to the album actually being scanned.
-    2. A canonical STUDIO release: primary type ``album`` (or untyped) with no
-       live/compilation/remix secondary type. Prefers one that carries a
-       release-group, so the name can never fall back to an edition title.
-    3. The earliest release date — but ONLY when no ``album_name`` was
-       supplied. With an anchor and no resemblance anywhere, nothing is
-       returned, because an unrelated release's title must never become the
-       track's ``release_title``.
-
-    Every stage breaks ties on the release id, so the result is deterministic
-    and does not depend on MusicBrainz's ordering.
-    """
     candidates = [r for r in (releases or []) if isinstance(r, dict)]
     if not candidates:
         return {}
@@ -676,7 +527,6 @@ def _select_primary_release(releases: Any, album_name: str | None) -> dict[str, 
     def _sort_key(release: dict[str, Any]) -> tuple[Any, ...]:
         return (str(release.get("date") or "9999"), str(release.get("id") or ""))
 
-    # ── 0. The EDITION the collection actually holds ───────────────────────
     if anchor:
         edition_matches = [
             r for r in candidates
@@ -685,7 +535,6 @@ def _select_primary_release(releases: Any, album_name: str | None) -> dict[str, 
         if edition_matches:
             return min(edition_matches, key=_sort_key)
 
-    # ── 1. The release matching the scanned album ──────────────────────────
     if anchor:
         matching = [
             r for r in candidates
@@ -695,11 +544,9 @@ def _select_primary_release(releases: Any, album_name: str | None) -> dict[str, 
         if matching:
             return min(matching, key=_sort_key)
 
-    # ── 2 & 3. No anchor, or nothing resembled it ──────────────────────────
     if anchor:
         return {}
 
-    # ── 2. A canonical studio release ──────────────────────────────────────
     def _is_studio(release: dict[str, Any]) -> bool:
         primary = _release_group_primary_type_of(release)
         if primary not in ("", "album"):
@@ -719,11 +566,9 @@ def _select_primary_release(releases: Any, album_name: str | None) -> dict[str, 
         )
         return studio[0]
 
-    # ── 3. Earliest, deterministically ─────────────────────────────────────
     return min(candidates, key=_sort_key)
 
 def _recording_live_affinity(recording: Any) -> bool | None:
-    """Whether a search candidate is a LIVE recording, or ``None`` if unknown."""
     if not isinstance(recording, dict):
         return None
     releases = [r for r in (recording.get("releases") or []) if isinstance(r, dict)]
@@ -1912,12 +1757,7 @@ def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None
             "release.fetch_metadata",
             Client.get_release,
             release_id,
-            # ``labels`` supplies ``label-info`` (record label + catalog
-            # number + barcode).  It was missing here, and because an explicit
-            # ``inc`` BYPASSES the client's ``_RELEASE_INC_SUPERSET`` fallback,
-            # the album page's Extended Metadata panel never had a label or
-            # catalog number to show.
-            inc="recordings+artist-credits+release-groups+media+labels+work-rels+recording-level-rels",
+            inc="recordings+artist-credits+release-groups+media+labels+work-rels+recording-level-rels+work-level-rels+artist-rels+genres",
             Log_context={"release_id": release_id},
         )
     except Exception as exc:
@@ -1963,12 +1803,20 @@ def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None
                 Recording = {}
             Position = track.get("position") if track.get("position") is not None else track.get("number")
             Length = track.get("length") if track.get("length") is not None else Recording.get("length")
+            
+            genres = [
+                str(item.get("name") or "").strip()
+                for item in Recording.get("genres") or []
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            ]
+            
             Tracks.append({
                 "mb_disc_number": Disc_number,
                 "mb_track_number": _as_int(Position, 0),
                 "mb_title": str(track.get("title") or Recording.get("title") or ""),
                 "mb_recording_mbid": str(Recording.get("id") or ""),
                 "mb_duration": Length,
+                "mb_genres": list(dict.fromkeys(genres)),
             })
 
     return {
