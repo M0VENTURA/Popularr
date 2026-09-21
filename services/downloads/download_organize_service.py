@@ -72,14 +72,45 @@ def organize_track(track_metadata: dict[str, Any] | int, payload: dict[str, Any]
     if not track_metadata.get("file_path"):
         return {"success": False, "error": "Missing file_path"}
 
+    src = Path(track_metadata["file_path"])
+    cfg = get_config()
+    
+    # --- STRICT BOUNDARY GUARD ---
+    downloads_folder = Path(cfg.get("downloads", {}).get("folder", "/downloads")).resolve()
+    src_resolved = src.resolve()
+    
+    try:
+        is_in_downloads = src_resolved.is_relative_to(downloads_folder)
+    except AttributeError:
+        # Fallback for Python < 3.9
+        is_in_downloads = str(src_resolved).startswith(str(downloads_folder))
+        
+    if not is_in_downloads:
+        logger.warning(
+            "Rejected auto-import: file is not in the configured downloads folder", 
+            src=str(src), 
+            downloads_folder=str(downloads_folder)
+        )
+        return {"success": False, "error": f"File originates outside the downloads folder ({downloads_folder})"}
+
+    infra = get_infra()
+    music_root_resolved = infra.fs.music_root.resolve()
+    
+    try:
+        is_in_library = src_resolved.is_relative_to(music_root_resolved)
+    except AttributeError:
+        is_in_library = str(src_resolved).startswith(str(music_root_resolved))
+        
+    if is_in_library:
+        logger.warning("Rejected auto-import: file is already inside the music library", src=str(src))
+        return {"success": False, "error": "File is already inside the music library"}
+    # -----------------------------
+
     if queue_item:
         try:
             _apply_stored_metadata(queue_item, track_metadata["file_path"])
         except Exception:
             pass
-
-    infra = get_infra()
-    src = Path(track_metadata["file_path"])
 
     target = build_target_path(
         track_metadata,
@@ -121,6 +152,23 @@ def _apply_stored_metadata(queue_item: dict[str, Any], file_path: str) -> None:
 
 def rename_and_move_file(file_path: str, metadata: dict[str, Any]) -> Dict[str, Any]:
     """Compatibility wrapper used by the download processing pipeline."""
+    src = Path(file_path)
+    cfg = get_config()
+    
+    # --- STRICT BOUNDARY GUARD ---
+    downloads_folder = Path(cfg.get("downloads", {}).get("folder", "/downloads")).resolve()
+    src_resolved = src.resolve()
+    
+    try:
+        is_in_downloads = src_resolved.is_relative_to(downloads_folder)
+    except AttributeError:
+        is_in_downloads = str(src_resolved).startswith(str(downloads_folder))
+        
+    if not is_in_downloads:
+        logger.warning("Rejected move: file is not in the configured downloads folder", file_path=file_path)
+        return {"success": False, "error": "File originates outside the downloads folder"}
+    # -----------------------------
+
     track = {
         "file_path": file_path,
         "artist": metadata.get("artist"),
