@@ -1114,7 +1114,8 @@ def _assign_stars(
         valid_catalogue_scores = [
             float(v) for v in (artist_scores or []) if float(v or 0) > 0
         ]
-        has_usable_catalogue = len(valid_catalogue_scores) >= 5
+        # Force online catalogue lookup by bypassing the local threshold
+        has_usable_catalogue = False
 
         if has_usable_catalogue:
             # ``album_z``/``artist_z`` were already computed above against
