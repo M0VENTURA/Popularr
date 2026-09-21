@@ -506,7 +506,7 @@ def _append_extra_genres(genres: list[str], title: str, album: str, intercepted_
     context_lower = f"{title or ''} {album or ''}".lower()
     
     # Base heuristic checks
-    if bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", title_lower)) or \
+    if bool(re.search(r"[\(\[]\s*(live\vert{}acoustic\vert{}unplugged)[^)\]]*[\)\]]\s*$", title_lower)) or \
        any(re.search(p, context_lower) for p in [r"\bconcert\b", r"\bat\s+\w+\s+(arena|stadium|hall|club|theatre|theater)"]):
         if intercepted_filters is not None:
             intercepted_filters.add("Live")
@@ -726,11 +726,8 @@ def enrich_genres_aggressively(artist_name: str, conn: Any = None, verbose: bool
             if verbose:
                 logger.info(f"{source} genres found", artist=artist_name, count=len(kept))
 
-    try:
-        from services.enrichment.discogs_service import get_discogs_genres
-        _add_clean(get_discogs_genres(artist_name, ""), "Discogs")
-    except Exception as e:
-        logger.debug("Discogs genre lookup failed", artist=artist_name, error=str(e))
+    # Discogs and MusicBrainz fallback calls removed here 
+    # Genres are now read directly from the database tracks table
 
     try:
         from api_clients.audiodb import get_audiodb_genres
