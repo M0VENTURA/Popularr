@@ -10,7 +10,7 @@ import structlog
 from quart import flash, jsonify, redirect, request, url_for
 
 from routes.scan_routes import scans_bp
-from routes.scan_routes._common import form_bool, run_async
+from routes.scan_routes._common import form_bool, run_async, stop_response
 
 from services.scanning.runtime_state import (
     scan_lock,
@@ -144,8 +144,7 @@ async def scan_stop() -> Any:
     request_scan_stop(path)
     
     logger.info("Stop requested for library scan")
-    await flash("Stop requested for library scan", "info")
-    return redirect(url_for("ui.dashboard"))
+    return await stop_response("Stop requested for library scan")
 
 
 # -------------------------------------------------------------------------
@@ -158,8 +157,7 @@ async def scan_stop_popularity() -> Any:
     request_scan_stop(get_scan_progress_path("singles_scan"))
 
     logger.info("Stop requested for popularity/singles scans")
-    await flash("Popularity scan stop requested", "info")
-    return redirect(url_for("ui.dashboard"))
+    return await stop_response("Popularity scan stop requested")
 
 
 @scans_bp.route("/scan/stop-singles", methods=["POST"])
@@ -167,8 +165,7 @@ async def scan_stop_singles() -> Any:
     request_scan_stop(get_scan_progress_path("singles_scan"))
 
     logger.info("Stop requested for singles detection scan")
-    await flash("Single detection scan stop requested", "info")
-    return redirect(url_for("ui.dashboard"))
+    return await stop_response("Single detection scan stop requested")
 
 
 # -------------------------------------------------------------------------
@@ -196,8 +193,7 @@ async def scan_stop_all() -> Any:
         clear_runtime(scan_type.replace("_scan", ""))
 
     logger.info("Stop requested for all scans", scan_types_affected=len(scan_types))
-    await flash("Stop requested for all scans", "success")
-    return redirect(url_for("ui.dashboard"))
+    return await stop_response("Stop requested for all scans", "success")
 
 
 # -------------------------------------------------------------------------

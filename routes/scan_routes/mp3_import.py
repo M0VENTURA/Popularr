@@ -13,7 +13,7 @@ from __future__ import annotations
 from quart import flash, redirect, request, url_for
 
 from routes.scan_routes import scans_bp
-from routes.scan_routes._common import run_async
+from routes.scan_routes._common import run_async, stop_response
 
 from services.scanning.runtime_state import (
     scan_lock,
@@ -73,5 +73,4 @@ async def scan_stop_mp3_import():
 
     clear_runtime("mp3_import")
 
-    await flash("MP3 import scan stop requested", "info")
-    return redirect(url_for("ui.dashboard"))
+    return await stop_response("MP3 import scan stop requested")

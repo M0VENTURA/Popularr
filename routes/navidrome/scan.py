@@ -13,7 +13,7 @@ from quart import flash, jsonify, redirect, request, url_for
 
 import services.scanning.runtime_state as runtime_state
 from routes.navidrome import navidrome_bp, get_navidrome_client
-from routes.scan_routes._common import form_bool, is_process_alive, run_async
+from routes.scan_routes._common import form_bool, is_process_alive, run_async, stop_response
 from services.scanning.pipelines.navidrome_pipeline import run_navidrome_import_scan
 from services.scanning.scan_state import progress_path, request_scan_stop
 
@@ -90,5 +90,4 @@ async def scan_stop_navidrome() -> Any:
         request_scan_stop(progress_path("navidrome_scan_progress.json"), "navidrome_scan")
         runtime_state.scan_process_navidrome = None
         
-    await flash("Navidrome sync scan stop requested", "info")
-    return redirect(url_for("ui.dashboard"))
+    return await stop_response("Navidrome sync scan stop requested")

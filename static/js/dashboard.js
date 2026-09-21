@@ -14,6 +14,39 @@ async function postJSON(u, b) {
   return r.json().catch(() => ({}));
 }
 
+/**
+ * POST to a scan stop endpoint and report what actually happened.
+ *
+ * The bare `fetch(url, { method: "POST" })` this replaces sent no JSON signal,
+ * so the route answered with its flash+redirect HTML page. The stop flag WAS
+ * set, but a failure — an expired session redirecting to the login page, or a
+ * 500 — was silently indistinguishable from success, and the button appeared
+ * to do nothing.
+ *
+ * Sending `Accept: application/json` makes the route negotiate a JSON reply
+ * (see routes/scan_routes/_common.py::stop_response), so the result is
+ * checkable. Returns {ok, message}.
+ */
+async function stopScanRequest(url) {
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Accept": "application/json", "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data || data.success === false) {
+      const reason = (data && data.error) || `HTTP ${response.status}`;
+      console.error(`Stop request failed for ${url}: ${reason}`);
+      return { ok: false, message: reason };
+    }
+    return { ok: true, message: data.message || "Stop requested" };
+  } catch (error) {
+    console.error(`Stop request error for ${url}:`, error);
+    return { ok: false, message: error && error.message ? error.message : String(error) };
+  }
+}
+
 function fE(s) {
   if (!s) return "";
   return ` — ${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`;
@@ -49,7 +82,7 @@ async function startPopularityScan(m, force, restart) {
 }
 
 async function stopPopularityScan() {
-  await fetch("/scan/stop-popularity", { method: "POST" });
+  return stopScanRequest("/scan/stop-popularity");
 }
 
 // Runs the popularity scan selected in the dashboard selector with the
@@ -118,7 +151,7 @@ async function startNavidromeServerScan() {
 }
 
 async function stopNavidromeSync() {
-  await fetch("/scan/stop-navidrome", { method: "POST" });
+  return stopScanRequest("/scan/stop-navidrome");
 }
 
 async function pollNavidromeStatus() {
@@ -160,7 +193,7 @@ async function startEssentiaScan() {
 }
 
 async function stopEssentiaScan() {
-  await fetch("/scan/stop-essentia-mood", { method: "POST" });
+  return stopScanRequest("/scan/stop-essentia-mood");
 }
 
 async function pollEssentiaStatus() {
@@ -178,7 +211,12 @@ async function pollEssentiaStatus() {
 }
 
 async function stopAllScans() {
-  await fetch("/scan/stop-all", { method: "POST" });
+  const result = await stopScanRequest("/scan/stop-all");
+  if (!result.ok) {
+    // Previously silent: an expired session (redirect to the login page) or a
+    // server error left the operator believing the scans had been stopped.
+    alert(`Could not stop scans: ${result.message}`);
+  }
 }
 
 // ===== Recent Scans (Dynamic) =====

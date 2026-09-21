@@ -44,8 +44,33 @@ _SETUP_PUBLIC_ENDPOINTS = frozenset({
 
 
 def _is_api_request() -> bool:
-    """True when the current request targets a JSON API endpoint."""
-    return request.path.startswith("/api/")
+    """True when the caller expects JSON rather than an HTML page.
+
+    Path-based detection (``/api/``) was the original test, but a handful of
+    fetch-only endpoints live OUTSIDE that prefix — the scan control routes
+    (``/scan/stop-popularity`` and friends) are called by the dashboard with
+    ``fetch`` and a JSON body. For those, an expired session used to answer
+    ``302 -> /login``, so the client followed the redirect, received the login
+    PAGE, and reported "Server returned HTML instead of JSON (HTTP 200)" —
+    pointing the user at the wrong problem entirely.
+
+    A request that explicitly asks for JSON now gets JSON errors, so a
+    session timeout surfaces as a 401 the client can act on. Requests that ask
+    for HTML (page navigations) and traditional form posts (no JSON signal)
+    keep the redirect-to-login behaviour.
+    """
+    if request.path.startswith("/api/"):
+        return True
+
+    accept = (request.headers.get("Accept") or "").strip().lower()
+    if "application/json" in accept:
+        return True
+
+    content_type = (request.headers.get("Content-Type") or "").lower()
+    if "application/json" in content_type:
+        return True
+
+    return (request.headers.get("X-Requested-With") or "").lower() == "xmlhttprequest"
 
 
 def register_app_hooks(app: Any) -> None:

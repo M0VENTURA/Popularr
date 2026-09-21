@@ -13,12 +13,57 @@ import threading
 from typing import Any, Callable
 
 import structlog
-from quart import redirect, url_for
+from quart import flash, jsonify, redirect, request, url_for
 
 logger = structlog.get_logger(__name__)
 
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def wants_json() -> bool:
+    """Return True when the caller expects JSON rather than an HTML page.
+
+    WHY THIS EXISTS: the ``/scan/stop-*`` routes were built as HTML FORM
+    endpoints — they ``flash()`` a message and ``redirect()`` to the dashboard
+    so the user sees a banner. The dashboard's JavaScript calls the same URLs
+    with ``fetch`` + JSON, so the redirect was followed to the dashboard, which
+    answered ``200 text/html``, and the client's ``JSON.parse`` failed with
+    "Server returned HTML instead of JSON (HTTP 200)".
+
+    The HTTP status in that message being 200 is the tell: the request
+    SUCCEEDED (the stop flag was set) but the response was a web page.
+
+    Content negotiation keeps BOTH callers working instead of breaking the
+    form path to satisfy the fetch path.
+
+    An explicit ``Accept`` wins over ``Content-Type``, because a browser using
+    ``fetch`` defaults ``Accept`` to ``*/*`` while a form post never sends
+    ``Accept: application/json``.
+    """
+    accept = (request.headers.get("Accept") or "").strip().lower()
+    if "application/json" in accept:
+        return True
+    if "text/html" in accept:
+        return False
+
+    content_type = (request.headers.get("Content-Type") or "").lower()
+    if "application/json" in content_type:
+        return True
+
+    return (request.headers.get("X-Requested-With") or "").lower() == "xmlhttprequest"
+
+
+async def stop_response(message: str, category: str = "info") -> Any:
+    """Reply to a stop request in the format the caller can actually read.
+
+    JSON clients get ``{"success": true, "message": ...}``; an HTML form client
+    still gets the flash banner + dashboard redirect it has always had.
+    """
+    if wants_json():
+        return jsonify({"success": True, "message": message})
+    await flash(message, category)
+    return redirect(url_for("ui.dashboard"))
 
 
 def form_bool(value: Any) -> bool:
