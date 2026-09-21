@@ -81,7 +81,10 @@ class TestCoverIsNeverTheTracksOwnArtist:
                 "lookup_by_isrc": lambda self, isrc, inc=None: [
                     {"id": "rec-1", "title": "Cave",
                      "artist-credit": [{"artist": {"name": "Muse"}}],
-                     "releases": [{"date": "1999-01-01"}]},
+                     # The real field name, so the year resolves and the
+                     # guard is what rejects the candidate (not a malformed
+                     # payload silently yielding no result).
+                     "first-release-date": "1999-06-08"},
                 ],
             })(),
         )
@@ -108,7 +111,7 @@ class TestCoverIsNeverTheTracksOwnArtist:
                 "lookup_by_isrc": lambda self, isrc, inc=None: [
                     {"id": "rec-1", "title": "Cave",
                      "artist-credit": [{"artist": {"name": "Someone Else"}}],
-                     "releases": [{"date": "1990-01-01"}]},
+                     "first-release-date": "1990-01-01"},
                 ],
             })(),
         )

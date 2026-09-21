@@ -112,6 +112,7 @@ from services.catalog.album_classification_service import (
 )
 from helpers.config_helpers import get_standout_config
 from helpers.logging_config import log_unified
+from helpers.normalization_service import normalize_unicode_punctuation
 
 logger = structlog.get_logger(__name__)
 
@@ -1229,7 +1230,6 @@ def _build_album_model(
             )
             for r in album_results
         }
-
         with db_session() as session:
             rows = session.execute(
                 text(
@@ -1418,9 +1418,36 @@ def _essential_playlist_name(artist: str) -> str:
     return name or f"{artist_display} - Essential Collection"
   
 def _normalise_essential_title(title: str) -> str:
-    t = str(title or "").strip().lower()
+    """Key used to decide whether two rows are the SAME track.
+
+    ⚠️ Unicode punctuation must be folded, not just lowercased. The library
+    holds the same recording twice with different apostrophes — the straight
+    ``'`` (U+0027) in one file and the typographic ``’`` (U+2019) in the other —
+    and this key is what every playlist builder groups by. Comparing them
+    raw produced two different keys, so both copies of Korn's "Y'all Want a
+    Single" survived de-duplication into the same playlist.
+
+    The reported clue was a 2-second duration difference, but duration was
+    never part of this key; the apostrophe was, and it is the difference that
+    actually defeats the grouping. Folding the whole class (quotes, primes,
+    dashes, NBSP) also closes the same hole for "–"/"—" and NBSP variants,
+    which fail identically.
+    """
+    t = normalize_unicode_punctuation(str(title or "")).strip().lower()
     t = _ESSENTIAL_TITLE_NOISE_RE.sub(" ", t)
     return re.sub(r"\s+", " ", t).strip()
+
+
+def _normalise_artist_key(artist: Any) -> str:
+    """Key used to decide whether two rows share a credited ARTIST.
+
+    The other half of the de-duplication key, and the same defect class as
+    ``_normalise_essential_title``: an artist credited with a typographic
+    apostrophe in one file ("Guns N’ Roses") and a straight one in another
+    ("Guns N' Roses") otherwise produced two keys, so a pair of duplicates
+    survived on the artist component alone.
+    """
+    return normalize_unicode_punctuation(str(artist or "")).strip().casefold()
 
 
 def _is_excluded_essential_artist(artist: str) -> bool:
@@ -1613,7 +1640,7 @@ def _create_new_music_playlist() -> int:
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
         key = (
-            str(row.get("artist") or "").strip().casefold(),
+            _normalise_artist_key(row.get("artist")),
             _normalise_essential_title(str(row.get("title") or "")),
         )
         if not key[1]:
@@ -2371,7 +2398,7 @@ def _create_genre_top_track_playlists(
         grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         for t in tracks:
             key = (
-                re.sub(r"\s+", " ", t["artist"]).strip().casefold(),
+                _normalise_artist_key(t["artist"]),
                 _normalise_essential_title(t["title"]),
             )
             grouped[key].append(t)

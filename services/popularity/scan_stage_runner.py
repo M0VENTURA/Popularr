@@ -708,6 +708,37 @@ def _run_album_cover_detection(artist: str, album: str, tracks: list[dict[str, A
     if not _covers_enabled:
         return
 
+    # ------------------------------------------------------------------
+    # Overlay the artist the track stage RESOLVED onto the rows this pass
+    # receives.
+    #
+    # ``tracks`` here is ``album_row["tracks"]`` — the raw DB rows read at load
+    # time. The track stage resolves each track's real performer (the whole
+    # point of the compilation work: "Various Artists" -> P.O.D./Incubus/…)
+    # but applies it to a COPY (``_build_effective_track(track, payload)``), so
+    # the raw dict still says "Various Artists". Every cover heuristic below
+    # compares the ORIGINAL artist it finds against the track's artist, and with
+    # the placeholder still in place that comparison says "different artist" for
+    # a track's OWN recording — which is how the false "(X Cover)" titles came
+    # back on the popularity scan immediately after a metadata scan had cleaned
+    # them.
+    #
+    # ``options["resolved_track_artists"]`` is keyed by track id and holds the
+    # post-resolution artist; absent an entry the raw value is left alone.
+    _resolved = options.get("resolved_track_artists") or {}
+    if _resolved:
+        _overlaid: list[dict[str, Any]] = []
+        for _row in tracks:
+            _tid = str(_row.get("id") or "")
+            _resolved_artist = str(_resolved.get(_tid) or "").strip()
+            if _resolved_artist and _resolved_artist != str(_row.get("artist") or "").strip():
+                _row = dict(_row)
+                _row["artist"] = _resolved_artist
+                # The album artist stays as it is — it is the compilation's own
+                # key and the cover code uses ``artist`` for the performer.
+            _overlaid.append(_row)
+        tracks = _overlaid
+
     try:
         _cover_results = detect_covers_for_album(
             album=album,
@@ -2143,6 +2174,30 @@ def run_scan(
                     section="post_singles_enrichment",
                     log_context={"artist": artist, "album": album},
                 )
+
+            # ------------------------------------------------------------------
+            # Cover detection — given the artists the track stage RESOLVED.
+            #
+            # The raw rows in ``tracks`` still carry the album-level artist for
+            # any track whose performer the identity pass resolved separately
+            # ("Various Artists" -> P.O.D./Incubus/…), because the track stage
+            # applies its result to a COPY. Publishing the resolved value here
+            # lets ``_run_album_cover_detection`` overlay it, so the cover
+            # heuristics compare the found original against the track's real
+            # performer instead of the placeholder. Without it, a track's OWN
+            # recording reads as "a different artist" and the false
+            # "(X Cover)" title is written back — the reported reversion of a
+            # metadata scan's cover fix by the following popularity scan.
+            _resolved_artists: dict[str, str] = {}
+            for _res in _track_results_ordered:
+                if not isinstance(_res, dict):
+                    continue
+                _rid = str(_res.get("track_id") or "").strip()
+                _rartist = str(_res.get("artist") or "").strip()
+                if _rid and _rartist:
+                    _resolved_artists[_rid] = _rartist
+            if _resolved_artists:
+                options["resolved_track_artists"] = _resolved_artists
 
             _run_album_cover_detection(artist=artist, album=album, tracks=tracks, options=options)
 

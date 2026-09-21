@@ -64,7 +64,9 @@ from helpers.musicbrainz_helpers import (
 )
 from helpers.normalization_service import (
     canonical_track_title,
+    is_track_artist_placeholder,
     names_match,
+    normalize_unicode_punctuation,
     normalize_writer_credits,
 )
 
@@ -142,6 +144,30 @@ def _cached_release(release_mbid: str) -> dict[str, Any] | None:
 
 def _has_cover_annotation(title: str) -> bool:
     return bool(_COVER_SUFFIX_RE.search(title or ""))
+
+
+def _same_artist(left: str, right: str) -> bool:
+    """True when two credits name the same artist.
+
+    ``names_match`` alone is not enough for the self-credit guard: it is
+    punctuation- and accent-SENSITIVE, so a diacritic difference in the SAME
+    name ("Ünloco" in the library vs "Unloco" on MusicBrainz) compared as two
+    different artists and the track was recorded as a cover of itself. The
+    Unicode-punctuation fold plus a diacritic fold (``normalize_string``)
+    closes that without merging genuinely different names.
+    """
+    if not left or not right:
+        return False
+    if names_match(left, right):
+        return True
+    try:
+        from helpers.normalization_service import normalize_string
+
+        _l = normalize_string(normalize_unicode_punctuation(left))
+        _r = normalize_string(normalize_unicode_punctuation(right))
+        return bool(_l) and _l == _r
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -271,13 +297,36 @@ class CoverDetector:
             # "Little Nicky"'s twelve tracks to "<title> (P.O.D. Cover)".
             # Checked here, at the single funnel every detection path goes
             # through, so no path can reintroduce it.
+            #
+            # ⚠️ This guard alone is NOT enough, because it can only compare
+            # against the track's `artist` — and the popularity scan hands this
+            # function `tracks` as loaded from the DB, which still says
+            # "Various Artists" for a compilation track whose real performer the
+            # track stage resolved separately (it applies its result to a COPY,
+            # `_build_effective_track(track, payload)`, leaving the raw dict
+            # untouched). So the placeholder is not a usable performer either;
+            # when BOTH sides are unusable the result is discarded, because no
+            # valid self-credit comparison exists. The metadata scan does not hit
+            # this path — it passes the resolved artist — which is exactly why
+            # that scan fixed the covers and the popularity scan then put them
+            # back.
             _orig = str(result.get("original_artist") or "").strip()
             _performer = str(track.get("artist") or "").strip()
-            if _orig and _performer and names_match(_orig, _performer):
+            _performer_usable = bool(_performer) and not is_track_artist_placeholder(_performer)
+            _orig_usable = bool(_orig) and not is_track_artist_placeholder(_orig)
+            if _orig_usable and _performer_usable and _same_artist(_orig, _performer):
                 logger.debug(
                     "Cover result discarded: original equals the track's own artist",
                     track=track.get("title"),
                     artist=_performer,
+                )
+                return
+            if _orig and not _performer_usable:
+                logger.info(
+                    "Cover result discarded: track artist is not a usable performer",
+                    track=track.get("title"),
+                    track_artist=_performer or None,
+                    original_artist=_orig,
                 )
                 return
             cover_results.append(result)
@@ -531,17 +580,32 @@ class CoverDetector:
         """Resolve an original via recordings sharing the track's ISRC.
 
         An ISRC identifies one specific recording, so a differently-credited
-        recording sharing it is weaker evidence than a modelled cover
-        relation. Confidence is capped at medium and a known year is required.
+        recording sharing it is weak evidence, not proof. Confidence is capped
+        at medium and a known year is required.
 
-        ⚠️ The credit to compare against is the TRACK's own performer, not the
-        album artist. On a Various Artists compilation the album artist is the
-        placeholder "Various Artists", which matches no real credit — so the
-        comparison always passed, and every ISRC-bearing track on "Little
-        Nicky" was reported as a cover of its own artist (P.O.D., Incubus,
-        Deftones, ...), renaming 9 of 12 tracks to "<title> (P.O.D. Cover)".
+        ⚠️ The credit compared against must be the TRACK's own performer, and
+        when that is not knowable this method must return None rather than
+        guess. Requiring only "the credit differs from *something*" is how the
+        reported false covers were produced: on a Various Artists compilation
+        the only artist available was the album-level placeholder, which
+        matches no real credit, so every ISRC-bearing track was reported as a
+        cover of its own performer and renamed "<title> (P.O.D. Cover)" — and
+        those renames came BACK on the popularity scan after a metadata scan
+        had removed them, because the popularity scan hands this function the
+        raw DB rows, whose ``artist`` is still the placeholder for any track
+        whose performer the track stage resolved separately.
         """
         performer = str(track_artist or "").strip() or str(album_artist or "").strip()
+        # No usable performer means there is nothing to compare against, so no
+        # cover verdict can be sound here. The modelled-relation and writer
+        # paths still run.
+        if not performer or is_track_artist_placeholder(performer):
+            logger.debug(
+                "ISRC cover check skipped: no usable track performer",
+                track=title,
+                performer=performer or None,
+            )
+            return None
         try:
             recordings = self.mb.lookup_by_isrc(
                 isrc, inc="artist-credits+releases+work-rels+recording-rels"
@@ -556,7 +620,7 @@ class CoverDetector:
                 if not rec.get("id"):
                     continue
                 rec_artist = artist_from_credit(rec.get("artist-credit", []))
-                if not rec_artist or names_match(rec_artist, performer):
+                if not rec_artist or _same_artist(rec_artist, performer):
                     continue
                 # Skip candidates that are themselves annotated as covers.
                 if _has_cover_annotation(str(rec.get("title") or "")):
