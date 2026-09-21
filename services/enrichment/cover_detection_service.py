@@ -14,6 +14,8 @@ Key Functions:
 
 Rebuilt with the following corrections:
 
+- Added database persistence write-backs to `detect_covers_for_artist()`
+  so detection results are updated in the tracks table.
 - Added `album_artist` to SQL extraction so `detect_cover_song` can fall
   back to it if the track artist is "Soundtrack" or differs.
 - The row mapping in ``detect_covers_for_artist`` read ``composer`` (index 4)
@@ -73,8 +75,8 @@ def detect_covers_for_artist(
     """Scan all tracks for *artist_name* and mark covers in the database.
 
     Uses the full ``CoverDetector`` pipeline (ISRC, MB relations, writer
-    analysis, heuristics) for each track individually.  Returns the number
-    of tracks updated.  ``conn`` is kept for backward compatibility — DB
+    analysis, heuristics) for each track individually. Returns the number
+    of tracks updated. ``conn`` is kept for backward compatibility — DB
     access runs on SQLAlchemy sessions.
     """
     try:
@@ -104,7 +106,6 @@ def detect_covers_for_artist(
 
     # Build a pseudo-album context so per-album caching works.
     albums: dict[str, list[dict[str, Any]]] = {}
-    updated = 0
     for row in rows:
         track = {
             "id": str(row_get(row, "id", 0, "")),
@@ -128,23 +129,54 @@ def detect_covers_for_artist(
         album_key = track["album"] or "_no_album"
         albums.setdefault(album_key, []).append(track)
 
-    for album_name, tracks in albums.items():
-        # Prefer the album artist the scan was requested for; the first
-        # track's artist can be a featured or per-track credit.
-        artist = artist_name or (tracks[0].get("album_artist") or tracks[0].get("artist") or album_name)
-        try:
-            results = detector.detect_covers_for_album(
-                album=album_name, artist=artist, tracks=tracks, force=force,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Cover detection failed for album",
-                artist=artist_name,
-                album=album_name,
-                error=str(exc),
-            )
-            continue
-        updated += len(results)
+    updated = 0
+    with db_session() as session:
+        for album_name, tracks in albums.items():
+            # Prefer the album artist the scan was requested for; the first
+            # track's artist can be a featured or per-track credit.
+            artist = artist_name or (tracks[0].get("album_artist") or tracks[0].get("artist") or album_name)
+            try:
+                results = detector.detect_covers_for_album(
+                    album=album_name, artist=artist, tracks=tracks, force=force,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Cover detection failed for album",
+                    artist=artist_name,
+                    album=album_name,
+                    error=str(exc),
+                )
+                continue
+
+            # Persist detection results back to the database
+            for res in results:
+                track_id = res.get("id")
+                is_cover = bool(res.get("is_cover"))
+                original_artist = res.get("original_cover_artist", "")
+                
+                try:
+                    session.execute(
+                        text(
+                            "UPDATE tracks SET "
+                            "is_cover = :is_cover, "
+                            "original_cover_artist = :original_cover_artist, "
+                            "cover_last_checked = CURRENT_TIMESTAMP "
+                            "WHERE id = :id"
+                        ),
+                        {
+                            "is_cover": is_cover,
+                            "original_cover_artist": original_artist,
+                            "id": track_id,
+                        },
+                    )
+                    updated += 1
+                except Exception as exc:
+                    logger.error(
+                        "Failed to update cover status for track",
+                        track_id=track_id,
+                        error=str(exc),
+                    )
+        session.commit()
 
     logger.info(
         "Cover detection complete for artist",
@@ -217,13 +249,11 @@ def detect_cover_song(
         a_artist = str(track_data.get("album_artist") or "").strip()
         
         if t_artist and a_artist and t_artist != a_artist:
-            # If the track artist is practically useless for detection (e.g., 'Soundtrack'), use the album artist
             if t_artist.lower() == "soundtrack":
                 artist = a_artist
             elif a_artist.lower() == "soundtrack":
                 artist = t_artist
             else:
-                # Typically, when they differ, the specific track artist is the better metric to verify a cover
                 artist = t_artist
 
     if not force and track_data:
@@ -243,12 +273,8 @@ def detect_cover_song(
         logger.debug("Cover detected via title annotation", track=title)
         return True, "title_annotation"
 
-    # THE FIX: Engage the actual CoverDetector engine!
-    # If the track has MusicBrainz metadata, use the heavy detector to check
-    # the work-mbid and recording relations to find the true original artist.
     if track_data and track_data.get("work_mbid"):
         try:
-            # Create a mock track list for the detector
             mock_track = {
                 "id": track_data.get("id") or "1",
                 "title": title,
@@ -261,7 +287,6 @@ def detect_cover_song(
             }
             detector = CoverDetector()
             
-            # Use the deep album detector logic which executes the MBID resolution
             album_name = track_data.get("album") or "Unknown Album"
             results = detector.detect_covers_for_album(
                 album=album_name, 
@@ -277,11 +302,6 @@ def detect_cover_song(
         except Exception as exc:
             logger.debug("CoverDetector engine failed", track=title, error=str(exc))
 
-    # NOTE: a songwriter differing from the performer is normal for most
-    # commercially released music (staff writers, producers, session
-    # composers) and is not on its own sufficient to call a track a cover.
-    # It is reported as weak corroboration for the caller to combine with
-    # other signals, not as a positive verdict.
     if composer or writer:
         for credit in (composer, writer):
             if not credit:
