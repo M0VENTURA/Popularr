@@ -352,25 +352,40 @@ def get_local_album_art(
     artist: str,
     album: str,
 ) -> tuple[bytes | None, str | None]:
-    """Get album art: local DB first, then Navidrome."""
-    with db_session() as session:
-        data, mime = fetch_album_art_blob(artist=artist, album=album)
+    """Album art for the album page: Navidrome FIRST, then what is stored.
 
-        if data:
+    ``getCoverArt`` on the album the user owns is the correct cover and a local
+    request, so it is asked before anything else on the online side. Cached art
+    a PROVIDER supplied may be replaced by it; the user's own upload or URL, and
+    Navidrome's own art, are final (see ``navidrome_art_may_replace``).
+    """
+    from services.enrichment.album_art_service import (
+        fetch_album_art_from_navidrome,
+        navidrome_art_may_replace,
+        save_album_art_to_db,
+    )
+    from db.repositories.metadata import fetch_album_art_record
+
+    data: bytes | None = None
+    mime: str | None = None
+    cached_source = ""
+    with db_session() as session:
+        data, mime, cached_source = fetch_album_art_record(artist=artist, album=album)
+
+        if data and not navidrome_art_may_replace(cached_source):
             return data, mime or "image/jpeg"
 
     try:
-        from services.enrichment.album_art_service import (
-            fetch_album_art_from_navidrome,
-            save_album_art_to_db,
-        )
-
-        data = fetch_album_art_from_navidrome(artist, album)
-        if data:
-            save_album_art_to_db(artist, album, data, source="navidrome")
-            return data, "image/jpeg"
+        navidrome_data = fetch_album_art_from_navidrome(artist, album)
+        if navidrome_data:
+            save_album_art_to_db(artist, album, navidrome_data, source="navidrome")
+            return navidrome_data, "image/jpeg"
     except Exception as exc:
-        logger.debug("Navidrome album art fallback failed", artist=artist, album=album, error=str(exc))
+        logger.debug("Navidrome album art lookup failed", artist=artist, album=album, error=str(exc))
+
+    if data:
+        # Navidrome has no copy — the art we already hold stands.
+        return data, mime or "image/jpeg"
 
     return None, None
 

@@ -180,9 +180,23 @@ def prepare_track_context(
         _album_artist_was_empty and not _identity["artist_already_had_credit"]
     )
     _scan_album_artist = _identity["album_artist"] if _write_album_artist else ""
+
+    # The TRACK's OWN artist — as opposed to ``artist`` above, which falls back to
+    # the album artist so that LOOKUPS always have something to query with.
+    #
+    # That fallback must never be written back onto the row. On a Various Artists
+    # compilation it stamped "Various Artists" (the ALBUM artist) onto every track
+    # that had no artist of its own, and because the metadata pass only fills an
+    # artist that is EMPTY, it also stopped MusicBrainz from supplying the song's
+    # real track artist — the reported "track artist is being incorrectly
+    # overwritten on Various Artists compilations as Various Artist".
+    _own_artist = str(track.get("artist") or "").strip()
+
     for _field, _value in (
         ("title", title),
-        ("artist", artist),
+        # Only the track's own artist (see ``_own_artist``): an empty value is
+        # skipped below so the column is left for MusicBrainz to fill.
+        ("artist", artist if _own_artist else ""),
         # ``album_artist`` is protected from stale overwrites in track_stage, so
         # the flag is what makes this single, deliberate write persist.
         ("album_artist", _scan_album_artist),
@@ -194,8 +208,11 @@ def prepare_track_context(
         ("title_had_featured_credit", _identity["title_had_featured_credit"]),
         ("title_had_remaster_wording", _identity["title_had_remaster_wording"]),
     ):
-        if _field == "album_artist" and not _value:
-            # Never blank an existing album artist.
+        if _field in ("artist", "album_artist") and not _value:
+            # Never blank — or fabricate — either artist column. An empty value
+            # here means "leave it as it is", so a track with no artist of its
+            # own stays empty for the metadata pass to fill from MusicBrainz,
+            # and an existing album artist is never cleared.
             continue
         try:
             track[_field] = _value

@@ -387,21 +387,31 @@ def _fetch_artist_image_bytes(artist_name: str) -> bytes | None:
 
 
 def attach_playlist_cover(playlist_name: str, artist_name: str) -> dict:
-    """Best-effort: push the artist's image as the playlist's cover art.
+    """Give a playlist the ARTIST's image as its cover art.
 
     Gated by ``navidrome.playlist_cover_art`` (default false). Resolves the
-    Navidrome playlist id by name, fetches the artist image bytes via the
-    same pipeline the /artist page uses, and uploads through
-    ``updatePlaylist`` (OpenSubsonic coverArt field).  Never raises.
+    artist image bytes through the same pipeline the /artist page uses, finds
+    the playlist in Navidrome by name, and uploads the image through
+    Navidrome's NATIVE artwork endpoint (``POST /api/playlist/{id}/image``) —
+    the source Navidrome's own docs list FIRST for playlist artwork.
 
-    Returns ``{"uploaded": bool, "reason": str}``.
+    It is deliberately NOT a Subsonic ``updatePlaylist`` call any more: that
+    endpoint has no cover parameter at all, so the upload was ignored, the
+    server answered ``status: ok`` and this function reported success while no
+    artwork was ever stored — the reported "playlist artwork isn't being added
+    properly".
+
+    Never raises. Returns ``{"ok": bool, "method": str, "reason": str}``; the
+    reason is always populated on failure (``disabled``, ``no image``,
+    ``no navidrome match``, ``artwork upload disabled``, ...), so the log tells
+    the truth instead of claiming a cover that is not there.
     """
     try:
         from helpers.config_helpers import get_config
         cfg = get_config() or {}
         nav_cfg = cfg.get("navidrome") or {}
         if not isinstance(nav_cfg, dict) or not nav_cfg.get("playlist_cover_art", False):
-            return {"uploaded": False, "reason": "disabled"}
+            return {"ok": False, "method": "none", "reason": "disabled"}
 
         nav_users = cfg.get("navidrome_users") or []
         if not nav_users and nav_cfg.get("base_url"):
@@ -409,9 +419,10 @@ def attach_playlist_cover(playlist_name: str, artist_name: str) -> dict:
 
         image_bytes = _fetch_artist_image_bytes(artist_name)
         if not image_bytes:
-            return {"uploaded": False, "reason": "no image"}
+            return {"ok": False, "method": "none", "reason": "no image"}
 
         from api_clients.navidrome import NavidromeClient
+        last_reason = "no navidrome match"
         for user in nav_users:
             base_url = user.get("base_url")
             username = user.get("user")
@@ -423,15 +434,26 @@ def attach_playlist_cover(playlist_name: str, artist_name: str) -> dict:
                 playlist = client.find_playlist_by_name(playlist_name)
                 if not playlist or not playlist.get("id"):
                     continue
-                if client.upload_playlist_cover(str(playlist["id"]), image_bytes):
+                ok, reason = client.upload_playlist_cover(str(playlist["id"]), image_bytes)
+                if ok:
                     logger.info("[PLAYLISTS] Cover set for %s (%s)", playlist_name, artist_name)
-                    return {"uploaded": True, "reason": "ok"}
+                    return {"ok": True, "method": "navidrome_native", "reason": "ok"}
+                # Map the server's answer to something an operator can act on.
+                last_reason = {
+                    "disabled": "artwork upload disabled on the server",
+                    "no_login": "navidrome login failed",
+                    "not_found": "playlist not found on the server",
+                }.get(reason, reason or "upload rejected")
+                logger.warning(
+                    "[PLAYLISTS] Cover upload rejected for %s: %s", playlist_name, last_reason
+                )
             except Exception as exc:
+                last_reason = str(exc)
                 logger.warning("[PLAYLISTS] Cover upload failed for %s: %s", playlist_name, exc)
-        return {"uploaded": False, "reason": "no navidrome match"}
+        return {"ok": False, "method": "navidrome_native", "reason": last_reason}
     except Exception as exc:
         logger.warning("[PLAYLISTS] Cover attach aborted: %s", exc)
-        return {"uploaded": False, "reason": str(exc)}
+        return {"ok": False, "method": "none", "reason": str(exc)}
 
 
 def sync_playlists_public() -> dict:

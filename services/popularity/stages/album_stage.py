@@ -509,20 +509,41 @@ def _fetch_album_art_with_fallback(
 
     Logger.info("[ENRICH] album-art pipeline started", **context)
 
+    _cached_blob = None
+    _cached_source = ""
     try:
-        from db.repositories.metadata import fetch_album_art_blob
+        from db.repositories.metadata import fetch_album_art_record
+
         cached = _call_with_heartbeat(
             "album_art.cache",
-            fetch_album_art_blob,
+            fetch_album_art_record,
             artist=artist,
             album=album,
             log_context=context,
         )
-        blob = cached[0] if isinstance(cached, (tuple, list)) and cached else None
-        if blob:
-            Logger.info("[ENRICH] album art cache hit", source="cached", **context)
-            return "cached"
-        Logger.info("[ENRICH] album art cache miss", **context)
+        if isinstance(cached, (tuple, list)) and cached:
+            _cached_blob = cached[0]
+            _cached_source = str(cached[2] if len(cached) > 2 else "") or ""
+
+        if _cached_blob:
+            # Cached art is only "done" when it is Navidrome's own copy or the
+            # USER's choice. Art a provider supplied gets first refusal from
+            # Navidrome — otherwise the cache made the Navidrome step
+            # unreachable for every album that had ever collected CAA/Discogs
+            # art, which is the reported "it looks online for it, but it should
+            # first use the coverart from Navidrome".
+            from services.enrichment.album_art_service import navidrome_art_may_replace
+
+            if not navidrome_art_may_replace(_cached_source):
+                Logger.info("[ENRICH] album art cache hit", source=_cached_source or "cached", **context)
+                return "cached"
+            Logger.info(
+                "[ENRICH] album art cache hit (provider art — checking Navidrome first)",
+                source=_cached_source or "unknown",
+                **context,
+            )
+        else:
+            Logger.info("[ENRICH] album art cache miss", **context)
     except Exception as exc:
         Logger.warning("[ENRICH] album-art cache check failed", error=_safe_error(exc), **context)
 
@@ -549,6 +570,13 @@ def _fetch_album_art_with_fallback(
         Logger.info("[ENRICH] Navidrome returned no album art", **context)
     except Exception as exc:
         Logger.warning("[ENRICH] Navidrome album-art provider failed", error=_safe_error(exc), **context)
+
+    if _cached_blob:
+        # Navidrome has no new copy, so the art already stored STANDS. Falling
+        # through would re-download the same provider art we already hold (and
+        # could replace a good cover with a worse one).
+        Logger.info("[ENRICH] album art kept", source=_cached_source or "cached", **context)
+        return "cached"
 
     try:
         data = _call_with_heartbeat(

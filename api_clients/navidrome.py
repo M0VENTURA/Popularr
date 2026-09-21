@@ -228,6 +228,9 @@ class NavidromeClient:
         self.use_token_auth = use_token_auth
         self._stats_cache: dict[str, Any] | None = None
         self._last_stats_time = 0.0
+        # Session token for Navidrome's NATIVE API (playlist artwork upload,
+        # ``/auth/login``).  Cached per client and dropped on a 401.
+        self._native_token: str = ""
 
     # ------------------------------------------------------------------
     # Core request helpers
@@ -657,41 +660,110 @@ class NavidromeClient:
             logger.error("Failed to update playlist public status", playlist_id=playlist_id, public=public, error=str(exc))
             return False
 
-    def upload_playlist_cover(self, playlist_id: str, image_bytes: bytes, mime_type: str = "image/jpeg") -> bool:
+    # ------------------------------------------------------------------
+    # Playlist cover art — Navidrome NATIVE API (not Subsonic).
+    #
+    # ``updatePlaylist`` in the Subsonic/OpenSubsonic spec has NO cover
+    # parameter — its parameters are exactly
+    # ``playlistId, name, comment, public, songIdToAdd, songIndexToRemove``
+    # (https://opensubsonic.netlify.app/docs/endpoints/updateplaylist/).
+    # This method used to POST the image there as a ``coverArt`` file:
+    # Navidrome ignored the unknown parameter, answered ``status: ok``, and the
+    # caller reported success — so playlist artwork silently never appeared.
+    #
+    # Navidrome's own web UI uploads through its NATIVE API, which the docs list
+    # as the FIRST source in playlist artwork resolution ("Uploaded image"):
+    #
+    #     POST {base}/api/playlist/{id}/image     multipart, field "image"
+    #
+    # It needs a session token (``POST /auth/login``) and, for non-admin users,
+    # ``EnableArtworkUpload`` (enabled by default). Upstream implementation:
+    # ``server/nativeapi/playlists.go`` + ``server/nativeapi/image_upload.go``.
+    # ------------------------------------------------------------------
+    def native_login(self) -> str:
+        """A Navidrome native-API session token, cached per client instance.
+
+        Returns "" when the login fails, so callers can report a real reason
+        instead of assuming the upload worked.
+        """
+        if self._native_token:
+            return self._native_token
+        if not self.base_url:
+            return ""
+        try:
+            response = self.session.post(
+                f"{self.base_url}/auth/login",
+                json={"username": self.username, "password": self.password},
+                timeout=15,
+            )
+            if response.status_code != 200:
+                logger.debug(
+                    "Navidrome native login rejected",
+                    status=response.status_code,
+                )
+                return ""
+            data = response.json() or {}
+            token = str(data.get("token") or "").strip()
+            self._native_token = token
+            return token
+        except Exception as exc:
+            logger.debug("Navidrome native login failed", error=str(exc))
+            return ""
+
+    def upload_playlist_cover(
+        self, playlist_id: str, image_bytes: bytes, mime_type: str = "image/jpeg"
+    ) -> tuple[bool, str]:
+        """Set a playlist's cover through Navidrome's native artwork upload.
+
+        Returns ``(ok, reason)``. ``reason`` is always meaningful, so a caller
+        can log WHY it failed — the previous implementation could only report
+        success, which is how a permanent failure went unnoticed.
+
+        Known reasons: ``""`` (ok), ``no_login``, ``disabled`` (the server
+        requires ``EnableArtworkUpload`` for non-admin users),
+        ``not_found`` (no such playlist), ``http_<code>``, and
+        ``exception``.
+        """
         if not playlist_id or not image_bytes:
-            return False
-        url = f"{self.base_url}/rest/updatePlaylist"
+            return False, "no_image"
+
+        token = self.native_login()
+        if not token:
+            return False, "no_login"
+
+        url = f"{self.base_url}/api/playlist/{playlist_id}/image"
+        # The file field MUST be named "image": the handler reads it with
+        # ``r.FormFile("image")`` and 400s with "missing image file" otherwise.
+        filename = "cover.png" if "png" in str(mime_type).lower() else "cover.jpg"
         try:
             response = self.session.post(
                 url,
-                params=self._build_params(playlistId=playlist_id),
-                files={"coverArt": ("cover.jpg", image_bytes, mime_type)},
+                headers={"Authorization": f"Bearer {token}"},
+                files={"image": (filename, image_bytes, mime_type)},
                 timeout=30,
             )
-            response.raise_for_status()
-            # Navidrome can return a 2xx with an empty / non-JSON body for
-            # mutation endpoints — treat that as success unless the body
-            # explicitly reports a failed status.
-            if not response.content or not response.text.strip():
-                return True
-            try:
-                data = response.json()
-            except (json.JSONDecodeError, ValueError):
-                parsed = _parse_non_json_envelope(response.text or "")
-                if parsed and parsed.get("status") == "failed":
-                    _log_subsonic_status(parsed, "updatePlaylist(cover)")
-                    return False
-                return True
-            envelope = data.get("subsonic-response", {}) or {}
-            if envelope.get("status") == "failed":
-                _log_subsonic_status(envelope, "updatePlaylist(cover)")
-            ok = bool(envelope.get("status") == "ok")
-            if not ok:
-                logger.warning("Playlist cover upload rejected", playlist_id=playlist_id, response=data)
-            return ok
+            if response.status_code == 401:
+                # The token expired between calls — re-login once and retry.
+                self._native_token = ""
+                token = self.native_login()
+                if not token:
+                    return False, "no_login"
+                response = self.session.post(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    files={"image": (filename, image_bytes, mime_type)},
+                    timeout=30,
+                )
+            if response.status_code == 403:
+                return False, "disabled"
+            if response.status_code == 404:
+                return False, "not_found"
+            if response.status_code >= 400:
+                return False, f"http_{response.status_code}"
+            return True, ""
         except Exception as exc:
-            logger.warning("Playlist cover upload failed", playlist_id=playlist_id, error=str(exc))
-            return False
+            logger.debug("Playlist cover upload failed", playlist_id=playlist_id, error=str(exc))
+            return False, "exception"
 
     def rename_playlist(self, playlist_id: str, name: str) -> bool:
         try:

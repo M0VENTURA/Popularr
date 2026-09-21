@@ -30,6 +30,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 class _FakeResult:
     def __init__(self, rows):
+        # A single row may be handed over as a bare mapping; normalise it, so a
+        # test cannot fail with a KeyError(0) from indexing the mapping itself.
+        if isinstance(rows, dict):
+            rows = [rows]
         self._rows = rows
 
     def mappings(self):
@@ -73,6 +77,26 @@ def _patch_session(monkeypatch, module, session):
     return session
 
 
+def _strip_string_literals(source: str) -> str:
+    """``source`` with every string constant blanked out.
+
+    Used by the "this call is gone" guards: a docstring or comment that names a
+    retired call is documentation, not usage, and must neither satisfy nor fail
+    the check. SQL text lives in string constants too, so any assertion ABOUT
+    the SQL reads the raw source instead.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            node.value = ""
+    return ast.unparse(tree)
+
+
 # ---------------------------------------------------------------------------
 # Artist members
 # ---------------------------------------------------------------------------
@@ -82,8 +106,17 @@ class TestMembersReaderIsDatabaseOnly:
         from services.metadata import artist_metadata_service as svc
 
         source = inspect.getsource(svc.get_artist_members_cached)
-        for forbidden in ("search_artists", "get_artist_members(", "get_shared_mb_client"):
-            assert forbidden not in source, f"the page path must not call {forbidden}"
+        # Scan the CODE only. The docstring deliberately NAMES the retired calls
+        # (that prose is the explanation of why they went), and a raw substring
+        # scan would trip over it — the same trap as grepping a source file for a
+        # string the comments quote.
+        code_only = _strip_string_literals(source)
+        # ``get_artist_members`` is asserted WITH its opening parenthesis: the
+        # function's own name is ``get_artist_members_cached``, so the bare name
+        # is a substring of the definition itself and could never be absent.
+        for forbidden in ("search_artists", "get_shared_mb_client", "get_artist_members("):
+            assert forbidden not in code_only, f"the page path must not call {forbidden}"
+        # The SQL text is a string constant, so that check reads the RAW source.
         assert "SELECT" in source
 
     def test_it_parses_the_cached_roster(self, monkeypatch):

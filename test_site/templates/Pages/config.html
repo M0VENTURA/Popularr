@@ -414,7 +414,7 @@
               <input class="form-check-input" type="checkbox" id="api_navidrome_playlist_cover_art" {% if nav_cfg.get('playlist_cover_art', False) %}checked{% endif %}>
               <label class="form-check-label" for="api_navidrome_playlist_cover_art"><strong>Playlist cover art</strong></label>
             </div>
-            <small class="form-text text-muted">When enabled, every playlist detected during the Navidrome library import (including the auto-generated Essential playlists) is switched to <strong>public</strong> visibility. Set automatically on each library sync. <strong>Playlist cover art</strong> pushes each artist's existing artwork to freshly created playlists via the Navidrome API.</small>
+            <small class="form-text text-muted">When enabled, every playlist detected during the Navidrome library import (including the auto-generated Essential playlists) is switched to <strong>public</strong> visibility. Set automatically on each library sync. <strong>Playlist cover art</strong> uploads the artist's own image as the cover of their playlists through Navidrome's native artwork upload — the first source Navidrome checks. Requires artwork uploads to be enabled in Navidrome (on by default).</small>
           </div>
         </div>
       </div>

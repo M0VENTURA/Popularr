@@ -24,7 +24,7 @@ from api_clients.coverartarchive import (
 from api_clients.discogs_http import DiscogsHttpClient
 from api_clients.musicbrainz_http import MusicBrainzHttpClient
 from db.engine import db_session
-from db.repositories.metadata import fetch_album_art_blob
+from db.repositories.metadata import fetch_album_art_blob, fetch_album_art_record
 from db.utils import row_get
 from helpers.normalization_service import (
     normalize_album,
@@ -219,22 +219,53 @@ def fetch_album_art_from_discogs(artist_name: str, album_name: str, token: str) 
 
 
 def fetch_album_art_from_navidrome(artist_name: str, album_name: str) -> bytes | None:
-    """Pull album art straight from Navidrome (Subsonic ``getCoverArt``)."""
-    
-    # GUARD: Never execute heavy fuzzy searches against Navidrome for missing albums.
+    """Pull album art from Navidrome's own library (Subsonic ``getCoverArt``).
+
+    This is the FIRST source every caller must try. The art Navidrome already
+    serves for the album the user owns is by definition the right cover, and it
+    costs one request to the local server instead of a lookup against MusicBrainz
+    / Cover Art Archive / Discogs / AudioDB.
+
+    Two steps, cheapest first:
+
+    1. **A song id from our own ``tracks`` table.** ``tracks.id`` IS the
+       Navidrome/Subsonic song id (the importer stores it verbatim — see
+       ``services/scanning/payload_builder.py``), and ``getCoverArt`` accepts a
+       song id, so ONE request returns the album's art with no search. This also
+       replaces the old library-wide ``client.search(...)`` fuzzy lookup, which
+       was expensive enough that the whole call had to be guarded.
+    2. Only when that yields nothing, the previous fallback: search Navidrome for
+       the album and use the ALBUM id.
+
+    The local-library guard is now CASE-INSENSITIVE, matching every other
+    album-scoped lookup in the app. It used to compare ``artist``/``album`` with
+    ``=`` while the rest of the code uses ``LOWER(...)``, so an album whose stored
+    casing differed was reported as "not in local library" and Navidrome was
+    skipped entirely — one of the reasons the online sources were reached first.
+    """
+    # GUARD: only for albums that ARE in the local library. Never run a
+    # Navidrome lookup for a missing release (the artist page lists those too).
+    local_song_id = ""
     try:
         with db_session() as session:
             row = session.execute(
-                text("SELECT 1 FROM tracks WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist AND album = :album LIMIT 1"),
-                {"artist": artist_name, "album": album_name}
+                text(
+                    "SELECT id FROM tracks "
+                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                    "  AND LOWER(COALESCE(album, '')) = LOWER(:album) "
+                    "  AND COALESCE(id, '') <> '' "
+                    "LIMIT 1"
+                ),
+                {"artist": artist_name, "album": album_name},
             ).fetchone()
             if not row:
                 logger.debug("Skipping Navidrome art search (album not in local library)", artist=artist_name, album=album_name)
                 return None
+            local_song_id = str(row[0] or "").strip()
     except Exception as exc:
         logger.debug("Navidrome guard check failed", error=str(exc))
         pass # Fail open to prevent regressions
-        
+
     try:
         from helpers.config_helpers import get_config
         from api_clients.navidrome import NavidromeClient
@@ -262,6 +293,17 @@ def fetch_album_art_from_navidrome(artist_name: str, album_name: str) -> bytes |
             password=password,
         )
 
+        # ---- Step 1: the song id we already hold. One request, no search. ----
+        if local_song_id:
+            data = client.get_cover_art_bytes(local_song_id, size=600)
+            if data:
+                logger.debug(
+                    "Fetched album art from Navidrome (library song id)",
+                    artist=artist_name, album=album_name, song_id=local_song_id,
+                )
+                return data
+
+        # ---- Step 2: locate the album on the server and use its album id. ----
         wanted_artist = normalize_artist(artist_name)
         wanted_album = normalize_album(album_name)
         album_id = None
@@ -381,10 +423,39 @@ def get_album_art_placeholder_svg(size: int = 300) -> Response:
     return Response(svg, mimetype='image/svg+xml')
 
 
+# Album-art sources that are ALREADY the best available copy: Navidrome's own
+# art, and the two the USER chose (an upload, or a URL they supplied). Everything
+# else came from a provider.
+_ART_SOURCES_ALREADY_BEST = frozenset({"navidrome", "upload", "url"})
+
+
+def navidrome_art_may_replace(source: str) -> bool:
+    """May Navidrome's ``getCoverArt`` replace the art already stored?
+
+    YES for anything a provider supplied (``musicbrainz``, ``discogs``,
+    ``audiodb``, ``itunes``, ``missing_releases``, ``unknown``, ``""``); NO for
+    Navidrome's own art and for the two user-chosen sources.
+
+    WHY this exists: every art path checks the DB cache BEFORE anything else and
+    returned the cached blob, so an album that had once collected Cover Art
+    Archive (or Discogs/AudioDB) art could never pick up the library's own cover
+    — the reported "currently it looks online for it, but it should first use the
+    coverart from Navidrome". The cache stays authoritative for the user's own
+    choices; a provider-sourced picture is upgradable.
+    """
+    return str(source or "").strip().lower() not in _ART_SOURCES_ALREADY_BEST
+
+
 def get_or_fetch_album_art(artist: str, album: str, discogs_token: str = "") -> tuple[bytes | None, str | None]:
-    """Orchestrates DB retrieval, API fetching, and DB caching."""
-    data, mime = fetch_album_art_blob(artist=artist, album=album)
-    if data:
+    """Orchestrates DB retrieval, API fetching, and DB caching.
+
+    Order: stored art (unless a provider supplied it) → Navidrome → MusicBrainz
+    / Cover Art Archive → Discogs → AudioDB. Navidrome is asked BEFORE the online
+    providers because the album the user owns is already in Navidrome, so its
+    ``getCoverArt`` is both the correct cover and a local request.
+    """
+    data, mime, cached_source = fetch_album_art_record(artist=artist, album=album)
+    if data and not navidrome_art_may_replace(cached_source):
         return data, mime
 
     # FAST PATH for Missing Releases: Check the missing_releases table for a cached cover URL
@@ -407,6 +478,12 @@ def get_or_fetch_album_art(artist: str, album: str, discogs_token: str = "") -> 
     if data:
         save_album_art_to_db(artist, album, data, source="navidrome")
         return data, "image/jpeg"
+
+    # Navidrome has no copy of this album: whatever we already hold STANDS,
+    # rather than re-downloading the same provider art it came from (``data``
+    # here is still the stored blob from the read at the top of this function).
+    if data:
+        return data, mime or "image/jpeg"
 
     data = fetch_album_art_from_musicbrainz(artist, album)
     if data:
@@ -553,6 +630,7 @@ __all__ = [
     "fetch_album_art_from_audiodb",
     "fetch_album_art_from_navidrome",
     "get_or_fetch_album_art",
+    "navidrome_art_may_replace",
     "download_and_save_album_art",
     "get_album_art_placeholder_svg",
 ]

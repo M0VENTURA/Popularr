@@ -73,6 +73,30 @@ def fetch_album_art_blob(conn: Any = None, artist: str = "", album: str = ""):
         return (row[0], row[1] or "image/jpeg")
 
 
+def fetch_album_art_record(conn: Any = None, artist: str = "", album: str = ""):
+    """``(image_data, mime, source)`` for one album's stored art.
+
+    Same read as ``fetch_album_art_blob`` plus the SOURCE, which the caller needs
+    to decide whether the stored picture may be replaced by Navidrome's own
+    copy: art that came from an online provider is upgradable, art the user
+    uploaded or pointed at a URL is not. Returned as one tuple so the existing
+    two-value callers of ``fetch_album_art_blob`` are untouched.
+    """
+    with db_session() as session:
+        result = session.execute(text("""
+            SELECT image_data, image_mime_type, source
+            FROM album_art
+            WHERE LOWER(COALESCE(artist_name, '')) = LOWER(:artist)
+              AND LOWER(COALESCE(album_name, '')) = LOWER(:album)
+            LIMIT 1
+        """), {"artist": artist, "album": album})
+
+        row = result.fetchone()
+        if not row:
+            return None, None, ""
+        return (row[0], row[1] or "image/jpeg", str(row[2] or ""))
+
+
 def save_album_art_db(conn: Any = None, artist: str = "", album: str = "",
                       image_data: bytes | None = None, mime: str = "", source: str = "") -> None:
     with db_session() as session:
