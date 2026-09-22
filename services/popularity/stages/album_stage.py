@@ -305,6 +305,41 @@ def _sanitize_release_name(album_name: str) -> str:
     return cleaned or album_name
 
 
+#: Resolve a stored type straight to its secondary-segment PRESENCE, so a rich
+#: stored value is never flattened by the title/artist heuristics below.
+#:
+#: Why this exists: ``_detect_album_type`` used to consult ``spotify_type``
+#: only AFTER the ``_COMPILATION_ARTISTS`` branch, so an album whose
+#: artist/album_artist is the literal placeholder ``"Soundtrack"`` returned
+#: ``album+compilation`` no matter what was stored — an ``ep+soundtrack`` EP
+#: lost its EP identity, and the manual "Album (Soundtrack)" choice was
+#: overwritten.  The stored value is the authoritative one (it is what the user
+#: picked, or what a previous MusicBrainz match resolved), so it is consulted
+#: FIRST.
+_RICH_TYPE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("+compilation", "album+compilation"),
+    ("+soundtrack", "album+soundtrack"),
+    ("+live", "album+live"),
+    ("+acoustic", "album+acoustic"),
+    ("+remix", "album+remix"),
+    ("+spokenword", "album+spokenword"),
+    ("+demo", "album+demo"),
+    ("+fieldrecording", "album+fieldrecording"),
+    ("+dj-mix", "album+dj-mix"),
+    ("+mixtape/street", "album+mixtape/street"),
+    ("+interview", "album+interview"),
+    ("+audiobook", "album+audiobook"),
+    ("+audio drama", "album+audio drama"),
+    ("+score", "album+score"),
+    ("(soundtrack)", "album+soundtrack"),
+    ("(live)", "album+live"),
+    ("(compilation)", "album+compilation"),
+    ("(remix)", "album+remix"),
+)
+
+#: Album artists/artists that mean "this folder is a compilation-or-placeholder",
+#: NOT a performer.  Kept name-compatible with the historical tuple so nothing
+#: that reads it changes behaviour.
 _COMPILATION_ARTISTS = frozenset(
     {"various artists", "various artists –", "various", "compilation", "soundtrack"}
 )
@@ -332,6 +367,60 @@ _DESTRUCTIVE_SECONDARY_TYPES = ("+live", "+acoustic", "+remix")
 _LIVE_TRACK_CORROBORATION_RATIO = 0.5
 
 
+def _rich_stored_album_type(raw: str | None) -> str | None:
+    """The STORED album type, when it carries real information.
+
+    Returns ``None`` only for a bare ``"album"`` (or an unusable value) so the
+    local heuristics still run — a plain "album" carries no information a
+    title/artist guess cannot refine.
+
+    A stored value WITH a secondary segment (``ep+soundtrack``,
+    ``album+soundtrack``, ``album+live`` …) is authoritative: it is what the
+    user picked on the album page, or what a previous MusicBrainz match
+    resolved.  A bare ``ep``/``single`` is ALSO returned, because it names a
+    primary type the placeholder/title heuristics must not overwrite — an EP
+    filed under the literal album artist "Soundtrack" used to come back as
+    ``album+compilation``, losing its EP identity (the reported symptom).
+
+    The PRIMARY segment is preserved verbatim: it is what distinguishes an EP
+    from an album, so ``ep+soundtrack`` must not come back as
+    ``album+soundtrack``.
+    """
+    text = str(raw or "").strip().lower()
+    if not text:
+        return None
+
+    if "+" in text:
+        primary = text.partition("+")[0].strip()
+        if not primary:
+            return None
+        # Keep the full composite; every segment is meaningful.
+        return text
+
+    for marker, resolved in _RICH_TYPE_MARKERS:
+        if marker in text:
+            return resolved
+
+    # A bare primary that carries identity: an EP/single is a real type, and it
+    # outranks the placeholder/title guesses.
+    if text in {"ep", "single"}:
+        return text
+
+    # A bare secondary spelling ("soundtrack", "live", …) — legacy single-value
+    # storage, which meant "an album with this secondary type".
+    try:
+        from services.catalog.release_categories import _resolve_mb_secondary
+
+        secondary = _resolve_mb_secondary(text)
+    except Exception:
+        secondary = None
+    if secondary:
+        return f"album+{secondary}"
+
+    # A bare "album" (or anything unrecognised): no information to add.
+    return None
+
+
 def _detect_album_type(
     artist: str,
     album: str,
@@ -342,35 +431,33 @@ def _detect_album_type(
     album_lower = (album or "").casefold().strip()
     album_artist_lower = (album_artist or "").casefold().strip()
 
+    # ── 1. A stored RICH type is authoritative and is consulted FIRST ─────
+    # This check used to sit BELOW the compilation-artist branch, so an album
+    # whose artist (or album_artist) is the literal placeholder "Soundtrack"
+    # always came back as "album+compilation" — silently discarding a stored
+    # "ep+soundtrack" (the EP identity was lost) and overwriting a manual
+    # "Album (Soundtrack)" choice on the next scan.
+    stored = _rich_stored_album_type(spotify_type)
+    if stored:
+        return stored
+
+    # ── 2. Compilation PLACEHOLDERS ───────────────────────────────────────
+    # "Soundtrack" is a placeholder album ARTIST, not a performer: it means the
+    # folder is a various-artists/compilation, NOT that its type is Soundtrack.
+    # (A genuine soundtrack is identified by its stored or MusicBrainz type —
+    # step 1 already handled a stored one.)
     if artist_lower in _COMPILATION_ARTISTS or album_artist_lower in _COMPILATION_ARTISTS:
         return "album+compilation"
-        
-    # Respect existing rich types from the DB (manual UI edits)
-    if spotify_type:
-        spotify_lower = spotify_type.casefold()
-        if "compilation" in spotify_lower or "+compilation" in spotify_lower:
-            return "album+compilation"
-        if "+live" in spotify_lower or "live" == spotify_lower:
-            return "album+live"
-        if "+acoustic" in spotify_lower:
-            return "album+acoustic"
-        if "+remix" in spotify_lower:
-            return "album+remix"
-        if "+soundtrack" in spotify_lower:
-            return "album+soundtrack"
 
+    # ── 3. Title heuristics ───────────────────────────────────────────────
+    # A bare "ep"/"single" never reaches here — step 1 already returned it.
     if "soundtrack" in album_lower:
         return "album+soundtrack"
     if any(re.search(pattern, album_lower) for pattern in _LIVE_ALBUM_PATTERNS):
         return "album+live"
     if "+remix" in album_lower or "(remix)" in album_lower:
         return "album+remix"
-        
-    if spotify_type:
-        spotify_lower = spotify_type.casefold()
-        if spotify_lower in {"single", "ep"}:
-            return spotify_lower
-            
+
     return "album"
 
 
@@ -1436,26 +1523,44 @@ def _lookup_musicbrainz_album_type(
             for value in (best.get("secondary_types") or [])
             if value
         }
-        mapping = {
-            "single": "single", "ep": "ep", "album": "album",
-            "compilation": "album+compilation", "live": "album+live",
-            "remix": "album+remix",
-        }
 
-        resolved: str | None
-        if primary == "album" or primary not in mapping:
-            if "live" in secondary:
-                resolved = "album+live"
-            elif {"acoustic", "unplugged"} & secondary:
-                resolved = "album+acoustic"
-            elif "compilation" in secondary:
-                resolved = "album+compilation"
-            elif "remix" in secondary:
-                resolved = "album+remix"
-            else:
-                resolved = mapping.get(primary)
+        # Secondary → composite mapping.  ORDER IS THE PRECEDENCE and mirrors
+        # `release_categories._PRECEDENCE` (compilation outranks soundtrack
+        # outranks live), so the type written here resolves to the same section
+        # the registry later reads back.
+        #
+        # ``soundtrack`` used to be MISSING from this table entirely, so a
+        # release-group MusicBrainz correctly flagged as a soundtrack resolved
+        # to a bare "album" and the type was silently lost.
+        _SECONDARY_ORDER: tuple[tuple[str, str], ...] = (
+            ("compilation", "compilation"),
+            ("soundtrack", "soundtrack"),
+            ("live", "live"),
+            ("acoustic", "acoustic"),
+            ("unplugged", "acoustic"),
+            ("remix", "remix"),
+            ("spokenword", "spokenword"),
+            ("demo", "demo"),
+            ("score", "score"),
+        )
+
+        matched_secondary = next(
+            (label for mb_type, label in _SECONDARY_ORDER if mb_type in secondary),
+            "",
+        )
+
+        if primary in {"single", "ep"}:
+            # The PRIMARY is the identity; a secondary is appended, so an
+            # "ep+soundtrack" stays an EP (the registry reads it as one) while
+            # still recording the soundtrack.
+            resolved: str | None = (
+                f"{primary}+{matched_secondary}" if matched_secondary else primary
+            )
+        elif matched_secondary:
+            resolved = f"album+{matched_secondary}"
         else:
-            resolved = mapping.get(primary)
+            # No secondary: keep a non-album primary as-is, otherwise "album".
+            resolved = primary if primary in {"single", "ep"} else "album"
 
         Logger.info(
             "[ENRICH] MusicBrainz album type result",
@@ -2333,6 +2438,101 @@ def _get_discogs_token() -> str | None:
         return None
 
 
+def _resolve_soundtrack_placeholders(
+    artist: str,
+    album: str,
+    release_group_mbid: str | None,
+    album_tracks: list[dict[str, Any]],
+) -> tuple[str, str | None]:
+    """Resolve the real performer(s) for an album filed under "Soundtrack".
+
+    Returns ``(album_artist, release_group_mbid)`` — either may be empty.
+
+    Two sources, in order of authority:
+
+    1. the release-group's OWN artist credit (exact, when the MBID is stored);
+    2. a MusicBrainz release-group SEARCH by album title.
+
+    Step 2 exists because the reported albums had ``album_artist =
+    "Soundtrack"`` and **no MBID saved at all** — the old correction required a
+    release-group MBID and returned immediately without one, so the placeholder
+    the legacy scan wrote was permanent and could never self-heal:
+    ``if not release_group_mbid: return``.
+    """
+    resolved = ""
+    resolved_rg = release_group_mbid
+
+    def _usable_credit(value: str) -> str:
+        """Reject an empty or still-placeholder credit."""
+        text = str(value or "").strip()
+        return "" if text.casefold() in {"", "soundtrack", "soundtracks"} else text
+
+    if release_group_mbid:
+        try:
+            service = get_shared_mb_service()
+            rg_data = _call_with_heartbeat(
+                "album_artist.musicbrainz.fetch_credits",
+                service.get_release_group_by_id,
+                release_group_mbid,
+                includes=["artist-credits"],
+                log_context={"artist": artist, "album": album, "release_group_mbid": release_group_mbid},
+            )
+            if isinstance(rg_data, dict) and rg_data.get("artist-credit"):
+                resolved = _usable_credit("".join(
+                    str(credit.get("name") or "") + str(credit.get("joinphrase") or "")
+                    for credit in rg_data["artist-credit"]
+                    if isinstance(credit, dict)
+                ))
+        except Exception as exc:
+            Logger.debug(
+                "[ENRICH] Soundtrack credit fetch failed",
+                release_group_mbid=release_group_mbid,
+                error=_safe_error(exc),
+            )
+
+    if not resolved:
+        # No stored MBID (or the credit was unusable — including a release-group
+        # that is ITSELF credited "Soundtrack"): find the release-group by album
+        # title.  ``search_releasegroup_matches`` already scores/ranks and
+        # applies the track-count penalty, so the best hit is a sound choice.
+        clean_album = _sanitize_release_name(album)
+        try:
+            service = get_shared_mb_service()
+            matches = _call_with_heartbeat(
+                "album_artist.musicbrainz.search_release_group",
+                service.search_releasegroup_matches,
+                artist,
+                clean_album,
+                limit=5,
+                log_context={"artist": artist, "album": album},
+            ) or []
+        except Exception as exc:
+            Logger.debug("[ENRICH] Soundtrack release-group search failed", error=_safe_error(exc))
+            matches = []
+
+        best = next((m for m in matches if isinstance(m, dict)), None)
+        candidate_mbid = str((best or {}).get("id") or "").strip()
+        credits = (best or {}).get("artist_credit") or (best or {}).get("artist-credit") or []
+        candidate_artist = _usable_credit("".join(
+            str(credit.get("name") or "") + str(credit.get("joinphrase") or "")
+            for credit in credits
+            if isinstance(credit, dict)
+        )) or _usable_credit(str((best or {}).get("artist") or ""))
+
+        # Only adopt a title match when it is confident: a wrong artist is worse
+        # than the placeholder, because the placeholder is at least obviously
+        # wrong and is filtered out everywhere.
+        score = float((best or {}).get("match_score") or 0)
+        if candidate_artist and score >= 0.8:
+            resolved = candidate_artist
+            if candidate_mbid:
+                resolved_rg = resolved_rg or candidate_mbid
+        elif candidate_mbid and not resolved_rg:
+            resolved_rg = candidate_mbid
+
+    return resolved, resolved_rg
+
+
 def _correct_soundtrack_album_artist(
     artist: str,
     album: str,
@@ -2346,38 +2546,34 @@ def _correct_soundtrack_album_artist(
         album_artist = next((str(t.get("album_artist") or "") for t in album_tracks if t.get("album_artist")), "")
         
     current_album_artist = (album_artist or "").strip()
-    if current_album_artist.casefold() != "soundtrack":
+    if current_album_artist.casefold() not in {"soundtrack", "soundtracks"}:
         return
-        
+
     if not release_group_mbid and album_tracks:
         release_group_mbid = next((str(t.get("musicbrainz_releasegroupid") or "") for t in album_tracks if t.get("musicbrainz_releasegroupid")), "")
-        
-    if not release_group_mbid:
-        return
 
     context = {"artist": artist, "album": album, "release_group_mbid": release_group_mbid}
-    
-    try:
-        service = get_shared_mb_service()
-        rg_data = _call_with_heartbeat(
-            "album_artist.musicbrainz.fetch_credits",
-            service.get_release_group_by_id,
-            release_group_mbid,
-            includes=["artist-credits"],
-            log_context=context,
+
+    # ⚠️ This used to `return` here when no MBID was stored, which is exactly
+    # the reported state — the legacy scan wrote album_artist="Soundtrack" and
+    # never stored a release-group id, so the placeholder could never be
+    # repaired.  Fall back to a title search instead.
+    mb_credit_name, resolved_rg = _resolve_soundtrack_placeholders(
+        artist, album, release_group_mbid, album_tracks
+    )
+    if resolved_rg and resolved_rg != release_group_mbid:
+        release_group_mbid = resolved_rg
+        context["release_group_mbid"] = resolved_rg
+
+    if not mb_credit_name:
+        Logger.info(
+            "[ENRICH] Soundtrack album_artist left as-is",
+            reason="no confident MusicBrainz artist credit could be resolved",
+            **context,
         )
-        
-        if not rg_data or "artist-credit" not in rg_data:
-            return
+        return
 
-        mb_credit_name = "".join(
-            credit.get("name", "") + credit.get("joinphrase", "")
-            for credit in rg_data["artist-credit"]
-        ).strip()
-
-        if not mb_credit_name or mb_credit_name.casefold() == "soundtrack":
-            return
-
+    try:
         # 1. Update the Database
         with _log_section("album_artist.correction.persist", old=current_album_artist, new=mb_credit_name, **context):
             with db_session() as session:
@@ -2387,7 +2583,7 @@ def _correct_soundtrack_album_artist(
                         SET album_artist = :new_album_artist
                         WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
                           AND album = :album
-                          AND album_artist ILIKE 'soundtrack'
+                          AND LOWER(TRIM(album_artist)) IN ('soundtrack', 'soundtracks')
                     """),
                     {
                         "new_album_artist": mb_credit_name,
@@ -2397,8 +2593,12 @@ def _correct_soundtrack_album_artist(
                 )
                 rows_updated = result.rowcount
                 
-        # 2. Update the shared in-memory context so track_stage sees the change
-        if album_context:
+        # 2. Update the shared in-memory context so track_stage sees the change.
+        # ⚠️ ``is not None``, NOT truthiness: the caller routinely passes an
+        # EMPTY dict, and ``if album_context:`` skipped it — so the corrected
+        # artist was written to the DB and then immediately overwritten by the
+        # track stage's stale in-memory copy.
+        if album_context is not None:
             album_context["album_artist"] = mb_credit_name
                 
         # 3. Update physical files and in-memory track dicts
