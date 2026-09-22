@@ -1741,6 +1741,27 @@ def _release_extended_fields(release: dict[str, Any], media: Any) -> dict[str, s
     }
 
 
+#: ``inc`` for the release fetch.  One constant so the two entry points cannot
+#: drift — omitting ``labels`` blanks the Extended Metadata panel, and omitting
+#: ``work-rels`` silently loses the writer/cover enrichment.
+_RELEASE_FETCH_INC = (
+    "recordings+artist-credits+release-groups+media+labels"
+    "+work-rels+recording-level-rels+work-level-rels+artist-rels+genres"
+)
+
+
+def _fetch_raw_release(release_id: str, client: Any = None) -> dict[str, Any] | None:
+    """GET a release through the shared client (or an injected one)."""
+    Client = client or get_shared_mb_client()
+    return _call_with_heartbeat(
+        "release.fetch_metadata",
+        Client.get_release,
+        release_id,
+        inc=_RELEASE_FETCH_INC,
+        Log_context={"release_id": release_id},
+    )
+
+
 def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None:
     """Fetch and flatten a MusicBrainz release for comparison/Link/Align.
 
@@ -1752,14 +1773,7 @@ def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None
     if not release_id:
         return None
     try:
-        Client = get_shared_mb_client()
-        Release = _call_with_heartbeat(
-            "release.fetch_metadata",
-            Client.get_release,
-            release_id,
-            inc="recordings+artist-credits+release-groups+media+labels+work-rels+recording-level-rels+work-level-rels+artist-rels+genres",
-            Log_context={"release_id": release_id},
-        )
+        Release = _fetch_raw_release(release_id)
     except Exception as exc:
         Logger.warning(
             "[MB] release metadata fetch failed",
@@ -1771,6 +1785,29 @@ def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None
     if not isinstance(Release, dict) or not Release.get("id"):
         return None
 
+    return _flatten_release(Release, release_id)
+
+
+def _flatten_release(Release: dict[str, Any], release_id: str) -> dict[str, Any]:
+    """Flatten a raw MusicBrainz release into the app's release payload.
+
+    Emits BOTH track key sets from one fetch:
+
+    * plain keys — ``title``, ``artist``, ``track_number``, ``disc_number``,
+      ``recording_mbid``, ``duration``, ``musicbrainz_genres``, ``writer``,
+      ``work_mbid``, ``is_cover`` … read by the queue adder
+      (``add_release_tracks_to_queue``), ``album_missing_service`` and the
+      album-page metadata save.
+    * ``mb_*`` keys — ``mb_title``, ``mb_track_number``, ``mb_disc_number``,
+      ``mb_recording_mbid``, ``mb_duration``, ``mb_genres`` — read by
+      ``_match_mb_tracks_to_library`` and
+      ``release_group_tracklist_similarity``.
+
+    These were briefly split into two mutually incompatible shapes. The queue
+    adder then read every track as "Unknown Track" (so an entire album
+    collapsed into duplicate rows) and the album-compare / missing-track passes
+    compared blanks. Emitting both keeps every consumer working from one fetch.
+    """
     Artist_credit = Release.get("artist-credit") or []
     Release_group = Release.get("release-group") or {}
     if not isinstance(Release_group, dict):
@@ -1789,8 +1826,16 @@ def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None
     Artist_ref = First_artist.get("artist") if isinstance(First_artist, dict) else None
     Album_artist_mbid = str(Artist_ref.get("id") or "") if isinstance(Artist_ref, dict) else ""
 
+    # Album artist is the PRIMARY credit only; the full joined credit lives on
+    # ``artist_credit`` (and on each track's own artist).  Writing the joined
+    # string as the album artist made Navidrome split a collaboration release
+    # (e.g. "Weezer & Rivers Cuomo") into two albums.
+    Primary_artist = primary_album_artist(Artist_credit) or _mb_artist_credit_name(Artist_credit)
+    Joined_artist_credit = build_artist_credit_string(Artist_credit)
+
     Tracks: list[dict[str, Any]] = []
     Media = Release.get("media") or []
+    Absolute_track_number = 1
     for disc_index, medium in enumerate(Media, start=1):
         if not isinstance(medium, dict):
             continue
@@ -1803,21 +1848,121 @@ def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None
                 Recording = {}
             Position = track.get("position") if track.get("position") is not None else track.get("number")
             Length = track.get("length") if track.get("length") is not None else Recording.get("length")
-            
+            Track_title = str(track.get("title") or Recording.get("title") or "")
+
             genres = [
                 str(item.get("name") or "").strip()
                 for item in Recording.get("genres") or []
                 if isinstance(item, dict) and str(item.get("name") or "").strip()
             ]
-            
-            Tracks.append({
+            genres = list(dict.fromkeys(genres))
+
+            # Per-track artist: the recording's own credit when it has one,
+            # otherwise the release's joined credit (NOT the primary only —
+            # a featured credit belongs on the track).
+            Track_artist = (
+                build_artist_credit_string(Recording.get("artist-credit") or [])
+                if Recording.get("artist-credit")
+                else ""
+            ) or Joined_artist_credit or Primary_artist
+
+            entry: dict[str, Any] = {
+                "disc_number": Disc_number,
+                "track_number": _as_int(Position, 0) or None,
+                "absolute_track_number": Absolute_track_number,
+                "title": Track_title,
+                "artist": Track_artist,
+                "recording_mbid": str(Recording.get("id") or ""),
+                # MusicBrainz returns length in MILLISECONDS; ``duration`` is
+                # stored in that raw unit and normalised on consumption by
+                # ``queue_duration_seconds``.
+                "duration": Length,
+                # ── Keys consumed by ``_match_mb_tracks_to_library`` and
+                # ``release_group_tracklist_similarity``.  Kept in addition to
+                # the plain keys above because those two helpers predicate on
+                # ``mb_*``; dropping them silently broke the album compare,
+                # missing-track and tracklist-similarity passes.
                 "mb_disc_number": Disc_number,
                 "mb_track_number": _as_int(Position, 0),
-                "mb_title": str(track.get("title") or Recording.get("title") or ""),
+                "mb_title": Track_title,
                 "mb_recording_mbid": str(Recording.get("id") or ""),
                 "mb_duration": Length,
-                "mb_genres": list(dict.fromkeys(genres)),
-            })
+                "mb_genres": list(genres),
+            }
+            if genres:
+                # Stored as a comma-joined STRING (the tag writer splits on
+                # commas); ``mb_genres`` above keeps the list form.
+                entry["musicbrainz_genres"] = ", ".join(genres)
+
+            # ── Recording work relationships (writers + cover detection) ──
+            # A "performance"/"recording of" work relation names the song's
+            # WORK; the work's own relations name the writers.  When the work
+            # is credited to a different artist, this recording is a COVER.
+            try:
+                writers: list[str] = []
+                composers: list[str] = []
+                lyricists: list[str] = []
+                for relation in Recording.get("relations") or []:
+                    if not isinstance(relation, dict):
+                        continue
+                    if str(relation.get("type") or "").casefold() not in {"performance", "recording of"}:
+                        continue
+                    work = relation.get("work") or {}
+                    if not isinstance(work, dict):
+                        continue
+                    if work.get("id"):
+                        entry["work_mbid"] = str(work["id"])
+                    if work.get("title"):
+                        entry["work_title"] = str(work["title"])
+                    iswc = str(work.get("iswc") or "").strip()
+                    if iswc:
+                        entry["iswc"] = iswc
+                    for work_relation in work.get("relations") or []:
+                        if not isinstance(work_relation, dict):
+                            continue
+                        work_type = str(work_relation.get("type") or "").casefold()
+                        target = work_relation.get("artist") or {}
+                        if not isinstance(target, dict) or not target.get("name"):
+                            continue
+                        name = str(target["name"])
+                        if work_type == "composer":
+                            composers.append(name)
+                        elif work_type == "lyricist":
+                            lyricists.append(name)
+                        if work_type in {"composer", "writer", "lyricist"}:
+                            writers.append(name)
+                    work_credit = work.get("artist-credit") or []
+                    if work_credit:
+                        work_artist = primary_album_artist(work_credit)
+                        entry["work_artist"] = work_artist
+                        release_artist_key = _normalise_artist_key(Track_artist)
+                        work_artist_key = _normalise_artist_key(work_artist)
+                        if (
+                            release_artist_key
+                            and work_artist_key
+                            and release_artist_key != work_artist_key
+                        ):
+                            entry["is_cover"] = True
+                            entry["original_cover_artist"] = work_artist
+                            if work.get("title"):
+                                # original_title = the WORK's title (the song
+                                # being covered), not the local cover's title.
+                                entry["original_title"] = str(work["title"])
+                if composers:
+                    entry["composer"] = ", ".join(dict.fromkeys(composers))
+                if lyricists:
+                    entry["lyricist"] = ", ".join(dict.fromkeys(lyricists))
+                if writers:
+                    entry["writer"] = ", ".join(dict.fromkeys(writers))
+            except Exception as exc:
+                Logger.debug(
+                    "[MB] work-relation parse failed",
+                    recording_mbid=str(Recording.get("id") or ""),
+                    error=_error(exc),
+                )
+
+            Tracks.append(entry)
+            Absolute_track_number += 1
 
     return {
         "release_mbid": str(Release.get("id") or release_id),
@@ -1825,20 +1970,48 @@ def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None
         "release_group_title": str(Release_group.get("title") or ""),
         "release_title": str(Release.get("title") or ""),
         "specific_release_title": str(Release.get("title") or ""),
+        "compilation": 1 if "compilation" in {t.casefold() for t in Secondary_types} else 0,
+        "original_date": str(Release_group.get("first-release-date") or Release.get("date") or ""),
+        # ``original_year`` is the STRING form (tags are text and the year
+        # writer regexes digits out of it); ``original_release_year`` keeps the
+        # int form the scoring/batch paths expect.
+        "original_year": str(Original_release_year or ""),
         "original_release_year": Original_release_year,
         "release_year": Version_release_year or Original_release_year,
         "version_release_year": Version_release_year,
-        "artist": build_artist_credit_string(Artist_credit) or _mb_artist_credit_name(Artist_credit),
+        "artist": Primary_artist,
+        "artist_credit": Joined_artist_credit,
         "album_artist_mbid": Album_artist_mbid,
         "album_type": Album_type,
         "disc_count": len(Media),
-        "artist_credit": build_artist_credit_string(Artist_credit),
         **_release_extended_fields(Release, Media),
         "tracks": Tracks,
     }
 
 def fetch_release_metadata(release_id: str) -> dict[str, Any] | None:
-    return fetch_musicbrainz_release_metadata(release_id)
+    """Alias of ``fetch_musicbrainz_release_metadata`` for legacy callers.
+
+    Kept as a real function (not a bare alias) because tests and the download
+    pipeline patch THIS name, and it must fetch through whatever client is
+    currently registered — including ``_get_service().http``.
+    """
+    if not release_id:
+        return None
+    try:
+        Client = getattr(_get_service(), "http", None) or get_shared_mb_client()
+        Release = _fetch_raw_release(release_id, Client)
+    except Exception as exc:
+        Logger.warning(
+            "[MB] release track fetch failed",
+            release_id=release_id,
+            error=_error(exc),
+        )
+        return None
+
+    if not isinstance(Release, dict) or not Release.get("id"):
+        return None
+
+    return _flatten_release(Release, release_id)
 
 def resolve_release_id(release_id: str) -> str:
     if not release_id:

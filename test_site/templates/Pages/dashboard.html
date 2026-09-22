@@ -292,8 +292,18 @@
                                   which pages/dashboard.js calls to fetch
                                   and render the upcoming-releases table.
                                   Must load BEFORE pages/dashboard.js.
+    services/musicbrainz-queue.js  provides global.searchMusicBrainzRelease —
+                                  the SAME function the per-row Search button
+                                  in the upcoming table calls (via
+                                  UpcomingReleasesService.search).  Its
+                                  dedicated page (Pages/downloads/upcoming.html)
+                                  loads it explicitly; the dashboard did not, so
+                                  every Search click reported "MusicBrainz search
+                                  is unavailable on this page."
+                                  Must load BEFORE pages/dashboard.js.
 #}
 <script src="{{ versioned_static('js/ui/status-badge.js') }}"></script>
+<script src="{{ versioned_static('js/services/musicbrainz-queue.js') }}"></script>
 <script src="{{ versioned_static('js/services/upcoming-releases.js') }}"></script>
 <script src="{{ versioned_static('js/pages/dashboard.js') }}"></script>
 {% endblock %}

@@ -243,11 +243,15 @@ def add_release_tracks_to_queue(
             seen_recordings: set[str] = set()
 
             for track in tracks:
-                track_title = track.get("title") or "Unknown Track"
+                track_title = track.get("title") or track.get("mb_title") or "Unknown Track"
                 track_artist = track.get("artist") or artist
                 track_number = track.get("track_number")
+                if track_number in (None, ""):
+                    track_number = track.get("mb_track_number")
                 disc_number = track.get("disc_number", 1)
-                recording_mbid = track.get("recording_mbid")
+                if disc_number in (None, ""):
+                    disc_number = track.get("mb_disc_number", 1)
+                recording_mbid = track.get("recording_mbid") or track.get("mb_recording_mbid")
 
                 dedupe_key = str(recording_mbid or "").strip().lower()
                 if not dedupe_key:
@@ -256,7 +260,11 @@ def add_release_tracks_to_queue(
                     continue
                 seen_recordings.add(dedupe_key)
 
-                duration = queue_duration_seconds(track.get("duration") or track.get("length"))
+                duration = queue_duration_seconds(
+                    track.get("duration")
+                    or track.get("mb_duration")
+                    or track.get("length")
+                )
                 existing = find_library_track(artist=track_artist, title=track_title, album=album)
                 if existing:
                     continue
@@ -287,8 +295,15 @@ def add_release_tracks_to_queue(
                     _mb_meta["is_cover"] = True
                     if track.get("original_cover_artist"):
                         _mb_meta["original_cover_artist"] = track["original_cover_artist"]
-                if track.get("musicbrainz_genres"):
-                    _mb_meta["musicbrainz_genres"] = track["musicbrainz_genres"]
+                # ``musicbrainz_genres`` is a comma-joined string on the tag
+                # surface; the MB release payload also carries the list form
+                # as ``mb_genres``, so accept either rather than silently
+                # dropping the genres.
+                _genres = track.get("musicbrainz_genres")
+                if not _genres and track.get("mb_genres"):
+                    _genres = ", ".join(str(g) for g in track["mb_genres"] if str(g).strip())
+                if _genres:
+                    _mb_meta["musicbrainz_genres"] = _genres
 
                 result = session.execute(
                     text("""
