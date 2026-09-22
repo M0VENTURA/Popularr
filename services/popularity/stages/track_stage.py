@@ -1866,6 +1866,34 @@ def process_track(
                 elif _cover_wording_removed and not _cover_manual_override:
                     update_payload["is_cover"] = False
                     update_payload["is_cover_reason"] = "cover attribution removed from title"
+
+                    # ── Claim the CLEANED title ──────────────────────────────
+                    # ``prepare_track_context`` already stripped the "(X Cover)"
+                    # wording IN PLACE on the loaded row, but ``title`` is in
+                    # ``_STALE_PROTECTED_COLUMNS``: ``_strip_album_type_columns``
+                    # DROPS it unless ``update_payload`` claims it. That guard
+                    # exists so a stale loaded title cannot clobber the album
+                    # stage's rename of a GENUINE cover — but this branch only
+                    # runs when detection has just decided the track is NOT a
+                    # cover, so no rename applies and the cleaned title is the
+                    # authoritative value.
+                    #
+                    # ⚠️ The comparison must NOT be against ``track.get("title")``:
+                    # the loaded dict was already mutated to the cleaned value, so
+                    # comparing against it can never differ and the claim never
+                    # fires — the DB then keeps "TrackName (Artist Cover)" while
+                    # ``is_cover`` reads False, which is the reported mismatch.
+                    _clean_title = _as_str(title).strip()
+                    if _clean_title:
+                        update_payload["title"] = _clean_title
+
+                    # ── Purge the stale "Cover" genre from EVERY genre column ─
+                    # The aggregation at step 5 re-votes from ``effective_track``,
+                    # which still carries the OLD ``genres`` CSV ("Cover, Rock")
+                    # and the OLD ``musicbrainz_genres`` list on the raw row, so
+                    # filtering ``musicbrainz_genres`` alone let "Cover" come
+                    # straight back through the ``genres`` column. Seed both
+                    # columns from the filtered lists instead.
                     _mbg = update_payload.get("musicbrainz_genres")
                     if _mbg is None:
                         _mbg = track.get("musicbrainz_genres")
@@ -1874,13 +1902,31 @@ def process_track(
                             _mbg = json.loads(_mbg)
                         except Exception:
                             _mbg = []
-                    if isinstance(_mbg, list):
-                        _mbg = [g for g in _mbg if str(g).strip().lower() != "cover"]
-                        update_payload["musicbrainz_genres"] = json.dumps(_mbg, ensure_ascii=False)
+                    if not isinstance(_mbg, list):
+                        _mbg = []
+                    _mbg = [
+                        g for g in _mbg
+                        if str(g).strip().lower() != "cover"
+                    ]
+                    update_payload["musicbrainz_genres"] = json.dumps(_mbg, ensure_ascii=False)
+
+                    # The aggregated CSV: drop "cover" and keep the rest. When
+                    # nothing survives, claim the empty value (the JSONB/CSV
+                    # normalisation below turns None into ""), otherwise the
+                    # stale CSV is what gets written back.
+                    _csv_raw = update_payload.get("genres")
+                    if _csv_raw is None:
+                        _csv_raw = track.get("genres")
+                    _csv_kept = [
+                        g.strip() for g in _parse_genre_input(_csv_raw)
+                        if g.strip() and g.strip().lower() != "cover"
+                    ]
+                    update_payload["genres"] = ", ".join(_csv_kept)
+
                     logger.info(
                         "[TRACK] false cover flag cleared",
                         track_id=track_id,
-                        title=title,
+                        title=_clean_title,
                         detector_verdict=reason,
                     )
         except Exception as e:
