@@ -2520,6 +2520,212 @@ def _match_mb_tracks_to_library(
 
     return Comparison, Extra_tracks
 
+
+def match_mb_tracks_to_files(
+    release_metadata: dict[str, Any] | None,
+    files: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Pair a release's MusicBrainz tracklist with the files on disk.
+
+    Deciding WHICH release a folder is belongs to a user choice; deciding which
+    FILE inside that folder is which TRACK of the release is mechanical, and
+    this is where it happens.
+
+    Each returned entry is one MusicBrainz track, carrying ``matched`` plus the
+    resolved ``file_path`` and the fields ``update_file_metadata`` consumes
+    (``title`` / ``artist`` / ``track_number`` / ``disc_number`` / ``album`` /
+    ``album_artist`` / ``recording_mbid`` / ``release_mbid`` / ``year`` and the
+    per-recording enrichment: genres, writer, work MBID, cover attribution).
+
+    Why this exists: ``match_folder_to_release`` used to read each file's OWN
+    tags and move it, so a release the user had just picked in Matched &
+    Unmatched Folders was filed under whatever the existing tags happened to
+    say — and ''/None in those tags meant the app derived a title from the
+    FILENAME.  The inline fallback that was supposed to cover the gap could
+    never fire: it iterated tracks fetched with ``inc=recordings+media``, which
+    carry ``title``/``position``, while comparing ``mb_trk["title"]`` against a
+    ``number`` key that no MusicBrainz track ever has.
+
+    Matching order per MusicBrainz track:
+      1. same track number (and disc, when BOTH sides state one),
+      2. same normalized title,
+      3. fuzzy title similarity >= ``_TRACKLIST_TITLE_FLOOR``.
+    A local file is claimed at most once, so two identical titles on one
+    release resolve in tracklist order rather than both collapsing onto the
+    first file.
+
+    Never invents metadata: an unmatched MusicBrainz track comes back with
+    ``matched=False`` and no ``file_path``, and a local file matching no track
+    is simply not represented — the caller keeps the file's own values.
+    """
+    if not isinstance(release_metadata, dict) or not files:
+        return []
+
+    def _track_number(value: Any) -> int | None:
+        text = str(value).split("/")[0].strip() if value is not None else ""
+        try:
+            return int(text)
+        except (TypeError, ValueError):
+            return None
+
+    def _disc_number(value: Any) -> int | None:
+        text = str(value).split("/")[0].strip() if value is not None else ""
+        try:
+            return int(text)
+        except (TypeError, ValueError):
+            return None
+
+    Album_artist = str(release_metadata.get("artist") or "").strip()
+    Album_title = str(
+        release_metadata.get("release_group_title")
+        or release_metadata.get("release_title")
+        or release_metadata.get("title")
+        or ""
+    ).strip()
+    Release_mbid = str(release_metadata.get("release_mbid") or "").strip()
+    # ``release_year`` is the specific release's year (the edition the user
+    # picked); ``original_year`` is the release GROUP's first release.  DATE
+    # tags the edition, ORIGINALYEAR keeps the original — never swap them.
+    Edition_year = str(release_metadata.get("release_year") or "").strip()
+    Original_year = str(
+        release_metadata.get("original_year") or release_metadata.get("year") or ""
+    ).strip()
+
+    Remaining = list(files)
+    Entries: list[dict[str, Any]] = []
+
+    for mb_track in release_metadata.get("tracks") or []:
+        if not isinstance(mb_track, dict):
+            continue
+
+        Mb_title = str(mb_track.get("mb_title") or mb_track.get("title") or "").strip()
+        Mb_number = mb_track.get("mb_track_number")
+        if Mb_number is None:
+            Mb_number = mb_track.get("track_number")
+        Mb_disc = mb_track.get("mb_disc_number")
+        if Mb_disc is None:
+            Mb_disc = mb_track.get("disc_number")
+        Mb_track_num = _track_number(Mb_number)
+        Mb_disc_num = _disc_number(Mb_disc)
+        Mb_norm = Normalize_title_for_lookup(Mb_title)
+
+        Entry: dict[str, Any] = {
+            "mb_track_number": Mb_track_num,
+            "mb_disc_number": Mb_disc_num,
+            "mb_title": Mb_title,
+            "mb_recording_mbid": str(
+                mb_track.get("mb_recording_mbid") or mb_track.get("recording_mbid") or ""
+            ).strip(),
+            "matched": False,
+            "file_path": "",
+        }
+
+        Match: dict[str, Any] | None = None
+
+        # 1) Track number. ``helpers.metadata_reader`` only surfaces a
+        #    track_number for files whose TRACKNUMBER tag is set, so this is
+        #    the only reliable identity for a well-tagged download.
+        if Mb_track_num is not None:
+            for candidate in Remaining:
+                if _track_number(candidate.get("track_number")) != Mb_track_num:
+                    continue
+                # A blank disc on the FILE is a wildcard: the reader does not
+                # populate disc_number at all for FLAC/MP3, so requiring a
+                # match would reject every disc-2 file of a 2-disc release.
+                Candidate_disc = _disc_number(candidate.get("disc_number"))
+                if (
+                    Mb_disc_num is not None
+                    and Candidate_disc is not None
+                    and Candidate_disc != Mb_disc_num
+                ):
+                    continue
+                Match = candidate
+                break
+
+        # 2) Exact normalized title — covers files with no track number, which
+        #    is exactly the untagged/unordered folder case.
+        if Match is None and Mb_norm:
+            for candidate in Remaining:
+                if Normalize_title_for_lookup(str(candidate.get("title") or "")) == Mb_norm:
+                    Match = candidate
+                    break
+
+        # 3) Fuzzy title, but only while the track numbers cannot disagree.
+        if Match is None and Mb_norm:
+            Best_candidate: dict[str, Any] | None = None
+            Best_score = 0.0
+            for candidate in Remaining:
+                Candidate_num = _track_number(candidate.get("track_number"))
+                if (
+                    Candidate_num is not None
+                    and Mb_track_num is not None
+                    and Candidate_num != Mb_track_num
+                ):
+                    continue
+                score = _similarity(
+                    Normalize_title_for_lookup(str(candidate.get("title") or "")),
+                    Mb_norm,
+                )
+                if score > Best_score:
+                    Best_candidate, Best_score = candidate, score
+            if Best_candidate is not None and Best_score >= _TRACKLIST_TITLE_FLOOR:
+                Match = Best_candidate
+
+        if Match is None:
+            Entries.append(Entry)
+            continue
+
+        Remaining.remove(Match)
+
+        # The FILE keeps its own artist when it names one (a per-track featured
+        # or collaboration credit is real data); the MusicBrainz values decide
+        # everything that identifies the ALBUM and the track's position in it.
+        File_artist = str(Match.get("artist") or "").strip()
+        Resolved_artist = (
+            str(mb_track.get("artist") or "").strip() or File_artist or Album_artist
+        )
+
+        Entry.update(
+            {
+                "matched": True,
+                "file_path": str(Match.get("file_path") or ""),
+                "title": Mb_title or str(Match.get("title") or "").strip(),
+                "artist": Resolved_artist,
+                "album": Album_title,
+                "album_artist": Album_artist,
+                "track_number": Mb_number if Mb_number is not None else Match.get("track_number"),
+                "disc_number": Mb_disc if Mb_disc is not None else Match.get("disc_number"),
+                "recording_mbid": Entry["mb_recording_mbid"],
+                "release_mbid": Release_mbid,
+                "release_year": Edition_year,
+                "originalyear": Original_year or Edition_year,
+            }
+        )
+
+        # Per-recording enrichment: without this the imported file loses the
+        # genres / writer / cover attribution it was matched with, which is the
+        # same regression the queue-completion path already fixed.
+        for _source, _target in (
+            ("musicbrainz_genres", "musicbrainz_genres"),
+            ("writer", "writer"),
+            ("work_mbid", "work_mbid"),
+            ("original_cover_artist", "original_cover_artist"),
+            ("original_title", "original_title"),
+            ("iswc", "iswc"),
+        ):
+            _value = mb_track.get(_source)
+            if _value not in (None, "", [], {}):
+                Entry[_target] = _value
+        if mb_track.get("is_cover"):
+            # Kept as the boolean the MusicBrainz data carries;
+            # ``update_file_metadata`` accepts True/1/"1"/"true" alike.
+            Entry["is_cover"] = True
+
+        Entries.append(Entry)
+
+    return Entries
+
+
 def _title_present_in(
     title: str,
     candidates: list[str],

@@ -1576,6 +1576,11 @@ async def album_detail(album_path: str) -> Any:
         updated_count = 0
         reverted_live_count = 0
         file_sync_failures = 0
+        # Genres are written through a dedicated repository call rather than
+        # through ``payload``, so the loop below never counted them.  Saving an
+        # album whose ONLY edit was the genre chips therefore wrote the genres
+        # and still reported "No changes were made."  Counted separately here.
+        genre_only_writes = 0
 
         for track in tracks:
             track_id = track.get("id")
@@ -1736,11 +1741,15 @@ async def album_detail(album_path: str) -> Any:
                     if g.strip()
                 ]
                 genres_str_clean = ", ".join(genres_list)
-                
+
                 if genres_list:
                     from db.repositories.metadata import update_track_genres
-                    update_track_genres(track_id=track_id, genres_str=genres_str_clean)
-                    
+                    _genre_rows = update_track_genres(track_id=track_id, genres_str=genres_str_clean)
+                    # Genres bypass ``payload``, so they must be counted here or
+                    # a genres-only save is reported as "No changes were made".
+                    if _genre_rows:
+                        genre_only_writes += 1
+
                     file_path = resolve_music_file_path(track.get("file_path"))
                     if file_path:
                         try:
@@ -1882,7 +1891,24 @@ async def album_detail(album_path: str) -> Any:
                 )
 
         if updated_count == 0 and reverted_live_count == 0 and file_sync_failures == 0:
-            await flash("No changes were made.", "info")
+            # Genres are written outside the payload, so a save whose ONLY edit
+            # was the genre chips did reach the DB even though ``updated_count``
+            # is 0.  Reporting "No changes were made." there was simply wrong.
+            if genre_only_writes:
+                await flash(
+                    f"Album genres saved — {genre_only_writes} track(s) updated.",
+                    "success",
+                )
+            elif not tracks:
+                # There is genuinely nothing to write: the album matched no
+                # track rows.  Saying "no changes" implied the values were
+                # already correct when nothing was even considered.
+                await flash(
+                    "⚠️ No tracks found for this album — nothing could be saved.",
+                    "warning",
+                )
+            else:
+                await flash("No changes were made.", "info")
 
         redirect_artist = new_artist or artist_name
         redirect_album = new_title or album_name

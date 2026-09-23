@@ -938,6 +938,86 @@ def associate_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
         return {"success": False, "error": str(exc)}
 
 
+def _apply_release_metadata_to_files(
+    *,
+    files: list[dict[str, Any]],
+    album_artist: str,
+    album: str,
+    year: str,
+    release_mbid: str,
+) -> dict[str, dict[str, Any]]:
+    """Fetch the release's MusicBrainz metadata and write it to the files.
+
+    Returns ``{file_path: matched_values}`` for the files whose tags were
+    actually written.  ``match_folder_to_release`` feeds those same values into
+    the move so the tags, the DB row and the destination filename all come from
+    ONE source and cannot disagree.
+
+    Everything here is best-effort: a MusicBrainz outage or an unwritable file
+    must never abort an import that would otherwise succeed, so failures fall
+    back to the file's own tags.
+    """
+    if not release_mbid or not files:
+        return {}
+
+    try:
+        from services.enrichment.musicbrainz_service import (
+            fetch_musicbrainz_release_metadata,
+            match_mb_tracks_to_files,
+        )
+
+        release_metadata = fetch_musicbrainz_release_metadata(release_mbid)
+    except Exception as exc:
+        logger.debug("Release metadata fetch failed during folder match", error=str(exc))
+        return {}
+
+    if not release_metadata:
+        logger.debug("No MusicBrainz metadata for release", release_mbid=release_mbid)
+        return {}
+
+    entries = match_mb_tracks_to_files(release_metadata, files)
+    matched = [entry for entry in entries if entry.get("matched") and entry.get("file_path")]
+    if not matched:
+        logger.info(
+            "Folder match: no track could be matched to the release tracklist",
+            release_mbid=release_mbid, file_count=len(files),
+        )
+        return {}
+
+    from services.metadata.tag_file_service import update_file_metadata
+
+    applied: dict[str, dict[str, Any]] = {}
+    for entry in matched:
+        path = str(entry.get("file_path") or "")
+        payload = {k: v for k, v in entry.items() if k not in {"file_path", "matched"}}
+        # The resolved release/album identity wins; the caller's values are only
+        # a fallback for the fields MusicBrainz did not supply.  (``setdefault``
+        # is not enough — the mapper always emits the keys, sometimes empty.)
+        if not payload.get("album"):
+            payload["album"] = album
+        if not payload.get("album_artist"):
+            payload["album_artist"] = album_artist
+        if not payload.get("release_year"):
+            payload["release_year"] = year
+        if not payload.get("recording_mbid"):
+            payload.pop("recording_mbid", None)
+        try:
+            if update_file_metadata(path, payload):
+                applied[path] = payload
+            else:
+                logger.debug("Tag write skipped for folder-match file", path=path)
+        except Exception as exc:
+            logger.warning("Could not write release metadata to file", path=path, error=str(exc))
+
+    logger.info(
+        "Applied MusicBrainz release metadata to matched files",
+        release_mbid=release_mbid,
+        matched_files=len(applied),
+        release_tracks=len(entries),
+    )
+    return applied
+
+
 def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
     """Phase 2: Confirm match and execute migration/organization pipeline."""
     try:
@@ -961,7 +1041,6 @@ def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
         from api_clients.musicbrainz_http import MusicBrainzHttpClient
         from helpers.config_helpers import get_config
         from helpers.metadata_reader import read_mp3_metadata
-        from helpers.normalization_service import edition_annotations_compatible, normalize_title_for_lookup
         from services.downloads.download_organize_helpers import move_track_to_library
         from services.enrichment.musicbrainz_service import build_artist_credit_string, primary_album_artist
 
@@ -977,14 +1056,6 @@ def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
         album = (release_data.get("title") or "").strip() or "Unknown Album"
         year = (release_data.get("date") or "")[:4]
 
-        mb_tracks: list[dict[str, Any]] = []
-        for medium in release_data.get("media") or []:
-            for trk in medium.get("tracks") or []:
-                mb_tracks.append({
-                    "title": str(trk.get("title") or "").strip(),
-                    "number": trk.get("number"),
-                })
-
         moved = 0
         errors: list[str] = []
         music_root = Path(
@@ -992,32 +1063,64 @@ def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
             or os.environ.get("MUSIC_ROOT", "/music")
         )
 
+        # ── Fetch the release's MusicBrainz tracklist and apply it ────────
+        # Deciding that this folder IS this release is the user's choice; working
+        # out which file is which track, and writing the release's metadata to
+        # the files, has to happen here — BEFORE the move.  ``move_track_to_library``
+        # only builds a path and moves the file; it writes no tags, so without
+        # this step the released was imported carrying whatever tags the files
+        # already had (and a missing title tag meant a title derived from the
+        # FILENAME).  The values applied here are reused for the move so the
+        # tags, the DB row and the filename all agree.
+        audio_files: list[dict[str, Any]] = []
         for audio in _get_files_in_folder(folder_abs):
             if not audio.get("is_audio"):
                 continue
             src = os.path.join(folder_abs, audio["name"])
-            
             try:
                 track_meta = read_mp3_metadata(src) or {}
             except Exception:
                 track_meta = {}
+            audio_files.append(
+                {
+                    "file_path": src,
+                    "title": str(track_meta.get("title") or "").strip(),
+                    "artist": str(track_meta.get("artist") or "").strip(),
+                    "track_number": track_meta.get("track_number"),
+                    "disc_number": track_meta.get("disc_number"),
+                }
+            )
 
-            title = str(track_meta.get("title") or "").strip()
-            track_artist = str(track_meta.get("artist") or "").strip() or release_credit
-            number = track_meta.get("track_number")
+        applied_metadata = _apply_release_metadata_to_files(
+            files=audio_files,
+            album_artist=album_artist,
+            album=album,
+            year=year,
+            release_mbid=release_mbid,
+        )
 
-            if not title or number is None:
-                match_title = title or Path(src).stem
-                norm_title = normalize_title_for_lookup(match_title)
-                for mb_trk in mb_tracks:
-                    if not mb_trk["title"]:
-                        continue
-                    if not edition_annotations_compatible(match_title, mb_trk["title"]):
-                        continue
-                    if normalize_title_for_lookup(mb_trk["title"]) == norm_title:
-                        title = mb_trk["title"]
-                        number = mb_trk.get("number")
-                        break
+        for audio in audio_files:
+            src = audio["file_path"]
+            track_meta = {
+                "title": audio.get("title"),
+                "artist": audio.get("artist"),
+                "track_number": audio.get("track_number"),
+            }
+            resolved = applied_metadata.get(src) or {}
+
+            if resolved:
+                # The release's values are authoritative for identity.
+                title = str(resolved.get("title") or "").strip()
+                track_artist = str(resolved.get("artist") or "").strip() or release_credit
+                number = resolved.get("track_number")
+                disc_number = resolved.get("disc_number")
+            else:
+                # No MusicBrainz counterpart for this file — keep its own tags.
+                # Never apply a sibling track's metadata to it.
+                title = str(track_meta.get("title") or "").strip()
+                track_artist = str(track_meta.get("artist") or "").strip() or release_credit
+                number = track_meta.get("track_number")
+                disc_number = None
 
             result = move_track_to_library(
                 {
@@ -1025,6 +1128,7 @@ def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
                     "artist": track_artist,
                     "title": title or Path(src).stem,
                     "track_number": number,
+                    "disc_number": disc_number,
                 },
                 {
                     "album_artist": album_artist,
@@ -1074,6 +1178,10 @@ def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
             "album_artist": album_artist,
             "album": album,
             "year": year,
+            # How many files actually received the release's MusicBrainz
+            # metadata. Surfaced so a caller can tell "matched the release but
+            # could not write the tags" apart from "everything went to plan".
+            "metadata_updated": len(applied_metadata),
         }
     except Exception as exc:
         logger.error("Match folder error", error=str(exc), exc_info=True)
