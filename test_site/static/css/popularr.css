@@ -163,6 +163,29 @@ main.container-fluid {
     .nav-links-wrapper  { flex: 0 0 auto; width: auto; order: 3; }
 }
 
+/* The Ctrl+K affordance inside the search box.
+   A SIBLING of the input inside the input-group rather than an absolutely
+   positioned overlay, because an overlay would cover the text being typed.
+   `d-none d-lg-flex` in the markup hides it wherever the navbar is tight. */
+.search-kbd-hint {
+    gap: 0.15rem;
+    cursor: default;
+    user-select: none;
+}
+
+.search-kbd {
+    display: inline-block;
+    padding: 0.05rem 0.3rem;
+    font-size: 0.68rem;
+    line-height: 1.2;
+    font-family: var(--bs-font-monospace, monospace);
+    color: var(--text-secondary);
+    background-color: var(--tertiary-bg);
+    border: 1px solid var(--border-color);
+    border-bottom-width: 2px;
+    border-radius: var(--radius-sm, 0.25rem);
+}
+
 /* The global modal wrappers in base.html are direct children of <body>,
    which is a flex column. Their contents are position:fixed modals, so the
    wrappers themselves would sit in the flex flow as zero-height items.

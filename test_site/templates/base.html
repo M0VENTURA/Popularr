@@ -44,13 +44,23 @@
       </div>
 
       <!-- Persistent Global Search Bar -->
-      <div class="nav-search-wrapper" id="navSearchForm" title="Search library or MusicBrainz">
+      <div class="nav-search-wrapper" id="navSearchForm" title="Search library or MusicBrainz (Ctrl+K)">
         <div class="input-group input-group-sm">
           <span class="input-group-text bg-dark border-secondary text-muted"><i class="bi bi-search"></i></span>
           <input type="text" id="navSearchInput" class="form-control bg-dark text-light border-secondary shadow-none"
                  placeholder="Search library or MusicBrainz…" autocomplete="off" aria-label="Search library or MusicBrainz"
+                 aria-keyshortcuts="Control+K Meta+K"
                  onfocus="openUnifiedSearch();this.select();"
                  oninput="syncNavSearchQuery()">
+          {# The shortcut hint is a SIBLING of the input inside the input-group,
+             not positioned over it: an absolutely-positioned overlay would sit
+             on top of the text the user is typing. `d-none d-lg-flex` hides it
+             wherever the navbar is tight — below lg the search row wraps and
+             the badge would crowd the input it labels. #}
+          <span class="input-group-text bg-dark border-secondary text-muted search-kbd-hint d-none d-lg-flex align-items-center"
+                id="navSearchKbdHint" title="Press Ctrl+K (⌘K on Mac) to search" aria-hidden="true">
+            <kbd class="search-kbd" id="navSearchKbd">Ctrl</kbd><kbd class="search-kbd">K</kbd>
+          </span>
           <button class="btn btn-outline-secondary btn-sm" type="button" title="Search" aria-label="Search" onclick="openUnifiedSearch()">
             <i class="bi bi-search"></i>
           </button>
@@ -102,9 +112,34 @@
           </li>
           {% endif %}
 
-          <li class="nav-item d-none d-lg-block"><a class="nav-link px-2" href="{{ url_for('ui.logs') }}" title="Logs"><i class="bi bi-file-text"></i></a></li>
-          <li class="nav-item d-none d-lg-block"><a class="nav-link px-2" href="{{ url_for('ui.help_page') }}" title="Help"><i class="bi bi-question-circle"></i></a></li>
-          <li class="nav-item d-none d-lg-block"><a class="nav-link px-2" href="{{ url_for('ui.config_editor') }}" title="Config"><i class="bi bi-gear"></i></a></li>
+          {#
+            SYSTEM MENU — Logs / Help / Config / Tag Corrections.
+
+            These were four separate top-level items (three icon-only links plus
+            "Tag Corrections" buried in the Artists dropdown), which made eleven
+            entries in one navbar. Between the lg and xl breakpoints every label
+            is hidden (`d-lg-none d-xl-inline`), so the icon-only items sat next
+            to unlabelled primary links with nothing to distinguish a page from a
+            utility — the crowding reported on 1024px–1280px viewports.
+
+            Folding them into one dropdown keeps every destination reachable
+            while removing three icons from the bar. `Tag Corrections` is listed
+            here as well as in the Artists menu on purpose: it is genuinely both,
+            and the Artists menu is where returning users look for it.
+
+            Keep the user menu for account-scoped actions only.  #}
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle" href="#" id="systemDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+              <i class="bi bi-gear-wide-connected"></i> <span class="d-none d-xl-inline">System</span>
+            </a>
+            <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end" aria-labelledby="systemDropdown">
+              <li><a class="dropdown-item" href="{{ url_for('ui.logs') }}"><i class="bi bi-file-text me-2"></i> Logs</a></li>
+              <li><a class="dropdown-item" href="{{ url_for('ui.correcting') }}"><i class="bi bi-tools me-2"></i> Tag Corrections</a></li>
+              <li><hr class="dropdown-divider"></li>
+              <li><a class="dropdown-item" href="{{ url_for('ui.help_page') }}"><i class="bi bi-question-circle me-2"></i> Help</a></li>
+              <li><a class="dropdown-item" href="{{ url_for('ui.config_editor') }}"><i class="bi bi-gear me-2"></i> Config</a></li>
+            </ul>
+          </li>
 
           {% if session.get('username') %}
           <li class="nav-item dropdown">
@@ -112,10 +147,6 @@
               <i class="bi bi-person-circle"></i> <span class="d-lg-none d-xl-inline">{{ session.get('username') }}</span>
             </a>
             <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
-              <li class="d-lg-none"><a class="dropdown-item" href="{{ url_for('ui.logs') }}"><i class="bi bi-file-text me-2"></i> Logs</a></li>
-              <li class="d-lg-none"><a class="dropdown-item" href="{{ url_for('ui.help_page') }}"><i class="bi bi-question-circle me-2"></i> Help</a></li>
-              <li class="d-lg-none"><a class="dropdown-item" href="{{ url_for('ui.config_editor') }}"><i class="bi bi-gear me-2"></i> Config</a></li>
-              <li class="d-lg-none"><hr class="dropdown-divider"></li>
               <li><a class="dropdown-item text-danger" href="{{ url_for('ui.logout') }}"><i class="bi bi-box-arrow-right me-2"></i> Logout</a></li>
             </ul>
           </li>

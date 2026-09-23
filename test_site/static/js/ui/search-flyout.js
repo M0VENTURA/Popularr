@@ -972,6 +972,52 @@
       }
     });
 
+    // ------------------------------------------------------------------
+    // Ctrl+K / ⌘K opens the unified search.
+    //
+    // Bound on `document` rather than on the banner input because the whole
+    // point is to work when focus is ANYWHERE — a shortcut that only fires
+    // once you have already clicked into the box saves nobody anything.
+    //
+    // The modifier check is deliberately `ctrlKey || metaKey` with the other
+    // one EXCLUDED, so Ctrl+Cmd+K does not also match. The labels on the
+    // matched keys are compared case-insensitively because `key` is 'k' when
+    // no modifier is held but 'K' when Shift is part of the combination, and
+    // some layouts report the uppercase form regardless.
+    //
+    // preventDefault stops two real collisions: the browser's own
+    // "focus address bar / search" binding, and — because Ctrl+K is also
+    // bound by several editors and by Chrome's search box — jumping the page.
+    // ------------------------------------------------------------------
+    document.addEventListener('keydown', function (e) {
+      if (!(e.ctrlKey || e.metaKey) || e.ctrlKey && e.metaKey) return;
+      if (String(e.key || '').toLowerCase() !== 'k') return;
+      // Never hijack the combination inside a text field: the user may be
+      // typing, and a browser/OS shortcut must keep working there.
+      const target = e.target;
+      const tag = String((target && target.tagName) || '').toLowerCase();
+      if (target && (target.isContentEditable || tag === 'input' || tag === 'textarea' || tag === 'select')) {
+        return;
+      }
+      e.preventDefault();
+      openUnifiedSearch();
+    });
+
+    // Label the hint with the modifier the platform actually uses: ⌘ on Apple
+    // hardware, Ctrl everywhere else. Navigator.platform is deprecated but is
+    // still the only synchronous way to tell them apart, and a wrong label is
+    // merely cosmetic if it is ever unavailable.
+    try {
+      const isMac = /Mac|iPhone|iPad|iPod/i.test(
+        (navigator.userAgentData && navigator.userAgentData.platform) ||
+        navigator.platform ||
+        navigator.userAgent ||
+        ''
+      );
+      const kbd = document.getElementById('navSearchKbd');
+      if (kbd) kbd.textContent = isMac ? '⌘' : 'Ctrl';
+    } catch (_e) { /* cosmetic only */ }
+
     // Typing syncs text only — no live searching.
     input.addEventListener('input', function () {
       const navEl = document.getElementById('navSearchInput');
