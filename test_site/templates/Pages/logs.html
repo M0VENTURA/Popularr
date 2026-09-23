@@ -59,10 +59,24 @@
 
     <!-- Filter Row -->
     <div class="p-2 mb-3 rounded border border-secondary d-flex flex-wrap gap-3 align-items-center flex-shrink-0" id="logFilterRow" style="background: var(--tertiary-bg);">
-        <div class="input-group input-group-sm" style="max-width: 320px;">
+        {#
+          The two mode toggles live INSIDE the input-group so they read as part
+          of the field they modify, not as separate controls. `aria-pressed`
+          carries the on/off state for assistive tech — a `.active` class alone
+          conveys nothing. The `<code>` glyphs (.* / Aa) are the conventional
+          affordances and need a monospace face to line up.
+        #}
+        <div class="input-group input-group-sm" style="max-width: 420px;">
             <span class="input-group-text bg-dark border-secondary"><i class="bi bi-search text-muted"></i></span>
             <input type="text" id="logFilterInput" class="form-control bg-dark text-light border-secondary" placeholder="Filter output (e.g., 'Error')..." autocomplete="off">
+            <button type="button" class="btn btn-outline-secondary log-filter-mode" id="filterRegexBtn"
+                    title="Treat the filter as a regular expression" aria-pressed="false"><code>.*</code></button>
+            <button type="button" class="btn btn-outline-secondary log-filter-mode" id="filterCaseBtn"
+                    title="Match case" aria-pressed="false"><code>Aa</code></button>
         </div>
+        {# Populated by logs.js on every render: "12 / 500 lines". Kept in the
+           DOM unconditionally so the module never has to create it. #}
+        <small class="text-muted" id="logMatchCount" aria-live="polite"></small>
         <div class="btn-group btn-group-sm" role="group" aria-label="Log level filter" id="logLevelFilters">
             <button type="button" class="btn btn-outline-secondary active fw-bold" data-level="all">All</button>
             <button type="button" class="btn btn-outline-danger" data-level="error" title="ERROR / CRITICAL"><i class="bi bi-x-octagon d-none d-md-inline"></i> Errors</button>
@@ -77,7 +91,7 @@
     </div>
 
     <!-- Log Viewer Card (Flex-grow to push to bottom of screen) -->
-    <div class="card flex-grow-1 d-flex flex-column shadow-sm overflow-hidden" style="min-height: 0;">
+    <div class="card flex-grow-1 d-flex flex-column shadow-sm overflow-hidden position-relative" style="min-height: 0;">
         <div class="card-header bg-dark border-bottom border-secondary py-1 px-3 d-flex justify-content-between align-items-center flex-shrink-0">
             <span id="tailBannerText" class="small text-warning fw-semibold d-none"></span>
             <button type="button" id="loadFullLogBtn" class="btn btn-sm btn-link text-info text-decoration-none py-0 ms-auto d-none" title="Load the entire log file">Load Full Log</button>
@@ -85,6 +99,23 @@
 
         <!-- The PRE tag scrolls natively -->
         <pre id="logOutput" class="card-body bg-dark text-light p-3 mb-0 flex-grow-1" style="overflow-y: auto; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; line-height: 1.5; white-space: pre; word-wrap: normal; scrollbar-width: thin;"></pre>
+
+        {#
+          Scroll-to-bottom affordance. Lives INSIDE the card (which is
+          `position-relative`) so it floats over the log output rather than
+          over the page. Hidden until the user scrolls away from the bottom
+          AND new lines arrive — see logs.js's updateJumpButton().
+
+          The count badge is `aria-hidden` because the button's own accessible
+          name already reports it (updateJumpButton sets aria-label), so a
+          screen reader would otherwise announce the number twice.
+        #}
+        <button type="button" id="scrollToBottomBtn"
+                class="btn btn-primary btn-sm rounded-circle shadow log-jump-btn d-none"
+                title="Jump to newest lines" aria-label="Jump to newest lines">
+            <i class="bi bi-arrow-down"></i>
+            <span class="badge bg-danger rounded-pill log-jump-badge d-none" id="unreadLogBadge" aria-hidden="true">0</span>
+        </button>
     </div>
 </div>
 {% endblock %}

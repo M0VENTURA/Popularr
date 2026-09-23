@@ -23,11 +23,100 @@
    ========================================================================== */
 
 /* One row per log line. The wrapper carries the level so a line's whole row
-   can be tinted without touching every span inside it. */
+   can be tinted without touching every span inside it.
+
+   ⚠️ The counter scope lives on #logOutput — the `<pre>` in the template — NOT
+   on a `.log-output` class, because no such class exists in the markup. */
+#logOutput {
+  counter-reset: logline;
+}
+
 .log-line {
   display: block;
-  padding: 0 0.25rem;
+  counter-increment: logline;
+  position: relative;
+  padding: 0 0.25rem 0 3.2rem;
   border-radius: 2px;
+}
+
+/* ── Line gutter + row readability ───────────────────────────────────────
+   The counter is the LINE INDEX WITHIN THE CURRENTLY RENDERED VIEW, not the
+   line's position in the file. That is a deliberate choice: `render()` filters
+   and re-renders, so a file-position number would contradict what is on screen
+   (showing "412, 913, 1502" down a filtered list reads as a rendering bug). A
+   view-local number matches what the user can see and count.
+
+   ⚠️ The counter is `increment`ed for every `.log-line`. Nothing needs to
+   reset it per render: `output.innerHTML = …` builds a fresh element tree, and
+   the counter belongs to that tree. */
+.log-line::before {
+  content: counter(logline);
+  position: absolute;
+  left: 0;
+  width: 2.6rem;
+  text-align: right;
+  color: var(--text-tertiary, #8a8a8a);
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+  user-select: none;          /* never let a line number land in a copy */
+  pointer-events: none;
+}
+
+/* Zebra striping for long, wrapped stack traces, plus a hover so the row under
+   the cursor is identifiable across its full width.
+
+   ⚠️ Uses the `odd` keyword rather than :nth-child, because the wrapper may or
+   may not be a direct child depending on how a line was wrapped. `odd` counts
+   only elements carrying the class, which is what "alternating log row" means.
+   ⚠️ Level tinting wins over striping on error rows: the .log-line.log-level-*
+   rules below come LATER in the file, so their background-color overrides this
+   one for the rows that matter most. */
+.log-line:nth-of-type(odd) {
+  background-color: rgba(255, 255, 255, 0.02);
+}
+
+.log-line:hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Scroll-to-bottom affordance ─────────────────────────────────────────
+   Absolutely positioned INSIDE the viewer card (which is position-relative).
+   `bottom`/`right` are in rem so the button clears the native scrollbar
+   without needing to know its width. */
+.log-jump-btn {
+  position: absolute;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 3;
+  width: 44px;                /* app-wide minimum touch target */
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.log-jump-badge {
+  position: absolute;
+  top: -0.35rem;
+  right: -0.35rem;
+  font-size: 0.62rem;
+  line-height: 1;
+  padding: 0.2em 0.4em;
+}
+
+/* ── Filter mode toggles ─────────────────────────────────────────────────
+   The `.*` / `Aa` glyphs sit in `<code>`, which is monospace by default — the
+   two buttons are the same width because both glyphs are two characters. */
+.log-filter-mode code {
+  font-size: 0.8rem;
+  line-height: 1;
+  pointer-events: none;       /* the whole button is the target */
+}
+
+.log-filter-mode[aria-pressed="true"] {
+  color: var(--text-primary, #fff);
+  border-color: var(--accent-info, #0dcaf0);
 }
 
 .log-ts {
