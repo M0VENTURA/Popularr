@@ -38,3 +38,8 @@ class ScanRequest(BaseModel):
     restart: bool = Field(default=False)
     artist: str | None = Field(default=None)
     album: str | None = Field(default=None)
+    #: Explicit resume point, chosen in the dashboard's resume prompt. Overrides
+    #: the stored checkpoint so the user's pick is honoured. For an artist that
+    #: had already finished, the caller passes the artist AFTER it — the scan
+    #: loop processes the named artist itself (see resume_options_service).
+    resume_from: str | None = Field(default=None)

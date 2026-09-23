@@ -102,12 +102,16 @@
     return global.ScanPreflight.confirmIfRunning({ scanName: scanName || '' });
   }
 
-  function startPopularityScan(mode, force, restart) {
-    return global.api.postJson('/api/popularity/run', {
+  function startPopularityScan(mode, force, restart, resumeFrom) {
+    const body = {
       mode: mode || 'popularity',
       force: !!force,
       restart: !!restart,
-    });
+    };
+    // Explicit resume point from the picker. The server treats a missing value
+    // as "use the stored checkpoint", so it is only sent when chosen.
+    if (resumeFrom) body.resume_from = resumeFrom;
+    return global.api.postJson('/api/popularity/run', body);
   }
 
   function stopPopularityScan() {
@@ -117,6 +121,10 @@
   /**
    * Run the selected popularity scan with the current Force / Restart state.
    * Restart clears the resume checkpoint so the scan begins from the top.
+   *
+   * With Restart UNCHECKED the user is continuing a previous run, so they are
+   * asked which artist to resume from first. Restart already means "from the
+   * top", so prompting there would be contradictory.
    */
   function runDashboardPopularityScan() {
     const mode = document.getElementById('popScanSelector')?.value || 'popularity';
@@ -128,7 +136,19 @@
       try {
         if (!await scanGate(global.ScanPreflight
           ? global.ScanPreflight.label(mode) : mode)) return;
-        await startPopularityScan(mode, force, restart);
+
+        // Resume prompt — only when continuing (Restart unchecked). `resume_from`
+        // is honoured by every mode (the load stage skips to that artist), so a
+        // metadata/popularity/singles run gets the same choice as a full scan.
+        // If nothing was ever recorded there is no prompt at all.
+        let resumeFrom = null;
+        if (!restart && global.ScanResumePicker) {
+          const choice = await global.ScanResumePicker.chooseResumeArtist();
+          if (!choice) return;   // cancelled — do not start
+          resumeFrom = choice.resume_from || null;
+        }
+
+        await startPopularityScan(mode, force, restart, resumeFrom);
         global.toast.success('Popularity scan started');
       } catch (error) {
         // Previously this was `catch (e) { console.error(...) }` — the user

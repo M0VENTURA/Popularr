@@ -151,6 +151,39 @@ def api_scan_status():
 
 
 # -------------------------------------------------------------------------
+# API: Resume artist options
+# -------------------------------------------------------------------------
+
+@scans_bp.route("/api/scan/resume-options")
+def api_scan_resume_options():
+    """Artists a resumed scan could start from, for the dashboard prompt.
+
+    Shown when a scan is started with **Restart unchecked**. Ordered:
+    the artist the interrupted full scan stopped at, then the most recently
+    touched artists (manually scanned, or with albums scanned).
+
+    Each entry carries the resolved ``mode`` so the UI can state what will
+    happen: ``next`` (the artist had finished — continue after it) or
+    ``restart`` (it was interrupted — re-scan that artist).
+    """
+    try:
+        from services.scanning.resume_options_service import get_resume_options
+
+        result = get_resume_options()
+    except Exception as exc:
+        logger.exception("Failed to build resume options", error=str(exc))
+        result = {"success": False, "error": str(exc), "has_options": False,
+                  "artists": [], "recommended": None}
+
+    response = jsonify(result)
+    # The resume point changes as scans run; never let a proxy cache it.
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
+# -------------------------------------------------------------------------
 # API: Recent scan history
 # -------------------------------------------------------------------------
 
@@ -317,22 +350,35 @@ async def api_popularity_run_compat():
     #   force+restart → start from the top in FORCED mode
     # The dashboard "All" scan checkpoints under ``full_scan``; the other
     # modes checkpoint under ``popularity_scan``.
+    #
+    # An explicit ``resume_from`` in the request OVERRIDES the checkpoint. The
+    # dashboard's resume prompt sends the artist the user picked; without this
+    # the choice would be silently ignored and the scan would resume from
+    # whatever the last interrupted run happened to leave behind. When the
+    # chosen artist had already FINISHED, the client sends the artist AFTER it
+    # (the service resolves that), because the scan loop processes the named
+    # artist itself.
     resume_from = None
     _checkpoint_scan_type = "full_scan" if mode == "all" else "popularity_scan"
     _checkpoint_path = get_scan_progress_path(_checkpoint_scan_type)
-    if not restart:
+    _requested_resume = str(
+        raw.get("resume_from") or getattr(params, "resume_from", "") or ""
+    ).strip()
+    if restart:
+        try:
+            from services.scanning.scan_state import clear_scan_checkpoint
+            clear_scan_checkpoint(_checkpoint_path)
+        except Exception:
+            pass
+    elif _requested_resume:
+        resume_from = _requested_resume
+    else:
         try:
             from services.scanning.scan_state import load_scan_checkpoint
             _cp = load_scan_checkpoint(_checkpoint_path)
             resume_from = _cp.get("last_scanned_artist") or None
         except Exception:
             resume_from = None
-    else:
-        try:
-            from services.scanning.scan_state import clear_scan_checkpoint
-            clear_scan_checkpoint(_checkpoint_path)
-        except Exception:
-            pass
 
     # Record "started" only AFTER the duplicate guards below — a rejected
     # start (already-running / stale DB state) must not leave an orphaned

@@ -77,12 +77,16 @@ function escapeHtml(str) {
   } catch (_) {}
 })();
 
-async function startPopularityScan(m, force, restart) {
+async function startPopularityScan(m, force, restart, resumeFrom) {
   if (window.ScanPreflight) {
     const scanName = window.ScanPreflight.label(m || 'popularity');
     if (!await window.ScanPreflight.confirmIfRunning({ scanName })) return;
   }
-  await postJSON("/api/popularity/run", { mode: m || "popularity", force: !!force, restart: !!restart });
+  const body = { mode: m || "popularity", force: !!force, restart: !!restart };
+  // Explicit resume point from the picker. The server treats a missing value as
+  // "use the stored checkpoint", so it is only sent when the user chose one.
+  if (resumeFrom) body.resume_from = resumeFrom;
+  await postJSON("/api/popularity/run", body);
 }
 
 async function stopPopularityScan() {
@@ -93,6 +97,10 @@ async function stopPopularityScan() {
 // current Force / Restart checkbox states.  No scan starts until Run is
 // pressed.  Restart clears the resume checkpoint so the scan begins from the
 // top (skipping recently-scanned items unless Force is also checked).
+//
+// With Restart UNCHECKED the user is continuing a previous run, so they are
+// asked which artist to resume from first.  Restart already means "from the
+// top", so prompting there would be contradictory.
 async function runDashboardPopularityScan() {
   const mode = document.getElementById("popScanSelector")?.value || "popularity";
   const force = !!document.getElementById("popScanForce")?.checked;
@@ -104,7 +112,15 @@ async function runDashboardPopularityScan() {
     btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Starting…';
   }
   try {
-    await startPopularityScan(mode, force, restart);
+    // Resume prompt — only when continuing (Restart unchecked). `resume_from`
+    // is honoured by every mode (the load stage skips to that artist).
+    let resumeFrom = null;
+    if (!restart && window.ScanResumePicker) {
+      const choice = await window.ScanResumePicker.chooseResumeArtist();
+      if (!choice) return;   // cancelled — do not start
+      resumeFrom = choice.resume_from || null;
+    }
+    await startPopularityScan(mode, force, restart, resumeFrom);
   } catch (e) {
     console.error("Error starting popularity scan:", e);
   } finally {
