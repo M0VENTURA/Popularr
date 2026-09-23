@@ -998,6 +998,7 @@ def get_metadata_update_config() -> dict[str, Any]:
     metadata_update:
       album_name_source: dedupe       # dedupe | album | release_group (release = alias)
       album_name_update_target: db    # db | files
+      apply_during_scan: true         # false = recommend instead of applying
       update_on_files:
         album_name: false
         year: false
@@ -1040,6 +1041,12 @@ def get_metadata_update_config() -> dict[str, Any]:
     ``album_name_update_target: files`` AND ``update_on_files.album_name:
     true`` are required.  With target ``db`` the rename stays in the
     database and Navidrome keeps serving the old name from the file tags.
+
+    ``apply_during_scan`` (default ``true``) decides whether the scan ACTS on
+    the MusicBrainz metadata it resolves.  When set to ``false`` the scan does
+    not write it; it STASHES the recommendations on the album's track rows
+    (``tracks.pending_mb_updates``) instead, so an album or artist page can
+    offer them with save/discard.  This is the "recommend, don't apply" mode.
     """
     cfg = get_config() or {}
     block = cfg.get("metadata_update") or {}
@@ -1070,6 +1077,16 @@ def get_metadata_update_config() -> dict[str, Any]:
         "album_name_source": source,
         "album_name_update_target": target,
         "update_on_files": fields,
+        # ``apply_during_scan`` — when false the scan stops APPLYING MusicBrainz
+        # metadata and instead STASHES its recommendations on the track rows
+        # (tracks.pending_mb_updates) for the user to save or discard later from
+        # the album/artist pages. Defaults to true (existing behaviour), so an
+        # existing config.yaml that lacks the key is unaffected.
+        "apply_during_scan": (
+            _as_truthy(block.get("apply_during_scan"))
+            if "apply_during_scan" in block
+            else True
+        ),
     }
 
 

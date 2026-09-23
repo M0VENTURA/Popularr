@@ -1389,6 +1389,58 @@ async def album_detail(album_path: str) -> Any:
         genres_str = (form.get("album_genres") or "").strip()
         cover_url = (form.get("cover_art_url") or "").strip()
 
+        # ── Staged per-track MusicBrainz review ──────────────────────────────
+        # The album page's "Lookup MBID" preview stages every per-track change
+        # (title, track/disc number, recording MBID, writer, genres, cover
+        # verdict) as JSON in a hidden form field instead of writing them on
+        # lookup. Honouring it here is what makes the review a SINGLE atomic
+        # save — see services/metadata/metadata_proposal_service.py for the
+        # shape, which is {"<track_id>": {"changes": [{"field", "value"|"proposed", ...}]}}.
+        #
+        # A malformed payload must never break the whole save: the album-level
+        # fields still apply, and the staged part is simply skipped.
+        _staged_updates: dict[str, dict[str, Any]] = {}
+        _staged_raw = (form.get("staged_track_updates") or "").strip()
+        if _staged_raw:
+            try:
+                _parsed = json.loads(_staged_raw)
+                if isinstance(_parsed, dict):
+                    for _tid, _entry in _parsed.items():
+                        if not isinstance(_entry, dict):
+                            continue
+                        _changes: dict[str, Any] = {}
+                        for _change in _entry.get("changes") or []:
+                            if not isinstance(_change, dict):
+                                continue
+                            _field_name = str(_change.get("field") or "").strip()
+                            if not _field_name:
+                                continue
+                            if "value" in _change:
+                                _changes[_field_name] = _change["value"]
+                            else:
+                                _changes[_field_name] = _change.get("proposed")
+                            # A cover verdict carries the original artist too.
+                            if _change.get("original_cover_artist"):
+                                _changes["original_cover_artist"] = _change["original_cover_artist"]
+                        if _changes:
+                            _staged_updates[str(_tid)] = _changes
+            except (TypeError, ValueError) as _staged_err:
+                logger.debug("Staged track updates were not valid JSON", error=str(_staged_err))
+
+        # Columns a staged review may write. Whitelisted (never derived from
+        # request input) so a crafted payload cannot reach an arbitrary column.
+        _STAGED_WRITABLE = frozenset({
+            "title", "track_number", "disc_number", "mbid",
+            "writer", "musicbrainz_genres", "is_cover", "original_cover_artist",
+        })
+
+        # A SAVED review clears the stashed recommendations for this album —
+        # they have just been applied, so offering them again would be stale.
+        # Read here (before the per-track loop) so the flag is known up front.
+        _has_pending_recommendations = bool(
+            (form.get("pending_recommendations") or "").strip()
+        )
+
         release_fields = [
             "recordlabel", "catalognumber", "barcode", "asin", "releasedate",
             "media", "releasetype", "releasestatus", "releasecountry", "copyright",
@@ -1629,6 +1681,31 @@ async def album_detail(album_path: str) -> Any:
             if cover_url:
                 payload["cover_art_url"] = cover_url
 
+            # ── Apply this track's staged MusicBrainz review ─────────────
+            # Written AFTER the album-level values so a per-track value the
+            # user reviewed and kept wins over the album-wide default.
+            # Whitelisted fields only; anything else in the payload is ignored.
+            _staged_for_track = _staged_updates.get(str(track_id))
+            if _staged_for_track:
+                for _sfield, _svalue in _staged_for_track.items():
+                    if _sfield not in _STAGED_WRITABLE:
+                        continue
+                    if _svalue is None or str(_svalue).strip() == "":
+                        continue
+                    payload[_sfield] = _svalue
+                # A reviewed cover verdict renames the title to the library's
+                # "Title (Original Artist Cover)" convention — mirroring the
+                # compare/apply path — unless the title was staged explicitly.
+                _staged_cover_artist = str(
+                    _staged_for_track.get("original_cover_artist") or ""
+                ).strip()
+                if _staged_for_track.get("is_cover") and _staged_cover_artist:
+                    _base_title = str(
+                        payload.get("title") or track.get("title") or ""
+                    ).strip()
+                    if _base_title and "cover)" not in _base_title.lower():
+                        payload["title"] = f"{_base_title} ({_staged_cover_artist} Cover)"
+
             for field, value in release_values.items():
                 if value:
                     payload[field] = value
@@ -1777,8 +1854,7 @@ async def album_detail(album_path: str) -> Any:
 
         if updated_count > 0:
             await flash(f"Album metadata saved — {updated_count} track(s) updated.", "success")
-        if file_sync_failures > 0:
-            await flash(
+        if file_sync_failures > 0:            await flash(
                 f"⚠️ {file_sync_failures} track(s) updated in the database but NOT in the audio "
                 "files (could not write tags).",
                 "warning",
@@ -1787,7 +1863,24 @@ async def album_detail(album_path: str) -> Any:
             await flash(f"Removed \"(Live)\"/\"(Acoustic)\" suffixes from {reverted_live_count} track(s).", "info")
         if _cover_embedded:
             await flash("🎨 Album cover art downloaded and embedded into track files.", "success")
-            
+
+        # A saved review means the stashed recommendations were just applied —
+        # clear them so the album page does not keep offering stale suggestions
+        # (the same "clear then re-stash" lifecycle the scan-side writer uses).
+        if _has_pending_recommendations and updated_count > 0:
+            try:
+                from services.metadata.pending_update_service import (
+                    discard_album_recommendations,
+                )
+                discard_album_recommendations(
+                    new_artist or artist_name, new_title or album_name
+                )
+            except Exception as _discard_exc:
+                logger.debug(
+                    "Could not clear saved recommendations",
+                    artist=artist_name, album=album_name, error=str(_discard_exc),
+                )
+
         if updated_count == 0 and reverted_live_count == 0 and file_sync_failures == 0:
             await flash("No changes were made.", "info")
 

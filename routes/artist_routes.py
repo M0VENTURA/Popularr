@@ -439,6 +439,31 @@ def api_scan_all_missing_releases() -> Any:
     return jsonify(data), code
 
 
+@artist_bp.route("/api/artist/metadata-recommendations", methods=["GET"])
+def api_artist_metadata_recommendations() -> Any:
+    """Per-album count of recommendations stashed by a scan.
+
+    Backs the artist page's "N pending updates" summary when metadata updating
+    is set to "Recommend only" — the scan stores its proposals on the album's
+    track rows (``tracks.pending_mb_updates``) instead of applying them.
+    """
+    artist = (request.args.get("artist") or "").strip()
+    if not artist:
+        return jsonify({"success": False,
+                        "error": "artist is required",
+                        "albums": [], "album_count": 0, "total": 0}), 400
+
+    from services.metadata.pending_update_service import fetch_artist_recommendations
+
+    try:
+        result = fetch_artist_recommendations(artist)
+    except Exception as exc:
+        logger.error("Failed to read artist recommendations", artist=artist, error=str(exc))
+        return jsonify({"success": False, "error": str(exc),
+                        "albums": [], "album_count": 0, "total": 0}), 500
+    return jsonify(result), 200
+
+
 @artist_bp.route("/api/artist/add", methods=["POST"])
 async def api_add_artist() -> Any:
     payload = (await request.get_json()) or {}

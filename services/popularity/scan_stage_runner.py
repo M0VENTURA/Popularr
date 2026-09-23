@@ -2283,6 +2283,68 @@ def run_scan(
 
             _run_album_cover_detection(artist=artist, album=album, tracks=tracks, options=options)
 
+            # --- RECOMMEND-INSTEAD-OF-APPLY (metadata_update.apply_during_scan) ---
+            # When the Config page has metadata updating set to "Recommend only",
+            # the scan must NOT write MusicBrainz metadata. Instead it records
+            # the changes it would have made against the album's tracks
+            # (tracks.pending_mb_updates) so the album and artist pages can offer
+            # them with save/discard.
+            #
+            # Deliberately placed here — after the album stage has resolved and
+            # persisted the album's release MBID, so the proposal is built from a
+            # known release rather than a fresh search — and BEFORE the file-tag
+            # sync below, so the same pass does not then write the very metadata
+            # that was deferred.
+            _stash_only = False
+            try:
+                from helpers.config_helpers import get_metadata_update_config as _get_mu
+                _stash_only = not bool((_get_mu() or {}).get("apply_during_scan", True))
+            except Exception as exc:
+                # Fail OPEN: an unreadable config must not silently stop the
+                # scan from applying metadata it has always applied.
+                logger.debug("Could not read metadata_update config", error=str(exc))
+                _stash_only = False
+
+            if _stash_only and not options.get("popularity_only") and not options.get("singles_detection_only"):
+                try:
+                    _release_mbid = ""
+                    for _ctx in track_contexts:
+                        _row = _ctx.get("track") or {}
+                        for _col in ("musicbrainz_releasegroupid", "musicbrainz_album_mbid",
+                                     "musicbrainz_albumid"):
+                            _candidate = str(_row.get(_col) or "").strip()
+                            if _candidate:
+                                _release_mbid = _candidate
+                                break
+                        if _release_mbid:
+                            break
+
+                    if _release_mbid:
+                        from services.metadata.metadata_proposal_service import (
+                            propose_album_metadata,
+                        )
+                        from services.metadata.pending_update_service import (
+                            stash_album_recommendations,
+                        )
+
+                        _proposal = propose_album_metadata(artist, album, _release_mbid)
+                        _stash = stash_album_recommendations(artist, album, _proposal)
+                        if _stash.get("stashed"):
+                            logger.debug(
+                                "[METADATA_REVIEW] stashed recommendations instead of applying",
+                                artist=artist, album=album, stashed=_stash.get("stashed"),
+                            )
+                    else:
+                        logger.debug(
+                            "[METADATA_REVIEW] no release MBID resolved — nothing to recommend",
+                            artist=artist, album=album,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not stash MusicBrainz recommendations",
+                        artist=artist, album=album, error=str(exc),
+                    )
+
             # --- FILE TAG SYNC ---
             if not options.get("popularity_only") and not options.get("singles_detection_only"):
                 try:

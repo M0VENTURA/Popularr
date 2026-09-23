@@ -1634,8 +1634,19 @@
           </small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Update on Files during Scan</label>
-          <div class="border rounded p-2" style="background: rgba(0,0,0,.15);">
+          <label class="form-label form-label-sm">Apply Metadata during Scan</label>
+          <select class="form-select form-select-sm" id="metadata_update_apply_during_scan">
+            <option value="true" {% if (config.get('metadata_update', {}) or {}).get('apply_during_scan', true) %}selected{% endif %}>Apply automatically (current behaviour)</option>
+            <option value="false" {% if not (config.get('metadata_update', {}) or {}).get('apply_during_scan', true) %}selected{% endif %}>Recommend only — save or discard later</option>
+          </select>
+          <small class="form-text text-muted">
+            <strong>Recommend only</strong> stops the scan writing MusicBrainz metadata. The changes it would
+            have made are stored against the album's tracks instead and offered on the album and artist pages,
+            where each one can be <strong>saved or discarded</strong>. Nothing is written until you say so.
+          </small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm">Update on Files during Scan</label>          <div class="border rounded p-2" style="background: rgba(0,0,0,.15);">
             {% set mu_fields = (config.get('metadata_update', {}) or {}).get('update_on_files', {}) %}
             <div class="form-check form-check-sm">
               <input class="form-check-input" type="checkbox" id="metadata_update_field_album_name" {% if mu_fields.get('album_name', false) %}checked{% endif %}>

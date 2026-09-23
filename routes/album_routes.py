@@ -329,6 +329,56 @@ def api_album_track_recommendations(artist: str, album: str) -> Any:
     return jsonify(result), status_code
 
 
+@album_bp.route("/metadata-recommendations", methods=["GET"])
+def api_album_metadata_recommendations() -> Any:
+    """Recommendations stashed by a scan when metadata updating is off.
+
+    The scan does not apply MusicBrainz metadata in "recommend only" mode; it
+    stores what it would have changed on the album's track rows. This reads
+    them back so the album page can offer save/discard.
+    """
+    artist = (request.args.get("artist") or "").strip()
+    album = (request.args.get("album") or "").strip()
+    if not artist or not album:
+        return jsonify({"success": False,
+                        "error": "artist and album are required",
+                        "album_changes": [], "track_changes": [],
+                        "counts": {"album_changes": 0, "tracks_changed": 0,
+                                   "track_changes": 0},
+                        "has_any": False}), 400
+
+    from services.metadata.pending_update_service import fetch_album_recommendations
+
+    try:
+        result = fetch_album_recommendations(artist, album)
+    except Exception as exc:
+        logger.error("Failed to read pending recommendations",
+                     artist=artist, album=album, error=str(exc))
+        return jsonify({"success": False, "error": str(exc),
+                        "album_changes": [], "track_changes": [], "has_any": False}), 500
+    return jsonify(result), 200
+
+
+@album_bp.route("/metadata-recommendations/discard", methods=["POST"])
+async def api_album_discard_recommendations() -> Any:
+    """Discard every stashed recommendation for an album."""
+    data = (await request.get_json(force=True, silent=True)) or {}
+    artist = (data.get("artist") or "").strip()
+    album = (data.get("album") or "").strip()
+    if not artist or not album:
+        return jsonify({"success": False, "error": "artist and album are required"}), 400
+
+    from services.metadata.pending_update_service import discard_album_recommendations
+
+    try:
+        result = discard_album_recommendations(artist, album)
+    except Exception as exc:
+        logger.error("Failed to discard recommendations",
+                     artist=artist, album=album, error=str(exc))
+        return jsonify({"success": False, "error": str(exc)}), 500
+    return jsonify(result), 200
+
+
 @album_bp.route("/musicbrainz", methods=["POST"])
 async def api_album_musicbrainz_lookup() -> Any:
     """Lookup album on MusicBrainz."""
@@ -368,6 +418,48 @@ async def api_album_musicbrainz_compare() -> Any:
         return jsonify({"error": "release_group_mbid, artist, and album are required"}), 400
         
     result, status_code = _pop_status(compare_musicbrainz_release(artist, album, rg_mbid))
+    return jsonify(result), status_code
+
+
+@album_bp.route("/musicbrainz/propose", methods=["POST"])
+async def api_album_musicbrainz_propose() -> Any:
+    """Preview the metadata a MusicBrainz import WOULD write.
+
+    Backs the album page's "Lookup MBID" review: after a release is chosen the
+    page asks what a full metadata import would change, fills the Edit Album
+    form with the proposed values and paints an orange bar under each changed
+    field.  **Nothing is written here** — the form is only persisted when the
+    user presses Save Metadata.
+
+    Body: {"artist", "album", "release_mbid"} — ``release_mbid`` may be a
+    concrete release id or a release-group id.
+    """
+    data = (await request.get_json(force=True, silent=True)) or {}
+    artist = (data.get("artist") or "").strip()
+    album = (data.get("album") or "").strip()
+    release_mbid = (data.get("release_mbid") or "").strip()
+
+    if not artist or not album or not release_mbid:
+        return jsonify({
+            "success": False,
+            "error": "artist, album and release_mbid are required",
+            "album_changes": [],
+            "track_changes": [],
+        }), 400
+
+    from services.metadata.metadata_proposal_service import propose_album_metadata
+
+    try:
+        result = propose_album_metadata(artist, album, release_mbid)
+    except Exception as exc:
+        logger.error(
+            "Album metadata proposal failed",
+            artist=artist, album=album, release_mbid=release_mbid, error=str(exc),
+        )
+        return jsonify({"success": False, "error": str(exc),
+                        "album_changes": [], "track_changes": []}), 500
+
+    status_code = 200 if result.get("success") else 400
     return jsonify(result), status_code
 
 

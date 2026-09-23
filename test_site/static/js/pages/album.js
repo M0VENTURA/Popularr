@@ -766,6 +766,7 @@
     // the edition year and the country can be filled from real release data.
     // A failure here must not undo the match — the group id is already set and
     // the user can still save or pick a version manually.
+    let resolvedReleaseId = '';
     try {
       const data = await global.api.postJson('/api/album/musicbrainz/best-release', {
         release_group_mbid: release.id,
@@ -775,6 +776,7 @@
 
       const best = (data && data.best_release) || null;
       if (best && best.id) {
+        resolvedReleaseId = best.id;
         setFieldValue('album_mbid', best.id);
 
         const releaseYear = yearOf(best.date);
@@ -791,12 +793,43 @@
       console.warn('Could not resolve the concrete release for this group', error);
     }
 
-    notifySuccess(
-      'Release matched and metadata filled in. Review the Edit Album tab, then click "Save Metadata". ' +
-      'Use "Compare with MusicBrainz" to import the tracklist.'
-    );
-  }
+    // ── Full metadata preview ─────────────────────────────────────────────
+    // Show EVERYTHING a metadata import would write — every album-level field
+    // plus each per-track change — as an orange bar under the field it
+    // affects. This is the whole point of the lookup: the user reviews one
+    // complete proposal and saves it once.
+    //
+    // ⚠️ STILL NOTHING IS WRITTEN. The album values go into the form and the
+    // per-track changes are staged into #staged_track_updates, which only the
+    // form's own submit posts. A wrong release is undone by reloading.
+    //
+    // The concrete release id is preferred (it carries the edition's own
+    // label/catalog/barcode/media), falling back to the release-group id the
+    // server can resolve itself.
+    let staged = null;
+    if (global.albumMetadataReview) {
+      try {
+        staged = await global.albumMetadataReview.applyProposal(
+          resolvedReleaseId || release.id
+        );
+      } catch (error) {
+        console.warn('Could not build the metadata preview', error);
+      }
+    }
 
+    if (staged) {
+      const counts = staged.counts || {};
+      notifySuccess(
+        `Release matched. ${counts.album_changes || 0} album field(s) and ` +
+        `${counts.tracks_changed || 0} track(s) have MusicBrainz updates to review — ` +
+        'check the Edit Album tab and the orange bars, then click "Save Metadata".'
+      );
+    } else {
+      notifySuccess(
+        'Release matched and metadata filled in. Review the Edit Album tab, then click "Save Metadata".'
+      );
+    }
+  }
   /** First four digits of a MusicBrainz date ("2014-11-24" → 2014). */
   function yearOf(value) {
     const text = String(value || '').trim();
@@ -857,6 +890,27 @@
     // Surface the Edit Album tab so the change is visible before saving.
     const tabBtn = document.querySelector('#albumPageTabs [data-bs-target="#tab-details"]');
     if (tabBtn && global.bootstrap) global.bootstrap.Tab.getOrCreateInstance(tabBtn).show();
+
+    // Full metadata preview — staged only, written by the form's own submit.
+    if (global.albumMetadataReview) {
+      global.albumMetadataReview.applyProposal(mbid)
+        .then((staged) => {
+          if (staged) {
+            const counts = staged.counts || {};
+            notifySuccess(
+              `MusicBrainz ID applied. ${counts.album_changes || 0} album field(s) and ` +
+              `${counts.tracks_changed || 0} track(s) have updates to review — ` +
+              'check the orange bars, then click "Save Metadata".'
+            );
+          } else {
+            notifySuccess('MusicBrainz ID applied. Click "Save Metadata" to persist it.');
+          }
+        })
+        .catch(() => {
+          notifySuccess('MusicBrainz ID applied. Click "Save Metadata" to persist it.');
+        });
+      return;
+    }
 
     notifySuccess('MusicBrainz ID applied. Click "Save Metadata" to persist it.');
   }

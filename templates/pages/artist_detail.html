@@ -280,6 +280,10 @@
         <button type="button" class="btn btn-sm btn-outline-secondary" id="releasesCollapseAllBtn"><i class="bi bi-arrows-collapse"></i> Collapse All</button>
       </div>
     </div>
+    {# Recommendations stashed by a scan when metadata updating is set to
+       "Recommend only" — a per-album count so the user can see what is waiting
+       without opening every album. Populated by js/metadata-recommendations.js. #}
+    <div id="artistMetadataRecommendations" class="d-none"></div>
     {% if visible_specs|length > 0 %}
     <div class="card-body py-2 release-jump-bar">
       {% for spec in visible_specs %}
@@ -330,4 +334,6 @@
 <script src="{{ versioned_static('js/services/genres.js') }}"></script>
 <script src="{{ versioned_static('js/pages/artist.js') }}"></script>
 <script src="{{ versioned_static('js/pages/artist-releases.js') }}"></script>
+{# Per-album count of MusicBrainz recommendations a scan stashed for review. #}
+<script src="{{ versioned_static('js/metadata-recommendations.js') }}"></script>
 {% endblock %}

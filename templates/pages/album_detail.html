@@ -428,6 +428,13 @@
             </div>
             <input type="hidden" id="album_genres" name="album_genres" value="{{ album_genres|join(', ') if album_genres else '' }}">
             <input type="hidden" id="cover_art_url" name="cover_art_url" value="">
+            {# Per-track MusicBrainz changes reviewed after a "Lookup MBID".
+               Held here as JSON and posted with the form so a review is still
+               ONE atomic save — the tracklist is never written on lookup. #}
+            <input type="hidden" id="staged_track_updates" name="staged_track_updates" value="">
+            {# Server-persisted suggestions (written during a scan when metadata
+               updating is switched off) awaiting the user's save/discard. #}
+            <input type="hidden" id="pending_recommendations" name="pending_recommendations" value="">
 
             <hr class="border-secondary my-3">
 
@@ -612,6 +619,7 @@
 </script>
 <script src="{{ versioned_static('js/downloads.js') }}"></script>
 <script src="{{ versioned_static('js/album_detail.js') }}"></script>
+<script src="{{ versioned_static('js/metadata-review.js') }}"></script>
 <script src="{{ versioned_static('js/genre-utils.js') }}"></script>
 {% include 'components/_musicbrainz_search_functions.html' ignore missing %}
 

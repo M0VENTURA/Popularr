@@ -457,6 +457,7 @@ function buildConfigObject() {
       {
         album_name_source: getValue('metadata_update_album_name_source', 'dedupe'),
         album_name_update_target: getValue('metadata_update_album_name_target', 'db'),
+        apply_during_scan: getValue('metadata_update_apply_during_scan', 'true') !== 'false',
         album_mbid_guard: Object.assign(
           {},
           ((window.pageConfig && window.pageConfig.metadata_update && window.pageConfig.metadata_update.album_mbid_guard) || {}),

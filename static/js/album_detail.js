@@ -338,6 +338,11 @@ window.openAlbumLookupModal = function () {
 // It therefore always alerted "No release selected or MBID not found".
 // The value now arrives directly from the shared modal's selection callback
 // (see downloads.js's handleGlobalMbSelect / confirmReleaseSelection).
+//
+// ⚠️ NOTHING IS WRITTEN HERE. The id goes into the form and the full metadata
+// preview (album fields + per-track changes, see js/metadata-review.js) is
+// staged into #staged_track_updates; the form's own submit persists it. A bad
+// match is therefore undone by simply reloading the page.
 window.applyAlbumMbid = function (mbid) {
     if (!mbid) {
         alert('No release selected.');
@@ -360,7 +365,31 @@ window.applyAlbumMbid = function (mbid) {
     const tabBtn = document.querySelector('#albumPageTabs [data-bs-target="#tab-details"]');
     if (tabBtn && window.bootstrap) bootstrap.Tab.getOrCreateInstance(tabBtn).show();
 
-    alert('MusicBrainz ID applied! Click "Save Metadata" to persist changes.');
+    // Full metadata preview: every album-level field plus each per-track
+    // change a metadata import would write, shown as orange bars. Staged only.
+    const review = window.albumMetadataReview;
+    if (!review || typeof review.applyProposal !== 'function') {
+        alert('MusicBrainz ID applied! Click "Save Metadata" to persist changes.');
+        return;
+    }
+
+    review.applyProposal(mbid).then(function (staged) {
+        if (!staged) {
+            // The preview could not be built — the id is still applied, so the
+            // user can save it and run Compare with MusicBrainz manually.
+            alert('MusicBrainz ID applied! Click "Save Metadata" to persist changes.');
+            return;
+        }
+        const counts = staged.counts || {};
+        alert(
+            'Release matched. ' + (counts.album_changes || 0) + ' album field(s) and ' +
+            (counts.tracks_changed || 0) + ' track(s) have MusicBrainz updates to review.\n\n' +
+            'Check the Edit Album tab and the orange bars, then click "Save Metadata".'
+        );
+    }).catch(function (error) {
+        console.error('Could not build the metadata preview', error);
+        alert('MusicBrainz ID applied! Click "Save Metadata" to persist changes.');
+    });
 };
 
 // ---------------------------------------------------------------------------

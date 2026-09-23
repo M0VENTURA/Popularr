@@ -431,6 +431,13 @@
             </div>
             <input type="hidden" id="album_genres" name="album_genres" value="{{ album_genres|join(', ') if album_genres else '' }}">
             <input type="hidden" id="cover_art_url" name="cover_art_url" value="">
+            {# Per-track MusicBrainz changes reviewed after a "Lookup MBID".
+               Held here as JSON and posted with the form so a review is still
+               ONE atomic save — the tracklist is never written on lookup. #}
+            <input type="hidden" id="staged_track_updates" name="staged_track_updates" value="">
+            {# Server-persisted suggestions (written during a scan when metadata
+               updating is switched off) awaiting the user's save/discard. #}
+            <input type="hidden" id="pending_recommendations" name="pending_recommendations" value="">
 
             <hr class="border-secondary my-3">
 
@@ -672,4 +679,9 @@
                        issues are fixed there.
 #}
 <script src="{{ versioned_static('js/pages/album.js') }}"></script>
+{# Album metadata review: previews a full MusicBrainz import (album fields +
+   per-track changes) after a Lookup MBID, without saving anything until the
+   form is submitted. Loaded AFTER pages/album.js because it decorates that
+   module's applyAlbumMatch() flow via the global it publishes. #}
+<script src="{{ versioned_static('js/services/metadata-review.js') }}"></script>
 {% endblock %}
