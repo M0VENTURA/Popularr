@@ -2147,8 +2147,22 @@ def lookup_musicbrainz_album(Artist: str, Album: str, Existing_mbid: str = "") -
             else:
                 Log_mbid_verdict(Verdict, artist=Artist, album=Album, mbid=Existing_mbid)
 
+    # Clean the album name before quoting it into the query.
+    #
+    # This used to search with the RAW album string, so any stored edition
+    # annotation was quoted verbatim into
+    # ``release:"Jomsviking (jewelcase version with … bonus track (no. 09))))) …"``
+    # — a title MusicBrainz cannot hold, so the lookup returned nothing and the
+    # album never matched an MBID. The parse-time clean leaves the ordinary
+    # release-group search intact for titles with no annotation, and the
+    # unquoted fallback below already existed for the punctuation-heavy case.
+    from helpers.normalization_service import (
+        strip_search_keywords as _strip_search_keywords,
+    )
+
+    _clean_album = _strip_search_keywords(Album) or Album
     Query = (
-        f'release:"{Escape_lucene_special_chars(Album)}" '
+        f'release:"{Escape_lucene_special_chars(_clean_album)}" '
         f'AND artist:"{Escape_lucene_special_chars(Artist)}"'
     )
     try:

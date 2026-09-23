@@ -310,6 +310,51 @@ _REPEATED_TRAILING_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A bare 4-digit YEAR as the FINAL trailing annotation, e.g. "… (2016)".
+#
+# This exists so the $ -anchored edition-marker rules above still fire when a
+# year follows the marker. It matches ONLY a year that is its own group — a
+# year inside a marker ("(20th Anniversary Edition)") is not matched, so the
+# marker keyword rule still sees the whole group.
+_TRAILING_YEAR_RE = re.compile(r"\s*[\(\[]\s*(\d{4})\s*[\)\]]\s*$")
+
+
+def repair_malformed_annotations(value: str) -> str:
+    """Reduce a title with UNBALANCED brackets to its plain leading title.
+
+    Taggers (and hand-editing) produce runs of unmatched closers::
+
+        Jomsviking (jewelcase version with "X" as bonus track (no. 09)))))
+            (jewelcase version with "X" as bonus track (no. 09)) (2016)
+
+    Every bracket rule in this module matches a BALANCED group, so that blob
+    defeats all of them — the annotation survives into the album name and into
+    every lookup key built from it, and the MusicBrainz search then asks for a
+    title that cannot exist. That is what broke the album lookup.
+
+    The test is deliberately the SIMPLE one — do the bracket COUNTS agree? — and
+    the repair the simplest that can work: keep the text before the first
+    opener.
+
+    ⚠️ Counting matters. An earlier attempt truncated at the first ``(`` whose
+    *remainder* held more closers than openers, which wrongly fired on a
+    perfectly valid NESTED group: in ``"(a (b))"`` the remainder from the inner
+    opener is ``"(b))"``, one opener and two closers. Only a whole-string
+    imbalance means the title is genuinely malformed.
+
+    A well-formed title — including one with a leading group that is part of
+    the real name, "(What's the Story) Morning Glory?" — is returned UNCHANGED,
+    so this is safe to run ahead of every bracket rule.
+    """
+    text = str(value or "")
+    if text.count(")") == text.count("(") and text.count("]") == text.count("["):
+        return text
+
+    # Unbalanced: keep the plain leading title. Fall back to the input when
+    # that would leave nothing (e.g. the opener is at position 0).
+    head = re.split(r"[\(\[]", text, maxsplit=1)[0].strip()
+    return head or text
+
 # Any bracketed annotation, anywhere in the string.
 _ANNOTATION_RE = re.compile(r"\s*([\(\[])([^)\]]*)([\)\]])")
 
@@ -437,11 +482,37 @@ def strip_album_edition_marker(value: str) -> str:
       - ANY repeated identical trailing marker (generic dedup — catches
         markers outside the keyword list regardless of language).
 
+    A TRAILING YEAR DOES NOT BLOCK THE STRIP. Navidrome and several taggers
+    write the year as its own trailing annotation
+    ("Jomsviking (jewelcase version with … bonus track) (2016)"), and the
+    stripper used to be anchored with ``$`` — so the marker was no longer last
+    and NOTHING was removed. That silently broke the album lookup for every
+    edition keyword whenever a year was present, because the un-stripped name
+    was then quoted into the MusicBrainz query. The year is now set aside,
+    the markers stripped, and the year re-appended (it is not an edition
+    marker and must not itself be discarded).
+
     NOTE: this removes the marker entirely, for building lookup keys. To
     repair a stored album name while KEEPING one copy of its edition, use
     `dedupe_annotations()` instead.
     """
-    cleaned = value or ""
+    original = value or ""
+
+    # A corrupted trailing bracket blob leaves unbalanced parens, which every
+    # balanced-group rule below would skip — so the annotation would survive
+    # into the lookup key. Repair it first.
+    original = repair_malformed_annotations(original)
+    cleaned = original
+
+    # Set a trailing year aside so the $ -anchored marker rule still applies.
+    # Only a bare 4-digit year in its own trailing group qualifies; a year
+    # inside a marker ("(20th Anniversary Edition)") is left alone.
+    trailing_year = ""
+    year_match = _TRAILING_YEAR_RE.search(cleaned)
+    if year_match:
+        trailing_year = year_match.group(1)
+        cleaned = cleaned[: year_match.start()].strip()
+
     prev = None
     for _ in range(8):  # bounded loop — never hang on pathological input
         stripped = _ALBUM_EDITION_STRIP_RE.sub("", cleaned).strip()
@@ -451,7 +522,15 @@ def strip_album_edition_marker(value: str) -> str:
             break
         prev = cleaned
         cleaned = stripped
-    return cleaned or (value or "")
+
+    if not cleaned:
+        # Everything was an edition marker: keep the original rather than
+        # returning an empty album name.
+        return original
+
+    # Re-attach the year, but only when something survived. If the marker
+    # strip consumed the whole name there was no real title to keep.
+    return f"{cleaned} ({trailing_year})" if trailing_year else cleaned
 
 
 def is_redundant_rename(old_name: str, new_name: str) -> bool:
@@ -538,7 +617,35 @@ def append_annotation_once(name: str, label: str) -> str:
 
 
 def strip_search_keywords(value: str) -> str:
-    """Remove parenthetical edition markers for *same-song different-cut* variants."""
+    """Remove parenthetical edition markers for *same-song different-cut* variants.
+
+    Two things happen here, in order, and BOTH matter:
+
+    1. **Malformed annotations are truncated.** A corrupted trailing blob —
+       ``Jomsviking (… bonus track (no. 09))))) (… (no. 09)) (2016)`` — leaves
+       unbalanced brackets that defeat every balanced-group rule in this
+       module, so the whole annotation used to survive into the MusicBrainz
+       query and the lookup could never match. See
+       :func:`repair_malformed_annotations`.
+
+    2. **Edition markers are stripped** via
+       :func:`strip_album_edition_marker`, which recognises a known-edition
+       vocabulary and tolerates a trailing year.
+
+    ⚠️ The config ``search.strip_keywords`` list is OPTIONAL and additive. This
+    function previously returned the input UNCHANGED whenever that list was
+    empty — and it is unset by default — so on a default install it was a NO-OP
+    and the album lookup searched with the raw, annotated name. The standard
+    marker stripping now always runs; the config list only adds extra custom
+    keywords on top.
+    """
+    if not value:
+        return value or ""
+
+    repaired = repair_malformed_annotations(value)
+    cleaned = strip_album_edition_marker(repaired)
+
+    # Optional EXTRA keywords from config, applied on top of the standard set.
     try:
         from helpers.config_helpers import get_config
         cfg = get_config() or {}
@@ -548,13 +655,14 @@ def strip_search_keywords(value: str) -> str:
         keyword_set = {str(k).strip().lower() for k in keywords if str(k).strip()}
     except Exception:
         keyword_set = set()
-    if not keyword_set or not value:
-        return value or ""
+
+    if not keyword_set:
+        return cleaned
 
     def _repl(match: Any) -> str:
         return "" if match.group(1).strip().lower() in keyword_set else match.group(0)
 
-    return re.sub(r"\(([^)]*)\)", _repl, value)
+    return re.sub(r"\(([^)]*)\)", _repl, cleaned).strip()
 
 
 # =============================================================================
