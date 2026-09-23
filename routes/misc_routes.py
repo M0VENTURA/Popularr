@@ -18,6 +18,10 @@ from sqlalchemy import text
 
 from db.engine import db_session
 from db.repositories.genres import log_genre_update
+from db.repositories.popularity_repository import (
+    coerce_json_value,
+    parse_genre_value,
+)
 from db.repositories.scan_repository import (
     normalize_existing_artist_rows,
     sanitize_artist_file_paths_and_duplicates,
@@ -1282,11 +1286,13 @@ async def api_remove_genres() -> Any:
             return jsonify({"error": "genres must be a non-empty list"}), 400
 
         def _strip_genres(raw: str | None) -> str:
-            if not raw:
-                return ""
+            # ``manual_genres`` is JSONB, so psycopg hands us a LIST for it while
+            # ``genres`` is TEXT and arrives as a string. Normalise BOTH through
+            # the shared parser — ``raw.replace(...)`` raises AttributeError on a
+            # list, and ``str(list)`` would store the Python repr "['a', 'b']".
             cleaned = [
-                g for g in (str(g).strip() for g in raw.replace("\\", ",").split(","))
-                if g and g.lower() not in remove_lower
+                g for g in parse_genre_value(raw)
+                if g.lower() not in remove_lower
             ]
             return ", ".join(dict.fromkeys(cleaned))
 
@@ -1313,7 +1319,7 @@ async def api_remove_genres() -> Any:
                     continue
                 session.execute(
                     text("UPDATE tracks SET genres = :genres, manual_genres = :manual WHERE id = :id"),
-                    {"genres": new_genres, "manual": new_manual, "id": track_id},
+                    {"genres": new_genres, "manual": coerce_json_value(new_manual), "id": track_id},
                 )
                 affected += 1
 
@@ -1375,7 +1381,8 @@ async def api_track_tags(track_id: str) -> Any:
                     return jsonify({"error": "Track not found"}), 404
 
                 def _merge(raw: str | None) -> str:
-                    existing = [g.strip() for g in (raw or "").replace("\\", ",").split(",") if g.strip()]
+                    # ``manual_genres`` is JSONB (a list) and ``genres`` is TEXT.
+                    existing = parse_genre_value(raw)
                     if genre.lower() not in {x.lower() for x in existing}:
                         existing.append(genre)
                     return ", ".join(existing)
@@ -1384,7 +1391,7 @@ async def api_track_tags(track_id: str) -> Any:
                 merged_manual = _merge(row[1])
                 session.execute(
                     text("UPDATE tracks SET genres = :genres, manual_genres = :manual WHERE id = :id"),
-                    {"genres": merged_genres, "manual": merged_manual, "id": track_id},
+                    {"genres": merged_genres, "manual": coerce_json_value(merged_manual), "id": track_id},
                 )
             tag_updates = {"genres": merged_genres, "manual_genres": merged_manual}
 
@@ -1436,8 +1443,8 @@ async def api_apply_genres() -> Any:
             return jsonify({"error": "genres must be a non-empty list"}), 400
 
         def _merge_genres(raw: str | None) -> str:
-            existing = [g.strip() for g in (raw or "").replace("\\", ",").split(",") if g.strip()]
-            merged = existing[:]
+            # Accepts a JSONB list or a TEXT string — see _strip_genres above.
+            merged = parse_genre_value(raw)
             for g in clean:
                 if g.lower() not in {x.lower() for x in merged}:
                     merged.append(g)
@@ -1458,7 +1465,7 @@ async def api_apply_genres() -> Any:
                     continue
                 session.execute(
                     text("UPDATE tracks SET genres = :genres, manual_genres = :manual WHERE id = :id"),
-                    {"genres": new_genres, "manual": new_manual, "id": track_id},
+                    {"genres": new_genres, "manual": coerce_json_value(new_manual), "id": track_id},
                 )
                 affected += 1
 

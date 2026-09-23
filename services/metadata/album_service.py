@@ -32,6 +32,10 @@ from db.repositories.metadata import (
     update_album_discogs_fields,
     ignore_missing_track_db,
 )
+from db.repositories.popularity_repository import (
+    coerce_json_value,
+    parse_genre_value,
+)
 from services.queue.queue_constraints import STATUS_DISPLAY_CONFIG
 from services.enrichment.album_art_service import (
     save_album_art_to_db,
@@ -746,15 +750,15 @@ def bulk_tag_tracks(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
                     continue
                 title = row.get("title")
                 current = str(row.get("genres") or "")
-                manual = str(row.get("manual_genres") or "")
+                # ⚠️ ``manual_genres`` is JSONB, so this is a LIST, not a string.
+                # ``str(list)`` yields the Python repr "['a', 'b']" — braces,
+                # quotes and commas included — which then got split into junk
+                # genre names and written straight back into the column.
+                manual = row.get("manual_genres")
                 file_path = str(row.get("file_path") or "")
 
-                def _split_genres(raw: str) -> set[str]:
-                    sep = "\\" if "\\" in raw else ","
-                    return {g.strip() for g in raw.split(sep) if g.strip()}
-
-                existing = _split_genres(current)
-                manual_existing = _split_genres(manual)
+                existing = set(parse_genre_value(current))
+                manual_existing = set(parse_genre_value(manual))
                 existing.update(genres)
                 manual_existing.update(genres)
 
@@ -770,7 +774,11 @@ def bulk_tag_tracks(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
 
                 session.execute(
                     text("UPDATE tracks SET genres = :genres, manual_genres = :manual WHERE id = :id"),
-                    {"genres": new_genres, "manual": new_manual, "id": track_id},
+                    {
+                        "genres": new_genres,
+                        "manual": coerce_json_value(new_manual),
+                        "id": track_id,
+                    },
                 )
                 updated_count += 1
             except Exception as exc:

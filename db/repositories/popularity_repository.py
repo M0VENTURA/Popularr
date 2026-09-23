@@ -90,48 +90,71 @@ def _do_get_tracks_table_column_types(session) -> Dict[str, str]:
     return _TRACKS_COLUMN_TYPES_CACHE
 
 
-def _coerce_json_value(value):
-    """Normalise a value for a JSON/JSONB column and return it as JSON TEXT.
+def parse_genre_value(value):
+    """Parse ANY genre value into a list of clean strings.
 
-    WHY THIS EXISTS — it is not a nicety. Several genre columns on ``tracks``
-    (``manual_genres``, ``musicbrainz_genres``, ``navidrome_genres``, …) are
-    declared JSONB, but the code that writes them builds a comma-separated
-    STRING: ``db/repositories/metadata.update_track_genres`` does
-    ``SET manual_genres = :genres`` with ``"Hardcore, Punk"``.
+    JSONB columns come back from psycopg as a Python **list**, not a string, so
+    read-side helpers written as ``raw.replace("\\\\", ",").split(",")`` raise
+    ``AttributeError`` on them — and ``str(value)`` "works" but yields the Python
+    repr ``"['a', 'b']"`` (braces and quotes included), which then round-trips
+    back into the column as a single junk genre.
 
-    ``"Hardcore, Punk"`` is not valid JSON, so PostgreSQL rejects the statement
-    with ``invalid input syntax for type json``.  This module had no JSON branch
-    at all — it fell through to ``return value`` unchanged — and the caller
-    (``routes/ui_routes.py``) logs the failure at DEBUG and moves on, so the
-    write silently did nothing while the UI reported success.
+    Accepts a list/tuple, a JSON array literal, a CSV string, and the legacy
+    backslash-separated form. Always returns ``list[str]`` with no empties.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        out: list[str] = []
+        for item in value:
+            out.extend(parse_genre_value(item))
+        return out
+    if isinstance(value, dict):
+        return [str(v).strip() for v in value.values() if str(v).strip()]
 
-    Historically the genre columns were TEXT (schema drift), which is why the
-    string round-trip appeared to work; the drift repair converged them to
-    their declared JSONB, and the writes started failing.  Coercing HERE fixes
-    it for every writer at once rather than special-casing one call site.
+    raw = str(value).strip()
+    if not raw:
+        return []
 
-    ⚠️ THE RETURN TYPE IS ALWAYS ``str`` (JSON text) or ``None`` — never a
-    Python list.  ``services/scanning/payload_builder.py`` already hands these
-    columns ``json.dumps([...])`` strings, and that path demonstrably works.  A
-    Python list would be adapted by the driver to a Postgres ARRAY literal
-    (``ARRAY['a','b']`` / ``{a,b}``), which a ``jsonb`` column REJECTS with
-    "column is of type jsonb but expression is of type text[]" — so returning a
-    list here would have broken the scanner while fixing the album page.
+    if raw[0] in "[{":
+        try:
+            return parse_genre_value(json.loads(raw))
+        except (TypeError, ValueError):
+            # A leading bracket that is not valid JSON (e.g. a title beginning
+            # with "[") — keep split as free text below.
+            pass
 
-    Conversion rules mirror ``db/schema.py``'s own ALTER:
-      * ``None``                       -> ``None``
-      * list/tuple/dict                -> ``json.dumps(...)``
-      * a string that parses as JSON   -> re-serialised, so ``'[ "a" ]'`` is
-        normalised rather than stored verbatim
-      * an empty/blank string          -> ``'[]'`` (an empty list, never NULL,
-        matching the schema's ``'' -> '[]'::jsonb`` rule)
-      * any other string               -> split on commas/semicolons/slashes,
-        trimmed, then ``json.dumps``-ed, so the CSV form the genre writers
-        produce becomes a real array
+    sep = "\\" if "\\" in raw else ","
+    if sep == "\\":
+        parts = raw.split("\\")
+    else:
+        parts = re.split(r"[,;/]+", raw)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def coerce_json_value(value):
+    """Serialise ANY value to JSON TEXT for a JSON/JSONB column.
+
+    THE ONE PLACE a value becomes JSON text. Public because the raw-SQL writers
+    (``db/repositories/metadata.update_track_genres``, ``routes/misc_routes.py``,
+    ``services/metadata/album_service.py``) do their own ``UPDATE`` and never go
+    through :func:`save_to_db` — so they must call this themselves. Leaving them
+    out is exactly how the album-genres box kept failing after the column path
+    was fixed.
+
+    ⚠️ ALWAYS returns ``str`` (JSON text) or ``None`` — never a Python list.
+    ``services/scanning/payload_builder.py`` already writes these columns as
+    ``json.dumps([...])`` strings and that path works; a Python list is adapted
+    by the driver to a Postgres ARRAY literal, which a ``jsonb`` column rejects
+    (``column is of type jsonb but expression is of type text[]``).
+
+    ``None`` -> ``None``; ``''``/blank -> ``'[]'`` (an empty list, never NULL,
+    matching ``db/schema.py``'s ``'' -> '[]'::jsonb`` rule); a list/dict -> JSON;
+    a JSON literal -> re-serialised (normalised); any other string -> split into
+    genre parts and serialised.
     """
     if value is None:
         return None
-
     if isinstance(value, tuple):
         value = list(value)
     if isinstance(value, (list, dict)):
@@ -149,12 +172,14 @@ def _coerce_json_value(value):
         try:
             return json.dumps(json.loads(raw), ensure_ascii=False)
         except (TypeError, ValueError):
-            # A leading bracket that is not valid JSON (e.g. a title beginning
-            # with "[") — fall through and treat it as free text.
             pass
 
-    parts = [p.strip() for p in re.split(r"[,;/\\]+", raw) if p.strip()]
-    return json.dumps(parts, ensure_ascii=False)
+    return json.dumps(parse_genre_value(raw), ensure_ascii=False)
+
+
+#: Back-compat alias — the JSON branch of the column coercer predates the
+#: standalone helper and is referenced by that name in tests/notes.
+_coerce_json_value = coerce_json_value
 
 
 def coerce_track_value_for_pg_type(column: str, value, pg_type: str):
@@ -176,7 +201,7 @@ def coerce_track_value_for_pg_type(column: str, value, pg_type: str):
         except (TypeError, ValueError):
             return None
     if pg_type in PG_JSON_TYPES:
-        return _coerce_json_value(value)
+        return coerce_json_value(value)
 
     return value
 

@@ -176,13 +176,27 @@ def fetch_album_tracks_for_tag_update(conn: Any = None, artist: str = "", album:
 
 
 def update_track_genres(conn: Any = None, track_id: Any = None, genres_str: str = "") -> int:
+    """Set a track's genres.
+
+    ⚠️ ``genres`` is TEXT but ``manual_genres`` is **JSONB**, and both are fed
+    the same comma-separated string here. A raw UPDATE bypasses ``save_to_db``
+    (and therefore its JSON coercion entirely), so the JSONB column must be
+    serialised at THIS call site or PostgreSQL rejects the statement with
+    ``invalid input syntax for type json``.
+    """
+    from db.repositories.popularity_repository import coerce_json_value
+
     with db_session() as session:
         result = session.execute(text("""
             UPDATE tracks
             SET genres = :genres,
-                manual_genres = :genres
+                manual_genres = :genres_json
             WHERE id = :id
-        """), {"genres": genres_str, "id": track_id})
+        """), {
+            "genres": genres_str,
+            "genres_json": coerce_json_value(genres_str),
+            "id": track_id,
+        })
         return result.rowcount or 0
 
 
