@@ -312,6 +312,34 @@ def _prune_genre_playlists_at_boot() -> None:
 
     threading.Thread(target=_run, daemon=True, name="boot-genre-playlist-prune").start()
 
+def _repair_jsonb_drift_at_boot() -> None:
+    """Run the JSONB/TEXT drift check-repair.  **test-site only.**
+
+    Runs in a background thread for the same reason as the genre-playlist
+    prune: it issues DDL and must never delay startup.  The pass itself
+    declines to do anything unless ``features.use_test_site`` is on, so on a
+    live install this thread starts, checks the flag, and exits — there is no
+    configuration under which it touches live data.
+
+    Kept out of ``ensure_full_schema`` deliberately.  The bootstrap runs under
+    an advisory lock and is allowed to fail hard (``raise``); this is
+    best-effort by design and must never be able to prevent a boot.
+    """
+    def _run() -> None:
+        try:
+            from db.jsonb_drift_repair import run_startup_check_repair
+
+            result = run_startup_check_repair()
+            if result.get("converted"):
+                logger.info(
+                    "JSONB drift repaired at boot",
+                    converted=result["converted"],
+                )
+        except Exception as exc:
+            logger.warning("JSONB drift check-repair skipped at boot", error=str(exc))
+
+    threading.Thread(target=_run, daemon=True, name="boot-jsonb-drift-repair").start()
+
 def init_database_and_schema() -> bool:
     max_attempts = 4
     for attempt in range(1, max_attempts + 1):
@@ -332,6 +360,7 @@ def init_database_and_schema() -> bool:
                 
                 _reset_stale_scan_states()
                 _prune_genre_playlists_at_boot()
+                _repair_jsonb_drift_at_boot()
                 return True
         except Exception as exc:
             msg = str(exc)
@@ -369,6 +398,7 @@ def _run_deferred_startup_migrations() -> None:
         run_migrations_on_startup()
         _reset_stale_scan_states()
         _prune_genre_playlists_at_boot()
+        _repair_jsonb_drift_at_boot()
     except Exception as exc:
         logger.error("Deferred schema bootstrap failed", exc_info=True)
 
