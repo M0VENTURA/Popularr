@@ -242,6 +242,27 @@
    * stop propagation — call event.preventDefault() yourself if needed, so the
    * behaviour is explicit rather than surprising.
    *
+   * ⚠️ `handler.call(this, this, event)` — NOT `handler(this, event)`.
+   *
+   * The element is passed BOTH ways on purpose:
+   *   * as the first ARGUMENT, which is the documented `(element, event)`
+   *     contract; and
+   *   * as `this`, because every existing caller was written as
+   *     `function () { this.dataset.x }`.
+   *
+   * A bare `handler(this, event)` binds nothing, so `this` is `undefined` in a
+   * strict handler and `globalThis` in a sloppy one — and `this.dataset` throws
+   * either way. That single call shape silently killed EVERY action bound
+   * through here: all ten queue row/group handlers in pages/download-queue.js
+   * and the folder actions in pages/monitor.js. Inside an addEventListener
+   * callback `this` already IS the element, which is what makes `.call` correct
+   * rather than a trick.
+   *
+   * ⚠️ Do not "simplify" this back to a bare call, and do not pick one style:
+   * the parameter is the contract, `this` is what the callers use. A test
+   * (`tests/test_item_groups_bindactions_this.py`) drives the real extracted
+   * code and fails on either regression.
+   *
    * @param {Element} root
    * @param {Object<string, Function>} map selector -> handler(element, event)
    */
@@ -252,7 +273,7 @@
       if (typeof handler !== 'function') return;
       root.querySelectorAll(selector).forEach((el) => {
         el.addEventListener('click', function (event) {
-          handler(this, event);
+          handler.call(this, this, event);
         });
       });
     });
