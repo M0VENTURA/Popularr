@@ -146,13 +146,28 @@
 {% macro render_release_section(key, section_id, icon, label, items, artist_name, description=None) %}
 {%- set library = items|rejectattr('is_missing')|list -%}
 {%- set missing = items|selectattr('is_missing')|list -%}
+{#
+  A category with NOTHING owned is COLLAPSED by default so the page can be
+  scrolled past without wading through empty sections.
+
+  The header still carries the counts — including how many albums are missing —
+  so the information is never hidden, and the toggle expands it again. The hint
+  text is deliberate: a rotated chevron alone reads as a dead header, and the
+  section must look expandable rather than broken.
+
+  `data-auto-collapsed` records the INITIAL state for the page script, which
+  uses it to keep "Expand All" and the jump chips coherent with what the user
+  can see.
+#}
+{%- set auto_collapse = library|length == 0 -%}
 {%- if items|length > 0 %}
-<div class="card mb-3 release-section" id="{{ section_id }}-section" data-category="{{ key }}" data-section-id="{{ section_id }}">
+<div class="card mb-3 release-section" id="{{ section_id }}-section" data-category="{{ key }}" data-section-id="{{ section_id }}" data-library-count="{{ library|length }}"{% if auto_collapse %} data-auto-collapsed="1"{% endif %}>
   <div class="card-header release-section-header">
-    <button type="button" class="release-section-toggle" data-bs-toggle="collapse" data-bs-target="#{{ section_id }}-body" aria-expanded="true">
+    <button type="button" class="release-section-toggle" data-bs-toggle="collapse" data-bs-target="#{{ section_id }}-body" aria-expanded="{{ 'false' if auto_collapse else 'true' }}">
       <i class="bi bi-chevron-down section-chevron"></i> <i class="bi {{ icon }}"></i> {{ label }}
       <span class="badge bg-success">{{ library|length }}</span>
       {% if missing %}<span class="badge bg-warning text-dark">{{ missing|length }} missing</span>{% endif %}
+      {% if auto_collapse %}<span class="release-collapsed-hint"><i class="bi bi-chevron-expand"></i> none in your library — click to show {{ items|length }}</span>{% endif %}
     </button>
     <div class="release-section-controls">
       <div class="btn-group btn-group-sm release-filter-group" role="group" aria-label="{{ label }} filter">
@@ -167,7 +182,7 @@
       <button type="button" class="btn btn-sm btn-outline-warning release-check-missing-btn" data-artist="{{ artist_name|e }}" data-category="{{ key }}" title="Check for missing releases"><i class="bi bi-flag"></i> <span class="d-none d-md-inline">Check Missing</span></button>
     </div>
   </div>
-  <div class="collapse show release-section-body" id="{{ section_id }}-body">
+  <div class="collapse{{ '' if auto_collapse else ' show' }} release-section-body" id="{{ section_id }}-body">
     {% if description %}<div class="text-muted small px-3 pt-2">{{ description }}</div>{% endif %}
     <div class="release-list" data-category="{{ key }}" data-section-id="{{ section_id }}">
       {% for album in items %}

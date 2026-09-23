@@ -73,6 +73,15 @@
 .release-section-toggle .section-chevron { transition: transform 0.2s ease; }
 .release-section-toggle[aria-expanded="false"] .section-chevron { transform: rotate(-90deg); }
 
+/*
+  A section with nothing owned starts collapsed. The hint keeps the header from
+  reading as a dead/broken row: it says why it is shut and that it opens.
+*/
+.release-collapsed-hint {
+  font-weight: 400; font-size: 0.8rem; color: var(--text-muted, #9aa0a6);
+}
+.release-section-toggle[aria-expanded="true"] .release-collapsed-hint { display: none; }
+
 .release-section-controls {
   display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center;
 }

@@ -592,6 +592,42 @@
 
   // ── Expanding / collapsing every section's tracklists ───────────────────
 
+  /**
+   * Open or shut every SECTION's accordion body.
+   *
+   * Without this, "Expand All" only revealed tracklists inside sections that
+   * were already open, so a section collapsed because it has nothing in the
+   * library (see the release-section macro) could never be revealed by the
+   * button that claims to expand everything.
+   *
+   * `aria-expanded` is kept in step rather than relying on the collapse event:
+   * the chevron and the "none in your library" hint are both driven by it, and
+   * collapsing a section whose body is ALREADY shut fires no event at all —
+   * leaving the header stale.
+   */
+  function setSectionExpanded(section, expand) {
+    var body = section.querySelector('.release-section-body');
+    var toggle = section.querySelector('.release-section-toggle');
+    if (!body) return;
+
+    if (global.bootstrap && global.bootstrap.Collapse) {
+      var instance = global.bootstrap.Collapse.getOrCreateInstance(body, { toggle: false });
+      if (expand) instance.show();
+      else instance.hide();
+    } else {
+      // No Bootstrap: flip the class directly so the body still responds.
+      body.classList.toggle('show', !!expand);
+    }
+    if (toggle) toggle.setAttribute('aria-expanded', expand ? 'true' : 'false');
+  }
+
+  /** Snap back to the state the page was rendered with (used on collapse-all). */
+  function restoreInitialSectionState() {
+    Array.prototype.forEach.call(doc.querySelectorAll('.release-section'), function (section) {
+      setSectionExpanded(section, section.getAttribute('data-auto-collapsed') !== '1');
+    });
+  }
+
   function expandAll(expand) {
     Array.prototype.forEach.call(doc.querySelectorAll('.release-item'), function (item) {
       var tracklistEl = item.querySelector('.release-tracklist');
@@ -603,6 +639,16 @@
       if (btn) btn.setAttribute('aria-expanded', expand ? 'true' : 'false');
       if (expand) loadTracklist(item);
     });
+
+    if (expand) {
+      // Reveal every section, including ones auto-collapsed for having no
+      // library items.
+      Array.prototype.forEach.call(doc.querySelectorAll('.release-section'), function (section) {
+        setSectionExpanded(section, true);
+      });
+    } else {
+      restoreInitialSectionState();
+    }
   }
 
   // ── Init ────────────────────────────────────────────────────────────────
