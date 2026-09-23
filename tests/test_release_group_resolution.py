@@ -133,7 +133,17 @@ def test_start_release_download_resolves_group_and_adds_per_track(monkeypatch):
 
     def fake_add(rid, tracks, artist, album, **k):
         calls["add_tracks"].append((rid, len(tracks)))
-        return [1, 2]
+        return {
+            "queue_ids": [1, 2],
+            "queued": True,
+            "reason": None,
+            "message": "",
+            "total_tracks": len(tracks),
+            "in_library": 0,
+            "already_queued": 0,
+            "already_active": 0,
+            "duplicate": 0,
+        }
 
     def fake_mkdir(*a, **k):
         return "/tmp/monitoring/abyss"
@@ -142,7 +152,7 @@ def test_start_release_download_resolves_group_and_adds_per_track(monkeypatch):
     monkeypatch.setattr(_dps, "fetch_musicbrainz_release_metadata", fake_raw_fetch)
     monkeypatch.setattr(_dps, "fetch_release_metadata", fake_svc_fetch)
     monkeypatch.setattr(_dps, "upsert_musicbrainz_release", fake_upsert)
-    monkeypatch.setattr(_dps, "add_release_tracks_to_queue", fake_add)
+    monkeypatch.setattr(_dps, "add_release_tracks_to_queue_detailed", fake_add)
     monkeypatch.setattr(_dps, "create_monitoring_folder", fake_mkdir)
 
     result = _dps.start_release_download("rg-abc", "Abyss", "Ad Infinitum", method="slskd")

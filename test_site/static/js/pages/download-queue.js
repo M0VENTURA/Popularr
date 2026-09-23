@@ -1593,6 +1593,21 @@
         queue_items_only: true,
       });
 
+      // queued:false means the API created no queue rows — the release is
+      // already owned or already queued. Reporting "Download queued" there
+      // would be false, so surface the API's own explanation instead.
+      //
+      // queued_tracks:0 is authoritative even when success is true: that is
+      // exactly what the endpoint used to return, so trusting `success` alone
+      // would reinstate the bug.
+      const queuedCount = Number(data && data.queued_tracks);
+      const explicitZero = data && data.queued_tracks !== undefined && queuedCount === 0;
+      if (data && (explicitZero || data.queued === false || data.success === false)
+          && !(queuedCount > 0)) {
+        notifyError((data && (data.message || data.error)) || 'Nothing to queue for this release.');
+        return;
+      }
+
       let message = `Download queued: ${releaseTitle}`;
       if (data.tracking_id) message += ` (tracking ${data.tracking_id})`;
       if (data.persistent_search) message += ' — will retry automatically on failure';

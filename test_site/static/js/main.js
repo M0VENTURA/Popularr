@@ -469,6 +469,40 @@
 
   let releasePickerOnQueued = null;
 
+  /**
+   * True when /api/musicbrainz/download reported that it enqueued nothing.
+   *
+   * The endpoint returns HTTP 200 with ``queued: false`` (plus a ``reason``
+   * and human-readable ``message``) rather than an error status, because
+   * ``api.postJson`` throws on non-2xx and that would hide the specific
+   * "already in your library" message behind a generic HTTP error.
+   *
+   * The track COUNT outranks ``success``: the endpoint used to answer
+   * ``success: true`` alongside ``queued_tracks: 0``, so a check that only
+   * looked at ``success`` would let the original bug straight back in. A
+   * legacy payload that omits the count entirely still counts as queued.
+   */
+  function nothingQueued(data) {
+    if (!data) return false;
+    const count = Number(data.queued_tracks);
+    if (count > 0) return false;
+    if (data.queued === false) return true;
+    if (data.queued === true) return false;
+    if (data.queued_tracks !== undefined && count === 0) return true;
+    return data.success === false && !data.tracking_id;
+  }
+
+  /** Show the non-success outcome of a queue request as a warning. */
+  function warnNothingQueued(data) {
+    const message = (data && (data.message || data.error)) || 'Nothing to queue for this release.';
+    if (global.toast && typeof global.toast.warning === 'function') {
+      global.toast.warning(message);
+    } else if (global.toast) {
+      global.toast.error(message);
+    }
+    return message;
+  }
+
   async function openReleasePicker(releaseGroupId, title, artist, onQueued) {
     if (!releaseGroupId) {
       global.toast.error('Missing release group ID');
@@ -509,6 +543,14 @@
         method: 'slskd',
         queue_items_only: true,
       });
+
+      // The API answers with queued:false when it created no queue rows — the
+      // release is already owned or already queued. That is not success, so
+      // the green pill and the onQueued callback must not fire.
+      if (nothingQueued(data)) {
+        warnNothingQueued(data);
+        return;
+      }
 
       if (!data.success && !data.tracking_id) {
         global.toast.error('Error queueing release: ' + (data.error || 'Unknown error'));
@@ -582,6 +624,10 @@
         session_id: null,
         queue_items_only: true,
       });
+      if (nothingQueued(data)) {
+        warnNothingQueued(data);
+        return;
+      }
       if (data.error) {
         global.toast.error('Error: ' + data.error);
         return;

@@ -1127,6 +1127,38 @@ async def api_musicbrainz_download() -> Any:
         if not tracking_id and result.get("queue_ids"):
             tracking_id = result.get("queue_ids")[0]
 
+        # Nothing queued is NOT success. Previously this reported success:True
+        # and "(0 tracks)", so the UI showed a green "Queued" toast for a
+        # release the user already owned or had already queued.
+        #
+        # Deliberately HTTP 200, not 4xx: ``api.postJson`` in the rebuilt UI
+        # throws on any non-2xx status, which would collapse the specific
+        # reason ("already in your library" vs "already queued") into one
+        # generic "HTTP 400" error. A 200 with queued:false lets the caller
+        # show the right message.
+        if not queued_tracks:
+            reason = result.get("queue_reason") or "nothing_queued"
+            message = result.get("queue_message") or f"Nothing to queue for {release_title}."
+            logger.warning(
+                "Download request queued no tracks",
+                release_id=release_id,
+                reason=reason,
+                skipped=result.get("queue_skipped"),
+            )
+            return jsonify({
+                "success": False,
+                "queued": False,
+                "tracking_id": None,
+                "reason": reason,
+                "message": message,
+                "error": message,
+                "total_tracks": int(result.get("total_tracks") or 0),
+                "queued_tracks": 0,
+                "skipped": result.get("queue_skipped") or {},
+                "persistent_search": persistent_search,
+                "session_id": session_id,
+            }), 200
+
         try:
             from services.queue.queue_signal import signal_new_item
             signal_new_item()
@@ -1135,6 +1167,7 @@ async def api_musicbrainz_download() -> Any:
 
         return jsonify({
             "success": True,
+            "queued": True,
             "tracking_id": tracking_id,
             "message": f"Download queued for {release_title} ({queued_tracks} tracks)",
             "total_tracks": queued_tracks,

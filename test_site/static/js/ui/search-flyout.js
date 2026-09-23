@@ -761,13 +761,40 @@
     }
 
     try {
-      await global.api.postJson('/api/musicbrainz/download', {
+      const data = await global.api.postJson('/api/musicbrainz/download', {
         release_id: id,
         release_title: rel.title || '',
         artist,
         method: 'slskd',
         queue_items_only: true,
       });
+
+      // Nothing enqueued (already owned / already queued) → the API answers
+      // 200 with queued:false. Marking the button "Queued" and firing the
+      // green pill here would claim a download that will never happen.
+      //
+      // The track COUNT is authoritative over the `success` flag: the old
+      // endpoint answered success:true with queued_tracks:0, so trusting
+      // `success` alone reinstates the bug. An explicit queued:false or
+      // success:false also fails; a legacy success payload with no counts
+      // (queued_tracks undefined) still succeeds.
+      const queuedCount = Number(data && data.queued_tracks) || 0;
+      const succeeded = !(
+        (data && (data.queued === false || data.success === false))
+        || (data && data.queued_tracks !== undefined && queuedCount === 0)
+      );
+      if (!succeeded) {
+        settle(false);
+        const message = (data && (data.message || data.error))
+          || 'Nothing to queue for this release.';
+        if (global.toast && typeof global.toast.warning === 'function') {
+          global.toast.warning(message);
+        } else {
+          notifyError(message);
+        }
+        return;
+      }
+
       settle(true);
       if (global.toast) global.toast.queued(rel.title || 'Release');
     } catch (error) {

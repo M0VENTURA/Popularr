@@ -188,7 +188,19 @@ def queue_add_batch(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def add_release_tracks_to_queue(
+#: Human-readable explanation for every non-empty ``reason`` code.
+_QUEUE_SKIP_MESSAGES: dict[str, str] = {
+    "already_active": "This release already has active downloads in the queue.",
+    "no_tracks": "MusicBrainz returned no tracks for this release.",
+    "all_in_library": "Every track in this release is already in your library.",
+    "already_queued": "Every track in this release is already in the download queue.",
+    "all_present": "Every track in this release is already in your library or queue.",
+    "all_duplicate": "The release listing repeated the same tracks.",
+    "nothing_queued": "No tracks could be queued for this release.",
+}
+
+
+def add_release_tracks_to_queue_detailed(
     release_id: str,
     tracks: list[dict[str, Any]],
     artist: str,
@@ -196,12 +208,43 @@ def add_release_tracks_to_queue(
     album_artist: str | None = None,
     queue_source: str = "soulseek",
     year: int | None = None,
-) -> list[int]:
-    """Add normalized tracks to the download queue."""
+) -> dict[str, Any]:
+    """Add normalized tracks to the download queue, reporting WHY any were skipped.
+
+    A bare ``list[int]`` return cannot distinguish "nothing to queue" from
+    "nothing to queue because you already own every track" — both are ``[]``.
+    Callers that surface the outcome to a user need that difference, so this
+    returns a structured result and ``add_release_tracks_to_queue`` stays as the
+    back-compat list-returning wrapper.
+
+    Returns a dict with ``queue_ids`` (list[int]), ``queued`` (bool), ``reason``
+    (None when something was queued, otherwise a code documented in
+    ``_QUEUE_SKIP_MESSAGES``), a human-readable ``message``, and counts for
+    ``already_active``, ``in_library``, ``already_queued`` and ``duplicate``.
+    """
     queue_ids: list[int] = []
+    in_library = 0
+    already_queued = 0
+    duplicate = 0
+    total_tracks = len(tracks or [])
+    already_active = 0
     normalized_source = (queue_source or "soulseek").strip().lower()
     if normalized_source not in ("soulseek",):
         normalized_source = "soulseek"
+
+    def _result(reason: str | None) -> dict[str, Any]:
+        return {
+            "queue_ids": queue_ids,
+            "queued": bool(queue_ids),
+            "queued_count": len(queue_ids),
+            "reason": reason,
+            "message": _QUEUE_SKIP_MESSAGES.get(reason or "", ""),
+            "total_tracks": total_tracks,
+            "already_active": already_active,
+            "in_library": in_library,
+            "already_queued": already_queued,
+            "duplicate": duplicate,
+        }
 
     try:
         with db_session() as session:
@@ -225,7 +268,8 @@ def add_release_tracks_to_queue(
                 ]
                 if _active_rows:
                     logger.info("Release already has active queue items — skipping re-queue", release_id=release_id, active_count=len(_active_rows))
-                    return []
+                    already_active = len(_active_rows)
+                    return _result("already_active")
                     
                 _stale_ids = [
                     (getattr(r, "_mapping", None) or {}).get("id") or r[0]
@@ -242,7 +286,7 @@ def add_release_tracks_to_queue(
 
             seen_recordings: set[str] = set()
 
-            for track in tracks:
+            for track in (tracks or []):
                 track_title = track.get("title") or track.get("mb_title") or "Unknown Track"
                 track_artist = track.get("artist") or artist
                 track_number = track.get("track_number")
@@ -257,6 +301,7 @@ def add_release_tracks_to_queue(
                 if not dedupe_key:
                     dedupe_key = re.sub(r"[^a-z0-9]+", " ", track_title.lower()).strip()
                 if dedupe_key in seen_recordings:
+                    duplicate += 1
                     continue
                 seen_recordings.add(dedupe_key)
 
@@ -267,6 +312,7 @@ def add_release_tracks_to_queue(
                 )
                 existing = find_library_track(artist=track_artist, title=track_title, album=album)
                 if existing:
+                    in_library += 1
                     continue
 
                 _dup_row = session.execute(
@@ -282,6 +328,7 @@ def add_release_tracks_to_queue(
                     {"artist": track_artist, "title": track_title},
                 ).fetchone()
                 if _dup_row is not None:
+                    already_queued += 1
                     continue
 
                 search_query = f"{track_artist} - {track_title}"
@@ -343,11 +390,49 @@ def add_release_tracks_to_queue(
                 signal_new_item()
             except Exception:
                 pass
-        return queue_ids
+            return _result(None)
+        if not total_tracks:
+            return _result("no_tracks")
+        if in_library and already_queued:
+            return _result("all_present")
+        if in_library:
+            return _result("all_in_library")
+        if already_queued:
+            return _result("already_queued")
+        if duplicate:
+            return _result("all_duplicate")
+        return _result("nothing_queued")
 
     except Exception as e:
         logger.error("Failed adding tracks to queue", error=str(e), exc_info=True)
         raise
+
+
+def add_release_tracks_to_queue(
+    release_id: str,
+    tracks: list[dict[str, Any]],
+    artist: str,
+    album: str,
+    album_artist: str | None = None,
+    queue_source: str = "soulseek",
+    year: int | None = None,
+) -> list[int]:
+    """Add normalized tracks to the download queue, returning the new row ids.
+
+    Thin wrapper over :func:`add_release_tracks_to_queue_detailed` for callers
+    that only need the ids. Prefer the detailed form when the user must be told
+    why nothing was queued.
+    """
+    result = add_release_tracks_to_queue_detailed(
+        release_id,
+        tracks,
+        artist,
+        album,
+        album_artist=album_artist,
+        queue_source=queue_source,
+        year=year,
+    )
+    return list(result.get("queue_ids") or [])
 
 
 def handle_unmatched_file(file_path: str, file_metadata: dict[str, Any]) -> dict[str, Any] | None:

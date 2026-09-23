@@ -41,7 +41,10 @@ from services.enrichment.musicbrainz_service import (
     resolve_release_id,
 )
 from services.infrastructure.filesystem_service import create_monitoring_folder
-from services.queue.queue_processing_service import add_release_tracks_to_queue
+from services.queue.queue_processing_service import (
+    add_release_tracks_to_queue,
+    add_release_tracks_to_queue_detailed,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -1237,7 +1240,7 @@ def start_release_download(release_id: Any, release_title: str, artist: str, met
             )
 
         queue_source = 'soulseek'
-        queue_ids = add_release_tracks_to_queue(
+        queue_result = add_release_tracks_to_queue_detailed(
             resolved_release_id,
             tracks,
             artist,
@@ -1246,12 +1249,26 @@ def start_release_download(release_id: Any, release_title: str, artist: str, met
             queue_source=queue_source,
             year=release_year,
         )
+        queue_ids = list(queue_result.get("queue_ids") or [])
 
         return {
             "success": True,
             "mb_release_db_id": mb_release_db_id,
             "queue_items_created": len(queue_ids),
             "queue_ids": queue_ids,
+            # Why nothing was queued, when that is the case. ``None`` once at
+            # least one track made it in. Additive so existing callers that
+            # only read queue_items_created/queue_ids are unaffected.
+            "queued": bool(queue_ids),
+            "queue_reason": queue_result.get("reason"),
+            "queue_message": queue_result.get("message") or "",
+            "queue_skipped": {
+                "in_library": queue_result.get("in_library") or 0,
+                "already_queued": queue_result.get("already_queued") or 0,
+                "already_active": queue_result.get("already_active") or 0,
+                "duplicate": queue_result.get("duplicate") or 0,
+            },
+            "total_tracks": queue_result.get("total_tracks") or 0,
         }
 
     except Exception as e:
