@@ -90,6 +90,18 @@
 
   // ── Scan controls ───────────────────────────────────────────────────────
 
+  /**
+   * Run the gate before every scan start.
+   *
+   * A start while another scan is running is rejected server-side as a
+   * duplicate, so ask first: name the running scan, offer to cancel it, and
+   * wait for it to actually stop before letting the new scan through.
+   */
+  async function scanGate(scanName) {
+    if (!global.ScanPreflight) return true;
+    return global.ScanPreflight.confirmIfRunning({ scanName: scanName || '' });
+  }
+
   function startPopularityScan(mode, force, restart) {
     return global.api.postJson('/api/popularity/run', {
       mode: mode || 'popularity',
@@ -114,6 +126,8 @@
 
     return global.buttonState.withBusy(btn, 'Starting…', async () => {
       try {
+        if (!await scanGate(global.ScanPreflight
+          ? global.ScanPreflight.label(mode) : mode)) return;
         await startPopularityScan(mode, force, restart);
         global.toast.success('Popularity scan started');
       } catch (error) {
@@ -149,6 +163,8 @@
     const force = !!document.getElementById('navImportForce')?.checked;
     const el = document.getElementById('nav-status');
 
+    if (!await scanGate('Navidrome Import')) return;
+
     try {
       const data = await global.api.postJson('/api/navidrome/import', {
         mode: force ? 'force' : 'all',
@@ -166,6 +182,7 @@
   }
 
   async function startNavidromeServerScan() {
+    if (!await scanGate('Navidrome Server Scan')) return;
     try {
       const data = await global.api.postJson('/api/navidrome/scan/start', {});
       setStatus('nav-status',
@@ -220,7 +237,8 @@
     }
   }
 
-  function startEssentiaScan() {
+  async function startEssentiaScan() {
+    if (!await scanGate('Essentia Mood Scan')) return;
     return global.api.postJson('/api/essentia/run', {});
   }
 

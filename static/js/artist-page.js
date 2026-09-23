@@ -302,6 +302,22 @@
     if (!form) { toast('Refresh', 'Scan form unavailable.', 'error'); return; }
     var select = form.querySelector('select[name="scan_type"]');
     if (select) select.value = 'metadata';
+
+    // The form carries `data-scan-preflight`, and the gate's own submit
+    // listener intercepts both this programmatic path and a plain click on Run
+    // — but form.submit() bypasses listeners, so ask here too when a scan is
+    // already running. Everything else goes through the listener.
+    // (No "cleared" flag: nothing consumes one, and a stale flag would
+    // silently skip the gate later.)
+    if (window.ScanPreflight) {
+      window.ScanPreflight.confirmIfRunning({ scanName: 'Metadata Scan' }).then(function (proceed) {
+        if (!proceed) return;
+        toast('Metadata refresh', 'Starting metadata scan…', 'info');
+        form.submit();
+      });
+      return;
+    }
+
     toast('Metadata refresh', 'Starting metadata scan…', 'info');
     form.submit();
   }

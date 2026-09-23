@@ -30,6 +30,13 @@ async function scanLetterArtists(letter, scanMode) {
     var scanModeValue = fullScan ? 'forced' : 'changes';
     var message = 'Start ' + (fullScan ? 'Full (Forced)' : 'Changes') + ' scan from letter "' + letter + '"?\n\nThis will resolve the first matching artist from your local library and scan from there.';
 
+    // Gate on a running scan FIRST: the offer to cancel it subsumes the generic
+    // confirmation below, and asking twice would be noise.
+    if (window.ScanPreflight) {
+        var proceed = await window.ScanPreflight.confirmIfRunning({ scanName: 'Artist Scan' });
+        if (!proceed) return;
+    }
+
     if (!confirm(message)) {
         return;
     }

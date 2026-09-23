@@ -78,6 +78,10 @@ function escapeHtml(str) {
 })();
 
 async function startPopularityScan(m, force, restart) {
+  if (window.ScanPreflight) {
+    const scanName = window.ScanPreflight.label(m || 'popularity');
+    if (!await window.ScanPreflight.confirmIfRunning({ scanName })) return;
+  }
   await postJSON("/api/popularity/run", { mode: m || "popularity", force: !!force, restart: !!restart });
 }
 
@@ -131,8 +135,12 @@ async function startNavidromeImport() {
   // the new-items/changed-album skips.  Unchecked = mode:all → normal import
   // that skips unchanged albums.
   const force = !!document.getElementById("navImportForce")?.checked;
-  const d = await postJSON("/api/navidrome/import", { mode: force ? "force" : "all" });
   const e = document.getElementById("nav-status");
+
+  if (window.ScanPreflight
+      && !await window.ScanPreflight.confirmIfRunning({ scanName: 'Navidrome Import' })) return;
+
+  const d = await postJSON("/api/navidrome/import", { mode: force ? "force" : "all" });
   if (d.success) {
     e.innerText = d.message || "Started";
     e.className = "text-success small";
@@ -144,6 +152,8 @@ async function startNavidromeImport() {
 }
 
 async function startNavidromeServerScan() {
+  if (window.ScanPreflight
+      && !await window.ScanPreflight.confirmIfRunning({ scanName: 'Navidrome Server Scan' })) return;
   const d = await postJSON("/api/navidrome/scan/start");
   const e = document.getElementById("nav-status");
   e.innerText = d.success ? "Server scan triggered" : "Failed";
@@ -189,6 +199,8 @@ async function pollNavidromeStatus() {
 }
 
 async function startEssentiaScan() {
+  if (window.ScanPreflight
+      && !await window.ScanPreflight.confirmIfRunning({ scanName: 'Essentia Mood Scan' })) return;
   await fetch("/api/essentia/run", { method: "POST" });
 }
 

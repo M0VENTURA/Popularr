@@ -228,6 +228,21 @@
     if (!form) { notifyError('Scan form unavailable on this page.'); return; }
     var select = form.querySelector('select[name="scan_type"]');
     if (select) select.value = 'metadata';
+
+    // `form.submit()` does NOT fire submit listeners, so the declarative
+    // `data-scan-preflight` guard on this form cannot see this path — ask here
+    // as well. (No "cleared" flag: nothing consumes one, and a stale flag would
+    // silently skip the gate later.)
+    if (global.ScanPreflight) {
+      global.ScanPreflight.confirmIfRunning({ scanName: 'Metadata Scan' })
+        .then(function (proceed) {
+          if (!proceed) return;
+          notifySuccess('Starting metadata scan…');
+          form.submit();
+        });
+      return;
+    }
+
     notifySuccess('Starting metadata scan…');
     form.submit();
   }

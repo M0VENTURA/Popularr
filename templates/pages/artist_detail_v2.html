@@ -131,7 +131,7 @@
       </div>
 
       <!-- Admin Controls Row -->
-      <form id="artistScanForm" action="{{ url_for('scans.scan_artist_custom') }}" method="post" class="d-flex align-items-center gap-2 mb-3 flex-wrap scan-toolbar">
+      <form id="artistScanForm" action="{{ url_for('scans.scan_artist_custom') }}" method="post" data-scan-preflight data-scan-preflight-name="Artist Scan" class="d-flex align-items-center gap-2 mb-3 flex-wrap scan-toolbar">
         <input type="hidden" name="artist" value="{{ artist_name }}">
 
         {#
@@ -517,6 +517,7 @@
   filter here restores it immediately, independently of that larger repair.
 #}
 <script src="{{ versioned_static('js/artist-album-filter.js') }}"></script>
+<script src="{{ versioned_static('js/scan-preflight.js') }}"></script>
 <script src="{{ versioned_static('js/artist-page.js') }}"></script>
 <script src="{{ versioned_static('js/artist-releases.js') }}"></script>
 

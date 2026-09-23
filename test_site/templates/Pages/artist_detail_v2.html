@@ -160,6 +160,8 @@
       <form id="artistScanForm"
             action="{{ url_for('scans.scan_artist_custom') }}"
             method="post"
+            data-scan-preflight
+            data-scan-preflight-name="Artist Scan"
             class="d-flex align-items-center gap-2 mb-3 flex-wrap scan-toolbar">
         <input type="hidden" name="artist" value="{{ artist_name }}">
 
@@ -532,6 +534,7 @@
 </script>
 
 <script src="{{ versioned_static('js/services/genres.js') }}"></script>
+<script src="{{ versioned_static('js/services/scan-preflight.js') }}"></script>
 <script src="{{ versioned_static('js/pages/artist.js') }}"></script>
 <script src="{{ versioned_static('js/pages/artist-detail-extras.js') }}"></script>
 <script src="{{ versioned_static('js/pages/artist-releases.js') }}"></script>

@@ -61,6 +61,16 @@
     const fullScan = scanMode === 'forced';
     const scanModeValue = fullScan ? 'forced' : 'changes';
 
+    // Gate on a running scan FIRST: offering to cancel it is the whole point,
+    // and asking twice (gate + the letter confirm below) would be noise, so the
+    // gate's own dialog replaces the generic one when a scan is active.
+    if (global.ScanPreflight) {
+      const proceed = await global.ScanPreflight.confirmIfRunning({
+        scanName: 'Artist Scan',
+      });
+      if (!proceed) return;
+    }
+
     const accepted = await global.ui.confirm({
       title: 'Start scan',
       message: `Start a ${fullScan ? 'Full (Forced)' : 'Changes'} scan from letter "${letter}"?`,
