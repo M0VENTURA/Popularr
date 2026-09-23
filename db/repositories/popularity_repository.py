@@ -300,9 +300,20 @@ def upsert_tracks_bulk(track_payloads: list[dict]) -> bool:
                 try:
                     _execute_save(session, payload)
                 except Exception as exc:
+                    # ⚠️ WARNING, not DEBUG, and it names the track + the DB's
+                    # own reason. This was ``logger.debug``, so a rejected
+                    # statement ("invalid input syntax for type json" against a
+                    # JSONB genre column) vanished from a normal log tail — the
+                    # scan reported success while every row of the affected
+                    # album was discarded, and the only trace was an ERROR line
+                    # in the POSTGRES log.
+                    #
+                    # ⚠️ This module uses the STDLIB logger, not structlog, so
+                    # keyword arguments raise "Logger._log() got an unexpected
+                    # keyword argument". Use %-style formatting here.
                     ok = False
-                    logger.debug(
-                        "Bulk track upsert skipped for %s: %s",
+                    logger.warning(
+                        "Bulk track upsert FAILED — row skipped (track_id=%s): %s",
                         payload.get("id"), exc,
                     )
             return ok

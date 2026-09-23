@@ -738,6 +738,11 @@ def bulk_tag_tracks(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
 
     updated_count = 0
     failed_files: list[str] = []
+    # Tracks whose DB write or tag write was REFUSED. Counted so the caller can
+    # tell "applied to 5 tracks" from "refused on all 5" — the function used to
+    # return success: True unconditionally, so the endpoint answered 200 and the
+    # UI reported the tags applied while every row had been skipped.
+    failed_count = 0
 
     with db_session() as session:
         for track_id in track_ids:
@@ -747,6 +752,7 @@ def bulk_tag_tracks(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
                     {"id": track_id},
                 ).mappings().first()
                 if not row:
+                    failed_count += 1
                     continue
                 title = row.get("title")
                 current = str(row.get("genres") or "")
@@ -782,14 +788,22 @@ def bulk_tag_tracks(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
                 )
                 updated_count += 1
             except Exception as exc:
+                failed_count += 1
                 logger.error("Bulk tag track failed", track_id=track_id, error=str(exc))
                 continue
 
+    # A batch that updated NOTHING did not succeed. Reporting success there is
+    # what made a total failure look like a completed tag write.
     return {
-        "success": True,
+        "success": updated_count > 0,
         "updated_count": updated_count,
+        "failed_count": failed_count,
         "failed_files": failed_files,
-    }, 200
+        "error": (
+            None if updated_count
+            else f"No tracks were updated ({failed_count} failed)."
+        ),
+    }, 200 if updated_count else 500
 
 
 def bulk_delete_tracks(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:

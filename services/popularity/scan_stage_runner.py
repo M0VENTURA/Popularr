@@ -2189,8 +2189,18 @@ def run_scan(
             try:
                 _deferred_payloads = _deferred_persist.drain()
                 if _deferred_payloads:
-                    upsert_tracks_bulk(_deferred_payloads)
-                    logger.debug("Bulk-persisted track(s)", count=len(_deferred_payloads), artist=artist, album=album)
+                    # ⚠️ The return value is CHECKED. It was discarded, so a
+                    # wholly refused batch (e.g. a JSONB genre column rejecting
+                    # a CSV string) was indistinguishable from success — the
+                    # scan carried on and the album simply had no rows.
+                    if not upsert_tracks_bulk(_deferred_payloads):
+                        logger.warning(
+                            "Bulk track persist reported FAILURES — some rows were "
+                            "refused by the database",
+                            artist=artist, album=album, count=len(_deferred_payloads),
+                        )
+                    else:
+                        logger.debug("Bulk-persisted track(s)", count=len(_deferred_payloads), artist=artist, album=album)
             except Exception as exc:
                 logger.warning("Bulk track persist failed", artist=artist, album=album, error=str(exc))
 

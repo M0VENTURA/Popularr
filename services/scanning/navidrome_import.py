@@ -457,7 +457,16 @@ def scan_artist_to_db(
 
             if _album_payloads:
                 try:
-                    upsert_tracks_bulk(_album_payloads)
+                    # ⚠️ The return value is CHECKED — see the note in
+                    # scan_stage_runner. A refused batch must not pass silently.
+                    if not upsert_tracks_bulk(_album_payloads):
+                        logger.warning(
+                            "[NAVIDROME_SCAN] Bulk track persist reported FAILURES — "
+                            "some rows were refused by the database",
+                            artist=artist_name,
+                            album=album_name,
+                            count=len(_album_payloads),
+                        )
                 except Exception as exc:
                     logger.warning(
                         "[NAVIDROME_SCAN] Bulk track persist failed",
