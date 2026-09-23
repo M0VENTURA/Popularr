@@ -1,13 +1,13 @@
-/* ==========================================================================
+﻿/* ==========================================================================
    static/js/ui/search-flyout.js
-   Unified hybrid search — All / In Library / MusicBrainz.
+   Unified hybrid search â€” All / In Library / MusicBrainz.
    Typing syncs the input only; searches run on Enter or a filter change.
 
    Load order:
-       utils/dom.js  →  utils/api.js  →  ui/toast.js
+       utils/dom.js  â†’  utils/api.js  â†’  ui/toast.js
        unified_search.js
 
-   ── BUGS FIXED ────────────────────────────────────────────────────────────
+   â”€â”€ BUGS FIXED â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
    1. THE MUSICBRAINZ COUNT BADGE RESET ITSELF TO ZERO ON THE LIBRARY TAB.
       On SCOPE_LIBRARY the MB promise was built as:
 
@@ -31,7 +31,7 @@
             ? !panel.classList.contains('d-none') : false);
       `||` binds tighter than `?:`, so the condition was
       `(!panel || panel.classList.get)`. DOMTokenList has no `.get` method,
-      so with a panel present that evaluated to `undefined` — falsy — and the
+      so with a panel present that evaluated to `undefined` â€” falsy â€” and the
       ternary ALWAYS produced `false`. Every click called
       setAdvancedFiltersVisible(false).
       (This was already annotated in the file; the corrected form is kept.)
@@ -41,13 +41,13 @@
       every release object from every search. It is now cleared per run.
 
    4. `hasAdvanced` WAS COMPUTED TWO DIFFERENT WAYS. runSearch() used
-      hasAnyAdvancedFilter(adv) — driven by ADVANCED_FILTER_KEYS — while
+      hasAnyAdvancedFilter(adv) â€” driven by ADVANCED_FILTER_KEYS â€” while
       fetchMb() re-derived it from its own hand-written OR chain. Both now
       use the one helper, so adding a filter key cannot leave one of them
       behind. (The previous fix to forward year_to/genre is preserved.)
 
    NOTE ON esc(): the local implementation is replaced by utils/dom.js's
-   escapeHtml, which escapes &, <, >, " and ' — the same five entities.
+   escapeHtml, which escapes &, <, >, " and ' â€” the same five entities.
    ========================================================================== */
 
 (function (global) {
@@ -75,6 +75,11 @@
   let _lastScope = null;
   let _mbDone = false;
   let _mbResults = [];
+  // Index into the currently rendered `.us-row` list, or -1 for "nothing
+  // highlighted". Kept as an INDEX rather than an element reference because
+  // every render replaces the rows wholesale via innerHTML, which would leave
+  // a stored element detached from the document.
+  let _activeRowIndex = -1;
 
   function emptyLocalResult() {
     return {
@@ -95,7 +100,250 @@
   const getMetaEl = () => document.getElementById('usResultMeta');
   const getErrorEl = () => document.getElementById('unifiedSearchError');
 
-  // ── Counts & scope ──────────────────────────────────────────────────────
+  /**
+   * Is the flyout on screen?
+   *
+   * Every row-navigation entry point must check this. The banner box mirrors
+   * the flyout and is ALWAYS present, so without the guard, arrowing in the
+   * banner on a closed flyout would move a highlight through rows nobody can
+   * see and swallow the keypress via preventDefault.
+   */
+  const isSearchOpen = () => {
+    const modalEl = getModalEl();
+    return !!modalEl && !modalEl.classList.contains('d-none');
+  };
+
+  // â”€â”€ Recent searches â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  //
+  // Re-running a search is the common case (the same artist, album or track
+  // reached for repeatedly), and the flyout starts empty every time.
+  //
+  // localStorage, not sessionStorage: the point is to survive a restart.
+  // Every access is wrapped â€” a browser in private mode can THROW on read, a
+  // full quota throws on write, and a corrupt value throws in JSON.parse.
+  // Recents are a convenience; none of those may break the flyout.
+
+  const RECENTS_KEY = 'popularr.unifiedSearch.recent';
+  const RECENTS_MAX = 8;
+
+  function readRecentSearches() {
+    try {
+      const store = global.localStorage;
+      if (!store) return [];
+      const raw = store.getItem(RECENTS_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((q) => typeof q === 'string' && q.trim().length >= MIN_QUERY_LENGTH)
+        .slice(0, RECENTS_MAX);
+    } catch (_e) {
+      return [];
+    }
+  }
+
+  function writeRecentSearches(list) {
+    try {
+      const store = global.localStorage;
+      if (!store) return;
+      store.setItem(RECENTS_KEY, JSON.stringify(list.slice(0, RECENTS_MAX)));
+    } catch (_e) { /* storage unavailable â€” recents are best-effort */ }
+  }
+
+  /**
+   * Move `query` to the front of the list, de-duplicated case-insensitively.
+   *
+   * Case-insensitive de-duplication keeps "Weezer" from displacing "weezer"
+   * and then sitting next to it, while the STORED text is the version the user
+   * actually typed â€” re-running a recent should reproduce their last search,
+   * not a normalised form of it.
+   */
+  function rememberSearch(query) {
+    const q = String(query || '').trim();
+    if (q.length < MIN_QUERY_LENGTH) return;
+    const key = q.toLowerCase();
+    const rest = readRecentSearches().filter((r) => r.toLowerCase() !== key);
+    writeRecentSearches([q].concat(rest));
+  }
+
+  function forgetSearch(query) {
+    const key = String(query || '').trim().toLowerCase();
+    writeRecentSearches(readRecentSearches().filter((r) => r.toLowerCase() !== key));
+  }
+
+  function recentSearchRows(recents) {
+    return recents.map((q) =>
+      `<div class="us-row us-recent-row" data-us-recent="${esc(q)}" role="button" tabindex="-1">` +
+        '<span class="us-row-icon"><i class="bi bi-clock-history"></i></span>' +
+        '<span class="us-row-main">' +
+          `<span class="us-row-title d-block">${esc(q)}</span>` +
+        '</span>' +
+        `<span class="us-row-action btn btn-sm btn-link text-muted p-0" data-us-recent-remove="${esc(q)}" ` +
+          'title="Remove from history" aria-label="Remove from history">' +
+          '<i class="bi bi-x-lg"></i></span>' +
+      '</div>'
+    ).join('');
+  }
+
+  function recentSearchSection(recents) {
+    return '<div class="us-section mb-1 us-recents">' +
+      '<div class="us-section-title d-flex align-items-center justify-content-between gap-2">' +
+        '<span><i class="bi bi-clock-history me-1"></i>Recent searches</span>' +
+        '<button type="button" class="btn btn-sm btn-link us-recents-clear py-0 text-decoration-none text-muted">' +
+        'Clear</button>' +
+      '</div>' +
+      recentSearchRows(recents) +
+      '</div>';
+  }
+
+  function emptyPromptHtml() {
+    return '<div class="text-center text-muted py-5">' +
+      '<i class="bi bi-search" style="font-size:2rem;"></i>' +
+      `<p class="mt-2 mb-0 small">Type at least ${MIN_QUERY_LENGTH} characters and press Enter</p></div>`;
+  }
+
+  /**
+   * Run a stored query, as though it had been typed and submitted.
+   *
+   * Mirrors the text into every box the banner keeps in sync (#navSearchInput
+   * and #dashboardTopSearchInput) so the visible query and the one that ran
+   * cannot disagree â€” the same mirroring the typing handler performs.
+   */
+  function applyRecentSearch(query) {
+    const q = String(query || '');
+    if (!q) return;
+    const input = getInputEl();
+    if (!input) return;
+    input.value = q;
+    ['navSearchInput', 'dashboardTopSearchInput'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.value = q;
+    });
+    if (getErrorEl()) getErrorEl().classList.add('d-none');
+    setAdvancedFiltersVisible(false);
+    runSearch();
+  }
+
+  /** Re-render the recents list in place after one is removed or cleared. */
+  function refreshRecentView() {
+    const resultsEl = getResultsEl();
+    const input = getInputEl();
+    if (!resultsEl || !input) return;
+    if (!isSearchOpen()) return;
+    // Only valid while the recents view is the one on screen.
+    if (input.value.trim().length >= MIN_QUERY_LENGTH) return;
+    if (hasAnyAdvancedFilter(getAdvancedFilters())) return;
+    const recents = readRecentSearches();
+    resultsEl.innerHTML = recents.length ? recentSearchSection(recents) : emptyPromptHtml();
+    resetActiveRow();
+  }
+
+  // â”€â”€ Keyboard navigation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+  /**
+   * Every row the user can arrow onto, in DOM order.
+   *
+   * Queried fresh on each call rather than cached: the results are rebuilt
+   * with innerHTML on every render AND on every section expand, so any cached
+   * node list would be stale the moment "Show All" is clicked.
+   */
+  function navigableRows() {
+    const resultsEl = getResultsEl();
+    if (!resultsEl) return [];
+    return Array.prototype.slice.call(resultsEl.querySelectorAll('.us-row'));
+  }
+
+  function resetActiveRow() {
+    // Delegate rather than just zeroing the index: the CLASS and the
+    // aria-current attribute live on the row elements, and those elements
+    // survive a close/open cycle (only innerHTML replaces them). Zeroing the
+    // index alone therefore left a stale highlight painted on a hidden row
+    // that reappeared the next time the flyout was opened â€” which is exactly
+    // what this function exists to prevent.
+    setActiveRow(-1);
+  }
+
+  /**
+   * Highlight `index`, or clear the highlight when it is out of range.
+   *
+   * Accepting an out-of-range index as "nothing active" is what lets ArrowUp
+   * at the top of the list step back OUT of the list instead of trapping the
+   * user at row 0.
+   */
+  function setActiveRow(index) {
+    const rows = navigableRows();
+    rows.forEach((row) => {
+      row.classList.remove('us-row-active');
+      row.removeAttribute('aria-current');
+    });
+    if (index < 0 || index >= rows.length) {
+      _activeRowIndex = -1;
+      return;
+    }
+    _activeRowIndex = index;
+    const row = rows[index];
+    row.classList.add('us-row-active');
+    // aria-current, NOT aria-selected: these rows are anchors and plain divs,
+    // and aria-selected is only valid on listbox/tab/grid roles. aria-current
+    // is valid on any element and means exactly "the current item in a set".
+    row.setAttribute('aria-current', 'true');
+    // `block: 'nearest'` scrolls only when the row is off-screen, so arrowing
+    // through already-visible rows does not shift the list under the user.
+    if (typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' });
+  }
+
+  function moveActiveRow(delta) {
+    if (!isSearchOpen()) return false;
+    const rows = navigableRows();
+    if (!rows.length) return false;
+    // Entering the list from the text field: ArrowDown starts at the top,
+    // ArrowUp at the bottom, matching every list the user has met before.
+    if (_activeRowIndex < 0) {
+      setActiveRow(delta > 0 ? 0 : rows.length - 1);
+      return true;
+    }
+    setActiveRow(_activeRowIndex + delta);
+    return true;
+  }
+
+  function activeRow() {
+    // A highlight is only meaningful while its own list is on screen â€” a
+    // closed flyout must never turn Enter into "open the last highlighted row".
+    if (!isSearchOpen()) return null;
+    const rows = navigableRows();
+    if (_activeRowIndex < 0 || _activeRowIndex >= rows.length) return null;
+    return rows[_activeRowIndex];
+  }
+
+  /** Follow the highlighted row, exactly as clicking it would. */
+  function activateRow(row) {
+    if (!row) return;
+    const recent = row.getAttribute('data-us-recent');
+    if (recent) {
+      applyRecentSearch(recent);
+      return;
+    }
+    // A real click keeps the markup's own semantics: queue rows run their
+    // handler through the delegated listener, and MusicBrainz rows honour
+    // their target/rel (they open in a new tab).
+    if (typeof row.click === 'function') row.click();
+  }
+
+  /**
+   * Enter: act on the highlighted row, else fall through to a search.
+   *
+   * Returns true when the key was consumed. Shared by the flyout input and
+   * global.submitUnifiedSearch so the two Enter paths cannot disagree about
+   * what a highlighted row means.
+   */
+  function handleEnterKey() {
+    const row = activeRow();
+    if (!row) return false;
+    activateRow(row);
+    return true;
+  }
+
+  // â”€â”€ Counts & scope â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function countLibrary(local) {
     const albumBuckets = (local.albums || []).length + (local.compilations || []).length
@@ -117,6 +365,9 @@
   function markRendered(query) {
     _lastQuery = query;
     _lastScope = _scope;
+    // Every render replaces the rows, so any highlight index is now pointing
+    // into a list that no longer exists.
+    resetActiveRow();
   }
 
   function selectScope(scope) {
@@ -128,7 +379,7 @@
     });
   }
 
-  // ── Filters ─────────────────────────────────────────────────────────────
+  // â”€â”€ Filters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function getTypeFilter() {
     const el = document.getElementById('unifiedSearchType');
@@ -162,7 +413,7 @@
     return ADVANCED_FILTER_KEYS.some((key) => !!adv[key]);
   }
 
-  // ── Fetching ────────────────────────────────────────────────────────────
+  // â”€â”€ Fetching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function fetchLibrary(query) {
     return global.api.postJson('/api/search', { query });
@@ -174,7 +425,7 @@
    */
   function fetchMb(query, limit, opts) {
     const options = opts || {};
-    // One source of truth — see bug 4.
+    // One source of truth â€” see bug 4.
     const hasAdvanced = hasAnyAdvancedFilter(options);
 
     if (!hasAdvanced && !options.type
@@ -201,7 +452,7 @@
       .catch(() => []);
   }
 
-  // ── Row builders ────────────────────────────────────────────────────────
+  // â”€â”€ Row builders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   const IMG_PLACEHOLDER =
     'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2244%22 height=%2244%22%3E%3Crect fill=%22%232a2a2a%22 width=%2244%22 height=%2244%22/%3E%3C/svg%3E';
@@ -209,9 +460,9 @@
   /**
    * Build a 44px thumbnail.
    *
-   * There is deliberately no inline `onerror` attribute here — the fallback
+   * There is deliberately no inline `onerror` attribute here â€” the fallback
    * is a single delegated capture-phase listener registered in init() (see
-   * `resultsEl.addEventListener('error', …, true)`). One listener replaces
+   * `resultsEl.addEventListener('error', â€¦, true)`). One listener replaces
    * an attribute on every row, and `error` events do not bubble, which is
    * why that listener must use capture.
    */
@@ -286,7 +537,7 @@
   // inverted form is a display label, not the artist's identity, and using it
   // for either would break the link and the avatar lookup.
   //
-  // Falls back to the raw name rather than throwing — the flyout must keep
+  // Falls back to the raw name rather than throwing â€” the flyout must keep
   // working if that script is ever missing.
   const names = global.artistNames || {
     sortName: (v) => (v === null || v === undefined ? '' : String(v)),
@@ -382,7 +633,7 @@
             '<i class="bi bi-music-note-fill"></i>', 'accent-library-bg') +
           '<span class="us-row-main">' +
             `<span class="us-row-title d-block">${esc(it.title)}${yearSuffix}</span>` +
-            `<span class="us-row-sub d-block"><span class="us-artist">By ${esc(it.artist)}</span> · ` +
+            `<span class="us-row-sub d-block"><span class="us-artist">By ${esc(it.artist)}</span> Â· ` +
             `<span class="us-type">${esc(it.typeLabel || 'Album')}</span></span>` +
             trackLine +
           '</span>' +
@@ -406,7 +657,7 @@
           '<i class="bi bi-hexagon-fill"></i>', 'accent-mb-bg') +
         '<span class="us-row-main">' +
           `<span class="us-row-title d-block">${esc(it.title)}${yearSuffix}</span>` +
-          `<span class="us-row-sub d-block"><span class="us-artist">By ${esc(it.artist)}</span> · ` +
+          `<span class="us-row-sub d-block"><span class="us-artist">By ${esc(it.artist)}</span> Â· ` +
           `<span class="us-type">${esc(it.typeLabel || 'Release')}</span></span>` +
           trackLine +
         '</span>' +
@@ -430,7 +681,7 @@
   // the bucket its TYPE maps to (``/api/search`` returns ``albums``,
   // ``compilations``, ``live_albums``, ``eps`` and ``singles``), so reading only
   // ``local.albums`` silently dropped every local compilation, live album, EP and
-  // single while the result counts — which sum all five — still counted them.
+  // single while the result counts â€” which sum all five â€” still counted them.
   // That is the reported "Library 2 but only the track is showing" for a Various
   // Artists album, whose bucket is ``compilations``.
   const LOCAL_RELEASE_BUCKETS = ['albums', 'compilations', 'live_albums', 'eps', 'singles'];
@@ -502,7 +753,7 @@
     if (options.allMbButton && options.mbPending) {
       html += '<div class="text-center my-2 text-muted small">' +
         '<span class="spinner-border spinner-border-sm me-1" role="status"></span> ' +
-        'Loading MusicBrainz results…</div>';
+        'Loading MusicBrainz resultsâ€¦</div>';
     } else if (options.allMbButton && mbReleases.length) {
       html += '<div class="text-center my-2">' +
         '<button type="button" class="btn btn-sm btn-outline-info us-all-mb-btn">' +
@@ -526,7 +777,7 @@
     return renderReleaseSections(buildBuckets(local || {}, releases), true);
   }
 
-  // ── Search ──────────────────────────────────────────────────────────────
+  // â”€â”€ Search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function runSearch() {
     const input = getInputEl();
@@ -539,22 +790,28 @@
     const seq = ++_runSeq;
 
     if (query.length < MIN_QUERY_LENGTH && !hasAdvanced) {
-      resultsEl.innerHTML = '<div class="text-center text-muted py-5">' +
-        '<i class="bi bi-search" style="font-size:2rem;"></i>' +
-        `<p class="mt-2 mb-0 small">Type at least ${MIN_QUERY_LENGTH} characters and press Enter</p></div>`;
+      // The recents list is what makes this state useful rather than empty â€”
+      // re-running a previous search is the common case, and it is also the
+      // state the flyout opens in.
+      const recents = readRecentSearches();
+      resultsEl.innerHTML = recents.length ? recentSearchSection(recents) : emptyPromptHtml();
       if (getMetaEl()) getMetaEl().textContent = '';
       markRendered(query);
       return;
     }
-
     resultsEl.innerHTML = '<div class="text-center py-5">' +
       '<div class="spinner-border text-primary" role="status">' +
-      '<span class="visually-hidden">Loading…</span></div></div>';
+      '<span class="visually-hidden">Loadingâ€¦</span></div></div>';
 
-    // Forward EVERY advanced filter — year_to and genre were previously read
+    // Forward EVERY advanced filter â€” year_to and genre were previously read
     // and then dropped before the request was built.
     const mbOpts = { type: getTypeFilter() };
     ADVANCED_FILTER_KEYS.forEach((key) => { mbOpts[key] = adv[key]; });
+
+    // Only record a search that is actually about to run. Recording any query
+    // that reaches this line would fill the list with partial fragments as the
+    // user typed.
+    rememberSearch(query);
 
     let localQuery = query;
     if (localQuery.length < MIN_QUERY_LENGTH && hasAdvanced) {
@@ -579,7 +836,7 @@
       : Promise.resolve(emptyLocalResult());
 
     // One MB request in every scope. The count travels on the resolved
-    // value; nothing writes _counts.mb as a side effect any more — see bug 1.
+    // value; nothing writes _counts.mb as a side effect any more â€” see bug 1.
     const mbLimit = _scope === SCOPE_ALL ? MB_LIMIT_ALL_TAB : MB_LIMIT_MB_TAB;
     const mbPromise = fetchMb(query, mbLimit, mbOpts);
 
@@ -604,11 +861,11 @@
         `${(filtered.tracks || []).length} track${(filtered.tracks || []).length === 1 ? '' : 's'}`,
       ];
       if (_scope === SCOPE_ALL) counts.push(`${_counts.mb || 0} musicbrainz`);
-      if (getMetaEl()) getMetaEl().textContent = counts.join(' · ');
+      if (getMetaEl()) getMetaEl().textContent = counts.join(' Â· ');
 
       const warnHtml = filtered.error
         ? '<div class="alert alert-warning py-2 small mb-2"><i class="bi bi-exclamation-triangle-fill"></i> ' +
-          `Library search failed (${esc(filtered.error)}) — showing MusicBrainz only.</div>`
+          `Library search failed (${esc(filtered.error)}) â€” showing MusicBrainz only.</div>`
         : '';
 
       // On the Library tab, MB results inform the count badge but are not
@@ -638,7 +895,7 @@
 
       // Only render from here once the library response is in. Rendering
       // with a still-empty localResult briefly paints "No library matches
-      // for X" — or drops the local albums out of the merged list — and
+      // for X" â€” or drops the local albums out of the merged list â€” and
       // then repaints a moment later when the library request lands.
       // Whether the user saw that flash was pure request-timing luck.
       if (localSettled) renderLocal(localResult);
@@ -671,7 +928,7 @@
     }
   }
 
-  // ── Queueing ────────────────────────────────────────────────────────────
+  // â”€â”€ Queueing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function notifyError(message) {
     const errEl = getErrorEl();
@@ -702,9 +959,9 @@
    *    without touching the button, so the click looked ignored while a
    *    MusicBrainz probe (seconds) and then the queue POST ran.
    * 2. NO IN-FLIGHT GUARD. `_queuedIds[id]` was only set inside the picker's
-   *    CALLBACK, which fires after the user has picked a version — so until
+   *    CALLBACK, which fires after the user has picked a version â€” so until
    *    then a second click was not blocked and started ANOTHER probe. N
-   *    clicks → N probes → N popups arriving together.
+   *    clicks â†’ N probes â†’ N popups arriving together.
    *
    * A *pick* and a *queue* are different events: picking opens the version
    * flyout, queueing actually enqueues. Only the latter may mark the button
@@ -720,10 +977,10 @@
 
     const artist = mbReleaseArtist(rel);
 
-    // Show a spinner immediately — the release-picker probe is a network
+    // Show a spinner immediately â€” the release-picker probe is a network
     // round trip measured in seconds, so silence reads as "nothing happened".
     const restoreBusy = (global.buttonState && global.buttonState.setBusy)
-      ? global.buttonState.setBusy(btn, 'Queuing…')
+      ? global.buttonState.setBusy(btn, 'Queuingâ€¦')
       : function () {};
 
     // Always clear the guard and the busy state, then either mark the button
@@ -769,7 +1026,7 @@
         queue_items_only: true,
       });
 
-      // Nothing enqueued (already owned / already queued) → the API answers
+      // Nothing enqueued (already owned / already queued) â†’ the API answers
       // 200 with queued:false. Marking the button "Queued" and firing the
       // green pill here would claim a download that will never happen.
       //
@@ -806,7 +1063,7 @@
     }
   }
 
-  // ── Panel / flyout ──────────────────────────────────────────────────────
+  // â”€â”€ Panel / flyout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function setAdvancedFiltersVisible(visible) {
     const panel = document.getElementById('unifiedAdvancedFilters');
@@ -834,11 +1091,13 @@
     input.value = value;
     setAdvancedFiltersVisible(false);
     if (getErrorEl()) getErrorEl().classList.add('d-none');
+    // A reopened flyout must not inherit the previous session's highlight.
+    resetActiveRow();
 
     // The flyout's `top` comes from --navbar-height in popularr.css, which
     // main.js keeps in sync with the real navbar. Setting an inline `top`
     // here would make this a SECOND source of truth that only updated on
-    // open — so a resize or mobile-menu expand while the flyout was open
+    // open â€” so a resize or mobile-menu expand while the flyout was open
     // would leave it detached from the navbar.
     const backdrop = document.getElementById('searchBackdrop');
     modalEl.classList.remove('d-none');
@@ -855,6 +1114,8 @@
     const modalEl = getModalEl();
     if (!modalEl) return;
     modalEl.classList.add('d-none');
+    // Drop the highlight with the list it belonged to.
+    resetActiveRow();
     const backdrop = document.getElementById('searchBackdrop');
     if (backdrop) backdrop.classList.add('d-none');
   }
@@ -867,9 +1128,12 @@
     const value = (navEl && navEl.value) || (dashEl && dashEl.value) || '';
     if (input.value !== value) input.value = value;
     if (getErrorEl()) getErrorEl().classList.add('d-none');
+    // Cleared from the banner â†’ show the recents too, so both boxes behave
+    // the same. A cached re-render only; no request is issued.
+    if (!value.trim()) refreshRecentView();
   }
 
-  // ── MusicBrainz tracklist table (used by the release picker) ────────────
+  // â”€â”€ MusicBrainz tracklist table (used by the release picker) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function renderMbReleaseTrackTable(tracks) {
     if (!tracks || !tracks.length) {
@@ -909,7 +1173,7 @@
       `<tbody>${rows}</tbody></table>`;
   }
 
-  // ── Filter sheet (mobile) ───────────────────────────────────────────────
+  // â”€â”€ Filter sheet (mobile) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function updateFilterButtonState() {
     const select = document.getElementById('unifiedSearchType');
@@ -984,7 +1248,7 @@
     });
   }
 
-  // ── Init ────────────────────────────────────────────────────────────────
+  // â”€â”€ Init â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   document.addEventListener('DOMContentLoaded', function () {
     const modalEl = getModalEl();
@@ -1000,10 +1264,10 @@
     });
 
     // ------------------------------------------------------------------
-    // Ctrl+K / ⌘K opens the unified search.
+    // Ctrl+K / âŒ˜K opens the unified search.
     //
     // Bound on `document` rather than on the banner input because the whole
-    // point is to work when focus is ANYWHERE — a shortcut that only fires
+    // point is to work when focus is ANYWHERE â€” a shortcut that only fires
     // once you have already clicked into the box saves nobody anything.
     //
     // The modifier check is deliberately `ctrlKey || metaKey` with the other
@@ -1013,8 +1277,8 @@
     // some layouts report the uppercase form regardless.
     //
     // preventDefault stops two real collisions: the browser's own
-    // "focus address bar / search" binding, and — because Ctrl+K is also
-    // bound by several editors and by Chrome's search box — jumping the page.
+    // "focus address bar / search" binding, and â€” because Ctrl+K is also
+    // bound by several editors and by Chrome's search box â€” jumping the page.
     // ------------------------------------------------------------------
     document.addEventListener('keydown', function (e) {
       if (!(e.ctrlKey || e.metaKey) || e.ctrlKey && e.metaKey) return;
@@ -1030,7 +1294,7 @@
       openUnifiedSearch();
     });
 
-    // Label the hint with the modifier the platform actually uses: ⌘ on Apple
+    // Label the hint with the modifier the platform actually uses: âŒ˜ on Apple
     // hardware, Ctrl everywhere else. Navigator.platform is deprecated but is
     // still the only synchronous way to tell them apart, and a wrong label is
     // merely cosmetic if it is ever unavailable.
@@ -1042,22 +1306,51 @@
         ''
       );
       const kbd = document.getElementById('navSearchKbd');
-      if (kbd) kbd.textContent = isMac ? '⌘' : 'Ctrl';
+      if (kbd) kbd.textContent = isMac ? 'âŒ˜' : 'Ctrl';
     } catch (_e) { /* cosmetic only */ }
 
-    // Typing syncs text only — no live searching.
+    // Typing syncs text only â€” no live searching.
     input.addEventListener('input', function () {
       const navEl = document.getElementById('navSearchInput');
       if (navEl && navEl.value !== input.value) navEl.value = input.value;
       const dashEl = document.getElementById('dashboardTopSearchInput');
       if (dashEl && dashEl.value !== input.value) dashEl.value = input.value;
+      // Clearing the box returns to the recent list. This is a re-render of
+      // already-cached text â€” NO request is issued â€” so it does not contradict
+      // the "typing syncs text only" rule the line above states. Without it the
+      // recents would only ever be reachable by closing and reopening.
+      if (!input.value.trim()) refreshRecentView();
     });
 
     input.addEventListener('keydown', function (e) {
-      if (e.key !== 'Enter') return;
-      e.preventDefault();
-      runSearch();
-      setAdvancedFiltersVisible(false);
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        // preventDefault stops the caret jumping to the start/end of the text
+        // â€” an ArrowUp that also rewrites the caret position reads as the
+        // input being reset rather than the list being navigated.
+        e.preventDefault();
+        moveActiveRow(e.key === 'ArrowDown' ? 1 : -1);
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (handleEnterKey()) return;
+        runSearch();
+        setAdvancedFiltersVisible(false);
+      }
+    });
+
+    // The banner box is where the typing usually happens (openUnifiedSearch
+    // focuses it back), so the arrows must work there too. It mirrors the
+    // flyout input, so what is on screen is the same either way.
+    ['navSearchInput', 'dashboardTopSearchInput'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('keydown', function (e) {
+        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+        if (!navigableRows().length) return;
+        e.preventDefault();
+        moveActiveRow(e.key === 'ArrowDown' ? 1 : -1);
+      });
     });
 
     input.addEventListener('focus', function () { this.select(); });
@@ -1066,8 +1359,8 @@
     // Enter must START a search from the BANNER box, not merely mirror text.
     //
     // The banner input (#navSearchInput) is where the typing actually happens:
-    // openUnifiedSearch focuses it back, so the flyout's own input — whose Enter
-    // handler is right above and works — rarely holds focus. The banner's inline
+    // openUnifiedSearch focuses it back, so the flyout's own input â€” whose Enter
+    // handler is right above and works â€” rarely holds focus. The banner's inline
     // handler only called syncNavSearchQuery(), which copies the text across and
     // nothing else, and runSearch is private to this closure, so the markup had
     // no way to reach it. The symptom was exactly that: a query ran only after
@@ -1097,8 +1390,13 @@
       if (flyoutInput && source && source !== flyoutInput && flyoutInput.value !== source.value) {
         flyoutInput.value = source.value;
       }
+      // A highlighted row wins over re-running the query: if the user has
+      // arrowed onto a result or a recent search, Enter means "open that".
+      // Checked here (not only on the flyout input) so the banner box, which is
+      // where the typing usually happens, behaves identically.
+      if (handleEnterKey()) return;
       // Bypass openUnifiedSearch's "same query as last time" short-circuit:
-      // pressing Enter is an explicit instruction to search, so it always runs —
+      // pressing Enter is an explicit instruction to search, so it always runs â€”
       // including when the user re-submits the same text.
       runSearch();
       setAdvancedFiltersVisible(false);
@@ -1153,12 +1451,12 @@
     });
 
     // Broken-artwork fallback. The old markup carried an inline
-    // onerror="this.onerror=null;this.src='…'" on every <img>; this replaces
+    // onerror="this.onerror=null;this.src='â€¦'" on every <img>; this replaces
     // all of them with one listener.
     //
     // CAPTURE IS REQUIRED: `error` events from <img> do not bubble, so a
     // normal (bubbling) listener on the container would never fire. The
-    // src check is the equivalent of the old `this.onerror = null` guard —
+    // src check is the equivalent of the old `this.onerror = null` guard â€”
     // without it, a placeholder that itself failed would loop.
     resultsEl.addEventListener('error', function (e) {
       const img = e.target;
@@ -1169,9 +1467,35 @@
     }, true);
 
     // One delegated listener covers the queue buttons, the section
-    // expanders and the "All MusicBrainz results" button, all of which are
-    // re-rendered on every search.
+    // expanders, the recent-search rows and the "All MusicBrainz results"
+    // button, all of which are re-rendered on every search.
     resultsEl.addEventListener('click', function (e) {
+      // Recent searches are plain <div>s, not anchors, so they need their own
+      // branch BEFORE any closest() walk that assumes a row is a link.
+      const recentRemove = e.target.closest ? e.target.closest('[data-us-recent-remove]') : null;
+      if (recentRemove) {
+        e.preventDefault();
+        e.stopPropagation();
+        forgetSearch(recentRemove.getAttribute('data-us-recent-remove'));
+        refreshRecentView();
+        return;
+      }
+
+      const clearAll = e.target.closest ? e.target.closest('.us-recents-clear') : null;
+      if (clearAll) {
+        e.preventDefault();
+        writeRecentSearches([]);
+        refreshRecentView();
+        return;
+      }
+
+      const recentRow = e.target.closest ? e.target.closest('[data-us-recent]') : null;
+      if (recentRow) {
+        e.preventDefault();
+        applyRecentSearch(recentRow.getAttribute('data-us-recent'));
+        return;
+      }
+
       if (!e.target.closest) return;
 
       const queueBtn = e.target.closest('.us-queue-btn');
@@ -1203,6 +1527,24 @@
   global.closeUnifiedFilterSheet = closeUnifiedFilterSheet;
   global.openUnifiedFilterSheet = openUnifiedFilterSheet;
   global._renderMbReleaseTrackTable = renderMbReleaseTrackTable;
+
+  // Exported for tests/probes only â€” the markup reaches all of this through
+  // `openUnifiedSearch` / `submitUnifiedSearch`. Namespaced under ONE key so
+  // the page's global namespace does not gain a dozen more bare identifiers.
+  global._unifiedSearchInternals = {
+    readRecentSearches: readRecentSearches,
+    rememberSearch: rememberSearch,
+    forgetSearch: forgetSearch,
+    writeRecentSearches: writeRecentSearches,
+    navigableRows: navigableRows,
+    moveActiveRow: moveActiveRow,
+    setActiveRow: setActiveRow,
+    activeRow: activeRow,
+    handleEnterKey: handleEnterKey,
+    runSearch: runSearch,
+    RECENTS_KEY: RECENTS_KEY,
+    RECENTS_MAX: RECENTS_MAX,
+  };
 
   // `toggleUsSection` was a window global solely to serve an inline onclick
   // in buildSection(). That markup now uses the delegated listener above.

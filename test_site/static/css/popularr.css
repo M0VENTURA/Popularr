@@ -768,6 +768,34 @@ form .form-check-input[name="force"] + .form-check-label {
     .us-row-meta { color: var(--text-tertiary); font-size: 0.72rem; flex-shrink: 0; }
 }
 
+/* Arrow-key highlight. Deliberately mirrors :hover so the row the keyboard is
+   on and the row the mouse is over read identically — a separate "selected"
+   treatment would imply two different kinds of emphasis. The outline is an
+   accessibility affordance for high-contrast / forced-colours modes where the
+   background tint alone would not be visible. */
+.us-row.us-row-active {
+    background: var(--tertiary-bg);
+    outline: 2px solid var(--spotify-green);
+    outline-offset: -2px;
+}
+
+/* Recent searches sit in the otherwise-empty prompt state, so they must read as
+   interactive — they are plain divs rather than anchors and carry no pointer
+   cursor of their own. */
+.us-recent-row { cursor: pointer; }
+.us-recents-clear { font-size: 0.75rem; text-transform: none; letter-spacing: 0; }
+.us-recent-row [data-us-recent-remove] { opacity: 0; transition: opacity 0.12s ease; }
+.us-recent-row:hover [data-us-recent-remove],
+.us-recent-row.us-row-active [data-us-recent-remove] { opacity: 1; }
+/* Touch devices never hover, so a hover-revealed control would be unreachable
+   there — keep it always visible when hover cannot be used. */
+@media (hover: none) {
+    .us-recent-row [data-us-recent-remove] { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .us-recent-row [data-us-recent-remove] { transition: none; }
+}
+
 .search-flyout #unifiedScopeTabs {
     &.us-scope-chips { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; &::-webkit-scrollbar { display: none; } }
     .nav-link {

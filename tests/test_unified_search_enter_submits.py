@@ -45,6 +45,57 @@ def _read(relative_path: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _strip_js_comments(source: str) -> str:
+    """Blank out JS comments, preserving newlines.
+
+    These assertions are about BEHAVIOUR, and both search modules explain the
+    traps they avoid in comments that name the same identifiers. Without this,
+    a proximity window can be measured from a doc block instead of from the
+    code — which is exactly how the highlighted-row comment in
+    search-flyout.js pushed `runSearch()` out of a 900-character window while
+    the behaviour was unchanged.
+
+    String literals are skipped so a `//` inside one is not treated as a
+    comment. Regex literals are not handled; neither module relies on one here.
+    """
+    out = list(source)
+    i, n = 0, len(source)
+
+    def blank(start: int, stop: int) -> None:
+        for k in range(start, min(stop, n)):
+            if out[k] != "\n":
+                out[k] = " "
+
+    while i < n:
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+        if ch == "/" and nxt == "/":
+            j = i
+            while j < n and source[j] != "\n":
+                j += 1
+            blank(i, j)
+            i = j
+        elif ch == "/" and nxt == "*":
+            j = source.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            blank(i, j)
+            i = j
+        elif ch in "\"'`":
+            j = i + 1
+            while j < n:
+                if source[j] == "\\":
+                    j += 2
+                    continue
+                if source[j] == ch:
+                    j += 1
+                    break
+                j += 1
+            i = j
+        else:
+            i += 1
+    return "".join(out)
+
+
 class TestBannerMarkupHasNoHalfHandler:
     """The bug itself: an onkeydown that only mirrors the text."""
 
@@ -99,7 +150,22 @@ class TestSearchModuleOwnsEnter:
     @pytest.mark.parametrize("module_path", SEARCH_MODULES)
     def test_enter_bypasses_the_same_query_short_circuit(self, module_path: str):
         """Re-pressing Enter must re-run the search, not hit openUnifiedSearch's
-        "same query as last time" guard."""
-        source = _read(module_path)
-        submit = source[source.find("submitUnifiedSearch") :]
-        assert "runSearch()" in submit[:900]
+        "same query as last time" guard.
+
+        The anchor is the ASSIGNMENT (`submitUnifiedSearch = function`), not the
+        first mention of the name. Prose mentioning the identifier is legitimate
+        — search-flyout.js documents the highlighted-row behaviour by name — and
+        a bare `source.find()` lands on that comment, measuring the distance to
+        a doc block rather than to the code. Comments are stripped for the same
+        reason: the assertion must describe behaviour, not documentation.
+        """
+        source = _strip_js_comments(_read(module_path))
+        anchor = max(
+            source.find("submitUnifiedSearch = function"),
+            source.find("submitUnifiedSearch=function"),
+        )
+        assert anchor >= 0, f"{module_path}: no submitUnifiedSearch assignment found"
+        submit = source[anchor:]
+        assert "runSearch()" in submit[:900], (
+            "submitting must reach runSearch — that call is the whole fix"
+        )
