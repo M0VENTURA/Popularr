@@ -1,7 +1,9 @@
 """Popularity persistence repository."""
 
 from __future__ import annotations
+import json
 import logging
+import re
 import time
 from typing import Dict
 
@@ -17,6 +19,7 @@ _TRACKS_COLUMN_TYPES_CACHE: Dict[str, str] | None = None
 PG_INT_TYPES = {"smallint", "integer", "bigint"}
 PG_FLOAT_TYPES = {"real", "double precision", "numeric", "decimal"}
 PG_BOOL_TYPES = {"boolean"}
+PG_JSON_TYPES = {"json", "jsonb"}
 
 DB_LOCK_MAX_RETRIES = 5
 DB_LOCK_BASE_DELAY_SECONDS = 0.25
@@ -87,6 +90,73 @@ def _do_get_tracks_table_column_types(session) -> Dict[str, str]:
     return _TRACKS_COLUMN_TYPES_CACHE
 
 
+def _coerce_json_value(value):
+    """Normalise a value for a JSON/JSONB column and return it as JSON TEXT.
+
+    WHY THIS EXISTS — it is not a nicety. Several genre columns on ``tracks``
+    (``manual_genres``, ``musicbrainz_genres``, ``navidrome_genres``, …) are
+    declared JSONB, but the code that writes them builds a comma-separated
+    STRING: ``db/repositories/metadata.update_track_genres`` does
+    ``SET manual_genres = :genres`` with ``"Hardcore, Punk"``.
+
+    ``"Hardcore, Punk"`` is not valid JSON, so PostgreSQL rejects the statement
+    with ``invalid input syntax for type json``.  This module had no JSON branch
+    at all — it fell through to ``return value`` unchanged — and the caller
+    (``routes/ui_routes.py``) logs the failure at DEBUG and moves on, so the
+    write silently did nothing while the UI reported success.
+
+    Historically the genre columns were TEXT (schema drift), which is why the
+    string round-trip appeared to work; the drift repair converged them to
+    their declared JSONB, and the writes started failing.  Coercing HERE fixes
+    it for every writer at once rather than special-casing one call site.
+
+    ⚠️ THE RETURN TYPE IS ALWAYS ``str`` (JSON text) or ``None`` — never a
+    Python list.  ``services/scanning/payload_builder.py`` already hands these
+    columns ``json.dumps([...])`` strings, and that path demonstrably works.  A
+    Python list would be adapted by the driver to a Postgres ARRAY literal
+    (``ARRAY['a','b']`` / ``{a,b}``), which a ``jsonb`` column REJECTS with
+    "column is of type jsonb but expression is of type text[]" — so returning a
+    list here would have broken the scanner while fixing the album page.
+
+    Conversion rules mirror ``db/schema.py``'s own ALTER:
+      * ``None``                       -> ``None``
+      * list/tuple/dict                -> ``json.dumps(...)``
+      * a string that parses as JSON   -> re-serialised, so ``'[ "a" ]'`` is
+        normalised rather than stored verbatim
+      * an empty/blank string          -> ``'[]'`` (an empty list, never NULL,
+        matching the schema's ``'' -> '[]'::jsonb`` rule)
+      * any other string               -> split on commas/semicolons/slashes,
+        trimmed, then ``json.dumps``-ed, so the CSV form the genre writers
+        produce becomes a real array
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, tuple):
+        value = list(value)
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, bool):
+        return json.dumps(value)
+    if isinstance(value, (int, float)):
+        return json.dumps(value)
+
+    raw = str(value).strip()
+    if not raw:
+        return "[]"
+
+    if raw[0] in "[{":
+        try:
+            return json.dumps(json.loads(raw), ensure_ascii=False)
+        except (TypeError, ValueError):
+            # A leading bracket that is not valid JSON (e.g. a title beginning
+            # with "[") — fall through and treat it as free text.
+            pass
+
+    parts = [p.strip() for p in re.split(r"[,;/\\]+", raw) if p.strip()]
+    return json.dumps(parts, ensure_ascii=False)
+
+
 def coerce_track_value_for_pg_type(column: str, value, pg_type: str):
     if value is None:
         return None
@@ -105,6 +175,8 @@ def coerce_track_value_for_pg_type(column: str, value, pg_type: str):
             return float(value) if value != "" else None
         except (TypeError, ValueError):
             return None
+    if pg_type in PG_JSON_TYPES:
+        return _coerce_json_value(value)
 
     return value
 

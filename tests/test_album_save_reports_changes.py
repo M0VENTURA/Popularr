@@ -52,6 +52,22 @@ def album_save(ui_source: str) -> str:
     return ui_source[start:end]
 
 
+#: Leading comparison of the all-counters-zero condition, WITHOUT the ``if``.
+#: Anchored on the comparison alone because the ``if`` and the comparison may
+#: legitimately sit on different lines once the condition spans several counters
+#: (``if (`` / newline / ``updated_count == 0`` / ``and …``). Matching the
+#: one-line spelling turned a reformat into a failure while the behaviour was
+#: unchanged; this anchor keeps the assertion about BRANCH ORDER and COUNTER
+#: COVERAGE, which is what these tests actually verify.
+ZERO_CONDITION = "updated_count == 0"
+
+
+def _nothing_to_save_block(ui_source: str) -> str:
+    """The zero-counters branch, from its condition through the fallbacks."""
+    idx = ui_source.index(ZERO_CONDITION)
+    return ui_source[idx: idx + 1600]
+
+
 class TestGenresAreCounted:
     def test_genre_writes_are_counted(self, album_save: str):
         """``update_track_genres`` returns a rowcount that must be tallied.
@@ -66,8 +82,7 @@ class TestGenresAreCounted:
 
     def test_genre_only_save_reports_success(self, ui_source: str):
         """A genres-only save reports the genre write, not "no changes"."""
-        idx = ui_source.index("if updated_count == 0 and reverted_live_count == 0")
-        window = ui_source[idx: idx + 1200]
+        window = _nothing_to_save_block(ui_source)
         assert "if genre_only_writes:" in window
         assert "Album genres saved" in window
         # The genre branch must come BEFORE the nothing-to-save fallbacks, or a
@@ -77,19 +92,36 @@ class TestGenresAreCounted:
 
 class TestNothingToSaveIsNotMasked:
     def test_empty_album_warns_instead_of_claiming_no_changes(self, ui_source: str):
-        idx = ui_source.index("if updated_count == 0 and reverted_live_count == 0")
-        window = ui_source[idx: idx + 1200]
+        window = _nothing_to_save_block(ui_source)
         assert "elif not tracks:" in window
         assert "No tracks found for this album" in window
 
     def test_no_changes_message_still_exists_as_the_final_fallback(self, ui_source: str):
-        idx = ui_source.index("if updated_count == 0 and reverted_live_count == 0")
-        window = ui_source[idx: idx + 1200]
+        window = _nothing_to_save_block(ui_source)
         assert 'await flash("No changes were made.", "info")' in window
         # It must be the LAST branch (a real no-op), never the first.
         assert window.index("elif not tracks:") < window.index(
             'await flash("No changes were made.", "info")'
         )
+
+    def test_the_zero_condition_consults_every_failure_counter(self, ui_source: str):
+        """The guard the branch order depends on must include the failure counts.
+
+        If ``db_failures`` / ``genre_write_failures`` were left out, a save whose
+        writes were REFUSED would fall into this branch and be reported as
+        "No changes were made." — the exact misreport this suite exists to
+        prevent.
+        """
+        window = _nothing_to_save_block(ui_source)
+        condition = window[: window.index(":\n")]
+        for counter in (
+            "updated_count == 0",
+            "reverted_live_count == 0",
+            "file_sync_failures == 0",
+            "db_failures == 0",
+            "genre_write_failures == 0",
+        ):
+            assert counter in condition, f"{counter} missing from the zero-check"
 
 
 class TestNoCommentColumn:

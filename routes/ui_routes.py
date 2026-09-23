@@ -1576,6 +1576,11 @@ async def album_detail(album_path: str) -> Any:
         updated_count = 0
         reverted_live_count = 0
         file_sync_failures = 0
+        # Writes the DB REFUSED. Counted so the page can say the save failed
+        # instead of claiming there was nothing to change.
+        db_failures = 0
+        # Genre writes that matched no rows (see ``update_track_genres``).
+        genre_write_failures = 0
         # Genres are written through a dedicated repository call rather than
         # through ``payload``, so the loop below never counted them.  Saving an
         # album whose ONLY edit was the genre chips therefore wrote the genres
@@ -1719,7 +1724,18 @@ async def album_detail(album_path: str) -> Any:
             # the DB nor the audio file tags carry a bogus disc position.
             # Only set this when the payload is otherwise being written (the
             # field is TEXT; an empty string clears the frame on file write).
-            if _strip_disc_numbers:
+            #
+            # ⚠️ An EXPLICITLY REVIEWED disc number wins over the inference
+            # below. The strip is an album-level heuristic about the library's
+            # existing tags; the staged value is the user having just confirmed
+            # the correct position against MusicBrainz. Without this guard,
+            # saving a review for a track whose disc number was actually wrong
+            # threw the correction away and wrote back the bogus value —
+            # silently, because the surrounding save still reported success.
+            # ``disc_number`` is in ``_STAGED_WRITABLE``, so this is also what
+            # that whitelist promises the user.
+            _disc_staged = bool(_staged_updates.get(str(track_id), {}).get("disc_number"))
+            if _strip_disc_numbers and not _disc_staged:
                 _cur_disc = str(track.get("disc_number") or "").strip()
                 # A "0" disc is a bogus single-disc value — always clear it.
                 if _cur_disc and _cur_disc != "0":
@@ -1730,7 +1746,7 @@ async def album_detail(album_path: str) -> Any:
                 # Multi-disc: ensure every track has a non-empty disc_number
                 # (default to "1" when unset, and never "0") so the album
                 # displays correctly.
-                _cur_disc = str(track.get("disc_number") or "").strip()
+                _cur_disc = str(payload.get("disc_number") or track.get("disc_number") or "").strip()
                 if not _cur_disc or _cur_disc == "0":
                     payload["disc_number"] = "1"
 
@@ -1744,7 +1760,18 @@ async def album_detail(album_path: str) -> Any:
 
                 if genres_list:
                     from db.repositories.metadata import update_track_genres
-                    _genre_rows = update_track_genres(track_id=track_id, genres_str=genres_str_clean)
+                    try:
+                        _genre_rows = update_track_genres(track_id=track_id, genres_str=genres_str_clean)
+                    except Exception as genre_err:
+                        # The genre columns are JSONB; a value the DB rejects
+                        # (or a connection blip) must not vanish silently — it
+                        # would make a genres-only save look like a no-op.
+                        _genre_rows = 0
+                        genre_write_failures += 1
+                        logger.warning(
+                            "Album save: genre write FAILED",
+                            track_id=track_id, error=str(genre_err),
+                        )
                     # Genres bypass ``payload``, so they must be counted here or
                     # a genres-only save is reported as "No changes were made".
                     if _genre_rows:
@@ -1762,7 +1789,18 @@ async def album_detail(album_path: str) -> Any:
                     insert_or_update_track(track_id, payload)
                     updated_count += 1
                 except Exception as db_err:
-                    logger.debug("DB update failed", track_id=track_id, error=str(db_err))
+                    # ⚠️ COUNTED, not swallowed. This used to be a bare DEBUG
+                    # log, so a rejected write (e.g. "invalid input syntax for
+                    # type json" against a JSONB genre column) left
+                    # ``updated_count`` at 0 and the page then flashed
+                    # "No changes were made." — telling the user their edit was
+                    # a no-op when in fact the save FAILED. A silent DEBUG log
+                    # also made the failure invisible in a normal log tail.
+                    db_failures += 1
+                    logger.warning(
+                        "Album save: DB update FAILED",
+                        track_id=track_id, error=str(db_err),
+                    )
 
             _resolved_file = resolve_music_file_path(track.get("file_path"))
             _file_write_ok = False
@@ -1781,7 +1819,11 @@ async def album_detail(album_path: str) -> Any:
                             _file_tags["genre"] = "Cover"
                     # Single-disc strip: build_tag_updates drops EMPTY values,
                     # so push disc_number="" explicitly to clear the frame.
-                    if _strip_disc_numbers:
+                    # Skipped when the review supplied a disc number — the
+                    # strip is an album-level heuristic, the staged value is a
+                    # confirmed correction, and this is the line that used to
+                    # undo it on the file after the DB had accepted it.
+                    if _strip_disc_numbers and not _disc_staged:
                         _file_tags["disc_number"] = ""
                     if _file_tags:
                         _file_write_ok = bool(update_file_tags(_resolved_file, _file_tags))
@@ -1863,6 +1905,21 @@ async def album_detail(album_path: str) -> Any:
 
         if updated_count > 0:
             await flash(f"Album metadata saved — {updated_count} track(s) updated.", "success")
+        # A REFUSED write is reported as a failure, and never allowed to fall
+        # through to the "No changes were made." branch below — that message
+        # told the user their edit was a no-op when the database had actually
+        # rejected it.
+        if db_failures > 0:
+            await flash(
+                f"⚠️ {db_failures} track(s) could NOT be saved to the database. "
+                "The metadata was not written — check the logs.",
+                "danger",
+            )
+        if genre_write_failures > 0:
+            await flash(
+                f"⚠️ Genres could not be saved for {genre_write_failures} track(s).",
+                "danger",
+            )
         if file_sync_failures > 0:            await flash(
                 f"⚠️ {file_sync_failures} track(s) updated in the database but NOT in the audio "
                 "files (could not write tags).",
@@ -1890,7 +1947,13 @@ async def album_detail(album_path: str) -> Any:
                     artist=artist_name, album=album_name, error=str(_discard_exc),
                 )
 
-        if updated_count == 0 and reverted_live_count == 0 and file_sync_failures == 0:
+        if (
+            updated_count == 0
+            and reverted_live_count == 0
+            and file_sync_failures == 0
+            and db_failures == 0
+            and genre_write_failures == 0
+        ):
             # Genres are written outside the payload, so a save whose ONLY edit
             # was the genre chips did reach the DB even though ``updated_count``
             # is 0.  Reporting "No changes were made." there was simply wrong.
