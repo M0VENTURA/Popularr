@@ -313,8 +313,14 @@ def write_album_tag_to_files(
             # Only the ALBUM frame is rewritten — passing a dict with
             # other fields None would make the FLAC/MP3 writer DELETE
             # those frames (None = "clear this field").
-            from services.metadata.tag_file_service import write_tags_to_file
-            if write_tags_to_file(fp, {"album": new_name}):
+            from services.metadata.tag_file_service import (
+                resolve_music_file_path,
+                write_tags_to_file,
+            )
+            # The stored path may be relative to the music root, and the caller
+            # passes paths straight from the DB.
+            resolved = resolve_music_file_path(str(fp))
+            if resolved and write_tags_to_file(resolved, {"album": new_name}):
                 written += 1
             else:
                 failed += 1

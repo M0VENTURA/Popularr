@@ -118,6 +118,14 @@ def test_sync_fills_missing_and_records_corrections(monkeypatch, _tagging_on):
         "services.metadata.tag_file_service.write_tags_to_file",
         lambda path, tags: written.append((path, tags)) or True,
     )
+    # The DB stores paths that may be RELATIVE to the music root, so the sync
+    # resolves each one before writing. Without patching the resolver, a fake
+    # "/tmp/1.mp3" does not exist on disk and the write is (correctly) skipped —
+    # which is the behaviour under test elsewhere, not this test's subject.
+    monkeypatch.setattr(
+        "services.metadata.tag_file_service.resolve_music_file_path",
+        lambda p: str(p) if p else None,
+    )
     recorded: list[dict] = []
     monkeypatch.setattr(
         "services.metadata.conflict_service.detect_and_record_conflicts",

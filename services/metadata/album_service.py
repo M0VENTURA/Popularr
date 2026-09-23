@@ -554,13 +554,26 @@ def get_album_queue_status_db(artist: str, album: str) -> dict[str, Any]:
 # =============================================================================
 
 def apply_genres_to_album(artist: str, album: str, genres: list[str]) -> dict[str, Any]:
+    """Apply genres to every track of an album — DB columns + audio file tags.
+
+    ⚠️ ``success`` now reflects whether anything was written. It was hard-coded
+    ``True``, so an album whose every track failed (unresolvable path, tag
+    writes disabled) still answered ``success: True`` and the response's
+    ``updated: 0`` blew straight through the caller's
+    ``status = 200 if result.get("success")`` check.
+
+    ⚠️ The stored path is RESOLVED before writing. It comes straight from the
+    DB, where it may be relative to the music root — the writer returns False
+    for anything that does not exist on disk, and that False was previously
+    counted as a failure correctly but never surfaced.
+    """
     from services.metadata.tag_file_service import update_file_tags, resolve_music_file_path
 
     genres_clean = [g.strip() for g in genres if g.strip()]
-    genres_str = ",".join(genres_clean)
+    genres_str = ", ".join(genres_clean)
 
     updated = 0
-    failed = []
+    failed: list[Any] = []
 
     tracks = fetch_album_tracks_for_tag_update(artist=artist, album=album)
 
@@ -572,19 +585,27 @@ def apply_genres_to_album(artist: str, album: str, genres: list[str]) -> dict[st
         resolved = resolve_music_file_path(path)
 
         if resolved:
-            if update_file_tags(resolved, {"genres": genres_clean}):
-                update_track_genres(track_id=track_id, genres_str=genres_str)
-                updated += 1
-            else:
+            try:
+                if update_file_tags(resolved, {"genres": genres_clean}):
+                    update_track_genres(track_id=track_id, genres_str=genres_str)
+                    updated += 1
+                else:
+                    failed.append(title)
+            except Exception as exc:
+                logger.warning(
+                    "apply_genres_to_album: tag write failed",
+                    track_id=track_id, title=title, error=str(exc),
+                )
                 failed.append(title)
         else:
             failed.append(title)
 
     return {
-        "success": True,
+        "success": updated > 0,
         "updated": updated,
         "failed": len(failed),
         "failed_files": failed,
+        "error": None if updated else "No tracks were updated.",
     }
 
 
@@ -814,6 +835,7 @@ def bulk_delete_tracks(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         return {"success": False, "error": "No tracks selected"}, 400
 
     deleted_count = 0
+    failed_count = 0
 
     with db_session() as session:
         for track_id in track_ids:
@@ -823,6 +845,8 @@ def bulk_delete_tracks(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
                     {"id": track_id},
                 ).mappings().first()
                 if not row:
+                    # A requested id that no longer exists is NOT a deletion.
+                    failed_count += 1
                     continue
                 file_path = str(row.get("file_path") or "")
                 if delete_files and file_path and os.path.exists(file_path):
@@ -833,10 +857,19 @@ def bulk_delete_tracks(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
                 session.execute(text("DELETE FROM tracks WHERE id = :id"), {"id": track_id})
                 deleted_count += 1
             except Exception as exc:
+                failed_count += 1
                 logger.error("Bulk delete track failed", track_id=track_id, error=str(exc))
                 continue
 
-    return {"success": True, "deleted_count": deleted_count}, 200
+    # ⚠️ Was ``{"success": True}, 200`` unconditionally, so deleting nothing
+    # (every id missing, or every DELETE refused) reported a completed delete
+    # and the UI announced "Deleted 0 track(s)" as a success.
+    return {
+        "success": deleted_count > 0,
+        "deleted_count": deleted_count,
+        "failed_count": failed_count,
+        "error": None if deleted_count else f"No tracks were deleted ({failed_count} failed).",
+    }, 200 if deleted_count else 500
 
 
 def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:

@@ -672,13 +672,26 @@ def get_stats(artist: str) -> tuple[dict[str, Any], int]:
 
 
 def apply_genres(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """Apply genres to all tracks by an artist."""
-    from services.metadata.tag_file_service import write_tags_to_file
+    """Apply genres to all tracks by an artist.
+
+    ⚠️ Reports what actually happened. The tag write was wrapped in a bare
+    ``except Exception: pass`` and the response said ``success: True, updated: N``
+    unconditionally — so a run where EVERY file tag write failed (an unresolved
+    path, a read-only mount, the tagging master toggle off) still told the user
+    the genres were applied. The count was the number of DB rows it looped over,
+    not the number it wrote.
+    """
+    from services.metadata.tag_file_service import (
+        resolve_music_file_path,
+        write_tags_to_file,
+    )
     artist = (payload.get("artist") or "").strip()
     genres = payload.get("genres", [])
     if not artist or not genres:
         return {"success": False, "error": "artist and genres required"}, 400
     try:
+        files_written = 0
+        files_failed = 0
         with db_session() as session:
             rows = session.execute(
                 text("SELECT id, file_path FROM tracks WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist"),
@@ -694,12 +707,36 @@ def apply_genres(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
                     {"genre_str": genre_str, "track_id": track_id},
                 )
                 updated += 1
-                if fp and fp.strip():
-                    try:
-                        write_tags_to_file(str(fp), {"genre": genres})
-                    except Exception:
-                        pass
-        return {"success": True, "updated": updated}, 200
+                if not (fp and str(fp).strip()):
+                    files_failed += 1
+                    continue
+                # The DB may hold a path relative to the music root; the writer
+                # needs an absolute, existing path or it silently returns False.
+                resolved = resolve_music_file_path(str(fp))
+                if not resolved:
+                    files_failed += 1
+                    logger.warning(
+                        "Apply genres: audio file not resolvable",
+                        artist=artist, track_id=track_id, file_path=str(fp),
+                    )
+                    continue
+                try:
+                    if write_tags_to_file(resolved, {"genre": genres}):
+                        files_written += 1
+                    else:
+                        files_failed += 1
+                except Exception as tag_exc:
+                    files_failed += 1
+                    logger.warning(
+                        "Apply genres: file tag write failed",
+                        artist=artist, track_id=track_id, error=str(tag_exc),
+                    )
+        return {
+            "success": updated > 0,
+            "updated": updated,
+            "files_written": files_written,
+            "files_failed": files_failed,
+        }, 200 if updated else 500
     except Exception as exc:
         logger.error("Apply genres failed", artist=artist, error=str(exc))
         return {"success": False, "error": str(exc)}, 500

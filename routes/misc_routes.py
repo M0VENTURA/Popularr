@@ -1485,6 +1485,16 @@ async def api_apply_genres() -> Any:
             return None
 
         threading.Thread(target=_trigger_scan, daemon=True).start()
+        # ⚠️ ``success`` reflects whether ANY row was written. It was hard-coded
+        # True, and the caller (static/js/genre-utils.js) branches on
+        # ``data.error`` rather than ``data.success`` — so an artist with no
+        # matching tracks still showed "✅ Applied N genre(s)".
+        if not affected:
+            return jsonify({
+                "success": False,
+                "affected_tracks": 0,
+                "error": f"No tracks matched artist '{artist_name}'.",
+            }), 200
         return jsonify({"success": True, "affected_tracks": affected,
                         "message": f"Applied genres to {affected} track(s)"}), 200
     except Exception as exc:

@@ -193,15 +193,48 @@ def fix_album_field(album_artist: str, album: str, field: str, value: Any) -> tu
             updated_count = len(affected)
 
         files_updated = 0
-        from services.metadata.tag_file_service import write_tags_to_file
+        files_failed = 0
+        from services.metadata.tag_file_service import (
+            resolve_music_file_path,
+            write_tags_to_file,
+        )
         for track in affected:
             fp = str(track.get("file_path") or "").strip()
-            if fp:
-                try:
-                    write_tags_to_file(fp, {field: value})
+            if not fp:
+                files_failed += 1
+                continue
+            # Resolve before writing: the DB may hold a path relative to the
+            # music root, and the writer returns False for anything that does
+            # not exist on disk.
+            resolved = resolve_music_file_path(fp)
+            if not resolved:
+                files_failed += 1
+                logger.warning(
+                    "fix_album_field: audio file not resolvable",
+                    file_path=fp, album=album, field=field,
+                )
+                continue
+            try:
+                # ⚠️ The RETURN VALUE is checked. This counted `files_updated`
+                # for any call that did not RAISE — so a writer that returned
+                # False (no file, tags disabled, unsupported format) was still
+                # reported as a successful write.
+                if write_tags_to_file(resolved, {field: value}):
                     files_updated += 1
-                except Exception:
-                    pass
+                else:
+                    files_failed += 1
+            except Exception as tag_exc:
+                files_failed += 1
+                logger.warning(
+                    "fix_album_field: file tag write failed",
+                    file_path=resolved, field=field, error=str(tag_exc),
+                )
+
+        if files_failed:
+            logger.warning(
+                "fix_album_field: some audio files were not updated",
+                album=album, files_updated=files_updated, files_failed=files_failed,
+            )
 
         return updated_count, files_updated
     except Exception as exc:

@@ -542,11 +542,27 @@ def sync_album_file_tags(artist: str, album: str) -> dict[str, Any]:
 
         if fill:
             try:
-                from services.metadata.tag_file_service import write_tags_to_file
-                if write_tags_to_file(file_path, fill):
+                from services.metadata.tag_file_service import (
+                    resolve_music_file_path,
+                    write_tags_to_file,
+                )
+                # The stored path may be relative to the music root; the writer
+                # returns False for a path that does not exist.
+                resolved = resolve_music_file_path(str(file_path or ""))
+                if resolved and write_tags_to_file(resolved, fill):
                     files_updated += 1
+                # ⚠️ WARNING, not DEBUG: a tag fill that silently did nothing is
+                # exactly the "I saved it and nothing changed" report, and DEBUG
+                # is invisible in a normal log tail.
+                else:
+                    logger.warning(
+                        "Tag fill did not write the file",
+                        track_id=track.get("id"), file_path=str(file_path or ""),
+                    )
             except Exception as exc:
-                logger.debug("Tag fill failed", track_id=track.get("id"), error=str(exc))
+                logger.warning(
+                    "Tag fill failed", track_id=track.get("id"), error=str(exc),
+                )
 
         # We auto-overwrite genres, so explicitly remove it before recording manual corrections
         if "genres" in fill:
