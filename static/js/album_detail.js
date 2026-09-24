@@ -1370,6 +1370,18 @@ window.queueMissingTrack = function (btn) {
         .then(r => r.json())
         .then(data => {
             if (data.success) {
+                // ⚠️ A dedupe is NOT an insert. ``success: true`` with
+                // ``already_queued: true`` means the request was handled but no
+                // row was added — marking the button "done" for it is the same
+                // false success that made added tracks look like they vanished.
+                // Only a real insert earns the green tick.
+                if (data.already_queued) {
+                    btn.disabled = false;
+                    btn.innerHTML = origHtml;
+                    btn.title = data.message || 'Already in the download queue';
+                    alert(data.message || 'Already in the download queue.');
+                    return;
+                }
                 btn.innerHTML = '<i class="bi bi-check-lg"></i>';
                 btn.classList.remove('btn-outline-success');
                 btn.classList.add('btn-success');

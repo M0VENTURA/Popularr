@@ -1916,13 +1916,22 @@ async function addToQueue(event) {
   }
 
   try {
-    await fetchJsonOrThrow('/api/queue/add', {
+    const result = await fetchJsonOrThrow('/api/queue/add', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ artist, title, album, source, priority })
     });
 
-    alert(`✅ Added to queue: ${artist} - ${title}`);
+    // ⚠️ A DEDUPE IS NOT AN INSERT. The server returns ``success: true`` WITH
+    // ``already_queued: true`` because the request was handled correctly — but
+    // no row was added. Alerting "Added to queue" unconditionally is why files
+    // the user added appeared to vanish: nothing was inserted and the existing
+    // blocker was often not even in the list they were looking at.
+    if (result && result.already_queued) {
+      alert(result.message || `Already in the queue: ${artist} - ${title}`);
+    } else {
+      alert(`✅ Added to queue: ${artist} - ${title}`);
+    }
     const form = document.getElementById('addToQueueForm');
     if (form) form.reset();
 
@@ -1969,15 +1978,25 @@ async function loadQueueStatus() {
     }
 
     const statusCounts = data.status_counts || {};
+    const sectionCounts = data.section_counts || {};
     const countFor = (...s) => s.reduce((sum, st) => sum + Number(statusCounts[st] || 0), 0);
     const setNum = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = String(val); };
 
-    setNum('queueTotalCount', countFor('queued', 'searching', 'processing', 'unmatched', 'pending_match', 'discovered', 'queried', 'matched', 'downloading', 'completed', 'moving', 'importing', 'failed', 'possible_duplicate', 'duplicate'));
-    setNum('queueQueuedCount', countFor('queued', 'searching', 'processing', 'unmatched', 'pending_match', 'discovered', 'queried', 'matched'));
+    // ⚠️ Use the SERVER's section_counts for the card totals. They are derived
+    // from the same status sets the server uses to build each list, so a pill
+    // reading "N" always has exactly N rows beneath it. Re-deriving these from a
+    // hand-written status list here is what let the two disagree: the old
+    // "Queued" list counted unmatched/matched/pending_match/discovered while
+    // the list could render none of them ("74 queued" over a list of 18).
+    const sectionOr = (name, ...fallbackStatuses) =>
+      Number(sectionCounts[name] != null ? sectionCounts[name] : countFor(...fallbackStatuses));
+
+    setNum('queueTotalCount', sectionOr('active', 'queued', 'searching', 'processing', 'downloading', 'queried'));
+    setNum('queueQueuedCount', sectionOr('active', 'queued', 'searching', 'processing', 'downloading', 'queried'));
     setNum('queueActiveCount', countFor('downloading'));
-    setNum('queueCompletedCount', countFor('completed'));
+    setNum('queueCompletedCount', sectionOr('ready', 'completed'));
     setNum('queueMovingCount', countFor('moving', 'importing'));
-    setNum('queueFailedCount', countFor('failed'));
+    setNum('queueFailedCount', sectionOr('failed', 'failed'));
 
     document.querySelectorAll('.stat-pill[data-pill-for]').forEach(pill => {
       const el = document.getElementById(pill.dataset.pillFor);
@@ -2233,35 +2252,67 @@ async function renderQueuePage() {
   try {
     const data = await fetchJsonOrThrow('/api/downloads/queue?limit=500');
     const statusCounts = (data && data.status_counts) || {};
+    const sectionCounts = (data && data.section_counts) || {};
     const countFor = (...s) => s.reduce((sum, st) => sum + Number(statusCounts[st] || 0), 0);
     const setNum = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = String(val); };
 
-    setNum('statQueuedNum', countFor('queued', 'searching', 'unmatched', 'pending_match', 'discovered', 'queried', 'matched'));
-    setNum('statDownloadingNum', countFor('downloading'));
-    setNum('statCompletedNum', countFor('completed'));
-    setNum('statFailedNum', countFor('failed'));
-    setNum('statImportedNum', countFor('imported', 'moving'));
-    setNum('queueActiveCount', countFor('queued', 'searching', 'downloading', 'failed'));
-    setNum('queueCompletedCount', countFor('completed'));
-    setNum('queueFailedCount', countFor('failed'));
+    // ⚠️ THE COUNTS CAME FROM A DIFFERENT SET THAN THE LISTS.
+    //
+    // These pills were hand-written lists that included
+    // unmatched/matched/pending_match/discovered, while the Active Queue list
+    // below them could render NONE of those (and dropped every local/discovered
+    // row). The pill counted a strict superset, so the page read
+    // "74 queued ... but the active queue shows 18" and no amount of paging
+    // could ever reconcile them.
+    //
+    // Both sides now come from the server's ONE partition
+    // (ACTIVE_SECTION / READY_SECTION / FAILED_SECTION): the pill is that
+    // section's count and the list is that section's rows.
+    const sectionNum = (name, ...fallbackStatuses) =>
+      Number(sectionCounts[name] != null ? sectionCounts[name] : countFor(...fallbackStatuses));
+
+    // "Queued" = the ACTIVE section minus the rows currently downloading, so
+    // Queued + Active == the Active Queue list's row count exactly. Both come
+    // from the server's partition; neither is re-derived from a hand-written
+    // status list here (which is how the pills and the list drifted apart).
+    const activeSection = sectionNum('active', 'queued', 'searching', 'processing', 'downloading', 'queried');
+    const downloadingCount = Number(sectionCounts.downloading != null ? sectionCounts.downloading : countFor('downloading'));
+
+    setNum('statQueuedNum', Math.max(0, activeSection - downloadingCount));
+    setNum('statDownloadingNum', downloadingCount);
+    setNum('statCompletedNum', sectionNum('ready', 'completed', 'unmatched', 'possible_duplicate'));
+    setNum('statFailedNum', sectionNum('failed', 'failed'));
+    // ⚠️ "Imported" is intentionally a STATISTIC, not a card count: ``imported``
+    // rows are finished work that no queue card lists, and
+    // ``test_the_full_breakdown_is_still_available`` pins that this breakdown is
+    // still served. It is the one pill deliberately not tied to a list, so it is
+    // labelled "Moved to library" rather than being presented as queue work.
+    setNum('statImportedNum', countFor('imported'));
+    setNum('queueActiveCount', activeSection);
+    setNum('queueCompletedCount', sectionNum('ready', 'completed', 'unmatched', 'possible_duplicate'));
+    setNum('queueFailedCount', sectionNum('failed', 'failed'));
 
     const lastRefreshed = document.getElementById('queueLastRefreshed');
     if (lastRefreshed) lastRefreshed.textContent = 'Updated ' + new Date().toLocaleTimeString([], { hour12: false });
 
     const items = (data && data.queue) || [];
     const completed = (data && data.completed) || [];
-    // Prefer the server's dedicated failed list; it matches the count above.
-    // Deriving it from ``items`` disagreed with that count, because the
-    // active-queue query EXCLUDES ``source IN ('local','discovered')`` rows
-    // (disk folders) and is capped at 500 oldest-first — so a failed disk
-    // folder, or a failed row past the cap, was counted but never rendered.
-    const failed = (data && data.failed) || items.filter(i => i.status === 'failed');
-    renderQueueList('active', items.filter(i => i.status !== 'failed' && i.status !== 'completed'));
-    renderQueueList('completed', completed.filter(i => (i.status || 'completed') !== 'failed'));
+    // Each card renders ITS OWN section, straight from the server. The server
+    // now returns the active section in ``queue``, the ready section in
+    // ``completed`` and the failed section in ``failed`` — the same three sets
+    // its ``section_counts`` are computed from, so each badge equals the number
+    // of rows rendered beneath it.
+    //
+    // ⚠️ Do NOT re-filter these with hand-written status lists. The old code
+    // sliced the cards out of one combined list, which is how a row could be
+    // counted by a pill but appear in no card (the "74 queued", 18-rows bug).
+    const failed = (data && data.failed) || [];
+    renderQueueList('active', items);
+    renderQueueList('completed', completed);
     renderQueueList('failed', failed);
 
     const retryAllBtn = document.getElementById('retryAllBtn');
-    if (retryAllBtn) retryAllBtn.style.display = Number(statusCounts.failed || 0) > 0 ? 'inline-block' : 'none';
+    if (retryAllBtn) retryAllBtn.style.display = Number(sectionCounts.failed || 0) > 0 ? 'inline-block' : 'none';
   } catch (error) {
     console.error('Error rendering queue page:', error);
   }

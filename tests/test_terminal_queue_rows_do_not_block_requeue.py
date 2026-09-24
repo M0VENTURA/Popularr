@@ -413,14 +413,21 @@ class TestQueueTotalMatchesTheListedSet:
 
     @staticmethod
     def _route_total(status_counts: dict) -> int:
-        """Exactly the computation in ``routes/downloads.api_queue``."""
-        from routes.downloads import ACTIVE_QUEUE_STATUSES, FAILED_STATUSES, PENDING_RETRY_STATUSES
+        """Exactly the computation in ``routes/downloads.api_queue``.
 
-        visible = ACTIVE_QUEUE_STATUSES | FAILED_STATUSES | PENDING_RETRY_STATUSES
+        ⚠️ ``total`` is the PAGER's denominator, and the pager pages the ACTIVE
+        list, so it counts the ACTIVE section and nothing else. It is
+        deliberately NOT the union of every displayable status: that includes
+        the Ready card's rows, which are a different list, and counting them
+        here is what produced a "Showing 1-18 of 74" that could never be
+        satisfied.
+        """
+        from routes.downloads import ACTIVE_SECTION
+
         return sum(
             int(count)
             for status, count in (status_counts or {}).items()
-            if str(status) in visible
+            if str(status) in ACTIVE_SECTION
         )
 
     def test_total_excludes_terminal_backlog(self):
@@ -434,51 +441,136 @@ class TestQueueTotalMatchesTheListedSet:
             "failed": 1,
         }
 
-        assert self._route_total(counts) == 8, (
-            "total must count only the statuses the queue actually lists "
-            "(queued 5 + downloading 2 + failed 1 = 8). Counting the terminal "
-            "backlog (completed 40 + imported 20 + in_collection 3) produced "
-            "the permanent 70-vs-18 mismatch"
+        # queued 5 + downloading 2 = 7. ``failed`` and ``completed`` belong to
+        # the Failed and Ready cards (different lists), and imported/
+        # in_collection are not displayable at all.
+        assert self._route_total(counts) == 7, (
+            "total must count only the ACTIVE section. Counting the terminal "
+            "backlog (completed 40 + imported 20 + in_collection 3) produced the "
+            "permanent 70-vs-18 mismatch"
         )
 
-    def test_total_counts_pending_retry_and_retryable_rows(self):
-        """⚠️ ``removed``/``deleted``/``cancelled`` ARE counted, and that is
-        correct — they sit in ``FAILED_STATUSES`` so the Failed card can list
-        them and offer Retry/Clear. The statuses that must NOT be counted are
-        the ones the queue genuinely never shows: completed/imported/
-        in_collection."""
+    def test_total_counts_pending_retry_rows(self):
+        """Parked-but-pending states ARE in the Active section: they are search
+        work that will resume once the retry window passes, and the Active Queue
+        renders them, so the pager must count them.
+
+        ⚠️ REVERSED from the original assertion, which expected
+        ``removed``/``deleted`` to be counted too on the grounds that
+        "they sit in FAILED_STATUSES so the Failed card can list them". That
+        reasoning was WRONG: ``get_failed_queue`` hard-codes ``status='failed'``,
+        so a ``removed``/``deleted`` row was counted but rendered by no card at
+        all — the very count-vs-list defect this file exists to prevent, in
+        miniature. They are tombstones and are now excluded from the count.
+        """
         counts = {"backed_off": 4, "pending_release": 3, "removed": 100, "deleted": 50}
-        assert self._route_total(counts) == 157
+        assert self._route_total(counts) == 7, (
+            "backed_off 4 + pending_release 3 = 7; removed/deleted are "
+            "tombstones no card renders, so they must not inflate the pager"
+        )
 
     def test_finished_rows_are_not_counted(self):
         """The actual backlog: finished downloads are invisible in the queue, so
         counting them was the permanent "70"."""
         assert self._route_total({"completed": 40, "imported": 20, "in_collection": 3}) == 0
 
-    def test_unmatched_and_matched_are_not_in_the_listing(self):
-        """They are neither active nor retryable, and ``get_active_queue`` does
-        not select them, so they must not inflate ``total``."""
-        assert self._route_total({"unmatched": 6, "matched": 2}) == 0
+    def test_unmatched_is_not_in_the_active_section(self):
+        """⚠️ REVERSED (user's decision) from
+        ``test_unmatched_and_matched_are_not_in_the_listing``.
 
-    def test_total_agrees_with_the_listing_query(self):
-        """The load-bearing pin: ``QUEUE_LISTED_STATUSES`` must be EXACTLY the
-        set ``get_active_queue`` filters on, so the pager and the list cannot
-        disagree again."""
+        The original asserted BOTH were absent from ``total``. That was the
+        source of the reported bug: the client's "Queued" pill counted
+        ``unmatched`` and ``matched`` while no list could render them, so the
+        page showed "74 queued / 0 active / 0 ready" above 18 rows and NOTHING
+        the user added appeared.
+
+        ``matched`` is now genuinely listable (it is search work waiting to
+        download), so it IS in the Active section and the pager counts it.
+        ``unmatched`` is a local-disk folder — the Active Queue renders it in
+        the **Ready** card, so it belongs to READY, not ACTIVE. Its pill is
+        therefore the Ready pill's count, and the Active pager does not count
+        it. Either way the row is now RENDERABLE, which is the point.
+        """
+        assert self._route_total({"matched": 2}) == 2
+        assert self._route_total({"unmatched": 6}) == 0, (
+            "unmatched belongs to the Ready card; counting it in the ACTIVE "
+            "pager would be the same bug in the opposite direction"
+        )
+
+    def test_the_sections_partition_the_displayed_statuses(self):
+        """⭐ THE LOAD-BEARING INVARIANT for the reported bug.
+
+        The pills and the lists disagreed because they came from two different
+        definitions of "the queue". They are now DIFFERENT VIEWS OF ONE
+        PARTITION: the three card sections must be pairwise disjoint, and
+        ``QUEUE_DISPLAY_STATUSES`` is defined as their union — so every
+        displayable status renders in exactly one card, and that card's count is
+        exactly its statuses' count. A status can therefore never again be
+        counted by a pill but rendered by no card.
+        """
+        from services.queue.queue_constraints import (
+            ACTIVE_SECTION,
+            FAILED_SECTION,
+            QUEUE_DISPLAY_STATUSES,
+            READY_SECTION,
+        )
+
+        active, ready, failed = set(ACTIVE_SECTION), set(READY_SECTION), set(FAILED_SECTION)
+
+        assert not (active & ready), f"counted by two cards: {sorted(active & ready)}"
+        assert not (active & failed), f"counted by two cards: {sorted(active & failed)}"
+        assert not (ready & failed), f"counted by two cards: {sorted(ready & failed)}"
+
+        assert active | ready | failed == set(QUEUE_DISPLAY_STATUSES), (
+            "the sections must cover every displayable status exactly once; "
+            f"uncovered: {sorted(set(QUEUE_DISPLAY_STATUSES) - (active | ready | failed))}"
+        )
+
+    def test_each_card_can_render_every_status_it_counts(self):
+        """The reconciliation, stated as the user experiences it.
+
+        ``ready`` must equal the set ``get_completed_queue`` actually selects,
+        and ``failed`` must equal what ``get_failed_queue`` selects — otherwise a
+        card's badge would count rows its own query cannot return.
+        """
         import inspect
 
         from db.repositories import queue as queue_repo
-        from routes.downloads import QUEUE_LISTED_STATUSES
+        from services.queue.queue_constraints import (
+            COMPLETED_QUEUE_STATUSES,
+            FAILED_SECTION,
+            READY_SECTION,
+        )
 
-        source = inspect.getsource(queue_repo.get_active_queue)
-        for status in sorted(QUEUE_LISTED_STATUSES):
-            assert f"'{status}'" not in source, (
-                f"{status} is hard-coded in get_active_queue instead of coming "
-                "from the shared constants; the two sets can now drift"
-            )
-        # And the listing really does build its filter from the same constants.
-        assert "ACTIVE_QUEUE_STATUSES" in source
-        assert "FAILED_STATUSES" in source
-        assert "PENDING_RETRY_STATUSES" in source
+        assert set(READY_SECTION) == set(COMPLETED_QUEUE_STATUSES), (
+            "the Ready card's count must describe the rows get_completed_queue "
+            "returns, or the badge and the list disagree"
+        )
+        failed_src = inspect.getsource(queue_repo.get_failed_queue)
+        assert "'failed'" in failed_src
+        assert FAILED_SECTION == frozenset({"failed"}), (
+            "get_failed_queue only ever selects status='failed', so counting any "
+            "other status in the Failed badge counts rows that card cannot list"
+        )
+
+    def test_total_agrees_with_the_listing_query(self):
+        """``total`` must be computed from the same section constant the listing
+        query is given, so the pager and the rows cannot describe different
+        sets."""
+        import inspect
+
+        from routes import downloads as downloads_route
+
+        source = inspect.getsource(downloads_route.api_queue)
+        code = "\n".join(line.split("#", 1)[0] for line in source.splitlines())
+
+        assert "ACTIVE_SECTION" in code, (
+            "api_queue must derive its pager total from ACTIVE_SECTION; a "
+            "literal status list is how the two sets drifted apart before"
+        )
+        # And the listing really is queried by section, not by a literal list.
+        assert "get_queue_display_items" in code
+        assert "ACTIVE_SECTION" in code and "READY_SECTION" in code and "FAILED_SECTION" in code
 
     def test_the_full_breakdown_is_still_available(self):
         """Fixing ``total`` must not hide the per-status pills, which render
@@ -493,14 +585,25 @@ class TestQueueTotalMatchesTheListedSet:
             "completed/imported counts even though those rows are not listed"
         )
 
-    def test_the_route_uses_the_shared_constant(self):
+    def test_the_route_uses_the_shared_section_constants(self):
         """Pinned so the expression cannot drift from the constants it must
-        agree with (``get_active_queue`` uses the same three sets, and
-        ``QUEUE_LISTED_STATUSES`` is their union).
+        agree with.
 
-        ⚠️ Comments are stripped first: the fix's own explanatory comment
-        QUOTES the old expression, so a naive substring check matches the prose
-        and fails — the comment-matching trap.
+        ⚠️ The invariant CHANGED with the count-vs-list fix. The route used to
+        derive ``total`` from ``QUEUE_LISTED_STATUSES`` (ACTIVE|FAILED|
+        PENDING_RETRY) and list rows with ``get_active_queue``. That pair still
+        disagreed with the CLIENT pills, which counted
+        ``unmatched``/``matched``/``pending_match``/``discovered`` too — so the
+        page read "74 queued" over 18 rows.
+
+        Now the route queries each card by its SECTION and computes each count
+        from the same section, so a pill and its rows are the same set by
+        construction. This pins that the route keeps using the shared constants
+        rather than reintroducing a literal status list.
+
+        ⚠️ Comments are stripped first: the explanatory comments QUOTE the old
+        expressions, so a naive substring check matches the prose and fails —
+        the comment-matching trap.
         """
         import inspect
 
@@ -509,9 +612,16 @@ class TestQueueTotalMatchesTheListedSet:
         source = inspect.getsource(downloads_route.api_queue)
         code = "\n".join(line.split("#", 1)[0] for line in source.splitlines())
 
-        assert "QUEUE_LISTED_STATUSES" in code, (
-            "api_queue must derive its total from QUEUE_LISTED_STATUSES; a "
-            "literal status list is how the two sets drifted apart before"
+        for name in ("ACTIVE_SECTION", "READY_SECTION", "FAILED_SECTION"):
+            assert name in code, (
+                f"api_queue must derive its lists and counts from {name}; a "
+                "literal status list is how the sets drifted apart before"
+            )
+        # ``QUEUE_LISTED_STATUSES`` remains as the shared alias for the whole
+        # displayed set; it must not be redefined locally.
+        assert "QUEUE_LISTED_STATUSES = " not in code, (
+            "the displayed set must come from the shared constant, not be "
+            "redefined in the route"
         )
         assert "sum(status_counts.values())" not in code, (
             "summing EVERY status is the original bug — it counted the "

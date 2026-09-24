@@ -408,6 +408,51 @@ def get_processing_snapshot() -> dict[str, int]:
     }
 
 
+def get_queue_display_items(
+    statuses: frozenset[str] | set[str],
+    limit: int = 500,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Queue rows for DISPLAY, restricted to *statuses*.
+
+    ⚠️ NOT a replacement for ``get_active_queue``. That function is used for
+    WORK (the slskd reaper cancels stalled transfers from it, and the folder
+    matcher resolves album tracks from it), so it deliberately excludes
+    ``source IN ('local','discovered')`` — a local-disk folder is not an active
+    transfer. Displaying the queue is a different question from acting on it.
+
+    The queue page's counts and its list disagreed because they came from two
+    different definitions: the "Queued" pill counted a hand-written set that
+    included ``unmatched``/``matched``/``pending_match``/``discovered``, while
+    the listing could not render any of them (nor any local/discovered row).
+    The result was "74 queued but the active queue shows 18". Callers now pass
+    ONE of the ``ACTIVE_SECTION`` / ``READY_SECTION`` / ``FAILED_SECTION`` sets,
+    which partition ``QUEUE_DISPLAY_STATUSES`` — so each row renders in exactly
+    one card and each card's badge is that section's count.
+    """
+    if not statuses:
+        return []
+    status_sql = ", ".join(f"'{s}'" for s in sorted(statuses))
+    try:
+        with db_session() as session:
+            track_num_expr = numeric_track_number_expr(session)
+            result = session.execute(
+                text(f"""
+                    SELECT *
+                    FROM download_queue
+                    WHERE status IN ({status_sql})
+                    ORDER BY created_at ASC,
+                             {track_num_expr},
+                             id ASC
+                    LIMIT :limit OFFSET :offset
+                """),
+                {"limit": limit, "offset": offset},
+            )
+            return [dict(r._mapping) for r in result.fetchall()]
+    except Exception as e:
+        logger.error("Failed to get queue display items", error=str(e))
+        return []
+
 def get_ready_for_processing(limit: int = 100) -> list[dict[str, Any]]:
     try:
         with db_session() as session:

@@ -121,15 +121,53 @@ def add_to_queue(
             pass
 
         if item.get("already_queued"):
-            return {"success": True, "already_queued": True, "item": item}
+            # ⚠️ A dedupe is NOT a plain success. The row was NOT inserted — an
+            # existing one blocked it. Returning a bare success made every caller
+            # (``/api/queue/add``, the album page, release/playlist importers) tell
+            # the user "Added to queue" while nothing changed and the track did not
+            # appear. Reported as "files I'm adding to download aren't showing".
+            #
+            # The message is derived from the EXISTING row's status so the user
+            # learns WHY, and ``displayable`` flags the genuinely confusing case: a
+            # blocker the queue page cannot render is a contradiction worth
+            # surfacing rather than hiding.
+            existing_status = str(item.get("status") or "").lower()
+            try:
+                from services.queue.queue_constraints import QUEUE_DISPLAY_STATUSES
+                is_displayable = existing_status in QUEUE_DISPLAY_STATUSES
+            except Exception:
+                is_displayable = True
+
+            return {
+                "success": True,
+                "already_queued": True,
+                "inserted": False,
+                "queue_id": item.get("id"),
+                "status": existing_status,
+                "displayable": is_displayable,
+                "message": (
+                    f"Already in the queue ({existing_status or 'unknown'})"
+                    if is_displayable
+                    else (
+                        f"Already in the queue with status '{existing_status}', which "
+                        "the queue page does not list — clear or retry that row to "
+                        "re-add this track"
+                    )
+                ),
+                "item": item,
+            }
 
         try:
             signal_new_item()
         except Exception:
             pass
 
-        return {"success": True, "item": item}
-
+        return {
+            "success": True,
+            "inserted": True,
+            "queue_id": item.get("id") if isinstance(item, dict) else None,
+            "item": item,
+        }
     except Exception as e:
         logger.error("Queue add failed", error=str(e), artist=artist, title=title)
         return {"success": False, "error": str(e)}

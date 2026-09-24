@@ -2019,14 +2019,33 @@
           notifyError('Failed to queue track: ' + (data.error || 'Unknown error'));
           return;
         }
+      // ⚠️ A dedupe is NOT an insert. ``success: true`` with
+      // ``already_queued: true`` means the request was handled but NO row was
+      // added — marking the button done for it is the same false success that
+      // made newly added tracks look like they had vanished.
+      if (data.already_queued) {
+        // The row is real, just pre-existing — the ordinary case. Say so.
         global.buttonState.setDone(btn, {
-          title: 'Added to download queue',
+          title: data.message || 'Already in the download queue',
           fromClass: 'btn-outline-success',
+          icon: 'bi-info-circle',
         });
-      } catch (error) {
-        notifyError('Error: ' + error.message);
+        // ⚠️ But when the blocker is a status the queue page cannot render, the
+        // user has NO way to see or clear it from here — so that one must be
+        // surfaced loudly rather than shown as a quiet tick.
+        if (data.displayable === false) {
+          notifyError(data.message || 'Already in the queue, but that row is not listed on the queue page.');
+        }
+        return;
       }
-    });
+      global.buttonState.setDone(btn, {
+        title: 'Added to download queue',
+        fromClass: 'btn-outline-success',
+      });
+    } catch (error) {
+      notifyError('Error: ' + error.message);
+    }
+  });
   }
 
   // ── Match a missing MB track to an existing library track ───────────────

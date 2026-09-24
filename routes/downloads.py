@@ -20,9 +20,7 @@ from sqlalchemy import text
 from api_clients.slskd_http import SlskdHttpClient
 from db.engine import db_session
 from db.repositories.queue import (
-    get_active_queue,
-    get_completed_queue,
-    get_failed_queue,
+    get_queue_display_items,
     get_queue_status_counts,
     insert_queue_item,
     update_queue_item,
@@ -79,21 +77,23 @@ from services.downloads.download_processing_service import (
 from services.downloads.match_orchestrator import apply_mbid_match_batch
 from services.downloads.slskd_service import SlskdService
 from services.queue.queue_constraints import (
-    ACTIVE_QUEUE_STATUSES,
-    FAILED_STATUSES,
-    PENDING_RETRY_STATUSES,
+    ACTIVE_SECTION,
+    FAILED_SECTION,
+    QUEUE_DISPLAY_STATUSES,
+    READY_SECTION,
 )
 from services.queue.queue_orchestrator import process_next_batch
 from services.queue.queue_signal import signal_new_item
 
-#: The statuses ``/api/downloads/queue`` can actually PAGE THROUGH — used for
-#: the ``total`` the pager shows, so it must describe the same set the client
-#: receives in ``queue``. Derived from the same three constants
-#: ``get_active_queue`` filters on; a test pins the equality so the two cannot
-#: drift apart again (the bug was ``total`` summing EVERY status).
-QUEUE_LISTED_STATUSES: frozenset[str] = (
-    ACTIVE_QUEUE_STATUSES | FAILED_STATUSES | PENDING_RETRY_STATUSES
-)
+#: Retained for compatibility and as the single source of truth for "which
+#: statuses the queue page shows". Kept as an alias of the shared constant so
+#: there is exactly ONE definition of that set.
+#:
+#: ⚠️ This used to be ACTIVE|FAILED|PENDING_RETRY, which excluded
+#: ``unmatched``/``matched``/``pending_match``/``discovered`` — the statuses the
+#: CLIENT's "Queued" pill counted. That is why the page showed "74 queued" above
+#: a list of 18 and no amount of paging reconciled them.
+QUEUE_LISTED_STATUSES: frozenset[str] = QUEUE_DISPLAY_STATUSES
 
 logger = structlog.get_logger(__name__)
 downloads_bp = Blueprint("downloads", __name__)
@@ -397,48 +397,75 @@ def api_queue() -> Any:
     offset = request.args.get("offset", 0, type=int)
     try:
         status_counts = get_queue_status_counts()
-        items = get_active_queue(limit=max(1, min(limit + offset, 500)))
-        if offset:
-            items = items[offset:offset + limit]
-        else:
-            items = items[:limit]
-            
-        completed = get_completed_queue(limit=min(limit, 50))
-        # The Failed Downloads card shows a COUNT from ``status_counts`` and a
-        # LIST built by the client. Feeding the list from ``items`` made the two
-        # disagree, because ``get_active_queue`` deliberately EXCLUDES
-        # ``source IN ('local','discovered')`` rows and is capped at 500 rows
-        # ordered OLDEST-first — so a failed disk-folder row, or a failed row
-        # beyond the cap, was counted but never listed. Serve the list from its
-        # own query with the same breadth as the count.
-        failed = get_failed_queue(limit=min(limit, 100))
-        # ``total`` must describe the SAME set the client can page through, i.e.
-        # the queue listing built by ``get_active_queue``. It used to be
-        # ``sum(status_counts.values())`` — every row in the table, including the
-        # terminal backlog the queue deliberately never shows
-        # (completed/imported/in_collection). On a real database that is a
-        # permanent pile of finished rows, so the pager read "showing 18 of 70"
-        # forever and the queue looked as though it had 52 invisible items.
+
+        # ⚠️ DISPLAY query, NOT ``get_active_queue``. That one is the WORK query
+        # (the slskd reaper cancels stalled transfers from it and the folder
+        # matcher resolves tracks from it) and deliberately excludes
+        # local/discovered sources, because a disk folder is not an active
+        # transfer. Act-on-it and show-it are different questions.
         #
-        # ⚠️ QUEUE_LISTED_STATUSES must stay in step with ``get_active_queue``'s
-        # own filter. It is derived from the SAME three constants that function
-        # uses (ACTIVE | FAILED | PENDING_RETRY), and the equality is pinned by
-        # a test so the two cannot drift. Counting from the status constants
-        # alone cannot reproduce the listing's
-        # ``source NOT IN ('local','discovered')`` clause, so a local-disk
-        # ``unmatched`` row can still be counted but not listed; that is a
-        # pre-existing, much smaller discrepancy (one row per un-matched local
-        # folder) and is deliberately not papered over here.
+        # ⚠️ The three sections PARTITION every displayable status, so a row
+        # lands in exactly one list. ``get_active_queue`` was used for the
+        # active list, which is why an ``unmatched`` local folder was counted by
+        # the pills but rendered by nothing.
+        active_items = get_queue_display_items(
+            ACTIVE_SECTION, limit=max(1, min(limit + offset, 500)), offset=offset,
+        )
+        if not offset:
+            active_items = active_items[:limit]
+
+        # ``Ready`` and ``Failed`` each come from their own section query rather
+        # than being sliced out of the paged active list, so their badges show
+        # that section's count and every row of it is renderable.
+        ready_items = get_queue_display_items(READY_SECTION, limit=min(limit, 50))
+        failed_items = get_queue_display_items(FAILED_SECTION, limit=min(limit, 100))
+
+        # ``total`` is the pager's denominator, and the pager pages the ACTIVE
+        # list, so it must describe the ACTIVE section and nothing else.
+        # ⚠️ NOT the sum of every displayable status: that includes the Ready
+        # card's rows, which are a different list — counting them here is what
+        # produced a "showing 1-18 of 74" that could never be satisfied.
         queue_total = sum(
             int(count)
             for status, count in (status_counts or {}).items()
-            if str(status) in QUEUE_LISTED_STATUSES
+            if str(status) in ACTIVE_SECTION
         )
+
+        # Per-section counts, derived from the SAME sets as the three queries —
+        # so a pill reading "N" always has exactly N rows under it.
+        def _section_total(section: frozenset[str]) -> int:
+            return sum(
+                int(count)
+                for status, count in (status_counts or {}).items()
+                if str(status) in section
+            )
+
+        # ⚠️ ``downloading_total`` is served so the client can present the two
+        # sub-pills of the Active card (Queued = waiting, Active = downloading)
+        # WITHOUT re-deriving either from a hand-written status list. Their sum
+        # is exactly ``section_counts.active``, i.e. the number of rows in the
+        # Active Queue list — which is what makes the pills reconcile with the
+        # list instead of contradicting it.
+        section_counts = {
+            "active": _section_total(ACTIVE_SECTION),
+            "ready": _section_total(READY_SECTION),
+            "failed": _section_total(FAILED_SECTION),
+            "downloading": _section_total(frozenset({"downloading"})),
+        }
+
         return jsonify({
             "success": True,
-            "queue": items,
-            "completed": completed,
-            "failed": failed,
+            # ``queue`` keeps its name/meaning for existing callers: the active
+            # section. ``completed``/``failed`` likewise.
+            "queue": active_items,
+            "completed": ready_items,
+            "failed": failed_items,
+            "section_counts": section_counts,
+            "sections": {
+                "active": sorted(ACTIVE_SECTION),
+                "ready": sorted(READY_SECTION),
+                "failed": sorted(FAILED_SECTION),
+            },
             "status_counts": status_counts or {},
             "total": queue_total,
             "limit": limit,

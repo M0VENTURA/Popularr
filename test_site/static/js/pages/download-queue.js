@@ -635,27 +635,39 @@
     }
 
     const statusCounts = (data && data.status_counts) || {};
+    const sectionCounts = (data && data.section_counts) || {};
     const items = (data && data.queue) || [];
     const completed = (data && data.completed) || [];
 
-    setCount('queueTotalCount', countStatuses(statusCounts,
-      'queued', 'searching', 'processing', 'unmatched', 'pending_match', 'discovered',
-      'queried', 'matched', 'downloading', 'completed', 'moving', 'importing', 'failed',
-      'possible_duplicate', 'duplicate'));
-    setCount('queueQueuedCount', countStatuses(statusCounts,
-      'queued', 'searching', 'processing', 'unmatched', 'pending_match', 'discovered',
-      'queried', 'matched'));
-    setCount('queueActiveCount', countStatuses(statusCounts, 'downloading'));
-    setCount('queueCompletedCount', countStatuses(statusCounts, 'completed'));
-    setCount('queueMovingCount', countStatuses(statusCounts, 'moving', 'importing'));
-    setCount('queueFailedCount', countStatuses(statusCounts, 'failed'));
+    // ⚠️ Counts come from the SERVER'S SECTION PARTITION, not from a
+    // hand-written status list here.
+    //
+    // These pills used to list statuses themselves — including
+    // unmatched/matched/pending_match/discovered — while the lists below could
+    // render none of those. The pill counted a strict SUPERSET, so the page
+    // showed "74 queued / 0 active / 0 ready" above 18 rows and nothing the
+    // user added appeared. Both sides now read the same partition, so a pill
+    // reading "N" always has exactly N rows beneath it.
+    const sectionNum = (name, ...fallback) =>
+      Number(sectionCounts[name] != null ? sectionCounts[name] : countStatuses(statusCounts, ...fallback));
+    const activeSection = sectionNum('active', 'queued', 'searching', 'processing', 'downloading', 'queried');
+    const downloadingCount = Number(
+      sectionCounts.downloading != null ? sectionCounts.downloading : countStatuses(statusCounts, 'downloading'));
 
-    setCount('statQueuedNum', countStatuses(statusCounts,
-      'queued', 'searching', 'unmatched', 'pending_match', 'discovered', 'queried', 'matched'));
-    setCount('statDownloadingNum', countStatuses(statusCounts, 'downloading'));
-    setCount('statCompletedNum', countStatuses(statusCounts, 'completed'));
-    setCount('statFailedNum', countStatuses(statusCounts, 'failed'));
-    setCount('statImportedNum', countStatuses(statusCounts, 'imported', 'moving'));
+    setCount('queueTotalCount', activeSection);
+    // Queued + Active == the Active card's row count, so the two sub-pills
+    // reconcile with the list instead of contradicting it.
+    setCount('queueQueuedCount', Math.max(0, activeSection - downloadingCount));
+    setCount('queueActiveCount', downloadingCount);
+    setCount('queueCompletedCount', sectionNum('ready', 'completed', 'unmatched', 'possible_duplicate'));
+    setCount('queueMovingCount', countStatuses(statusCounts, 'moving'));
+    setCount('queueFailedCount', sectionNum('failed', 'failed'));
+
+    setCount('statQueuedNum', Math.max(0, activeSection - downloadingCount));
+    setCount('statDownloadingNum', downloadingCount);
+    setCount('statCompletedNum', sectionNum('ready', 'completed', 'unmatched', 'possible_duplicate'));
+    setCount('statFailedNum', sectionNum('failed', 'failed'));
+    setCount('statImportedNum', countStatuses(statusCounts, 'imported'));
 
     // Hide zero-value stat pills.
     document.querySelectorAll('.stat-pill[data-pill-for]').forEach((pill) => {

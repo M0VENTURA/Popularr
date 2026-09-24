@@ -94,6 +94,95 @@ TERMINAL_QUEUE_STATUSES: frozenset[str] = frozenset({
     "deleted",
 })
 
+# ⚠️ Statuses the QUEUE PAGE displays — and therefore the set both its count
+# pills and its list must be derived from.
+#
+# THE DEFECT THIS EXISTS TO PREVENT: the stats bar and the list were computed
+# from two DIFFERENT definitions of "the queue", so they disagreed on screen.
+#   * the "Queued" pill was a hand-written list in the CLIENT
+#     (downloads.js:2239) that included ``unmatched`` / ``matched`` /
+#     ``pending_match`` / ``discovered``;
+#   * ``get_active_queue`` (the listing) filtered on
+#     ACTIVE | FAILED | PENDING_RETRY, which excludes all four, AND added
+#     ``source NOT IN ('local','discovered')``.
+# Reported as "74 queued ... but the active queue shows 18 items". The pill
+# counted a strict SUPERSET, so no amount of paging could ever reconcile them.
+#
+# ⚠️ THIS IS DELIBERATELY WIDER THAN ``ACTIVE_QUEUE_STATUSES`` and is NOT the
+# same thing as "active". It includes the local-disk states (``unmatched``)
+# because the count pills include them — the user's decision is that the LIST
+# catches up to the count, so anything counted is now renderable.
+#
+# ⚠️ DO NOT use this for work decisions. ``get_active_queue`` remains the
+# strict, source-filtered query that the slskd reaper and the folder matcher
+# rely on; using this set there would treat a local-disk folder as an active
+# transfer and cancel/mismatch it. This set is for DISPLAY only.
+# ⚠️⚠️ THE QUEUE PAGE'S THREE CARDS, AS STATUS SETS — and the ONE source of
+# truth for "how many are in each".
+#
+# THE DEFECT THIS EXISTS TO PREVENT: the page showed "74 queued / 0 active /
+# 0 ready" above a list of 18 items, and adding files appeared to do nothing.
+# The counts and the lists were computed from DIFFERENT definitions of "the
+# queue": the "Queued" pill was a hand-written list inside the CLIENT
+# (downloads.js / download-queue.js) that included ``unmatched``/``matched``/
+# ``pending_match``/``discovered``, while the list came from ``get_active_queue``
+# — which excludes all four AND drops every ``source IN
+# ('local','discovered')`` row. The pill therefore counted a strict SUPERSET of
+# what could ever be rendered, so NO amount of paging could reconcile them.
+#
+# THE INVARIANT (pinned by a test): the three sections must be pairwise
+# DISJOINT, and ``QUEUE_DISPLAY_STATUSES`` is DEFINED as their union. Every
+# row the page can show therefore belongs to exactly ONE card, and each card's
+# count is that set's count — so a pill reading "N" always has exactly N rows
+# beneath it. That is what makes the two halves unable to drift again.
+#
+# ⚠️ The membership below is chosen so each status sits in the section whose
+# PILL counts it. In particular ``unmatched`` is in READY (not ACTIVE), which
+# matches the UI: the "Completed & Ready to Organize" card is where un-matched
+# disk folders have always been shown, with a warning badge. Putting it in
+# ACTIVE would have recreated the bug in the opposite direction — counted under
+# "Queued" but rendered by the Ready card.
+FAILED_SECTION: frozenset[str] = frozenset({
+    "failed",
+})
+
+#: Exactly what ``get_completed_queue`` selects, so the Ready card's list and
+#: its count are the same set. ⚠️ Must stay a subset of the counted statuses —
+#: ``imported``/``in_collection``/``awaiting_selection`` are NOT displayable.
+READY_SECTION: frozenset[str] = frozenset(
+    COMPLETED_QUEUE_STATUSES & (
+        ACTIVE_QUEUE_STATUSES
+        | COMPLETED_QUEUE_STATUSES
+        | {"unmatched", "matched", "pending_match", "discovered"}
+    )
+)
+
+#: In-flight work + parked-but-pending search work + the statuses the "Queued"
+#: pill counts. Subtracting the other two sections keeps the three disjoint
+#: (``moving`` is in ACTIVE_QUEUE_STATUSES *and* in COMPLETED_QUEUE_STATUSES).
+ACTIVE_SECTION: frozenset[str] = frozenset(
+    (
+        ACTIVE_QUEUE_STATUSES
+        | PENDING_RETRY_STATUSES
+        | {"matched", "pending_match", "discovered"}
+    )
+    - READY_SECTION
+    - FAILED_SECTION
+)
+
+#: Every status the queue page can display. DEFINED as the union of the three
+#: sections — deliberately not written out by hand, so it cannot contain a
+#: status that no card renders.
+#:
+#: ``removed``/``cancelled``/``deleted`` are deliberately EXCLUDED: they are
+#: tombstones for rows the user deleted, no card shows them, and
+#: ``get_failed_queue`` only ever returns ``failed``. Counting them (the
+#: previous behaviour) inflated the Failed badge with rows that could not be
+#: listed — the same count-vs-list defect in miniature.
+QUEUE_DISPLAY_STATUSES: frozenset[str] = frozenset(
+    ACTIVE_SECTION | READY_SECTION | FAILED_SECTION
+)
+
 # ⚠️ Statuses a row must have to BLOCK re-queueing the same track/release.
 #
 # This is deliberately NOT ``ACTIVE_QUEUE_STATUSES``. ``unmatched`` is neither
@@ -319,6 +408,10 @@ __all__ = [
     "FAILED_STATUSES",
     "PENDING_RETRY_STATUSES",
     "TERMINAL_QUEUE_STATUSES",
+    "QUEUE_DISPLAY_STATUSES",
+    "ACTIVE_SECTION",
+    "READY_SECTION",
+    "FAILED_SECTION",
     "ALL_QUEUE_STATUSES",
     "STATUS_DISPLAY_CONFIG",
     "DEFAULT_STATUS_DISPLAY",
