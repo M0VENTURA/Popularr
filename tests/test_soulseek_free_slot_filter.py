@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -62,7 +63,7 @@ def _code_only(source: str) -> str:
 def _function_body(source: str, signature_fragment: str) -> str:
     """Extract ONE function's body by brace matching.
 
-    ��� Slicing from the signature to end-of-file is WRONG and was a real bug in
+    NOTE: Slicing from the signature to end-of-file is WRONG and was a real bug in
     this file: the slice swallowed every LATER renderer, so a mutation that
     removed the filter from this function still matched the identical filter
     text further down the file, and the guard passed on broken code.
