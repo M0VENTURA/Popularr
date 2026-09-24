@@ -177,7 +177,13 @@ class SlskdHttpClient:
     # the transfer `id` (a server-assigned GUID) - this is a hard
     # requirement of slskd's real Transfers API, not an optional filter.
     # ------------------------------------------------------------------
-    def enqueue_downloads(self, username: str, files: list[dict[str, Any]], timeout: int = 15) -> list[str]:
+    def enqueue_downloads(
+        self,
+        username: str,
+        files: list[dict[str, Any]],
+        timeout: int = 15,
+        raise_on_error: bool = False,
+    ) -> list[str]:
         """Queue one or more files for download from a user.
 
         POSTs to /transfers/downloads/{username} (username in the URL,
@@ -193,6 +199,12 @@ class SlskdHttpClient:
         Returns a list of transfer ids (as returned by newer slskd
         versions), or an empty list on older versions that return no body,
         or on failure.
+
+        ⚠️ Because an empty list means BOTH "accepted, older slskd returned
+        no body" and "the request failed", callers that must not treat a
+        silent failure as success should pass ``raise_on_error=True`` and
+        handle the exception. The default stays ``False`` so existing
+        best-effort callers are unaffected.
         """
         if not username or not files:
             return []
@@ -205,6 +217,8 @@ class SlskdHttpClient:
             return data if isinstance(data, list) else []
         except Exception as exc:
             logger.debug("Failed to enqueue download(s)", username=username, file_count=len(files), error=str(exc))
+            if raise_on_error:
+                raise
             return []
 
     def enqueue_download(self, username: str, filename: str, size: int = 0, timeout: int = 15) -> list[str]:

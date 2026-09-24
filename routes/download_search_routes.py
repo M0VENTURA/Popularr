@@ -261,46 +261,87 @@ def slskd_search_results(search_id: str) -> Any:
 
 @slskd_bp.route("/download", methods=["POST"])
 async def slskd_download() -> Any:
-    """Proxy endpoint to download from slskd."""
+    """Proxy endpoint to download from slskd.
+
+    Accepts TWO payload shapes:
+
+    * **Batch** — ``{"files": [{"username", "filename", "size"}, ...]}``.
+      This is what the search page sends (``downloads_page.js``
+      ``downloadSlskdBatch`` and ``services/slskd.js`` ``download``).  It was
+      silently dropped when the routes were split out of ``app.py``, so every
+      multi-file / "Download selected" request was rejected with
+      "username and filename required".
+    * **Single** — ``{"username", "filename", "size"}``.
+
+    A single download is just a batch of one, so both funnel into
+    ``SlskdService.download_files``.
+    """
     cfg = get_config()
     slskd_config = cfg.get("slskd", {})
     if not slskd_config.get("enabled"):
         return jsonify({"error": "slskd not enabled"}), 400
-        
+
     payload = (await request.get_json()) or {}
-    username = payload.get("username", "")
-    filename = payload.get("filename", "")
-    
-    # NEW: Extract size from payload
-    size = payload.get("size")
-    
-    if not username or not filename:
-        return jsonify({"error": "username and filename required"}), 400
-        
+    files_payload = payload.get("files")
+
+    if files_payload is not None:
+        if not isinstance(files_payload, list):
+            return jsonify({"error": "files must be a list"}), 400
+        if not files_payload:
+            return jsonify({"error": "files must not be empty"}), 400
+        for entry in files_payload:
+            if not isinstance(entry, dict) or not entry.get("username") or not entry.get("filename"):
+                return jsonify({"error": "Each file requires username and filename"}), 400
+        # Retained for the log line below and for callers that mix both shapes.
+        files = files_payload
+    else:
+        username = payload.get("username", "")
+        filename = payload.get("filename", "")
+        if not username or not filename:
+            return jsonify({"error": "username and filename required"}), 400
+        files = [{"username": username, "filename": filename, "size": payload.get("size")}]
+
     try:
         client = SlskdHttpClient(slskd_config["web_url"], slskd_config.get("api_key", ""))
         slskd = SlskdService(http_client=client)
-        
-        # NEW: Forward size to the service
-        result = await asyncio.to_thread(slskd.download_file, username, filename, size=size)
-        
-        if result is None:
-            try:
-                result = await asyncio.to_thread(client.enqueue_download, username, filename, size)
-            except TypeError:
-                result = await asyncio.to_thread(client.enqueue_download, username, filename)
-        
+
+        results = await asyncio.to_thread(slskd.download_files, files)
+
+        requested = sum(int(item.get("requested") or 0) for item in results)
+        successful_users = sum(1 for item in results if item.get("success"))
+        # ``requested`` is a count of files slskd ACCEPTED, not files that will
+        # finish.  Reporting success with requested == 0 is the silent no-op
+        # that made a rejected download look enqueued.
+        overall_success = requested > 0 and successful_users > 0
+
+        label = files[0]["filename"] if len(files) == 1 else f"{len(files)} files"
         _log_manual_search_event(
             search_type="manual",
-            query=f"{username} - {filename}",
-            result_count=1,
-            notes="selected_for_download",
-            selected_result={"username": username, "filename": filename, "size": size},
+            query=files[0]["username"] if len(files) == 1 else f"{len(files)} files",
+            result_count=len(files),
+            notes="selected_for_download" if overall_success else "download_enqueue_failed",
+            selected_result={"files": files, "requested": requested},
         )
-        return jsonify({"success": True, "result": result})
+
+        if not overall_success:
+            logger.error("Failed to enqueue download", file_count=len(files), requested=requested)
+            return jsonify({
+                "success": False,
+                "error": "Failed to enqueue download",
+                "requested": requested,
+                "userBatches": results,
+            }), 500
+
+        logger.info("Enqueued download(s)", file_count=len(files), requested=requested, label=label)
+        return jsonify({
+            "success": True,
+            "requested": requested,
+            "userBatches": results,
+        })
     except Exception as exc:
-        logger.error("Failed to enqueue download", username=username, filename=filename, error=str(exc))
+        logger.error("Failed to enqueue download", file_count=len(files), error=str(exc))
         return jsonify({"error": str(exc)}), 500
+
 
 @slskd_bp.route("/cancel", methods=["POST"])
 async def slskd_cancel() -> Any:
@@ -346,7 +387,13 @@ def slskd_status() -> Any:
 
 @slskd_bp.route("/retry", methods=["POST"])
 async def slskd_retry() -> Any:
-    """Retry a failed Soulseek download."""
+    """Retry a failed Soulseek download.
+
+    slskd scopes a transfer by BOTH the peer username and the server-assigned
+    transfer id — ``POST /transfers/downloads/{username}/{transfer_id}/retry``
+    — so both are required.  This route used to accept a ``filename`` and pass
+    it as the transfer id, which could never match a real transfer.
+    """
     cfg = get_config()
     slskd_config = cfg.get("slskd", {})
     if not slskd_config.get("enabled"):
@@ -354,17 +401,28 @@ async def slskd_retry() -> Any:
 
     payload = (await request.get_json()) or {}
     username = payload.get("username", "")
-    filename = payload.get("filename", "")
+    # Accept the legacy ``filename`` key but never use it as a transfer id: a
+    # filename is not a transfer id, and passing one silently retried nothing.
+    transfer_id = payload.get("transfer_id") or ""
 
-    if not username or not filename:
-        return jsonify({"error": "username and filename required"}), 400
+    if not username or not transfer_id:
+        return jsonify({
+            "error": "username and transfer_id required",
+            "detail": "slskd identifies a transfer by username + transfer id, not by filename.",
+        }), 400
 
     try:
         client = SlskdHttpClient(slskd_config["web_url"], slskd_config.get("api_key", ""))
-        result = await asyncio.to_thread(client.retry_download, username, filename)
+        result = await asyncio.to_thread(client.retry_download, username, transfer_id)
+        if not result:
+            return jsonify({
+                "success": False,
+                "error": "slskd rejected the retry request",
+                "result": result,
+            }), 502
         return jsonify({"success": True, "result": result})
     except Exception as exc:
-        logger.error("Failed to retry download", username=username, filename=filename, error=str(exc))
+        logger.error("Failed to retry download", username=username, transfer_id=transfer_id, error=str(exc))
         return jsonify({"error": str(exc)}), 500
 
 
@@ -390,17 +448,33 @@ async def slskd_queue_download() -> Any:
     try:
         client = SlskdHttpClient(slskd_config["web_url"], slskd_config.get("api_key", ""))
         slskd = SlskdService(http_client=client)
-        
-        # NEW: Forward size to the service
-        result = await asyncio.to_thread(slskd.download_file, username, filename, size=size)
 
-        if not result:
-            try:
-                await asyncio.to_thread(client.enqueue_download, username, filename, size)
-            except TypeError:
-                await asyncio.to_thread(client.enqueue_download, username, filename)
+        results = await asyncio.to_thread(
+            slskd.download_files,
+            [{"username": username, "filename": filename, "size": size}],
+        )
+        requested = sum(int(item.get("requested") or 0) for item in results)
+        enqueued = requested > 0
 
         _stored_filename = str(filename).replace("\\", "/").strip()
+
+        # Only link the queue row once slskd has actually accepted the file.
+        # Marking it "downloading" unconditionally told the completion matcher
+        # to wait for a transfer that was never requested — the row looked
+        # active forever while nothing was downloading.
+        if not enqueued:
+            logger.error(
+                "slskd rejected queue download — leaving queue item untouched",
+                queue_id=queue_id,
+                username=username,
+                filename=_stored_filename,
+            )
+            return jsonify({
+                "success": False,
+                "error": "slskd did not accept the download request",
+                "requested": requested,
+                "userBatches": results,
+            }), 502
         try:
             update_queue_item(
                 queue_id,
@@ -417,7 +491,7 @@ async def slskd_queue_download() -> Any:
         except Exception as exc:
             logger.debug("Failed to write to queue log", error=str(exc))
 
-        return jsonify({"success": True, "result": result})
+        return jsonify({"success": True, "requested": requested, "userBatches": results})
     except Exception as exc:
         logger.error("Failed to queue download", queue_id=queue_id, error=str(exc))
         return jsonify({"error": str(exc)}), 500

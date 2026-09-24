@@ -385,6 +385,87 @@ class SlskdService:
                 return False
         return False
 
+    def download_files(self, files: list[dict[str, Any]], timeout: Optional[int] = None) -> list[dict[str, Any]]:
+        """Queue several files for download, batching by peer username.
+
+        ``files`` is the shape the search page already produces::
+
+            [{"username": "peer", "filename": "Music/x.flac", "size": 1234}, ...]
+
+        Returns one entry per peer so the caller can distinguish "slskd
+        accepted the request" from "slskd accepted nothing"::
+
+            [{"username": "peer", "requested": 2, "success": True}, ...]
+
+        ``requested`` counts the files actually handed to slskd, which is
+        NOT the same as the number of transfers that will complete — the
+        caller must not treat a non-zero ``requested`` as a finished
+        download.  It only means the remote peer was asked for the file.
+
+        Losing this method (it existed as ``SlskdClient.download_files``
+        before the routes were split out of ``app.py``) silently broke every
+        multi-file download, because ``/api/slskd/download`` then only
+        accepted the single ``username``/``filename`` payload shape.
+        """
+        if not self.http.enabled:
+            return []
+
+        by_user: dict[str, list[dict[str, Any]]] = {}
+        for entry in files or []:
+            if not isinstance(entry, dict):
+                continue
+            entry_user = str(entry.get("username") or "").strip()
+            entry_filename = str(entry.get("filename") or "").strip()
+            if not entry_user or not entry_filename:
+                continue
+            by_user.setdefault(entry_user, []).append({
+                "filename": entry_filename,
+                "size": int(entry.get("size") or 0),
+            })
+
+        results: list[dict[str, Any]] = []
+        for entry_user, payload_files in by_user.items():
+            transfer_ids: list[str] = []
+            peer_success = True
+            peer_error: str | None = None
+            try:
+                # ``raise_on_error=True`` is load-bearing: without it a failed
+                # POST is indistinguishable from an older slskd that accepted
+                # the request without a body, and the caller would report a
+                # silent no-op as success.
+                transfer_ids = self.http.enqueue_downloads(
+                    entry_user, payload_files, timeout=timeout or 15, raise_on_error=True
+                ) or []
+            except TypeError:
+                # Older client without the ``raise_on_error``/``timeout`` kwargs.
+                try:
+                    transfer_ids = self.http.enqueue_downloads(entry_user, payload_files) or []
+                except Exception as exc:
+                    peer_success, peer_error = False, str(exc)
+            except Exception as exc:
+                peer_success, peer_error = False, str(exc)
+
+            if not peer_success:
+                logger.error(
+                    "slskd batch download failed",
+                    username=entry_user,
+                    file_count=len(payload_files),
+                    error=peer_error,
+                )
+
+            results.append({
+                "username": entry_user,
+                # ``requested`` counts the files handed to slskd — NOT the
+                # number of transfers that will complete.  Only the remote peer
+                # being asked for the file is proven here.
+                "requested": len(payload_files) if peer_success else 0,
+                "transfer_ids": transfer_ids,
+                "success": peer_success,
+                "error": peer_error,
+            })
+
+        return results
+
     def filter_results_by_quality(self, responses: list[SearchResponse], min_bitrate: int = 192, min_sample_rate: int = 44100, max_results: int = 50) -> list[dict]:
         qualified = []
         for response in responses:
