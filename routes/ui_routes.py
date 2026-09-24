@@ -1382,8 +1382,24 @@ async def album_detail(album_path: str) -> Any:
         track_artist = (form.get("track_artist") or "").strip()
         track_composer = (form.get("track_composer") or "").strip()
         track_comment = (form.get("track_comment") or "").strip()
-        album_mbid = (form.get("album_mbid") or "").strip()
-        album_rg_mbid = (form.get("album_release_group_mbid") or "").strip()
+        # ⚠️ TWO field names for the release MBID, and the second one was the
+        # reason the artist page's "Edit Release" modal silently discarded it.
+        #
+        # The ALBUM page renders ``name="album_mbid"``; the artist page's edit
+        # modal sent the value as ``mbid``. Nothing read ``mbid`` here, so the
+        # modal's MBID box was write-only — the user typed an id, saved, and
+        # the field was thrown away with no error ("Save Changes" still
+        # reported success). Accept both rather than pick a winner, since
+        # either caller may be the one posting.
+        album_mbid = (
+            form.get("album_mbid") or form.get("musicbrainz_release_id") or form.get("mbid") or ""
+        ).strip()
+        album_rg_mbid = (
+            form.get("album_release_group_mbid")
+            or form.get("musicbrainz_release_group_id")
+            or form.get("release_group_mbid")
+            or ""
+        ).strip()
         discogs_id = (form.get("album_discogs_id") or "").strip()
         artist_mbid = (form.get("artist_mbid") or "").strip()
         genres_str = (form.get("album_genres") or "").strip()

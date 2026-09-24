@@ -384,12 +384,53 @@
   function openEditReleaseModal(data) {
     var el = showModal('editReleaseModal');
     if (!el) return;
+
+    var artist = data.artist || '';
+    var album = data.album || '';
+
     var set = function (id, value) { var f = doc.getElementById(id); if (f) f.value = value == null ? '' : value; };
-    set('editReleaseArtist', data.artist || '');
-    set('editReleaseOriginalTitle', data.album || '');
-    set('editReleaseTitle', data.album || '');
+    var setStatus = function (msg) { var s = doc.getElementById('editReleaseStatus'); if (s) s.textContent = msg || ''; };
+
+    // Seed from the row so the modal is usable immediately and never shows
+    // stale values from a previously-opened row.
+    set('editReleaseArtist', artist);
+    set('editReleaseOriginalTitle', album);
+    set('editReleaseTitle', album);
+    set('editReleaseArtistField', artist);
     set('editReleaseYear', data.year || '');
     set('editReleaseMbid', data.mbid || '');
+
+    // Then load the album's ACTUAL metadata.
+    //
+    // ⚠️ The row's data-* attributes only carry artist/album/mbid/rgid/year, so
+    // every other field would render empty and saving would post blanks over
+    // real data. These values come from the album's own tracks through the same
+    // precedence the album page uses — one source of truth for both forms.
+    setStatus('Loading album metadata…');
+    var qs = '?artist=' + encodeURIComponent(artist) + '&album=' + encodeURIComponent(album);
+    fetch('/api/album/metadata' + qs, { headers: { Accept: 'application/json' } })
+      .then(function (r) { return r.json(); })
+      .then(function (payload) {
+        if (!payload || !payload.success || !payload.metadata) {
+          // Never block the edit: the row-seeded values are still usable.
+          setStatus(payload && payload.error ? payload.error : 'Could not load album metadata.');
+          return;
+        }
+        var m = payload.metadata;
+        Object.keys(m).forEach(function (key) {
+          var field = el.querySelector('[name="' + key + '"]');
+          if (field && m[key] !== '' && m[key] != null) field.value = m[key];
+        });
+        // The album artist field is named album_artist and is populated above;
+        // re-apply it so a metadata gap cannot blank a required input.
+        if (!doc.getElementById('editReleaseArtistField').value) {
+          set('editReleaseArtistField', artist);
+        }
+        setStatus(payload.track_count ? payload.track_count + ' track(s).' : '');
+      })
+      .catch(function () {
+        setStatus('Could not load album metadata — showing the release row values.');
+      });
   }
 
   function importMissingRelease(artist, album, button, summary) {
@@ -685,29 +726,71 @@
     var saveBtn = doc.getElementById('editReleaseSaveBtn');
     if (saveBtn) {
       saveBtn.addEventListener('click', function () {
-        var artist = (doc.getElementById('editReleaseArtist') || {}).value || '';
-        var original = (doc.getElementById('editReleaseOriginalTitle') || {}).value || '';
-        var title = (doc.getElementById('editReleaseTitle') || {}).value || '';
-        var year = (doc.getElementById('editReleaseYear') || {}).value || '';
-        if (!title) { toastError('A release title is required.'); return; }
+        var get = function (id) { var f = doc.getElementById(id); return f ? f.value : ''; };
+        var artist = get('editReleaseArtist');
+        var original = get('editReleaseOriginalTitle');
+        var title = get('editReleaseTitle');
+        var year = get('editReleaseYear');
 
+        if (!title) { toastError('A release title is required.'); return; }
+        if (!artist) { toastError('An album artist is required.'); return; }
+
+        // ⚠️ Post EVERY field the modal renders, by NAME, from the form itself.
+        //
+        // The previous version hand-picked three values and never read the MBID
+        // box, so the MBID was discarded on save with no error while the handler
+        // still reported success. Reading the fields generically means a field
+        // added to the markup is posted automatically and cannot be forgotten
+        // here — the same reasoning as the modal-mirrors-the-album-page rule.
         var form = new FormData();
+        var fields = doc.querySelectorAll('#editReleaseModal [name]');
+        Array.prototype.forEach.call(fields, function (field) {
+          if (field.disabled) return;
+          // Skip the hidden bookkeeping inputs: album_artist is posted below
+          // from the visible, editable field, and the hidden ones exist only so
+          // the modal can tell where the release was opened from.
+          if (field.id === 'editReleaseArtist' || field.id === 'editReleaseOriginalTitle') return;
+          form.set(field.name, field.value == null ? '' : field.value);
+        });
+
+        // Guarantee the two required values survive even if the generic sweep
+        // was skipped (e.g. a browser that excludes empty fields).
         form.set('album_title', title);
         form.set('album_artist', artist);
-        if (year) form.set('album_originalyear', year);
+        if (year) form.set('release_year', year);
+
+        var statusEl = doc.getElementById('editReleaseStatus');
+        var setStatus = function (msg) { if (statusEl) statusEl.textContent = msg || ''; };
 
         saveBtn.disabled = true;
-        fetch('/album/' + encodeURIComponent(artist) + '/' + encodeURIComponent(original), {
+        setStatus('Saving…');
+
+        // ⚠️ ``original`` (the album name the row was rendered with) is the URL
+        // KEY, which is what the route looks the album up by. It is not the new
+        // title, so it must not be replaced by ``title`` here — a rename has to
+        // address the album under its CURRENT name.
+        var url = '/album/' + encodeURIComponent(artist) + '/' + encodeURIComponent(original);
+        fetch(url, {
           method: 'POST',
+          headers: { Accept: 'application/json' },
           body: form,
         })
           .then(function (r) {
             saveBtn.disabled = false;
-            if (r.ok) { toastSuccess('Release updated.'); global.location.reload(); }
-            else toastError('Save failed.');
+            if (r.ok || r.redirected) {
+              toastSuccess('Release updated.');
+              global.location.reload();
+              return null;
+            }
+            setStatus('Save failed.');
+            return r.json().catch(function () { return {}; });
+          })
+          .then(function (data) {
+            if (data && data.error) toastError(data.error);
           })
           .catch(function () {
             saveBtn.disabled = false;
+            setStatus('Save failed.');
             toastError('Save failed.');
           });
       });

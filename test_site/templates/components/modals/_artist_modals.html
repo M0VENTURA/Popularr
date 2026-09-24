@@ -175,29 +175,181 @@
   </div>
 </div>
 
-{# ── Release edit (driven by release rows) ─────────────────────────────── #}
+{# ── Release edit (driven by release rows) ───────────────────────────────
+   ⚠️ THIS MODAL MUST MIRROR THE ALBUM PAGE'S EDIT FORM.
+
+   It previously exposed only Title / Year / MBID. Two problems followed:
+
+     1. It could not express the fields the album page can, so editing an
+        album from the artist page offered strictly less than editing it from
+        the album page — for the SAME endpoint.
+     2. The values were only ever filled from ``data-*`` attributes on the
+        release row, and the MBID box was never read back on save at all, so
+        the fields appeared not to save.
+
+   The field NAMES below are the exact ones
+   ``routes/ui_routes.py::album_detail`` reads on POST, and the values are
+   loaded per-album from ``GET /api/album/metadata`` — the same precedence the
+   album page uses. Keep the two in step: a field the album page posts but this
+   modal omits is a field a user cannot edit from an artist page, and a field
+   named differently here is silently discarded on save.
+#}
 <div class="modal fade" id="editReleaseModal" tabindex="-1">
   <div class="modal-dialog modal-lg">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title">Edit Release</h5>
+        <h5 class="modal-title"><i class="bi bi-pencil-square"></i> Edit Release</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
-        <input type="hidden" id="editReleaseArtist">
-        <input type="hidden" id="editReleaseOriginalTitle">
-        <div class="mb-3">
-          <label class="form-label" for="editReleaseTitle">Title</label>
-          <input type="text" class="form-control" id="editReleaseTitle">
+        <input type="hidden" id="editReleaseArtist" name="album_artist_hidden">
+        <input type="hidden" id="editReleaseOriginalTitle" name="album_original_title_hidden">
+
+        <h6 class="text-muted mb-3"><i class="bi bi-info-circle me-1"></i>Basic Info</h6>
+        <div class="row g-2 mb-3">
+          <div class="col-12 col-md-6">
+            <label class="form-label small" for="editReleaseTitle">Album Title *</label>
+            <input type="text" class="form-control" id="editReleaseTitle" name="album_title" required>
+          </div>
+          <div class="col-12 col-md-6">
+            <label class="form-label small" for="editReleaseArtistField">Album Artist *</label>
+            <input type="text" class="form-control" id="editReleaseArtistField" name="album_artist" required>
+          </div>
+          <div class="col-12">
+            <label class="form-label small" for="editReleaseReleaseTitle">Release Name <span class="text-muted fw-normal">— specific edition</span></label>
+            <input type="text" class="form-control" id="editReleaseReleaseTitle" name="album_release_title" placeholder="e.g. Experience: Expanded (Remixes and B-Sides)">
+            <div class="form-text text-muted">Leave blank when the collection holds the original release.</div>
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small" for="editReleaseOriginalYear">Original Year</label>
+            <input type="number" class="form-control" id="editReleaseOriginalYear" name="album_originalyear" placeholder="YYYY">
+            <div class="form-text text-muted">Release group's first release.</div>
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small" for="editReleaseYear">Release Year</label>
+            <input type="number" class="form-control" id="editReleaseYear" name="release_year" placeholder="YYYY">
+            <div class="form-text text-muted">This edition's year.</div>
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small" for="editReleaseAlbumType">Album Type</label>
+            <select class="form-select" id="editReleaseAlbumType" name="album_type">
+              <option value="">Unknown</option>
+              <option value="album">Album</option>
+              <option value="album+compilation">Album (Compilation)</option>
+              <option value="album+live">Album (Live)</option>
+              <option value="album+remix">Album (Remix)</option>
+              <option value="album+soundtrack">Album (Soundtrack)</option>
+              <option value="ep">EP</option>
+              <option value="single">Single</option>
+            </select>
+          </div>
         </div>
-        <div class="mb-3">
-          <label class="form-label" for="editReleaseYear">Year</label>
-          <input type="text" class="form-control" id="editReleaseYear" placeholder="Year">
+
+        <hr class="my-3">
+
+        <h6 class="text-muted mb-3"><i class="bi bi-link-45deg me-1"></i>Identifiers &amp; Linking</h6>
+        <div class="row g-2 mb-3">
+          <div class="col-12 col-md-6">
+            <label class="form-label small" for="editReleaseMbid">MusicBrainz Release ID</label>
+            <input type="text" class="form-control" id="editReleaseMbid" name="album_mbid">
+          </div>
+          <div class="col-12 col-md-6">
+            <label class="form-label small" for="editReleaseRgMbid">MusicBrainz Release Group ID</label>
+            <input type="text" class="form-control" id="editReleaseRgMbid" name="album_release_group_mbid">
+          </div>
+          <div class="col-12 col-md-6">
+            <label class="form-label small" for="editReleaseArtistMbid">MusicBrainz Artist ID</label>
+            <input type="text" class="form-control" id="editReleaseArtistMbid" name="artist_mbid">
+          </div>
+          <div class="col-12 col-md-6">
+            <label class="form-label small" for="editReleaseDiscogsId">Discogs Release ID</label>
+            <input type="text" class="form-control" id="editReleaseDiscogsId" name="album_discogs_id">
+          </div>
         </div>
-        <div class="mb-3">
-          <label class="form-label" for="editReleaseMbid">MBID</label>
-          <input type="text" class="form-control" id="editReleaseMbid" placeholder="MBID">
+
+        <hr class="my-3">
+
+        <h6 class="text-muted mb-3"><i class="bi bi-tags me-1"></i>Release Details</h6>
+        <div class="row g-2 mb-3">
+          {#
+            NOTE every id here is prefixed ``editRelease`` and every name matches
+            the album page's. The album page's own inputs use ids like
+            ``album_recordlabel``; duplicating those ids in this partial would
+            create a DUPLICATE DOM id whenever both render on one page, and
+            ``getElementById`` returns the FIRST match — so the modal would
+            silently write into the album page's hidden field instead.
+          #}
+          <div class="col-12 col-md-6">
+            <label class="form-label small" for="editReleaseRecordLabel">Record Label</label>
+            <input type="text" class="form-control" id="editReleaseRecordLabel" name="album_recordlabel">
+          </div>
+          <div class="col-12 col-md-6">
+            <label class="form-label small" for="editReleaseCatalogNumber">Catalog Number</label>
+            <input type="text" class="form-control" id="editReleaseCatalogNumber" name="album_catalognumber">
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small" for="editReleaseBarcode">Barcode</label>
+            <input type="text" class="form-control" id="editReleaseBarcode" name="album_barcode">
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small" for="editReleaseAsin">ASIN</label>
+            <input type="text" class="form-control" id="editReleaseAsin" name="album_asin">
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small" for="editReleaseDate">Release Date</label>
+            <input type="text" class="form-control" id="editReleaseDate" name="album_releasedate" placeholder="YYYY-MM-DD">
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small" for="editReleaseMedia">Media</label>
+            <input type="text" class="form-control" id="editReleaseMedia" name="album_media" placeholder="e.g. CD">
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small" for="editReleaseCountry">Release Country</label>
+            <input type="text" class="form-control" id="editReleaseCountry" name="album_releasecountry" placeholder="e.g. US">
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small" for="editReleaseLanguage">Language</label>
+            <input type="text" class="form-control" id="editReleaseLanguage" name="album_language">
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small" for="editReleaseTrackTotal">Track Total</label>
+            <input type="number" class="form-control" id="editReleaseTrackTotal" name="album_tracktotal">
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small" for="editReleaseDiscTotal">Disc Total</label>
+            <input type="number" class="form-control" id="editReleaseDiscTotal" name="album_disctotal">
+          </div>
+          <div class="col-12 col-md-6">
+            <label class="form-label small" for="editReleaseReleaseStatus">Release Status</label>
+            <input type="text" class="form-control" id="editReleaseReleaseStatus" name="album_releasestatus" placeholder="e.g. Official">
+          </div>
+          <div class="col-12 col-md-6">
+            <label class="form-label small" for="editReleaseAlbumVersion">Album Version</label>
+            <input type="text" class="form-control" id="editReleaseAlbumVersion" name="album_albumversion">
+          </div>
+          <div class="col-12 col-md-6">
+            <label class="form-label small" for="editReleaseDiscSubtitle">Disc Subtitle</label>
+            <input type="text" class="form-control" id="editReleaseDiscSubtitle" name="album_discsubtitle">
+          </div>
+          {#
+            Track Artist applies to EVERY track in the album, so it is
+            deliberately BLANK here rather than prefilled — the album page
+            leaves it blank for the same reason. Prefilling a value (e.g. the
+            majority artist) would write it across the album on the next save
+            and silently homogenise a compilation.
+          #}
+          <div class="col-12 col-md-6">
+            <label class="form-label small" for="editReleaseTrackArtist">Track Artist <span class="text-muted fw-normal">(applies to all tracks)</span></label>
+            <input type="text" class="form-control" id="editReleaseTrackArtist" name="track_artist" placeholder="Leave blank to keep each track's artist">
+          </div>
         </div>
+
+        <div class="mb-3">
+          <label class="form-label small" for="editReleaseGenres">Album Genres <span class="text-muted fw-normal">(comma separated, written to all tracks)</span></label>
+          <input type="text" class="form-control" id="editReleaseGenres" name="album_genres" placeholder="e.g. Rock, Alternative">
+        </div>
+
+        <div id="editReleaseStatus" class="small text-muted"></div>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>

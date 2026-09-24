@@ -70,6 +70,108 @@ def api_album_rename_files(artist: str, album: str) -> Any:
     return jsonify(result), 200
 
 
+@album_bp.route("/metadata", methods=["GET"])
+async def api_album_metadata() -> Any:
+    """Current album-level metadata, for the artist page's Edit Release modal.
+
+    ⚠️ WHY THIS EXISTS. The artist page's Edit Release modal rendered Title /
+    Year / MBID as EMPTY boxes (it only ever filled them from ``data-*``
+    attributes on the release row, and the MBID box was never read on save at
+    all). Filling them from the row's own attributes would have shown wrong
+    values for the other fields, and hard-coding a second field list here would
+    drift from the album page's.
+
+    So the values come from the album's own tracks, using the SAME field names
+    the album page's form posts and the SAME precedence rules
+    (``_first_value`` over the candidate column names). A field added to the
+    album page is then returned by this endpoint automatically — which is what
+    lets the modal grow to match without a second source of truth.
+    """
+    artist = unquote(request.args.get("artist") or "").strip()
+    album = unquote(request.args.get("album") or "").strip()
+    if not artist or not album:
+        return jsonify({"success": False, "error": "artist and album required"}), 400
+
+    # (payload key) -> (candidate track columns, in priority order).
+    # Mirrors routes/ui_routes.py::album_detail's ``album_data`` construction.
+    fields: dict[str, tuple[str, ...]] = {
+        "album_title": ("album",),
+        "album_artist": ("album_artist", "artist"),
+        "album_release_title": ("release_title",),
+        "album_originalyear": ("originalyear", "year", "album_year"),
+        "release_year": ("release_year",),
+        "album_type": ("musicbrainz_albumtype", "spotify_album_type", "album_type"),
+        "track_artist": (),
+        "album_mbid": ("musicbrainz_album_mbid", "musicbrainz_releaseid", "musicbrainz_albumid"),
+        "album_release_group_mbid": ("musicbrainz_releasegroupid", "musicbrainz_release_group_id"),
+        "artist_mbid": ("musicbrainz_artistid", "artist_mbid"),
+        "album_discogs_id": ("discogs_album_id", "discogs_release_id"),
+        "album_recordlabel": ("recordlabel",),
+        "album_catalognumber": ("catalognumber", "catalog_number", "catalog"),
+        "album_barcode": ("barcode",),
+        "album_asin": ("asin",),
+        "album_releasedate": ("releasedate", "release_date", "date"),
+        "album_media": ("media",),
+        "album_releasetype": ("releasetype",),
+        "album_releasestatus": ("releasestatus",),
+        "album_releasecountry": ("releasecountry",),
+        "album_copyright": ("copyright",),
+        "album_language": ("language",),
+        "album_explicitstatus": ("explicitstatus",),
+        "album_originaldate": ("originaldate",),
+        "album_tracktotal": ("tracktotal",),
+        "album_disctotal": ("disctotal",),
+        "album_discsubtitle": ("discsubtitle",),
+        "album_albumversion": ("albumversion",),
+        "album_script": ("script",),
+    }
+
+    try:
+        from sqlalchemy import text
+        from db.engine import db_session
+
+        with db_session() as session:
+            rows = session.execute(
+                text("""
+                    SELECT *
+                    FROM tracks
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                      AND LOWER(COALESCE(album, '')) = LOWER(:album)
+                """),
+                {"artist": artist, "album": album},
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("Album metadata lookup failed", artist=artist, album=album, error=str(exc))
+        return jsonify({"success": False, "error": "Could not read album metadata"}), 200
+
+    if not rows:
+        return jsonify({"success": False, "error": "Album not found"}), 404
+
+    tracks = [dict(getattr(row, "_mapping", row)) for row in rows]
+
+    def _first(candidates: tuple[str, ...]) -> str:
+        """First non-empty value across the tracks, honouring column priority.
+
+        Priority is OUTER (column) then INNER (track): column ``b`` on track 2
+        beats column ``a`` on track 1, so a value present only on a later track
+        still wins over an earlier empty one.
+        """
+        for column in candidates:
+            for track in tracks:
+                value = track.get(column)
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+        return ""
+
+    values = {key: _first(cols) for key, cols in fields.items() if cols}
+    # ``track_artist`` is deliberately absent from the response: it is a
+    # per-track field, not album-level, so prefilling it would let one save
+    # overwrite every track's artist with the majority value.
+    values.setdefault("album_genres", "")
+
+    return jsonify({"success": True, "metadata": values, "track_count": len(tracks)})
+
+
 @album_bp.route("/favourite", methods=["GET", "POST", "DELETE"])
 async def api_album_favourite() -> Any:
     """Check, add, or remove an album from favourites."""
