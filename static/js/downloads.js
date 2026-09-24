@@ -2022,6 +2022,47 @@ async function clearEntireQueue() {
   } catch (e) { alert('❌ Network error: ' + e.message); }
 }
 
+/**
+ * Delete the IMPORTED history so deleted tracks can be downloaded again.
+ *
+ * ⚠️ "Clear Queue" does NOT do this — it deliberately keeps ``imported`` rows,
+ * because they record what has already been moved into the library. That left no
+ * way to remove them at all, and a stale ``imported`` row makes the album page
+ * treat the track as already handled (``album_missing_service`` counts
+ * ``imported`` as queue coverage), so it never shows as missing and cannot be
+ * re-downloaded. After removing tracks from the database, this is what unblocks
+ * fetching them again.
+ *
+ * Deliberately does NOT touch files on disk — unlike "Purge All". The row is
+ * history; the library files were deleted separately by the user.
+ */
+async function clearImportedRecords() {
+  if (!confirm(
+    'Clear the IMPORTED history?\n\n' +
+    'This deletes the record of downloads already moved into your library, so ' +
+    'deleted tracks are no longer treated as already handled.\n\n' +
+    'No files on disk are touched.\n\n' +
+    'NOTE: the album pages show their "missing tracks" list from a snapshot the ' +
+    'SCAN refreshes, so re-scan (or re-run the album comparison) afterwards to ' +
+    'make those tracks appear and become downloadable again.\n\n' +
+    'This cannot be undone.'
+  )) return;
+  try {
+    const data = await fetchJsonOrThrow('/api/queue/clear', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filters: { status: 'imported' } })
+    });
+    alert(
+      `✅ Cleared ${data.deleted || 0} imported record(s)\n\n` +
+      'Re-scan to refresh each album\'s missing-tracks list so the deleted ' +
+      'tracks can be downloaded again.'
+    );
+    queuePageOffset = 0;
+    await loadQueueStatus();
+  } catch (e) { alert('❌ Network error: ' + e.message); }
+}
+
 async function clearQueue() {
   return clearEntireQueue();
 }

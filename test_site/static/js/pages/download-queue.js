@@ -1189,6 +1189,48 @@
     }
   }
 
+  /**
+   * Delete the IMPORTED history so deleted tracks can be downloaded again.
+   *
+   * ⚠️ "Clear queue" deliberately KEEPS imported rows — they are the record of
+   * what has already been moved into the library, so wiping them as a side
+   * effect of a routine clear would be destructive. That left NO way to remove
+   * them at all, and a stale `imported` row makes the album page treat the track
+   * as already handled (album_missing_service counts `imported` as queue
+   * coverage), so it never shows as missing and cannot be re-downloaded.
+   *
+   * Sends an explicit `filters.status`, because the default branch excludes
+   * imported. Does not touch files on disk — unlike "Purge All".
+   */
+  async function clearImportedRecords() {
+    const accepted = await confirmFn({
+      title: 'Clear imported history',
+      message: 'Delete the record of downloads already moved into your library?',
+      detail: 'Deleted tracks will no longer be treated as already handled. ' +
+        'No files on disk are touched. ' +
+        'NOTE: album pages read their "missing tracks" list from a snapshot the ' +
+        'SCAN refreshes, so re-scan afterwards for them to appear. ' +
+        'This cannot be undone.',
+      tone: 'danger',
+      confirmLabel: 'Clear imported',
+    });
+    if (!accepted) return;
+
+    try {
+      const data = await global.api.postJson('/api/queue/clear', {
+        filters: { status: 'imported' },
+      });
+      notifySuccess(
+        `Cleared ${data.deleted || 0} imported record(s) — re-scan to refresh ` +
+        'each album\'s missing-tracks list'
+      );
+      queuePageOffset = 0;
+      await loadQueueStatus();
+    } catch (error) {
+      notifyError('Error: ' + error.message);
+    }
+  }
+
   async function purgeAllQueueAndDownloads() {
     // Typed confirmation: this permanently deletes every file in the
     // downloads folder. A one-click confirm is not proportionate.
@@ -1860,6 +1902,7 @@
   global.organizeFile = organizeFile;
   global.clearEntireQueue = clearDownloadQueue;
   global.clearDownloadQueue = clearDownloadQueue;
+  global.clearImportedRecords = clearImportedRecords;
   global.purgeAllQueueAndDownloads = purgeAllQueueAndDownloads;
   global.retryAllFailed = retryAllFailed;
   global.cleanupCopiedSources = cleanupCopiedSources;

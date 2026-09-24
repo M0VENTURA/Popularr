@@ -161,8 +161,23 @@
         <button class="btn btn-sm btn-outline-warning" onclick="retryAllFailed()" id="retryAllBtn" title="Re-queue all failed items" style="display:none">
           <i class="bi bi-arrow-counterclockwise"></i> Retry All Failed
         </button>
-        <button class="btn btn-sm btn-outline-danger" onclick="clearEntireQueue()" title="Clear entire queue (keep imported)">
+        <button class="btn btn-sm btn-outline-danger" onclick="clearEntireQueue()" title="Clear entire queue (keeps the imported history)">
           <i class="bi bi-trash3"></i> Clear Queue
+        </button>
+        <!--
+          ⚠️ SEPARATE from "Clear Queue" ON PURPOSE. "Clear Queue" deliberately
+          keeps `imported` rows, because they are the record of what has already
+          been moved into the library — wiping them as a side effect of a routine
+          clear would be destructive.
+
+          But there was NO way to remove them at all, and a stale `imported` row
+          tells the album page the track is already handled, so it never appears
+          as missing and cannot be re-downloaded. That is what this button is
+          for: after deleting tracks from the database, clear the imported
+          records so they can be downloaded again.
+        -->
+        <button class="btn btn-sm btn-outline-secondary" onclick="clearImportedRecords()" title="Delete the imported history so deleted tracks can be downloaded again">
+          <i class="bi bi-clock-history"></i> Clear Imported
         </button>
         <button class="btn btn-sm btn-danger" onclick="purgeAllQueueAndDownloads()" title="Delete all queue rows and all files in the configured downloads folder">
           <i class="bi bi-trash-fill"></i> Purge All

@@ -604,21 +604,64 @@ def queue_retry_all_failed() -> Dict[str, Any]:
 
 
 def queue_clear(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Delete queue rows.
+
+    ``filters.status`` selects ONE status to delete (``{"status": "imported"}``
+    is how the "Clear Imported" action works).
+
+    ⚠️ The default branch deliberately EXCLUDES ``imported`` — those rows are
+    the record of what has already been moved into the library, and wiping them
+    as a side effect of a routine "clear the queue" would be destructive. That
+    exclusion was previously the ONLY behaviour, with no way to remove the rows
+    at all; ``filters.status`` is the deliberate, explicit escape hatch.
+
+    ``filters.statuses`` accepts a LIST for multi-status clears (e.g. the
+    terminal-history pair ``["imported", "in_collection"]``).
+    """
     try:
         filters = data.get("filters", {}) or {}
+
+        # ⚠️ Validate against the known statuses. The value is interpolated into
+        # a bound parameter (so this is not injection), but an unknown status
+        # silently deletes NOTHING while still reporting success — which reads
+        # as "cleared" to the user. Reject it instead.
+        from services.queue.queue_constraints import ALL_QUEUE_STATUSES
+
+        requested = filters.get("statuses")
+        if requested is None and filters.get("status"):
+            requested = [filters["status"]]
+        if requested is not None:
+            if not isinstance(requested, (list, tuple, set)):
+                return {"success": False, "error": "filters.statuses must be a list"}
+            requested = [str(s) for s in requested]
+            unknown = [s for s in requested if s not in ALL_QUEUE_STATUSES]
+            if unknown:
+                return {
+                    "success": False,
+                    "error": f"Unknown queue status(es): {unknown}",
+                    "valid_statuses": sorted(ALL_QUEUE_STATUSES),
+                }
+            if not requested:
+                return {"success": False, "error": "No statuses given"}
+
         with db_session() as session:
-            if filters.get("status"):
+            if requested:
+                placeholders = ", ".join(f":st{i}" for i in range(len(requested)))
+                params = {f"st{i}": s for i, s in enumerate(requested)}
                 result = session.execute(
-                    text("DELETE FROM download_queue WHERE status = :status"),
-                    {"status": filters["status"]},
+                    text(f"DELETE FROM download_queue WHERE status IN ({placeholders})"),
+                    params,
                 )
+                deleted = int(result.rowcount or 0)
             else:
                 result = session.execute(
                     text("DELETE FROM download_queue WHERE status != :status"),
                     {"status": "imported"},
                 )
-            deleted = int(result.rowcount or 0)
-        return {"success": True, "deleted": deleted}
+                deleted = int(result.rowcount or 0)
+
+        logger.info("Queue cleared", statuses=requested or ["!= imported"], deleted=deleted)
+        return {"success": True, "deleted": deleted, "statuses": requested or None}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
