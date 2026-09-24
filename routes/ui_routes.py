@@ -80,6 +80,30 @@ logger = structlog.get_logger(__name__)
 ui_bp = Blueprint("ui", __name__)
 
 
+def _album_type_is_live_state(raw: str | None) -> bool:
+    """True when an album-type string describes a LIVE-state release.
+
+    "Live state" covers the forms the tagging pipeline applies and the revert in
+    ``album_detail`` undoes: live, acoustic and unplugged.
+    (``helpers.normalization_service.strip_live_acoustic_suffix`` strips all
+    three, so they must be recognised together or the revert deletes a label it
+    does not consider live.)
+
+    ⚠️ WORD BOUNDARIES, not a substring test. The type strings arrive in several
+    shapes — ``album+live`` from the Album Type select, ``Live`` / ``Live Album``
+    / ``(live)`` from older writes and the classifier — and a bare substring
+    check both misses some of them and matches words that merely CONTAIN a
+    marker: ``"delivery"`` contains ``"live"``, so a naive check would classify
+    an album called *Delivery* as a live release and strip its titles.
+
+    The OLD guard here tested only the two ``+live`` / ``(live)`` spellings, so
+    an ``album+acoustic`` release was treated as an ordinary studio album and had
+    its "(Acoustic)" titles stripped on every save — the acoustic half of the
+    same report.
+    """
+    return bool(re.search(r"\b(?:live|acoustic|unplugged)\b", str(raw or "").lower()))
+
+
 # ===========================================================================
 # AUTH HELPERS
 # ===========================================================================
@@ -1844,7 +1868,52 @@ async def album_detail(album_path: str) -> Any:
                     track_id=track_id, file_path=_resolved_file,
                 )
 
-            if album_type and "+live" not in album_type.lower() and "(live)" not in album_type.lower():
+            # ── Live-state revert: ONLY when the album is RECLASSIFIED ──────
+            #
+            # ⚠️ THIS USED TO RUN ON EVERY SAVE OF A NON-LIVE ALBUM, and it
+            # DELETED the live/acoustic/unplugged marker from the title.
+            #
+            # `revert_track_live_state` does two things: it clears the
+            # is_live/is_acoustic/album_context_live flags AND it rewrites the
+            # title through `strip_live_acoustic_suffix`. So on an ordinary
+            # album save, a track whose metadata had just been updated to
+            # "Song (Unplugged)" was silently reduced back to "Song" — the
+            # reported "saving removes live, unplugged or acoustic from a track
+            # even if the metadata had updated to include them".
+            #
+            # The old guard only asked "is the SAVED type non-live?", which is
+            # true for every ordinary album — so it fired essentially always.
+            # That is the wrong question. The revert exists to undo tagging the
+            # pipeline had applied because it believed the album was live; it is
+            # only meaningful when that belief has just CHANGED.
+            #
+            # This save path cannot express that change either: it never writes
+            # is_live / is_acoustic / album_context_live (none is in the payload
+            # built above, and none is in `_STAGED_WRITABLE`). Nothing about the
+            # live state was cleared here, so there is nothing to undo.
+            #
+            # The correct condition is therefore "the album WAS live and is now
+            # being saved as non-live" — a RECLASSIFICATION. The stored type is
+            # read from the track rows the page already loaded, so no extra
+            # query is introduced. A track-level edit that genuinely clears
+            # `is_live` is handled by the track routes, which compare the old
+            # and new values directly.
+            _stored_type = str(
+                track.get("musicbrainz_albumtype")
+                or track.get("spotify_album_type")
+                or track.get("album_type")
+                or ""
+            ).lower()
+            # ⚠️ `+acoustic` counts as live-state too. The OLD guard only
+            # checked "+live"/"(live)", so an album typed `album+acoustic` was
+            # treated as an ordinary album and had its "(Acoustic)" titles
+            # stripped on every save — the acoustic half of the same report.
+            # `_apply_live_remix_album_tagging` applies the Acoustic label on
+            # exactly that type, so the revert must recognise it as live state.
+            _stored_type_was_live = _album_type_is_live_state(_stored_type)
+            _saved_type_is_live = _album_type_is_live_state((album_type or "").lower())
+
+            if _stored_type_was_live and not _saved_type_is_live:
                 # Guard first: the revert opens its own session and re-reads the
                 # row, so calling it for every track on a plainly studio album
                 # cost one SELECT per track and logged two INFO lines each for
