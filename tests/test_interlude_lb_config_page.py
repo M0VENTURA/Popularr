@@ -13,6 +13,8 @@ filter and the saved config would silently drop the keys.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 
