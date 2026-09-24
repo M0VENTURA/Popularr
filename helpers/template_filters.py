@@ -8,6 +8,51 @@ Called once during app factory setup.
 """
 
 
+def _unwrap_markup(value) -> str:
+    """Recover the ORIGINAL text from a Jinja ``Markup`` value.
+
+    ⚠️ This is what makes ``path_segment`` safe to apply to a macro's output,
+    and it fixes a real, reported bug: an album named "B-Sides & Rarities"
+    produced an unreachable album link.
+
+    A Jinja MACRO renders its body with autoescape on, so the macro RETURNS
+    ``Markup('B-Sides &amp; Rarities')`` — the text is ALREADY HTML-escaped.
+    Applying ``quote()`` to that encodes the entity's own ``&`` and ``;``:
+
+        quote(quote('B-Sides &amp; Rarities'))
+            -> 'B-Sides%2520%2526amp%253B%2520Rarities'
+        quote(quote('B-Sides & Rarities'))
+            -> 'B-Sides%2520%2526%2520Rarities'      # correct
+
+    The route ``unquote()``s that to ``'B-Sides &amp; Rarities'``, which does
+    not match the stored ``'B-Sides & Rarities'``, so the album page 404s.
+
+    ⚠️ Why this hides so well: ``Markup`` renders UNESCAPED, so the visible
+    page text read as a correct "B-Sides & Rarities" while only the href was
+    broken. Nothing looked wrong on screen.
+
+    ⚠️ Use ``html.unescape`` rather than re-deriving the text from the markup.
+    The inverse operation is not guessable in general: ``&amp;`` could be a
+    literal ampersand written by a user, and re-escaping the result keeps the
+    round trip stable, so a name that genuinely contains "&amp;" still works.
+
+    Only ``Markup`` instances are touched. A plain ``str`` is returned
+    unchanged, so this cannot alter a value that never went through
+    autoescape — which matters because ``path_segment`` is also called on raw
+    DB values throughout the templates.
+    """
+    if value is None:
+        return ""
+    try:
+        from markupsafe import Markup
+    except Exception:  # pragma: no cover - markupsafe ships with Jinja2
+        return str(value)
+    if isinstance(value, Markup):
+        from html import unescape
+        return unescape(str(value))
+    return str(value)
+
+
 def encode_path_segment(value) -> str:
     """Percent-encode a value for use as a single URL path segment.
 
@@ -18,11 +63,14 @@ def encode_path_segment(value) -> str:
     intact, the route keeps it as one segment, and the route's own
     ``unquote()`` restores the raw name.  Unlike ``urlencode`` (which turns
     spaces into ``+``), spaces stay ``%20``.
+
+    Accepts Jinja ``Markup`` as well as ``str`` — see ``_unwrap_markup`` for
+    why that matters, and why it is not optional.
     """
     from urllib.parse import quote
     if value is None:
         return ""
-    return quote(quote(str(value), safe=""), safe="")
+    return quote(quote(_unwrap_markup(value), safe=""), safe="")
 
 
 def register_filters(app):
