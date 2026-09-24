@@ -355,7 +355,12 @@ function buildConfigObject() {
         daily_musicbrainz_release_per_artist_limit: parseInt(getValue('daily_musicbrainz_release_per_artist_limit', '100')) || 100,
         daily_musicbrainz_release_global_limit: parseInt(getValue('daily_musicbrainz_release_global_limit', '50')) || 0,
         upcoming_releases_scan_enabled: getChecked('upcoming_releases_scan_enabled', true),
-        upcoming_releases_purge_days: parseInt(getValue('upcoming_releases_purge_days', '30')) || 30
+        upcoming_releases_purge_days: parseInt(getValue('upcoming_releases_purge_days', '30')) || 30,
+        // parseNumber, NOT `parseInt(...) || 28`: 0 is a legitimate value here
+        // ("show nothing older / nothing future-dated") and `||` would replace
+        // it with the default. parseNumber only falls back on NaN.
+        upcoming_releases_lookback_days: parseNumber('upcoming_releases_lookback_days', 28),
+        upcoming_releases_lookahead_days: parseNumber('upcoming_releases_lookahead_days', 14)
       },
       collectFeatureFieldOverrides()
     ),

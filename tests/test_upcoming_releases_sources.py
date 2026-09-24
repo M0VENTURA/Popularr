@@ -72,11 +72,25 @@ def seeded_db(monkeypatch):
         conn.execute(text(_CREATE_TABLE))
         # Dates relative to "today" so the rows stay inside the scraper's
         # rolling display window no matter when the suite runs.
+        #
+        # The offsets are derived from the live window rather than hard-coded:
+        # they were previously 30/60/90 days, which silently fell outside once
+        # the default lookahead was narrowed to two weeks, so these tests began
+        # failing for a reason that had nothing to do with source filtering.
+        # Spreading them across the window keeps them meaningful for ANY
+        # configured window size.
         from datetime import date, timedelta
+
+        from services.upcoming_releases.wikipedia_scraper_service import get_release_window
+
         _today = date.today()
-        d_kpop = (_today + timedelta(days=30)).isoformat()
-        d_metal = (_today + timedelta(days=60)).isoformat()
-        d_mb = (_today + timedelta(days=90)).isoformat()
+        _win_start, _win_end = get_release_window()
+        _span = max(1, (_win_end.date() - _today).days)
+        # Always strictly inside the window, and never after _win_end.
+        d_kpop = (_today + timedelta(days=max(0, _span // 3))).isoformat()
+        d_metal = (_today + timedelta(days=max(0, (2 * _span) // 3))).isoformat()
+        d_mb = _win_end.strftime("%Y-%m-%d")
+        assert _win_start.date() <= _today, "the display window must include today"
         conn.execute(text(
             "INSERT INTO upcoming_releases (artist_name, album_name, source, source_key, release_date) VALUES "
             f"('Kpop Artist', 'Al1', 'K-Pop/Korean Music 2026', '2026_kpop', '{d_kpop}'),"

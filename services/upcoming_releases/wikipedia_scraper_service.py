@@ -945,22 +945,77 @@ def scrape(
     return scraper.scrape_all()
 
 
-def get_release_window() -> tuple[datetime, datetime]:
-    """Rolling window for upcoming-release imports/display.
+def _window_days(
+    feature_key: str,
+    legacy_months_key: str,
+    default_days: int,
+) -> int:
+    """Resolve one side of the release window, in DAYS.
 
-    Releases are kept when dated within the last ``lookback`` months and the
-    next ``lookahead`` months from today (default 2 / 6).  Tunable via
-    ``features.upcoming_releases_lookback_months`` and
-    ``features.upcoming_releases_lookahead_months``.
+    ⚠️ The default here IS the behaviour. It used to be
+    ``30 * lookback_months`` with ``lookback_months`` defaulting to **2**, so on
+    2026-09-24 the window opened on **2026-07-26** — the reported "still showing
+    July". The intent is 4 weeks back / 2 weeks forward, so the defaults are
+    **28 and 14 days**.
+
+    ⚠️ The old keys (``upcoming_releases_lookback_months`` /
+    ``upcoming_releases_lookahead_months``) were on NEITHER Config page and in
+    NEITHER ``config.js`` collector, so the window could not be corrected from
+    the UI at all. They are still honoured as a fallback so a hand-edited
+    ``config.yaml`` keeps working, but the DAYS key wins.
+
+    ⚠️ ``0`` is a legitimate value (e.g. "show nothing future-dated"), so the
+    lookup must not be truthiness-tested — ``value or default`` would silently
+    replace it. Same trap this codebase has hit with ``or`` before.
     """
     try:
         from helpers.config_helpers import get_feature
-        lookback = max(0, int(get_feature("upcoming_releases_lookback_months", 2) or 2))
-        lookahead = max(0, int(get_feature("upcoming_releases_lookahead_months", 6) or 6))
+
+        raw = get_feature(feature_key, None)
+        if raw is not None:
+            return max(0, int(raw))
+
+        legacy = get_feature(legacy_months_key, None)
+        if legacy is not None:
+            return max(0, 30 * int(legacy))
+    except (TypeError, ValueError):
+        # A non-numeric setting is a config error, not a reason to break the
+        # page — fall through to the default.
+        pass
     except Exception:
-        lookback, lookahead = 2, 6
+        # A config read that raises (missing file, unreadable) must not take
+        # the whole Upcoming Releases view down with it.
+        pass
+    return default_days
+
+
+def get_release_window() -> tuple[datetime, datetime]:
+    """Rolling window for upcoming-release imports/display.
+
+    Releases are kept when dated within the last ``lookback_days`` and the next
+    ``lookahead_days`` from today — **default 28 / 14 days**, i.e. the last four
+    weeks and the next two weeks, centred on today.
+
+    Tunable from the Config page (``features.upcoming_releases_lookback_days`` /
+    ``features.upcoming_releases_lookahead_days``).
+
+    ⚠️ This window is what the DASHBOARD table is filtered by. Its
+    ``loadUpcomingReleasesTable()`` sends no ``window`` parameter, so the
+    separate "tight" clause in ``upcoming_releases_routes`` (``window_days > 0``)
+    never applies — this function alone governs what the dashboard shows.
+    """
+    lookback_days = _window_days(
+        "upcoming_releases_lookback_days",
+        "upcoming_releases_lookback_months",
+        28,
+    )
+    lookahead_days = _window_days(
+        "upcoming_releases_lookahead_days",
+        "upcoming_releases_lookahead_months",
+        14,
+    )
     now = datetime.now()
-    return now - timedelta(days=30 * lookback), now + timedelta(days=30 * lookahead)
+    return now - timedelta(days=lookback_days), now + timedelta(days=lookahead_days)
 
 
 def _within_release_window(
@@ -996,6 +1051,14 @@ def purge_stale_upcoming_releases(days: int | None = None) -> dict[str, Any]:
     The ``days`` window defaults to ``features.upcoming_releases_purge_days``
     (config page), falling back to 30 days.
 
+    ⚠️ The purge is FLOORED at the display lookback
+    (``get_release_window()``). Purge window and display window are independent
+    settings, so ``upcoming_releases_purge_days: 7`` alongside a 90-day lookback
+    would delete rows the dashboard is still trying to show — the table would
+    silently empty from the left as the scheduler ran. Defaults (30 vs 28) do
+    not overlap, but the configuration can, so the floor is enforced here rather
+    than relying on the defaults agreeing.
+
     Returns:
         ``{"deleted": int, "days": int}`` (or the exception message when the
         table is unavailable / the query fails structurally).
@@ -1007,6 +1070,29 @@ def purge_stale_upcoming_releases(days: int | None = None) -> dict[str, Any]:
                 days = int(get_feature("upcoming_releases_purge_days", 30) or 30)
             except Exception:
                 days = 30
+
+        # Never purge inside the window the UI displays.
+        try:
+            _display_start, _display_end = get_release_window()
+            _display_lookback_days = max(
+                0, (datetime.now().date() - _display_start.date()).days
+            )
+            if days < _display_lookback_days:
+                # ⚠️ This module uses stdlib logging, NOT structlog — kwargs
+                # style raises TypeError: Logger._log() got an unexpected
+                # keyword argument, and the `except Exception` below would
+                # swallow it, silently disabling the floor.
+                logger.info(
+                    "Upcoming purge window raised to match the display lookback "
+                    "(configured=%s effective=%s)",
+                    days,
+                    _display_lookback_days,
+                )
+                days = _display_lookback_days
+        except Exception:
+            # A failure computing the display window must not block the purge;
+            # the configured value is still applied.
+            pass
         cutoff = (datetime.now().date() - timedelta(days=max(1, days))).isoformat()
         with db_session() as session:
             result = session.execute(

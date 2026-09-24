@@ -822,6 +822,16 @@
           <input type="number" class="form-control" id="upcoming_releases_purge_days" placeholder="30" value="{{ config.get('features', {}).get('upcoming_releases_purge_days', 30) }}" min="1" max="365">
           <div class="form-text">Releases older than this are removed each daily cycle unless bookmarked, queued or imported.</div>
         </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label">Show Last (days)</label>
+          <input type="number" class="form-control" id="upcoming_releases_lookback_days" placeholder="28" value="{{ config.get('features', {}).get('upcoming_releases_lookback_days', 28) }}" min="0" max="365">
+          <div class="form-text">How far back the Upcoming Releases table shows. <strong>28 days = the last 4 weeks.</strong></div>
+        </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label">Show Next (days)</label>
+          <input type="number" class="form-control" id="upcoming_releases_lookahead_days" placeholder="14" value="{{ config.get('features', {}).get('upcoming_releases_lookahead_days', 14) }}" min="0" max="365">
+          <div class="form-text">How far ahead the Upcoming Releases table shows. <strong>14 days = the next 2 weeks.</strong></div>
+        </div>
         <div class="col-12"><hr class="my-2"></div>
         <div class="col-12">
           <h6 class="mb-2"><i class="bi bi-calendar2-week"></i> Daily MusicBrainz Artist Release Refresh</h6>
