@@ -94,6 +94,46 @@ TERMINAL_QUEUE_STATUSES: frozenset[str] = frozenset({
     "deleted",
 })
 
+# ⚠️ Statuses a row must have to BLOCK re-queueing the same track/release.
+#
+# This is deliberately NOT ``ACTIVE_QUEUE_STATUSES``. ``unmatched`` is neither
+# active nor terminal (a local-disk folder waiting to be matched) yet it must
+# still block, because re-queueing a track that is sitting on disk unmatched
+# would download a duplicate.
+#
+# ⚠️ AND IT DELIBERATELY EXCLUDES EVERY TERMINAL STATUS. Including them was a
+# real defect with two reported symptoms:
+#
+#   * ``insert_queue_item`` deduped against ``completed``/``imported``/
+#     ``in_collection``/``unmatched`` rows. Those rows are NOT shown in the
+#     queue, so the user got "already in the queue" for a track they could not
+#     see, and the new row was never inserted — "files I'm adding to download
+#     aren't showing".
+#   * ``add_release_tracks_to_queue_detailed`` skipped the whole release with
+#     reason ``already_active`` for the same invisible rows — "a release
+#     already has items in the queue, but they aren't there".
+#
+# An ``imported``/``completed`` row means the track is IN THE LIBRARY, which is
+# a separate check (``find_library_track``) with its own, more accurate message.
+# A ``removed``/``cancelled``/``deleted``/``failed`` row is explicitly one the
+# user wants gone or retried, so it must never block a fresh add either.
+BLOCKING_REQUEUE_STATUSES: frozenset[str] = frozenset({
+    "queued",
+    "searching",
+    "processing",
+    "downloading",
+    "moving",
+    "queried",
+    "copy_recommended",
+    "matched",
+    "unmatched",
+    "pending_match",
+    "possible_duplicate",
+    "duplicate",
+    "backed_off",
+    "pending_release",
+})
+
 # =============================================================================
 # ALL VALID STATUSES
 # =============================================================================

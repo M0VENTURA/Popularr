@@ -78,8 +78,22 @@ from services.downloads.download_processing_service import (
 )
 from services.downloads.match_orchestrator import apply_mbid_match_batch
 from services.downloads.slskd_service import SlskdService
+from services.queue.queue_constraints import (
+    ACTIVE_QUEUE_STATUSES,
+    FAILED_STATUSES,
+    PENDING_RETRY_STATUSES,
+)
 from services.queue.queue_orchestrator import process_next_batch
 from services.queue.queue_signal import signal_new_item
+
+#: The statuses ``/api/downloads/queue`` can actually PAGE THROUGH — used for
+#: the ``total`` the pager shows, so it must describe the same set the client
+#: receives in ``queue``. Derived from the same three constants
+#: ``get_active_queue`` filters on; a test pins the equality so the two cannot
+#: drift apart again (the bug was ``total`` summing EVERY status).
+QUEUE_LISTED_STATUSES: frozenset[str] = (
+    ACTIVE_QUEUE_STATUSES | FAILED_STATUSES | PENDING_RETRY_STATUSES
+)
 
 logger = structlog.get_logger(__name__)
 downloads_bp = Blueprint("downloads", __name__)
@@ -398,13 +412,35 @@ def api_queue() -> Any:
         # beyond the cap, was counted but never listed. Serve the list from its
         # own query with the same breadth as the count.
         failed = get_failed_queue(limit=min(limit, 100))
+        # ``total`` must describe the SAME set the client can page through, i.e.
+        # the queue listing built by ``get_active_queue``. It used to be
+        # ``sum(status_counts.values())`` — every row in the table, including the
+        # terminal backlog the queue deliberately never shows
+        # (completed/imported/in_collection). On a real database that is a
+        # permanent pile of finished rows, so the pager read "showing 18 of 70"
+        # forever and the queue looked as though it had 52 invisible items.
+        #
+        # ⚠️ QUEUE_LISTED_STATUSES must stay in step with ``get_active_queue``'s
+        # own filter. It is derived from the SAME three constants that function
+        # uses (ACTIVE | FAILED | PENDING_RETRY), and the equality is pinned by
+        # a test so the two cannot drift. Counting from the status constants
+        # alone cannot reproduce the listing's
+        # ``source NOT IN ('local','discovered')`` clause, so a local-disk
+        # ``unmatched`` row can still be counted but not listed; that is a
+        # pre-existing, much smaller discrepancy (one row per un-matched local
+        # folder) and is deliberately not papered over here.
+        queue_total = sum(
+            int(count)
+            for status, count in (status_counts or {}).items()
+            if str(status) in QUEUE_LISTED_STATUSES
+        )
         return jsonify({
             "success": True,
             "queue": items,
             "completed": completed,
             "failed": failed,
             "status_counts": status_counts or {},
-            "total": sum(status_counts.values()) if status_counts else 0,
+            "total": queue_total,
             "limit": limit,
             "offset": offset,
         })

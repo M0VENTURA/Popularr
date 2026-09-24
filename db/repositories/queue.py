@@ -132,22 +132,30 @@ def insert_queue_item(
         return {"success": False, "error": "Artist and title are required"}
 
     with db_session() as session:
-        # Dedupe on normalized (artist, title) across ALL active statuses and
-        # ANY source.  Previously the dedupe required ``source = :source``, so
-        # adding the same song via different entry points (Soulseek search,
-        # MusicBrainz release, playlist import, upcoming releases) created
-        # multiple rows for the same track — "20 versions of one song".
-        # Local/discovered rows are still kept separate (they represent files
-        # already on disk, never a search) — a searchable insert only dedupes
-        # against other searchable rows, and a local insert only against other
-        # local rows.
+        # Dedupe on normalized (artist, title) across the statuses that BLOCK a
+        # re-add, and ANY source.  Previously the dedupe required
+        # ``source = :source``, so adding the same song via different entry
+        # points (Soulseek search, MusicBrainz release, playlist import,
+        # upcoming releases) created multiple rows for the same track — "20
+        # versions of one song".
+        #
+        # ⚠️ The status list comes from BLOCKING_REQUEUE_STATUSES and must NOT
+        # be written out by hand. It USED to include completed/unmatched/
+        # imported/in_collection, which are INVISIBLE in the queue — so adding a
+        # track the user could not see reported "already in the queue" and
+        # inserted nothing ("files I'm adding to download aren't showing").
+        from services.queue.queue_constraints import BLOCKING_REQUEUE_STATUSES
+
+        _blocking = ",".join(
+            f"'{s}'" for s in sorted(BLOCKING_REQUEUE_STATUSES)
+        )
         _is_local = str(source or "").lower() in ("local", "discovered")
         existing = session.execute(
-            text("""
+            text(f"""
                 SELECT * FROM download_queue
                 WHERE LOWER(artist) = LOWER(:artist)
                   AND LOWER(title) = LOWER(:title)
-                  AND status IN ('queued', 'searching', 'downloading', 'completed', 'unmatched', 'imported', 'in_collection', 'matched', 'processing', 'moving')
+                  AND status IN ({_blocking})
                   AND (LOWER(COALESCE(source, '')) IN ('local', 'discovered')) = :is_local
                 ORDER BY created_at ASC
                 LIMIT 1

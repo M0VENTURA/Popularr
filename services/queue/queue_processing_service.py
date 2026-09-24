@@ -249,10 +249,27 @@ def add_release_tracks_to_queue_detailed(
     try:
         with db_session() as session:
             import_group = f"mbid_{release_id}"
-            _active_statuses = {
-                "queued", "searching", "downloading", "processing", "moving",
-                "unmatched", "completed", "imported", "in_collection",
-            }
+            # ⚠️ MUST be the blocking set, not a hand-written list.
+            #
+            # This used to be a local set that ALSO contained the TERMINAL
+            # statuses completed/imported/in_collection/unmatched. Those rows
+            # are filtered out of the queue listing, so a release whose tracks
+            # had all been imported reported "already_active" — the user saw
+            # "a release already has items in the queue" while the queue was
+            # empty of them, and nothing could be re-added.
+            #
+            # "Already in the library" is a DIFFERENT, intentional skip with its
+            # own message (``all_in_library``), decided below per track.
+            from services.queue.queue_constraints import BLOCKING_REQUEUE_STATUSES
+
+            _active_statuses = set(BLOCKING_REQUEUE_STATUSES)
+            # Same set, rendered for the per-track duplicate probe below. Both
+            # MUST use the shared constant: they were two hand-written lists
+            # that had already drifted from each other, and both wrongly
+            # blocked on terminal statuses (see BLOCKING_REQUEUE_STATUSES).
+            _blocking_status_sql = ", ".join(
+                f"'{s}'" for s in sorted(BLOCKING_REQUEUE_STATUSES)
+            )
             try:
                 _existing_rows = session.execute(
                     text("""
@@ -270,10 +287,22 @@ def add_release_tracks_to_queue_detailed(
                     logger.info("Release already has active queue items — skipping re-queue", release_id=release_id, active_count=len(_active_rows))
                     already_active = len(_active_rows)
                     return _result("already_active")
-                    
+
+                # ⚠️ STRICTLY the dead-end statuses — never the whole
+                # non-active remainder. ``_existing_rows`` covers EVERY row for
+                # this release, so deriving the purge from "whatever is not
+                # blocking" would DELETE the user's imported/completed history
+                # for the release the moment they re-queued it.
+                #
+                # These six are the ones a re-queue legitimately supersedes: the
+                # download is gone or was rejected, so a fresh attempt replaces
+                # the row rather than leaving a dead one behind.
+                _SUPERSEDED_STATUSES = {"removed", "cancelled", "deleted", "failed"}
                 _stale_ids = [
                     (getattr(r, "_mapping", None) or {}).get("id") or r[0]
                     for r in _existing_rows
+                    if str((getattr(r, "_mapping", None) or {}).get("status") or r[1] or "").lower()
+                    in _SUPERSEDED_STATUSES
                 ]
                 if _stale_ids:
                     _in_placeholders = ", ".join(f":sid_{i}" for i in range(len(_stale_ids)))
@@ -316,13 +345,11 @@ def add_release_tracks_to_queue_detailed(
                     continue
 
                 _dup_row = session.execute(
-                    text("""
+                    text(f"""
                         SELECT id FROM download_queue
                         WHERE LOWER(COALESCE(artist, '')) = LOWER(:artist)
                           AND LOWER(COALESCE(title, '')) = LOWER(:title)
-                          AND status IN ('queued', 'searching', 'downloading', 'processing',
-                                         'moving', 'unmatched', 'completed', 'imported',
-                                         'in_collection', 'matched')
+                          AND status IN ({_blocking_status_sql})
                         ORDER BY created_at ASC LIMIT 1
                     """),
                     {"artist": track_artist, "title": track_title},
