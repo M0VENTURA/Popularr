@@ -35,12 +35,12 @@
    each section (see static/js/artist-releases.js). The old markup was
 
        .category-section                                  (the category card)
-         .album-row[data-status="library" | "missing"]
+         .album-row[data-status="library" | "missing" | "upcoming"]
 
    and the new markup is
 
        .release-section                                   (the category card)
-         .release-item[data-status="library" | "missing"]
+         .release-item[data-status="library" | "missing" | "upcoming"]
 
    Both shapes are matched below. The previous version only knew the OLD one, so
    after the release-section migration every selector matched nothing and this
@@ -76,10 +76,15 @@
    * wrongly showing a missing one, and "Missing" is the explicit opt-in. So an
    * unexpected or absent status leans to Library rather than silently
    * disappearing from both views.
+   *
+   * ⚠️ `upcoming` is the exception, because it is a KNOWN status and the album
+   * is demonstrably NOT owned. Leaning it to Library (as the default rule above
+   * would) claimed the collection contained an album that has not been released
+   * yet. The lean-to-Library rule is for UNKNOWN statuses only.
    */
   function rowIsLibrary(row) {
     var status = String(row.getAttribute('data-status') || '').toLowerCase();
-    return status !== 'missing';
+    return status !== 'missing' && status !== 'upcoming';
   }
 
   /**
@@ -98,6 +103,8 @@
         visible = true;
       } else if (filter === 'missing') {
         visible = String(row.getAttribute('data-status') || '').toLowerCase() === 'missing';
+      } else if (filter === 'upcoming') {
+        visible = String(row.getAttribute('data-status') || '').toLowerCase() === 'upcoming';
       } else {
         visible = rowIsLibrary(row);
       }

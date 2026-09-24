@@ -46,9 +46,9 @@
    ── MARKUP CONTRACT (components/_release_section.html) ───────────────────
      .release-section[data-category]            the category card
        .release-section-toggle                  collapse the whole section
-       .release-filter-radio[value=all|library|missing]
-       .release-list[data-category]
-         .release-item[data-status=library|missing][data-title]
+       .release-filter-radio[value=all|library|missing|upcoming]
+     .release-list[data-category]
+         .release-item[data-status=library|missing|upcoming][data-title]
            .release-summary[data-artist][data-album][data-mbid]
              .release-art / .release-art-placeholder
              .release-title
@@ -184,7 +184,16 @@
     var album = summary.getAttribute('data-album') || '';
     var mbid = summary.getAttribute('data-mbid') || '';
     var releaseId = summary.getAttribute('data-release-id') || '';
-    var isMissing = item.getAttribute('data-status') === 'missing';
+    /*
+      ⚠️ THREE STATES, and `upcoming` must route like `missing`.
+
+      A release that is not out yet has NO `tracks` rows — exactly like a
+      missing one — so asking the local /api/album/tracklist for it returns
+      nothing and the expander silently looks broken. Only an OWNED album reads
+      the local table, so the test is "is it library?", not "is it missing?".
+      Treating `upcoming` as not-missing here was the bug this guards.
+    */
+    var isMissing = item.getAttribute('data-status') !== 'library';
 
     contentEl.innerHTML = '<div class="text-center py-2"><span class="spinner-border spinner-border-sm"></span> Loading tracks...</div>';
 

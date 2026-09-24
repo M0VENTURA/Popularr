@@ -30,8 +30,8 @@ from helpers.artist_sort import (
     artist_sort_name,
     artist_sort_sql,
 )
+from services.catalog.artist_release_entries import build_missing_and_upcoming_entries
 from services.catalog.release_categories import (
-    category_for_musicbrainz,
     normalise_category,
     ordered_specs,
 )
@@ -962,76 +962,67 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
 
     genres = collect_top_genres(tracks)
 
-    missing_entries: list[dict[str, Any]] = []
+    #: Missing + upcoming release entries for the discography sections.
+    #:
+    #: The decision rules live in
+    #: ``services.catalog.artist_release_entries`` as a PURE function, because
+    #: inline here they were untestable without driving the whole page (DB plus
+    #: MusicBrainz-adjacent lookups), and the rules are subtle: upcoming is
+    #: decided from the DATE (not the year, which was wrong for most of the
+    #: calendar), it overrides the release TYPE, undated rows are never
+    #: promoted, and one entry per title is emitted across BOTH sources.
+    missing_rows: list[dict[str, Any]] = []
+    upcoming_rows: list[dict[str, Any]] = []
     try:
         with db_session() as session:
-            missing_result = session.execute(
-                text("""
-                    SELECT title, release_id, primary_type, first_release_date,
-                           cover_art_url, category
-                    FROM missing_releases
-                    WHERE LOWER(artist) = LOWER(:name)
-                    ORDER BY first_release_date DESC NULLS LAST
-                """),
-                {"name": name},
-            )
-            
-            for row in missing_result.fetchall():
-                mr = dict(row._mapping)
-                mr_title = str(mr.get("title") or "").strip()
-                if not mr_title:
-                    continue
-                    
-                album_key = mr_title.lower()
-                if album_key in albums_by_key:
-                    continue
-
-                release_year = None
-                first_release = str(mr.get("first_release_date") or "")
-                
-                if len(first_release) == 4 and first_release.isdigit():
-                    release_year = safe_int(first_release)
-                elif first_release and len(first_release) >= 4:
-                    try:
-                        release_year = safe_int(first_release[:4])
-                    except Exception:
-                        pass
-
-                missing_entry = {
-                    "album": mr_title,
-                    "title": mr_title,
-                    "album_year": release_year,
-                    "track_count": 0,
-                    "avg_stars": None,
-                    "total_duration": 0,
-                    "is_missing": True,
-                    "is_upcoming": bool(
-                        release_year and release_year > datetime.now().year
-                    ),
-                    "first_release_date": first_release,
-                    "cover_art_url": mr.get("cover_art_url") or "",
-                    "release_id": mr.get("release_id") or "",
-                }
-
-                category = str(mr.get("category") or "").strip()
-                if category:
-                    # ``normalise_category`` resolves canonical keys, legacy
-                    # display labels ("Live Album") AND composite type strings,
-                    # so rows written before the category registry existed land
-                    # in the right section instead of defaulting to Studio.
-                    missing_entry["_category"] = normalise_category(category)
-                else:
-                    # No stored category: derive it from the release-group type
-                    # rather than guessing "album", which is what put field
-                    # recordings and DJ-mixes under Studio Albums.
-                    missing_entry["_category"] = category_for_musicbrainz(
-                        str(mr.get("primary_type") or ""),
-                        mr.get("secondary_types") or "",
-                    )
-
-                missing_entries.append(missing_entry)
+            missing_rows = [
+                dict(r._mapping)
+                for r in session.execute(
+                    text("""
+                        SELECT title, release_id, primary_type, first_release_date,
+                               cover_art_url, category
+                        FROM missing_releases
+                        WHERE LOWER(artist) = LOWER(:name)
+                        ORDER BY first_release_date DESC NULLS LAST
+                    """),
+                    {"name": name},
+                ).fetchall() or []
+            ]
     except Exception as exc:
         logger.debug("Failed to load missing releases", artist=name, error=str(exc))
+
+    # `upcoming_releases` is filled by an INDEPENDENT pipeline
+    # (`services/upcoming_releases/`: Wikipedia scraper + MusicBrainz fetcher)
+    # that drives the Upcoming Releases page. The artist page never read it, so
+    # an announcement already discovered there stayed invisible until the scan
+    # happened to cache the same release group into `missing_releases`.
+    # Probed defensively: a missing/older schema must not stop the page.
+    try:
+        with db_session() as session:
+            upcoming_rows = [
+                dict(r._mapping)
+                for r in session.execute(
+                    text("""
+                        SELECT album_name, release_date, release_group_mbid,
+                               primary_type, release_year
+                        FROM upcoming_releases
+                        WHERE LOWER(TRIM(artist_name)) = LOWER(TRIM(:name))
+                    """),
+                    {"name": name},
+                ).fetchall() or []
+            ]
+    except Exception as exc:
+        logger.debug(
+            "Failed to load upcoming releases", artist=name, error=str(exc),
+        )
+
+    missing_entries = build_missing_and_upcoming_entries(
+        missing_rows=missing_rows,
+        upcoming_rows=upcoming_rows,
+        owned_titles=[
+            str(a.get("album") or "") for a in albums
+        ] + [str(a.get("title") or "") for a in albums],
+    )
 
     all_albums = albums + missing_entries
     all_albums.sort(

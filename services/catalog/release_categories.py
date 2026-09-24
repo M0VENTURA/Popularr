@@ -36,6 +36,7 @@ template, route or JavaScript change.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Final
 
 
@@ -88,10 +89,31 @@ _OTHER_SPEC: Final[CategorySpec] = CategorySpec(
     "other", "Other Releases", "bi-collection", "other-releases"
 )
 
+#: Releases that are ANNOUNCED BUT NOT OUT YET.
+#:
+#: ΓÜá∩╕Å This bucket is NOT a MusicBrainz release TYPE. A not-yet-released album is
+#: still primary ``Album`` (or EP/Single) ΓÇö "upcoming" describes its DATE, not
+#: its type.  It is therefore the ONE category that cannot be derived by
+#: ``category_for_musicbrainz`` and must be decided from the release date
+#: instead, which is what ``UPCOMING_KEY`` + ``is_upcoming_date`` exist for.
+#:
+#: It is deliberately checked BEFORE the type-based classification by every
+#: caller: a future-dated studio album belongs under Upcoming, not under Studio
+#: Albums, or the section would be unreachable for the ordinary case (an
+#: artist's next album is the commonest kind of upcoming release).
+UPCOMING_KEY: Final[str] = "upcoming"
+
+_UPCOMING_SPEC: Final[CategorySpec] = CategorySpec(
+    UPCOMING_KEY, "Upcoming Releases", "bi-calendar-event", "upcoming-releases"
+)
+
 #: key -> spec, for every category the UI can render.
 SPECS: Final[dict[str, CategorySpec]] = {
     spec.key: spec for spec in _STANDARD_SPECS
-} | {spec.key: spec for _mb, spec in _SECONDARY_SPECS} | {_OTHER_SPEC.key: _OTHER_SPEC}
+} | {spec.key: spec for _mb, spec in _SECONDARY_SPECS} | {
+    _UPCOMING_SPEC.key: _UPCOMING_SPEC,
+    _OTHER_SPEC.key: _OTHER_SPEC,
+}
 
 #: The studio bucket.  Named so callers can express "is this a plain studio
 #: album?" without repeating the string.
@@ -99,8 +121,21 @@ STUDIO_KEY: Final[str] = "album"
 
 #: Canonical section order.  Standard sections keep their historical positions;
 #: everything else follows, with the catch-all last.
+#:
+#: ΓÜá∩╕Å UPCOMING IS FIRST, and that is deliberate rather than incidental.  It is
+#: the only section whose contents are NEWS ΓÇö an artist's next album is worth
+#: seeing before a discography the user already owns ΓÇö and the section carries
+#: its own count badge, so putting it first does not hide anything.  A section
+#: with nothing in the library also AUTO-COLLAPSES (see
+#: ``components/_release_section.html``), so an artist with one upcoming album
+#: and thirty owned ones gets a single collapsed header above the discography
+#: rather than a wall of future releases.
+#:
+#: Note this is the ONE ordering decision the type registry cannot infer: every
+#: other key is a MusicBrainz release TYPE, while ``upcoming`` is a date bucket.
 ORDERED_KEYS: Final[tuple[str, ...]] = (
-    tuple(spec.key for spec in _STANDARD_SPECS)
+    (UPCOMING_KEY,)
+    + tuple(spec.key for spec in _STANDARD_SPECS)
     + tuple(spec.key for _mb, spec in _SECONDARY_SPECS)
     + (_OTHER_SPEC.key,)
 )
@@ -154,6 +189,16 @@ _LEGACY_ALIASES: Final[dict[str, str]] = {
     "scores": "score",
     "other": "other",
     "other releases": "other",
+    # The date bucket. Listed here so a stored value ("Upcoming", "Upcoming
+    # Releases", "announced", "unreleased") resolves to the section rather than
+    # falling through to the catch-all ΓÇö ``normalise_category`` only consults
+    # aliases and MusicBrainz type spellings, and "upcoming" is neither.
+    "upcoming": UPCOMING_KEY,
+    "upcoming release": UPCOMING_KEY,
+    "upcoming releases": UPCOMING_KEY,
+    "announced": UPCOMING_KEY,
+    "unreleased": UPCOMING_KEY,
+    "tba": UPCOMING_KEY,
 }
 
 #: MusicBrainz secondary type -> category key.  Covers ALL secondary types,
@@ -417,6 +462,71 @@ def spec_for(key: str | None) -> CategorySpec:
     return SPECS.get(normalise_category(key), _OTHER_SPEC)
 
 
+def is_upcoming_date(value: object, today: date | None = None) -> bool:
+    """True when *value* is a release date in the FUTURE.
+
+    Accepts the three shapes the release data actually carries:
+
+    * ``"2027-03-01"`` ΓÇö a full MusicBrainz first-release-date;
+    * ``"2027-03"`` / ``"2027"`` ΓÇö a PARTIAL date (MusicBrainz publishes these
+      when only the month or year is known, which is the norm for an announced
+      album long before release);
+    * a ``datetime``/``date`` object.
+
+    ΓÜá∩╕Å THIS DELIBERATELY REPLACES THE OLD ``year > now.year`` TEST, which was
+    wrong for most of the calendar.  It compared only the YEAR, so on
+    2026-09-24 a release dated **2026-12-05 was "not upcoming"** (2026 is not
+    > 2026) ΓÇö every album still to come this year was labelled plain "Missing",
+    which is most of them.  A date is upcoming when it is LATER THAN TODAY,
+    whatever year that lands in.
+
+    ΓÜá∩╕Å UNDATED rows return False. That is the caller's chosen policy ("only
+    releases with a future date"), not an oversight ΓÇö so a TBA row is never
+    silently promoted into the Upcoming section with no date to justify it.
+
+    A partial date is resolved to the LATEST instant it could mean (``2027`` ->
+    2027-12-31), because a year-only date in the future is upcoming on any day
+    of that year, whereas resolving it to January 1st would make a March
+    announcement look like it had already passed.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+
+    today = today or datetime.now().date()
+
+    candidate: date | None = None
+    for fmt, clamp in (
+        ("%Y-%m-%d", None),
+        ("%Y-%m", "month"),
+        ("%Y", "year"),
+    ):
+        try:
+            parsed = datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+        if clamp == "month":
+            # Last day of the parsed month.
+            nxt = (parsed.replace(day=28) + timedelta(days=4)).replace(day=1)
+            candidate = nxt - timedelta(days=1)
+        elif clamp == "year":
+            candidate = date(parsed.year, 12, 31)
+        else:
+            candidate = parsed
+        break
+
+    if candidate is None:
+        # A datetime/date handed over directly.
+        if isinstance(value, datetime):
+            candidate = value.date()
+        elif isinstance(value, date):
+            candidate = value
+
+    if candidate is None:
+        return False
+    return candidate > today
+
+
 def label_for(key: str | None) -> str:
     return spec_for(key).label
 
@@ -454,10 +564,12 @@ __all__ = [
     "ORDERED_KEYS",
     "SPECS",
     "STUDIO_KEY",
+    "UPCOMING_KEY",
     "category_for_album_row",
     "category_for_album_type",
     "category_for_musicbrainz",
     "icon_for",
+    "is_upcoming_date",
     "label_for",
     "normalise_category",
     "normalise_secondary_types",

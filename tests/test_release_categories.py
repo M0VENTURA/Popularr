@@ -218,8 +218,21 @@ class TestLegacyValues:
 
 
 class TestOrdering:
+    def test_upcoming_is_first(self):
+        """The one DATE bucket leads, so unreleased material is seen first.
+
+        ``upcoming`` is not a MusicBrainz release TYPE (a not-yet-released album
+        is still primary ``Album``), so it is the only key whose position the
+        type registry cannot infer. It leads because its contents are the only
+        NEWS on the page; the section carries its own count badge, and a section
+        with nothing in the library auto-collapses, so an artist with one
+        upcoming album and thirty owned ones stays compact.
+        """
+        assert ORDERED_KEYS[0] == "upcoming"
+
     def test_standard_sections_come_first(self):
-        assert ORDERED_KEYS[:6] == (
+        """The historical six keep their order, immediately after ``upcoming``."""
+        assert ORDERED_KEYS[1:7] == (
             "album", "ep", "single", "compilation", "live_album", "remix_album",
         )
 

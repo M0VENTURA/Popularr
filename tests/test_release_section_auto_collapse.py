@@ -81,12 +81,36 @@ class TestMacroStructure:
 
     @pytest.mark.parametrize("rel", COMPONENTS)
     def test_missing_badge_stays_in_the_header(self, rel):
-        """The count must remain visible above the collapsed body."""
+        """The counts must remain visible above the collapsed body.
+
+        Asserting on the guard's INTENT rather than one literal spelling: the
+        counts are now split (``missing_only`` / ``upcoming``) because a
+        not-yet-released album is missing from the collection but is NOT
+        something the user can go and download, so the "N missing" figure must
+        stop counting it. A guard pinned to the old exact string would have
+        failed on a correct change and pushed the next person to undo it.
+        """
         body = _read(rel)
         header = body.split("release-section-body", 1)[0]
-        assert "{% if missing %}<span class=\"badge bg-warning text-dark\">" in header, (
+        assert "{{ missing_only|length }} missing" in header, (
             "the 'N missing' badge must stay in the header, above the body"
         )
+        assert "{{ upcoming|length }} upcoming" in header, (
+            "the 'N upcoming' badge must stay in the header, above the body"
+        )
+        assert "badge bg-warning text-dark" in header
+
+    @pytest.mark.parametrize("rel", COMPONENTS)
+    def test_upcoming_counts_exclude_what_is_merely_missing(self, rel):
+        """`missing` includes upcoming rows, so the counts must split them.
+
+        Both sets are derived from the same `items` list, so a change that
+        dropped the split would silently make the "N missing" figure advertise
+        downloads that do not exist yet.
+        """
+        body = _read(rel)
+        assert "{%- set upcoming = items|selectattr('is_upcoming')|list -%}" in body
+        assert "{%- set missing_only = missing|rejectattr('is_upcoming')|list -%}" in body
 
     @pytest.mark.parametrize("rel", COMPONENTS)
     def test_toggle_still_uses_bootstrap_collapse(self, rel):

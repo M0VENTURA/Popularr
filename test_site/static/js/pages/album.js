@@ -2457,6 +2457,105 @@
 
   document.addEventListener('DOMContentLoaded', loadSimilarArtists);
 
+  // ── Persisted missing tracks (loaded on page load) ───────────────────────
+  /*
+    ⚠️ THE ALBUM PAGE NEVER SHOWED ITS MISSING TRACKS.
+
+    `missing_album_tracks` holds them per album and the scan refreshes it, but
+    the only thing that ever RENDERED them was `injectMissingRows`, which runs
+    exclusively from the manual "Compare with MusicBrainz" result. So the artist
+    page advertised "3 missing" on a row, the user opened the album to download
+    them, and the album page listed nothing to click — the list existed in the
+    database the whole time.
+
+    This loads the persisted list on page load and reuses `buildMissingRow`, so
+    the per-row controls (queue / match / hide) are the SAME ones the Compare
+    path builds and cannot drift from it.
+  */
+
+  /** Shape a `missing_album_tracks` row as the `mb_*` track object. */
+  function missingRowToTrackComp(row) {
+    return {
+      matched: false,
+      mb_title: row.title || '',
+      mb_track_number: row.track_number,
+      mb_disc_number: row.disc_number != null ? row.disc_number : 1,
+      mb_recording_mbid: row.recording_mbid || '',
+      mb_duration: row.duration,
+    };
+  }
+
+  /**
+   * Append a missing row AFTER the last real track row.
+   *
+   * Deliberately NOT `injectMissingRows`: that positions each row relative to
+   * `data.comparison`, and these rows are in no comparison (they come from the
+   * DB, not a Compare run). Its `indexOf` returns -1, which would insert before
+   * the FIRST row every time — REVERSING the list.
+   */
+  function appendMissingRow(row, tbody) {
+    const rows = tbody.querySelectorAll('tr[data-track-id]');
+    const last = rows.length ? rows[rows.length - 1] : null;
+    if (last) last.insertAdjacentElement('afterend', row);
+    else tbody.appendChild(row);
+  }
+
+  async function loadAlbumMissingTracks() {
+    const tbody = document.getElementById('albumTracksTbody');
+    if (!tbody) return;
+    const artist = pageArtist();
+    const album = pageAlbum();
+    if (!artist || !album) return;
+
+    // Already rendered from a Compare run — do not duplicate the list.
+    if (tbody.querySelector('.mb-missing-row')) return;
+
+    let data;
+    try {
+      data = await global.api.getJson(
+        `/api/album/missing-tracks?artist=${encodeURIComponent(artist)}`
+        + `&album=${encodeURIComponent(album)}`
+      );
+    } catch (_e) {
+      return; // non-fatal: the tracklist still shows what is owned
+    }
+
+    const missing = (data && data.missing_tracks) || [];
+    if (!missing.length) return;
+
+    const seen = new Set();
+    missing.forEach((row) => {
+      const comp = missingRowToTrackComp(row);
+      // Distinct rows are expected, but a duplicate title + position would
+      // render two identical rows.
+      const key = [comp.mb_disc_number, comp.mb_track_number,
+        String(comp.mb_title).toLowerCase()].join('\u0000');
+      if (seen.has(key)) return;
+      seen.add(key);
+
+      // Context is built PER ROW: each persisted row carries its own release id
+      // and year, which is more accurate than a page-level guess and is what
+      // the queue payload needs.
+      const ctx = {
+        release_mbid: row.release_id || null,
+        mb_year: row.year || '',
+      };
+      appendMissingRow(buildMissingRow(comp, ctx), tbody);
+    });
+
+    // Advertise the count, so the header agrees with what is rendered.
+    const badge = document.getElementById('albumMissingHeaderBadge');
+    if (badge) {
+      badge.textContent = `${missing.length} track${missing.length === 1 ? '' : 's'} missing`;
+      badge.classList.remove('d-none');
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    // Fire-and-forget: a failure here must not stop the page's other wiring.
+    loadAlbumMissingTracks();
+  });
+
   // ── Public API ──────────────────────────────────────────────────────────
 
   global.albumDetail = {

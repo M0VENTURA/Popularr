@@ -445,13 +445,16 @@ window.applyAlbumMbid = function (mbid) {
 // file as a plain <script> (not a module), so they're already global here —
 // no need to redefine them.
 function _getLinkedReleaseMbid() {
-    const releaseGroupField = document.getElementById('album_release_group_mbid');
-    const releaseField = document.getElementById('album_mbid');
-    return (
-        (releaseGroupField && releaseGroupField.value.trim()) ||
-        (releaseField && releaseField.value.trim()) ||
-        ''
-    );
+    // ⚠️ Defensive on purpose. `loadAlbumMissingTracks` calls this INSIDE A LOOP
+    // over the missing rows, so a single throw here (a missing input, or one
+    // without a .value) would abort the whole loop and lose every row — the
+    // album page would look complete while actually showing nothing.
+    const valueOf = function (id) {
+        const el = document.getElementById(id);
+        const raw = el && el.value;
+        return typeof raw === 'string' ? raw.trim() : '';
+    };
+    return valueOf('album_release_group_mbid') || valueOf('album_mbid') || '';
 }
 
 /**
@@ -1413,6 +1416,112 @@ window.ignoreMissingTrack = function (btn) {
 };
 
 // ---------------------------------------------------------------------------
+// Persisted missing tracks (loaded on page load)
+// ---------------------------------------------------------------------------
+/*
+  ⚠️ THE ALBUM PAGE NEVER SHOWED ITS MISSING TRACKS.
+
+  `missing_album_tracks` holds them per album, and the scan refreshes it — but
+  the only thing that ever RENDERED them was `_injectMissingTrackRows`, which
+  runs exclusively from the manual "Compare with MusicBrainz" result. So the
+  artist page advertised "3 missing" on a row, the user opened the album to
+  download them, and the album page listed nothing to click. The list existed in
+  the DB the whole time.
+
+  This loads the persisted list on page load, so those flagged tracks are
+  actually selectable. It reuses `_buildMissingTrackRow`, so the per-row controls
+  (queue / match / hide) are the SAME ones the Compare path builds and cannot
+  drift from it.
+*/
+
+/** Shape a `missing_album_tracks` row as the `mb_*` comparison object. */
+function _missingRowToTrackComp(row) {
+    return {
+        matched: false,
+        mb_title: row.title || '',
+        mb_track_number: row.track_number,
+        mb_disc_number: row.disc_number != null ? row.disc_number : 1,
+        mb_recording_mbid: row.recording_mbid || '',
+        mb_duration: row.duration,
+        // Kept for the manual match flow, which reads the track artist.
+        track_artist: row.track_artist || '',
+    };
+}
+
+/**
+ * Append a missing row AFTER the last real track row.
+ *
+ * Deliberately not `_injectMissingTrackRows`: that positions each row relative
+ * to `data.comparison`, and these rows are in no comparison (they come from the
+ * DB, not from a Compare run). Its `indexOf` returns -1, which leaves it
+ * inserting before the FIRST row every time — which REVERSES the list.
+ */
+function _appendMissingRow(row, tbody) {
+    const rows = tbody.querySelectorAll('tr[data-track-id]');
+    const last = rows.length ? rows[rows.length - 1] : null;
+    if (last) last.insertAdjacentElement('afterend', row);
+    else tbody.appendChild(row);
+}
+
+/** Load and render this album's persisted missing tracks. */
+window.loadAlbumMissingTracks = function () {
+    const tbody = document.getElementById('albumTracksTbody');
+    if (!tbody) return;
+    const artist = window._pageData ? window._pageData.artistName : '';
+    const album = window._pageData ? window._pageData.albumName : '';
+    if (!artist || !album) return;
+
+    // Already rendered from a Compare run — do not duplicate the list.
+    if (tbody.querySelector('.mb-missing-row')) return;
+
+    fetch('/api/album/missing-tracks?artist=' + encodeURIComponent(artist)
+        + '&album=' + encodeURIComponent(album))
+        .then(r => (r.ok ? r.json() : {}))
+        .then(data => {
+            const missing = (data && data.missing_tracks) || [];
+            if (!missing.length) return;
+
+            const seen = new Set();
+            missing.forEach(row => {
+                const comp = _missingRowToTrackComp(row);
+                // The endpoint returns distinct rows, but a duplicate title +
+                // position would render two identical rows.
+                const key = [comp.mb_disc_number, comp.mb_track_number,
+                             String(comp.mb_title).toLowerCase()].join('\u0000');
+                if (seen.has(key)) return;
+                seen.add(key);
+
+                // Context is built PER ROW: each persisted row carries its own
+                // release id and year, which is more accurate than a page-level
+                // guess, and is what the queue payload needs.
+                const ctx = {
+                    release_mbid: row.release_id || _getLinkedReleaseMbid(),
+                    mb_year: row.year || '',
+                };
+                _appendMissingRow(_buildMissingTrackRow(comp, ctx), tbody);
+            });
+
+            // Advertise the count in the header, and reveal the
+            // "search missing tracks" affordance the template hides until a
+            // count is known.
+            const badge = document.getElementById('albumMissingHeaderBadge');
+            if (badge) {
+                badge.textContent = missing.length + ' track'
+                    + (missing.length === 1 ? '' : 's') + ' missing';
+                badge.classList.remove('d-none');
+            }
+            const searchBtn = document.querySelector('.album-search-missing-btn');
+            if (searchBtn) searchBtn.style.display = '';
+        })
+        .catch(err => {
+            // Non-fatal for the PAGE (the owned tracklist still renders), but
+            // deliberately LOUD: a silent swallow here is what would hide a
+            // row-builder error behind an album that simply looks complete.
+            console.error('Could not load missing tracks:', err);
+        });
+};
+
+// ---------------------------------------------------------------------------
 // Match a missing MusicBrainz track to an existing (unmatched) library track
 // ---------------------------------------------------------------------------
 // Candidates are the CURRENT comparison's extra_tracks — library rows the
@@ -1586,6 +1695,12 @@ function _performBulkDelete(deleteFiles) {
 // spinner and nothing ever populated it — the fetch lived only on the TRACK
 // page's inline script. The spinner span therefore never stopped.
 document.addEventListener('DOMContentLoaded', function () {
+    // Persisted missing tracks. Fired here so a plain page load shows the same
+    // flagged tracks the artist page counted, without needing a Compare run.
+    if (typeof window.loadAlbumMissingTracks === 'function') {
+        window.loadAlbumMissingTracks();
+    }
+
     const container = document.getElementById('albumSimilarArtistsContainer');
     if (!container) return;
 

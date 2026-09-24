@@ -72,6 +72,14 @@
 {%- set cover = _cover_of(album, artist_name)|trim -%}
 {%- set is_missing = album.is_missing -%}
 {#-
+  A release that is ANNOUNCED BUT NOT OUT YET. It is still `is_missing` (the
+  artist does not have it), but it must not read as an ordinary gap in the
+  collection — the user cannot own something that has not been released. The
+  badge, the filter filter and the actions all key off this.
+-#}
+{%- set is_upcoming = album.is_upcoming -%}
+{%- set status = 'upcoming' if is_upcoming else ('missing' if is_missing else 'library') -%}
+{#-
   ``data-status`` is consumed by the per-section All / Library / Missing
   radio filter rendered in render_release_section, and by
   static/js/artist-releases.js. Missing rows are flagged distinctly so the
@@ -82,7 +90,7 @@
   title is not unique on its own (three self-titled Weezer albums) and the
   server cannot know which rows will collide.
 -#}
-<div class="release-item" data-status="{{ 'missing' if is_missing else 'library' }}" data-year="{{ year or 0 }}" data-title="{{ title|e }}" data-mbid="{{ mbid|e }}">
+<div class="release-item" data-status="{{ status }}" data-year="{{ year or 0 }}" data-title="{{ title|e }}" data-mbid="{{ mbid|e }}">
   {#-
     ``data-release-id`` is what /api/artist/release/tracklist keys on for a
     MISSING release — the expander reads it from the SUMMARY element, and it
@@ -100,13 +108,28 @@
     <div class="release-meta">
       <div class="release-title-row">
         <span class="release-title">{{ title }}</span>
+        {% if is_upcoming %}
+        {#- Not yet released. A distinct badge, because "Missing" would be
+            misleading: the user cannot own something not yet released, and the
+            "N missing" count is about gaps in albums they DO own. -#}
+        <span class="badge release-status-badge"
+              style="background-color: rgba(100,116,139,0.2); color: #cbd5e1; border: 1px solid var(--border-color);"
+              title="This release has not been released yet{% if year %} ({{ year }}){% endif %}">
+          <i class="bi bi-calendar-event"></i> Upcoming{% if year %} {{ year }}{% endif %}
+        </span>
+        {% else %}
         <span class="badge {{ 'bg-warning text-dark' if is_missing else 'bg-success' }} release-status-badge">
           {{ 'Missing' if is_missing else 'In Library' }}
         </span>
+        {% endif %}
         {#- Populated by static/js/artist-releases.js via
             /api/album/missing-tracks. Hidden until a count arrives, so an
-            album with no gap never shows a "0 tracks missing" badge. -#}
+            album with no gap never shows a "0 tracks missing" badge. Owned
+            albums only — an unreleased album has no tracklist for tracks to be
+            missing FROM. -#}
+        {% if not is_upcoming %}
         <span class="badge bg-warning text-dark album-missing-tracks-badge" style="display:none;"></span>
+        {% endif %}
       </div>
       {%- set _rel_title = (album.release_title or '')|trim -%}
       {%- if not is_missing and _rel_title and _rel_title|lower != title|lower %}
@@ -146,6 +169,14 @@
 {% macro render_release_section(key, section_id, icon, label, items, artist_name, description=None) %}
 {%- set library = items|rejectattr('is_missing')|list -%}
 {%- set missing = items|selectattr('is_missing')|list -%}
+{#-
+  `missing` includes the not-yet-released entries (they ARE missing from the
+  collection), so the sections that report them split them apart: a user looking
+  for something to download right now must not be pointed at an album that does
+  not exist yet.
+-#}
+{%- set upcoming = items|selectattr('is_upcoming')|list -%}
+{%- set missing_only = missing|rejectattr('is_upcoming')|list -%}
 {#
   A category with NOTHING owned is COLLAPSED by default so the page can be
   scrolled past without wading through empty sections.
@@ -166,7 +197,8 @@
     <button type="button" class="release-section-toggle" data-bs-toggle="collapse" data-bs-target="#{{ section_id }}-body" aria-expanded="{{ 'false' if auto_collapse else 'true' }}">
       <i class="bi bi-chevron-down section-chevron"></i> <i class="bi {{ icon }}"></i> {{ label }}
       <span class="badge bg-success">{{ library|length }}</span>
-      {% if missing %}<span class="badge bg-warning text-dark">{{ missing|length }} missing</span>{% endif %}
+      {% if missing_only %}<span class="badge bg-warning text-dark">{{ missing_only|length }} missing</span>{% endif %}
+      {% if upcoming %}<span class="badge bg-secondary">{{ upcoming|length }} upcoming</span>{% endif %}
       {% if auto_collapse %}<span class="release-collapsed-hint"><i class="bi bi-chevron-expand"></i> none in your library — click to show {{ items|length }}</span>{% endif %}
     </button>
     <div class="release-section-controls">
@@ -176,7 +208,9 @@
         <input type="radio" class="btn-check release-filter-radio" name="filter-{{ section_id }}" id="filter-{{ section_id }}-library" value="library" autocomplete="off">
         <label class="btn btn-outline-secondary" for="filter-{{ section_id }}-library">Library ({{ library|length }})</label>
         <input type="radio" class="btn-check release-filter-radio" name="filter-{{ section_id }}" id="filter-{{ section_id }}-missing" value="missing" autocomplete="off">
-        <label class="btn btn-outline-secondary" for="filter-{{ section_id }}-missing">Missing ({{ missing|length }})</label>
+        <label class="btn btn-outline-secondary" for="filter-{{ section_id }}-missing">Missing ({{ missing_only|length }})</label>
+        <input type="radio" class="btn-check release-filter-radio" name="filter-{{ section_id }}" id="filter-{{ section_id }}-upcoming" value="upcoming" autocomplete="off">
+        <label class="btn btn-outline-secondary" for="filter-{{ section_id }}-upcoming">Upcoming ({{ upcoming|length }})</label>
       </div>
       <button type="button" class="btn btn-sm btn-outline-info release-search-all-btn" data-artist="{{ artist_name|e }}" title="Search MusicBrainz for unreleased material"><i class="bi bi-cloud-download"></i> <span class="d-none d-md-inline">Search All</span></button>
       <button type="button" class="btn btn-sm btn-outline-warning release-check-missing-btn" data-artist="{{ artist_name|e }}" data-category="{{ key }}" title="Check for missing releases"><i class="bi bi-flag"></i> <span class="d-none d-md-inline">Check Missing</span></button>
