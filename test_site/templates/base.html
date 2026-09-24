@@ -403,6 +403,13 @@
   <script src="{{ versioned_static('js/ui/player.js') }}"></script>
   <script src="{{ versioned_static('js/main.js') }}"></script>
   <script src="{{ versioned_static('js/ui/search-flyout.js') }}"></script>
+  {#
+    album-soulseek.js defines global.openSlskdSearchAlbum for the album page's
+    Actions dropdown. It is global rather than page-scoped because
+    Pages/album_detail.html is served by BOTH the live-tree route and the
+    preview one.
+  #}
+  <script src="{{ versioned_static('js/services/album-soulseek.js') }}"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

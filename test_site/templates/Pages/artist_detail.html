@@ -359,6 +359,14 @@
 <script src="{{ versioned_static('js/services/genres.js') }}"></script>
 <script src="{{ versioned_static('js/pages/artist.js') }}"></script>
 <script src="{{ versioned_static('js/pages/artist-releases.js') }}"></script>
+{#
+  pages/soulseek-search.js: publishes global.performSlskdSearch.
+  components/modals/_artist_modals.html renders the download modal's
+  Soulseek tab with a Search button calling performSlskdSearch() — it reads
+  #slskdSearchInput / #slskdResults, exactly the ids this controller drives.
+  Without this script the click threw ReferenceError and did nothing.
+#}
+<script src="{{ versioned_static('js/pages/soulseek-search.js') }}"></script>
 {# Per-album count of MusicBrainz recommendations a scan stashed for review. #}
 <script src="{{ versioned_static('js/pages/metadata-recommendations.js') }}"></script>
 {% endblock %}

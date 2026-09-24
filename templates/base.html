@@ -318,6 +318,13 @@
   <script src="{{ versioned_static('js/artist_names.js') }}"></script>
   <script src="{{ versioned_static('js/main.js') }}"></script>
   <script src="{{ versioned_static('js/unified_search.js') }}"></script>
+  {#
+    album-soulseek.js defines global.openSlskdSearchAlbum, which
+    pages/album_detail.html's Actions dropdown calls inline. The function was
+    never carried out of old_system, so that menu item was inert. Loaded
+    globally because the album page is rendered in this tree.
+  #}
+  <script src="{{ versioned_static('js/album-soulseek.js') }}"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

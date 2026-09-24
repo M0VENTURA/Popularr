@@ -1339,6 +1339,14 @@
 #}
 <script src="{{ versioned_static('js/services/musicbrainz-queue.js') }}"></script>
 <script src="{{ versioned_static('js/services/slskd.js') }}"></script>
+{#
+  pages/soulseek-search.js: this page's own download modal
+  (#downloadModal → Soulseek tab) has a Search button calling
+  performSlskdSearch(). That function lives ONLY here — neither slskd.js nor
+  artist.js defines it — so without this script the button threw
+  ReferenceError and did nothing.
+#}
+<script src="{{ versioned_static('js/pages/soulseek-search.js') }}"></script>
 <script src="{{ versioned_static('js/services/genres.js') }}"></script>
 <script src="{{ versioned_static('js/pages/artist.js') }}"></script>
 
