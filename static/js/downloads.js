@@ -1728,6 +1728,9 @@ function renderSoulseekManualSearchResults(results) {
   const container = document.getElementById('soulseekManualResults');
   if (!container) return;
 
+  // Captured before filtering so the footer can say how many were dropped.
+  const total = (results || []).length;
+
   const validResults = (results || []).filter(row => {
     const slots = row.freeUploadSlots !== undefined ? row.freeUploadSlots : 1;
     return slots > 0;
@@ -1787,6 +1790,9 @@ function renderSoulseekManualSearchResults(results) {
         </thead>
         <tbody>${rows}</tbody>
       </table>
+    </div>
+    <div class="text-muted small mt-2">
+      Found ${validResults.length} available result(s) (of ${total} returned).
     </div>
   `;
 }
@@ -1858,6 +1864,121 @@ document.addEventListener('DOMContentLoaded', function () {
     if (searchParam) openSoulseekManualSearchModal(searchParam);
   } catch (_) {}
 });
+
+// ============================================================================
+// SOULSEEK RESULT ACTIONS
+// ============================================================================
+//
+// ⚠️ BOTH of these were referenced by inline `onclick` handlers rendered by this
+// file and defined NOWHERE in it — so on every page that loads downloads.js the
+// buttons threw `ReferenceError` and were inert:
+//
+//   downloadSlskdFile  ← the "Download" button on each search-tab result
+//                        (pollSlskdSearchResults, ~line 1421)
+//   showSlskdResults   ← the "Select" button on an awaiting-selection
+//                        MusicBrainz download (refreshMbDownloads, ~line 1291)
+//
+// `downloadSlskdFile` DID exist in static/js/artist_detail.js, which is why a
+// repo-wide grep looked reassuring — but the downloads pages never load that
+// file (see templates/pages/downloads/*.html), so the function was absent
+// exactly where its button renders. That is the "defined, just not loaded HERE"
+// failure mode; a definition elsewhere is not a definition here.
+
+/**
+ * Download ONE Soulseek search result.
+ *
+ * Posts the SINGLE payload shape to /api/slskd/download, which accepts both
+ * `{username, filename, size}` and the batch `{files: [...]}` form.
+ *
+ * ⚠️ The artist_detail.js copy posted to `/api/slskd/download-single`, a route
+ * that DOES NOT EXIST in this codebase — so that copy could only ever produce
+ * "Network error" / a 404. Do not copy it back.
+ *
+ * @param {string} username
+ * @param {string} filename
+ * @param {number|string} size bytes
+ * @param {HTMLElement|null} buttonEl optional, for inline busy feedback
+ */
+async function downloadSlskdFile(username, filename, size, buttonEl = null) {
+  if (!username || !filename) {
+    alert('Missing Soulseek result details.');
+    return;
+  }
+
+  const btn = buttonEl && buttonEl.tagName ? buttonEl : null;
+  const origHtml = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  }
+
+  try {
+    const data = await fetchJsonOrThrow('/api/slskd/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username,
+        filename,
+        size: Number.isFinite(Number(size)) ? Math.round(Number(size)) : 0,
+      }),
+    });
+    // ⚠️ A failure is NOT always an `error` key — the route signals some
+    // rejections with `success: false`. Checking only `data.error` reported
+    // success for those.
+    if (data && (data.success === false || data.error)) {
+      throw new Error((data && data.error) || 'Failed to enqueue Soulseek download');
+    }
+    alert('✅ Download started! Check the Downloads page for progress.');
+    if (typeof loadQueueStatus === 'function') {
+      try { await loadQueueStatus(); } catch (_) { /* non-fatal */ }
+    }
+  } catch (error) {
+    console.error('Soulseek download failed:', error);
+    alert('❌ Could not start download: ' + error.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origHtml;
+    }
+  }
+}
+
+/**
+ * Show the candidate files for a MusicBrainz download awaiting selection.
+ *
+ * ⚠️ DELIBERATELY NOT IMPLEMENTED HERE.
+ *
+ * The button that calls this (`refreshMbDownloads`, status
+ * `awaiting_selection`) renders on the MusicBrainz-downloads table, but there is
+ * NO endpoint that serves the stored candidate files for such a download:
+ * `GET /api/musicbrainz/download/<id>` is DELETE-only (405), and the only
+ * results route is `/api/slskd/search/<search_id>`, which needs a LIVE search
+ * id that an awaiting-selection row does not carry.
+ *
+ * Inventing a fetch here would mean guessing at a data source and shipping a
+ * button that looks wired but cannot work — the exact false-success class this
+ * file has already been burned by. Left as a loud, explicit failure so the next
+ * person sees the gap instead of a silent no-op, and so the console names the
+ * missing endpoint rather than reporting nothing at all.
+ */
+function showSlskdResults(downloadId) {
+  console.error(
+    'showSlskdResults: no endpoint serves stored Soulseek candidates for a ' +
+    'MusicBrainz download (id=' + downloadId + '). This button needs a ' +
+    'server-side decision before it can be wired.'
+  );
+  alert(
+    'Selecting a file for this download is not wired up yet.\n\n' +
+    'Use the search icon on the queue row to pick a file manually instead.'
+  );
+}
+
+// Both are called from inline handlers, which resolve names on `window`. These
+// are top-level declarations in a classic (non-module) script, so they are
+// already global — assigned explicitly anyway so an ordered loader or a future
+// bundler cannot quietly break the inline handlers.
+window.downloadSlskdFile = downloadSlskdFile;
+window.showSlskdResults = showSlskdResults;
 
 // ============================================================================
 // QUEUE MANAGEMENT FUNCTIONS

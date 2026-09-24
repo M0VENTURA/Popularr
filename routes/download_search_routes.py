@@ -206,6 +206,25 @@ def slskd_search_results(search_id: str) -> Any:
         results = []
         for resp in responses or []:
             username = getattr(resp, "username", "") or ""
+            # ⚠️ THE FREE-SLOT FIELD WAS BEING DISCARDED HERE.
+            #
+            # `slskd_service.get_search_results` reads `hasFreeUploadSlot` off
+            # the slskd response into `SearchResponse.has_free_upload_slot`, but
+            # this loop never copied it into the payload — so every consumer that
+            # filters on it saw `undefined`.
+            #
+            # Two client-side filters depend on it and BOTH silently degraded to
+            # "keep everything" (they default a missing value to 1):
+            #   downloads.js renderSoulseekManualSearchResults  (the manual modal)
+            #   downloads.js renderSlskdResults                 (the search tab)
+            # The search tab even printed "filtered zero slots" while filtering
+            # nothing at all. The whole point of the filter — do not offer a peer
+            # that cannot take another upload — was never in effect.
+            #
+            # Sent under BOTH spellings: `freeUploadSlots` is what the existing
+            # clients read, `has_free_upload_slot` matches the service/dataclass
+            # naming so a future consumer does not need a third name for one fact.
+            free_slot = bool(getattr(resp, "has_free_upload_slot", True))
             for file in getattr(resp, "files", []) or []:
                 results.append({
                     "username": username,
@@ -216,6 +235,10 @@ def slskd_search_results(search_id: str) -> Any:
                     "sample_rate": getattr(file, "sample_rate", 0) or 0,
                     "length": getattr(file, "length", 0) or 0,
                     "duration": getattr(file, "duration_formatted", "0:00") or "0:00",
+                    "freeUploadSlots": 1 if free_slot else 0,
+                    "has_free_upload_slot": free_slot,
+                    "upload_speed": getattr(resp, "upload_speed", None),
+                    "queue_length": getattr(resp, "queue_length", None),
                 })
 
         count = len(results or [])
