@@ -50,6 +50,12 @@ def clean_title(
     if not value:
         return ""
 
+    # Make an unbracketed trailing edition marker equivalent to its bracketed
+    # form BEFORE ``remove_brackets`` runs. Without this the marker is invisible
+    # to the strip and survives into the key: "X (Version)" keyed as "x" while
+    # "X Version" keyed as "x version", so one album produced two identities.
+    value = bracket_trailing_edition_marker(value)
+
     if remove_brackets:
         value = strip_parentheses(value, full=True)
 
@@ -237,6 +243,155 @@ def strip_remaster_suffix(value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# UNBRACKETED trailing edition markers
+#
+# Every rule below requires the marker to be BRACKETED, and a large class of
+# tag source writes it WITHOUT brackets:
+#
+#     "The Mirror's Truth Version"
+#     "American Idiot Deluxe Edition"
+#
+# That is not cosmetic damage, because it breaks the two decisions that stop an
+# album from duplicating:
+#
+#   * the LOOKUP KEY. normalize_title_for_lookup DROPS a bracketed annotation
+#     ("X (Version)" -> "x") but KEEPS an unbracketed one ("X Version" ->
+#     "x version"), so the SAME album under the two spellings yields two
+#     DIFFERENT keys. The release then reads as missing while also being owned,
+#     and every import writes another copy — the reported "overwriting as a new
+#     version on every import".
+#   * the REPAIR. repair_annotations / strip_album_edition_marker are no-ops on
+#     the unbracketed form, so a metadata update never corrects the stored name
+#     — the reported "isn't being corrected during a metadata update".
+#
+# The fix is not a second parallel rule set (whose vocabulary would drift): an
+# unbracketed trailing marker is REWRITTEN into its bracketed form first, after
+# which every rule already here applies unchanged. One transformation, one
+# vocabulary.
+# ---------------------------------------------------------------------------
+
+#: Single-word edition markers, tokenised from the keyword list above (which
+#: also carries the multi-word "mastered for"). Used ONLY to decide whether an
+#: unbracketed trailing run is a marker.
+_TRAILING_MARKER_TOKENS = frozenset({
+    "edition", "deluxe", "version", "remaster", "remastered", "anniversary",
+    "expanded", "extended", "limited", "special", "bonus", "collector",
+    "collectors", "ultimate", "standard", "digital", "premium", "reissue",
+    "epic", "clean", "explicit", "tour", "press", "production", "mastered",
+    "itunes", "apple", "masters", "japanese", "uk", "us", "european",
+    "super", "disc", "tracks", "track",
+})
+
+#: Glue allowed inside a marker run ("Collector's Edition", "20th Anniversary
+#: Deluxe Edition", "Remastered 2016"). A run made ONLY of glue carries no
+#: marker and is deliberately left alone — a marker keyword must ALSO be
+#: present, which is what stops a real title ending in "… of" being mangled.
+_TRAILING_MARKER_GLUE = frozenset({
+    "the", "of", "and", "for", "no", "s",
+})
+
+#: The SAME form words the bracketed rule's leading lookahead excludes. A run
+#: naming a FORM identifies a different RECORDING, not a different pressing of
+#: the same one, so "X Live Version" must survive exactly as
+#: "X (Live Version)" already does.
+_FORM_TOKENS = frozenset({
+    "live", "remix", "acoustic", "unplugged", "instrumental", "demo",
+    "karaoke",
+})
+
+
+def _split_trailing_edition_marker(value: str) -> tuple[str, str]:
+    """Split ``"X Deluxe Edition"`` into ``("X", "Deluxe Edition")``.
+
+    Returns ``(value, "")`` when the tail carries no marker, so callers treat
+    "nothing to do" and "no match" identically and can never blank a name.
+
+    The run is found by walking BACKWARDS from the last word while each word is
+    a marker token, glue, or a number. That is what keeps the sweep from
+    swallowing real title words: in "The Mirror's Truth Version" only
+    ``Version`` qualifies, because ``Truth`` is not a marker token.
+
+    ⚠️ ALREADY-BRACKETED input is returned untouched. That is not a shortcut:
+    every other rule in this module is balanced-group anchored and already
+    handles "(Version)", so re-bracketing it here would produce the malformed
+    "((Version))" — the double wrapping an earlier version of this function
+    actually emitted.
+    """
+    text = str(value or "")
+    if not text.strip():
+        return text, ""
+
+    # Let the bracket-anchored rules own a bracketed tail.
+    if text.rstrip().endswith((")", "]")):
+        return text, ""
+
+    tokens = text.split()
+    index = len(tokens)
+    while index > 0:
+        probe = tokens[index - 1].strip("'\u2019-").casefold()
+        collapsed = re.sub(r"[^a-z0-9]+", "", probe)
+        if not collapsed:
+            # A bare punctuation token ("-") is not part of a marker.
+            break
+        if (
+            collapsed.isdigit()
+            or collapsed in _TRAILING_MARKER_TOKENS
+            or collapsed in _TRAILING_MARKER_GLUE
+            # Form words are consumed by the sweep so the run can be RECOGNISED
+            # and then refused below. Stopping in front of them instead would
+            # split "X Live Version" into head "X Live" + marker "Version",
+            # rewriting it to "X Live (Version)" — which the bracketed
+            # stripper then removes, silently deleting the form. The bracketed
+            # equivalent "X (Live Version)" is preserved, and the two spellings
+            # must behave identically.
+            or collapsed in _FORM_TOKENS
+        ):
+            index -= 1
+            continue
+        break
+
+    marker = " ".join(tokens[index:])
+    if not marker:
+        return text, ""
+
+    marker_tokens = {
+        re.sub(r"[^a-z0-9]+", "", token.casefold())
+        for token in marker.split()
+    }
+    # A form names a different RECORDING — never strip it, mirroring the
+    # bracketed rule's leading lookahead.
+    if marker_tokens & _FORM_TOKENS:
+        return text, ""
+    # Require a genuine marker word; a run of only glue/digits is not one.
+    if not (marker_tokens & _TRAILING_MARKER_TOKENS):
+        return text, ""
+
+    head = " ".join(tokens[:index]).strip()
+    if not head:
+        # Everything was a marker ("Version"): keep the original rather than
+        # handing back an empty name.
+        return text, ""
+    return head, marker
+
+
+def bracket_trailing_edition_marker(value: str) -> str:
+    """Rewrite an unbracketed trailing edition marker into its bracketed form.
+
+        "The Mirror's Truth Version"     -> "The Mirror's Truth (Version)"
+        "American Idiot Deluxe Edition"  -> "American Idiot (Deluxe Edition)"
+        "Helden X Hymnen Live Version"   -> unchanged (form marker)
+        "The Wall"                       -> unchanged
+
+    Idempotent, and a no-op whenever there is nothing to normalise — so it is
+    safe to run ahead of every rule in this module.
+    """
+    head, marker = _split_trailing_edition_marker(value)
+    if not marker:
+        return value
+    return f"{head} ({marker})"
+
+
+# ---------------------------------------------------------------------------
 # Edition annotations
 #
 # ONE keyword list drives every edition-annotation decision in this module.
@@ -377,10 +532,17 @@ def annotation_keys(name: str) -> list[str]:
 
 
 def has_edition_annotation(name: str) -> bool:
-    """True when ``name`` carries an edition/version style annotation."""
+    """True when ``name`` carries an edition/version style annotation.
+
+    An UNBRACKETED trailing marker counts too ("X Version"): the bracketing
+    step makes it visible to ``annotation_keys``, which reads bracketed groups
+    only. Without it this returned False for the unbracketed spelling, so every
+    caller that keys off it treated a versioned album as plain.
+    """
+    bracketed = bracket_trailing_edition_marker(str(name or ""))
     return any(
         any(keyword in key for keyword in _EDITION_ANNOTATION_KEYWORDS)
-        for key in annotation_keys(name)
+        for key in annotation_keys(bracketed)
     )
 
 
@@ -462,8 +624,14 @@ def repair_annotations(name: str) -> str:
 
     This is the function to use when repairing a STORED name. It preserves
     one copy of every distinct annotation, so editions are never lost.
+
+    An unbracketed trailing marker is first normalised into its bracketed form,
+    so a name like "X Version" reaches the dedupe/form-collapse rules at all
+    and cannot keep growing a fresh copy on each metadata pass.
     """
-    return collapse_redundant_form_labels(dedupe_annotations(name))
+    return collapse_redundant_form_labels(
+        dedupe_annotations(bracket_trailing_edition_marker(str(name or "")))
+    )
 
 
 def strip_album_edition_marker(value: str) -> str:
@@ -502,6 +670,12 @@ def strip_album_edition_marker(value: str) -> str:
     # balanced-group rule below would skip — so the annotation would survive
     # into the lookup key. Repair it first.
     original = repair_malformed_annotations(original)
+
+    # An UNBRACKETED trailing marker ("X Version") is rewritten into its
+    # bracketed form so the rules below can see it at all; every one of them is
+    # balanced-group anchored, which is why the unbracketed spelling survived
+    # every previous attempt at stripping it.
+    original = bracket_trailing_edition_marker(original)
     cleaned = original
 
     # Set a trailing year aside so the $ -anchored marker rule still applies.
