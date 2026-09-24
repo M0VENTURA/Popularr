@@ -434,16 +434,29 @@ def _module_body(path: Path) -> str:
 
 
 @pytest.mark.parametrize(
-    "live_rel,rebuilt_rel",
+    "live_rel,rebuilt_rel,canary",
     [
         # The two trees lay static/ out differently: the live tree is FLAT
         # (static/js/*.js) while the rebuilt tree is FOLDERED
         # (static/js/pages/*.js). The PAIR is what must stay equivalent, not the
         # relative path.
-        ("js/artist-releases.js", "js/pages/artist-releases.js"),
+        (
+            "js/artist-releases.js",
+            "js/pages/artist-releases.js",
+            # Each module publishes a different global, so the "was this file
+            # gutted?" canary has to be per-module. A single shared canary would
+            # falsely fail every other module.
+            "global.artistReleases",
+        ),
+        # busy-popup is loaded by BOTH trees' base.html, so a divergence would
+        # make the queue/lookup progress popup behave differently depending
+        # only on the cutover flag.
+        ("js/busy-popup.js", "js/ui/busy-popup.js", "global.busyPopup"),
     ],
 )
-def test_shared_module_copies_do_not_drift(live_rel: str, rebuilt_rel: str) -> None:
+def test_shared_module_copies_do_not_drift(
+    live_rel: str, rebuilt_rel: str, canary: str
+) -> None:
     """A module served by BOTH trees must be one implementation.
 
     ``artist-releases.js`` touches no tree-specific global — it feature-detects
@@ -458,8 +471,8 @@ def test_shared_module_copies_do_not_drift(live_rel: str, rebuilt_rel: str) -> N
     assert rebuilt.is_file(), f"missing {rebuilt.relative_to(REPO_ROOT)}"
 
     live_code = _module_body(live)
-    assert "global.artistReleases" in live_code, (
-        f"{live.relative_to(REPO_ROOT)} does not publish `artistReleases` — "
+    assert canary in live_code, (
+        f"{live.relative_to(REPO_ROOT)} does not publish `{canary}` — "
         "either the header-stripping above is wrong or the module was gutted"
     )
     assert live_code == _module_body(rebuilt), (

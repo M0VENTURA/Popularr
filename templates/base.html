@@ -309,6 +309,17 @@
   <script src="{{ versioned_static('js/player.js') }}"></script>
   <script src="{{ versioned_static('js/musicbrainz-folder-groups.js') }}"></script>
   {#
+    Compact centred "working…" popup. Loaded globally (not per page) because
+    queueing and MusicBrainz lookups happen from several pages, and it must be
+    available wherever those buttons live. Distinct from the inline button
+    spinners: this shows a popup for actions that have no button of their own
+    (the album page's MBID lookup) or whose window spans several steps.
+
+    The rebuilt tree has its own copy at js/ui/busy-popup.js and the two bodies
+    must not drift — see test_artist_page_contract.test_shared_module_copies_do_not_drift.
+  #}
+  <script src="{{ versioned_static('js/busy-popup.js') }}"></script>
+  {#
     Artist filing (global.artistNames). Loaded here because the unified search
     below and several page scripts use it, and the server files the /artists
     sections by the same rules — the two must agree.

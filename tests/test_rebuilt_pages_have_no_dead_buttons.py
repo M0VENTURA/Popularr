@@ -27,11 +27,12 @@ in three distinct shapes — worth remembering, because the fix differs:
 
   (c) NO DEFINITION ANYWHERE — an obsolete button.
       ``openSlskdSearchAlbum``, ``openAlbumArtModal``, ``alignTracklist``,
-      ``openMbReleaseModal``, ``downloadMissingTracks``, ``renameAlbumFiles``,
-      ``autoLinkAllMbids``. Two of these call functions that exist ONLY in
-      ``old_system/`` (frozen reference, never to be migrated).
+        ``openMbReleaseModal``, ``downloadMissingTracks``, ``renameAlbumFiles``.
+        Two of these call functions that exist ONLY in ``old_system/`` (frozen
+        reference, never to be migrated).
 
-── HOW THE RESOLUTION WORKS ────────────────────────────────────────────────
+        (``autoLinkAllMbids`` was in this group and is now IMPLEMENTED — see the
+        note at its old register position.)
 ``versioned_static()`` under test-site mode serves the rebuilt tree, and the
 static view FALLS BACK to the live tree for anything the rebuilt tree lacks
 (``js/downloads.js`` still resolves to ``static/js/downloads.js``). So a script
@@ -249,25 +250,27 @@ def _page_files() -> list[Path]:
 # implementation sitting unused (see the module docstring).
 _OBSOLETE_BUTTONS: dict[tuple[str, str], str] = {
     # ── name exists nowhere in either tree ──────────────────────────────────
-    ("album_detail.html", "openAlbumArtModal"): (
-        "Album-art editing was never ported. `openAlbumArtModal` is defined "
-        "only in old_system/templates/album.html. Remove the button or port "
-        "the modal."
-    ),
-    ("album_detail.html", "downloadMissingTracks"): (
-        "Not defined anywhere; the missing-track download flow is not in the "
-        "rebuilt tree."
-    ),
-    ("album_detail.html", "renameAlbumFiles"): (
-        "Not defined anywhere; file renaming is handled by the organize flow."
-    ),
-    ("album_detail.html", "autoLinkAllMbids"): (
-        "Not defined anywhere. The restored twin of this button is "
-        "`downloadMissingTracks` on the artist page, not this one."
-    ),
-    ("album_detail.html", "alignTracklist"): (
-        "Not defined anywhere; tracklist alignment was not ported."
-    ),
+    # ⚠️ FIVE ALBUM HANDLERS USED TO BE REGISTERED HERE and have been REMOVED,
+    # because all five are now implemented in BOTH trees:
+    #     openAlbumArtModal     — search/paste/upload dialog; the three backend
+    #                             endpoints (search-art, set-art, upload-art)
+    #                             already existed and were unreachable from the
+    #                             album page. Also called by the pencil over the
+    #                             album art, so that was dead too.
+    #     downloadMissingTracks — clicks the existing `.mb-queue-missing` rows,
+    #                             whose payloads live in closures and so cannot
+    #                             be read back out of the DOM.
+    #     renameAlbumFiles      — POST /api/album/{artist}/{album}/rename-files
+    #                             already existed and was unreachable.
+    #     alignTracklist        — renumbers via the same per-track
+    #                             /api/v1/tracks/<id>/apply-mb-field endpoint the
+    #                             inline Apply button uses. NOTE: track numbers
+    #                             on this page are DISPLAY-ONLY cells, so there
+    #                             is nothing to write in the DOM.
+    #     autoLinkAllMbids      — POST /api/musicbrainz/link-album-mbids.
+    # test_the_register_has_no_stale_entries is what forces each deletion, and
+    # tests/test_busy_popup.py::test_the_five_handlers_are_not_in_the_obsolete_register
+    # keeps this register and that suite from disagreeing about what is dead.
     # _organize_group.html is shared by album_detail.html and the queue page.
     # Its controls live in pages/download-queue.js, so the ALBUM page cannot
     # reach them (and the queue page can, because it loads that script).

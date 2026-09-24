@@ -397,6 +397,15 @@
   <script src="{{ versioned_static('js/ui/modal.js') }}"></script>
   <script src="{{ versioned_static('js/ui/confirm.js') }}"></script>
   <script src="{{ versioned_static('js/ui/button-state.js') }}"></script>
+  {#
+    Compact centred "working…" popup. Loaded globally (not per page) because
+    queueing and MusicBrainz lookups happen from several pages, and it must be
+    available wherever those buttons live. Distinct from button-state.js: that
+    spins the clicked button, this shows a popup for actions that have no
+    button of their own (the album page's MBID lookup) or whose window spans
+    several steps.
+  #}
+  <script src="{{ versioned_static('js/ui/busy-popup.js') }}"></script>
 
   <script src="{{ versioned_static('js/services/musicbrainz-picker.js') }}"></script>
 

@@ -315,6 +315,17 @@ document.addEventListener('change', function (e) {
 // `performMbSearch()` (which resolves them with getElementById, i.e. the
 // FIRST match) wrote its results into base.html's hidden global modal while
 // the visible one sat on its placeholder.
+
+/** In-flight lookup popup. Module-scoped: opened by the picker, released by
+ *  the match callback, which is a separate function. */
+let _albumLookupBusy = null;
+
+/** Release the lookup popup. Safe to call repeatedly / with no popup. */
+function _endAlbumLookupBusy() {
+    if (window.busyPopup) window.busyPopup.hide(_albumLookupBusy);
+    _albumLookupBusy = null;
+}
+
 window.openAlbumLookupModal = function () {
     const artist = window._pageData ? window._pageData.artistName : '';
     const album = window._pageData ? window._pageData.albumName : '';
@@ -325,8 +336,27 @@ window.openAlbumLookupModal = function () {
         return;
     }
 
+    // The lookup is a network round trip that continues after the user picks
+    // a release (applyAlbumMbid resolves the edition), so the popup is opened
+    // here and released in applyAlbumMbid rather than wrapped. "Looking up
+    // a match" was previously entirely silent.
+    _albumLookupBusy = window.busyPopup
+        ? window.busyPopup.show('Looking up MusicBrainz match…')
+        : null;
+
     window.openGlobalMbSearch(artist, album, function (selected) {
-        if (selected && selected.id) window.applyAlbumMbid(selected.id);
+        if (selected && selected.id) {
+            // Release even if the apply throws, so the popup cannot strand.
+            Promise.resolve()
+                .then(() => window.applyAlbumMbid(selected.id))
+                .catch(function (error) {
+                    console.error('Applying the MusicBrainz match failed', error);
+                    alert('Could not apply the MusicBrainz match.');
+                })
+                .finally(_endAlbumLookupBusy);
+        } else {
+            _endAlbumLookupBusy();
+        }
     });
 };
 
@@ -423,6 +453,459 @@ function _getLinkedReleaseMbid() {
         ''
     );
 }
+
+/**
+ * Refresh the album page after a mutation.
+ *
+ * ⚠️ THIS FUNCTION WAS REFERENCED BUT NEVER DEFINED, in either tree. Callers
+ * guarded with `typeof window.refreshAlbumPage === 'function'`, which turned
+ * the missing definition into a SILENT no-op: after changing the album art or
+ * auto-linking MBIDs the page kept showing the old state and reported no error.
+ *
+ * The full reload is deliberate. Applying a new cover rewrites the art file and
+ * `/art` is streamed from a BytesIO with no ETag/Cache-Control, so reloading
+ * reliably re-fetches it rather than needing a `?t=` cache-buster. And
+ * auto-linking can change several things at once (per-track MB status, the
+ * comparison banner), so patching one element's `src` would leave the rest
+ * stale.
+ */
+window.refreshAlbumPage = function () {
+    window.location.reload();
+};
+
+/**
+ * Auto-link Recording MBIDs for this album's unlinked tracks.
+ *
+ * ⚠️ THIS FUNCTION WAS MISSING ENTIRELY. Both the Actions dropdown item
+ * ("Auto-Link MBIDs") and the inline "Link" button already called
+ * `autoLinkAllMbids()` — four call sites across the two trees — but nothing
+ * defined it, so every click threw `ReferenceError: autoLinkAllMbids is not
+ * defined`. A template has no compiler, so the broken button shipped.
+ *
+ * The endpoint it should have called already existed and was reachable:
+ * POST /api/musicbrainz/link-album-mbids, which matches the local (unlinked)
+ * tracklist against an MB release's recordings and writes
+ * musicbrainz_trackid + recording_mbid onto each matched row.
+ *
+ * Needs a release MBID to fetch a tracklist from. `_getLinkedReleaseMbid()`
+ * returns the release-group id when the concrete release id is empty, and the
+ * endpoint only acts on the latter (it validates a UUID and fetches the
+ * release) — so a group-only album gets the endpoint's own explanatory
+ * message rather than a silent no-op.
+ */
+window.autoLinkAllMbids = function () {
+    const artist = window._pageData ? window._pageData.artistName : '';
+    const album = window._pageData ? window._pageData.albumName : '';
+    const releaseId = _getLinkedReleaseMbid();
+
+    const run = function () {
+        return fetch('/api/musicbrainz/link-album-mbids', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ artist: artist, album: album, release_id: releaseId })
+        })
+            .then(r => r.json())
+            .then(data => {
+                if (!data || data.success !== true) {
+                    alert('Auto-linking MBIDs failed: ' + ((data && data.error) || 'Unknown error'));
+                    return;
+                }
+                // `linked: 0` with a message is the normal "nothing left to do"
+                // case, so the server's own sentence is the best thing to show.
+                alert(data.message || ('Linked ' + (data.linked || 0) + ' track(s).'));
+                if (typeof window.refreshAlbumPage === 'function') window.refreshAlbumPage();
+            })
+            .catch(err => alert('Error: ' + err.message));
+    };
+
+    if (window.busyPopup) {
+        // showAndRun releases the popup in a finally, so a throw cannot strand
+        // it, and its own rejection is already surfaced by the catch above.
+        return window.busyPopup.showAndRun('Auto-linking MusicBrainz IDs…', run);
+    }
+    return run();
+};
+
+/**
+ * Download EVERY track this album is missing from the library.
+ *
+ * ⚠️ THIS FUNCTION WAS MISSING ENTIRELY — `onclick="downloadMissingTracks()"`
+ * on the Actions dropdown threw ReferenceError.
+ *
+ * The missing tracks are already rendered with their own handlers, and each
+ * carries its payload either in `data-*` attributes (live tree) or in a
+ * closure (rebuilt tree). A closure payload cannot be read back out of the
+ * DOM, so this clicks the same buttons the user would — one code path, so the
+ * MBID/duration/source handling is identical and cannot drift.
+ */
+
+//: Missing-track rows exist in BOTH trees but with different markup:
+//:   live    — `<button ... onclick="queueMissingTrack(this)">`, payload in data-*
+//:   rebuilt — `<button class="... mb-queue-missing">`, payload in a closure
+//: Matching either keeps this working in both trees with no feature flag.
+const MISSING_QUEUE_SELECTOR = '.mb-queue-missing, [onclick*="queueMissingTrack("]';
+
+//: A settled SUCCESS. button-state.js (rebuilt) sets this deliberately
+//: non-reverting class; the live tree sets the same class by hand.
+function _missingQueued(btn) { return btn.classList.contains('btn-success'); }
+
+//: Still in flight. `_popularrBusy` covers the rebuilt tree even if its
+//: handler has not yet disabled the button; `disabled` covers the live tree,
+//: whose handler disables up front and only re-enables on FAILURE.
+function _missingPending(btn) {
+    return Boolean(btn._popularrBusy) || (btn.disabled && !_missingQueued(btn));
+}
+window.downloadMissingTracks = function () {
+    const rows = Array.from(document.querySelectorAll(MISSING_QUEUE_SELECTOR));
+    const pending = rows.filter(function (b) { return !b.disabled && !_missingQueued(b); });
+
+    if (!pending.length) {
+        alert(rows.length
+            ? 'Every missing track has already been queued.'
+            : 'No missing tracks to queue — run "Compare with MusicBrainz" first.');
+        return;
+    }
+
+    if (!confirm('Add ' + pending.length + ' missing track(s) to the download queue?')) return;
+
+    const ordered = pending.slice();
+    const endBusy = window.busyPopup
+        ? window.busyPopup.show('Adding missing tracks to queue…')
+        : null;
+
+    // Click the same buttons the user would, so the payload/MBID/source
+    // handling is identical to the per-row path and cannot drift from it.
+    ordered.forEach(function (b) { b.click(); });
+
+    // Poll the buttons' own state rather than duplicating the queue logic.
+    // This deliberately only *stops* when nothing is pending, so an unsettled
+    // click is waited for rather than being misreported as a failure.
+    const deadline = Date.now() + 60000;
+    const tick = function () {
+        const stillPending = ordered.filter(_missingPending).length;
+        if (stillPending && Date.now() < deadline) { setTimeout(tick, 200); return; }
+
+        if (window.busyPopup) window.busyPopup.hide(endBusy);
+        const queued = ordered.filter(_missingQueued).length;
+        if (!queued) {
+            alert('No track could be queued — see the error shown on the row.');
+        } else if (stillPending) {
+            alert('Queued ' + queued + ' of ' + ordered.length + ' track(s). ' +
+                  stillPending + ' still processing — watch the Downloads page.');
+        } else {
+            alert('Queued ' + queued + ' of ' + ordered.length + ' track(s).');
+        }
+    };
+    setTimeout(tick, 200);
+};
+
+/**
+ * Rename this album's files to match the configured naming format.
+ *
+ * ⚠️ THIS FUNCTION WAS MISSING ENTIRELY — `renameAlbumFiles(...)` on the
+ * Actions dropdown threw ReferenceError. The endpoint already existed and was
+ * reachable: POST /api/album/{artist}/{album}/rename-files.
+ */
+window.renameAlbumFiles = function (artistArg, albumArg) {
+    const artist = artistArg || (window._pageData ? window._pageData.artistName : '');
+    const album = albumArg || (window._pageData ? window._pageData.albumName : '');
+    if (!artist || !album) {
+        alert('Cannot rename files without an artist and album.');
+        return;
+    }
+    if (!confirm('Rename every file in "' + album + '" to the configured naming format?\n\n' +
+                 'Tags are re-read from the files, and the file paths in the database are updated.')) return;
+
+    const run = function () {
+        return fetch('/api/album/' + encodeURIComponent(artist) + '/' + encodeURIComponent(album) + '/rename-files', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (!data || data.success !== true) {
+                    alert('Rename failed: ' + ((data && data.error) || 'Unknown error'));
+                    return;
+                }
+                alert(data.message || ('Renamed ' + (data.renamed_count || 0) + ' file(s).'));
+                if (Array.isArray(data.errors) && data.errors.length) {
+                    alert(data.errors.length + ' file(s) could not be renamed — see the logs.');
+                }
+            })
+            .catch(function (err) { alert('Error: ' + err.message); });
+    };
+
+    if (window.busyPopup) return window.busyPopup.showAndRun('Renaming album files…', run);
+    return run();
+};
+
+/**
+ * Open the "Change Album Art" dialog: search external sources, paste a URL, or
+ * upload a file.
+ *
+ * ⚠️ THIS FUNCTION WAS MISSING ENTIRELY — three call sites (the Actions
+ * dropdown item AND the pencil over the album art) threw ReferenceError. All
+ * three backend endpoints already existed:
+ *   GET  /api/album/search-art?artist=&album=&source=
+ *   POST /api/album/set-art      {artist, album, image_url}
+ *   POST /api/album/upload-art   multipart: artist, album, image
+ *
+ * NOTE: search-art returns base64 `data:` URLs in `images[].url` (it embeds the
+ * fetched bytes rather than exposing a remote link), and set-art accepts a
+ * `data:` URL — so a search hit can be applied directly with no re-download.
+ */
+window.openAlbumArtModal = function () {
+    const artist = window._pageData ? window._pageData.artistName : '';
+    const album = window._pageData ? window._pageData.albumName : '';
+    if (!artist || !album) {
+        alert('Cannot change album art without an artist and album.');
+        return;
+    }
+
+    const MODAL_ID = 'albumArtChangeModal';
+    const existing = document.getElementById(MODAL_ID);
+    if (existing) {
+        if (window.bootstrap) window.bootstrap.Modal.getOrCreateInstance(existing).show();
+        return;
+    }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'modal fade';
+    wrap.id = MODAL_ID;
+    wrap.tabIndex = -1;
+    wrap.innerHTML =
+        '<div class="modal-dialog modal-lg modal-dialog-centered">' +
+        '  <div class="modal-content bg-dark text-light border-secondary">' +
+        '    <div class="modal-header border-secondary">' +
+        '      <h5 class="modal-title"><i class="bi bi-image me-2"></i>Change Album Art</h5>' +
+        '      <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>' +
+        '    </div>' +
+        '    <div class="modal-body">' +
+        '      <div class="d-flex gap-2 mb-3">' +
+        '        <button type="button" class="btn btn-sm btn-outline-info" id="albumArtSearchBtn">' +
+        '          <i class="bi bi-search me-1"></i>Search external sources</button>' +
+        '        <select class="form-select form-select-sm bg-dark text-light border-secondary" id="albumArtSourceSel" style="max-width:12rem">' +
+        '          <option value="musicbrainz" selected>MusicBrainz</option>' +
+        '          <option value="discogs">Discogs</option>' +
+        '          <option value="itunes">iTunes</option>' +
+        '          <option value="audiodb">AudioDB</option>' +
+        '        </select>' +
+        '      </div>' +
+        '      <div id="albumArtStatus" class="small text-muted mb-2"></div>' +
+        '      <div id="albumArtResults" class="row g-2 mb-3"></div>' +
+        '      <hr class="border-secondary">' +
+        '      <label for="albumArtUrlInput" class="form-label small">…or paste an image URL</label>' +
+        '      <div class="input-group input-group-sm mb-3">' +
+        '        <input type="url" class="form-control bg-dark text-light border-secondary" id="albumArtUrlInput" placeholder="https://…/cover.jpg">' +
+        '        <button class="btn btn-outline-success" type="button" id="albumArtUrlApplyBtn">Apply</button>' +
+        '      </div>' +
+        '      <label for="albumArtFileInput" class="form-label small">…or upload a file</label>' +
+        '      <div class="input-group input-group-sm">' +
+        '        <input type="file" class="form-control bg-dark text-light border-secondary" id="albumArtFileInput" accept="image/*">' +
+        '        <button class="btn btn-outline-success" type="button" id="albumArtUploadBtn">Upload</button>' +
+        '      </div>' +
+        '    </div>' +
+        '    <div class="modal-footer border-secondary">' +
+        '      <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Close</button>' +
+        '    </div>' +
+        '  </div>' +
+        '</div>';
+    document.body.appendChild(wrap);
+
+    const modal = window.bootstrap ? new window.bootstrap.Modal(wrap) : null;
+    const statusEl = wrap.querySelector('#albumArtStatus');
+    const resultsEl = wrap.querySelector('#albumArtResults');
+
+    const setStatus = function (msg, isError) {
+        statusEl.textContent = msg || '';
+        statusEl.className = 'small mb-2 ' + (isError ? 'text-danger' : 'text-muted');
+    };
+
+    // Local busy affordance. This must NOT use `window.buttonState`: the live
+    // tree does not load button-state.js at all, so depending on it would make
+    // every one of these buttons silently skip its busy state there.
+    const withSpinner = function (btn, label, fn) {
+        if (!btn) return fn();
+        const originalHtml = btn.innerHTML;
+        const wasDisabled = btn.disabled;
+        btn.disabled = true;
+        if (label) {
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>' + label;
+        }
+        return Promise.resolve()
+            .then(fn)
+            .finally(function () { btn.disabled = wasDisabled; btn.innerHTML = originalHtml; });
+    };
+
+    const applyUrl = function (url, btn) {
+        if (!url) return;
+        const send = function () {
+            return fetch('/api/album/set-art', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ artist: artist, album: album, image_url: url })
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (!data || data.success !== true) {
+                        setStatus((data && data.error) || 'Could not set album art.', true);
+                        return;
+                    }
+                    if (modal) modal.hide();
+                    if (typeof window.refreshAlbumPage === 'function') window.refreshAlbumPage();
+                })
+                .catch(function (err) { setStatus('Error: ' + err.message, true); });
+        };
+        return withSpinner(btn, '', send);
+    };
+
+    wrap.querySelector('#albumArtSearchBtn').addEventListener('click', function () {
+        const source = wrap.querySelector('#albumArtSourceSel').value;
+        const btn = this;
+        const search = function () {
+            setStatus('Searching…');
+            resultsEl.innerHTML = '';
+            const url = '/api/album/search-art?artist=' + encodeURIComponent(artist) +
+                        '&album=' + encodeURIComponent(album) +
+                        '&source=' + encodeURIComponent(source);
+            return fetch(url)
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    const images = (data && data.images) || [];
+                    if (!images.length) {
+                        setStatus((data && data.error) || 'No images found on that source.', true);
+                        return;
+                    }
+                    setStatus(images.length + ' image(s) found — click one to apply.');
+                    resultsEl.innerHTML = images.map(function (img, i) {
+                        const u = (typeof img === 'string') ? img : (img.url || img.image_url || '');
+                        return '<div class="col-4 col-md-3">' +
+                            '<button type="button" class="btn p-0 border-0 w-100 album-art-pick" data-url="' +
+                            String(u).replace(/"/g, '&quot;') + '" title="Use this image">' +
+                            '<img src="' + u + '" class="img-fluid rounded" style="aspect-ratio:1;object-fit:cover" alt="Album art candidate ' + (i + 1) + '">' +
+                            '</button></div>';
+                    }).join('');
+                    resultsEl.querySelectorAll('.album-art-pick').forEach(function (b) {
+                        b.addEventListener('click', function () { applyUrl(b.dataset.url, b); });
+                    });
+                })
+                .catch(function (err) { setStatus('Error: ' + err.message, true); });
+        };
+        return withSpinner(btn, 'Searching…', search);
+    });
+
+    wrap.querySelector('#albumArtUrlApplyBtn').addEventListener('click', function () {
+        applyUrl(wrap.querySelector('#albumArtUrlInput').value.trim(), this);
+    });
+
+    wrap.querySelector('#albumArtUploadBtn').addEventListener('click', function () {
+        const input = wrap.querySelector('#albumArtFileInput');
+        const file = input.files && input.files[0];
+        if (!file) {
+            setStatus('Choose an image file first.', true);
+            return;
+        }
+        const btn = this;
+        const upload = function () {
+            setStatus('Uploading…');
+            const form = new FormData();
+            form.append('artist', artist);
+            form.append('album', album);
+            form.append('image', file);
+            // Multipart: a JSON helper would break this, so raw fetch.
+            return fetch('/api/album/upload-art', { method: 'POST', body: form })
+                .then(function (r) {
+                    return r.json().catch(function () { return {}; })
+                        .then(function (data) { return { ok: r.ok, status: r.status, data: data }; });
+                })
+                .then(function (out) {
+                    if (!out.ok || (out.data && out.data.success === false)) {
+                        setStatus((out.data && out.data.error) || ('Upload failed (HTTP ' + out.status + ').'), true);
+                        return;
+                    }
+                    if (modal) modal.hide();
+                    if (typeof window.refreshAlbumPage === 'function') window.refreshAlbumPage();
+                })
+                .catch(function (err) { setStatus('Error: ' + err.message, true); });
+        };
+        return withSpinner(btn, 'Uploading…', upload);
+    });
+
+    // Tear the markup down so a later open starts clean and ids cannot go stale.
+    wrap.addEventListener('hidden.bs.modal', function () { wrap.remove(); });
+
+    if (modal) modal.show();
+};
+
+/**
+ * Align the tracklist: renumber the album's tracks from the current
+ * MusicBrainz comparison.
+ *
+ * ⚠️ THIS FUNCTION WAS MISSING ENTIRELY — the "Align" button threw
+ * ReferenceError.
+ *
+ * There is no bulk "align" endpoint, and inventing one that rewrites files
+ * would bypass the existing per-track apply path. Instead this applies the
+ * track-number suggestion through the SAME endpoint the per-track Apply button
+ * uses (`/api/v1/tracks/<id>/apply-mb-field`), so the DB row and the file tags
+ * are updated identically and nothing new can drift.
+ *
+ * Track numbers are DISPLAY-ONLY cells on this page (not form inputs), so
+ * writing to the DOM would have done nothing — the POST is what renumbers.
+ */
+window.alignTracklist = function () {
+    const comparison = (window._mbComparisonData && window._mbComparisonData.comparison) || [];
+    if (!comparison.length) {
+        alert('Nothing to align to — run "Lookup MBID" or "Compare with MusicBrainz" first.');
+        return;
+    }
+
+    const needsNumber = comparison.filter(function (c) {
+        return c && c.matched && c.library_track_id && c.mb_track_number != null &&
+               String(c.library_track_number == null ? '' : c.library_track_number) !== String(c.mb_track_number);
+    });
+    if (!needsNumber.length) {
+        alert('Track numbers already match the MusicBrainz order.');
+        return;
+    }
+    if (!confirm('Renumber ' + needsNumber.length + ' track(s) to the MusicBrainz order?\n\n' +
+                 'This writes the number to the database and the audio file tags for each track.')) return;
+
+    const run = function () {
+        let applied = 0, failed = 0;
+        // Sequential: each call updates the DB and rewrites file tags.
+        const step = function (i) {
+            if (i >= needsNumber.length) return Promise.resolve();
+            const comp = needsNumber[i];
+            return fetch(_API_V1_PREFIX + '/tracks/' + encodeURIComponent(String(comp.library_track_id)) + '/apply-mb-field', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ field: 'track_number', value: String(comp.mb_track_number) })
+            })
+                .then(function (r) { return r.json().catch(function () { return {}; }); })
+                .then(function (data) {
+                    if (data && data.success) {
+                        applied += 1;
+                        document.querySelectorAll('.track-number-display-' + CSS.escape(String(comp.library_track_id)))
+                            .forEach(function (el) { el.textContent = comp.mb_track_number; });
+                    } else {
+                        failed += 1;
+                    }
+                })
+                .catch(function () { failed += 1; })
+                .then(function () { return step(i + 1); });
+        };
+        return step(0).then(function () {
+            alert(applied
+                ? ('Aligned ' + applied + ' track number(s)' + (failed ? '; ' + failed + ' failed.' : '.'))
+                : ('Could not align any tracks (' + failed + ' failed).'));
+        });
+    };
+
+    if (window.busyPopup) return window.busyPopup.showAndRun('Aligning tracklist…', run);
+    return run();
+};
 
 window._mbComparisonData = null;
 
@@ -856,6 +1339,15 @@ window.queueMissingTrack = function (btn) {
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
 
+    // Also raise the popup: the button spinner alone is easy to miss when the
+    // row is scrolled or the click came from a dense tracklist.
+    const queueBusy = window.busyPopup
+        ? window.busyPopup.show('Adding to download queue…')
+        : null;
+    const endQueueBusy = function () {
+        if (window.busyPopup) window.busyPopup.hide(queueBusy);
+    };
+
     fetch('/api/queue/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -892,7 +1384,8 @@ window.queueMissingTrack = function (btn) {
             btn.disabled = false;
             btn.innerHTML = origHtml;
             alert('Network error: ' + err.message);
-        });
+        })
+        .finally(endQueueBusy);
 };
 
 // Hides a missing-track row for this viewing session only. Unlike ignoring a

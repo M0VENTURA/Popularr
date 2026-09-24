@@ -701,6 +701,13 @@
       return;
     }
 
+    // The picker path above can run for many seconds before this point, and a
+    // button spinner alone is easy to miss on a dense result list. Raise the
+    // popup for the final POST and release it in .finally on every exit path.
+    var busied = window.busyPopup
+      ? window.busyPopup.show('Adding to download queue…')
+      : null;
+
     fetch('/api/musicbrainz/download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -721,6 +728,9 @@
       .catch(function (e) {
         settle(false);
         notifyError('Queue failed: ' + e.message);
+      })
+      .finally(function () {
+        if (window.busyPopup) window.busyPopup.hide(busied);
       });
   }
 

@@ -599,38 +599,49 @@
 
     const importGroup = `${artist} - ${album}`;
 
-    try {
-      const data = await global.api.postJson(QUEUE_BATCH_ENDPOINT, {
-        items: items,
-        import_group: importGroup,
-        import_type: 'album',
-      });
+    // Queueing a whole release is a batch POST plus a queue refresh, and the
+    // caller may have come from a dropdown item or a search result rather than
+    // a button with a spinner of its own. Show the popup for the whole window;
+    // showAndRun releases it in a finally so a throw cannot strand it.
+    const run = async () => {
+      try {
+        const data = await global.api.postJson(QUEUE_BATCH_ENDPOINT, {
+          items: items,
+          import_group: importGroup,
+          import_type: 'album',
+        });
 
-      if (!data.success) {
-        notifyError('Error: ' + (data.error || 'Failed to add tracks to queue'));
+        if (!data.success) {
+          notifyError('Error: ' + (data.error || 'Failed to add tracks to queue'));
+          return false;
+        }
+
+        if (closeModal && global.modal) global.modal.hide(MODAL_ID);
+
+        notifySuccess(buildQueueMessage(data, album, selectionLabel));
+
+        if (typeof global.loadQueueStatus === 'function') {
+          await global.loadQueueStatus();
+        }
+
+        // Tells other open tabs to refresh their queue view.
+        try {
+          localStorage.setItem(QUEUE_UPDATED_KEY, Date.now().toString());
+        } catch (e) {
+          console.warn('Could not update localStorage:', e);
+        }
+        return true;
+      } catch (error) {
+        console.error('Error queueing release:', error);
+        notifyError('Error: ' + error.message);
         return false;
       }
+    };
 
-      if (closeModal && global.modal) global.modal.hide(MODAL_ID);
-
-      notifySuccess(buildQueueMessage(data, album, selectionLabel));
-
-      if (typeof global.loadQueueStatus === 'function') {
-        await global.loadQueueStatus();
-      }
-
-      // Tells other open tabs to refresh their queue view.
-      try {
-        localStorage.setItem(QUEUE_UPDATED_KEY, Date.now().toString());
-      } catch (e) {
-        console.warn('Could not update localStorage:', e);
-      }
-      return true;
-    } catch (error) {
-      console.error('Error queueing release:', error);
-      notifyError('Error: ' + error.message);
-      return false;
+    if (global.busyPopup) {
+      return global.busyPopup.showAndRun('Adding to download queue…', run);
     }
+    return run();
   }
 
   /**
