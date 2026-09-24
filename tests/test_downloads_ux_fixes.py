@@ -5,8 +5,10 @@ Verifies:
     metadata (artist/album), falling back to the folder path when metadata
     is missing or mixed.
   - ``requeue_due_failed_items`` never leaves an item stuck in ``failed`` —
-    items past ``max_retries`` still requeue once their retry window arrives
-    (config retry rules govern the backoff).
+    retries are unbounded, so an item requeues once its retry window arrives
+    regardless of how often it already failed (config retry rules govern the
+    backoff only).  ``download_queue.max_retries`` was dropped in migration 015
+    because it was never enforced.
   - The MusicBrainz release-group search falls back to an artist-only query
     when the combined artist+album query returns no results.
 """
@@ -85,7 +87,6 @@ def queue_env(monkeypatch):
                 status TEXT DEFAULT 'queued',
                 file_path TEXT,
                 retry_count INTEGER DEFAULT 0,
-                max_retries INTEGER DEFAULT 5,
                 retry_delay_minutes INTEGER DEFAULT 30,
                 failure_reason TEXT,
                 next_retry_at TEXT,
@@ -120,23 +121,29 @@ def queue_env(monkeypatch):
     return engine
 
 
-def test_failed_items_requeue_even_past_max_retries(queue_env):
-    """An item past max_retries is still requeued once its window is due —
-    it must never be left permanently stuck in 'failed'."""
+def test_failed_items_requeue_even_with_many_prior_attempts(queue_env):
+    """An item with a high retry_count is still requeued once its window is
+    due — retries are unbounded, so nothing is ever left permanently 'failed'.
+
+    ``download_queue.max_retries`` was never enforced (``mark_failed`` ignored
+    it) and was dropped in migration 015; this asserts the behaviour that
+    column used to advertise.
+    """
     from db.repositories.queue import requeue_due_failed_items
 
     with queue_env.begin() as conn:
         conn.execute(text("""
             INSERT INTO download_queue (id, artist, title, status, retry_count,
-                                        max_retries, retry_delay_minutes, next_retry_at)
+                                        retry_delay_minutes, next_retry_at)
             VALUES
-                (1, 'A', 'Song One', 'failed', 10, 5, 30, NULL),      -- past max_retries, due
-                (2, 'B', 'Song Two', 'failed', 0, 5, 30, '2099-01-01')  -- not yet due (future)
+                (1, 'A', 'Song One', 'failed', 10, 30, NULL),      -- many attempts, due
+                (2, 'B', 'Song Two', 'failed', 0, 30, '2099-01-01')  -- not yet due (future)
         """))
 
     requeued = requeue_due_failed_items(limit=50)
     ids = [r["id"] for r in requeued]
-    # Item 1 (past max_retries, due) requeues; item 2 (future next_retry_at) stays pending.
+    # Item 1 is due, so it requeues regardless of how often it already failed;
+    # item 2 (future next_retry_at) stays pending.
     assert 1 in ids
     assert 2 not in ids
 
@@ -155,8 +162,8 @@ def test_failed_items_requeue_when_due_uses_delay(queue_env):
     with queue_env.begin() as conn:
         conn.execute(text("""
             INSERT INTO download_queue (id, artist, title, status, retry_count,
-                                        max_retries, retry_delay_minutes, next_retry_at)
-            VALUES (1, 'A', 'Song', 'failed', 2, 5, 15, NULL)
+                                        retry_delay_minutes, next_retry_at)
+            VALUES (1, 'A', 'Song', 'failed', 2, 15, NULL)
         """))
 
     requeued = requeue_due_failed_items(limit=50)

@@ -62,7 +62,6 @@ def queue_env(monkeypatch):
                 file_path TEXT,
                 music_file_path TEXT,
                 retry_count INTEGER DEFAULT 0,
-                max_retries INTEGER DEFAULT 5,
                 retry_delay_minutes INTEGER DEFAULT 30,
                 failure_reason TEXT,
                 next_retry_at TEXT,
@@ -194,10 +193,10 @@ class TestDownloadFailureReturnsToQueue:
         must keep the later window — a 24h search backoff must not be clobbered
         to the short default delay by a later failure."""
         from db.repositories.queue import mark_failed
-        from db.repositories.queue import _queue_retry_defaults
+        from db.repositories.queue import _queue_retry_delay_minutes
 
         sql = None
-        delay = _queue_retry_defaults()[0]
+        delay = _queue_retry_delay_minutes()
         assert delay >= 1  # the default window is a real positive interval
 
         # Capture without executing (Postgres-only syntax).

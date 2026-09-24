@@ -318,7 +318,7 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "found_filename": "TEXT", "file_path": "TEXT", 
         "matched_file_path": "TEXT", "music_file_path": "TEXT",
         "failure_reason": "TEXT", "retry_count": "INTEGER DEFAULT 0", 
-        "max_retries": "INTEGER DEFAULT 5", "retry_delay_minutes": "INTEGER DEFAULT 30", 
+        "retry_delay_minutes": "INTEGER DEFAULT 30", 
         "next_retry_at": "TIMESTAMP", "last_failure_time": "TIMESTAMP",
         "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "imported_at": "TIMESTAMP", 
         "verified_in_music_at": "TIMESTAMP", "moved_at": "TIMESTAMP", 

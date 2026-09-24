@@ -268,7 +268,8 @@ class DownloadQueue(Base):
     music_file_path: Mapped[str | None] = mapped_column(String)
     failure_reason: Mapped[str | None] = mapped_column(String)
     retry_count: Mapped[int | None] = mapped_column(Integer, server_default=text("0"))
-    max_retries: Mapped[int | None] = mapped_column(Integer, server_default=text("5"))
+    # NOTE: ``max_retries`` was removed in migration 015 — it was never enforced
+    # (mark_failed ignores any ceiling), so retries are deliberately unbounded.
     retry_delay_minutes: Mapped[int | None] = mapped_column(Integer, server_default=text("30"))
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_failure_time: Mapped[datetime | None] = mapped_column(DateTime)

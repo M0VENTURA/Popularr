@@ -35,7 +35,7 @@ UPDATE_ALLOWED_COLUMNS = frozenset({
     "file_path", "matched_file_path", "music_file_path", "found_filename",
     "progress", "speed",
     "slskd_username", "slskd_transfer_id", "is_manual_download",
-    "retry_count", "max_retries", "retry_delay_minutes", "next_retry_at",
+    "retry_count", "retry_delay_minutes", "next_retry_at",
     "failure_reason",
     "release_date",
     "status",
@@ -442,7 +442,7 @@ def requeue_due_failed_items(limit: int = 50) -> list[dict[str, Any]]:
                 {"limit": limit},
             )
             rows = [dict(r._mapping) for r in result.fetchall()]
-            _delay_default = _queue_retry_defaults()[0]
+            _delay_default = _queue_retry_delay_minutes()
             next_retry_expr = interval_minutes_expr(session, ":delay")
             for row in rows:
                 qid = row.get("id")
@@ -590,19 +590,24 @@ def schedule_queue_retry(
         return None
 
 
-def _queue_retry_defaults() -> tuple[int, int]:
+def _queue_retry_delay_minutes() -> int:
+    """Default retry window (minutes) for an unscheduled failure.
+
+    Only the DELAY is configurable — there is no retry ceiling, because a
+    track that fails to download must always return to the queue rather than
+    being abandoned.  The dead ``max_retries`` column was removed in migration
+    015; ``queue.max_retries`` in config.yaml is no longer read.
+    """
     try:
         from helpers.config_helpers import get_config
         q = (get_config() or {}).get("queue") or {}
-        delay = max(1, int(q.get("failure_retry_delay_minutes", 30) or 30))
-        max_retries = max(1, int(q.get("max_retries", 5) or 5))
-        return delay, max_retries
+        return max(1, int(q.get("failure_retry_delay_minutes", 30) or 30))
     except Exception:
-        return 30, 5
+        return 30
 
 
 def mark_failed(queue_id: int, reason: str) -> dict[str, Any] | None:
-    delay = _queue_retry_defaults()[0]
+    delay = _queue_retry_delay_minutes()
     try:
         with db_session() as session:
             session.execute(
