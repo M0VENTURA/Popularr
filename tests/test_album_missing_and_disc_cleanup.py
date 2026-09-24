@@ -56,9 +56,19 @@ class TestGetLibraryTracksLenientAlbum:
             "album_artist TEXT, album TEXT, title TEXT, track_number TEXT, "
             "disc_number TEXT, file_path TEXT, duration REAL, mbid TEXT)"
         ))
+        # ⚠️ UNIQUE id, deliberately NOT 't1'.
+        #
+        # ``conftest.db_session`` shares ONE in-memory SQLite DB across the whole
+        # session, and several other test files insert a tracks row with id='t1'
+        # (test_album_musicbrainz_matching, test_favourites_sync, …). Together
+        # with ``ON CONFLICT DO NOTHING`` that made this test's own row get
+        # SILENTLY SKIPPED whenever it happened to run after one of them, so
+        # ``get_library_tracks`` found nothing and ``len(tracks) == 1`` failed.
+        # The test passed or failed purely on collection order.
         db_session.execute(text(
             "INSERT INTO tracks (id, artist, album_artist, album, title, track_number, disc_number) "
-            "VALUES ('t1', 'Stray Kids', 'Stray Kids', '2024 - 樂-STAR', '락 (樂) (LALALALA)', '2', '1') "
+            "VALUES ('lenient-year-prefix-1', 'Stray Kids', 'Stray Kids', '2024 - 樂-STAR', "
+            "'락 (樂) (LALALALA)', '2', '1') "
             "ON CONFLICT DO NOTHING"
         ))
         db_session.commit()
@@ -80,10 +90,13 @@ class TestGetMissingTracksRowMapping:
             "disc_number TEXT, file_path TEXT, duration REAL, mbid TEXT, "
             "musicbrainz_album_mbid TEXT)"
         ))
+        # Unique id — see the note in TestGetLibraryTracksLenientAlbum: id='t1'
+        # collides with rows other test files leave in the shared in-memory DB,
+        # and the ON CONFLICT DO NOTHING below would then skip this insert.
         db_session.execute(text(
             "INSERT INTO tracks (id, artist, album_artist, album, title, track_number, "
             "disc_number, musicbrainz_album_mbid) "
-            "VALUES ('t1', 'Artist', 'Artist', 'Album', 'Song', '1', '1', 'rel-mbid-1') "
+            "VALUES ('rowmap-mbid-1', 'Artist', 'Artist', 'Album', 'Song', '1', '1', 'rel-mbid-1') "
             "ON CONFLICT DO NOTHING"
         ))
         db_session.commit()
