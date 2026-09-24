@@ -469,6 +469,38 @@ async def api_queue_upcoming() -> Any:
                 )
                 if result.get("success"):
                     queued_tracks = int(result.get("queue_items_created") or 0)
+                    # ``start_release_download`` reports success: True even when
+                    # MusicBrainz returned a release whose every track was
+                    # already in the library / queue, which yielded ZERO new
+                    # queue rows.  Marking the release "queued" on that basis
+                    # showed a finished-looking release that had nothing
+                    # downloading behind it.
+                    if queued_tracks <= 0:
+                        _reason = result.get("queue_reason") or "nothing_queued"
+                        _message = (
+                            result.get("queue_message")
+                            or "No tracks could be queued for this release."
+                        )
+                        logger.warning(
+                            "Upcoming release queued no tracks — not marking as queued",
+                            release_id=release_id,
+                            album=album,
+                            reason=_reason,
+                            message=_message,
+                        )
+                        # ``error`` is what the UI toasts, so it carries the
+                        # human sentence; the machine code travels separately.
+                        return jsonify({
+                            "success": False,
+                            "error": _message,
+                            "reason": _reason,
+                            "total_tracks": int(result.get("total_tracks") or 0),
+                            "queued_tracks": 0,
+                            "artist": artist,
+                            "album": album,
+                            "release_group_mbid": release_mbid,
+                        }), 409
+
                     with db_session() as session:
                         session.execute(
                             text("UPDATE upcoming_releases SET status = 'queued' WHERE id = :id"),
