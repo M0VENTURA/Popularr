@@ -1864,8 +1864,33 @@ def process_track(
                     _cover_list = ["Cover"] + [g for g in _mbg if g != "Cover"]
                     update_payload["musicbrainz_genres"] = json.dumps(_cover_list, ensure_ascii=False)
                 elif _cover_wording_removed and not _cover_manual_override:
-                    update_payload["is_cover"] = False
-                    update_payload["is_cover_reason"] = "cover attribution removed from title"
+                    # ── STRIP THE WORDING ONLY — NEVER THE VERDICT ────────────
+                    #
+                    # ⚠️ This branch used to set ``is_cover = False`` and delete
+                    # the "Cover" genre here. That was destructive and wrong.
+                    #
+                    # ``detect_cover_song`` is a SHALLOW, fast check. Its only
+                    # real evidence path needs ``track_data["work_mbid"]``, which
+                    # is not populated this early in a scan, so mid-scan it
+                    # almost always falls through to ``(False, "no_match")``.
+                    # The DEEP verification — MusicBrainz work relations and
+                    # ISRC (``CoverDetectorImpl.detect_covers_for_album``) — does
+                    # not run until the end of the album scan.
+                    #
+                    # So a ``no_match`` here means "not yet proven", not
+                    # "disproven". Treating it as disproven cleared the flag on
+                    # genuine covers whose titles carried "(X Cover)" (Kenny
+                    # Rogers' "Ruby, Don't Take Your Love to Town", "Mahna,
+                    # Mahna", "Multiply the Heartaches"), and it also removed the
+                    # evidence the deep pass searches for:
+                    # ``CoverDetectorImpl._is_already_confirmed_cover`` requires
+                    # BOTH a truthy ``is_cover`` AND a "cover" genre, so clearing
+                    # both here defeated the very check meant to confirm them.
+                    #
+                    # We keep ONLY the part that was ever the point: removing
+                    # "(Original Artist Cover)" from the title. The verdict and
+                    # the genre are left untouched for the deep detector to
+                    # decide.
 
                     # ── Claim the CLEANED title ──────────────────────────────
                     # ``prepare_track_context`` already stripped the "(X Cover)"
@@ -1873,58 +1898,21 @@ def process_track(
                     # ``_STALE_PROTECTED_COLUMNS``: ``_strip_album_type_columns``
                     # DROPS it unless ``update_payload`` claims it. That guard
                     # exists so a stale loaded title cannot clobber the album
-                    # stage's rename of a GENUINE cover — but this branch only
-                    # runs when detection has just decided the track is NOT a
-                    # cover, so no rename applies and the cleaned title is the
-                    # authoritative value.
+                    # stage's rename of a GENUINE cover — but no rename applies
+                    # on this path, so the cleaned title is authoritative.
                     #
                     # ⚠️ The comparison must NOT be against ``track.get("title")``:
                     # the loaded dict was already mutated to the cleaned value, so
                     # comparing against it can never differ and the claim never
                     # fires — the DB then keeps "TrackName (Artist Cover)" while
-                    # ``is_cover`` reads False, which is the reported mismatch.
+                    # the title never normalises.
                     _clean_title = _as_str(title).strip()
                     if _clean_title:
                         update_payload["title"] = _clean_title
 
-                    # ── Purge the stale "Cover" genre from EVERY genre column ─
-                    # The aggregation at step 5 re-votes from ``effective_track``,
-                    # which still carries the OLD ``genres`` CSV ("Cover, Rock")
-                    # and the OLD ``musicbrainz_genres`` list on the raw row, so
-                    # filtering ``musicbrainz_genres`` alone let "Cover" come
-                    # straight back through the ``genres`` column. Seed both
-                    # columns from the filtered lists instead.
-                    _mbg = update_payload.get("musicbrainz_genres")
-                    if _mbg is None:
-                        _mbg = track.get("musicbrainz_genres")
-                    if isinstance(_mbg, str):
-                        try:
-                            _mbg = json.loads(_mbg)
-                        except Exception:
-                            _mbg = []
-                    if not isinstance(_mbg, list):
-                        _mbg = []
-                    _mbg = [
-                        g for g in _mbg
-                        if str(g).strip().lower() != "cover"
-                    ]
-                    update_payload["musicbrainz_genres"] = json.dumps(_mbg, ensure_ascii=False)
-
-                    # The aggregated CSV: drop "cover" and keep the rest. When
-                    # nothing survives, claim the empty value (the JSONB/CSV
-                    # normalisation below turns None into ""), otherwise the
-                    # stale CSV is what gets written back.
-                    _csv_raw = update_payload.get("genres")
-                    if _csv_raw is None:
-                        _csv_raw = track.get("genres")
-                    _csv_kept = [
-                        g.strip() for g in _parse_genre_input(_csv_raw)
-                        if g.strip() and g.strip().lower() != "cover"
-                    ]
-                    update_payload["genres"] = ", ".join(_csv_kept)
-
-                    logger.info(
-                        "[TRACK] false cover flag cleared",
+                    logger.debug(
+                        "[TRACK] cover wording stripped from title; verdict left "
+                        "for deep detection",
                         track_id=track_id,
                         title=_clean_title,
                         detector_verdict=reason,

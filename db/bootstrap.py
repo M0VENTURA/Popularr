@@ -340,6 +340,45 @@ def _repair_jsonb_drift_at_boot() -> None:
 
     threading.Thread(target=_run, daemon=True, name="boot-jsonb-drift-repair").start()
 
+def _repair_shallowly_cleared_cover_verdicts_at_boot() -> None:
+    """Re-flag cover verdicts a removed branch cleared without evidence.
+
+    ``track_stage`` used to clear ``is_cover`` from the result of a SHALLOW
+    check, so genuine covers were unflagged before the deep detection pass ran.
+    The rows it touched are identifiable by the reason string it wrote, which is
+    why this repair is possible at all. See
+    ``services/enrichment/cover_verdict_repair_service``.
+
+    Background thread, like the other boot repairs: it is a plain UPDATE and
+    must never delay — or be able to prevent — a boot. It is also idempotent
+    (the repair overwrites the fingerprint it searches for), so running it on
+    every start is free once the backlog is cleared.
+
+    Note this only re-flags; it does not decide the cover question. The deep
+    detector does that on the next album pass, with real evidence, and clears
+    the row again if nothing confirms it.
+    """
+    def _run() -> None:
+        try:
+            from services.enrichment.cover_verdict_repair_service import (
+                repair_shallowly_cleared_cover_verdicts,
+            )
+
+            result = repair_shallowly_cleared_cover_verdicts()
+            if result.get("repaired"):
+                logger.info(
+                    "Cover verdicts re-flagged at boot for deep re-detection",
+                    repaired=result["repaired"],
+                )
+        except Exception as exc:
+            logger.warning(
+                "Cover verdict repair skipped at boot", error=str(exc)
+            )
+
+    threading.Thread(
+        target=_run, daemon=True, name="boot-cover-verdict-repair"
+    ).start()
+
 def init_database_and_schema() -> bool:
     max_attempts = 4
     for attempt in range(1, max_attempts + 1):
@@ -361,6 +400,7 @@ def init_database_and_schema() -> bool:
                 _reset_stale_scan_states()
                 _prune_genre_playlists_at_boot()
                 _repair_jsonb_drift_at_boot()
+                _repair_shallowly_cleared_cover_verdicts_at_boot()
                 return True
         except Exception as exc:
             msg = str(exc)
@@ -399,6 +439,7 @@ def _run_deferred_startup_migrations() -> None:
         _reset_stale_scan_states()
         _prune_genre_playlists_at_boot()
         _repair_jsonb_drift_at_boot()
+        _repair_shallowly_cleared_cover_verdicts_at_boot()
     except Exception as exc:
         logger.error("Deferred schema bootstrap failed", exc_info=True)
 

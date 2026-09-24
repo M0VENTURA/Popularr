@@ -177,15 +177,48 @@ class TestBulkUpsertReportsFailures:
         # A bad row must not abort the rest of the album.
         assert bulk_harness.attempted == ["bad-1", "ok-1", "bad-2"]
 
-    def test_the_failure_names_the_track_and_the_reason(self, bulk_harness, caplog):
+    def test_the_failure_names_the_track_and_the_reason(self, bulk_harness):
+        """The WARNING must name the track and carry the DB's reason.
+
+        ⚠️ A handler on the module's own logger, NOT pytest's ``caplog``.
+
+        ``caplog`` attaches its capture handler to the ROOT logger, and
+        ``app.py:50`` calls ``helpers.logging_config.setup_logging()`` at import,
+        whose ``logging.config.dictConfig()`` includes a ``""`` (root) entry
+        that **replaces the root logger's handler list** — removing caplog's
+        handler. Importing ``app`` anywhere earlier in the session therefore
+        kills ``caplog`` for the rest of the run.
+
+        That produced a false failure ONLY in the full suite: this test passed
+        in isolation and failed with ``assert 'bad-1' in ''`` when run with the
+        other 3000 tests. A handler bound to the specific logger is unaffected
+        by dictConfig's root-handler replacement.
+        """
         import logging
 
         from db.repositories import popularity_repository as pr
 
-        with caplog.at_level(logging.WARNING):
-            pr.upsert_tracks_bulk([{"id": "bad-1", "musicbrainz_genres": "x"}])
+        records: list[logging.LogRecord] = []
 
-        joined = " ".join(r.getMessage() for r in caplog.records)
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        target = logging.getLogger(pr.__name__)
+        handler = _Capture(level=logging.WARNING)
+        previous_level = target.level
+        target.addHandler(handler)
+        target.setLevel(logging.WARNING)
+        try:
+            pr.upsert_tracks_bulk([{"id": "bad-1", "musicbrainz_genres": "x"}])
+        finally:
+            target.removeHandler(handler)
+            target.setLevel(previous_level)
+
+        joined = " ".join(r.getMessage() for r in records)
+        assert joined, (
+            "no WARNING was emitted at all — a refused write is silent again"
+        )
         assert "bad-1" in joined, "the log must name the track that failed"
         assert "json" in joined.lower(), "the log must carry the DB's reason"
 

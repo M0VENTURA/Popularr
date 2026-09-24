@@ -251,7 +251,20 @@ class TestCoverFlagIsCleared:
         )
         return sink.rows[0]
 
-    def test_a_false_cover_from_the_wording_is_cleared(self):
+    def test_a_false_cover_from_the_wording_is_not_cleared_by_the_stage(self):
+        """⚠️ INVERTED 2026-09-24 — the stage must no longer clear the flag.
+
+        This test previously asserted the opposite. That behaviour was the
+        reported bug: the stage runs a SHALLOW cover check, so a ``no_match``
+        there is not evidence of anything, and acting on it deleted the flag
+        and genre of genuine covers (Kenny Rogers' "Ruby, Don't Take Your Love
+        to Town", "Mahna, Mahna", "Multiply the Heartaches") before the deep
+        detection pass — MusicBrainz work relations, ISRC, writer coverage —
+        ever ran.
+
+        Clearing now happens at the END of the deep pass. See
+        ``test_cover_verdict_cleared_only_after_deep_detection.py``.
+        """
         sink = self._Sink()
         result = self._run(
             {
@@ -261,11 +274,28 @@ class TestCoverFlagIsCleared:
             },
             sink,
         )
-        assert result["is_cover"] in (False, 0)
-        assert result["is_cover_reason"] == "cover attribution removed from title"
-        # The genre the false verdict had added is gone too.
-        assert "Cover" not in str(result.get("musicbrainz_genres") or "")
+        assert result["is_cover"] in (1, True), (
+            "the track stage cleared the flag from a shallow `no_match`; only "
+            "the deep detection pass may clear a cover verdict"
+        )
+        # The genre the verdict had added is left for the deep pass to re-judge.
+        assert "Cover" in str(result.get("musicbrainz_genres") or "")
         assert "Rock" in str(result.get("musicbrainz_genres") or "")
+
+    def test_the_wording_is_still_stripped_from_the_title(self):
+        """The legitimate half of the branch must keep working."""
+        sink = self._Sink()
+        result = self._run(
+            {
+                "is_cover": 1,
+                "original_cover_artist": "Disturbed",
+                "title_had_cover_wording": True,
+            },
+            sink,
+        )
+        assert result.get("title") == "Song", (
+            "the '(Disturbed Cover)' suffix must still be removed from the title"
+        )
 
     def test_a_manual_override_is_never_cleared(self):
         sink = self._Sink()

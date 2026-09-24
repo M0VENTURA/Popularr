@@ -120,6 +120,20 @@ def _false_cover(**overrides) -> dict:
 
 
 class TestAllThreeArtifactsAreCleared:
+    """⚠️ UPDATED 2026-09-24 — WHERE each artifact is now cleared.
+
+    This suite was written when ``track_stage`` cleared all three. That turned
+    out to be destructive: the stage runs a SHALLOW check, so it cleared
+    legitimate covers before the deep pass could look at them. See
+    ``test_cover_verdict_cleared_only_after_deep_detection.py``.
+
+    Split by artifact:
+
+    * the TITLE is still normalised here — that was always the legitimate half;
+    * the FLAG and the GENRE are now cleared by the deep detection pass, at the
+      end of the album scan, where every technique has actually run.
+    """
+
     def test_the_suffixed_title_is_replaced_in_the_persisted_row(self):
         """The reported symptom: the flag cleared but the title did not."""
         result = _persist(_false_cover())
@@ -129,26 +143,31 @@ class TestAllThreeArtifactsAreCleared:
             "update_payload or the DB keeps the '(Artist Cover)' suffix"
         )
 
-    def test_the_flag_is_cleared(self):
-        result = _persist(_false_cover())
-        assert result["is_cover"] in (False, 0)
-        assert result["is_cover_reason"] == "cover attribution removed from title"
+    def test_the_stage_does_NOT_clear_the_flag(self):
+        """⚠️ Inverted from the original assertion, deliberately.
 
-    def test_the_cover_genre_is_gone_from_both_columns(self):
-        """The second reported symptom: the Cover genre stayed behind."""
-        result = _persist(_false_cover())
-        assert "cover" not in str(result.get("musicbrainz_genres") or "").lower()
-        assert "cover" not in str(result.get("genres") or "").lower()
-        # The legitimate genre survives.
-        assert "rock" in str(result.get("genres") or "").lower()
-
-    def test_cover_as_the_only_genre_does_not_come_back(self):
-        """With no other source, "Cover" must not be re-derived from the title.
-
-        ``_append_extra_genres`` re-adds the intercepted "Cover" filter tag
-        whenever the TITLE contains the word — so this case fails unless the
-        TITLE is claimed too.
+        The stage must leave the verdict for the deep pass. Clearing here is
+        what deleted genuine covers' flags.
         """
+        result = _persist(_false_cover())
+        assert result.get("is_cover") in (1, True), (
+            "the track stage cleared the cover flag; only the deep detection "
+            "pass may clear a verdict, because its negative result is "
+            "meaningful and the shallow check's is not"
+        )
+
+    def test_the_cover_genre_is_left_for_the_deep_pass(self):
+        """The genre is evidence ``_is_already_confirmed_cover`` needs."""
+        result = _persist(_false_cover())
+        assert "cover" in str(result.get("musicbrainz_genres") or "").lower(), (
+            "the Cover genre was purged by the stage; the deep pass needs it to "
+            "recognise an already-confirmed cover"
+        )
+        assert "rock" in str(result.get("genres") or "").lower(), (
+            "the legitimate genre must survive"
+        )
+
+    def test_cover_as_the_only_genre_survives_the_stage(self):
         result = _persist(
             _false_cover(
                 musicbrainz_genres=json.dumps(["Cover"]),
@@ -156,8 +175,7 @@ class TestAllThreeArtifactsAreCleared:
             )
         )
         assert result.get("title") == CLEAN_TITLE
-        assert "cover" not in str(result.get("genres") or "").lower()
-        assert "cover" not in str(result.get("musicbrainz_genres") or "").lower()
+        assert "cover" in str(result.get("genres") or "").lower()
 
 
 class TestGenuineCoversAreUntouched:
@@ -207,31 +225,57 @@ class TestGenuineCoversAreUntouched:
         assert "rock" in str(result.get("genres") or "").lower()
 
 
-class TestTheClaimIsScoped:
-    """Guard the two mechanisms so a later refactor cannot silently undo them."""
+class TestTheTitleClaimIsScoped:
+    """Guard the mechanism so a later refactor cannot silently undo it.
+
+    ⚠️ UPDATED 2026-09-24. The original version of this class anchored on the
+    string ``"cover attribution removed from title"``, which was the reason
+    string the destructive branch wrote. That branch is gone (it cleared
+    genuine covers from a shallow check), so the anchor is now the surviving
+    part — the title claim — and the assertions about the genre purge are
+    replaced by ones asserting the genre is NOT purged here.
+    """
 
     @staticmethod
-    def _clear_branch_source() -> str:
+    def _cover_branch_source() -> str:
+        """The branch that strips the wording without clearing the verdict.
+
+        ⚠️ The anchor is the branch COMMENT, not the log message. Anchoring on
+        ``"cover wording stripped from title"`` lands on the ``logger.debug``
+        call at the END of the branch, so the window is the tail only and the
+        title claim before it is never inspected — the assertion then fails for
+        a reason that has nothing to do with the behaviour. (This codebase has
+        hit the same class of mistake with ``source.index`` on a doc comment
+        before.)
+        """
         import inspect
 
         source = inspect.getsource(track_stage.process_track)
-        start = source.index("cover attribution removed from title")
-        # The branch ends at the next `except` that closes the cover block.
+        start = source.index("STRIP THE WORDING ONLY")
         end = source.index("Cover detection failed", start)
         return source[start:end]
 
-    def test_the_clear_branch_claims_the_title(self):
-        window = self._clear_branch_source()
+    def test_the_branch_claims_the_title(self):
+        window = self._cover_branch_source()
         assert 'update_payload["title"]' in window, (
-            "the clear branch must claim `title` in update_payload, or "
+            "the branch must claim `title` in update_payload, or "
             "_strip_album_type_columns drops the cleaned value"
         )
 
-    def test_the_clear_branch_seeds_the_genres_csv(self):
-        window = self._clear_branch_source()
-        assert 'update_payload["genres"]' in window, (
-            "the clear branch must also seed the `genres` CSV; filtering only "
-            "`musicbrainz_genres` left 'cover' to be re-voted from the stale CSV"
+    def test_the_branch_does_not_clear_the_verdict(self):
+        window = self._cover_branch_source()
+        assert 'update_payload["is_cover"] = False' not in window, (
+            "the branch must NOT clear is_cover — that is the deep pass's job"
+        )
+
+    def test_the_branch_does_not_purge_the_genre(self):
+        window = self._cover_branch_source()
+        assert 'update_payload["musicbrainz_genres"]' not in window, (
+            "the branch must NOT rewrite musicbrainz_genres; the deep pass "
+            "needs the Cover genre to recognise a confirmed cover"
+        )
+        assert 'update_payload["genres"]' not in window, (
+            "the branch must NOT rewrite the genres CSV either"
         )
 
     def test_the_stale_protection_is_not_weakened(self):

@@ -272,6 +272,11 @@ class CoverDetector:
         cover_results: list[dict[str, Any]] = []
         pending_updates: list[dict[str, Any]] = []
         _fresh_skipped: set[str] = set()
+        #: Tracks whose stored verdict stands, so they are neither re-detected
+        #: nor cleared. Kept separate from ``seen_track_ids`` because that set
+        #: also holds DETECTED covers — and the two need opposite treatment when
+        #: clearing unconfirmed flags at the end of this function.
+        _confirmed_skipped: set[str] = set()
 
         if not force:
             checked_map = self._load_cover_checked_map([t.get("id") for t in tracks])
@@ -283,7 +288,20 @@ class CoverDetector:
                     _fresh_skipped.add(tid)
                     seen_track_ids.add(tid)
                     continue
-                if self._is_already_confirmed_cover(track) or self._cover_has_original_artist(track):
+                if self._stored_verdict_is_self_referential(track):
+                    # A recording is never a cover OF ITS OWN PERFORMER, so a
+                    # stored verdict saying exactly that is provably wrong. Do
+                    # NOT let it suppress detection: fall through and assess the
+                    # track properly, so the end of this function can clear it
+                    # when nothing confirms it.
+                    logger.debug(
+                        "Stored cover verdict ignored — original artist is the "
+                        "track's own performer",
+                        track=track.get("title"),
+                        original_artist=track.get("original_cover_artist"),
+                    )
+                elif self._is_already_confirmed_cover(track) or self._cover_has_original_artist(track):
+                    _confirmed_skipped.add(tid)
                     seen_track_ids.add(tid)
 
         track_writers = self._collect_track_writers(tracks, artist, seen_track_ids)
@@ -510,10 +528,115 @@ class CoverDetector:
                     clean_title = update.get("title", "")
                     self._update_file_metadata(fp, clean_title, ["Cover"])
 
+        # ── Clear verdicts that this pass could NOT confirm ────────────────
+        #
+        # THIS is the only place a stored cover verdict may be cleared, and it
+        # runs AFTER the full detection pipeline above — MusicBrainz work
+        # relations, ISRC, recording relations and the writer/coverage pass —
+        # has had its say. That ordering is the whole point.
+        #
+        # The track stage used to clear the flag much earlier, from the result
+        # of ``detect_cover_song``, which is a SHALLOW check: its only real
+        # evidence path needs ``work_mbid``, which is not populated that early
+        # in a scan, so it routinely answered ``no_match`` for genuine covers
+        # and permanently deleted their flag and "Cover" genre before this pass
+        # ever looked at them.
+        #
+        # Here, "nothing confirmed it" is a MEANINGFUL negative: every deep
+        # technique has actually been tried against real data.
+        self._clear_unconfirmed_verdicts(
+            tracks,
+            confirmed_ids={str(r.get("track_id")) for r in cover_results},
+            fresh_skipped=_fresh_skipped,
+            confirmed_skipped=_confirmed_skipped,
+            force=force,
+        )
+
         self._persist_checked(tracks, _fresh_skipped)
 
         logger.info("Cover detection complete", album=album, found_count=len(cover_results))
         return cover_results
+
+    def _clear_unconfirmed_verdicts(
+        self,
+        tracks: list[dict[str, Any]],
+        confirmed_ids: set[str],
+        fresh_skipped: set[str],
+        confirmed_skipped: set[str],
+        force: bool,
+    ) -> None:
+        """Clear stored cover verdicts this pass did not confirm.
+
+        The mirror image of the detection loop, and the ONLY sanctioned way a
+        cover flag is removed.
+
+        What is left alone, and why:
+
+        * ``cover_manual_override`` — a user-locked verdict outranks every
+          heuristic here.
+        * ``confirmed_skipped`` — the loop judged the stored verdict credible
+          (annotated, or flagged with an original artist); it was never a
+          candidate for clearing.
+        * ``fresh_skipped`` — assessed within the recheck window. Deliberately
+          excluded: these were not examined this run, so silence from them is
+          not evidence. Without this the daily scan would clear every unflagged
+          track on its second pass.
+        * ``confirmed_ids`` — detected as covers above.
+
+        Tracks NOT in ``fresh_skipped`` and NOT confirmed are the ones this run
+        actually assessed and found nothing for. Their verdict is cleared.
+        """
+        to_clear: list[str] = []
+        for track in tracks:
+            tid = str(track.get("id") or "")
+            if not tid:
+                continue
+            if track.get("cover_manual_override"):
+                continue
+            if tid in confirmed_ids or tid in confirmed_skipped or tid in fresh_skipped:
+                continue
+            if not self._is_cover_flagged(track) and not self._cover_has_original_artist(track):
+                continue  # nothing stored — nothing to clear
+            to_clear.append(tid)
+
+        if not to_clear:
+            return
+
+        # Imported locally, matching ``_persist_checked`` above — this module is
+        # imported very early and ``db.engine`` must not be pulled in at module
+        # scope.
+        from sqlalchemy import text as _text
+        from db.engine import db_session as _db_session
+
+        cleared = 0
+        for tid in to_clear:
+            try:
+                with _db_session() as session:
+                    result = session.execute(
+                        _text(
+                            "UPDATE tracks SET is_cover = 0, is_cover_reason = :reason "
+                            "WHERE id = :id AND COALESCE(cover_manual_override, 0) = 0"
+                        ),
+                        {
+                            "reason": (
+                                "Deep cover detection found no evidence: "
+                                "MusicBrainz work relations, ISRC, recording "
+                                "relations and writer coverage all negative"
+                            ),
+                            "id": tid,
+                        },
+                    )
+                    if (result.rowcount or 0) > 0:
+                        cleared += 1
+            except Exception as exc:
+                logger.debug("Cover verdict clear failed", track_id=tid, error=str(exc))
+
+        if cleared:
+            logger.info(
+                "Cleared unconfirmed cover verdicts",
+                count=cleared,
+                album_tracks=len(tracks),
+            )
 
     def _persist_checked(self, tracks: list[dict[str, Any]], skipped: set[str]) -> None:
         try:
@@ -1332,6 +1455,48 @@ class CoverDetector:
         if not CoverDetector._is_cover_flagged(track):
             return False
         return bool(str(track.get("original_cover_artist") or "").strip())
+
+    @staticmethod
+    def _stored_verdict_is_self_referential(track: dict[str, Any]) -> bool:
+        """True when a stored cover verdict is provably wrong.
+
+        "Track X (Track X Cover)" is a contradiction: a recording is never a
+        cover of its own performer. This happens when a heuristic compares the
+        original it finds against the ALBUM-level placeholder — on a
+        compilation the album artist is "Various Artists", which matches no real
+        credit, so a track's own recording is recorded as somebody else's song
+        and titled "<title> (POD Cover)" while the performer IS P.O.D.
+
+        Checked with ``names_match``, which tolerates case and whitespace — but
+        ⚠️ NOT accents or punctuation (``"P.O.D."`` vs ``"POD"`` and
+        ``"Ünloco"`` vs ``"Unloco"`` both return False; verified, not
+        assumed). This is therefore a CONSERVATIVE guard: it catches the
+        placeholder-driven case that produced "<title> (P.O.D. Cover)" on
+        P.O.D.'s own track, and simply does not fire when the two names differ
+        in punctuation. That is the correct failure direction — missing one
+        leaves the stored verdict untouched, whereas a looser match would clear
+        a genuine cover.
+
+        Returning True does not clear anything by itself; it stops the stored
+        verdict from suppressing detection, so the track is genuinely assessed.
+        """
+        if not CoverDetector._is_cover_flagged(track):
+            return False
+        if track.get("cover_manual_override"):
+            return False
+
+        original = str(track.get("original_cover_artist") or "").strip()
+        if not original:
+            return False
+
+        performer = str(track.get("artist") or "").strip()
+        if not performer or is_track_artist_placeholder(performer):
+            # No usable performer to compare against — cannot conclude.
+            return False
+        if is_track_artist_placeholder(original):
+            return False
+
+        return names_match(original, performer)
 
     # -- persistence ------------------------------------------------------
 
