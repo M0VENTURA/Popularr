@@ -47,7 +47,35 @@
         <div class="input-group mb-3">
           <input type="text" id="soulseekManualQuery" class="form-control"
                  placeholder="Artist - Title" autocomplete="off">
-          <button class="btn btn-success" id="soulseekManualSearchBtn" type="button">
+          {#-
+            ⚠️ THE SEARCH BUTTON WAS DEAD ON /downloads/monitor IN THIS TREE.
+
+            This partial deliberately carried no inline `onclick` and relied on
+            services/slskd.js to bind the button on DOMContentLoaded. That is
+            correct on the pages that load skld.js, but NOT on the monitor page,
+            because the monitor PAGE is SHADOWED to the LIVE tree (see
+            helpers/test_site_mode.py::_SHADOWED_TEMPLATES). So in test_site mode
+            the page came from `templates/pages/downloads/monitor.html`, which
+            loads `static/js/downloads.js` and NOT `services/slskd.js`:
+            neither the inline handler nor the JS binding existed and the click
+            did nothing at all.
+
+            ``runSoulseekManualSearchFromModal`` below closes that gap and is
+            NAMED deliberately: an anonymous IIFE in an onclick reads as
+            `function(...)` to the dead-button scanner
+            (tests/test_rebuilt_pages_have_no_dead_buttons.py), which then cannot
+            resolve it and reports a false dead button. It also simply reads
+            better.
+
+            It resolves the implementation at CLICK time, so the same markup
+            works whichever script the page actually loaded:
+              * services/slskd.js      -> global.runSoulseekManualSearch
+              * static/js/downloads.js -> the same name, defined there
+            With neither present the user gets an explanation instead of a
+            button that silently does nothing — the failure mode being fixed.
+          -#}
+          <button class="btn btn-success" id="soulseekManualSearchBtn" type="button"
+                  onclick="runSoulseekManualSearchFromModal(this)">
             <i class="bi bi-search"></i> Search
           </button>
         </div>
@@ -57,3 +85,29 @@
     </div>
   </div>
 </div>
+
+{#-
+  The button's handler. Defined HERE, next to the markup that calls it, so the
+  partial is self-contained: whichever page includes it, the handler exists.
+
+  It resolves the implementation lazily (at click time) rather than binding a
+  specific function here, because the two trees legitimately provide different
+  ones:
+      queue page   — services/slskd.js       (global.runSoulseekManualSearch)
+      monitor page — static/js/downloads.js  (same name)
+
+  Guarded so a second definition cannot be installed if the partial is included
+  twice on one page, which would otherwise leave the LAST one winning.
+-#}
+<script>
+if (typeof window.runSoulseekManualSearchFromModal !== 'function') {
+  window.runSoulseekManualSearchFromModal = function (btn) {
+    var impl = window.runSoulseekManualSearch;
+    if (typeof impl === 'function') { impl.call(window); return; }
+    // No implementation loaded: say so. A dead-looking button with no message is
+    // the exact symptom this handler exists to remove.
+    if (btn) btn.disabled = false;
+    alert('The Soulseek search is unavailable on this page — its script did not load.');
+  };
+}
+</script>
