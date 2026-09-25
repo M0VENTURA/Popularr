@@ -114,6 +114,7 @@ def cleanup_stale_artist_tracks_if_needed(
         )
 
 
+
 def cleanup_empty_artist_dirs(*, artist_name: str, canonical_artist_name: str) -> None:
     """Remove empty album directories beneath the artist folder."""
     try:

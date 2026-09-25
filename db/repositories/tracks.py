@@ -148,37 +148,52 @@ def get_current_track_rating(track_id: str) -> int:
 
 def delete_tracks_by_id(track_ids: Set[str], *, context: str, session: Any | None = None) -> int:
     """Delete tracks by ID.
-    
+
     Args:
         track_ids: Set of track IDs to delete.
         context: Description for logging (e.g. artist name).
         session: Optional SQLAlchemy session. If None, creates one.
-        
+
     Returns:
-        Number of tracks deleted.
+        Number of rows ACTUALLY deleted.
+
+    Raises:
+        Exception: Re-raised from the driver.  The previous implementation
+            swallowed every error, logged it, and returned ``0`` — which the
+            scan reported as "nothing to do".  A refused DELETE (constraint
+            violation, dropped connection, lock) therefore looked identical to
+            a successful no-op and deleted rows stayed in the database.
     """
     if not track_ids:
         return 0
-    
+
     def _do_delete(sess):
         placeholders = ", ".join([f":id_{i}" for i in range(len(track_ids))])
         params = {f"id_{i}": tid for i, tid in enumerate(track_ids)}
-        sess.execute(text(f"DELETE FROM tracks WHERE id IN ({placeholders})"), params)
-        return len(track_ids)
-    
-    try:
-        if session is not None:
-            return _do_delete(session)
-        else:
-            with db_session() as sess:
-                return _do_delete(sess)
-    except Exception as err:
-        logger.error(
-            "Failed to remove stale tracks for %s: %s",
+        result = sess.execute(text(f"DELETE FROM tracks WHERE id IN ({placeholders})"), params)
+        # Report the real row count: a DELETE that matched nothing must not be
+        # counted as a successful removal of len(track_ids) tracks.
+        try:
+            return int(result.rowcount)
+        except Exception:
+            return len(track_ids)
+
+    if session is not None:
+        deleted = _do_delete(session)
+    else:
+        with db_session() as sess:
+            deleted = _do_delete(sess)
+
+    _expected = len(track_ids)
+    if deleted < _expected:
+        logger.warning(
+            "delete_tracks_by_id removed fewer rows than requested for %s: "
+            "requested=%s deleted=%s (rows were already gone, or the ids do not match)",
             context,
-            err,
+            _expected,
+            deleted,
         )
-        return 0
+    return deleted
 
 # db/repositories/tracks.py
 def update_track_single_status(

@@ -68,8 +68,22 @@ def cleanup_stale_album_tracks_if_needed(
     stale_ids = cached_ids_for_album - nav_ids
     if not stale_ids:
         return
-        
-    removed = delete_tracks_by_id(stale_ids, context=f"album '{album_name}' (diff_mode)")
+
+    # A failed DELETE must not abort the rest of the artist's cleanup (other
+    # albums still need pruning), but it must NOT be silent either — the
+    # repository re-raises, so log the failure loudly and carry on.
+    try:
+        removed = delete_tracks_by_id(stale_ids, context=f"album '{album_name}' (diff_mode)")
+    except Exception as err:
+        logger.error(
+            "Failed to remove stale album tracks — rows were NOT deleted",
+            artist=artist_name,
+            album=album_name,
+            stale_count=len(stale_ids),
+            error=str(err),
+        )
+        return
+
     if removed:
         log_unified(f"Navidrome Import - {artist_name} - Removed {removed} stale track(s) from album '{album_name}'")
 
@@ -95,7 +109,17 @@ def cleanup_stale_artist_tracks_if_needed(
     if not stale_ids:
         return
 
-    removed = delete_tracks_by_id(stale_ids, context=f"artist '{artist_name}'")
+    try:
+        removed = delete_tracks_by_id(stale_ids, context=f"artist '{artist_name}'")
+    except Exception as err:
+        logger.error(
+            "Failed to remove stale artist tracks — rows were NOT deleted",
+            artist=artist_name,
+            stale_count=len(stale_ids),
+            error=str(err),
+        )
+        return
+
     if removed:
         log_unified(f"Navidrome Import - {artist_name} - Removed {removed} stale track(s) no longer in library")
 

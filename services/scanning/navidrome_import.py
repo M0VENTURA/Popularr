@@ -136,7 +136,7 @@ def compute_artist_album_diff(
                 text("""
                     SELECT album, COUNT(*) as track_count
                     FROM tracks
-                    WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
                       AND album IS NOT NULL AND TRIM(album) <> ''
                     GROUP BY album
                 """),
@@ -237,7 +237,7 @@ def prefetch_artist_state(*, canonical_artist_name: str) -> dict[str, Any]:
             text("""
                 SELECT id, album, album_artist
                 FROM tracks
-                WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
+                WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
             """),
             {"artist": canonical_artist_name},
         )
@@ -360,6 +360,26 @@ def scan_artist_to_db(
             _name for _name, _count in _album_name_counts.items() if _count > 1
         }
 
+        # Album names that collide once edition markers are stripped share ONE
+        # cached id set (``existing_album_tracks`` is keyed by the stripped
+        # name).  Cleaning each entry individually would make the colliding
+        # entries delete each other's tracks.  Skipping the cleanup entirely —
+        # the previous behaviour — stranded genuinely deleted tracks in these
+        # albums forever, so the cleanup is DEFERRED and run once over the
+        # UNION of every colliding entry's Navidrome ids.
+        #
+        # The union is only trustworthy when EVERY entry of that name had its
+        # tracks fetched: an entry skipped before the fetch contributes no ids,
+        # and running the union anyway would delete that entry's live tracks.
+        duplicate_entry_totals: dict[str, int] = {
+            _name: _count
+            for _name, _count in _album_name_counts.items()
+            if _name in duplicate_album_names
+        }
+        duplicate_fetched_counts: dict[str, int] = {}
+        duplicate_nav_ids: dict[str, set[str]] = {}
+        duplicate_cached_ids: dict[str, set[str]] = {}
+
         navi_client = active_client or _get_fallback_client()
 
         _albums_matched_filter = 0
@@ -404,7 +424,20 @@ def scan_artist_to_db(
                 if track.get("id"):
                     navidrome_track_ids.add(track.get("id"))
 
+            # Record this entry's ids for the deferred colliding-name cleanup.
+            # Counted straight after the fetch — before any skip decision — so
+            # an entry skipped as "cached" still contributes its live ids.
+            if album_name in duplicate_entry_totals:
+                duplicate_fetched_counts[album_name] = (
+                    duplicate_fetched_counts.get(album_name, 0) + 1
+                )
+                duplicate_nav_ids.setdefault(album_name, set()).update(
+                    track.get("id") for track in tracks if track.get("id")
+                )
+
             cached_ids_for_album = existing_album_tracks.get(album_name, set())
+            if album_name in duplicate_entry_totals:
+                duplicate_cached_ids[album_name] = cached_ids_for_album
             album_needs_reimport = album_name in albums_needing_reimport
 
             if should_skip_cached_album(
@@ -489,6 +522,30 @@ def scan_artist_to_db(
                     album_name=album_name,
                     cached_ids_for_album=cached_ids_for_album,
                     navidrome_tracks=tracks,
+                )
+
+        # Deferred cleanup for names that collide once edition markers are
+        # stripped.  Runs only when every entry of the name was fetched, so the
+        # union genuinely represents everything Navidrome still holds.
+        if diff_mode:
+            for _dup_name in sorted(duplicate_album_names):
+                if duplicate_fetched_counts.get(_dup_name, 0) != duplicate_entry_totals.get(_dup_name, 0):
+                    logger.debug(
+                        "Skipping colliding-album cleanup - not every entry was fetched",
+                        artist=artist_name,
+                        album=_dup_name,
+                        fetched=duplicate_fetched_counts.get(_dup_name, 0),
+                        total=duplicate_entry_totals.get(_dup_name, 0),
+                    )
+                    continue
+                cleanup_stale_album_tracks_if_needed(
+                    artist_name=artist_name,
+                    album_name=_dup_name,
+                    cached_ids_for_album=duplicate_cached_ids.get(_dup_name, set()),
+                    navidrome_tracks=[
+                        {"id": track_id}
+                        for track_id in duplicate_nav_ids.get(_dup_name, set())
+                    ],
                 )
 
         # An album_filter that matches nothing used to return silently, so the
