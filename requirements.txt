@@ -21,7 +21,7 @@ rapidfuzz>=3.0.0,<4.0.0
 markdown>=3.5,<4.0
 
 # Database — SQLAlchemy ORM + async driver + migrations
-sqlalchemy>=2.0,<3.0
+sqlalchemy[asyncio]>=2.0,<3.0
 asyncpg>=0.29,<1.0
 alembic>=1.13,<2.0
 
