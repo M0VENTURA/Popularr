@@ -827,11 +827,42 @@ def build_organize_group_target_path(
     track_number: Any,
     source_file: str | os.PathLike[str],
 ) -> Path:
-    ext = Path(source_file).suffix.lower()
-    track_prefix = f"{int(track_number):02d} - " if track_number is not None else ""
-    album_folder = f"({year}) {album_name}" if year else album_name or "Unknown Album"
-    relative_path = Path(album_artist or artist or "Unknown Artist") / album_folder
-    return Path(music_root) / relative_path / f"{track_prefix}{title}{ext}"
+    """Destination path for a queue group's track — ONE layout, not two.
+
+    ⚠️ This used to HARDCODE its own layout::
+
+        album_folder = f"({year}) {album_name}"
+        filename     = f"{track_prefix}{title}{ext}"
+
+    while every other importer built its path from the configured
+    ``downloads.file_name_format`` via ``_build_target_path``::
+
+        Album Artist/1999 - Album/03. Track Artist - Title.flac
+
+    So the SAME album landed in ``(1999) Album`` when organised as a queue
+    group and in ``1999 - Album`` when imported by the download pipeline —
+    two different folders for one album, which is the reported "folder
+    structure changed".  The hardcoded form also ignored the user's naming
+    format entirely.
+
+    Delegating to ``_build_target_path`` makes the configured format the
+    single source of truth, so an album always lands in the same folder no
+    matter which action imported it.
+    """
+    from services.downloads.download_organize_helpers import _build_target_path
+
+    return Path(
+        _build_target_path(
+            str(music_root),
+            album_artist or artist,
+            year,
+            album_name,
+            artist,
+            title,
+            track_number,
+            str(source_file),
+        )
+    )
 
 
 def organize_group_sync(group_id: Any, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
