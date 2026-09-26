@@ -462,3 +462,504 @@ class TestTheBehaviourIsDescribedHonestly:
             "count, or the operator will keep raising a value that was not "
             "the problem"
         )
+
+
+# ---------------------------------------------------------------------------
+# REGRESSION: the wrapper must be UNWRAPPED, or a completed album is discarded
+# ---------------------------------------------------------------------------
+#
+# THE REPORT
+# ----------
+# A full scan logged every track's score AND its Single verdict, then:
+#
+#     [POPULARITY] Album 'Ricky Martin - 17: Greatest Hits' skipped (did not
+#     complete) — continuing with the artist's remaining albums
+#     Popularity Scan - All albums were skipped (recently scanned or up to date).
+#     [FINALISE_STAGE] Finalising scan — 0 tracks processed
+#
+# WHY THAT HAPPENED
+# -----------------
+# ``_bounded_call_report`` has TWO return conventions:
+#
+#     seconds is None    -> the function's RAW result
+#     seconds is a value -> a WRAPPER {"ok", "result", "abandoned", ...}
+#
+# ``_bounded_album_phase`` forwarded ``seconds`` straight through, so the moment
+# a per-album budget was configured — it is by DEFAULT — every call site began
+# receiving the wrapper instead of the phase's result:
+#
+#   * ``album_result = wrapper`` -> ``.get("detected_album_type")`` is None, so
+#     the log read "Album enriched: ... (type=None)".
+#   * ``_track_results_ordered = wrapper`` -> not a list, so the OLD
+#     ``_track_phase_is_incomplete`` (``return not isinstance(result, list)``)
+#     reported "did not complete" for a phase that had finished PERFECTLY.  The
+#     album was skipped, its tracks were never appended to ``results``, and
+#     SINGLE DETECTION NEVER RAN during a full scan.
+#
+# These tests CALL the helpers, because a source-text assertion cannot catch a
+# neutered branch (``if False`` leaves the text intact).
+
+class TestTheAlbumPhaseUnwrapsTheBudgetReport:
+    """Behavioural, end-to-end over the real helpers and the real budget."""
+
+    @staticmethod
+    def _phase_result() -> dict:
+        """What ``enrich_album`` actually returns (note: NOT a budget report)."""
+        return {
+            "detected_album_type": "album+compilation",
+            "album": {"id": 1},
+        }
+
+    def test_a_configured_budget_still_returns_the_phases_own_result(self):
+        """The whole bug in one assertion: budget ON must not change the shape."""
+        import services.popularity.scan_stage_runner as runner
+
+        result = runner._bounded_album_phase(
+            self._phase_result,
+            seconds=900.0,
+            section="enrich_album",
+            log_context={"artist": "A", "album": "B"},
+        )
+
+        assert isinstance(result, dict), (
+            "a finished phase must return its own result, not a wrapper"
+        )
+        assert result.get("detected_album_type") == "album+compilation", (
+            "with a budget configured the album type must survive, or the log "
+            "reads '(type=None)' and the caller cannot use the enrichment"
+        )
+        assert "abandoned" not in result, (
+            "a completed call must NOT look like an abandonment"
+        )
+
+    def test_a_disabled_budget_returns_the_same_thing(self):
+        """``seconds=None`` (album_timeout_seconds=0) must agree with the above."""
+        import services.popularity.scan_stage_runner as runner
+
+        result = runner._bounded_album_phase(
+            self._phase_result,
+            seconds=None,
+            section="enrich_album",
+            log_context={},
+        )
+        assert result == self._phase_result(), (
+            "0/disabled must behave exactly like a configured budget that did "
+            "not fire — one code path, one shape"
+        )
+
+    def test_the_disabled_path_is_decided_by_seconds_not_by_the_payload_shape(self):
+        """``seconds is None`` IS the discriminator; the shape is only a guard.
+
+        With the budget DISABLED, ``_bounded_call_report`` returns whatever the
+        phase produced — so a phase result that merely CONTAINS an ``abandoned``
+        key (documentation, a nested report, a future phase's own bookkeeping)
+        must be passed through untouched. Sniffing the payload instead of
+        ``seconds`` would misread it as a budget abandonment and discard the
+        album's real result — the same class of bug this whole change fixes.
+        """
+        import services.popularity.scan_stage_runner as runner
+
+        def _phase_that_happens_to_report_abandoned() -> dict:
+            return {
+                "detected_album_type": "album",
+                "abandoned": True,          # phase's OWN data, not a budget report
+                "reason": "inner sub-task gave up",
+            }
+
+        result = runner._bounded_album_phase(
+            _phase_that_happens_to_report_abandoned,
+            seconds=None,
+            section="enrich_album",
+            log_context={},
+        )
+
+        assert result.get("detected_album_type") == "album", (
+            "with the budget disabled the phase result must come back whole — "
+            "discriminating on the payload shape would silently drop it"
+        )
+        assert result.get("reason") == "inner sub-task gave up", (
+            "the phase's own reason must survive; it is not the budget's"
+        )
+
+    def test_a_completed_track_phase_is_not_incomplete_with_a_budget(self):
+        """The regression proper: this is what killed single detection."""
+        import services.popularity.scan_stage_runner as runner
+
+        track_results = [{"track_id": 1, "score": 10.0}, {"track_id": 2, "score": 20.0}]
+
+        def _track_phase(**_kw):
+            return track_results
+
+        result = runner._bounded_album_phase(
+            _track_phase,
+            track_jobs=[],
+            max_workers=1,
+            artist="A",
+            album="B",
+            seconds=900.0,
+            section="album_track_phase",
+            log_context={"artist": "A", "album": "B"},
+        )
+
+        assert isinstance(result, list), (
+            "the track phase's list must come back as a list even when a "
+            "budget is configured"
+        )
+        assert runner._track_phase_is_incomplete(result) is False, (
+            "a track phase that FINISHED must never be reported incomplete — "
+            "that is what skipped every album and discarded every Single "
+            "verdict during a full scan"
+        )
+
+    def test_a_phase_that_exceeds_its_budget_is_still_reported(self):
+        """The unwrap must not swallow a genuine abandonment."""
+        import time
+
+        import services.popularity.scan_stage_runner as runner
+
+        def _hang():
+            time.sleep(5)
+            return {"detected_album_type": "album"}
+
+        result = runner._bounded_album_phase(
+            _hang,
+            seconds=0.2,
+            section="enrich_album",
+            log_context={},
+        )
+
+        abandoned, reason = runner._album_phase_was_abandoned(result)
+        assert abandoned is True, (
+            "an album that really blows its budget must still be flagged, or "
+            "the hang is no longer isolated to that album"
+        )
+        assert reason, "the abandonment must carry a reason for the log"
+
+    def test_an_abandoned_track_phase_is_incomplete_and_a_finished_one_is_not(self):
+        """Pin the contract against the shapes the helper actually receives.
+
+        ``_execute_track_jobs_safely`` ALWAYS returns a list, so a non-list means
+        the phase produced no results.  Two shapes reach here after the unwrap:
+        the budget's ``abandoned`` sentinel, and ``None``/``{}`` from a call that
+        RAISED.
+        """
+        import services.popularity.scan_stage_runner as runner
+
+        assert runner._track_phase_is_incomplete(
+            {"ok": False, "abandoned": True, "reason": "exceeded 900.0s budget"}
+        ) is True, "an abandoned phase must skip only its own album"
+        assert runner._track_phase_is_incomplete([{"score": 1}]) is False, (
+            "a completed phase returns its list and must never be skipped"
+        )
+        assert runner._track_phase_is_incomplete([]) is False, (
+            "an album with no eligible tracks is COMPLETE, not incomplete"
+        )
+
+    def test_a_failed_track_phase_is_also_incomplete(self):
+        """⚠️ Found by probing: the failure shapes must still skip their album.
+
+        This is NOT the same as the regression.  The caller's next step is
+        ``zip(_track_jobs, _track_results_ordered)``, which raises ``TypeError``
+        against ``None`` and silently yields ZERO pairs against ``{}`` — so
+        classifying a failed phase as "complete" either unwinds the album loop or
+        drops every track without a skip.  ``_bounded_album_phase`` unwraps a
+        failure to ``report["result"]``, which is exactly ``None``.
+        """
+        import services.popularity.scan_stage_runner as runner
+
+        assert runner._track_phase_is_incomplete(None) is True, (
+            "a RAISED call unwraps to None; treating it as complete crashes the "
+            "album loop on zip(None)"
+        )
+        assert runner._track_phase_is_incomplete({}) is True, (
+            "the seconds-is-None failure path returns {}; treating it as "
+            "complete silently drops every track of the album"
+        )
+        assert runner._track_phase_is_incomplete(
+            {"ok": False, "result": None, "abandoned": False, "reason": "boom"}
+        ) is True, "a failed (not abandoned) budget report must still skip"
+
+    def test_a_failed_track_phase_actually_reaches_the_skip(self):
+        """The end-to-end version: a RAISING phase must be reported incomplete."""
+        import services.popularity.scan_stage_runner as runner
+
+        def _explodes(**_kw):
+            raise RuntimeError("track phase blew up")
+
+        for seconds in (900.0, None):
+            result = runner._bounded_album_phase(
+                _explodes,
+                track_jobs=[1, 2],
+                max_workers=1,
+                artist="A",
+                album="B",
+                seconds=seconds,
+                section="album_track_phase",
+                log_context={},
+            )
+            assert runner._track_phase_is_incomplete(result) is True, (
+                f"seconds={seconds}: a phase that raised must skip its album, "
+                "not be zipped against None"
+            )
+
+
+class TestTheArtistCallSiteToleratesADisabledBudget:
+    """The SAME defect class, one level up, found by probing the artist loop.
+
+    ``popularity_pipeline`` does::
+
+        _artist_report = _bounded_call_report(_run_one_artist, seconds=...)
+        if _artist_report.get("ok"):
+
+    ``_run_one_artist`` returns ``None``, and ``_bounded_call_report`` returns
+    the RAW result when ``seconds is None``.  So with
+    ``artist_timeout_seconds = 0`` — the Config page's own "disable the timeout"
+    setting — ``_artist_report`` was ``None`` and the whole artist loop died on
+    the FIRST artist with ``AttributeError: 'NoneType' object has no attribute
+    'get'``.
+    """
+
+    def test_the_independent_case_crashes_without_the_guard(self):
+        """Documents the failure the guard exists to prevent."""
+        import services.popularity.scan_stage_runner as runner
+
+        raw = runner._bounded_call_report(lambda: None, seconds=None, label="x")
+        assert raw is None, "seconds=None returns the raw result, here None"
+        with pytest.raises(AttributeError):
+            raw.get("ok")  # type: ignore[union-attr]
+
+    def test_the_pipeline_normalises_a_missing_report(self):
+        """The fix must be present as a CHECK, not merely as text."""
+        source = PIPELINE.read_text(encoding="utf-8")
+        idx = source.index("_artist_report = _bounded_call_report(")
+        window = source[idx: idx + 1600]
+        assert "isinstance(_artist_report, dict)" in window, (
+            "the artist call site must normalise a non-dict report, or "
+            "artist_timeout_seconds=0 crashes the full scan on artist #1"
+        )
+        # Anchor the fallback INSIDE the same window so an unrelated occurrence
+        # elsewhere in the file cannot satisfy this.
+        assert '"ok": True' in window, (
+            "a missing report means the artist ran and did not raise"
+        )
+        assert "abandoned" in window, (
+            "the normalised report must satisfy the abandonment read below it"
+        )
+
+
+class TestTheMissingTrackSnapshotIsNotStarvedByASkip:
+    """The SECOND reported symptom: "the missing tracks were also missing after the scan".
+
+    SAME root cause as the phase bug above.  ``get_missing_tracks`` is the ONLY
+    writer of ``missing_album_tracks`` (it calls ``_persist_missing_tracks``), and
+    it runs at the END of the per-album loop body — while the skip ``continue``
+    fires EARLY.  So a wrongly-abandoned album never refreshed its snapshot, the
+    album page kept reading the stale rows, and a prompt re-scan was then skipped
+    as "recently scanned" — leaving the tracks reported missing indefinitely.
+
+    Fixing the unwrap is what actually restores this.  These tests pin the
+    REACHABILITY so a future edit cannot re-couple the snapshot to the skip path,
+    and they document why the snapshot is not a per-page-load concern.
+    """
+
+    def test_the_snapshot_runs_in_the_normal_path_not_the_skip_branch(self):
+        """A COMPLETED album must refresh the snapshot — that is the whole point.
+
+        The snapshot is the only writer of ``missing_album_tracks``, and the
+        album it most needs to describe correctly is one that finished.  If the
+        call lived inside the abandon/skip branch it would run only for albums
+        that were cut short, so a normal album would never refresh its rows.
+
+        This is a WIRING assertion (the call is positioned in the non-skipped
+        part of the loop body), which is what source checks are for.  The
+        behavioural half — that a completed phase is NOT skipped, and therefore
+        that this call is actually reached — is covered by
+        ``TestTheAlbumPhaseUnwrapsTheBudgetReport`` above.
+        """
+        source = SCANNER.read_text(encoding="utf-8")
+
+        skip_idx = source.index("if _track_phase_is_incomplete(_track_results_ordered):")
+        skip_window = source[skip_idx: skip_idx + 1400]
+        assert "continue" in skip_window, (
+            "the incomplete-phase branch must abort this album only"
+        )
+        assert "get_missing_tracks(" not in skip_window, (
+            "the snapshot must not live in the abandon/skip branch, or a "
+            "normally-completed album would never refresh it"
+        )
+
+        snapshot_idx = source.index("_missing = get_missing_tracks(artist=artist, album=album)")
+        assert snapshot_idx > skip_idx, (
+            "the snapshot must run in the normal path of the album loop, i.e. "
+            "after the skip branch — not before it"
+        )
+
+    def test_the_snapshot_is_gated_only_by_the_scan_type(self):
+        """It must not be gated on the album being skipped or on performance.
+
+        The gate is the scan MODE: metadata and combined passes refresh album
+        identity, popularity-only and singles-only passes deliberately do not.
+        A per-page-load recompute was removed on purpose (see the endpoint's
+        docstring), so the scan is the sole maintainer of this table.
+        """
+        source = SCANNER.read_text(encoding="utf-8")
+        idx = source.index("_missing = get_missing_tracks(artist=artist, album=album)")
+        window = source[idx - 500: idx]
+
+        assert 'not options.get("popularity_only")' in window, (
+            "the snapshot gate must still exclude popularity-only scans"
+        )
+        assert 'not options.get("singles_detection_only")' in window, (
+            "the snapshot gate must still exclude singles-only scans"
+        )
+        assert "_track_phase_is_incomplete" not in window, (
+            "the snapshot must not be re-coupled to the track-phase verdict"
+        )
+
+    def test_the_endpoint_stays_database_only(self):
+        """Pins WHY the scan is the sole writer, so nobody 'optimises' the
+        snapshot back into the request path (one MusicBrainz call per owned
+        album per artist-page load)."""
+        routes = (
+            REPO_ROOT / "routes" / "album_routes.py"
+        ).read_text(encoding="utf-8")
+        idx = routes.index("def api_album_missing_tracks")
+        window = routes[idx: idx + 1400]
+        assert "get_missing_tracks_from_db" in window, (
+            "the endpoint must read the persisted snapshot"
+        )
+        assert "get_missing_tracks(" not in window, (
+            "the endpoint must NOT recompute — that is what made a page load "
+            "fire a MusicBrainz release fetch per owned album"
+        )
+
+    def test_the_only_writer_is_the_scan(self):
+        """If another writer appears, this reasoning (and the caveat the Clear
+        Imported flow shows the user) is no longer true."""
+        svc = (
+            REPO_ROOT / "services" / "metadata" / "album_missing_service.py"
+        ).read_text(encoding="utf-8")
+        assert svc.count("_persist_missing_tracks(artist, album, missing)") == 1, (
+            "exactly one persist call site is expected inside get_missing_tracks"
+        )
+        scanner = SCANNER.read_text(encoding="utf-8")
+        assert scanner.count("get_missing_tracks(artist=artist, album=album)") == 1, (
+            "the scan is expected to be the only caller that refreshes the "
+            "snapshot; a second caller would change when it goes stale"
+        )
+
+
+class TestTheZeroTrackSummaryTellsTheTruth:
+    """The message the user actually saw, and acted on.
+
+    The reported run ended with::
+
+        Popularity Scan - All albums were skipped (recently scanned or up to
+        date). Run in Forced mode to rescan.
+
+    Every album had in fact been ABANDONED on its per-album budget, not found
+    up to date — and the advice was useless, because ``force`` bypasses only the
+    freshness check::
+
+        if not force and not album_filter:      # <- the up-to-date skip
+            ...
+        skip_album = ...                        # forced mode sets this False
+
+    The budget check runs regardless, so a forced rescan abandons the same
+    albums again. That is why a re-scan changed nothing and the missing tracks
+    stayed missing. ``skipped_albums`` conflates the two outcomes, so the
+    summary could not distinguish them.
+    """
+
+    def test_an_abandoned_run_does_not_claim_the_albums_were_up_to_date(self):
+        import services.popularity.scan_stage_runner as runner
+
+        msg = runner._zero_track_summary(abandoned_albums=3, skipped_albums=3)
+
+        assert "recently scanned or up to date" not in msg, (
+            "claiming the albums were up to date is factually wrong when they "
+            "were abandoned on budget"
+        )
+        assert "3" in msg, "the abandon count must be reported"
+        assert "budget" in msg.lower(), (
+            "the summary must name the real cause so it is actionable"
+        )
+        assert "Forced mode does NOT bypass the budget" in msg, (
+            "the old advice sent the user to a rescan that cannot help; the "
+            "summary must say so explicitly"
+        )
+
+    def test_a_genuinely_up_to_date_run_keeps_the_original_message(self):
+        import services.popularity.scan_stage_runner as runner
+
+        msg = runner._zero_track_summary(abandoned_albums=0, skipped_albums=5)
+
+        assert "recently scanned or up to date" in msg, (
+            "when nothing was abandoned the original message is correct"
+        )
+        assert "Forced mode" in msg, (
+            "and so is its advice — forced mode really does bypass the "
+            "freshness check"
+        )
+        assert "budget" not in msg.lower(), "no budget claim when none applied"
+
+    def test_the_summary_names_the_real_config_label(self):
+        """The advice must name the control the user can actually find.
+
+        The Config page calls it **"Per-Album Scan Timeout (seconds)"** — the
+        label rendered for ``popularity.album_timeout_seconds``. That label is
+        asserted against BOTH template trees so the message cannot drift into
+        naming a control that does not exist (the user would search for a
+        phrase the page never shows).
+        """
+        import services.popularity.scan_stage_runner as runner
+
+        msg = runner._zero_track_summary(3, 3)
+        assert "Per-Album Scan Timeout" in msg, (
+            "the advice must use the Config page's own label"
+        )
+
+        for rel in (
+            "templates/pages/config.html",
+            "test_site/templates/Pages/config.html",
+        ):
+            html = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            assert "Per-Album Scan Timeout (seconds)" in html, (
+                f"{rel}: the label the summary refers to must exist on the "
+                "Config page"
+            )
+            assert 'id="pop_album_timeout_seconds"' in html, (
+                f"{rel}: and it must be bound to album_timeout_seconds"
+            )
+
+    def test_forced_mode_really_cannot_bypass_the_budget(self):
+        """Pins the FACT behind the corrected advice, so the wording cannot be
+        'simplified' back into an untrue statement."""
+        source = SCANNER.read_text(encoding="utf-8")
+        # The up-to-date skip is the only thing gated on `force`.
+        skip_idx = source.index("if not force and not album_filter:")
+        assert skip_idx, "the freshness skip must remain gated on force"
+        # The budget is resolved unconditionally, outside any `force` guard.
+        budget_idx = source.index("_album_budget = _resolve_album_budget()")
+        assert budget_idx < skip_idx, (
+            "the per-album budget must be resolved for the whole scan, not "
+            "only when NOT forced — otherwise the advice would be true"
+        )
+
+    def test_the_abandon_count_is_reported_additively(self):
+        """The counters feed the summary AND the run result; a second
+        increment site must be counted or the message under-reports."""
+        source = SCANNER.read_text(encoding="utf-8")
+        assert source.count("abandoned_albums += 1") == 2, (
+            "both abandon sites must count: the enrich phase and the track "
+            "phase (they are separate `_bounded_album_phase` call sites)"
+        )
+        assert source.count("skipped_albums += 1") == 3, (
+            "the up-to-date skip plus the two abandon sites"
+        )
+        assert '"abandoned_albums": abandoned_albums' in source, (
+            "the additive result key lets the dashboard distinguish the cases"
+        )
+
+
+

@@ -634,6 +634,21 @@ def _run_full_scan_as_artist_pipeline(
                 seconds=_artist_budget,
                 label=f"artist pipeline '{artist}'",
             )
+
+            # ⚠️ `_bounded_call_report` has TWO return conventions:
+            #   * `seconds is None` (budget DISABLED via artist_timeout_seconds=0)
+            #     returns the function's RAW result — here `None`, because
+            #     `_run_one_artist` returns nothing.
+            #   * a configured budget returns the wrapper dict.
+            # Reading `.get("ok")` unconditionally therefore crashed the whole
+            # artist loop with AttributeError on the first artist for anyone who
+            # followed the Config page's advice to "set 0 to disable the timeout".
+            # Normalise first: "no report" simply means the artist ran and did
+            # not raise (an exception propagates out of the helper, it does not
+            # come back as a report).
+            if not isinstance(_artist_report, dict):
+                _artist_report = {"ok": True, "abandoned": False, "reason": None}
+
             if _artist_report.get("ok"):
                 log_unified(f"[FULL_SCAN] Artist {i + 1}/{total} done: {artist}")
             else:

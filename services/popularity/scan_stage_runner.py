@@ -274,10 +274,12 @@ def _bounded_album_phase(
 ) -> Any:
     """Run one PHASE of an album under the per-album budget.
 
+    ⚠️⚠️ RETURNS THE FUNCTION'S OWN RESULT, never the budget report.
+
     WHY THE ALBUM IS THE RIGHT UNIT
     -------------------------------
     A stuck call looks like ONE album not finishing, so bounding the album
-    isolates the damage to that album.  Bounding the ARTIST instead made the
+    isolates the damage to that album. Bounding the ARTIST instead made the
     budget a size limit: ``get_all_artists`` groups by
     ``COALESCE(NULLIF(TRIM(album_artist),''), TRIM(artist))``, so
     "Various Artists" is a single row holding every compilation in the
@@ -285,16 +287,43 @@ def _bounded_album_phase(
 
         Various Artists  abandoned  exceeded 1800.0s budget
 
-    On exceed this returns an ``abandoned`` report and the caller SKIPS the
+    On exceed this returns an ``abandoned`` sentinel and the caller SKIPS the
     rest of that album and moves to the next one — the artist keeps its
-    remaining albums.  Deliberately NOT wired to ``scan_cancellation``: that
+    remaining albums. Deliberately NOT wired to ``scan_cancellation``: that
     registry is keyed per ARTIST, so cancelling from here would unwind every
     remaining album of the artist and recreate the original problem one level
     down.
 
     ``seconds=None`` runs the phase unbounded (the budget is disabled).
+
+    ⚠️⚠️ WHY IT UNWRAPS
+    -------------------
+    ``_bounded_call_report`` has TWO return conventions:
+
+        ``seconds is None``    -> the function's RAW result
+        ``seconds`` is a value -> a WRAPPER ``{"ok", "result", "abandoned", ...}``
+
+    Passing ``seconds`` straight through meant every call site silently started
+    receiving the wrapper as soon as a per-album budget was configured (it is by
+    default). The damage was quiet and severe:
+
+      * ``album_result = wrapper`` -> ``wrapper.get("detected_album_type")`` is
+        ``None``, so the log read ``Album enriched: ... (type=None)`` even
+        though the stage had resolved ``album+compilation``.
+      * ``_track_results_ordered = wrapper`` -> not a list, so
+        ``_track_phase_is_incomplete()`` reported **"did not complete" for a
+        phase that finished perfectly**. The album was skipped, its tracks were
+        never appended to ``results``, and the run ended with
+        "All albums were skipped" / "0 tracks processed" — so SINGLE DETECTION
+        never ran during a full scan, even though the per-track logs showed
+        every verdict being computed. The same skip also starved the
+        missing-track snapshot, which is written later in the same loop body.
+
+    So the wrapper is unwrapped HERE and only the ABANDONMENT is propagated, as
+    a sentinel the caller can recognise. Returning the raw value keeps these
+    call sites exactly as they were before the budget existed.
     """
-    return _bounded_call_report(
+    report = _bounded_call_report(
         func,
         *args,
         seconds=seconds,
@@ -302,6 +331,33 @@ def _bounded_album_phase(
         log_context=log_context,
         **kwargs,
     )
+
+    # ``seconds is None`` IS the discriminator, and naming it is what makes the
+    # two conventions unambiguous: in that mode ``_bounded_call_report`` returns
+    # the function's own result, whatever its shape. (Sniffing the payload alone
+    # would misfire if a phase legitimately returned a dict carrying an
+    # "abandoned" key.) The shape test stays as a guard so a non-report can
+    # never be unwrapped to ``None``.
+    if seconds is None or not isinstance(report, dict) or "abandoned" not in report:
+        return report
+
+    if report.get("abandoned"):
+        # Propagate ONLY the abandonment, in the shape the callers already
+        # understand (they test ``result.get("abandoned")`` / non-list).
+        return {
+            "ok": False,
+            "abandoned": True,
+            "reason": report.get("reason"),
+            "budget_seconds": report.get("budget_seconds"),
+        }
+
+    # ⚠️ A FAILURE (ok=False, not abandoned) unwraps to ``report["result"]``,
+    # which is ``None``. That is deliberate and matches the pre-budget behaviour
+    # of ``_bounded_call_report(seconds=None)`` — but it means the caller must not
+    # assume a list. ``_track_phase_is_incomplete`` treats any non-list as
+    # incomplete, so a failed track phase still skips its album instead of being
+    # zipped against ``None``.
+    return report.get("result")
 
 
 def _album_phase_was_abandoned(result: Any) -> tuple[bool, str]:
@@ -318,13 +374,59 @@ def _album_phase_was_abandoned(result: Any) -> tuple[bool, str]:
 
 
 def _track_phase_is_incomplete(result: Any) -> bool:
-    """True when the album's track phase did not return its results.
+    """True when the album's track phase did NOT return its results.
 
-    ``_execute_track_jobs_safely`` always returns a LIST. Anything else is the
-    ``abandoned`` report from the budget, so the album must be skipped rather
-    than treated as a list of results.
+    ``_execute_track_jobs_safely`` ALWAYS returns a list (it pre-allocates
+    ``[None] * len(track_jobs)``), so a non-list can only mean the phase produced
+    no results at all:
+
+      * the ``abandoned`` sentinel from the per-album budget,
+      * ``{}`` / ``None`` — what ``_bounded_call_report`` yields when the call
+        RAISED, and what the unwrap in ``_bounded_album_phase`` passes on.
+
+    Classifying the failure shapes as incomplete is load-bearing, not defensive:
+    the caller's next step is ``zip(_track_jobs, _track_results_ordered)``, which
+    raises ``TypeError`` on ``None`` and silently yields ZERO pairs on ``{}`` —
+    either way the album's tracks are lost without a skip.
+
+    ⚠️ WHY THIS IS ONLY SOUND NOW: this test is the ``not isinstance(result,
+    list)`` form, and while ``_bounded_album_phase`` forwarded the budget
+    WRAPPER a phase that had finished PERFECTLY also arrived here as a dict. Every
+    album was therefore reported "did not complete", skipped, and its Single
+    verdicts discarded. The fix belongs in the UNWRAP, not here — do not "tighten"
+    this into a shape check for an ``abandoned`` key, or the failure shapes above
+    stop skipping their album.
     """
     return not isinstance(result, list)
+
+
+def _zero_track_summary(abandoned_albums: int, skipped_albums: int) -> str:
+    """The honest summary for a scan that processed NO tracks.
+
+    ⚠️ ``skipped_albums`` conflates TWO unrelated outcomes: albums skipped
+    because they were already up to date, and albums ABANDONED for exceeding
+    their per-album time budget (both the enrich phase and the track phase
+    increment it). Reporting every case as "recently scanned or up to date" was
+    a lie whenever the real cause was the budget — and the advice it gave
+    ("Run in Forced mode to rescan") CANNOT help, because ``force`` only
+    bypasses the up-to-date check, not the budget, so the same album is
+    abandoned again on the next run.
+
+    ⭐ Factored out as a pure function so the DECISION can be tested by CALLING
+    it; a source-text assertion cannot catch a neutered branch.
+    """
+    if abandoned_albums:
+        return (
+            f"Popularity Scan - no tracks processed: {abandoned_albums} album(s) "
+            "exceeded their per-album time budget ("
+            f"{skipped_albums} album(s) skipped in total). Raise the 'Per-Album Scan "
+            "Timeout' in Config, or set it to 0 to disable the budget, then rescan — "
+            "Forced mode does NOT bypass the budget."
+        )
+    return (
+        "Popularity Scan - All albums were skipped (recently scanned or up to "
+        "date). Run in Forced mode to rescan."
+    )
 
 
 def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
@@ -1309,6 +1411,10 @@ def run_scan(
     albums_processed = 0
     tracks_processed = 0
     skipped_albums = 0
+    # The SUBSET of `skipped_albums` that was abandoned by the per-album budget
+    # rather than found up to date. Kept separate so the end-of-run summary can
+    # tell the truth about why nothing was processed (see _zero_track_summary).
+    abandoned_albums = 0
     results: list[dict[str, Any]] = []
     last_checkpoint_artist: str | None = None
     scan_type = _resolve_scan_type(options)
@@ -1971,6 +2077,7 @@ def run_scan(
             )
             if _album_abandoned:
                 skipped_albums += 1
+                abandoned_albums += 1
                 log_unified(
                     f"[POPULARITY] Album '{artist} - {album}' skipped "
                     f"({_album_abandon_reason}) — continuing with the artist's "
@@ -2357,6 +2464,7 @@ def run_scan(
                     else "did not complete"
                 )
                 skipped_albums += 1
+                abandoned_albums += 1
                 log_unified(
                     f"[POPULARITY] Album '{artist} - {album}' skipped "
                     f"({_track_reason}) — continuing with the artist's "
@@ -2682,7 +2790,16 @@ def run_scan(
             log_unified(f"[POPULARITY] {_quarter * 25}% complete ({albums_processed}/{total_albums} albums processed)")
 
     if tracks_processed == 0:
-        log_unified("Popularity Scan - All albums were skipped (recently scanned or up to date). Run in Forced mode to rescan.")
+        log_unified(_zero_track_summary(abandoned_albums, skipped_albums))
+        if abandoned_albums:
+            # Actionable, and loud: every album was cut short, so the operator
+            # needs to know the budget (not the freshness check) is the cause.
+            logger.warning(
+                "Popularity scan processed 0 tracks — albums were abandoned on budget",
+                abandoned_albums=abandoned_albums,
+                skipped_albums=skipped_albums,
+                total_albums=total_albums,
+            )
 
     _close_artist_section(_section_artist)
 
@@ -2712,6 +2829,8 @@ def run_scan(
         "success": True,
         "albums_processed": albums_processed,
         "albums_skipped": skipped_albums,
+        # Additive: the subset of albums_skipped that blew their time budget.
+        "abandoned_albums": abandoned_albums,
         "tracks_processed": tracks_processed,
         "run_essentia": _essentia_enabled,
     }
