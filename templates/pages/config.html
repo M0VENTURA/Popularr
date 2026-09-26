@@ -2516,7 +2516,7 @@
       <div class="setting-card">
         <div class="setting-info">
           <label class="setting-title" for="playlists_genre_playlists_enabled">Create Genre Top-Tracks Playlists</label>
-          <p class="setting-description">Library-wide <code>{Genre} - Top Tracks.m3u</code> playlists generated once per scan (and refreshed per album when its tracks change): every track at or above the Minimum Stars is assigned its top weighted genres, each genre pool is sorted by popularity (most popular first), a playlist is only created when the genre clears the Create Threshold, and every qualifying track is included (no top-N cap).</p>
+          <p class="setting-description">Library-wide <code>{Genre} - Top Tracks.m3u</code> playlists generated once per scan (and refreshed per album when its tracks change): every track at or above the Minimum Stars is assigned its top weighted genres, each genre pool is ranked by <strong>global</strong> popularity (see Track Ordering below), a playlist is only created when the genre clears the Create Threshold, and every qualifying track is included (no top-N cap).</p>
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
@@ -2588,6 +2588,35 @@
           <label for="playlists_genre_max_genres">Genres Per Track</label>
           <input type="number" step="1" min="1" max="10" class="form-control form-control-sm" id="playlists_genre_max_genres" placeholder="3" value="{{ config.get('playlists', {}).get('genre_playlists_max_genres', 3) }}">
           <span class="help-text">How many top weighted genres each track may appear in. Default: <strong>3</strong></span>
+        </div>
+      </div>
+
+      <!-- Playlist track ordering -->
+      <div class="thresholds-grid">
+        <div class="input-card">
+          <label for="playlists_order_mode">Track Ordering</label>
+          <select class="form-select form-select-sm" id="playlists_order_mode">
+            <option value="prominence" {% if config.get('playlists', {}).get('playlist_order_mode', 'prominence') == 'prominence' %}selected{% endif %}>Global popularity (recommended)</option>
+            <option value="stored" {% if config.get('playlists', {}).get('playlist_order_mode', 'prominence') == 'stored' %}selected{% endif %}>Stored score (legacy)</option>
+          </select>
+          <span class="help-text">
+            <strong>Global popularity</strong> ranks every track by its raw Last.fm/ListenBrainz
+            listener counts, which mean the same thing on every album.
+            <strong>Stored score</strong> uses the score relative to each track's own album — so a
+            weak track on a quiet album can outrank a strong track on a busy one. Default: <strong>Global popularity</strong>
+          </span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_max_per_artist">Max Tracks Per Artist</label>
+          <input type="number" step="1" min="0" max="500" class="form-control form-control-sm" id="playlists_max_per_artist" placeholder="25" value="{{ config.get('playlists', {}).get('genre_playlists_max_per_artist', 25) }}">
+          <span class="help-text">Stops one prolific artist filling a genre playlist. Overflow tracks move to the end rather than being dropped. Set to <strong>0</strong> for no limit. Default: <strong>25</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_interleave_artists">Spread Artists Through The List</label>
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_interleave_artists" {% if config.get('playlists', {}).get('playlist_interleave_artists', True) %}checked{% endif %}>
+          </div>
+          <span class="help-text">Avoids consecutive runs from the same artist, so a ranked list does not arrive album by album. Changes the order only — never which tracks are included. Default: <strong>on</strong></span>
         </div>
       </div>
 

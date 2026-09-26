@@ -192,6 +192,34 @@ def _collect_listenbrainz(artists: list[dict[str, Any]], per_artist: int = 1) ->
 # Orchestration
 # ---------------------------------------------------------------------------
 
+def interleave_by_source(groups: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Round-robin several candidate lists into one, preserving each list's order.
+
+    ⚠️ WHY THIS EXISTS. ``generate_recommendations`` used to append the Last.fm
+    candidates and THEN the ListenBrainz ones, and truncate the combined list to
+    ``limit``. Because Last.fm is collected first and contributes one track per
+    library artist, the truncation was always reached inside the Last.fm block:
+    with 24 library artists and ``limit=12`` the playlist held **12 Last.fm
+    tracks and 0 ListenBrainz tracks**, even though the UI's default source is
+    "Last.fm + ListenBrainz". At ``limit=25`` it was 24/1.
+
+    Round-robinning BEFORE the truncation means each source contributes its best
+    candidates in turn, so ``source="both"`` genuinely mixes both.
+
+    ⭐ ``zip_longest`` (not ``zip``) is load-bearing: the lists are usually of
+    DIFFERENT lengths, and plain ``zip`` would silently stop at the shortest one,
+    discarding every remaining candidate from the longer list.
+    """
+    from itertools import zip_longest
+
+    out: list[dict[str, Any]] = []
+    for row in zip_longest(*(groups or [])):
+        for item in row:
+            if item is not None:
+                out.append(item)
+    return out
+
+
 def generate_recommendations(
     source: str = "both",
     name: str = "Recommended Mix",
@@ -207,11 +235,16 @@ def generate_recommendations(
 
     artists = _library_top_artists(limit=max(8, limit * 2))
 
-    candidates: list[dict[str, Any]] = []
+    # ⚠️ Collect each source SEPARATELY and INTERLEAVE them before the limit is
+    # applied. Appending one after the other made the truncation fall entirely
+    # inside the first source, so `source="both"` never actually used
+    # ListenBrainz (12 Last.fm / 0 ListenBrainz at limit=12).
+    source_groups: list[list[dict[str, Any]]] = []
     if source in ("lastfm", "both"):
-        candidates += _collect_lastfm(artists, per_artist)
+        source_groups.append(_collect_lastfm(artists, per_artist))
     if source in ("listenbrainz", "both"):
-        candidates += _collect_listenbrainz(artists, per_artist)
+        source_groups.append(_collect_listenbrainz(artists, per_artist))
+    candidates: list[dict[str, Any]] = interleave_by_source(source_groups)
 
     # Dedupe by normalised title + artist, then cap at the requested limit.
     from helpers.normalization_service import normalize_title_for_lookup

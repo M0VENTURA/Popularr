@@ -94,6 +94,7 @@ from db.engine import db_session
 from db.utils import row_get
 from services.popularity.popularity_math import (
     age_skew_multiplier,
+    album_prominence_score,
     album_ratio_standout,
     apply_album_relative_popularity,
     calculate_robust_zscore,
@@ -1460,6 +1461,212 @@ def _build_album_model(
         return {}
 
 
+def _effective_order_score(
+    row: dict[str, Any],
+    mode: str,
+) -> float:
+    """The score a PLAYLIST sorts on, in a form comparable ACROSS albums.
+
+    ⭐⭐ WHY THIS EXISTS — the defect it fixes
+    -----------------------------------------
+    ``tracks.popularity`` / ``tracks.final_score`` hold an **album-relative**
+    value: ``_apply_album_relative_normalization`` re-maps the raw score through
+    a robust z-score against the track's OWN album distribution and then through
+    a logistic (``_persist_album_relative_scores`` writes it). It answers "how
+    far above its own record does this track sit", which is exactly what star
+    rating needs — but it is NOT comparable between two albums.
+
+    Ordering a multi-artist/multi-album playlist on it therefore ranks ALBUM
+    CONTEXT, not the track. Measured with the real function: a raw 10 on a
+    low-median album stores as 29.1 while a raw 65 on a high-median album stores
+    as 18.7, so the weaker track sorts FIRST. The same raw score of 50 stores as
+    50.0, 50.0 or 61.1 depending only on its album's spread.
+
+    ``popularity_math.top_songs_by_genre``'s own docstring already says an
+    album-relative score "is only meaningful within one album's own
+    distribution" — and that function was never called.
+
+    ``mode="prominence"`` uses ``album_prominence_score``, a log-scaled blend of
+    the track's RAW ``lastfm_listeners`` and ``listenbrainz_listens``. Those are
+    absolute global counts, so the value means the same thing on every album and
+    is safe to sort across the whole library. This is the same measure
+    ``_build_album_model`` already uses for cross-album benchmark comparison.
+
+    ``mode="stored"`` keeps the existing behaviour (used as the fallback when a
+    track has no listener data to compare on).
+
+    ⚠️ ``stars`` is NOT a safe fallback for this: ``_assign_stars`` rates a track
+    against its own album AND artist distributions, so star tiers are
+    album-relative too and cannot break ties across albums.
+    """
+    if mode == "prominence":
+        prominence = album_prominence_score(
+            int(row.get("lastfm_listeners") or 0),
+            int(row.get("listenbrainz_listens") or 0),
+        )
+        if prominence > 0:
+            return prominence
+    return float(row.get("popularity_score") or row.get("score") or row.get("final_score") or 0)
+
+
+def _playlist_order_key(
+    row: dict[str, Any],
+    mode: str = "prominence",
+) -> tuple:
+    """Full sort key for a generated playlist, most preferred first.
+
+    ⭐ The PRIMARY key is ``_effective_order_score`` (cross-album comparable).
+    Star tier and the stored score are demoted to TIE-BREAKERS, because both are
+    album-relative: keeping them primary is what let album context decide the
+    order.
+
+    ``title`` is the final tie-breaker so the order is DETERMINISTIC — a
+    playlist rebuilt from an unchanged library must produce byte-identical
+    output, or the push cache can never settle.
+    """
+    return (
+        -float(_effective_order_score(row, mode)),
+        -int(row.get("stars") or 0),
+        -float(row.get("popularity_score") or row.get("score") or 0),
+        str(row.get("title") or "").casefold(),
+    )
+
+
+def _apply_artist_cap(
+    ordered: list[dict[str, Any]],
+    max_per_artist: int | None,
+) -> list[dict[str, Any]]:
+    """Limit how many tracks ONE credited artist may contribute.
+
+    ⭐ Without a cap, ranking by prominence alone lets a prolific artist with a
+    consistent catalogue monopolise a genre playlist. Measured on a synthetic
+    400-track pool (2 artists x 100 tracks, 20 artists x 10): the two large
+    artists took **200 of 300 tracks (67%)**, because ``_popularity_order`` has
+    no artist key and no cap.
+
+    ⚠️ The cap must NOT shrink the playlist. Overflow tracks are DEFERRED to the
+    end in their original relative order rather than dropped, so a genre with
+    only one qualifying artist still yields a full playlist. ``max_per_artist``
+    of ``None`` or ``<= 0`` means unlimited.
+    """
+    if not max_per_artist or max_per_artist <= 0:
+        return ordered
+
+    counts: dict[str, int] = {}
+    kept: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    for row in ordered:
+        key = _normalise_artist_key(row.get("artist") or row.get("album_artist") or "")
+        if counts.get(key, 0) < max_per_artist:
+            counts[key] = counts.get(key, 0) + 1
+            kept.append(row)
+        else:
+            deferred.append(row)
+    return kept + deferred
+
+
+def _interleave_artists(ordered: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Spread a ranked list so consecutive tracks rarely share an artist.
+
+    ⭐ Purpose: a playlist that is a pure score ranking arrives ALBUM-BLOCKED —
+    the top tracks of one record sit next to each other and the list is
+    effectively "album by album". Round-robinning by artist gives the ranking a
+    listenable shape without changing WHICH tracks are included, only their
+    order.
+
+    ⚠️ Each artist's own tracks stay in ranked order (the round-robin takes
+    them in turn), and the artist's FIRST pick always appears before its second,
+    so the highest-ranked track still leads. This is a re-order, never a
+    re-rank.
+    """
+    from collections import defaultdict
+
+    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in ordered:
+        buckets[_normalise_artist_key(row.get("artist") or row.get("album_artist") or "")].append(row)
+
+    if len(buckets) <= 1:
+        return list(ordered)
+
+    out: list[dict[str, Any]] = []
+    while True:
+        progressed = False
+        for bucket in buckets.values():
+            if bucket:
+                out.append(bucket.pop(0))
+                progressed = True
+        if not progressed:
+            break
+    return out
+
+
+def _ordered_playlist_rows(
+    winners: list[dict[str, Any]],
+    *,
+    order_mode: str,
+    max_per_artist: int | None = None,
+    interleave: bool = False,
+) -> list[dict[str, Any]]:
+    """Apply the full ordering pipeline to a playlist's winning tracks.
+
+    Order of operations is deliberate:
+      1. RANK on the cross-album-comparable key.
+      2. CAP each artist, deferring (never dropping) the overflow.
+      3. Optionally INTERLEAVE artists, which only re-orders step 2's result.
+    """
+    ordered = sorted(winners, key=lambda r: _playlist_order_key(r, order_mode))
+    ordered = _apply_artist_cap(ordered, max_per_artist)
+    if interleave:
+        ordered = _interleave_artists(ordered)
+    return ordered
+
+
+def _ordered_by_percentile_then_prominence(
+    winners: list[dict[str, Any]],
+    mode: str = "prominence",
+) -> list[dict[str, Any]]:
+    """Essential-Collection ordering: star tier, then catalogue percentile.
+
+    Kept deliberately SEPARATE from ``_playlist_order_key`` because an Essential
+    Collection is a SINGLE artist: every track is scored against the same
+    catalogue, so the album-relative remapping that makes a cross-artist order
+    unsound does not apply here, and the catalogue percentile is a legitimate
+    primary key.
+
+    What changes is the tie-break. The old key fell back to
+    ``-popularity_score``, which is derived from the SAME album-relative value as
+    the percentile — so it could not separate two tracks whose percentiles were
+    equal, and the order between albums was decided by how tightly spread each
+    album was. The raw listener-based prominence is used instead, which reflects
+    the tracks' actual standing.
+    """
+    return sorted(
+        winners,
+        key=lambda r: (
+            -int(r.get("stars") or 0),                                # 5★ tier first
+            -float(r.get("percentile") or 0.0),                       # catalogue percentile in tier
+            -float(_effective_order_score(r, mode)),                  # cross-album standing
+            str(r.get("title") or "").casefold(),                     # deterministic
+        ),
+    )
+
+
+def _resolve_max_per_artist(cfg: dict[str, Any]) -> int | None:
+    """Per-artist track cap for a generated playlist.
+
+    ``0`` (or a missing/invalid value) means UNLIMITED, which is the documented
+    meaning everywhere else in this config (see ``album_timeout_seconds``): a
+    cap that silently becomes a default would make "0 = no limit" impossible to
+    express. Default **25** applies the anti-monopoly cap out of the box.
+    """
+    raw = cfg.get("genre_playlists_max_per_artist", 25)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 25
+    return None if value <= 0 else value
+
+
 # ---------------------------------------------------------------------------
 # Navidrome sync
 # ---------------------------------------------------------------------------
@@ -1850,14 +2057,35 @@ def _sync_essential_playlist(
         from helpers.config_helpers import get_config
         cfg = (get_config() or {}).get("playlists") or {}
         max_tracks = max(1, int(cfg.get("essential_max_tracks", 50) or 50))
+        order_mode = str(cfg.get("playlist_order_mode", "prominence") or "prominence").strip().lower()
+        if order_mode not in ("prominence", "stored"):
+            order_mode = "prominence"
     except Exception:
         max_tracks = 50
+        order_mode = "prominence"
 
     if artist_scores is None:
         try:
             with db_session() as session:
+                # ⚠️ Case-INSENSITIVE, matching the track-row query just below.
+                #
+                # This used `... = :artist` while the row fetch used
+                # `LOWER(TRIM(...)) = LOWER(TRIM(:artist))`. When the artist name
+                # the scan iterates differs only in case from the stored
+                # `album_artist` (clean_artist_name_for_storage title-cases), the
+                # row query still returns the artist's tracks but this one
+                # returned ZERO rows. The cohort then fell back to an EMPTY list,
+                # and `calculate_percentile_star_rating(score, [])` returns
+                # percentile 0.0 for EVERY track — so the playlist's PRIMARY sort
+                # key became a constant and the ordering silently collapsed to
+                # the tie-breakers (star tier, then raw score, then title).
                 res = session.execute(
-                    text("SELECT final_score FROM tracks WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist AND final_score > 0"),
+                    text(
+                        "SELECT final_score FROM tracks "
+                        "WHERE LOWER(TRIM(COALESCE(NULLIF(album_artist, ''), artist))) "
+                        "      = LOWER(TRIM(:artist)) "
+                        "  AND final_score > 0"
+                    ),
                     {"artist": artist},
                 )
                 artist_scores = [float(r[0]) for r in res.fetchall() or [] if r and r[0]]
@@ -1875,6 +2103,8 @@ def _sync_essential_playlist(
                            COALESCE(is_live, 0) AS is_live,
                            COALESCE(is_compilation, 0) AS is_compilation,
                            COALESCE(popularity, final_score, 0) AS popularity_score,
+                           COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
+                           COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
                            year, release_year, artist, album_artist, genres
                     FROM tracks
                     WHERE COALESCE(stars, star_rating) >= 4
@@ -1964,14 +2194,16 @@ def _sync_essential_playlist(
         _, pct = calculate_percentile_star_rating(float(w.get("popularity_score") or 0), artist_scores)
         w["percentile"] = pct
 
-    winners.sort(
-        key=lambda r: (
-            -int(r.get("stars") or 0),               # 1. All 5★ tracks first, then 4★
-            -float(r.get("percentile") or 0.0),      # 2. Catalogue percentile within a star tier
-            -float(r.get("popularity_score") or 0),  # 3. Raw popularity breaks percentile ties
-            str(r.get("title") or "").casefold(),    # 4. Alphabetical tie-breaker
-        ),
-    )
+    # ⭐ An Essential Collection is a SINGLE artist, so every track's score is
+    # relative to the same catalogue — album-relative remapping does NOT distort
+    # the comparison here, and the catalogue percentile IS the right primary key.
+    # What the old key could not do is break ties meaningfully: `-percentile`
+    # then `-popularity_score` are both derived from the same album-relative
+    # value, so two albums' tracks could interleave purely by album spread.
+    # Star tier and percentile stay PRIMARY (unchanged behaviour); the raw
+    # cross-album listener signal is used as the tie-breaker within a percentile
+    # bucket, which is strictly more informative than the remapped score.
+    winners = _ordered_by_percentile_then_prominence(winners, order_mode)
     winners = winners[:max_tracks]
 
     _song_ids = [str(r.get("id") or "").strip() for r in winners if str(r.get("id") or "").strip()]
@@ -2283,6 +2515,8 @@ _GENRE_ROWS_SQL = """
            COALESCE(popularity, final_score, 0) AS popularity_score,
            COALESCE(is_live, 0) AS is_live,
            COALESCE(is_compilation, 0) AS is_compilation,
+           COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
+           COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
            genres
     FROM tracks
     WHERE COALESCE(stars, star_rating) >= :min_stars
@@ -2394,6 +2628,12 @@ def _create_genre_top_track_playlists(
             or _GENRE_PLAYLIST_DEFAULT_MAX_TRACKS
         ),
     )
+    # ⭐ Ordering controls (see _effective_order_score / _apply_artist_cap).
+    order_mode = str(cfg.get("playlist_order_mode", "prominence") or "prominence").strip().lower()
+    if order_mode not in ("prominence", "stored"):
+        order_mode = "prominence"
+    max_per_artist = _resolve_max_per_artist(cfg)
+    interleave_artists = bool(cfg.get("playlist_interleave_artists", True))
 
     create_enabled = _genre_playlists_enabled()
     delete_enabled = _genre_playlists_delete_enabled()
@@ -2470,6 +2710,11 @@ def _create_genre_top_track_playlists(
                 "duration": row.get("duration"),
                 "stars": int(row.get("stars") or 0),
                 "score": float(row.get("popularity_score") or row.get("final_score") or 0),
+                "popularity_score": float(row.get("popularity_score") or row.get("final_score") or 0),
+                # Raw global listener counts: the ONLY cross-album-comparable
+                # signal available here (``popularity_score`` is album-relative).
+                "lastfm_listeners": int(row.get("lastfm_listeners") or 0),
+                "listenbrainz_listens": int(row.get("listenbrainz_listens") or 0),
                 "artist": str(row.get("artist") or row.get("album_artist") or ""),
                 "is_live": int(row.get("is_live") or 0),
                 "is_compilation": int(row.get("is_compilation") or 0),
@@ -2485,13 +2730,6 @@ def _create_genre_top_track_playlists(
             item["is_compilation"],
             -item["stars"],
             -item["score"],
-            item["title"].casefold(),
-        )
-
-    def _popularity_order(item: dict[str, Any]) -> tuple:
-        return (
-            -item["score"],
-            -item["stars"],
             item["title"].casefold(),
         )
 
@@ -2535,7 +2773,16 @@ def _create_genre_top_track_playlists(
         if not create_enabled and not playlist_exists:
             continue
 
-        winners.sort(key=_popularity_order)
+        # ⭐ Rank on a CROSS-ALBUM-comparable key, cap per artist, then spread.
+        # Previously this was `winners.sort(key=_popularity_order)` — a pure
+        # stored-score ranking, where the stored score is album-relative, so the
+        # order reflected album context rather than the tracks.
+        winners = _ordered_playlist_rows(
+            winners,
+            order_mode=order_mode,
+            max_per_artist=max_per_artist,
+            interleave=interleave_artists,
+        )
         winners = winners[:max_tracks]
 
         _song_ids = [str(t.get("id") or "").strip() for t in winners if str(t.get("id") or "").strip()]
