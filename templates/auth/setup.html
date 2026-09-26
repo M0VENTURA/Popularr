@@ -60,13 +60,13 @@
     </div>
     <p class="text-muted small mb-3">Popularr reads your library from Navidrome and sends star ratings back. Your password is stored in <code>config.yaml</code> only.</p>
     <div class="mb-3">
-      <label class="form-label">Navidrome URL</label>
+      <label class="form-label" for="navUrl">Navidrome URL</label>
       <input type="url" class="form-control" id="navUrl" placeholder="https://music.yourdomain.com" value="{{ defaults.get('nav_url', 'http://navidrome:4533') }}">
       <small class="form-text text-muted">Full URL including the scheme — no trailing slash required. Example: <code>https://music.yourdomain.com</code></small>
     </div>
     <div class="row g-3 mb-3">
-      <div class="col-sm-6"><label class="form-label">Username</label><input type="text" class="form-control" id="navUser" placeholder="admin" value="{{ defaults.get('nav_user', '') }}"></div>
-      <div class="col-sm-6"><label class="form-label">Password</label><input type="password" class="form-control" id="navPass" placeholder="••••••••" value="{{ defaults.get('nav_pass', '') }}"></div>
+      <div class="col-sm-6"><label class="form-label" for="navUser">Username</label><input type="text" class="form-control" id="navUser" placeholder="admin" value="{{ defaults.get('nav_user', '') }}"></div>
+      <div class="col-sm-6"><label class="form-label" for="navPass">Password</label><input type="password" class="form-control" id="navPass" placeholder="••••••••" value="{{ defaults.get('nav_pass', '') }}"></div>
     </div>
 
     <!-- Database (pre-filled from env if available) -->
@@ -74,11 +74,11 @@
       <summary class="fw-semibold small mb-2"><i class="bi bi-database"></i> PostgreSQL Database <span class="text-muted fw-normal">(pre-filled from environment)</span></summary>
       <div class="border rounded p-3 mt-2">
         <div class="row g-2">
-          <div class="col-sm-6"><label class="form-label form-label-sm">Host</label><input type="text" class="form-control form-control-sm" id="pgHost" value="{{ pg.get('host', '') }}"></div>
-          <div class="col-sm-3"><label class="form-label form-label-sm">Port</label><input type="text" class="form-control form-control-sm" id="pgPort" value="{{ pg.get('port', '5432') }}"></div>
-          <div class="col-sm-3"><label class="form-label form-label-sm">Database</label><input type="text" class="form-control form-control-sm" id="pgDb" value="{{ pg.get('database', 'popularr') }}"></div>
-          <div class="col-sm-6"><label class="form-label form-label-sm">User</label><input type="text" class="form-control form-control-sm" id="pgUser" value="{{ pg.get('user', 'popularr') }}"></div>
-          <div class="col-sm-6"><label class="form-label form-label-sm">Password</label><input type="password" class="form-control form-control-sm" id="pgPass" value="{{ pg.get('password', '') }}"></div>
+          <div class="col-sm-6"><label class="form-label form-label-sm" for="pgHost">Host</label><input type="text" class="form-control form-control-sm" id="pgHost" value="{{ pg.get('host', '') }}"></div>
+          <div class="col-sm-3"><label class="form-label form-label-sm" for="pgPort">Port</label><input type="text" class="form-control form-control-sm" id="pgPort" value="{{ pg.get('port', '5432') }}"></div>
+          <div class="col-sm-3"><label class="form-label form-label-sm" for="pgDb">Database</label><input type="text" class="form-control form-control-sm" id="pgDb" value="{{ pg.get('database', 'popularr') }}"></div>
+          <div class="col-sm-6"><label class="form-label form-label-sm" for="pgUser">User</label><input type="text" class="form-control form-control-sm" id="pgUser" value="{{ pg.get('user', 'popularr') }}"></div>
+          <div class="col-sm-6"><label class="form-label form-label-sm" for="pgPass">Password</label><input type="password" class="form-control form-control-sm" id="pgPass" value="{{ pg.get('password', '') }}"></div>
         </div>
       </div>
     </details>
@@ -172,7 +172,7 @@
     </div>
     <p class="text-muted small mb-3">How files are organized into your music library when downloaded or renamed. You can change this later in Settings → File Management.</p>
     <div class="border rounded p-3 mb-3">
-      <label class="form-label"><strong>Default Naming Convention</strong></label>
+      <label class="form-label" for="setupFileNameFormat"><strong>Default Naming Convention</strong></label>
       <input type="text" class="form-control font-monospace" id="setupFileNameFormat" placeholder="{album_artist}/{year} - {album}/{track_number}. {artist} - {title}" value="{{ defaults.get('file_name_format', '{album_artist}/{year} - {album}/{track_number}. {artist} - {title}') }}">
       <div class="row g-2 mt-1">
         <div class="col-sm-6 small text-muted"><code>{track_number}</code> — 2-digit track number</div>
@@ -191,14 +191,14 @@
       <div id="setupConversionOptions" class="d-none">
         <div class="row g-2">
           <div class="col-sm-6">
-            <label class="form-label form-label-sm">Mode</label>
+            <label class="form-label form-label-sm" for="setupConversionMode">Mode</label>
             <select class="form-select form-select-sm" id="setupConversionMode">
               <option value="flac_to_mp3" {% if defaults.get('conversion_mode', 'flac_to_mp3') == 'flac_to_mp3' %}selected{% endif %}>FLAC to MP3</option>
               <option value="none" {% if defaults.get('conversion_mode', 'flac_to_mp3') == 'none' %}selected{% endif %}>Disabled (Move as-is)</option>
             </select>
           </div>
           <div class="col-sm-6">
-            <label class="form-label form-label-sm">MP3 Bitrate (kbps)</label>
+            <label class="form-label form-label-sm" for="setupConversionBitrate">MP3 Bitrate (kbps)</label>
             <input type="number" class="form-control form-control-sm" id="setupConversionBitrate" min="96" max="320" step="1" value="{{ defaults.get('conversion_bitrate', 320) }}">
           </div>
         </div>

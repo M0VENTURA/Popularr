@@ -913,12 +913,12 @@
               <input type="text" class="form-control" id="newSrcName" placeholder="e.g. Jazz Music 2026" autocomplete="off">
             </div>
             <div class="col-12 col-md-4">
-              <label class="form-label fw-bold" for="newSrcUrl">Column Order <span class="text-danger">*</span></label>
+              <label class="form-label fw-bold">Column Order <span class="text-danger">*</span></label>
               <div id="newSrcColumns"></div>
               <div class="form-text">Pick the table column for each position (day, artist, album, genre). Genre columns are skipped during parsing.</div>
             </div>
             <div class="col-12">
-              <label class="form-label fw-bold">Wikipedia URL <span class="text-danger">*</span></label>
+              <label class="form-label fw-bold" for="newSrcUrl">Wikipedia URL <span class="text-danger">*</span></label>
               <input type="url" class="form-control" id="newSrcUrl" placeholder="https://en.wikipedia.org/wiki/..." autocomplete="off">
             </div>
           </div>
@@ -1721,7 +1721,7 @@
       {% set mbid_guard = (config.get('metadata_update', {}) or {}).get('album_mbid_guard', {}) %}
       <div class="row g-3 mt-1 pt-3 border-top">
         <div class="col-12">
-          <label class="form-label form-label-sm mb-1" for="metadata_update_mbid_guard_enabled">MusicBrainz Album ID Guard</label>
+          <label class="form-label form-label-sm mb-1">MusicBrainz Album ID Guard</label>
           <small class="form-text text-muted d-block mb-2">
             Before an album MusicBrainz ID is written to the tracks or the audio files, the ID's own artist and title
             are compared with this album's text. A mismatch is refused and the ID is discarded — the normal text search
@@ -1731,7 +1731,7 @@
           </small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Guard</label>
+          <label class="form-label form-label-sm" for="metadata_update_mbid_guard_enabled">Guard</label>
           <select class="form-select form-select-sm" id="metadata_update_mbid_guard_enabled">
             <option value="true" {% if mbid_guard.get('enabled', true) %}selected{% endif %}>Enabled (recommended)</option>
             <option value="false" {% if not mbid_guard.get('enabled', true) %}selected{% endif %}>Disabled</option>
@@ -2413,17 +2413,17 @@
           <div class="border rounded p-3 h-100">
             <h6 class="mb-2">{{ label }}</h6>
             <div class="mb-2">
-              <label class="form-label form-label-sm">Artist Catalog Top %</label>
+              <label class="form-label form-label-sm" for="era_{{ key }}_catalog_top_pct">Artist Catalog Top %</label>
               <input type="number" step="0.01" min="0.01" max="1" class="form-control form-control-sm" id="era_{{ key }}_catalog_top_pct" placeholder="{{ top_pct }}" value="{{ scaling.get(key ~ '_catalog_top_pct', top_pct) }}">
               <small class="form-text text-muted">Track must rank in the top {{ top_pct * 100 }}% of the artist's total discography to qualify for 5★. Default: <strong>{{ top_pct }}</strong></small>
             </div>
             <div class="mb-2">
-              <label class="form-label form-label-sm">Top Album Tracks (Rank)</label>
+              <label class="form-label form-label-sm" for="era_{{ key }}_album_top_n">Top Album Tracks (Rank)</label>
               <input type="number" step="1" min="1" max="20" class="form-control form-control-sm" id="era_{{ key }}_album_top_n" placeholder="{{ top_n }}" value="{{ scaling.get(key ~ '_album_top_n', top_n) }}">
               <small class="form-text text-muted">Track must rank among the top {{ top_n }} most popular tracks on this specific album. Default: <strong>{{ top_n }}</strong></small>
             </div>
             <div>
-              <label class="form-label form-label-sm">Max 5★ Tracks Per Album</label>
+              <label class="form-label form-label-sm" for="era_{{ key }}_max_5star_slots">Max 5★ Tracks Per Album</label>
               <input type="number" step="1" min="1" max="20" class="form-control form-control-sm" id="era_{{ key }}_max_5star_slots" placeholder="{{ slots }}" value="{{ scaling.get(key ~ '_max_5star_slots', slots) }}">
               <small class="form-text text-muted">Hard limit on how many tracks on a single album can be awarded 5★. Default: <strong>{{ slots }}</strong></small>
             </div>
