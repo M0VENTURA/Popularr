@@ -167,8 +167,6 @@ def api_export_logs():
         },
     )
 
-    return jsonify(result)
-
 
 # =============================================================================
 # DOWNLOAD BY FILENAME (any file in the log dir, security-constrained)

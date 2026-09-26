@@ -27,3 +27,12 @@ alembic>=1.13,<2.0
 
 # Resilient retries/backoff for API clients, DB acquisition and scheduler
 tenacity>=9.0,<10.0
+
+# Static analysis used by the test suite, not by the app at runtime.
+# tests/test_no_undefined_names_in_production.py uses pyflakes to fail the
+# build on an ``undefined name`` — the pattern behind the UnboundLocalError
+# that made every artist in a full scan report "failed" while the scan moved
+# on (``_singles_pass`` read before it was bound). pyflakes is authoritative
+# here; a hand-rolled AST checker produced only false positives.
+pyflakes>=3.2,<5.0
+

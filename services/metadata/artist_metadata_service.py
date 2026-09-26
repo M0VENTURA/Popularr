@@ -19,6 +19,15 @@ from db.engine import db_session
 from services.enrichment.artist_bio_service import get_artist_biography
 from services.enrichment.musicbrainz_service import get_shared_mb_client
 
+# ⚠️ Module-level, NOT a local import inside one function.  ``lookup_ids``
+# builds a Lucene query with this helper, and it used to be imported only
+# inside ``genre_recommendations`` — so in ``lookup_ids`` the name was
+# undefined and raised NameError, which the surrounding
+# ``except Exception`` swallowed at DEBUG level.  The MusicBrainz half of the
+# artist-ID lookup therefore ALWAYS failed and silently returned an empty
+# musicbrainz_artist_id, with nothing in the log to show why.
+from api_clients.musicbrainz_http import escape_lucene_special_chars
+
 logger = structlog.get_logger(__name__)
 
 
