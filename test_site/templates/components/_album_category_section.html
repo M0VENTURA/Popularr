@@ -4,28 +4,32 @@
       {% from "components/_album_category_section.html" import render_album_row %}
       {{ render_album_row(album, artist_name, album.is_missing) }}
 
-  ⚠️ THE IMPORT PATH MATTERS. The live templates still say
+  ⚠️ THE IMPORT PATH MATTERS. A template importing this file MUST use the
+  `components/` prefix. The bare-root spelling
 
       {% from "_album_category_section.html" import render_album_row %}
 
-  with the name at the TEMPLATE ROOT. That resolved in old_system, where the
-  file sat at templates/_album_category_section.html. In the current tree the
-  file lives under components/, and there is NO Jinja loader configuration
-  anywhere in the app (no ChoiceLoader / FileSystemLoader / jinja_loader — I
-  grepped app.py, helpers/, routes/, db/ and services/), so Quart's loader
-  searches templates/ only and the root-relative name cannot be found. Both
-  importers — pages/album_detail.html and pages/artist_detail.html — therefore
-  raise TemplateNotFound when they render.
+  does NOT resolve in either tree: the file lives under components/, and the
+  Jinja FileSystemLoader searches `templates/` only. Verified by rendering a
+  minimal template containing just the import — it raises TemplateNotFound in
+  both the rebuilt and the live tree.
 
-  Fix in the live tree: either move the file back to templates/ or update the
-  two imports to components/_album_category_section.html (what this copy does).
+  ⚠️ THIS FILE IS CURRENTLY ORPHANED (verified 2026-09-26). Only ONE template
+  imports `render_album_row` — pages/downloads/monitor.html — and that page is
+  in _SHADOWED_TEMPLATES, so the LIVE copies/ downloads/monitor.html is served
+  instead. The live `components/_album_category_section.html` is imported by
+  NOTHING at all. Consequences:
 
-  ⚠️ KNOWN BROKEN HANDLER: the "Quick Queue" button below calls
-  quickQueueRelease(...). That function is defined NOWHERE in the repository —
-  not in static/js/, not in templates/, not in old_system/ (verified with
-  git grep across the whole of origin/develop). It is the only reference to the
-  name in the entire codebase, so the button has always thrown ReferenceError.
-  pages/album.js needs to own it; until then the button cannot work.
+    * The "Quick Queue" button below calls quickQueueRelease(...), which is
+      defined NOWHERE in the repository, so it would throw ReferenceError. It has
+      never actually been clickable, because this macro never renders.
+    * The artist page renders its release rows through
+      components/_release_section.html (`render_release_section`), NOT this
+      file — and that macro already has a working import button
+      (.release-import-btn). So no user-facing queueing feature is missing.
+
+  Before reviving this file, delete the Quick Queue button or implement
+  `quickQueueRelease`, and fix the bare-root import in monitor.html.
   searchMusicBrainzReleaseFromEncoded(), used on the next button, DOES exist
   (services/musicbrainz-queue.js).
 #}

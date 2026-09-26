@@ -500,7 +500,11 @@
   </div>
 
   <!-- Import Macro -->
-  {% from "_album_category_section.html" import render_album_row %}
+  {# ⚠️ The macro lives in components/, NOT at the template root. Jinja's
+     FileSystemLoader searches templates/ only, so the bare-root spelling
+     `"_album_category_section.html"` raised TemplateNotFound (verified
+     unresolvable in BOTH trees). Fixed to the real path. #}
+  {% from "components/_album_category_section.html" import render_album_row %}
 
   <!-- Albums Section -->
   {% set total_discovered_albums = albums_by_category.album|selectattr('is_missing', 'equalto', False)|list|length %}
@@ -1281,7 +1285,7 @@
     <div class="modal-content">
       <div class="modal-header">
         <h5 class="modal-title"><i class="bi bi-pencil-square"></i> Edit Track</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close dialog"></button>
       </div>
       <div class="modal-body">
         <input type="hidden" id="editTrackId">

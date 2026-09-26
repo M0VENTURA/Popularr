@@ -298,7 +298,7 @@
                               data-title="{{ track.title|e }}" 
                               data-artist="{{ (track.artist or artist_name)|e }}" 
                               data-art="/api/album/{{ artist_name|path_segment }}/{{ album_name|path_segment }}/art" 
-                              onclick="playTrackFromAlbum(this)" title="Play">
+                              onclick="playTrackFromAlbum(this)" title="Play" aria-label="Play {{ track.title|e }}">
                         <i class="bi bi-play-fill"></i>
                       </button>
                     {% endif %}
@@ -417,7 +417,7 @@
                   {% for genre in album_genres %}
                     <span class="badge bg-primary me-1 mb-1">
                       {{ genre }}
-                      <button type="button" class="btn-close btn-close-white ms-1" style="font-size: 0.6rem;" onclick="stageRemoveAlbumGenre('{{ genre|escapejs }}')"></button>
+                      <button type="button" class="btn-close btn-close-white ms-1" style="font-size: 0.6rem;" onclick="stageRemoveAlbumGenre('{{ genre|escapejs }}')" aria-label="Remove this genre"></button>
                     </span>
                   {% endfor %}
                 {% else %}
