@@ -1456,6 +1456,29 @@ def get_slskd_timeouts() -> dict[str, Any]:
     }
 
 
+def get_slskd_search_cleanup_interval() -> int:
+    """How many Soulseek searches between automatic stale-search cleanups.
+
+    Config section: ``slskd.search_cleanup_interval`` in config.yaml
+
+    The cleanup costs a ``GET /searches`` round-trip, and slskd serialises API
+    operations — so running it before EVERY search delayed the search itself
+    for no benefit.  It now runs once per window of N searches (search #1,
+    #N+1, …).
+
+    A value of ``0`` or less DISABLES the automatic cleanup ("never"), which is
+    deliberately different from ``1`` ("before every search").
+
+    Default: 10
+    """
+    try:
+        cfg = get_config() or {}
+        raw = (cfg.get("slskd") or {}).get("search_cleanup_interval", 10)
+        return int(raw)
+    except Exception:
+        return 10
+
+
 # -----------------------------------------------------------------------------
 # Last.fm Service Configuration
 # -----------------------------------------------------------------------------

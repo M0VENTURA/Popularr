@@ -275,6 +275,13 @@
           enabled: getChecked('slskd_enabled'),
           web_url: getValue('slskd_web_url'),
           api_key: getValue('slskd_api_key'),
+          // Stale-search cleanup cadence: run it once every N searches rather
+          // than before every one.  0 DISABLES it ("never"), which is why this
+          // is NOT guarded with `|| 10` — that would turn 0 back into 10.
+          search_cleanup_interval: (() => {
+            const raw = parseInt(getValue('slskd_search_cleanup_interval', '10'), 10);
+            return Number.isFinite(raw) ? Math.max(0, raw) : 10;
+          })(),
           timeouts: Object.assign(
             {},
             ((global.pageConfig && global.pageConfig.slskd && global.pageConfig.slskd.timeouts) || {}),

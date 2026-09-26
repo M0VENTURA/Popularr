@@ -117,7 +117,7 @@ async def slskd_search() -> Any:
         slskd_service = SlskdService(http_client=client)
 
         try:
-            await asyncio.to_thread(slskd_service.clear_stale_searches, budget_seconds=6)
+            await asyncio.to_thread(slskd_service.maybe_clear_stale_searches, budget_seconds=6)
         except Exception:
             pass
 

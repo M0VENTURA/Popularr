@@ -12,6 +12,7 @@ Raw HTTP is handled by api_clients.slskd_http.
 
 from __future__ import annotations
 
+import threading
 import time
 import traceback
 from dataclasses import dataclass
@@ -24,6 +25,26 @@ import structlog
 from api_clients.slskd_http import SlskdHttpClient
 
 logger = structlog.get_logger(__name__)
+
+#: How many searches may run between automatic stale-search cleanups.
+#: Read from ``slskd.search_cleanup_interval`` (see the Config page); the
+#: default keeps the slskd round-trip off 9 out of every 10 searches.
+_DEFAULT_SEARCH_CLEANUP_INTERVAL = 10
+
+
+def _configured_cleanup_interval() -> int:
+    """Return the configured cleanup cadence, falling back to the default.
+
+    Delegates to ``helpers.config_helpers.get_slskd_search_cleanup_interval`` so
+    the setting has ONE definition (the Config page reads the same key).  A
+    config read failure degrades to the default rather than disabling cleanup.
+    """
+    try:
+        from helpers.config_helpers import get_slskd_search_cleanup_interval
+
+        return int(get_slskd_search_cleanup_interval())
+    except Exception:
+        return _DEFAULT_SEARCH_CLEANUP_INTERVAL
 
 STUCK_SEARCH_TIMEOUT_MS = 3 * 60 * 1000
 EMPTY_TERMINAL_STATES = frozenset({"Completed, Cancelled", "Completed, Errored", "Cancelled", "Errored"})
@@ -177,8 +198,46 @@ class SlskdService:
         "Cancelled", "TimedOut", "Errored", "Failed", "Rejected", "Error",
     ])
 
-    def __init__(self, http_client: SlskdHttpClient):
+    def __init__(self, http_client: SlskdHttpClient, search_cleanup_interval: int | None = None):
         self.http = http_client
+        # Per-instance override; ``None`` means "use the shared cadence".
+        self._cleanup_interval_override = (
+            None if search_cleanup_interval is None else int(search_cleanup_interval)
+        )
+
+    # ── Stale-search cleanup CADENCE (process-wide) ───────────────────────
+    # ``clear_stale_searches`` costs a ``GET /searches`` round-trip (and a
+    # DELETE per stale search found).  slskd serialises API operations, so
+    # doing that before EVERY search delayed the search itself for no benefit —
+    # most of the time there is nothing stale to remove.
+    #
+    # The cleanup therefore runs ONCE PER WINDOW of N searches: search #1,
+    # then #11, #21, …  An interval of 0 or less DISABLES it (never clean
+    # automatically).
+    #
+    # ⚠️ The counters are CLASS attributes, not instance state, and that is
+    # load-bearing.  Both entry points construct a FRESH ``SlskdService`` per
+    # operation:
+    #   * ``routes/download_search_routes.py::slskd_search`` builds one per
+    #     HTTP request;
+    #   * ``download_pipeline_service`` builds one per queued download.
+    # An instance counter would therefore reset on every call and the cleanup
+    # would run every single time — exactly the behaviour being removed.
+    _cleanup_lock = threading.Lock()
+    _searches_since_cleanup = 0
+
+    @classmethod
+    def reset_cleanup_cadence(cls) -> None:
+        """Reset the shared counter (used by tests and manual maintenance)."""
+        with cls._cleanup_lock:
+            cls._searches_since_cleanup = 0
+
+    @classmethod
+    def _effective_cleanup_interval(cls) -> int:
+        # Deliberately NOT cached: ``get_config()`` is already an in-memory
+        # cache, and a class-level copy would survive a Config-page save — the
+        # operator would change the interval and see no effect until restart.
+        return _configured_cleanup_interval()
 
     @staticmethod
     def state_text(raw_state: Any) -> str:
@@ -499,7 +558,7 @@ class SlskdService:
             wait_seconds = _SLSKD_SEARCH_MAX_WAIT_SECONDS
             
         try:
-            self.clear_stale_searches(budget_seconds=6)
+            self.maybe_clear_stale_searches(budget_seconds=6)
         except Exception:
             pass
             
@@ -598,6 +657,54 @@ class SlskdService:
             return payload if isinstance(payload, list) else []
         except Exception:
             return []
+
+    def maybe_clear_stale_searches(self, budget_seconds: float = 8) -> bool:
+        """Run the stale-search cleanup at most once per N searches.
+
+        Returns True when the cleanup actually ran.
+
+        This is the entry point search paths should use.  ``clear_stale_searches``
+        itself stays public and unconditional for callers that genuinely want it
+        on demand (manual maintenance, tests).
+
+        Cadence: the 1st search of each window cleans up, then every Nth after
+        that.  An interval of ``0`` or less DISABLES it — never clean up
+        automatically.  A failure is swallowed (logged by
+        ``clear_stale_searches``) so a cleanup problem can never fail the user's
+        search.
+        """
+        cls = type(self)
+        interval = (
+            self._cleanup_interval_override
+            if self._cleanup_interval_override is not None
+            else cls._effective_cleanup_interval()
+        )
+        if interval <= 0:
+            return False
+
+        with cls._cleanup_lock:
+            # Count the SEARCH first, then decide.  Counting after the decision
+            # would make the first call of every window skip.
+            cls._searches_since_cleanup += 1
+            should_clean = (cls._searches_since_cleanup - 1) % interval == 0
+            if should_clean:
+                # ⚠️ Reset to 1, NOT 0.  This search has just been counted, so
+                # restoring it to 0 loses that count and makes the next call
+                # re-satisfy ``(counter - 1) % interval == 0`` — i.e. the
+                # cleanup then runs on EVERY search, which is the exact bug
+                # this gate exists to remove.
+                cls._searches_since_cleanup = 1
+
+        if not should_clean:
+            return False
+
+        try:
+            self.clear_stale_searches(budget_seconds=budget_seconds)
+        except Exception as exc:
+            # clear_stale_searches already swallows its own errors; this is a
+            # belt-and-braces guard so a future edit cannot break the search.
+            logger.warning("Stale search cleanup failed (search continues)", error=str(exc))
+        return True
 
     def clear_stale_searches(self, budget_seconds: float = 8) -> None:
         """Cancel terminal-state (or long-running stuck) searches in slskd."""

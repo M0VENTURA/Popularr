@@ -507,6 +507,11 @@
           <input type="number" min="0" max="60" class="form-control form-control-sm" id="slskd_inter_item_delay" placeholder="5" value="{{ config.get('slskd', {}).get('timeouts', {}).get('inter_item_delay_seconds', 5) }}">
           <small class="form-text text-muted">Pause between starting consecutive queued transfers, to be kind to peers and slskd itself.</small>
         </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label form-label-sm" for="slskd_search_cleanup_interval">Search Cleanup Interval</label>
+          <input type="number" min="0" max="500" class="form-control form-control-sm" id="slskd_search_cleanup_interval" placeholder="10" value="{{ config.get('slskd', {}).get('search_cleanup_interval', 10) }}">
+          <small class="form-text text-muted">Run the stale-search cleanup once every N Soulseek searches instead of before every one (each cleanup costs an slskd round-trip). Set 0 to disable it.</small>
+        </div>
       </div>
     </div>
   </div>
