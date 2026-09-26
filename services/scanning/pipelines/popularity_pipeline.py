@@ -15,6 +15,7 @@ from typing import Any
 
 import structlog
 
+from services.popularity import scan_cancellation as _scan_cancellation
 from services.popularity.pipeline import run_popularity_scan
 from helpers.logging_config import log_unified
 from services.scanning.scan_history_service import record_scan
@@ -26,6 +27,141 @@ from services.scanning.scan_state import (
 )
 
 logger = structlog.get_logger(__name__)
+
+#: How long to wait for an abandoned artist's worker to notice its
+#: cancellation before moving on, in seconds.  Bounded on purpose: cancellation
+#: is cooperative, so a worker blocked in a syscall may never observe it, and
+#: waiting indefinitely would reintroduce the frozen scan the budget prevents.
+_ABANDONED_GRACE_SECONDS = 5.0
+
+#: Hard ceiling on ANY single drain wait, regardless of configuration. The
+#: drain must never be able to stall the scan, so this is NOT configurable.
+_ABANDONED_MAX_WAIT_SECONDS = 60.0
+
+#: Default cap on simultaneously-live abandoned workers. One artist's worker
+#: still winding down is harmless; a growing pile contends for the DB pool and
+#: the shared rate limiter, which is what turned a slow artist into a cascade.
+_DEFAULT_MAX_LIVE_ABANDONED = 1
+
+
+def _resolve_max_live_abandoned() -> int:
+    """Read the abandoned-worker cap from config (``features`` block).
+
+    Clamped to 0-16.  ``0`` means "never wait" — every abandoned worker is left
+    to unwind on its own, which is the pre-fix behaviour available for a
+    deliberately unattended/oversubscribed host.
+    """
+    try:
+        from helpers.config_helpers import get_feature
+
+        value = int(
+            get_feature(
+                "full_scan_max_abandoned_workers",
+                _DEFAULT_MAX_LIVE_ABANDONED,
+            )
+            or 0
+        )
+    except Exception:
+        value = _DEFAULT_MAX_LIVE_ABANDONED
+    return max(0, min(value, 16))
+
+
+def _live_abandoned_workers(workers: list[Any]) -> list[Any]:
+    """Drop finished workers in place and return the still-running ones."""
+    workers[:] = [w for w in workers if getattr(w, "is_alive", lambda: False)()]
+    return workers
+
+
+def _effective_grace_seconds(grace_seconds: float) -> float:
+    """Clamp a requested grace period to the hard ceiling.
+
+    Factored out so the clamp can be asserted directly and cheaply: verifying
+    it by TIMING a 1-hour wait would make the suite take an hour.
+    """
+    try:
+        requested = float(grace_seconds)
+    except (TypeError, ValueError):
+        return _ABANDONED_GRACE_SECONDS
+    if requested < 0:
+        return 0.0
+    return min(requested, _ABANDONED_MAX_WAIT_SECONDS)
+
+
+def _drain_abandoned_workers(
+    workers: list[Any],
+    artist_position: int,
+    max_live: int,
+    *,
+    grace_seconds: float = _ABANDONED_GRACE_SECONDS,
+) -> dict[str, int]:
+    """Wait (briefly, bounded) until few enough abandoned workers remain.
+
+    Called after an artist is abandoned and asked to cancel.  The wait is a
+    GRACE PERIOD, not a join: an artist cancelled at an album boundary needs a
+    moment to unwind, but a worker stuck in a blocked syscall must never be
+    able to stall the scan — that is the whole reason the budget exists.
+
+    Termination is guaranteed by TWO independent bounds (a deadline AND an
+    iteration ceiling), so neither a pathological clock nor a worker that
+    ignores cancellation can hang the caller.
+
+    Returns ``{"live": n, "finished": m, "forced": k}`` where ``forced`` counts
+    workers abandoned while still running because the cap could not be met.
+    """
+    stats = {"live": 0, "finished": 0, "forced": 0}
+
+    if max_live <= 0:
+        # Cap disabled: never wait.  Report the true outstanding count so the
+        # condition stays visible in the log rather than being hidden.
+        live = _live_abandoned_workers(workers)
+        stats["live"] = len(live)
+        stats["forced"] = len(live)
+        if live:
+            logger.warning(
+                "[FULL_SCAN] Abandoned workers still running (cap disabled)",
+                live=len(live),
+                artists=[getattr(w, "name", "?") for w in live],
+            )
+        return stats
+
+    effective_grace = _effective_grace_seconds(grace_seconds)
+    deadline = time.monotonic() + effective_grace
+    max_iterations = int(effective_grace / 0.25) + 4
+    iterations = 0
+
+    while iterations < max_iterations:
+        iterations += 1
+        if len(_live_abandoned_workers(workers)) <= max_live:
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.25)
+
+    live = _live_abandoned_workers(workers)
+    stats["live"] = len(live)
+
+    if len(live) > max_live:
+        # The grace period expired with stragglers left.  Log loudly: this is
+        # the case where the cascade could still resume, so it must be visible
+        # rather than silently tolerated.
+        stats["forced"] = len(live) - max_live
+        logger.warning(
+            "[FULL_SCAN] Abandoned workers still running after grace period — "
+            "these can slow the next artists",
+            live=len(live),
+            cap=max_live,
+            grace_seconds=effective_grace,
+            artists=[getattr(w, "name", "?") for w in live],
+        )
+    else:
+        logger.debug(
+            "[FULL_SCAN] Abandoned workers drained to cap",
+            live=len(live),
+            cap=max_live,
+            position=artist_position,
+        )
+
+    return stats
 
 
 def is_popularity_scan_active() -> bool:
@@ -321,6 +457,14 @@ def _run_full_scan_as_artist_pipeline(
     # banner (the reported need: when an artist is abandoned after the budget,
     # surface the reason instead of silently continuing).
     _abandoned_artists: dict[str, list[dict[str, Any]]] = {}
+    # Live worker threads from abandoned artists, oldest first.  Bounded via
+    # ``_drain_abandoned_workers`` so they cannot accumulate into the cascade
+    # that made later artists time out.
+    _abandoned_workers: list[Any] = []
+    _max_live_abandoned = _resolve_max_live_abandoned()
+    # New cancellation generation: a cancellation raised in a PREVIOUS run must
+    # not be able to cancel a same-named artist in this one.
+    _scan_epoch = _scan_cancellation.begin_scan()
     # Stage bands for the overall percentage.  Each artist contributes an
     # equal share; within an artist the four stages (Metadata, Popularity,
     # Singles Detection, Essentia) each take a quarter of that share.  The
@@ -426,12 +570,19 @@ def _run_full_scan_as_artist_pipeline(
             # with a live-but-stuck worker thread — the runtime self-heal
             # correctly refuses to clear a live owner, so the scan never
             # recovered.  Abandon the artist after the budget and move on.
-            _artist_budget = 1800  # 30 min per artist default
+            # Configurable via popularity.artist_timeout_seconds (Config page).
+            # 0 DISABLES the budget: no artist is ever abandoned, which is the
+            # right setting for a library whose artists legitimately need
+            # longer than the default — abandoning a merely-SLOW artist is
+            # what created the cascade.
+            _artist_budget: float | None = 1800.0
             try:
-                from helpers.config_helpers import get_feature
-                _artist_budget = int(get_feature("full_scan_artist_timeout_seconds", 1800) or 1800)
+                from helpers.config_helpers import get_artist_timeout_seconds
+
+                _resolved_budget = int(get_artist_timeout_seconds())
+                _artist_budget = None if _resolved_budget <= 0 else float(_resolved_budget)
             except Exception:
-                pass
+                _artist_budget = 1800.0
 
             def _run_one_artist() -> None:
                 run_artist_scan_pipeline(artist, force=force, progress_callback=_cb)
@@ -459,6 +610,41 @@ def _run_full_scan_as_artist_pipeline(
                     artist=artist,
                     reason=_reason,
                 )
+
+                # ── Stop the abandoned straggler ───────────────────────
+                # The budget exists for a genuinely HUNG call, but a merely
+                # SLOW artist was being abandoned too — and its thread kept
+                # running after the loop moved on, holding a DB connection and
+                # shared rate-limiter slots (which makes the NEXT artist
+                # likelier to time out: the cascade).  It also kept writing its
+                # OWN artist index into the progress row, so percent_complete
+                # went BACKWARDS behind the loop.
+                #
+                # Ask it to unwind at its next album boundary.  This is
+                # advisory — a truly blocked syscall cannot be interrupted —
+                # so _drain_abandoned_workers below bounds how many pile up.
+                if _abandoned:
+                    try:
+                        _cancelled = _scan_cancellation.request_cancel(artist, epoch=_scan_epoch)
+                        if _cancelled:
+                            logger.info(
+                                "[FULL_SCAN] Cancelled abandoned artist so its worker unwinds",
+                                artist=artist,
+                                budget_seconds=_artist_report.get("budget_seconds"),
+                            )
+                    except Exception as _cancel_exc:
+                        logger.debug(
+                            "[FULL_SCAN] Artist cancellation request failed",
+                            artist=artist, error=str(_cancel_exc),
+                        )
+
+                    # Track the handle so the pile-up can be bounded.  A daemon
+                    # thread that never unwinds is still referenceable here,
+                    # and finished ones are dropped by the drain.
+                    _worker = _artist_report.get("thread")
+                    if _worker is not None:
+                        _abandoned_workers.append(_worker)
+
                 # Persist to the full_scan progress row so /api/scan-progress
                 # carries it; the dashboard banner reads scan.abandoned_artists.
                 try:
@@ -488,6 +674,28 @@ def _run_full_scan_as_artist_pipeline(
                     )
                 except Exception as _rec_exc:
                     logger.debug("[FULL_SCAN] Abandoned-artist record failed", error=str(_rec_exc))
+
+                # ── Bound how many abandoned workers can pile up ───────
+                # Cancellation is cooperative, so an artist stuck in a blocked
+                # syscall may never reach a checkpoint.  Waiting for EVERY
+                # abandoned artist would reintroduce the frozen scan the budget
+                # prevents, so wait a SHORT grace period and continue if
+                # stragglers remain.  The wait is bounded in the helper by both
+                # a deadline and an iteration ceiling.
+                try:
+                    _drain_stats = _drain_abandoned_workers(
+                        _abandoned_workers, i, _max_live_abandoned
+                    )
+                    if _drain_stats.get("forced"):
+                        log_unified(
+                            f"[FULL_SCAN] {_drain_stats['forced']} abandoned artist(s) "
+                            "still running — see the warning above"
+                        )
+                except Exception as _drain_exc:
+                    logger.debug(
+                        "[FULL_SCAN] Abandoned-worker drain failed",
+                        error=str(_drain_exc),
+                    )
 
             # Persist the resume checkpoint so a stopped/failed "All" scan can
             # RESUME from this artist next time (unless restart was requested —

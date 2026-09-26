@@ -1498,6 +1498,31 @@
           <input type="number" step="30" min="120" max="1800" class="form-control form-control-sm" id="pop_prefetch_budget_seconds" placeholder="180" value="{{ config.get('popularity', {}).get('prefetch_budget_seconds', 180) }}">
           <small class="form-text text-muted">Wall-clock budget for the per-artist prefetch / post-singles enrichment (the bulk Last.fm/ListenBrainz/MusicBrainz/Discogs work). Kept low so a stalled bulk call is abandoned quickly and the scan keeps moving. Default: <strong>180</strong></small>
         </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="pop_artist_timeout_seconds">Per-Artist Scan Timeout (seconds)</label>
+          <input type="number" step="60" min="0" max="21600" class="form-control form-control-sm" id="pop_artist_timeout_seconds" placeholder="1800" value="{{ config.get('popularity', {}).get('artist_timeout_seconds', 1800) }}">
+          <small class="form-text text-muted">
+            Safety net for a <strong>hung</strong> artist during a full library scan. When an artist
+            exceeds this it is <strong>abandoned and skipped</strong> — it is not scanned, and the next
+            artist starts. Raise it if your artists legitimately need longer; a slow artist that gets
+            abandoned makes the rest of the scan slower, not faster.
+            Set to <strong>0</strong> to disable the timeout entirely (never abandon an artist).
+            Default: <strong>1800</strong> (30 min)
+          </small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="pop_max_abandoned_workers">Max Abandoned Artists To Overlap</label>
+          <input type="number" step="1" min="0" max="16" class="form-control form-control-sm" id="pop_max_abandoned_workers" placeholder="1" value="{{ config.get('features', {}).get('full_scan_max_abandoned_workers', 1) }}">
+          <small class="form-text text-muted">
+            How many abandoned artists may still be winding down before the scan waits for them.
+            An abandoned artist is asked to stop, but a truly stuck one may not notice — waiting for
+            it forever would freeze the scan, so the scan waits only briefly and then continues.
+            Keep this at <strong>1</strong> unless you see "Abandoned workers still running after
+            grace period" in the log: a pile-up of abandoned artists competes for the database and
+            API rate limits, which makes later artists time out. Set to <strong>0</strong> to never
+            wait. Default: <strong>1</strong>
+          </small>
+        </div>
       </div>
     </div>
   </div>

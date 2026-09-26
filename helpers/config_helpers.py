@@ -2203,6 +2203,56 @@ def get_prefetch_budget_seconds() -> int:
     return max(120, min(budget, 1800))
 
 
+def get_artist_timeout_seconds() -> int:
+    """Per-artist wall-clock budget during a full-library scan (seconds).
+
+    Config section: ``popularity.artist_timeout_seconds`` in config.yaml.
+
+    The dashboard's "All" scan bounds EACH artist with this budget.  It is a
+    safety net for a genuinely HUNG call (a stuck API/DNS/DB request the
+    per-track timeouts cannot catch), not a performance target: when it
+    expires the artist is abandoned and the scan moves on, so the artist is
+    never actually scanned.
+
+    ⚠️ Abandoning a merely-SLOW artist is what caused the reported cascade —
+    the abandoned worker kept running, contending for the DB pool and the
+    shared HTTP rate limiter, which made the NEXT artist likelier to time out
+    too.  Raising this is therefore the correct lever for a library whose
+    artists legitimately need longer than the default.
+
+    Previously this was read as ``features.full_scan_artist_timeout_seconds``
+    with a hardcoded 1800 default and was NOT exposed anywhere in the UI — so
+    the value could only be changed by hand-editing config.yaml, and an
+    operator hitting the cascade had no supported way to fix it.
+
+    Default: 1800 (30 min).  Clamped 60-21600 (1 min - 6 h); ``0`` disables
+    the budget entirely (never abandon an artist).
+    """
+    cfg = get_config()
+    raw: Any = None
+    try:
+        popularity = cfg.get("popularity") or {}
+        if isinstance(popularity, dict) and "artist_timeout_seconds" in popularity:
+            raw = popularity.get("artist_timeout_seconds")
+        else:
+            # Back-compat: the original location, still honoured so an
+            # existing config.yaml keeps working after this move.
+            raw = get_feature("full_scan_artist_timeout_seconds", None)
+    except Exception:
+        raw = None
+
+    if raw is None:
+        return 1800
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 1800
+    if value <= 0:
+        # Explicit opt-out: no budget, so no artist is ever abandoned.
+        return 0
+    return max(60, min(value, 21600))
+
+
 # =============================================================================
 # Matching & Threshold Configuration
 # =============================================================================

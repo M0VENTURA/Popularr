@@ -75,6 +75,7 @@ from services.popularity.popularity_sources import (
     track_identity_key,
 )
 from services.popularity.progress_tracker import finish, start, update
+from services.popularity import scan_cancellation as _scan_cancellation
 from services.popularity.release_cache_service import (
     get_artist_promo_titles,
     get_artist_single_titles,
@@ -208,6 +209,13 @@ def _bounded_call_report(
             "abandoned": True,
             "reason": f"exceeded {seconds}s budget",
             "budget_seconds": seconds,
+            # ⚠️ The worker is STILL RUNNING. Callers that need to stop it (or
+            # merely to know how many are outstanding) need the handle itself;
+            # returning only a boolean is what let abandoned artists pile up
+            # silently, each still holding a DB connection and rate-limiter
+            # slots. ``thread`` is a daemon, so an unreachable straggler can
+            # never block interpreter shutdown.
+            "thread": thread,
         }
 
     if _errors:
@@ -1564,6 +1572,28 @@ def run_scan(
         if effective_stop_file and is_stop_requested(effective_stop_file):
             _close_artist_section(_section_artist)
             log_unified("Scan stopped by user request")
+            finish(success=False)
+            return False
+
+        # ── Per-artist cancellation (abandoned straggler) ──────────────
+        # When the full-scan loop abandons THIS artist for exceeding its
+        # budget, it asks us to stop here.  Same safe boundary as the user
+        # stop above: the previous album has completed, so unwinding cannot
+        # leave a half-written album — but unlike the user stop it unwinds
+        # one artist, not the whole scan.
+        #
+        # Without this the abandoned worker kept running: it held a DB
+        # connection and shared HTTP rate-limiter slots while the loop had
+        # already moved on, which made the NEXT artist likelier to time out
+        # too (probed: 8 slow artists -> 8 concurrent pipelines). It also kept
+        # writing its OWN artist index into the progress row, driving
+        # percent_complete BACKWARDS behind the main loop.
+        if _scan_cancellation.is_cancelled(album_row.get("artist") or artist_filter):
+            _close_artist_section(_section_artist)
+            log_unified(
+                f"Scan cancelled for artist '{album_row.get('artist') or artist_filter}' "
+                "— abandoned after exceeding its time budget; moving on"
+            )
             finish(success=False)
             return False
 

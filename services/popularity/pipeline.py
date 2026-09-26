@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 import structlog
 
+from services.popularity import scan_cancellation as _scan_cancellation
 from services.popularity.progress_tracker import update
 from services.scanning.scan_state import (
     write_progress_with_current_artist,
@@ -270,7 +271,29 @@ def run_popularity_scan(
     try:
         result = scanner(**kwargs)
 
-        if result is False or (isinstance(result, dict) and result.get("status") == "stopped"):
+        # A False return means the scan did not run to completion. There are
+        # now TWO reasons for that, and they must not be conflated:
+        #   * the user pressed Stop            -> "stopped by user request"
+        #   * WE abandoned this artist for
+        #     exceeding its budget and asked
+        #     it to unwind (full-scan cascade
+        #     fix)                             -> "cancelled (budget)"
+        # Reporting our own cancellation as a user stop would put "Scan stopped
+        # by user request" in the log and mark the popularity_scan row
+        # "stopped" during an ordinary full scan, which is exactly the kind of
+        # misleading state that sends someone hunting for a Stop click that
+        # never happened.
+        _cancelled_internally = result is False and _scan_cancellation.is_cancelled(artist_filter)
+
+        if _cancelled_internally:
+            update(stage="cancelled", message="Artist cancelled by scan (budget exceeded)")
+            log_unified(
+                f"[POPULARITY] Artist '{artist_filter}' cancelled — abandoned after "
+                "exceeding its time budget"
+            )
+            from services.popularity.progress_tracker import finish as _tracker_finish
+            _tracker_finish(success=False)
+        elif result is False or (isinstance(result, dict) and result.get("status") == "stopped"):
             update(stage="stopped", message="Scan stopped by user")
             log_unified("[POPULARITY] Scan stopped by user request")
             from services.popularity.progress_tracker import finish as _tracker_finish
@@ -281,13 +304,19 @@ def run_popularity_scan(
 
         if progress_file:
             try:
+                if _cancelled_internally:
+                    _final_status = "cancelled"
+                elif result is False:
+                    _final_status = "stopped"
+                else:
+                    _final_status = "complete"
                 write_progress_with_current_artist(
                     progress_file,
                     _scan_type_label,
                     False,
                     current_artist=artist_filter,
                     extra={
-                        "status": "complete" if result is not False else "stopped",
+                        "status": _final_status,
                         "mode": _scan_type_label,
                         "exit_code": 0,
                     },

@@ -432,6 +432,13 @@
             prune_empty_folders: getChecked('downloads_prune_empty_folders', true)
           },
           mature_track_min_age_years: parseInt(getValue('mature_track_min_age_years', '2')) || 2,
+          // How many abandoned artists may still be winding down before the
+          // full scan waits for them. 0 = never wait, so it is NOT guarded
+          // with `|| 1` (that would turn "never wait" back into "wait for 1").
+          full_scan_max_abandoned_workers: (() => {
+            const raw = parseInt(getValue('pop_max_abandoned_workers', '1'), 10);
+            return Number.isFinite(raw) ? Math.max(0, raw) : 1;
+          })(),
           daily_musicbrainz_release_scan_enabled: getChecked('daily_musicbrainz_release_scan_enabled', true),
           daily_musicbrainz_release_lookback_days: parseInt(getValue('daily_musicbrainz_release_lookback_days', '42')) || 42,
           daily_musicbrainz_release_lookahead_days: parseInt(getValue('daily_musicbrainz_release_lookahead_days', '120')) || 120,
@@ -581,7 +588,14 @@
           },
           track_timeout_seconds: parseInt(getValue('pop_track_timeout_seconds', '600'), 10) || 600,
           scan_threads: parseInt(getValue('pop_scan_threads', '4'), 10) || 4,
-          prefetch_budget_seconds: parseInt(getValue('pop_prefetch_budget_seconds', '360'), 10) || 360
+          prefetch_budget_seconds: parseInt(getValue('pop_prefetch_budget_seconds', '360'), 10) || 360,
+          // Per-artist full-scan budget. 0 DISABLES the timeout (never
+          // abandon an artist), so this is NOT guarded with `|| 1800` — that
+          // would turn the "disabled" value back into 30 minutes.
+          artist_timeout_seconds: (() => {
+            const raw = parseInt(getValue('pop_artist_timeout_seconds', '1800'), 10);
+            return Number.isFinite(raw) ? Math.max(0, raw) : 1800;
+          })()
         }
       ),
       statistics: Object.assign(
