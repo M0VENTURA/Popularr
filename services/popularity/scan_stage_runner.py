@@ -1146,6 +1146,19 @@ def run_scan(
         **extra_kwargs,
     }
 
+    # ⚠️ Derived from ``options``, so it MUST be bound before its first use.
+    # It used to be assigned ~100 lines further down, just after the scan
+    # banner — but the banner itself reads it (``_scan_mode_label``), so every
+    # scan with ``force=False`` died with
+    #   UnboundLocalError: cannot access local variable '_singles_pass' where
+    #   it is not associated with a value
+    # which aborted the whole artist.  ``force=True`` masked it: the expression
+    # ``"Forced Scan" if force else (...)`` short-circuits and never evaluates
+    # ``_singles_pass``, so only non-forced scans crashed.
+    _singles_pass = bool(
+        options.get("singles_only") or options.get("singles_with_missing_popularity")
+    )
+
     try:
         _essentia_enabled = bool(get_feature("run_essentia", False))
     except Exception:
@@ -1214,7 +1227,6 @@ def run_scan(
     results: list[dict[str, Any]] = []
     last_checkpoint_artist: str | None = None
     scan_type = _resolve_scan_type(options)
-    _singles_pass = bool(options.get("singles_only") or options.get("singles_with_missing_popularity"))
 
     _scan_threads = 4
     try:
