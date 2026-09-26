@@ -31,6 +31,18 @@ A label does not need ``for=``:
 So this guard only holds the invariant that is always true: **if a
 ``for=`` is present, it must work.**
 
+KNOWN LIMITATION -- read before trusting a pass
+-----------------------------------------------
+These rules cannot detect a ``for=`` that points at the WRONG control when
+that control happens to be labelable. The live tree had exactly this:
+``test_site/templates/Pages/config.html`` aimed the "Column Order" label at
+``newSrcUrl`` (the Wikipedia URL input) while its own control was a ``<div>``.
+Rule 1 and 2 both pass, because ``newSrcUrl`` exists and is an ``<input>``.
+
+It was caught only *indirectly*: adding the correct ``for="newSrcUrl"`` to the
+Wikipedia URL label created a second claim on one control, which is what rule
+3 reports. A wrong-but-labelable target in isolation remains undetected.
+
 Markup inside ``<script>`` is skipped. Those are JS template literals that
 build rows at runtime; they cannot be validated statically, and
 ``templates/playlists/browse.html`` legitimately contains two *mutually
