@@ -81,6 +81,7 @@ from api_clients.musicbrainz_http import (
 from helpers.normalization_service import (
     edition_annotations_compatible as Edition_annotations_compatible,
     extract_edition_annotation as Extract_edition_annotation,
+    format_duration_mmss as Format_duration_mmss,
     normalize_string as Normalize_string,
     normalize_title_for_lookup as Normalize_title_for_lookup,
     normalize_title_for_lucene_query as Normalize_title_for_lucene_query,
@@ -88,11 +89,23 @@ from helpers.normalization_service import (
     strip_featured_artist as Strip_featured_artist,
     strip_search_keywords as Strip_search_keywords,
     strip_single_release_suffix as Strip_single_release_suffix,
+    track_duration_seconds as Track_duration_seconds,
 )
 
 Logger = structlog.get_logger(__name__)
 
 T = TypeVar("T")
+
+#: Seconds of difference tolerated when comparing a library track's duration
+#: against MusicBrainz. Small enough to catch a genuinely different recording
+#: (a radio edit runs tens of seconds shorter), large enough to absorb the
+#: encoder/tag rounding that makes an exact match read as 0:59 vs 1:00.
+#:
+#: Module-level rather than config-driven on purpose: this is a CORRECTNESS
+#: comparison, and the value matches the old system's
+#: ``_DURATION_TOLERANCE_SEC = 5`` so a library that behaved correctly before
+#: keeps behaving the same.
+DURATION_TOLERANCE_SECONDS = 5
 
 __all__ = [
     "MusicBrainzService",
@@ -2478,14 +2491,31 @@ def _match_mb_tracks_to_library(
                 Diff_fields.append("mbid")
             if str(Library_disc_number or "1").strip() != str(Entry["mb_disc_number"]):
                 Diff_fields.append("disc_number")
-            if Entry["mb_duration"] is not None:
-                try:
-                    Lib_ms = int(float(Library_duration or 0))
-                    Mb_ms = int(Entry["mb_duration"])
-                    if abs(Lib_ms - Mb_ms) > 2000:
-                        Diff_fields.append("duration")
-                except (TypeError, ValueError):
-                    pass
+
+            # ── Duration ────────────────────────────────────────────────
+            # The two sides are in DIFFERENT UNITS: ``tracks.duration`` holds
+            # SECONDS (both writers copy Navidrome/Subsonic's ``duration``,
+            # which is specified in seconds) while MusicBrainz reports
+            # ``length`` in MILLISECONDS. Comparing them raw made
+            # ``abs(240 - 240000) > 2000`` true for an EXACT 4:00 match, so
+            # every track looked wrong and the check was indistinguishable
+            # from noise — the reported "duration doesn't seem to be checked".
+            #
+            # Normalise BOTH to seconds, as the old system did, and use a
+            # tolerance that ignores tag/encoder rounding but still catches a
+            # genuinely different recording (a radio edit, a live take).
+            Library_duration_seconds = Track_duration_seconds(Library_duration)
+            Mb_duration_seconds = Track_duration_seconds(Entry["mb_duration"])
+            Entry["library_duration_seconds"] = Library_duration_seconds
+            Entry["mb_duration_seconds"] = Mb_duration_seconds
+            # Human-readable forms so the UI never renders a raw millisecond
+            # count (it used to show "Length: 240 -> 240000").
+            Entry["library_duration_display"] = Format_duration_mmss(Library_duration)
+            Entry["mb_duration_display"] = Format_duration_mmss(Entry["mb_duration"])
+
+            if Library_duration_seconds is not None and Mb_duration_seconds is not None:
+                if abs(Library_duration_seconds - Mb_duration_seconds) > DURATION_TOLERANCE_SECONDS:
+                    Diff_fields.append("duration")
 
             Diff_fields = [field for field in Diff_fields if field not in Ignored]
 

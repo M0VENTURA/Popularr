@@ -305,6 +305,52 @@
     (trackChanges || []).forEach(renderTrackRow);
   }
 
+  /**
+   * Report tracks whose LENGTH differs from MusicBrainz.
+   *
+   * Informational only. A file's duration is intrinsic to the audio, so a
+   * metadata import cannot write it — these rows carry NO Include/Ignore
+   * toggle, because there is nothing to stage. They are shown because a length
+   * mismatch is the clearest sign the file is a DIFFERENT VERSION of the
+   * recording (a radio edit, a live take), which is exactly what a review
+   * should surface rather than quietly "correct" the tags around.
+   */
+  function renderDurationChecks(checks) {
+    const tbody = document.getElementById('albumTracksTbody');
+    if (!tbody) return;
+    (checks || []).forEach((check) => {
+      const row = trackRow(check.track_id);
+      if (!row) return;
+      let insertAfter = row;
+      let sibling = insertAfter.nextElementSibling;
+      while (sibling && (sibling.classList.contains('mb-staged-row') ||
+                         sibling.classList.contains('mb-duration-row'))) {
+        insertAfter = sibling;
+        sibling = sibling.nextElementSibling;
+      }
+      const tr = document.createElement('tr');
+      tr.className = 'mb-duration-row';
+      tr.dataset.trackId = String(check.track_id);
+      tr.innerHTML =
+        '<td colspan="5" style="padding:.3rem .75rem;border-top:none;">' +
+          '<div class="d-flex align-items-start gap-2 flex-wrap rounded px-2 py-1" ' +
+               'style="background:rgba(13,202,240,.12);border-left:3px solid #0dcaf0;">' +
+            '<small class="text-info-emphasis">' +
+              '<i class="bi bi-clock-history me-1"></i><strong>Length differs:</strong>' +
+            '</small>' +
+            '<small class="flex-grow-1" style="font-size:.75rem;">' +
+              '<em>' + esc(check.library_duration || '—') + '</em> → ' +
+              '<strong>' + esc(check.mb_duration || '—') + '</strong> ' +
+              '<span class="text-muted">— this is probably a different version of the ' +
+              'recording. Nothing to save: a file\'s length cannot be changed by a ' +
+              'metadata update.</span>' +
+            '</small>' +
+          '</div>' +
+        '</td>';
+      insertAfter.insertAdjacentElement('afterend', tr);
+    });
+  }
+
   // ── Banner ──────────────────────────────────────────────────────────────
 
   function bannerHost() {
@@ -342,6 +388,7 @@
 
     const albumCount = counts.album_changes || 0;
     const trackCount = counts.tracks_changed || 0;
+    const durationCount = counts.duration_mismatches || 0;
 
     banner.innerHTML =
       '<i class="bi bi-lightning-fill"></i>' +
@@ -353,6 +400,13 @@
           trackCount + ' track' + (trackCount === 1 ? '' : 's') +
           ' can be updated. Nothing is saved until you press Save Metadata.' +
         '</div>' +
+        (durationCount
+          ? '<div class="text-info-emphasis">' +
+              durationCount + ' track' + (durationCount === 1 ? '' : 's') +
+              ' have a different LENGTH to MusicBrainz — see the length notes ' +
+              'below (informational; a file\'s length cannot be changed).' +
+            '</div>'
+          : '') +
         '<div class="text-muted" data-mb-review-count></div>' +
       '</div>' +
       '<button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2" ' +
@@ -371,6 +425,7 @@
     clearBanner();
     clearAlbumBars();
     clearTrackRows();
+    document.querySelectorAll('.mb-duration-row').forEach((el) => el.remove());
   }
 
   // ── Entry points ────────────────────────────────────────────────────────
@@ -416,6 +471,7 @@
     });
 
     stageTrackChanges(data.track_changes || []);
+    renderDurationChecks(data.duration_checks || []);
     showBanner(data.counts || {}, data.release_title);
     markDirty();
     return data;
@@ -493,6 +549,7 @@
       if (fillField(change.field, change.proposed)) renderAlbumBar(change);
     });
     stageTrackChanges(data.track_changes || []);
+    renderDurationChecks(data.duration_checks || []);
     showBanner(data.counts || {}, data.release_title || '');
 
     const pendingInput = document.getElementById('pending_recommendations');

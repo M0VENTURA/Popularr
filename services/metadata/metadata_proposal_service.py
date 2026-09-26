@@ -221,6 +221,40 @@ def _album_level_proposals(
     return proposals
 
 
+def _duration_checks(comparison: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Report tracks whose LENGTH does not match MusicBrainz.
+
+    INFORMATIONAL ONLY — deliberately not routed through ``_TRACK_FIELD_SPECS``
+    or ``changes``. A file's duration is intrinsic to the audio, so an import
+    cannot "write" it; putting it in ``changes`` would render an "Included"
+    toggle that silently discards the value on save, because ``duration`` is not
+    in ``routes/ui_routes.py``'s ``_STAGED_WRITABLE`` whitelist.
+
+    It still belongs in the review: a length mismatch is the clearest evidence
+    the file is a DIFFERENT VERSION of the recording (a radio edit, a live take,
+    an extended mix) rather than a tagging problem. Silence here would let a
+    wrong file be "corrected" into a confident-looking wrong album.
+
+    Reads the server-normalised fields rather than recomputing, so the review
+    and the Compare button can never disagree about whether a track differs.
+    """
+    checks: list[dict[str, Any]] = []
+    for entry in comparison:
+        if not entry.get("matched") or not entry.get("library_track_id"):
+            continue
+        diff = entry.get("diff_fields") or []
+        if "duration" not in diff:
+            continue
+        checks.append({
+            "track_id": _as_text(entry.get("library_track_id")),
+            "title": _as_text(entry.get("library_title")),
+            "track_number": _as_text(entry.get("library_track_number")),
+            "library_duration": _as_text(entry.get("library_duration_display")),
+            "mb_duration": _as_text(entry.get("mb_duration_display")),
+        })
+    return checks
+
+
 def _track_proposals(
     local_tracks: list[dict[str, Any]],
     comparison: list[dict[str, Any]],
@@ -344,10 +378,18 @@ def propose_album_metadata(
           "tracks":    [{"track_id", "title", "track_number",
                          "changes": [{"field", "label", "current", "proposed"}, ...]},
                         ...],
-          "counts":    {"album_changes": n, "tracks_changed": m, "track_changes": k},
+          "duration_checks": [{"track_id", "title", "track_number",
+                              "library_duration", "mb_duration"}, ...],
+          "counts":    {"album_changes": n, "tracks_changed": m, "track_changes": k,
+                        "duration_mismatches": d},
           "missing":   [{"mb_track_number", "mb_title", ...}, ...],
           "extra":     [{"library_track_id", "library_title", ...}, ...],
         }
+
+    ``duration_checks`` is INFORMATIONAL: a length difference means the file is
+    probably a different version of the recording, but a file's duration cannot
+    be written by a metadata import, so those entries are reported rather than
+    staged. See :func:`_duration_checks`.
     """
     artist = _as_text(artist)
     album = _as_text(album)
@@ -395,6 +437,12 @@ def propose_album_metadata(
 
     album_changes = _album_level_proposals(local_tracks, metadata)
     track_changes = _track_proposals(local_tracks, comparison, metadata)
+    # Duration is reported SEPARATELY and never staged: a file's length is
+    # intrinsic to the audio, so there is nothing a metadata import could write
+    # for it. It is surfaced because a mismatch is the clearest sign the file is
+    # a different version of the recording (a radio edit, a live take), which is
+    # exactly what a metadata review should draw attention to.
+    duration_checks = _duration_checks(comparison)
 
     return {
         "success": True,
@@ -408,6 +456,7 @@ def propose_album_metadata(
         "release_title": _as_text(metadata.get("release_title")),
         "album_changes": album_changes,
         "track_changes": track_changes,
+        "duration_checks": duration_checks,
         "missing": [
             {
                 "mb_track_number": entry.get("mb_track_number"),
@@ -424,5 +473,6 @@ def propose_album_metadata(
             "tracks_changed": len(track_changes),
             "track_changes": sum(len(t["changes"]) for t in track_changes),
             "total_tracks": len(comparison),
+            "duration_mismatches": len(duration_checks),
         },
     }

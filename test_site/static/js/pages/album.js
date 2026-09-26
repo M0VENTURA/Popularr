@@ -1544,10 +1544,32 @@
       `MusicBrainz Recording ID: ${c.library_mbid
         ? '<em>' + esc(c.library_mbid) + '</em>'
         : '<em>missing</em>'} → <strong>added</strong>`,
-    duration: (c) =>
-      `Length: ${esc(String(c.library_duration ?? '—'))} → ${esc(String(c.mb_duration ?? '—'))} ` +
-      '<span class="text-muted">(informational — not editable)</span>',
+    duration: (c) => {
+      // Show durations as m:ss, never raw: the library value is SECONDS and
+      // the MusicBrainz value is MILLISECONDS, so printing them directly read
+      // as "Length: 240 → 240000" for the same 4-minute track.
+      const lib = c.library_duration_display || fmtDuration(c.library_duration);
+      const mb = c.mb_duration_display || fmtDuration(c.mb_duration);
+      return `Length: <em>${esc(lib || '—')}</em> → <strong>${esc(mb || '—')}</strong> ` +
+        '<span class="text-muted">(different recording — check the file is the right version; not editable)</span>';
+    },
   };
+
+  // Format a duration as m:ss. Accepts seconds (library) OR milliseconds
+  // (MusicBrainz ``length``): anything over an hour can only be ms.
+  function durationSeconds(value) {
+    if (value == null || value === '' || value === 0 || value === '0') return null;
+    const num = Number(value);
+    if (!Number.isFinite(num) || num <= 0) return null;
+    return num > 3600 ? num / 1000 : num;
+  }
+
+  function fmtDuration(value) {
+    const seconds = durationSeconds(value);
+    if (seconds == null) return '';
+    const whole = Math.round(seconds);
+    return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
+  }
 
   async function compareWithMusicBrainz() {
     const releaseMbid = linkedReleaseMbid();

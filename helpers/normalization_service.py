@@ -1556,6 +1556,61 @@ def queue_duration_seconds(value: Any) -> float | None:
     return value / 1000 if value >= 3000 else value
 
 
+#: A track's duration is stored in SECONDS in ``tracks.duration``: both writers
+#: copy Navidrome/Subsonic's own ``duration`` field, which the Subsonic API
+#: specifies in seconds (``scanning/metadata_extractor.py`` and
+#: ``db/repositories/navidrome.py``). MusicBrainz instead reports ``length`` in
+#: MILLISECONDS. Anything at or below this many seconds is therefore treated as
+#: seconds and left alone; above it, the value can only be milliseconds.
+#:
+#: The threshold is one HOUR on purpose: a genuine long track (an 11-minute
+#: epic at 700s) must never be misread as 0.7s. Matches
+#: ``popularity/stages/finalise_stage.py::_track_duration_seconds``.
+_DURATION_MS_THRESHOLD_SECONDS = 3600
+
+
+def track_duration_seconds(value: Any) -> float | None:
+    """Normalise ANY track duration to SECONDS, or None when unusable.
+
+    Use this for every duration COMPARISON. The two sources disagree on unit —
+    ``tracks.duration`` is seconds, MusicBrainz ``length`` is milliseconds — and
+    comparing them raw makes every track look different:
+
+        abs(240 - 240000) > 2000   # always true, for an EXACT 4:00 match
+
+    which is why a duration check can appear to be "not running" while in fact
+    it fires on every track, correct or not.
+
+    Returns None for a missing, empty, zero or negative value — a duration that
+    is not known cannot be compared, and reporting it as a difference would be
+    a false positive.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0:
+        return None
+    if seconds > _DURATION_MS_THRESHOLD_SECONDS:
+        seconds = seconds / 1000.0
+    return seconds if seconds > 0 else None
+
+
+def format_duration_mmss(value: Any) -> str:
+    """Render a duration (seconds OR milliseconds) as ``m:ss``.
+
+    Returns ``""`` when the value is unusable, so callers can fall back to a
+    placeholder rather than printing "None" or a raw millisecond count.
+    """
+    seconds = track_duration_seconds(value)
+    if seconds is None:
+        return ""
+    total = int(round(seconds))
+    return f"{total // 60}:{total % 60:02d}"
+
+
 def is_valid_version(track_title: str, allow_live_remix: bool = False) -> bool:
     """Validate track version against blacklist and whitelist."""
     title = track_title.lower()

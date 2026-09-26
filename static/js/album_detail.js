@@ -1003,8 +1003,36 @@ const _MB_FIELD_LABELS = {
     track_number: (c) => `Track #: ${escapeHtml(String(c.library_track_number ?? '—'))} → ${escapeHtml(String(c.mb_track_number))}`,
     disc_number: (c) => `Disc: ${escapeHtml(String(c.library_disc_number ?? 1))} → ${escapeHtml(String(c.mb_disc_number))}`,
     mbid: (c) => `MusicBrainz Recording ID: ${c.library_mbid ? '<em>' + escapeHtml(c.library_mbid) + '</em>' : '<em>missing</em>'} → <strong>added</strong>`,
-    duration: (c) => `Length: ${escapeHtml(String(c.library_duration ?? '—'))} → ${escapeHtml(String(c.mb_duration ?? '—'))} <span class="text-muted">(informational — not editable)</span>`,
+    // ⚠️ Show the DURATIONS as m:ss, never raw. The server sends the library
+    // value in SECONDS and the MusicBrainz value in MILLISECONDS, so printing
+    // them directly read as "Length: 240 → 240000" — two numbers that look
+    // wildly different while describing the same 4-minute track. That is why
+    // the duration difference looked like it was never being checked. The
+    // server also supplies ready-formatted strings; the fallback formats the
+    // raw values in case an older payload arrives.
+    duration: (c) => {
+        const lib = c.library_duration_display || _fmtDuration(c.library_duration);
+        const mb = c.mb_duration_display || _fmtDuration(c.mb_duration);
+        return `Length: <em>${escapeHtml(lib || '—')}</em> → <strong>${escapeHtml(mb || '—')}</strong> ` +
+            '<span class="text-muted">(different recording — check the file is the right version; not editable)</span>';
+    },
 };
+
+// Format a duration as m:ss. Accepts seconds (library) OR milliseconds
+// (MusicBrainz ``length``): anything over an hour can only be ms.
+function _fmtDuration(value) {
+    const seconds = _durationSeconds(value);
+    if (seconds == null) return '';
+    const whole = Math.round(seconds);
+    return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
+}
+
+function _durationSeconds(value) {
+    if (value == null || value === '' || value === 0 || value === '0') return null;
+    const num = Number(value);
+    if (!Number.isFinite(num) || num <= 0) return null;
+    return num > 3600 ? num / 1000 : num;
+}
 
 function _displayMBComparison(data) {
     document.querySelectorAll('.mb-update-row').forEach(el => el.remove());
