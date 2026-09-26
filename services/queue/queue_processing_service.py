@@ -246,6 +246,7 @@ def add_release_tracks_to_queue_detailed(
     album_artist: str | None = None,
     queue_source: str = "soulseek",
     year: int | None = None,
+    album_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Add normalized tracks to the download queue, reporting WHY any were skipped.
 
@@ -255,11 +256,27 @@ def add_release_tracks_to_queue_detailed(
     returns a structured result and ``add_release_tracks_to_queue`` stays as the
     back-compat list-returning wrapper.
 
+    ``album_metadata`` carries the ALBUM-scoped MusicBrainz fields (release
+    type / status / country / album-artist MBID / original year …).  They are
+    stored on every row's ``metadata`` JSON so the post-download import can
+    apply the same release metadata an album-page lookup would, without
+    re-fetching MusicBrainz.  Optional: a caller that does not supply it leaves
+    behaviour exactly as before.
+
     Returns a dict with ``queue_ids`` (list[int]), ``queued`` (bool), ``reason``
     (None when something was queued, otherwise a code documented in
     ``_QUEUE_SKIP_MESSAGES``), a human-readable ``message``, and counts for
     ``already_active``, ``in_library``, ``already_queued`` and ``duplicate``.
     """
+    _album_meta: dict[str, Any] = {}
+    if isinstance(album_metadata, dict):
+        from services.downloads.download_completion_service import (
+            _ALBUM_LEVEL_COLUMNS as _ALBUM_COLS,
+        )
+        for _col in _ALBUM_COLS:
+            _val = album_metadata.get(_col)
+            if _val is not None and str(_val).strip() != "":
+                _album_meta[_col] = _val
     queue_ids: list[int] = []
     in_library = 0
     already_queued = 0
@@ -417,6 +434,11 @@ def add_release_tracks_to_queue_detailed(
                 if _genres:
                     _mb_meta["musicbrainz_genres"] = _genres
 
+                # Album-scoped release metadata, persisted so the import can
+                # apply the full release identity without re-querying MB.
+                if _album_meta:
+                    _mb_meta["album_metadata"] = dict(_album_meta)
+
                 result = session.execute(
                     text("""
                         INSERT INTO download_queue
@@ -481,6 +503,7 @@ def add_release_tracks_to_queue(
     album_artist: str | None = None,
     queue_source: str = "soulseek",
     year: int | None = None,
+    album_metadata: dict[str, Any] | None = None,
 ) -> list[int]:
     """Add normalized tracks to the download queue, returning the new row ids.
 
@@ -496,6 +519,7 @@ def add_release_tracks_to_queue(
         album_artist=album_artist,
         queue_source=queue_source,
         year=year,
+        album_metadata=album_metadata,
     )
     return list(result.get("queue_ids") or [])
 

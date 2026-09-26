@@ -1240,6 +1240,24 @@ def start_release_download(release_id: Any, release_title: str, artist: str, met
             )
 
         queue_source = 'soulseek'
+        # Convert the MB payload to tracks-column names BEFORE handing it over:
+        # ``add_release_tracks_to_queue_detailed`` validates against
+        # ``_ALBUM_LEVEL_COLUMNS`` (column names), while ``mb_data`` is keyed by
+        # MusicBrainz field names (``album_type``, ``status``, …), so passing it
+        # raw would store nothing.
+        _album_metadata: dict[str, Any] = {}
+        if isinstance(mb_data, dict):
+            try:
+                from services.downloads.download_completion_service import (
+                    _album_level_mb_fields,
+                )
+                _album_metadata = _album_level_mb_fields(mb_data)
+            except Exception as _album_exc:
+                logger.debug(
+                    "Could not derive album-level queue metadata",
+                    release_id=resolved_release_id,
+                    error=str(_album_exc),
+                )
         queue_result = add_release_tracks_to_queue_detailed(
             resolved_release_id,
             tracks,
@@ -1248,6 +1266,10 @@ def start_release_download(release_id: Any, release_title: str, artist: str, met
             album_artist=release_album_artist,
             queue_source=queue_source,
             year=release_year,
+            # Persist the release's ALBUM-scoped metadata onto every queue row
+            # so the post-download import can apply the same field set an
+            # album-page lookup would, without re-querying MusicBrainz.
+            album_metadata=(_album_metadata or None),
         )
         queue_ids = list(queue_result.get("queue_ids") or [])
 

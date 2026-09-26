@@ -36,6 +36,7 @@ Callers:
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -666,6 +667,122 @@ def _extract_duration_seconds(file_path: str) -> Optional[int]:
 # MOVE / IMPORT
 # =============================================================================
 
+#: Album/RELEASE-scoped fields that an album-page lookup applies to every track.
+#: The download-import path must apply the same set so a downloaded album
+#: matches the MusicBrainz release it was queued against.
+_ALBUM_LEVEL_COLUMNS: tuple[str, ...] = (
+    "musicbrainz_albumtype",
+    "musicbrainz_albumstatus",
+    "musicbrainz_albumartistid",
+    "musicbrainz_releasegroupid",
+    "releasecountry",
+    "originalyear",
+    "releasedate",
+    "recordlabel",
+    "catalognumber",
+    "barcode",
+    "media",
+)
+
+
+def _album_level_mb_fields(release: dict[str, Any]) -> dict[str, Any]:
+    """Map a flattened MusicBrainz release to tracks-column names.
+
+    These are the ALBUM-scoped fields ``routes/ui_routes.py`` writes to every
+    track when a release is matched from the album page.  A downloaded album
+    must end up with the same set, or it will not match the release it was
+    queued against.
+
+    ``year``/``release_year`` are deliberately NOT included: the import path
+    owns those through the queue row, and the tag writer has dedicated
+    DATE-vs-ORIGINALYEAR handling for them.
+    """
+    out: dict[str, Any] = {}
+    mapping = {
+        "musicbrainz_albumtype": release.get("album_type"),
+        "musicbrainz_albumstatus": release.get("status"),
+        "musicbrainz_albumartistid": release.get("album_artist_mbid"),
+        "musicbrainz_releasegroupid": release.get("release_group_mbid"),
+        "releasecountry": release.get("releasecountry"),
+        "originalyear": release.get("original_year"),
+        "releasedate": release.get("releasedate"),
+        "recordlabel": release.get("recordlabel"),
+        "catalognumber": release.get("catalognumber"),
+        "barcode": release.get("barcode"),
+        "media": release.get("media"),
+    }
+    for column, value in mapping.items():
+        if value is not None and str(value).strip() != "":
+            out[column] = value
+    return out
+
+
+def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    """Resolve album-level MusicBrainz metadata for a completing download.
+
+    Two sources, in order:
+
+    1. What was STORED when the release was queued — the queue row's own
+       columns, then the ``metadata`` JSON that ``add_release_tracks_to_queue``
+       writes (this is the "persist at queue time" half).
+    2. A REFRESH from MusicBrainz for anything still missing (the "fetch on
+       import" half), using the release MBID the row was queued against.
+
+    A failed fetch is not an error: the stored values are still applied, and a
+    release the user never matched simply resolves to no album fields.
+    """
+    resolved: dict[str, Any] = {}
+
+    # ── 1. stored: queue-row columns ─────────────────────────────────────
+    for column in _ALBUM_LEVEL_COLUMNS:
+        value = item.get(column)
+        if value is not None and str(value).strip() != "":
+            resolved[column] = value
+
+    # ── 1b. stored: the queue row's metadata JSON ────────────────────────
+    stored = item.get("metadata")
+    if isinstance(stored, str):
+        try:
+            stored = json.loads(stored or "{}") or {}
+        except Exception:
+            stored = {}
+    if isinstance(stored, dict):
+        album_payload = stored.get("album_metadata")
+        if isinstance(album_payload, dict):
+            for column, value in album_payload.items():
+                if (
+                    column not in resolved
+                    and value is not None
+                    and str(value).strip() != ""
+                ):
+                    resolved[column] = value
+
+    # ── 2. refresh from MusicBrainz for anything still missing ───────────
+    release_mbid = str(
+        item.get("release_mbid") or item.get("release_id") or ""
+    ).strip()
+    missing = [c for c in _ALBUM_LEVEL_COLUMNS if not resolved.get(c)]
+    if release_mbid and missing:
+        try:
+            from services.enrichment.musicbrainz_service import (
+                fetch_musicbrainz_release_metadata,
+            )
+
+            release = fetch_musicbrainz_release_metadata(release_mbid)
+            if isinstance(release, dict):
+                for column, value in _album_level_mb_fields(release).items():
+                    if column not in resolved and str(value).strip() != "":
+                        resolved[column] = value
+        except Exception as exc:
+            logger.debug(
+                "Album-level MB refresh failed — using stored values only",
+                release_mbid=release_mbid,
+                error=str(exc),
+            )
+
+    return resolved
+
+
 def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> None:
     meta: dict[str, Any] = {
         "title": item.get("title"),
@@ -699,6 +816,15 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> None:
     if item.get("musicbrainz_releasegroupid"):
         meta["musicbrainz_releasegroupid"] = item.get("musicbrainz_releasegroupid")
 
+    # ── Album-level MusicBrainz metadata ─────────────────────────────────
+    # Resolved from what was stored at queue time and, for anything still
+    # missing, refreshed from MusicBrainz via the release MBID.  Applied to
+    # BOTH the file tags and the tracks row so an imported album carries the
+    # same release metadata an album-page lookup would have written.
+    _album_level = _resolve_album_level_metadata(item)
+    for _col, _val in _album_level.items():
+        meta.setdefault(_col, _val)
+
     # ── Stored MusicBrainz enrichment (writer / cover / genres) ──────────
     # ``add_release_tracks_to_queue`` persisted the per-recording work-rels
     # (writer + cover attribution) and MB genres in the queue row's
@@ -711,9 +837,8 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> None:
     try:
         _stored = item.get("metadata") or {}
         if isinstance(_stored, str):
-            import json as _json
             try:
-                _stored = _json.loads(_stored) or {}
+                _stored = json.loads(_stored) or {}
             except Exception:
                 _stored = {}
         if isinstance(_stored, dict):
@@ -751,10 +876,23 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> None:
             "musicbrainz_workid", "recording_mbid", "release_mbid",
             "musicbrainz_artistid", "musicbrainz_albumartistid",
             "musicbrainz_releasegroupid",
+            # Album-level fields — see ``_ALBUM_LEVEL_COLUMNS``.  Without these
+            # the row kept the track-level enrichment but not the release
+            # identity, so the library showed an album that did not match the
+            # MBID release it was downloaded for.
+            "musicbrainz_albumtype", "musicbrainz_albumstatus",
+            "releasecountry", "originalyear", "releasedate",
+            "recordlabel", "catalognumber", "barcode", "media",
+            # ``release_mbid`` is a download_queue column, not a tracks column;
+            # the tracks-table equivalent is ``musicbrainz_album_mbid``.
+            "musicbrainz_album_mbid",
         }
         for _col in _mb_cols:
             if meta.get(_col) not in (None, ""):
                 _db_payload[_col] = meta[_col]
+
+        if release_mbid and not _db_payload.get("musicbrainz_album_mbid"):
+            _db_payload["musicbrainz_album_mbid"] = release_mbid
 
         if recording_mbid or release_mbid:
             # Find the track row by MBID first (most reliable), then by the

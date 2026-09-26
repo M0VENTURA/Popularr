@@ -811,6 +811,29 @@ _COLUMN_TO_TAG_FIELD: dict[str, str] = {
     "r128_album_gain": "r128_album_gain",
 }
 
+#: Album/RELEASE-level MusicBrainz fields that must reach the file tags when a
+#: caller supplies them.  ``update_file_metadata`` forwards only an explicit
+#: key list, so anything not named there is silently discarded — which is how
+#: an "album-page parity" payload lost its release-country / album-type /
+#: album-artist-MBID on the way to the writer.
+#:
+#: Deliberately EXCLUDES ``year`` / ``release_year``: those have their own
+#: DATE-vs-ORIGINALYEAR handling in ``build_tag_updates`` and are already
+#: applied above.
+_ALBUM_MB_TAG_COLUMNS: tuple[str, ...] = (
+    "musicbrainz_albumtype",
+    "musicbrainz_albumstatus",
+    "musicbrainz_albumartistid",
+    "musicbrainz_releasegroupid",
+    "releasecountry",
+    "recordlabel",
+    "catalognumber",
+    "barcode",
+    "media",
+    "originalyear",
+    "originaldate",
+)
+
 
 def build_tag_updates(payload: dict[str, Any]) -> dict[str, Any]:
     """Map a DB-column payload to tag-writer field names.
@@ -919,6 +942,20 @@ def update_file_metadata(file_path: str, metadata: Dict[str, Any]) -> bool:
         tag_updates["musicbrainz_workid"] = metadata.get("work_mbid")
     if metadata.get("iswc"):
         tag_updates["iswc"] = metadata.get("iswc")
+
+    # ---- Album-level MusicBrainz fields -------------------------------------
+    # These are the RELEASE-level identity fields an album-page lookup writes
+    # onto every track of the album (type / status / country / album-artist
+    # MBID / release-group MBID).  They were silently DROPPED here: the writer
+    # only forwarded the hand-listed keys above, so a caller could pass them and
+    # an imported album still came out without them.
+    #
+    # ``_COLUMN_TO_TAG_FIELD`` already owns the column→tag mapping, so it is
+    # reused rather than duplicated — any future rename stays in one place.
+    for _column in _ALBUM_MB_TAG_COLUMNS:
+        _album_value = metadata.get(_column)
+        if _album_value is not None and str(_album_value).strip() != "":
+            tag_updates[_COLUMN_TO_TAG_FIELD.get(_column, _column)] = _album_value
 
     return write_tags_to_file(file_path, tag_updates)
 

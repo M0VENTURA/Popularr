@@ -1983,6 +1983,11 @@ def _flatten_release(Release: dict[str, Any], release_id: str) -> dict[str, Any]
         "artist_credit": Joined_artist_credit,
         "album_artist_mbid": Album_artist_mbid,
         "album_type": Album_type,
+        # The release's STATUS ("Official", "Promotion", "Bootleg", …).  The
+        # album page persists it as ``musicbrainz_albumstatus``, but it had no
+        # source here — so the download-import path could never write it and an
+        # imported album silently lost a field an album-page lookup sets.
+        "status": str(Release.get("status") or "").strip(),
         "disc_count": len(Media),
         **_release_extended_fields(Release, Media),
         "tracks": Tracks,

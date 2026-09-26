@@ -1103,20 +1103,82 @@ async def api_musicbrainz_download() -> Any:
                 "start_release_download failed — falling back to simple queue add",
                 release_id=release_id, error=result.get("error"),
             )
-            add_result = queue_add({
-                "artist": artist,
-                "title": release_title,
-                "album": release_title,
-                "source": "soulseek",
-            })
-            if not add_result.get("success"):
-                return jsonify({"error": add_result.get("error") or result.get("error", "Download failed")}), 500
 
-            queue_id = (add_result.get("item") or {}).get("id")
+            # The managed path failed, but the RELEASE is still known.  Queue its
+            # tracks individually when the tracklist can be fetched, so each row
+            # carries its OWN artist instead of stamping the release artist onto
+            # every track — on a Various-Artists compilation the single-row
+            # fallback labelled every download "Various Artists".
+            _fallback_ids: list[int] = []
+            _fallback_reason: str | None = None
+            _mb_tracks: list[Any] = []
+            try:
+                from services.enrichment.musicbrainz_service import (
+                    fetch_musicbrainz_release_metadata,
+                )
+                from services.queue.queue_processing_service import (
+                    add_release_tracks_to_queue_detailed,
+                )
+                from services.downloads.download_completion_service import (
+                    _album_level_mb_fields,
+                )
+
+                _mb_release = fetch_musicbrainz_release_metadata(release_id)
+                _mb_tracks = (_mb_release or {}).get("tracks") or []
+                if _mb_tracks:
+                    _fallback = add_release_tracks_to_queue_detailed(
+                        release_id,
+                        _mb_tracks,
+                        artist,
+                        release_title,
+                        album_artist=artist,
+                        queue_source="soulseek",
+                        year=(_mb_release or {}).get("release_year"),
+                        album_metadata=_album_level_mb_fields(_mb_release or {}),
+                    )
+                    _fallback_ids = list(_fallback.get("queue_ids") or [])
+                    _fallback_reason = _fallback.get("reason")
+            except Exception as _fallback_exc:
+                logger.warning(
+                    "Per-track fallback queue failed — using single-row fallback",
+                    release_id=release_id,
+                    error=str(_fallback_exc),
+                )
+
+            if not _fallback_ids:
+                # No tracklist available (offline, or every track already owned):
+                # keep the previous single-row behaviour so the download can
+                # still be attempted.
+                add_result = queue_add({
+                    "artist": artist,
+                    "title": release_title,
+                    "album": release_title,
+                    "source": "soulseek",
+                })
+                if not add_result.get("success"):
+                    return jsonify({"error": add_result.get("error") or result.get("error", "Download failed")}), 500
+
+                queue_id = (add_result.get("item") or {}).get("id")
+                return jsonify({
+                    "success": True,
+                    "tracking_id": queue_id,
+                    "message": f"Download queued for {release_title} (Fallback search)",
+                    "persistent_search": persistent_search,
+                    "session_id": session_id,
+                }), 201
+
             return jsonify({
                 "success": True,
-                "tracking_id": queue_id,
-                "message": f"Download queued for {release_title} (Fallback search)",
+                "tracking_id": _fallback_ids[0],
+                "queue_ids": _fallback_ids,
+                "queued": True,
+                "queued_tracks": len(_fallback_ids),
+                "total_tracks": len(_mb_tracks),
+                "reason": _fallback_reason,
+                "message": (
+                    f"Download queued for {release_title} "
+                    f"({len(_fallback_ids)} track(s), fallback search)"
+                ),
                 "persistent_search": persistent_search,
                 "session_id": session_id,
             }), 201

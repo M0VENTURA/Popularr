@@ -1362,6 +1362,30 @@
     if (previewEl) previewEl.textContent = `Music / ${path} / 01. Track Title.mp3`;
   }
 
+  /**
+   * The artist to put in the modal's PER-TRACK "Artist" field.
+   *
+   * `group.sublabel` is the ALBUM artist (`item.album_artist || item.artist`),
+   * so using it for both fields pre-filled "Various Artists" into the track
+   * artist box on a compilation — and the value is applied to every track.
+   * The track field must therefore be derived from the tracks' OWN artist
+   * column, falling back to the album artist only when no row carries one.
+   *
+   * @returns {string} the most common per-track artist, or the album artist
+   */
+  function dominantTrackArtist(group) {
+    const counts = Object.create(null);
+    (group && group.items || []).forEach((item) => {
+      const value = (item && item.artist ? String(item.artist) : '').trim();
+      if (value) counts[value] = (counts[value] || 0) + 1;
+    });
+    const ranked = Object.keys(counts);
+    if (!ranked.length) return (group && group.sublabel) || '';
+    // Most frequent wins; ties resolve to the first seen for determinism.
+    ranked.sort((a, b) => counts[b] - counts[a] || ranked.indexOf(a) - ranked.indexOf(b));
+    return ranked[0];
+  }
+
   function openOrganizeGroupModal(group) {
     organizeGroupKey = group.key;
 
@@ -1377,9 +1401,15 @@
     // blank and confirmOrganizeGroup() rejected the submit with "Artist and
     // Album fields are required" until the user retyped a value the app
     // already had.
+    //
+    // ⚠️ The two fields are DIFFERENT values.  `sublabel` is the ALBUM artist,
+    // so copying it into the track-artist field stamped a compilation's every
+    // track with "Various Artists".  The track field takes the tracks' own
+    // artist.
     const orgArtist = document.getElementById('orgArtist');
     const orgAlbumArtist = document.getElementById('orgAlbumArtist');
-    if (orgArtist && group.sublabel) orgArtist.value = group.sublabel;
+    const _trackArtist = dominantTrackArtist(group);
+    if (orgArtist && _trackArtist) orgArtist.value = _trackArtist;
     if (orgAlbumArtist && group.sublabel) orgAlbumArtist.value = group.sublabel;
 
     const firstYear = (group.items || []).map((i) => i.year).find(Boolean);
