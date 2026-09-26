@@ -2203,6 +2203,51 @@ def get_prefetch_budget_seconds() -> int:
     return max(120, min(budget, 1800))
 
 
+def get_album_timeout_seconds() -> int:
+    """Per-album wall-clock budget during a scan (seconds).
+
+    Config section: ``popularity.album_timeout_seconds`` in config.yaml.
+
+    WHY THIS IS A SEPARATE BUDGET FROM ``artist_timeout_seconds``
+    -----------------------------------------------------------
+    An artist row is not a unit of work.  ``get_all_artists`` groups by
+    ``COALESCE(NULLIF(TRIM(album_artist),''), TRIM(artist))``, so
+    **"Various Artists" is ONE artist containing every compilation in the
+    library** — hundreds of albums.  A flat per-artist budget is therefore a
+    SIZE limit wearing a timeout's clothes: the artist is abandoned for doing
+    legitimate work, losing every album it had not reached yet.  The reported
+    case was exactly this::
+
+        Various Artists  abandoned  exceeded 1800.0s budget
+
+    Because one slow album is what a stuck syscall actually looks like, the
+    album is the correct unit to bound.  When an album exceeds this budget it
+    is skipped and the scan CONTINUES with the artist's remaining albums,
+    instead of discarding the whole artist.
+
+    Set to ``0`` to disable the per-album budget entirely.
+
+    Default: 900 (15 min) — an album of ~15 tracks doing full metadata +
+    popularity + singles work finishes well inside this; only a genuinely
+    stuck album reaches it.  Clamped 60-21600 (1 min - 6 h).
+    """
+    cfg = get_config()
+    try:
+        raw = (cfg.get("popularity") or {}).get("album_timeout_seconds", 900)
+    except Exception:
+        raw = 900
+    if raw is None:
+        return 900
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 900
+    if value <= 0:
+        # Explicit opt-out: no per-album budget, so no album is ever skipped.
+        return 0
+    return max(60, min(value, 21600))
+
+
 def get_artist_timeout_seconds() -> int:
     """Per-artist wall-clock budget during a full-library scan (seconds).
 
@@ -2219,6 +2264,12 @@ def get_artist_timeout_seconds() -> int:
     shared HTTP rate limiter, which made the NEXT artist likelier to time out
     too.  Raising this is therefore the correct lever for a library whose
     artists legitimately need longer than the default.
+
+    ⚠️ This is a FIXED OVERHEAD budget, NOT a per-album one.  The caller adds
+    ``get_album_timeout_seconds() * album_count`` so that a large artist
+    ("Various Artists" can hold hundreds of compilations) is not abandoned for
+    the crime of being large; the per-album budget is what catches an actually
+    stuck album.  See ``get_album_timeout_seconds``.
 
     Previously this was read as ``features.full_scan_artist_timeout_seconds``
     with a hardcoded 1800 default and was NOT exposed anywhere in the UI — so

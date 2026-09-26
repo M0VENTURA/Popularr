@@ -30,6 +30,7 @@ from db.repositories.tracks import DeferredPersistSink, upsert_tracks_bulk
 
 # Config & Helpers
 from helpers.config_helpers import (
+    get_album_timeout_seconds,
     get_config,
     get_feature,
     get_prefetch_budget_seconds,
@@ -248,6 +249,82 @@ def _bounded_call_report(
         "reason": None,
         "budget_seconds": seconds,
     }
+
+
+def _resolve_album_budget() -> float | None:
+    """Read the per-album wall-clock budget, or None when disabled.
+
+    ``None`` means "no budget": ``_bounded_call_report(seconds=None)`` runs the
+    call directly with no join at all, which is what ``0`` must mean.
+    """
+    try:
+        resolved = int(get_album_timeout_seconds())
+    except Exception:
+        return 900.0
+    return None if resolved <= 0 else float(resolved)
+
+
+def _bounded_album_phase(
+    func: Callable[..., T],
+    *args: Any,
+    seconds: float | None,
+    section: str,
+    log_context: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Run one PHASE of an album under the per-album budget.
+
+    WHY THE ALBUM IS THE RIGHT UNIT
+    -------------------------------
+    A stuck call looks like ONE album not finishing, so bounding the album
+    isolates the damage to that album.  Bounding the ARTIST instead made the
+    budget a size limit: ``get_all_artists`` groups by
+    ``COALESCE(NULLIF(TRIM(album_artist),''), TRIM(artist))``, so
+    "Various Artists" is a single row holding every compilation in the
+    library, and it was abandoned wholesale for legitimately being large::
+
+        Various Artists  abandoned  exceeded 1800.0s budget
+
+    On exceed this returns an ``abandoned`` report and the caller SKIPS the
+    rest of that album and moves to the next one — the artist keeps its
+    remaining albums.  Deliberately NOT wired to ``scan_cancellation``: that
+    registry is keyed per ARTIST, so cancelling from here would unwind every
+    remaining album of the artist and recreate the original problem one level
+    down.
+
+    ``seconds=None`` runs the phase unbounded (the budget is disabled).
+    """
+    return _bounded_call_report(
+        func,
+        *args,
+        seconds=seconds,
+        section=section,
+        log_context=log_context,
+        **kwargs,
+    )
+
+
+def _album_phase_was_abandoned(result: Any) -> tuple[bool, str]:
+    """Classify a bounded album-phase result as ``(abandoned, reason)``.
+
+    Factored out of the loop so the DECISION can be tested behaviourally. A
+    source-text assertion cannot catch a branch being neutered (``if False``
+    leaves the text intact), and this decision is the whole point of the
+    change: an abandoned album is skipped while the artist continues.
+    """
+    if isinstance(result, dict) and result.get("abandoned"):
+        return True, str(result.get("reason") or "exceeded its time budget")
+    return False, ""
+
+
+def _track_phase_is_incomplete(result: Any) -> bool:
+    """True when the album's track phase did not return its results.
+
+    ``_execute_track_jobs_safely`` always returns a LIST. Anything else is the
+    ``abandoned`` report from the budget, so the album must be skipped rather
+    than treated as a list of results.
+    """
+    return not isinstance(result, list)
 
 
 def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
@@ -1248,6 +1325,12 @@ def run_scan(
     except Exception:
         _prefetch_budget = None
 
+    # Per-ALBUM wall-clock budget.  ``None`` disables it.  This is the budget
+    # that actually matches a stuck call (one album not finishing), so it is
+    # what isolates the damage to a single album instead of discarding the
+    # artist.
+    _album_budget = _resolve_album_budget()
+
     log_unified(f"[POPULARITY] Scan mode: {scan_type.capitalize()} — {total_albums} album(s) queued")
     if force:
         log_unified("[POPULARITY] Forced mode — album-skip and score-freeze checks are DISABLED")
@@ -1867,7 +1950,7 @@ def run_scan(
 
             log_unified(f"[POPULARITY] Enriching album: {artist} - {album}")
 
-            album_result = _bounded_call_report(
+            album_result = _bounded_album_phase(
                 enrich_album,
                 album_row=album_row,
                 album_context=album_context,
@@ -1875,7 +1958,31 @@ def run_scan(
                 options=options,
                 section="enrich_album",
                 log_context={"artist": artist, "album": album},
+                seconds=_album_budget,
             ) or {}
+
+            # An album that blew the per-album budget is SKIPPED — the artist
+            # keeps every remaining album.  This is deliberately NOT a
+            # cancellation: the scan_cancellation registry is keyed per ARTIST,
+            # so cancelling here would unwind the artist's remaining albums and
+            # recreate the whole-artist loss one level down.
+            _album_abandoned, _album_abandon_reason = _album_phase_was_abandoned(
+                album_result
+            )
+            if _album_abandoned:
+                skipped_albums += 1
+                log_unified(
+                    f"[POPULARITY] Album '{artist} - {album}' skipped "
+                    f"({_album_abandon_reason}) — continuing with the artist's "
+                    "remaining albums"
+                )
+                record_scan(
+                    scan_type, "failed",
+                    message=f"Album exceeded its time budget: {_album_abandon_reason}",
+                    artist=artist, album=album,
+                )
+                albums_processed += 1
+                continue
 
             log_unified(f"[POPULARITY] Album enriched: {artist} - {album} (type={album_result.get('detected_album_type')})")
 
@@ -2221,12 +2328,51 @@ def run_scan(
 
                 _track_jobs.append((prepared_track, track_context, _track_options, _frozen))
 
-            _track_results_ordered = _execute_track_jobs_safely(
+            _track_results_ordered = _bounded_album_phase(
+                _execute_track_jobs_safely,
                 track_jobs=_track_jobs,
                 max_workers=_scan_threads,
                 artist=artist,
-                album=album
+                album=album,
+                section="album_track_phase",
+                log_context={"artist": artist, "album": album},
+                seconds=_album_budget,
             )
+
+            # ⚠️ The track phase is where most of an album's wall-clock goes,
+            # so it MUST be bounded too — otherwise a hung album never reaches
+            # the budget at all, burns the whole ARTIST budget, and the artist
+            # is still abandoned wholesale (the reported behaviour).
+            #
+            # NOTE this bounds the CALL, not the per-track futures.  The
+            # per-track timeouts were deliberately removed (see
+            # ``_execute_track_jobs_safely``) because abandoning individual
+            # futures leaked zombie threads and starved the DB pool.  Skipping
+            # the whole ALBUM is the safe granularity: the workers that did
+            # finish have already persisted through the deferred sink.
+            if _track_phase_is_incomplete(_track_results_ordered):
+                _track_reason = (
+                    str(_track_results_ordered.get("reason") or "did not complete")
+                    if isinstance(_track_results_ordered, dict)
+                    else "did not complete"
+                )
+                skipped_albums += 1
+                log_unified(
+                    f"[POPULARITY] Album '{artist} - {album}' skipped "
+                    f"({_track_reason}) — continuing with the artist's "
+                    "remaining albums"
+                )
+                record_scan(
+                    scan_type, "failed",
+                    message="Album track phase exceeded its time budget",
+                    artist=artist, album=album,
+                )
+                try:
+                    _deferred_persist.drain()
+                except Exception as exc:
+                    logger.debug("Deferred persist drain failed", error=str(exc))
+                albums_processed += 1
+                continue
 
             try:
                 _deferred_payloads = _deferred_persist.drain()
@@ -2303,10 +2449,11 @@ def run_scan(
                         logger.debug("Post-singles enrichment failed", artist=artist, album=album, error=str(exc))
 
                 log_unified(f"[POPULARITY] Post-singles enrichment for '{artist} - {album}' (covers, genres, artist metadata)")
-                _bounded_call_report(
+                _bounded_album_phase(
                     _post_singles_enrichment_work,
                     section="post_singles_enrichment",
                     log_context={"artist": artist, "album": album},
+                    seconds=_album_budget,
                 )
 
             # ------------------------------------------------------------------

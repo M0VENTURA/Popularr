@@ -512,6 +512,13 @@ function buildConfigObject() {
         track_timeout_seconds: parseInt(getValue('pop_track_timeout_seconds', '600'), 10) || 600,
         scan_threads: parseInt(getValue('pop_scan_threads', '4'), 10) || 4,
         prefetch_budget_seconds: parseInt(getValue('pop_prefetch_budget_seconds', '360'), 10) || 360,
+        // Per-ALBUM full-scan budget. 0 DISABLES it (never skip an album), so
+        // this is NOT guarded with `|| 900` — that would turn the "disabled"
+        // value back into 15 minutes.
+        album_timeout_seconds: (() => {
+          const raw = parseInt(getValue('pop_album_timeout_seconds', '900'), 10);
+          return Number.isFinite(raw) ? Math.max(0, raw) : 900;
+        })(),
         // Per-artist full-scan budget. 0 DISABLES the timeout (never abandon
         // an artist), so this is NOT guarded with `|| 1800` — that would turn
         // the "disabled" value back into 30 minutes.

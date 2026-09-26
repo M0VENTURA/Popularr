@@ -575,12 +575,53 @@ def _run_full_scan_as_artist_pipeline(
             # right setting for a library whose artists legitimately need
             # longer than the default — abandoning a merely-SLOW artist is
             # what created the cascade.
+            #
+            # ⚠️⚠️ THE BUDGET IS SCALED BY ALBUM COUNT, ON PURPOSE.
+            # An artist row is not a unit of work.  ``get_all_artists`` groups
+            # by ``COALESCE(NULLIF(TRIM(album_artist),''), TRIM(artist))``, so
+            # **"Various Artists" is ONE artist holding every compilation in
+            # the library** — hundreds of albums.  With a FLAT budget that
+            # artist was abandoned for legitimately being large:
+            #
+            #     Various Artists  abandoned  exceeded 1800.0s budget
+            #
+            # ...which discarded every album it had not reached yet.  So the
+            # configured value is treated as FIXED OVERHEAD (the Navidrome
+            # import and the Essentia pass, which have no album granularity)
+            # and each album gets its own allowance on top.  An actually stuck
+            # ALBUM is caught by the separate per-album budget in the runner,
+            # which skips that one album and keeps the rest.
             _artist_budget: float | None = 1800.0
             try:
-                from helpers.config_helpers import get_artist_timeout_seconds
+                from helpers.config_helpers import (
+                    get_album_timeout_seconds,
+                    get_artist_timeout_seconds,
+                )
 
                 _resolved_budget = int(get_artist_timeout_seconds())
-                _artist_budget = None if _resolved_budget <= 0 else float(_resolved_budget)
+                if _resolved_budget <= 0:
+                    _artist_budget = None
+                else:
+                    _album_allowance = max(0, int(get_album_timeout_seconds()))
+                    _artist_album_count = 0
+                    try:
+                        from db.repositories.library import get_album_counts_by_artist
+
+                        _all_counts = get_album_counts_by_artist() or {}
+                        _artist_album_count = int(
+                            _all_counts.get(artist)
+                            or _all_counts.get(str(artist).strip())
+                            or 0
+                        )
+                    except Exception as _count_exc:
+                        logger.debug(
+                            "[FULL_SCAN] Album-count lookup failed; using the "
+                            "un-scaled artist budget",
+                            artist=artist, error=str(_count_exc),
+                        )
+                    _artist_budget = float(
+                        _resolved_budget + _album_allowance * _artist_album_count
+                    )
             except Exception:
                 _artist_budget = 1800.0
 

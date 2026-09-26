@@ -7,6 +7,10 @@ from sqlalchemy import text
 from db.engine import db_session
 import logging 
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 def fetch_artist_library_stats(conn: Any = None) -> tuple | None:
     """Fetch total library album/track/five-star counts."""
     with db_session() as session:
@@ -176,6 +180,45 @@ def get_albums_for_artist(artist: str) -> list[str]:
             ORDER BY album
         """), {"artist": artist})
         return [str(row[0]) for row in result.fetchall() or [] if row[0]]
+
+
+def get_album_counts_by_artist() -> dict[str, int]:
+    """Distinct album count per artist, in ONE query.
+
+    Exists so a caller sizing work PER ARTIST does not have to query per
+    artist: a full library scan needs the count for every artist it is about
+    to process, and a per-artist loop would be hundreds of round-trips.
+
+    Grouping matches :func:`get_all_artists` exactly
+    (``COALESCE(NULLIF(TRIM(album_artist),''), TRIM(artist))``), so the keys
+    line up with the names the scan iterates.  An artist whose name differs
+    only by surrounding whitespace or case WILL still match after
+    ``.strip()``, which is what the callers rely on.
+
+    Returns ``{}`` on failure rather than raising: a scan must not die because
+    a sizing hint could not be read.  Callers must treat a missing artist as
+    "count unknown" and fall back to their un-scaled behaviour.
+    """
+    try:
+        with db_session() as session:
+            rows = session.execute(text("""
+                SELECT COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist)) AS artist_name,
+                       COUNT(DISTINCT album) AS album_count
+                FROM tracks
+                WHERE COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist)) IS NOT NULL
+                  AND COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist)) != ''
+                  AND album IS NOT NULL
+                  AND TRIM(album) != ''
+                GROUP BY 1
+            """)).fetchall()
+    except Exception as exc:
+        logger.warning("Album counts per artist read failed", error=str(exc))
+        return {}
+    return {
+        str(row[0]): int(row[1] or 0)
+        for row in rows or []
+        if row and row[0]
+    }
 
 
 

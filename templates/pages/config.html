@@ -1511,6 +1511,19 @@
           <small class="form-text text-muted">Wall-clock budget for the per-artist prefetch / post-singles enrichment (the bulk Last.fm/ListenBrainz/MusicBrainz/Discogs work). Kept low so a stalled bulk call is abandoned quickly and the scan keeps moving. Default: <strong>180</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="pop_album_timeout_seconds">Per-Album Scan Timeout (seconds)</label>
+          <input type="number" step="60" min="0" max="21600" class="form-control form-control-sm" id="pop_album_timeout_seconds" placeholder="900" value="{{ config.get('popularity', {}).get('album_timeout_seconds', 900) }}">
+          <small class="form-text text-muted">
+            Safety net for a <strong>hung album</strong> during a scan. When a single album exceeds
+            this it is <strong>skipped</strong>, and the scan continues with that artist's
+            <strong>remaining albums</strong> — only the stuck album is lost.
+            This is the budget that catches a stuck call, because a hang always looks like
+            <em>one album</em> not finishing. Lower it to bound a bad album more tightly.
+            Set to <strong>0</strong> to disable it (never skip an album).
+            Default: <strong>900</strong> (15 min)
+          </small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
           <label class="form-label form-label-sm" for="pop_artist_timeout_seconds">Per-Artist Scan Timeout (seconds)</label>
           <input type="number" step="60" min="0" max="21600" class="form-control form-control-sm" id="pop_artist_timeout_seconds" placeholder="1800" value="{{ config.get('popularity', {}).get('artist_timeout_seconds', 1800) }}">
           <small class="form-text text-muted">
@@ -1518,6 +1531,10 @@
             exceeds this it is <strong>abandoned and skipped</strong> — it is not scanned, and the next
             artist starts. Raise it if your artists legitimately need longer; a slow artist that gets
             abandoned makes the rest of the scan slower, not faster.
+            This is <strong>fixed overhead</strong> (library import + audio analysis) and is scaled
+            automatically by the artist's album count, so a large artist such as
+            <em>Various Artists</em> — one artist holding every compilation in the library — is not
+            abandoned merely for being large. The per-album timeout above is what catches a stuck album.
             Set to <strong>0</strong> to disable the timeout entirely (never abandon an artist).
             Default: <strong>1800</strong> (30 min)
           </small>
