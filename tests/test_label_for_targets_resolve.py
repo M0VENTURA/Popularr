@@ -51,6 +51,7 @@ TEMPLATE_ROOTS = (
 LABEL = re.compile(r"<label\b([^>]*)>", re.IGNORECASE)
 FOR_ATTR = re.compile(r'\bfor\s*=\s*"([^"]*)"', re.IGNORECASE)
 ID_ATTR = re.compile(r'\bid\s*=\s*"([^"]*)"', re.IGNORECASE)
+CONTROL = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.IGNORECASE)
 ANY_TAG = re.compile(r"<([a-zA-Z][\w-]*)\b([^>]*)>", re.IGNORECASE)
 SCRIPT_BLOCK = re.compile(r"<script\b.*?</script\s*>", re.IGNORECASE | re.DOTALL)
 JINJA_COMMENT = re.compile(r"\{#.*?#\}", re.DOTALL)
@@ -170,8 +171,67 @@ class TestEveryLabelForAttributeResolves:
         )
 
 
-class TestTheScanItselfIsSound:
-    """The guard is worthless if it cannot see the markup it guards."""
+class TestNoActionableLabelIsLeftUnassociated:
+    """Ratchet: a label that COULD be associated must not be left unassociated.
+
+    "Could be associated" means: it directly precedes a control that already
+    carries an ``id``. In that case the association is free -- one attribute --
+    and leaving it out is a silent accessibility defect.
+
+    This is deliberately NOT "every label must have ``for=``": a label that
+    heads a group of checkboxes has no single target, and forcing one on it
+    would be wrong. Wrapping labels are already associated implicitly.
+    """
+
+    @staticmethod
+    def _actionable() -> list[str]:
+        found: list[str] = []
+        for path in _template_files():
+            raw = path.read_text(encoding="utf-8")
+            markup = _strip_non_markup(raw)
+            try:
+                rel = path.relative_to(REPO_ROOT).as_posix()
+            except ValueError:
+                rel = path.name
+            for label in LABEL.finditer(markup):
+                if FOR_ATTR.search(label.group(1)):
+                    continue
+                close = markup.find("</label>", label.end())
+                if close == -1:
+                    continue
+                inner = markup[label.end():close]
+                if CONTROL.search(inner):
+                    continue  # wraps its control: already associated
+                tail = markup[close + len("</label>"):][:600]
+                control = CONTROL.match(tail.lstrip())
+                if not control:
+                    continue  # heads a group, or nothing follows
+                if ID_ATTR.search(control.group(2)):
+                    line = raw.count("\n", 0, label.start()) + 1
+                    found.append(f"{rel}:{line}")
+        return found
+
+    def test_no_label_that_could_be_associated_is_missing_for(self) -> None:
+        actionable = self._actionable()
+        assert not actionable, (
+            "These labels sit directly above a control that already has an id, "
+            "so adding for= is free — yet they are unassociated:\n  "
+            + "\n  ".join(actionable)
+        )
+
+    def test_the_ratchet_can_actually_fail(self, tmp_path: Path) -> None:
+        """A ratchet that cannot fail is decoration."""
+        bad = tmp_path / "actionable.html"
+        bad.write_text('<label>Name</label><input id="n">', encoding="utf-8")
+        markup = _strip_non_markup(
+            bad.read_text(encoding="utf-8"))
+        label = LABEL.search(markup)
+        close = markup.find("</label>", label.end())
+        tail = markup[close + len("</label>"):][:600]
+        control = CONTROL.match(tail.lstrip())
+        assert control and ID_ATTR.search(control.group(2)), (
+            "the detector must classify this as actionable"
+        )
 
     def test_script_bodies_are_excluded_from_the_scan(self) -> None:
         src = (

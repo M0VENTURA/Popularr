@@ -1548,87 +1548,87 @@
     <div class="card-body">
       <div class="row g-3">
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Full Scan Rescan Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_album_skip_days" value="{{ config.get('features', {}).get('album_skip_days', 7) }}">
+          <label class="form-label form-label-sm" for="feature_album_skip_days">Full Scan Rescan Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_album_skip_days" value="{{ config.get('features', {}).get('album_skip_days', 7) }}" id="feature_album_skip_days">
           <small class="form-text text-muted">Albums scanned by a <strong>full scan</strong> within this many days are skipped. Set to <strong>0 to always rescan</strong>. Default: <strong>7</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Popularity Scan Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_popularity_skip_days" value="{{ config.get('features', {}).get('popularity_skip_days', 7) }}">
+          <label class="form-label form-label-sm" for="feature_popularity_skip_days">Popularity Scan Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_popularity_skip_days" value="{{ config.get('features', {}).get('popularity_skip_days', 7) }}" id="feature_popularity_skip_days">
           <small class="form-text text-muted">Albums re-scored by the <strong>Popularity</strong> scan option within this many days are skipped. Set to <strong>0 to always run</strong>. Default: <strong>7</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Singles Scan Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_singles_skip_days" value="{{ config.get('features', {}).get('singles_skip_days', 7) }}">
+          <label class="form-label form-label-sm" for="feature_singles_skip_days">Singles Scan Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_singles_skip_days" value="{{ config.get('features', {}).get('singles_skip_days', 7) }}" id="feature_singles_skip_days">
           <small class="form-text text-muted">Albums whose <strong>Singles</strong> scan ran within this many days are skipped (verdicts are also reused per-track inside their freshness TTL). Set to <strong>0 to always run</strong>. Default: <strong>7</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Metadata Scan Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_metadata_skip_days" value="{{ config.get('features', {}).get('metadata_skip_days', 0) }}">
+          <label class="form-label form-label-sm" for="feature_metadata_skip_days">Metadata Scan Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_metadata_skip_days" value="{{ config.get('features', {}).get('metadata_skip_days', 0) }}" id="feature_metadata_skip_days">
           <small class="form-text text-muted">Albums whose <strong>Metadata</strong> scan ran within this many days are skipped. Set to <strong>0 to always run</strong> (default — metadata stays fresh).</small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Old Album Age Threshold (months)</label>
-          <input type="number" step="1" min="1" max="600" class="form-control form-control-sm feature-field" name="feature_old_album_age_months" value="{{ config.get('features', {}).get('old_album_age_months', 48) }}">
+          <label class="form-label form-label-sm" for="feature_old_album_age_months">Old Album Age Threshold (months)</label>
+          <input type="number" step="1" min="1" max="600" class="form-control form-control-sm feature-field" name="feature_old_album_age_months" value="{{ config.get('features', {}).get('old_album_age_months', 48) }}" id="feature_old_album_age_months">
           <small class="form-text text-muted">Albums released before this age (in months) are <strong>old albums</strong> and use the longer old-album windows below — their popularity changes far less often. Default: <strong>48</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Full Scan Old-Album Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_album_old_album_skip_days" value="{{ config.get('features', {}).get('album_old_album_skip_days', 30) }}">
+          <label class="form-label form-label-sm" for="feature_album_old_album_skip_days">Full Scan Old-Album Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_album_old_album_skip_days" value="{{ config.get('features', {}).get('album_old_album_skip_days', 30) }}" id="feature_album_old_album_skip_days">
           <small class="form-text text-muted">Old albums skipped by a <strong>full scan</strong> for this many days. Default: <strong>30</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Popularity Old-Album Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_popularity_old_album_skip_days" value="{{ config.get('features', {}).get('popularity_old_album_skip_days', 30) }}">
+          <label class="form-label form-label-sm" for="feature_popularity_old_album_skip_days">Popularity Old-Album Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_popularity_old_album_skip_days" value="{{ config.get('features', {}).get('popularity_old_album_skip_days', 30) }}" id="feature_popularity_old_album_skip_days">
           <small class="form-text text-muted">Old albums re-scored by the <strong>Popularity</strong> scan for this many days. Default: <strong>30</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Singles Old-Album Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_singles_old_album_skip_days" value="{{ config.get('features', {}).get('singles_old_album_skip_days', 30) }}">
+          <label class="form-label form-label-sm" for="feature_singles_old_album_skip_days">Singles Old-Album Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_singles_old_album_skip_days" value="{{ config.get('features', {}).get('singles_old_album_skip_days', 30) }}" id="feature_singles_old_album_skip_days">
           <small class="form-text text-muted">Old albums whose <strong>Singles</strong> scan ran for this many days. Default: <strong>30</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Metadata Old-Album Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_metadata_old_album_skip_days" value="{{ config.get('features', {}).get('metadata_old_album_skip_days', 30) }}">
+          <label class="form-label form-label-sm" for="feature_metadata_old_album_skip_days">Metadata Old-Album Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_metadata_old_album_skip_days" value="{{ config.get('features', {}).get('metadata_old_album_skip_days', 30) }}" id="feature_metadata_old_album_skip_days">
           <small class="form-text text-muted">Old albums whose <strong>Metadata</strong> scan ran for this many days. Default: <strong>30</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Missing-Release Tracklists per Artist</label>
-          <input type="number" step="1" min="0" max="200" class="form-control form-control-sm feature-field" name="feature_missing_release_tracklist_limit" value="{{ config.get('features', {}).get('missing_release_tracklist_limit', 10) }}">
+          <label class="form-label form-label-sm" for="feature_missing_release_tracklist_limit">Missing-Release Tracklists per Artist</label>
+          <input type="number" step="1" min="0" max="200" class="form-control form-control-sm feature-field" name="feature_missing_release_tracklist_limit" value="{{ config.get('features', {}).get('missing_release_tracklist_limit', 10) }}" id="feature_missing_release_tracklist_limit">
           <small class="form-text text-muted">Missing releases per artist whose <strong>tracklist</strong> is fetched and cached in the background by the missing-releases sweep, so the artist page's expander loads them instantly. The sweep already pauses whenever a popularity scan is running. Each tracklist costs up to <strong>3 MusicBrainz requests</strong> against the shared 1&nbsp;req/s budget. Set to <strong>0 to disable</strong>. Default: <strong>10</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Minimum Tracks for Album Skip Check</label>
-          <input type="number" step="1" min="1" max="100" class="form-control form-control-sm feature-field" name="feature_album_skip_min_tracks" value="{{ config.get('features', {}).get('album_skip_min_tracks', 1) }}">
+          <label class="form-label form-label-sm" for="feature_album_skip_min_tracks">Minimum Tracks for Album Skip Check</label>
+          <input type="number" step="1" min="1" max="100" class="form-control form-control-sm feature-field" name="feature_album_skip_min_tracks" value="{{ config.get('features', {}).get('album_skip_min_tracks', 1) }}" id="feature_album_skip_min_tracks">
           <small class="form-text text-muted">Albums below this track count are not treated as valid albums by the skip check. Default: <strong>1</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Skip Unchanged Albums</label>
-          <select class="form-select form-select-sm feature-field" name="feature_skip_unchanged_albums">
+          <label class="form-label form-label-sm" for="feature_skip_unchanged_albums">Skip Unchanged Albums</label>
+          <select class="form-select form-select-sm feature-field" name="feature_skip_unchanged_albums" id="feature_skip_unchanged_albums">
             <option value="true" {% if config.get('features', {}).get('skip_unchanged_albums', True) %}selected{% endif %}>True</option>
             <option value="false" {% if not config.get('features', {}).get('skip_unchanged_albums', True) %}selected{% endif %}>False</option>
           </select>
           <small class="form-text text-muted">Skip albums whose tracks are all already scored and singles-assessed, even inside the window. Default: <strong>True</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Run Singles Detection on Skipped Albums</label>
-          <select class="form-select form-select-sm feature-field" name="feature_run_singles_on_skipped_albums">
+          <label class="form-label form-label-sm" for="feature_run_singles_on_skipped_albums">Run Singles Detection on Skipped Albums</label>
+          <select class="form-select form-select-sm feature-field" name="feature_run_singles_on_skipped_albums" id="feature_run_singles_on_skipped_albums">
             <option value="true" {% if config.get('features', {}).get('run_singles_on_skipped_albums', False) %}selected{% endif %}>True</option>
             <option value="false" {% if not config.get('features', {}).get('run_singles_on_skipped_albums', False) %}selected{% endif %}>False</option>
           </select>
           <small class="form-text text-muted">Backfill single verdicts on skipped albums (both skip paths) so never-assessed tracks get one without a full rescan. Makes Discogs/MusicBrainz lookups for tracks without a stored verdict — off by default for quiet, fast skips.</small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Flag Cover Songs During Scans</label>
-          <select class="form-select form-select-sm feature-field" name="feature_cover_detection_enabled">
+          <label class="form-label form-label-sm" for="feature_cover_detection_enabled">Flag Cover Songs During Scans</label>
+          <select class="form-select form-select-sm feature-field" name="feature_cover_detection_enabled" id="feature_cover_detection_enabled">
             <option value="true" {% if config.get('features', {}).get('cover_detection_enabled', True) %}selected{% endif %}>True</option>
             <option value="false" {% if not config.get('features', {}).get('cover_detection_enabled', True) %}selected{% endif %}>False</option>
           </select>
           <small class="form-text text-muted">MusicBrainz work-history lookup + "(Artist Cover)" renames. Turn off to skip the per-track cover pass entirely. Default: <strong>True</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Deep Genre Search (Discogs / MB fallback)</label>
-          <select class="form-select form-select-sm feature-field" name="feature_deep_genre_search">
+          <label class="form-label form-label-sm" for="feature_deep_genre_search">Deep Genre Search (Discogs / MB fallback)</label>
+          <select class="form-select form-select-sm feature-field" name="feature_deep_genre_search" id="feature_deep_genre_search">
             <option value="true" {% if config.get('features', {}).get('deep_genre_search', False) %}selected{% endif %}>True</option>
             <option value="false" {% if not config.get('features', {}).get('deep_genre_search', False) %}selected{% endif %}>False</option>
           </select>
