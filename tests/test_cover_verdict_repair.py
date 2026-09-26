@@ -76,8 +76,32 @@ class TestTheFingerprintIsTheReasonNotTheFlag:
         assert fake_db.params["damaged_reason"] == "cover attribution removed from title"
 
     def test_it_only_touches_rows_that_are_currently_unflagged(self, fake_db):
+        """The predicate must select UNFLAGGED rows — expressed as a boolean.
+
+        ⚠️ This used to assert the literal text ``COALESCE(is_cover, 0) = 0``,
+        which pinned the DEFECT rather than the intent. ``is_cover`` is BIGINT so
+        that specific predicate is legal, but the sibling predicate on
+        ``cover_manual_override`` (BOOLEAN) used the same shape and made the
+        whole statement fail on PostgreSQL with
+        "COALESCE types boolean and integer cannot be matched" — so the test was
+        green while the repair never ran in production.
+
+        Asserted on the COLUMN rather than an exact string, so the correct
+        boolean spelling (``is_cover IS NOT TRUE``) is required but a future
+        rename of the SQL formatting does not break it.
+        """
         repair.repair_shallowly_cleared_cover_verdicts()
-        assert "COALESCE(is_cover, 0) = 0" in fake_db.sql
+        sql = fake_db.sql
+        assert "is_cover" in sql, "the repair must filter on the cover flag"
+        assert "IS NOT TRUE" in sql.upper(), (
+            "the unflagged-row predicate must use boolean syntax "
+            "(`IS NOT TRUE`); the integer form fails on PostgreSQL"
+        )
+        assert "COALESCE(cover_manual_override, 0)" not in sql, (
+            "cover_manual_override is BOOLEAN, so COALESCE with 0 is exactly the "
+            "`COALESCE types boolean and integer cannot be matched` error that "
+            "stopped this repair running in production"
+        )
 
     def test_it_never_touches_a_manual_override(self, fake_db):
         """A user-locked verdict outranks any repair."""

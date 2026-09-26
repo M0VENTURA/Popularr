@@ -615,7 +615,7 @@ class CoverDetector:
                     result = session.execute(
                         _text(
                             "UPDATE tracks SET is_cover = 0, is_cover_reason = :reason "
-                            "WHERE id = :id AND COALESCE(cover_manual_override, 0) = 0"
+                            "WHERE id = :id AND cover_manual_override IS NOT TRUE"
                         ),
                         {
                             "reason": (

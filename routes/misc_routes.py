@@ -100,7 +100,14 @@ def api_sandbox_metrics() -> Any:
                     "SELECT CAST(id AS TEXT) AS id, title, artist, album, "
                     "COALESCE(lastfm_score, 0) AS lf, COALESCE(listenbrainz_score, 0) AS lb, "
                     "COALESCE(age_score, 0) AS age, COALESCE(final_score, 0) AS score, "
-                    "COALESCE(stars, 0) AS stars, COALESCE(is_single, 0) AS single "
+                    "COALESCE(stars, 0) AS stars, "
+                    # is_single is BOOLEAN, so COALESCE(is_single, 0) mixes
+                    # boolean with integer and PostgreSQL rejects it outright:
+                    #   ERROR: COALESCE types boolean and integer cannot be matched
+                    # SQLite tolerated it, which is why it survived CI. Cast the
+                    # boolean to an integer so the alias keeps its original 0/1
+                    # JSON shape on every engine.
+                    "CAST(COALESCE(is_single, FALSE) AS INTEGER) AS single "
                     f"FROM tracks WHERE {where} ORDER BY artist, album, track_number "
                     f"LIMIT {_SANDBOX_MAX_TRACKS}"
                 ),
