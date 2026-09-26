@@ -38,7 +38,7 @@ from typing import Any
 
 import structlog
 
-from db.utils import get_db_connection_raw
+from db.utils import get_db_connection_raw, is_transient_pg_startup_error
 from helpers.logging_config import log_unified
 from services.metadata.tag_file_service import (
     sync_track_tags_to_file,
@@ -109,6 +109,82 @@ def _write_progress(progress_file: str, payload: dict[str, Any]) -> None:
             raise
     except Exception as exc:
         logger.debug("Failed writing essentia progress", error=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Database write helpers
+# ---------------------------------------------------------------------------
+
+#: psycopg2 raises these once a cursor/connection has been closed. A dropped
+#: connection closes its cursor with it, so the FIRST failure carries the real
+#: cause ("server closed the connection unexpectedly") and every later attempt
+#: on the SAME cursor reports only one of these.
+_CLOSED_CONNECTION_MARKERS = (
+    "cursor already closed",
+    "connection already closed",
+    "connection is closed",
+)
+
+
+def _is_lost_connection(exc: BaseException) -> bool:
+    """Return True when ``exc`` means the connection can no longer be used.
+
+    Treating only the ORIGINAL drop as recoverable would be useless: the
+    cursor dies with the connection, so every subsequent write raises
+    "cursor already closed" and a scan would give up on each remaining track
+    while reporting the symptom rather than the cause.
+    """
+    message = str(exc or "").lower()
+    if any(marker in message for marker in _CLOSED_CONNECTION_MARKERS):
+        return True
+    return is_transient_pg_startup_error(exc)
+
+
+def _update_with_reconnect(
+    conn: Any,
+    cursor: Any,
+    sql: str,
+    params: tuple[Any, ...],
+) -> tuple[Any, Any, int]:
+    """Run an UPDATE + COMMIT, reconnecting ONCE if the connection was lost.
+
+    Returns ``(conn, cursor, rowcount)``. The caller MUST rebind its own
+    ``conn``/``cursor`` from the result, because the retry runs on a NEW
+    connection and the old cursor is dead.
+
+    Why this exists: the scan holds ONE raw connection for the whole run and
+    runs an Essentia subprocess (up to ``per_file_timeout`` seconds) between
+    writes, so the connection sits idle for long stretches. If PostgreSQL
+    drops it — a server restart, a network blip, or
+    ``idle_in_transaction_session_timeout`` — the cursor is closed with it.
+    Without a retry the very next write fails with "cursor already closed"
+    and EVERY remaining track is silently skipped (each one logging the
+    symptom, not the cause). One drop becomes one reconnect.
+
+    Bounded: at most 2 attempts, so a genuinely broken database still fails
+    fast rather than looping.
+    """
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            cursor.execute(sql, params)
+            conn.commit()
+            return conn, cursor, int(getattr(cursor, "rowcount", 0) or 0)
+        except Exception as exc:
+            if attempts > 1 or not _is_lost_connection(exc):
+                raise
+            logger.warning(
+                "Essentia scan: database connection lost, reconnecting",
+                error=str(exc),
+            )
+            log_unified("Essentia Scan - DB connection lost, reconnecting…")
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = get_db_connection_raw(reason="essentia_scan_reconnect")
+            cursor = conn.cursor()
 
 
 # ---------------------------------------------------------------------------
@@ -924,8 +1000,6 @@ def run_essentia_mood_scan(
                     time.sleep(inter_file_delay)
                 continue
 
-            updated_tracks += 1
-
             # Build UPDATE payload
             updates: dict[str, Any] = {}
             if mood_str:
@@ -999,15 +1073,18 @@ def run_essentia_mood_scan(
             updates["essentia_scan_version"] = _essentia_scan_version
             updates["essentia_last_updated"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
 
-            # Apply DB updates
+            # Apply DB updates. A reconnect here is REBOUND into the loop
+            # variables so every later iteration (and the final commit/close)
+            # uses the fresh connection rather than the dead one.
             set_clauses = ", ".join(f"{k} = {placeholder}" for k in updates)
             set_params = list(updates.values()) + [track_id]
             try:
-                cursor.execute(
+                conn, cursor, _rowcount = _update_with_reconnect(
+                    conn,
+                    cursor,
                     f"UPDATE tracks SET {set_clauses} WHERE id = {placeholder}",
                     tuple(set_params),
                 )
-                conn.commit()
             except Exception as db_exc:
                 logger.error(
                     "Failed to update track",
@@ -1019,6 +1096,14 @@ def run_essentia_mood_scan(
                 except Exception:
                     pass
                 continue
+
+            # Counted only now that the row is actually written. Counting
+            # before the attempt reported a failed save as updated, and both
+            # the progress file and the final summary are read by the UI.
+            # A rowcount of 0 means the track row was gone by the time the
+            # UPDATE ran, so nothing was written and nothing should be claimed.
+            if _rowcount > 0:
+                updated_tracks += 1
 
             # Sync tags to audio file
             try:
