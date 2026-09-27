@@ -12,6 +12,10 @@ from sqlalchemy import text
 from api_clients.musicbrainz_http import MusicBrainzHttpClient, MUSICBRAINZ_UUID_RE
 from db.engine import async_db_session, db_session
 from helpers.config_helpers import get_config
+from helpers.normalization_service import (
+    album_name_key,
+    normalize_title_for_compare,
+)
 from services.downloads.download_pipeline_service import start_release_download
 from services.downloads.download_processing_service import queue_add
 from services.downloads.download_matching_service import get_musicbrainz_release_tracks
@@ -23,6 +27,125 @@ mb_bp = Blueprint("musicbrainz", __name__, url_prefix="/api/musicbrainz")
 
 _mb_client: MusicBrainzHttpClient | None = None
 _client_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Release-result relevance
+#
+# The modal LISTS near-misses rather than rejecting them, so relevance is a
+# GRADED score and not the strict boolean of
+# ``normalization_service.album_names_match`` (which exists to decide whether a
+# library album IS the requested one, where "matching a different album is worse
+# than matching none").  Here the job is to ORDER candidates, so a near-miss
+# must still be returned — just below the real answer.
+# ---------------------------------------------------------------------------
+
+#: Tier values, ordered so a better match always outranks a worse one:
+#: exact > marker-insensitive > containment > fuzzy.
+_RELEASE_TITLE_EXACT = 1.0
+_RELEASE_TITLE_MARKER_EQUAL = 0.9
+_RELEASE_TITLE_CONTAINS = 0.85
+#: Ceiling for the fuzzy tier, kept strictly below CONTAINS so a containment
+#: match can never be beaten by a high fuzzy ratio.
+_RELEASE_TITLE_FUZZY_MAX = 0.8
+
+#: Minimum relevance for the artist-only fallback to keep a candidate.  The
+#: fallback deliberately filters, because that query returns the artist's whole
+#: catalogue.
+_ARTIST_FALLBACK_MIN_RELEVANCE = 0.45
+
+
+def _is_word_aligned_containment(a: str, b: str) -> bool:
+    """True when the shorter key appears in the longer as WHOLE WORDS.
+
+    A raw ``in`` test is far too generous for titles: it made the single
+    character "r" a "containment match" for "reviver", i.e. as relevant as
+    "Reviver (Remixes)".  Padding with spaces requires the match to start and
+    end on a word boundary, so "reviver" contains-is-in "reviver remixes" and
+    "17" is in "17 greatest hits", while "r" is not in "reviver".
+    """
+    if not a or not b or a == b:
+        return False
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    return f" {short} " in f" {long} "
+
+
+def release_title_relevance(album: str, title: str) -> float:
+    """How well a candidate release title matches the album the user typed.
+
+    Returns 0.0-1.0, higher is better:
+
+    * ``1.0`` — the normalized album keys agree (``album_name_key`` folds case,
+      whitespace and separator runs, and drops a trailing edition marker, so
+      "Reviver" and "Reviver (Deluxe)" agree).
+    * ``0.9`` — only the version-marker-insensitive keys agree
+      (``normalize_title_for_compare``), i.e. the same name once "Live",
+      "(Acoustic)", a cover annotation etc. is ignored.  "Reviver Live" lands
+      here while plain "Reviver" stays at 1.0, so the plain release wins.
+    * ``0.85`` — the shorter key appears in the longer as whole words.
+    * otherwise a ``difflib`` ratio, scaled BELOW 0.85 so it can never outrank a
+      containment match.
+
+    Extracted as a helper on purpose: it is the single definition of "closest
+    match" shared by the ranking and by the artist-only fallback's filter, so
+    the two cannot disagree about what relevance means.
+    """
+    want_key = album_name_key(album)
+    have_key = album_name_key(title)
+    if not want_key or not have_key:
+        return 0.0
+    if want_key == have_key:
+        return _RELEASE_TITLE_EXACT
+
+    want_cmp = normalize_title_for_compare(album)
+    have_cmp = normalize_title_for_compare(title)
+    if not want_cmp or not have_cmp:
+        return 0.0
+    if want_cmp == have_cmp:
+        return _RELEASE_TITLE_MARKER_EQUAL
+    if _is_word_aligned_containment(want_cmp, have_cmp):
+        return _RELEASE_TITLE_CONTAINS
+
+    import difflib as _difflib
+
+    ratio = _difflib.SequenceMatcher(None, want_cmp, have_cmp).ratio()
+    return min(_RELEASE_TITLE_FUZZY_MAX, ratio * 0.75)
+
+
+def _release_mb_score(release: dict[str, Any]) -> float:
+    """MusicBrainz's own relevance score, or 0.0 when absent.
+
+    Only the query endpoint returns one; locally cached rows and browsed
+    results have none, so this must tolerate a missing/non-numeric value.
+    """
+    raw = release.get("score")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def release_result_sort_key(
+    release: dict[str, Any],
+    *,
+    album: str,
+    year: str,
+) -> tuple[float, float, int, str]:
+    """Ranking key for a search result. Higher sorts first.
+
+    The album the user typed is the primary term — that is what makes "the
+    closest match" land at the top.  MusicBrainz's own score then separates
+    candidates of equal title relevance, a matching year breaks the next tie,
+    and the newest release is the final tiebreak (the previous, and only,
+    ordering rule).
+    """
+    date = str(release.get("first_release_date") or "")
+    return (
+        release_title_relevance(album, str(release.get("title") or "")),
+        _release_mb_score(release),
+        1 if year and date.startswith(year) else 0,
+        date,
+    )
 
 
 def _quote_ident(identifier: str, bind: Any) -> str:
@@ -455,6 +578,10 @@ async def api_musicbrainz_search() -> Any:
             "artist-credit": artist_credit,
             "cover_art_url": cover_art_url,
             "source": source,
+            # MusicBrainz's own relevance score. Kept so the ranking can use it
+            # to separate candidates whose titles are equally relevant, instead
+            # of discarding the API's ordering entirely.
+            "score": _release_mb_score(rg),
         }
 
     def _attach_concrete_releases(rg: dict[str, Any]) -> dict[str, Any]:
@@ -712,28 +839,16 @@ async def api_musicbrainz_search() -> Any:
                         else []
                     )
                     if raw_groups and album:
-                        import difflib as _difflib
-                        album_norm = re.sub(r"[^a-z0-9]+", " ", album.lower()).strip()
-                        album_core = re.sub(r"\s*[\(\[].+$", "", album_norm).strip()
-
-                        def _rg_similarity(rg: dict[str, Any]) -> float:
-                            title = str(rg.get("title") or "").lower()
-                            t_norm = re.sub(r"[^a-z0-9]+", " ", title).strip()
-                            t_core = re.sub(r"\s*[\(\[].+$", "", t_norm).strip()
-                            best = max(
-                                _difflib.SequenceMatcher(None, album_norm, t_norm).ratio(),
-                                _difflib.SequenceMatcher(None, album_core, t_core).ratio(),
-                            )
-                            # Bonus for substring containment (edition markers).
-                            if album_core and (album_core in t_norm or t_core in album_norm):
-                                best = max(best, 0.85)
-                            return best
-
+                        # Reuse the SAME relevance definition the final ranking
+                        # uses.  This block previously had its own inline
+                        # ``_rg_similarity`` AND sorted by it, only for the
+                        # unconditional re-sort to discard that order.
                         raw_groups = [
                             rg for rg in raw_groups
-                            if _rg_similarity(rg) >= 0.45
+                            if release_title_relevance(
+                                album, str(rg.get("title") or "")
+                            ) >= _ARTIST_FALLBACK_MIN_RELEVANCE
                         ]
-                        raw_groups.sort(key=_rg_similarity, reverse=True)
                 except Exception as exc:
                     logger.debug("Artist-only fallback failed", error=str(exc))
 
@@ -761,10 +876,16 @@ async def api_musicbrainz_search() -> Any:
             releases = _dedupe_owned_releases(releases)
 
         if artist_only:
+            # Browsing one artist has no title to match, so "newest first" stays
+            # the order — deliberately unchanged by the relevance ranking below.
             releases.sort(key=lambda x: str(x.get("first_release_date") or ""), reverse=True)
         else:
+            # ⚠️ This used to sort on ``(artist name, release date)`` — a key
+            # with NO album title in it and no MusicBrainz score either, so a
+            # NEWER near-miss outranked the release the user typed (and the
+            # artist-only fallback's similarity order was thrown away).
             releases.sort(
-                key=lambda x: (str(x.get("artist") or "").lower(), str(x.get("first_release_date") or "")),
+                key=lambda x: release_result_sort_key(x, album=album, year=year),
                 reverse=True,
             )
 
