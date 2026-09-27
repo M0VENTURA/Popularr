@@ -9,6 +9,7 @@ Handles:
 
 from __future__ import annotations
 
+import asyncio
 import io
 from urllib.parse import unquote
 from typing import Any
@@ -533,6 +534,13 @@ async def api_album_musicbrainz_propose() -> Any:
     field.  **Nothing is written here** — the form is only persisted when the
     user presses Save Metadata.
 
+    ⭐ THE PROPOSAL IS STASHED SO IT SURVIVES A RELOAD. The page renders it from
+    browser state, so without this a refresh lost the whole review — there was
+    nothing for the already-existing "pending recommendations" loader to find,
+    because only a SCAN (in "recommend only" mode) ever stashed anything.
+    "Nothing is written" still holds for the TRACK data: this stores only the
+    proposal envelope, which the user saves or discards.
+
     Body: {"artist", "album", "release_mbid"} — ``release_mbid`` may be a
     concrete release id or a release-group id.
     """
@@ -560,6 +568,27 @@ async def api_album_musicbrainz_propose() -> Any:
         )
         return jsonify({"success": False, "error": str(exc),
                         "album_changes": [], "track_changes": []}), 500
+
+    # ⭐ Persist so the review survives a reload until saved or discarded.
+    # A failure is REPORTED, never swallowed: the user would otherwise approve
+    # a diff that silently vanishes on the next page view.
+    if result.get("success"):
+        try:
+            from services.metadata.pending_update_service import (
+                stash_album_recommendations,
+            )
+            await asyncio.to_thread(
+                stash_album_recommendations, artist, album, result
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not stash album metadata proposal",
+                artist=artist, album=album, error=str(exc),
+            )
+            result["stash_warning"] = (
+                "This review could not be saved to the database, so it will not "
+                "survive a page reload."
+            )
 
     status_code = 200 if result.get("success") else 400
     return jsonify(result), status_code

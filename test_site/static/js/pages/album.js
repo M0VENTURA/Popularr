@@ -1703,6 +1703,13 @@
           return;
         }
 
+        // ⚠️ The comparison was computed but could not be STORED. Say so: the
+        // diff below is real and actionable, but it will not survive a reload,
+        // and a silent failure here is indistinguishable from success.
+        if (data.stash_warning) {
+          notifyError(String(data.stash_warning));
+        }
+
         comparisonData = data;
         displayComparison(data);
       } catch (error) {

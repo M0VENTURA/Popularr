@@ -750,16 +750,23 @@ class TestTheArtistCallSiteToleratesADisabledBudget:
 class TestTheMissingTrackSnapshotIsNotStarvedByASkip:
     """The SECOND reported symptom: "the missing tracks were also missing after the scan".
 
-    SAME root cause as the phase bug above.  ``get_missing_tracks`` is the ONLY
-    writer of ``missing_album_tracks`` (it calls ``_persist_missing_tracks``), and
-    it runs at the END of the per-album loop body — while the skip ``continue``
-    fires EARLY.  So a wrongly-abandoned album never refreshed its snapshot, the
-    album page kept reading the stale rows, and a prompt re-scan was then skipped
-    as "recently scanned" — leaving the tracks reported missing indefinitely.
+    SAME root cause as the phase bug above.  ``get_missing_tracks`` refreshes
+    the ``missing_album_tracks`` snapshot, and it runs at the END of the
+    per-album loop body — while the skip ``continue`` fires EARLY.  So a
+    wrongly-abandoned album never refreshed its snapshot, the album page kept
+    reading the stale rows, and a prompt re-scan was then skipped as "recently
+    scanned" — leaving the tracks reported missing indefinitely.
 
     Fixing the unwrap is what actually restores this.  These tests pin the
     REACHABILITY so a future edit cannot re-couple the snapshot to the skip path,
-    and they document why the snapshot is not a per-page-load concern.
+    and they document why the request path reads the snapshot instead of
+    recomputing it.
+
+    NOTE: the scan is no longer the snapshot's only writer — the album page's
+    Compare now persists its own findings too (so they survive a reload until
+    saved or discarded).  ``test_the_snapshot_has_exactly_two_writers`` states
+    that contract; the one thing that must stay true is that a PAGE LOAD never
+    recomputes.
     """
 
     def test_the_snapshot_runs_in_the_normal_path_not_the_skip_branch(self):
@@ -833,19 +840,85 @@ class TestTheMissingTrackSnapshotIsNotStarvedByASkip:
             "fire a MusicBrainz release fetch per owned album"
         )
 
-    def test_the_only_writer_is_the_scan(self):
-        """If another writer appears, this reasoning (and the caveat the Clear
-        Imported flow shows the user) is no longer true."""
+    def test_the_snapshot_has_exactly_two_writers(self):
+        """ⓘ THIS TEST WAS DELIBERATELY CHANGED — THE INVARIANT MOVED.
+
+        It used to assert that the SCAN was the snapshot's ONLY writer, so that
+        "when does this go stale?" had one answer. The product requirement then
+        changed: findings shown after a metadata import or an album-page
+        release match must PERSIST until the user saves or discards them. That
+        requires the album page to write the snapshot too, because the scan is
+        not what produced those findings and the page cannot wait for one.
+
+        So the invariant is now: ONE SQL writer, TWO considered callers —
+
+          * ``get_missing_tracks`` ......... the SCAN's refresh
+          * ``persist_missing_from_comparison``  the album page's Compare
+
+        The dangerous case (a request-path recompute that fired a MusicBrainz
+        release fetch on every page load) is still excluded, and is pinned by
+        ``test_the_endpoint_stays_database_only`` above. This test pins the
+        remaining risk: a THIRD writer appearing unnoticed, and a second
+        caller being added to the scan path.
+        """
         svc = (
             REPO_ROOT / "services" / "metadata" / "album_missing_service.py"
         ).read_text(encoding="utf-8")
-        assert svc.count("_persist_missing_tracks(artist, album, missing)") == 1, (
-            "exactly one persist call site is expected inside get_missing_tracks"
+
+        # The only place rows are actually written. Both callers funnel here,
+        # so the DELETE/INSERT pair stays in one function and cannot drift.
+        assert svc.count("INSERT INTO missing_album_tracks") == 1, (
+            "the snapshot must have exactly one INSERT site"
         )
+        assert svc.count("DELETE FROM missing_album_tracks") == 1, (
+            "the snapshot must have exactly one DELETE site"
+        )
+
+        # Exactly two CALLERS, counted as calls to the function rather than one
+        # exact argument spelling. Counting the string
+        # "_persist_missing_tracks(artist, album, missing)" was mutation-tested
+        # and a THIRD writer passed different arguments (`... (artist, album,
+        # [])`), which evaded the guard entirely. Counting the call itself
+        # cannot be evaded that way.
+        call_sites = (
+            svc.count("_persist_missing_tracks(")
+            - svc.count("def _persist_missing_tracks(")
+        )
+        assert call_sites == 2, (
+            f"expected exactly 2 snapshot writers, found {call_sites}: the "
+            "scan's get_missing_tracks and the album page's "
+            "persist_missing_from_comparison — a third writer changes when the "
+            "snapshot goes stale and must be a deliberate decision"
+        )
+        for expected_caller in (
+            "def get_missing_tracks(",
+            "def persist_missing_from_comparison(",
+        ):
+            assert expected_caller in svc, (
+                f"{expected_caller} is one of the two intended writers"
+            )
+
+        # The comparison writer must reuse the comparison it was handed rather
+        # than re-deriving the missing set (which would re-pay the throttled
+        # MusicBrainz release lookup the album page already made).
+        idx = svc.index("def persist_missing_from_comparison(")
+        # Bound the window by the NEXT definition, not a fixed character count,
+        # so a longer docstring cannot silently push the body out of the window
+        # and turn this into a vacuous pass.
+        end = svc.index("def get_missing_tracks_from_db(", idx)
+        window = svc[idx:end]
+        assert "mb_title" in window, (
+            "it must translate the comparison's mb_* keys, which is the "
+            "already-fetched data"
+        )
+        assert "get_missing_tracks(" not in window, (
+            "it must NOT re-derive via get_missing_tracks — that is the "
+            "duplicate MusicBrainz fetch this path exists to avoid"
+        )
+
         scanner = SCANNER.read_text(encoding="utf-8")
         assert scanner.count("get_missing_tracks(artist=artist, album=album)") == 1, (
-            "the scan is expected to be the only caller that refreshes the "
-            "snapshot; a second caller would change when it goes stale"
+            "the scan must still refresh the snapshot from exactly one place"
         )
 
 

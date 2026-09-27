@@ -284,6 +284,112 @@ def get_missing_tracks(artist: str, album: str) -> dict[str, Any]:
     }
 
 
+def _as_text(value: Any) -> str:
+    """Normalise any scalar to a trimmed string (``None`` -> ``""``)."""
+    return "" if value is None else str(value).strip()
+
+
+def persist_missing_from_comparison(
+    artist: str,
+    album: str,
+    comparison: dict[str, Any],
+) -> int:
+    """Persist the MISSING tracks from an already-computed comparison.
+
+    ⭐ WHY THIS EXISTS. ``get_missing_tracks`` derives the missing set itself, by
+    resolving the release and fetching its metadata — a MusicBrainz release
+    SEARCH plus a release fetch when the album has no stored MBID. The album
+    page's Compare already HAS the comparison in hand (``compare_musicbrainz_release``
+    returns a ``comparison`` list whose unmatched entries are exactly the missing
+    tracks), so re-deriving it would pay those calls a second time — and
+    MusicBrainz is throttled to 1 req/s, shared with any running scan.
+
+    Falls back to the derivation-free path: it only reads the local tracklist to
+    honour the download-queue coverage rule, so a track already downloaded or
+    queued is never re-listed as missing.
+
+    Returns the number of rows written. Raises only for a genuine DB failure;
+    the caller decides whether that is fatal (it is not — the comparison the
+    user is looking at remains valid).
+    """
+    comparison_rows = (comparison or {}).get("comparison") or []
+    release_id = _as_text(
+        (comparison or {}).get("mb_release_mbid")
+        or (comparison or {}).get("release_mbid")
+    )
+    release_year = (
+        (comparison or {}).get("mb_original_release_year")
+        or (comparison or {}).get("mb_year")
+        or ""
+    )
+
+    # Queue coverage, so a downloaded/queued track is not re-listed. Read-only.
+    queued_keys: set[str] = set()
+    queued_by_position: set[tuple[int, str]] = set()
+    try:
+        from db.engine import db_session as _q_session
+        from sqlalchemy import text as _q_text
+
+        album_norm = _album_key(album)
+        with _q_session() as session:
+            q_rows = session.execute(
+                _q_text("""
+                    SELECT title, track_number, disc_number, album
+                    FROM download_queue
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                      AND status IN ('queued', 'searching', 'downloading',
+                                     'processing', 'moving', 'imported',
+                                     'in_collection', 'matched', 'completed')
+                """),
+                {"artist": artist},
+            ).mappings().all() or []
+        for q in q_rows:
+            q_album = _as_text(q.get("album"))
+            if q_album and _album_key(q_album) != album_norm:
+                continue
+            qt = q.get("title") or ""
+            if qt:
+                queued_keys.add(_title_match_key(qt))
+            qtn = str(q.get("track_number") or "").strip()
+            qd = int(q.get("disc_number") or 1) if q.get("disc_number") not in (None, "", "0", 0) else 1
+            if qtn:
+                queued_by_position.add((qd, qtn))
+    except Exception as exc:
+        logger.debug("Queue coverage check failed for comparison persist", error=str(exc))
+
+    missing: list[dict[str, Any]] = []
+    for entry in comparison_rows:
+        if entry.get("matched"):
+            continue
+        title = _as_text(entry.get("mb_title"))
+        if not title:
+            continue
+        mb_disc = int(entry.get("mb_disc_number") or 1)
+        mb_num = str(entry.get("mb_track_number") or "").strip()
+        norm = _title_match_key(title)
+
+        if norm in queued_keys or (mb_num and (mb_disc, mb_num) in queued_by_position):
+            continue
+
+        missing.append({
+            "title": title,
+            "track_number": entry.get("mb_track_number"),
+            "disc_number": entry.get("mb_disc_number", 1),
+            "recording_mbid": entry.get("mb_recording_mbid"),
+            "track_artist": entry.get("mb_artist") or artist,
+            "year": release_year,
+            "release_id": release_id,
+            "duration": entry.get("mb_duration"),
+        })
+
+    _persist_missing_tracks(artist, album, missing)
+    logger.info(
+        "Persisted missing tracks from a comparison",
+        artist=artist, album=album, missing=len(missing),
+    )
+    return len(missing)
+
+
 def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
     """The persisted missing-track list for one album — DATABASE ONLY.
 

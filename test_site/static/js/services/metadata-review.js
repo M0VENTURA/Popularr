@@ -66,9 +66,27 @@
 
   function notify(message, kind) {
     if (kind === 'error' && global.toast) return global.toast.error(message);
+    // ⚠️ 'warning' must reach toast.warning, not toast.success. A stash that
+    // FAILED is not a success — reporting it as one is how a review silently
+    // disappears on the next reload.
+    if (kind === 'warning' && global.toast && global.toast.warning) {
+      return global.toast.warning(message);
+    }
     if (kind !== 'error' && global.toast) return global.toast.success(message);
     // No toast module (or no kind): stay silent for success, alert for errors.
-    if (kind === 'error') global.alert(message);
+    if (kind === 'error' || kind === 'warning') global.alert(message);
+  }
+
+  /**
+   * Surface a server-side persistence failure.
+   *
+   * Both endpoints return `stash_warning` when the proposal could not be written
+   * to the database. Without this the user sees a complete review, approves it,
+   * reloads, and finds it gone — with nothing anywhere saying why.
+   */
+  function reportStashWarning(data) {
+    const warning = data && data.stash_warning;
+    if (warning) notify(String(warning), 'warning');
   }
 
   /** POST JSON through the page's api helper when present, else raw fetch. */
@@ -459,6 +477,8 @@
         ((data && data.error) || 'Unknown error'), 'error');
       return null;
     }
+
+    reportStashWarning(data);
 
     (data.album_changes || []).forEach((change) => {
       const id = change.field;

@@ -20,6 +20,7 @@ file's Flask/Quart style instead.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 from urllib.parse import unquote
@@ -46,6 +47,17 @@ async def compare_album_musicbrainz(artist: str, album: str) -> Any:
     Body: {"release_mbid": "..."} — the release (or release-group) MBID
     already saved on the album (see the Edit Album tab's MusicBrainz Release
     / Release Group ID fields). This endpoint does not run a fresh search.
+
+    ⭐ THE DIFF IS PERSISTED. The page renders it from browser state, but the
+    user asked that anything picked up from a lookup survive a reload until it
+    is saved or discarded. So the same proposal the page is shown is stashed on
+    the track rows (``tracks.pending_mb_updates``) and the missing set is
+    refreshed in ``missing_album_tracks`` — exactly what a scan in "recommend
+    only" mode already does, through the same writers.
+
+    A failure to persist is REPORTED in ``stash_warning`` rather than swallowed:
+    a swallowed write is this codebase's recurring defect class, and the user
+    would otherwise see a diff that silently disappears on the next reload.
     """
     artist = unquote(artist)
     album = unquote(album)
@@ -65,11 +77,17 @@ async def compare_album_musicbrainz(artist: str, album: str) -> Any:
             payload, status = _fail(result.get("error") or "Comparison failed", 400)
             return jsonify(payload), status
 
+        stash_warning = await asyncio.to_thread(
+            _persist_comparison_findings, artist, album, release_mbid, result
+        )
+
         # Drop "success" before spreading into _ok(**result) — _ok already
         # sets that key itself, and passing it twice would raise a duplicate
         # keyword argument error if _ok names `success` as an explicit param.
         result_fields = {k: v for k, v in result.items() if k != "success"}
         payload, status = _ok(**result_fields)
+        if stash_warning:
+            payload["stash_warning"] = stash_warning
         return jsonify(payload), status
     except Exception as exc:
         logger.error(
@@ -80,6 +98,66 @@ async def compare_album_musicbrainz(artist: str, album: str) -> Any:
         )
         payload, status = _fail(str(exc), 500)
         return jsonify(payload), status
+
+
+def _persist_comparison_findings(
+    artist: str,
+    album: str,
+    release_mbid: str,
+    comparison: dict[str, Any],
+) -> str:
+    """Stash a Compare result so it survives a reload. Returns a warning text.
+
+    BLOCKING — called through ``asyncio.to_thread``. It performs DB writes and
+    one ``propose_album_metadata`` call (which itself reads MusicBrainz), so it
+    must never run on the event loop.
+
+    Returns "" on success, or a human-readable warning when any part failed. The
+    caller surfaces it; nothing here raises, because a failed STASH must not fail
+    the comparison the user is looking at.
+    """
+    from services.metadata.album_missing_service import persist_missing_from_comparison
+    from services.metadata.metadata_proposal_service import propose_album_metadata
+    from services.metadata.pending_update_service import stash_album_recommendations
+
+    problems: list[str] = []
+
+    try:
+        # Reuse the comparison already in hand — WITHOUT this the proposal pays a
+        # second compare_musicbrainz_release() for the same album.
+        proposal = propose_album_metadata(
+            artist, album, release_mbid, comparison_result=comparison
+        )
+        stash = stash_album_recommendations(artist, album, proposal)
+        if not isinstance(stash, dict):
+            problems.append("the recommendation store returned an unexpected value")
+        elif stash.get("reason") and not stash.get("stashed"):
+            # "nothing to recommend" is a legitimate outcome, not a failure.
+            pass
+    except Exception as exc:
+        logger.warning(
+            "Could not stash compared recommendations",
+            artist=artist, album=album, error=str(exc),
+        )
+        problems.append("the metadata recommendations could not be stored")
+
+    try:
+        persist_missing_from_comparison(artist, album, comparison)
+    except Exception as exc:
+        logger.warning(
+            "Could not persist compared missing tracks",
+            artist=artist, album=album, error=str(exc),
+        )
+        problems.append("the missing-track list could not be stored")
+
+    if not problems:
+        return ""
+    return (
+        "This comparison could not be saved to the database ("
+        + "; ".join(problems)
+        + "), so it will not survive a page reload."
+    )
+
 
 
 @api_v1_bp.route("/albums/<path:artist>/<path:album>/bulk-delete", methods=["POST"])

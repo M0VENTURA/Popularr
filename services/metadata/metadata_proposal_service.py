@@ -362,12 +362,19 @@ def propose_album_metadata(
     artist: str,
     album: str,
     release_mbid: str,
+    comparison_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the metadata a MusicBrainz import WOULD write for this album.
 
     Writes nothing.  ``release_mbid`` may be a concrete release id or a
     release-group id — ``compare_musicbrainz_release`` resolves the concrete
     release inside the group.
+
+    ``comparison_result`` lets a caller that has ALREADY run the comparison
+    (the album page's Compare button) reuse it.  Without it every proposal costs
+    a second ``compare_musicbrainz_release`` call for the same album — the
+    release fetch is cached, but the comparison itself is not, and this module
+    exists in part because MusicBrainz calls are rate-limited to 1 req/s.
 
     Returns::
 
@@ -419,7 +426,9 @@ def propose_album_metadata(
         fetch_musicbrainz_release_metadata,
     )
 
-    comparison_result = compare_musicbrainz_release(artist, album, release_mbid) or {}
+    comparison_result = comparison_result or {}
+    if not comparison_result:
+        comparison_result = compare_musicbrainz_release(artist, album, release_mbid) or {}
     if not comparison_result.get("success"):
         return {
             "success": False,
