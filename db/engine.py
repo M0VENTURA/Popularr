@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
-from sqlalchemy.pool import QueuePool
+from sqlalchemy.pool import QueuePool, StaticPool
 from tenacity import (
     AsyncRetrying,
     Retrying,
@@ -198,18 +198,48 @@ def get_engine() -> Engine:
     if _ENGINE is not None:
         return _ENGINE
 
+    sync_url = db_settings.sync_url
+
+    # ⚠️⚠️ SQLITE IN-MEMORY NEEDS StaticPool, NOT QueuePool.
+    #
+    # `sqlite:///:memory:` gives EVERY CONNECTION ITS OWN, SEPARATE, EMPTY
+    # DATABASE. A QueuePool therefore hands out a fresh empty database whenever
+    # it opens a second connection, and `dispose()` (which `db_session()` calls
+    # on a transient error, and which the test suite does on teardown) discards
+    # the one connection holding the schema.
+    #
+    # Consequence before this change: the unit suite's shared test database was
+    # only "shared" while a single pooled connection happened to survive. Any
+    # second connection saw `no such table: tracks`, and later tests failed with
+    # no relation to what they asserted — a purely ORDER-DEPENDENT failure. The
+    # suite's own conftest docstring already CLAIMED StaticPool while the engine
+    # actually built a QueuePool.
+    #
+    # StaticPool keeps exactly one connection and reuses it for every checkout,
+    # which is what "one shared in-memory database" requires. It is scoped to
+    # sqlite (a file-backed sqlite URL is unaffected either way, but StaticPool
+    # would serialise it needlessly), so PostgreSQL keeps the QueuePool it
+    # needs.
+    is_memory_sqlite = str(sync_url).startswith("sqlite") and ":memory:" in str(sync_url)
+
     kwargs: dict[str, Any] = {
         "echo": db_settings.sqlalchemy_echo,
-        "poolclass": QueuePool,
-        "pool_size": db_settings.db_pool_size,
-        "max_overflow": db_settings.db_pool_overflow,
-        "pool_timeout": db_settings.db_pool_timeout,
         "pool_pre_ping": True,
-        "pool_recycle": db_settings.db_pool_recycle_seconds,
-        "connect_args": _build_connect_args(db_settings.sync_url),
+        "connect_args": _build_connect_args(sync_url),
     }
+    if is_memory_sqlite:
+        kwargs["poolclass"] = StaticPool
+        kwargs["connect_args"] = {**kwargs["connect_args"], "check_same_thread": False}
+    else:
+        kwargs.update({
+            "poolclass": QueuePool,
+            "pool_size": db_settings.db_pool_size,
+            "max_overflow": db_settings.db_pool_overflow,
+            "pool_timeout": db_settings.db_pool_timeout,
+            "pool_recycle": db_settings.db_pool_recycle_seconds,
+        })
 
-    _ENGINE = create_engine(db_settings.sync_url, **kwargs)
+    _ENGINE = create_engine(sync_url, **kwargs)
     logger.info("SQLAlchemy engine created (postgresql)")
     return _ENGINE
 

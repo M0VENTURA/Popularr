@@ -30,6 +30,33 @@ def _clean_runtime():
     clear_runtime("popularity")
 
 
+@pytest.fixture(autouse=True)
+def _restore_engine_singleton():
+    """⚠️ ``_fresh_db()`` REPLACES the global engine singleton.
+
+    It used to do so PERMANENTLY: ``db_engine_mod._ENGINE = engine`` with no
+    restore, so this file left a stray engine (and its open connection) behind
+    for every test that ran afterwards in the session. The engine is a
+    PROCESS-WIDE singleton, so anything asserting on its pool, its URL or its
+    shared in-memory database then failed for a reason that had nothing to do
+    with the code under test — a purely ORDER-DEPENDENT failure.
+
+    Snapshot before the test and restore afterwards.
+    """
+    previous_engine = db_engine_mod._ENGINE
+    previous_factory = db_engine_mod._SESSION_FACTORY
+    yield
+    swapped_in = db_engine_mod._ENGINE
+    db_engine_mod._ENGINE = previous_engine
+    db_engine_mod._SESSION_FACTORY = previous_factory
+    # Release the temporary engine's connection rather than leaking it.
+    if swapped_in is not None and swapped_in is not previous_engine:
+        try:
+            swapped_in.dispose()
+        except Exception:
+            pass
+
+
 def _fresh_db() -> None:
     """Swap the singleton engine for a fresh in-memory SQLite engine."""
     engine = create_engine("sqlite:///:memory:")
