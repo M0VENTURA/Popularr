@@ -609,6 +609,88 @@
     }).join('');
   }
 
+  // ── Needs Metadata Approval ─────────────────────────────────────────────
+
+  let lastPendingApprovalPayload = null;
+
+  /**
+   * Render the albums whose scan recommendations are still awaiting a decision.
+   *
+   * ⭐ THE LIST IS A WORK QUEUE, NOT A LOG. An album leaves it by itself once
+   * its review is saved or DISCARDED, because both paths clear the stash the
+   * scan wrote (`tracks.pending_mb_updates`) — so there is nothing to re-scan
+   * and no "approved" bookkeeping to keep in sync here.
+   */
+  function renderPendingApproval(albums) {
+    const card = document.getElementById('pendingApprovalCard');
+    const body = document.getElementById('pending-approval-body');
+    const countEl = document.getElementById('pending-approval-count');
+    if (!card || !body) return;
+
+    if (!albums || !albums.length) {
+      // Hide rather than empty: an up-to-date library should not show a panel
+      // that says nothing needs doing.
+      card.classList.add('d-none');
+      body.innerHTML = '';
+      if (countEl) countEl.textContent = '0';
+      return;
+    }
+
+    card.classList.remove('d-none');
+    if (countEl) countEl.textContent = String(albums.length);
+
+    body.innerHTML = albums.map((album) => {
+      // Each row links to the album page, where the existing review UI shows
+      // the proposed changes and "Save Metadata" applies them (which also
+      // clears the stash, removing the row on the next poll).
+      const artist = encodeURIComponent(album.artist || '');
+      const title = encodeURIComponent(album.album || '');
+      const year = album.album_year ? `/${encodeURIComponent(album.album_year)}` : '';
+      const url = `/album/${artist}/${title}${year}`;
+
+      const changes = Number(album.change_count) || 0;
+      const tracks = Number(album.tracks_changed) || 0;
+      const albumChanges = Number(album.album_changes) || 0;
+
+      // Spell out WHERE the changes are: a two-field album-level edit and a
+      // twenty-track retag are very different amounts of work.
+      const detail = [
+        albumChanges ? `${albumChanges} album field${albumChanges === 1 ? '' : 's'}` : '',
+        tracks ? `${tracks} track${tracks === 1 ? '' : 's'}` : '',
+      ].filter(Boolean).join(' · ');
+
+      return `
+        <a href="${url}"
+           class="list-group-item list-group-item-action bg-transparent border-secondary d-flex justify-content-between align-items-start gap-2 p-2">
+          <div class="min-w-0">
+            <div class="fw-bold text-truncate text-light" style="font-size: 0.9rem;">${esc(album.album || '')}</div>
+            <div class="text-muted text-truncate" style="font-size: 0.8rem;">${esc(album.artist || '')}</div>
+            ${detail ? `<div class="text-muted extra-small text-truncate">${esc(detail)}</div>` : ''}
+          </div>
+          <div class="flex-shrink-0 text-end">
+            <span class="badge bg-info text-dark" title="${esc(String(changes))} recommended change${changes === 1 ? '' : 's'}">
+              ${esc(String(changes))} change${changes === 1 ? '' : 's'}
+            </span>
+            <div class="text-muted extra-small mt-1">${esc(formatScanTimestamp(album.stashed_at))}</div>
+          </div>
+        </a>`;
+    }).join('');
+  }
+
+  async function updatePendingApproval() {
+    try {
+      const data = await global.api.getJson('/api/metadata/pending-recommendations?limit=50');
+      const payload = JSON.stringify(data.albums || []);
+      // Skip the re-render when nothing changed — this runs on the same 5s
+      // poll as the rest of the dashboard and the list is usually static.
+      if (payload === lastPendingApprovalPayload) return;
+      lastPendingApprovalPayload = payload;
+      renderPendingApproval(data.albums || []);
+    } catch (_error) {
+      /* transient: leave the last good list in place */
+    }
+  }
+
   async function updateRecentScans() {
     try {
       const data = await global.api.getJson('/api/scans/recent?limit=25');
@@ -675,6 +757,7 @@
       pollEssentiaStatus(),
       updateActiveScans(),
       updateRecentScans(),
+      updatePendingApproval(),
     ]);
   }
 
@@ -720,6 +803,8 @@
   global.dashboard = {
     updateAll,
     renderRecentScans,
+    renderPendingApproval,
+    updatePendingApproval,
     loadUpcomingReleasesTable,
     setUpcomingTableFilter,
     formatElapsed,

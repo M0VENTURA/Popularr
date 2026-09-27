@@ -196,7 +196,43 @@
 
         <!-- RIGHT COLUMN: Historical (Recently Added + Recent Scans) -->
         <div class="col-12 col-lg-5 col-xl-4 d-flex flex-column gap-3">
-            
+
+            {#
+              Needs Metadata Approval.
+
+              ⭐ Lists albums whose SCAN produced MusicBrainz recommendations the
+              user has not yet accepted, newest first. The data already existed:
+              the scan stashes what a metadata import WOULD write onto
+              `tracks.pending_mb_updates` (with a `stashed_at` timestamp) whenever
+              the Config page's metadata updating is recommend-only.
+
+              An album disappears from this list on its own once its review is
+              saved or discarded, because BOTH paths clear the stash — nothing
+              has to be re-scanned. So the list is a work queue, not a log.
+
+              Populated by pages/dashboard.js from
+              GET /api/metadata/pending-recommendations. The card starts HIDDEN
+              and is revealed only when there is something to approve, so an
+              up-to-date library does not show an empty panel.
+            #}
+            <div class="card shadow-sm d-none" id="pendingApprovalCard">
+                <div class="card-header py-2 d-flex justify-content-between align-items-center border-secondary">
+                    <h6 class="mb-0">
+                        <i class="bi bi-clipboard-check text-info me-1"></i> Needs Metadata Approval
+                    </h6>
+                    <span class="badge bg-info text-dark" id="pending-approval-count">0</span>
+                </div>
+                <div class="card-body p-0 overflow-y-auto" style="max-height: 420px; scrollbar-width: thin;">
+                    <div class="list-group list-group-flush" id="pending-approval-body">
+                        <!-- Populated by javascript -->
+                    </div>
+                </div>
+                <div class="card-footer py-2 text-muted extra-small border-secondary">
+                    Recommendations from the last scan, newest first. Saving or discarding
+                    an album's changes removes it from this list.
+                </div>
+            </div>
+
             <!-- Recently Added Albums -->
             <div class="card shadow-sm" id="recentAlbumsCard">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center border-secondary">

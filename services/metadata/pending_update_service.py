@@ -52,6 +52,22 @@ _ALBUM_TRACK_IDS_SQL = """
       AND LOWER(COALESCE(album, '')) = LOWER(:album)
 """
 
+#: Every row carrying a stashed envelope. Bounded by the number of albums still
+#: awaiting a decision, which is small — only albums the user has NOT resolved.
+_ALBUMS_PENDING_SQL = """
+    SELECT
+        COALESCE(NULLIF(album_artist, ''), artist) AS artist,
+        album,
+        CAST(id AS TEXT) AS id,
+        title,
+        pending_mb_updates,
+        mb_ignored_fields
+    FROM tracks
+    WHERE pending_mb_updates IS NOT NULL
+      AND TRIM(pending_mb_updates) != ''
+      AND album IS NOT NULL AND TRIM(album) != ''
+"""
+
 
 def _as_text(value: Any) -> str:
     return "" if value is None else str(value).strip()
@@ -259,6 +275,105 @@ def fetch_album_recommendations(artist: str, album: str) -> dict[str, Any]:
         },
         "has_any": bool(album_changes or track_changes),
     }
+
+
+def fetch_albums_pending_review(limit: int = 50) -> list[dict[str, Any]]:
+    """Albums whose stashed recommendations are still awaiting a decision.
+
+    Backs the dashboard's "needs metadata approval" panel. An album leaves this
+    list by itself once its review is SAVED, because the save path calls
+    ``discard_album_recommendations`` (``routes/ui_routes.py``) — nothing has to
+    be re-scanned for the panel to empty.
+
+    ⭐ ONE query, grouped in Python. The recency key (``stashed_at``) lives
+    INSIDE the JSON envelope rather than in its own column, so ordering happens
+    here instead of in SQL; parsing JSON in a query would also bind this to one
+    database dialect (the tests run on SQLite, production on PostgreSQL).
+
+    Only albums that actually HAVE surviving changes are returned: an album
+    whose every proposed field was since ignored would offer the user work that
+    saves nothing.
+    """
+    try:
+        with db_session() as session:
+            rows = session.execute(text(_ALBUMS_PENDING_SQL)).fetchall()
+    except Exception as exc:
+        logger.warning("Could not read pending recommendations", error=str(exc))
+        return []
+
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows or []:
+        mapping = dict(row._mapping)
+        artist = _as_text(mapping.get("artist"))
+        album = _as_text(mapping.get("album"))
+        if not artist or not album:
+            continue
+
+        try:
+            envelope = json.loads(mapping.get("pending_mb_updates"))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(envelope, dict):
+            continue
+        if envelope.get("version") not in (None, _ENVELOPE_VERSION):
+            # Unknown envelope: skip rather than mis-report it.
+            continue
+
+        entry = grouped.setdefault(
+            (artist.casefold(), album.casefold()),
+            {
+                "artist": artist,
+                "album": album,
+                "release_title": "",
+                "release_mbid": "",
+                "stashed_at": "",
+                "album_changes": 0,
+                "track_changes": 0,
+                "tracks_changed": 0,
+            },
+        )
+        entry["release_title"] = (
+            entry["release_title"] or _as_text(envelope.get("release_title"))
+        )
+        entry["release_mbid"] = (
+            entry["release_mbid"] or _as_text(envelope.get("release_mbid"))
+        )
+        # ISO-8601, so a plain string comparison orders it correctly.
+        entry["stashed_at"] = max(
+            entry["stashed_at"], _as_text(envelope.get("stashed_at"))
+        )
+
+        ignored = mapping.get("mb_ignored_fields")
+        # The album block is written onto the FIRST track only, so take the
+        # largest set seen rather than trusting whichever row is read first.
+        entry["album_changes"] = max(
+            entry["album_changes"],
+            len(_filter_ignored(envelope.get("album_changes") or [], ignored)),
+        )
+        own = _filter_ignored(envelope.get("changes") or [], ignored)
+        if own:
+            entry["tracks_changed"] += 1
+            entry["track_changes"] += len(own)
+
+    albums: list[dict[str, Any]] = []
+    for entry in grouped.values():
+        total = int(entry["album_changes"]) + int(entry["track_changes"])
+        if total <= 0:
+            continue
+        entry["change_count"] = total
+        albums.append(entry)
+
+    # Newest first. Two passes so the SECOND (recency) sort wins while the
+    # first keeps artist/album as a stable tie-break — a single reverse sort
+    # would flip the tie-break too.
+    albums.sort(key=lambda a: (a["artist"].casefold(), a["album"].casefold()))
+    albums.sort(key=lambda a: a.get("stashed_at") or "", reverse=True)
+
+    try:
+        capped = max(1, int(limit))
+    except (TypeError, ValueError):
+        capped = 50
+    return albums[:capped]
 
 
 def _filter_ignored(
