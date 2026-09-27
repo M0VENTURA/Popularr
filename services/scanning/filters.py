@@ -18,6 +18,8 @@ from typing import Any
 
 import structlog
 
+from helpers.normalization_service import album_names_match
+
 logger = structlog.get_logger(__name__)
 
 
@@ -34,7 +36,7 @@ def should_skip_album(
     if filter_missing and album_name not in albums_needing_reimport:
         logger.debug("Skipping album - no missing fields", album=album_name)
         return True
-    if album_filter and album_name.strip() != album_filter.strip():
+    if album_filter and not album_names_match(album_filter, album_name):
         logger.debug(
             "Skipping album - does not match filter",
             album=album_name,

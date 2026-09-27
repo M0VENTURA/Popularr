@@ -564,6 +564,25 @@ def scan_artist_to_db(
                 navidrome_album_count=len(albums),
             )
 
+        # ⚠️ The filter is TOLERANT on purpose (``album_names_match``), so it
+        # can match MORE THAN ONE album: asking for "Greatest Hits" matches
+        # both "17: Greatest Hits" and "18: Greatest Hits". Every match IS
+        # imported, because that is what the request named — but the ambiguity
+        # is stated rather than left as a silent surprise, since the user
+        # clicked a single album.
+        if album_filter and _albums_matched_filter > 1:
+            log_unified(
+                f"[NAVIDROME_IMPORT] The album filter '{album_filter}' matched "
+                f"{_albums_matched_filter} Navidrome albums for '{artist_name}' "
+                "— all of them were imported."
+            )
+            logger.warning(
+                "[NAVIDROME_IMPORT] Album filter matched multiple Navidrome albums",
+                artist=artist_name,
+                album_filter=album_filter,
+                matched=_albums_matched_filter,
+            )
+
         if not filter_missing and not album_filter and not diff_mode:
             if navidrome_track_ids:
                 cleanup_stale_artist_tracks_if_needed(

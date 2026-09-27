@@ -1288,6 +1288,89 @@ def normalize_album(value: str) -> str:
     )
 
 
+# =============================================================================
+# ALBUM-NAME MATCHING (tolerant, but only across real boundaries)
+# =============================================================================
+#
+# ⭐ WHY. The album scan's filter used EXACT string equality, so requesting
+# "17: Greatest Hits" never matched Navidrome's "17" (or its "Greatest Hits"),
+# and the album was skipped — reported to the user as a name mismatch that did
+# not exist. A page's title and Navidrome's own album name legitimately differ.
+#
+# ⚠️ MATCHING A DIFFERENT ALBUM IS WORSE THAN MATCHING NONE. Every tolerance
+# below is anchored on a SEPARATOR, so "Absolution" does NOT match
+# "Absolution II" or "Absolution Live" — those are different releases, and a
+# loose rule would import the wrong one. A bare space is deliberately NOT a
+# boundary.
+#
+# Separator runs are collapsed to ONE sentinel so that "17: Greatest Hits",
+# "17 - Greatest Hits" and "17 (Greatest Hits)" all agree. A word-internal
+# hyphen is NOT a separator ("Spider-Man", "Re-Animator").
+_ALBUM_SEPARATOR_RE = re.compile(
+    r"""
+    \s*[:;,.·•|/\\]+\s*          # unambiguous punctuation, spaced or not
+    | \s*[\(\[\{]\s*             # an opening bracket
+    | \s*[\)\]\}]\s*             # a closing bracket
+    | \s+[-–—]+\s+               # a DASHED separator: whitespace both sides
+    """,
+    re.VERBOSE,
+)
+
+#: Stands in for a separator run. A NULL byte cannot occur in a title, so it is
+#: never confused with real content.
+_ALBUM_SEPARATOR = "\x00"
+
+
+def album_name_key(value: str) -> str:
+    """Comparison key for an album name, with separator runs collapsed.
+
+    Strips trailing edition markers (``strip_album_edition_marker``), folds case
+    and whitespace, and replaces every separator run with one sentinel.
+    """
+    text = strip_album_edition_marker(str(value or ""))
+    text = _ALBUM_SEPARATOR_RE.sub(_ALBUM_SEPARATOR, text.casefold())
+    return " ".join(text.split()).strip(_ALBUM_SEPARATOR + " ")
+
+
+def album_names_match(requested: str, candidate: str) -> bool:
+    """True when ``candidate`` is the album the user asked for.
+
+    Tolerant about case, spacing, a stripped edition marker and a
+    number-ing/subtitle boundary; strict about everything else. Every permitted
+    cut must land on a separator, which is what keeps "Absolution" from matching
+    "Absolution II". See the notes above for why.
+
+    ⚠️ Callers must handle MULTIPLE matches. Asking for "Greatest Hits" matches
+    both "17: Greatest Hits" and "18: Greatest Hits", so this cannot identify a
+    single album on its own — never assume exactly one hit.
+    """
+    if not str(requested or "").strip() or not str(candidate or "").strip():
+        return False
+
+    want = album_name_key(requested)
+    have = album_name_key(candidate)
+    if not want or not have:
+        return False
+    if want == have:
+        return True
+
+    sep = _ALBUM_SEPARATOR
+
+    # `have` is `want` plus a separator-introduced suffix ("17" -> "17: X").
+    if len(have) > len(want) and have.startswith(want) and have[len(want)] == sep:
+        return True
+    # `want` is `have` plus a separator-introduced suffix ("17: X" -> "17").
+    if len(want) > len(have) and want.startswith(have) and want[len(have)] == sep:
+        return True
+    # `have` is a separator-introduced SUFFIX of `want` ("X" vs "17: X").
+    if len(want) > len(have) and want.endswith(have) and want[len(want) - len(have) - 1] == sep:
+        return True
+    # `want` is a separator-introduced suffix of `have`.
+    if len(have) > len(want) and have.endswith(want) and have[len(have) - len(want) - 1] == sep:
+        return True
+    return False
+
+
 def clean_album_name_for_storage(value: str) -> str:
     """Canonicalization for the album / stored display name.
 

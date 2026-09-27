@@ -18,6 +18,7 @@ from db.repositories.library import (
     get_tracks_for_album,
 )
 from helpers.logging_config import log_unified
+from helpers.normalization_service import album_names_match
 
 logger = structlog.get_logger(__name__)
 
@@ -137,7 +138,12 @@ def load_candidates(options: dict[str, Any]) -> list[dict[str, Any]]:
         albums = get_albums_for_artist(artist)
 
         for album in albums:
-            if album_filter and album.lower().strip() != album_filter.lower().strip():
+            # ⚠️ Must use the SAME rule as ``should_skip_album`` does for the
+            # Navidrome import: the two gate one album scan in sequence, so an
+            # exact comparison here would re-skip the very album the import
+            # just accepted (Navidrome's "17" vs the page's "17: Greatest
+            # Hits"), leaving the popularity stage with nothing to score.
+            if album_filter and not album_names_match(album_filter, album):
                 continue
 
             # -----------------------------------------------------------------

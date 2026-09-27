@@ -138,9 +138,13 @@ class _RetryTransport(httpx.BaseTransport):
             )
 
         last_status_response: httpx.Response | None = None
+        #: 1-based count of transport attempts, so a retried failure can say
+        #: WHICH attempt it was instead of reading like a hard failure.
+        attempt_no = 0
 
         def _attempt() -> httpx.Response:
-            nonlocal last_status_response
+            nonlocal last_status_response, attempt_no
+            attempt_no += 1
             
             host = request.url.host
             is_internal = host in ("127.0.0.1", "localhost") or host.startswith("192.168.") or host.startswith("10.") or host.startswith("172.")
@@ -172,13 +176,48 @@ class _RetryTransport(httpx.BaseTransport):
                 try:
                     response = self._transport.handle_request(request)
                 except Exception as e:
-                    logger.error(f"[HTTP-TRACE] [{thread_name}] Network I/O FAILED for {request.url} - {repr(e)}")
+                    # ⚠️ A RETRIED attempt is NOT an error, and this log used to
+                    # say it was: it sits INSIDE the retry loop, so a transient
+                    # ReadTimeout that the policy retries — and that the caller
+                    # handles, e.g. get_similar_artists returning [] — was
+                    # reported as a hard failure once PER ATTEMPT. That is the
+                    # reported "[HTTP-TRACE] ... ReadTimeout" ERROR noise from
+                    # labs.api.listenbrainz.org.
+                    #
+                    # The level now states what actually happened: a RETRYABLE
+                    # failure is a WARNING naming the attempt, while anything
+                    # the policy will NOT retry (an SSL certificate error, a
+                    # malformed request) is final by definition and stays ERROR.
+                    # The exception still propagates, so a caller that treats it
+                    # as fatal reports it itself, with the context only it has.
+                    if _is_retryable(e):
+                        logger.warning(
+                            f"[HTTP-TRACE] [{thread_name}] Network I/O attempt "
+                            f"failed for {request.url} "
+                            f"(attempt {attempt_no}/{self._retries + 1}) - {repr(e)}"
+                        )
+                    else:
+                        logger.error(
+                            f"[HTTP-TRACE] [{thread_name}] Network I/O FAILED for "
+                            f"{request.url} - {repr(e)}"
+                        )
                     raise
             else:
                 try:
                     response = self._transport.handle_request(request)
                 except Exception as e:
-                    logger.error(f"[HTTP-TRACE] [{thread_name}] Internal Network I/O FAILED for {request.url} - {repr(e)}")
+                    # Same distinction as above, for a local/internal host.
+                    if _is_retryable(e):
+                        logger.warning(
+                            f"[HTTP-TRACE] [{thread_name}] Internal Network I/O "
+                            f"attempt failed for {request.url} "
+                            f"(attempt {attempt_no}/{self._retries + 1}) - {repr(e)}"
+                        )
+                    else:
+                        logger.error(
+                            f"[HTTP-TRACE] [{thread_name}] Internal Network I/O "
+                            f"FAILED for {request.url} - {repr(e)}"
+                        )
                     raise
 
             if response.status_code in self._status_forcelist:
