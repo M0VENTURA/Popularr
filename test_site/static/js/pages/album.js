@@ -77,6 +77,21 @@
     else global.alert(message);
   }
 
+  /**
+   * ⚠️ THIS WAS MISSING and is used by the per-track rename. `album.js` defined
+   * only error/success, while `track.js` defines all three — so calling
+   * `notifyInfo(...)` here threw `ReferenceError: notifyInfo is not defined`,
+   * and a TypeError/ReferenceError inside an async handler is INVISIBLE: no
+   * toast, no dialog, the button simply appears to do nothing (the same failure
+   * shape as the old `bindActions` defect). The "already at the correct path"
+   * branch would have died silently.
+   */
+  function notifyInfo(message) {
+    if (global.toast && global.toast.info) global.toast.info(message);
+    else if (global.toast) global.toast.success(message);
+    else global.alert(message);
+  }
+
   function confirmFn(opts) {
     if (global.ui && global.ui.confirm) return global.ui.confirm(opts);
     const parts = [opts.message];
@@ -240,6 +255,88 @@
     } catch (error) {
       notifyError('Error loading track: ' + error.message);
     }
+  }
+
+  /**
+   * Rename ONE track's file to the configured naming format.
+   *
+   * The button sits beside Edit and Delete on each album-page row, so this is
+   * the per-track counterpart of `renameAlbumFiles`.
+   *
+   * ⚠️ MOVES A FILE ON DISK, so it is confirmed first. The track page's own
+   * rename had NO prompt and renamed the moment it was clicked — the same class
+   * of unrecoverable-action-without-consent as deleting. The prompt names the
+   * CURRENT location, because "rename to the configured format" means nothing to
+   * a user who cannot see which file is about to move. (The DESTINATION cannot be
+   * shown: it is computed server-side by `_build_target_path` from the track's
+   * tags, so the client does not know it without a second request.)
+   */
+  async function renameTrackFileFromAlbum(trackId, trackTitle) {
+    if (!trackId) return;
+
+    const currentPath = currentFilePathFor(trackId);
+    const label = trackTitle ? `"${trackTitle}"` : 'this track';
+
+    // ⚠️ The path goes in `items`, not `detail`. `detail` is escaped into a
+    // single <p>, so the `\n`s that make two lines in a native confirm() are
+    // collapsed into spaces there and the paths run together.
+    const opts = {
+      title: 'Rename file',
+      message: `Move the file for ${label} to the configured naming format?`,
+      detail: 'The file will be moved into the folder and filename built from the track\'s own tags (artist, year, album, track number, title).',
+      tone: 'warning',
+      confirmLabel: 'Rename',
+    };
+    if (currentPath) opts.items = [`Current location: ${currentPath}`];
+
+    const confirmed = global.ui && global.ui.confirm
+      ? await global.ui.confirm(opts)
+      : window.confirm(`Rename the file for ${label} to the configured naming format?`);
+    if (!confirmed) return;
+
+    const run = async () => {
+      const data = await global.api.postJson(
+        `/api/track/${encodeURIComponent(trackId)}/rename-file`,
+        {}
+      );
+      if (!data || data.success !== true) {
+        notifyError((data && data.error) || 'Rename failed.');
+        return;
+      }
+      if (data.renamed === false || data.unchanged === true) {
+        notifyInfo('File is already at the correct path — no rename needed.');
+        return;
+      }
+      notifySuccess(`Renamed to: ${data.new_path || 'new location'}`);
+      // The page shows the file path, so it must be refreshed to show the new
+      // one. Reloading is the honest option: the row is server-rendered, and
+      // patching the DOM here would only update the copy on screen.
+      setTimeout(() => global.location.reload(), 1200);
+    };
+
+    if (global.busyPopup) {
+      return global.busyPopup.showAndRun('Renaming file…', run)
+        .catch((error) => notifyError('Rename failed: ' + error.message));
+    }
+    return run().catch((error) => notifyError('Rename failed: ' + error.message));
+  }
+
+  global.renameTrackFileFromAlbum = renameTrackFileFromAlbum;
+
+  /**
+   * The file path currently displayed for a track row, if the page shows one.
+   *
+   * Read from the DOM rather than fetched: the row is server-rendered with the
+   * path, and a second request just to populate a confirmation dialog would add
+   * a round-trip to an action that may be cancelled.
+   */
+  function currentFilePathFor(trackId) {
+    const row = document.querySelector(
+      `#albumTracksTbody tr[data-track-id="${CSS.escape(String(trackId))}"]`
+    );
+    if (!row) return '';
+    const pathEl = row.querySelector('[data-track-file-path]');
+    return pathEl ? (pathEl.getAttribute('data-track-file-path') || '') : '';
   }
 
   /**

@@ -159,6 +159,32 @@
 
   async function renameTrackFile() {
     if (!trackId) return;
+
+    // ⚠️ MOVES A FILE ON DISK. This used to rename the moment the menu item was
+    // clicked, with no confirmation at all — unlike the album-level rename,
+    // which has always prompted. The prompt names the CURRENT path so the user
+    // can see what is about to move, not just that something will.
+    //
+    // ⚠️ The path goes in `items`, not `detail`: `detail` is escaped into a
+    // single <p>, where a `\n` collapses to a space and the sentence runs into
+    // the path.
+    const pathEl = document.getElementById('trackFilePath');
+    const currentPath = pathEl ? (pathEl.getAttribute('data-track-file-path') || '') : '';
+
+    const opts = {
+      title: 'Rename file',
+      message: 'Move this file to the configured naming format?',
+      detail: 'The file will be moved into the folder and filename built from the track\'s own tags (artist, year, album, track number, title).',
+      tone: 'warning',
+      confirmLabel: 'Rename',
+    };
+    if (currentPath) opts.items = [`Current location: ${currentPath}`];
+
+    const confirmed = global.ui && global.ui.confirm
+      ? await global.ui.confirm(opts)
+      : window.confirm('Rename this file to the configured naming format?');
+    if (!confirmed) return;
+
     try {
       const data = await global.api.postJson(
         `/api/track/${encodeURIComponent(trackId)}/rename-file`, {}

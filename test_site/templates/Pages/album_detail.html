@@ -279,6 +279,17 @@
                   {% if track.artist and track.artist != artist_name %}
                     <small class="text-muted ms-1">— {{ track.artist }}</small>
                   {% endif %}
+                  {# The file path is rendered UNDER the title rather than as its own
+                     column: this table's rows are only partly server-rendered, and
+                     the MusicBrainz sub-rows injected by album.js use a hard-coded
+                     colspan. Adding a column would shift those and misalign them. #}
+                  {% if track.file_path %}
+                    <div class="extra-small text-muted font-monospace text-break" data-track-file-path="{{ track.file_path|e }}" title="{{ track.file_path|e }}">
+                      <i class="bi bi-file-earmark-music me-1"></i>{{ track.file_path }}
+                    </div>
+                  {% else %}
+                    <div class="extra-small text-muted fst-italic">No file path recorded</div>
+                  {% endif %}
                 </td>
                 <td class="text-center text-muted small">
                   {% if track.duration %}
@@ -304,6 +315,9 @@
                     {% endif %}
                     <button class="btn btn-outline-secondary py-0 px-2" onclick="openEditTrackFromAlbum('{{ track.id }}')" title="Edit track metadata">
                       <i class="bi bi-pencil"></i>
+                    </button>
+                    <button class="btn btn-outline-primary py-0 px-2" onclick="renameTrackFileFromAlbum('{{ track.id }}', '{{ track.title|escapejs }}')" title="Rename file to the configured naming format">
+                      <i class="bi bi-files"></i>
                     </button>
                     <button class="btn btn-outline-danger py-0 px-2" onclick="deleteTrack('{{ track.id }}')" title="Delete track">
                       <i class="bi bi-trash"></i>

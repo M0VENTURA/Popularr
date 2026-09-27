@@ -229,6 +229,29 @@
 
                                 <h6 class="text-muted fw-bold small text-uppercase mb-3">Identifiers &amp; Credits</h6>
                                 <div class="mb-3">
+                                    <label class="form-label small fw-semibold text-muted mb-1">File Path</label>
+                                    {% if track.file_path %}
+                                        <div class="input-group">
+                                            <input type="text" class="form-control font-monospace" style="font-size:0.8rem;"
+                                                   value="{{ track.file_path }}" readonly
+                                                   id="trackFilePath" data-track-file-path="{{ track.file_path|e }}"
+                                                   aria-label="File path on disk">
+                                            <button class="btn btn-outline-primary" type="button"
+                                                    data-action="track-rename"
+                                                    title="Rename this file to the configured naming format">
+                                                <i class="bi bi-files"></i> Rename
+                                            </button>
+                                        </div>
+                                        <div class="form-text text-muted" style="font-size:0.75rem;">
+                                            The file on disk. Renaming moves it to the folder and filename built from the track's own tags.
+                                        </div>
+                                    {% else %}
+                                        <div class="form-control-plaintext text-muted fst-italic" style="font-size:0.8rem;">
+                                            No file path recorded for this track.
+                                        </div>
+                                    {% endif %}
+                                </div>
+                                <div class="mb-3">
                                     <label for="mbid" class="form-label small fw-semibold text-muted mb-1">MusicBrainz Recording ID</label>
                                     <div class="input-group">
                                         <input type="text" class="form-control" id="mbid" name="mbid" value="{{ track.beets_mbid or track.mbid or track.musicbrainz_trackid or '' }}">
