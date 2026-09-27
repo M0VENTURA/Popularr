@@ -452,6 +452,60 @@ def _record_corrections(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def is_various_artists_album(
+    tracks: list[dict[str, Any]],
+    artist: str,
+    album: str,
+) -> bool:
+    """True when this album's tracks must keep their OWN genres.
+
+    A various-artists compilation puts a DIFFERENT performer on each track, so
+    it has no single album genre to distribute. The album-level genre sync below
+    aggregates every track's genre sources into ONE list and writes that list to
+    EVERY track, which on a compilation replaced each performer's own genre with
+    a blend of the whole record (reported: every track on a VA album ended up
+    carrying the same value).
+
+    Deliberately asks for ``"va"`` and NOT for "any compilation". The classifier
+    also reports ``"single_artist"`` for a greatest-hits or other one-artist
+    compilation, and such an album legitimately has one artist's genre to share.
+    This mirrors the distinction the popularity pipeline already draws between
+    ``is_compilation`` and ``is_va_compilation``.
+
+    Only the classifier's album-artist and distinct-track-artist rules can
+    produce ``"va"``; its release-type rule runs LAST and can only return
+    ``"single_artist"``, so no album-type field is passed in — a type tag
+    cannot change this verdict, and reading one would be a dead branch.
+    """
+    try:
+        from services.catalog.album_classification_service import (
+            classify_compilation_category,
+        )
+    except Exception as exc:
+        logger.debug("Compilation classifier unavailable", error=str(exc))
+        return False
+
+    rows = [t for t in tracks or [] if isinstance(t, dict)]
+    album_artist = next(
+        (str(t.get("album_artist") or "").strip() for t in rows if t.get("album_artist")),
+        "",
+    )
+    try:
+        category = classify_compilation_category(
+            artist=artist,
+            album=album,
+            tracks=rows,
+            album_artist=album_artist or artist,
+        ) or ""
+    except Exception as exc:
+        logger.debug(
+            "Compilation classification failed",
+            artist=artist, album=album, error=str(exc),
+        )
+        return False
+    return category == "va"
+
+
 def sync_album_file_tags(artist: str, album: str) -> dict[str, Any]:
     """Fill missing file tags + record corrections for one album's tracks."""
     try:
@@ -472,24 +526,35 @@ def sync_album_file_tags(artist: str, album: str) -> dict[str, Any]:
     # Generate perfect genres from the strict guardrail output. Force update
     # the DB so that finalise_stage.py generates clean Navidrome playlists,
     # and bind them to the track instances so the physical files are overwritten.
+    #
+    # A VARIOUS-ARTISTS compilation is excluded: its tracks are different
+    # performers, so there is no album genre to hand out, and distributing the
+    # aggregated blend destroyed each track's own genre. The per-track genres
+    # computed by the scan's track stage are left exactly as they are.
     # -------------------------------------------------------------------------
     try:
         from services.enrichment.genre_aggregation_service import get_track_recommendations
         from db.engine import db_session
         from sqlalchemy import text
-        
-        rec_data = get_track_recommendations(artist, album)
-        if rec_data and rec_data.get("genres"):
-            clean_genres = ", ".join(rec_data["genres"])
-            
-            with db_session() as session:
-                session.execute(
-                    text("UPDATE tracks SET genres = :g WHERE COALESCE(NULLIF(album_artist, ''), artist) = :a AND album = :alb"),
-                    {"g": clean_genres, "a": artist, "alb": album}
-                )
-            
-            for t in tracks:
-                t["genres"] = clean_genres
+
+        if is_various_artists_album(tracks, artist, album):
+            logger.debug(
+                "Skipped album-level genre overwrite on a various-artists album",
+                artist=artist, album=album, tracks=len(tracks),
+            )
+        else:
+            rec_data = get_track_recommendations(artist, album)
+            if rec_data and rec_data.get("genres"):
+                clean_genres = ", ".join(rec_data["genres"])
+
+                with db_session() as session:
+                    session.execute(
+                        text("UPDATE tracks SET genres = :g WHERE COALESCE(NULLIF(album_artist, ''), artist) = :a AND album = :alb"),
+                        {"g": clean_genres, "a": artist, "alb": album}
+                    )
+
+                for t in tracks:
+                    t["genres"] = clean_genres
     except Exception as exc:
         logger.warning("Active genre database cleanup failed", error=str(exc))
     # -------------------------------------------------------------------------
