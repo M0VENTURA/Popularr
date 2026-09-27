@@ -20,6 +20,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    JSON,
     LargeBinary,
     Sequence,
     String,
@@ -128,6 +129,19 @@ class Track(Base):
     discogs_genres: Mapped[str | None] = mapped_column(Text)
     musicbrainz_genres: Mapped[str | None] = mapped_column(Text)
     essentia_genres: Mapped[str | None] = mapped_column(Text)
+    # AudioDB/Wikidata genres were added by db/schema.py's _ensure_columns with
+    # their registry type (JSONB), never by migration 001, so unlike the genre
+    # columns above they are genuinely JSONB in a live database and hold a JSON
+    # LIST.  Omitting them here made Track.__table__.create() — which the whole
+    # test suite uses to build its schema — produce a tracks table without
+    # them, so every query naming them raised OperationalError that callers
+    # such as the genre aggregation swallow as a warning.
+    audiodb_genres: Mapped[list[str] | None] = mapped_column(
+        JSONB().with_variant(JSON, "sqlite")
+    )
+    wikidata_genres: Mapped[list[str] | None] = mapped_column(
+        JSONB().with_variant(JSON, "sqlite")
+    )
     tags_last_updated: Mapped[str | None] = mapped_column(String)
 
     # Mood & Audio Features
