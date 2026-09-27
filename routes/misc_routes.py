@@ -1003,6 +1003,68 @@ async def api_apply_country_as_genre() -> Any:
         return jsonify({"error": str(exc)}), 500
 
 
+def _has_duplicate_artist_variants(
+    collapsed: list[dict[str, Any]],
+) -> bool:
+    """True when more than one distinct spelling survives the guest strip.
+
+    ⭐ WHY THIS IS A FUNCTION. The decision used to be an inline
+    ``len(variations_data) > 1``, which no behavioural test can reach without an
+    HTTP round trip and which a static test cannot check at all — inverting or
+    neutering the condition would leave the text intact. Extracting it makes the
+    condition itself directly testable.
+
+    ONE survivor means the only difference between the spellings was a guest
+    credit ("Powerwolf" vs "Powerwolf feat. X"), which is not a data error and
+    must not be offered as a merge.
+    """
+    return len(collapsed or []) > 1
+
+
+def _collapse_duplicate_artist_rows(
+    raw_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collapse raw ``(artist, track_count)`` rows onto their bare act name.
+
+    ⭐ WHY. ``api_get_duplicate_artists`` finds every spelling of one MBID and
+    offers to merge them. A track that FEATURES a guest carries the PRIMARY
+    artist's MBID together with a credit-bearing name
+    ("Powerwolf feat. Unleash The Archers"), which is not a second artist — it is
+    the same act, differently credited. Grouping on the raw column therefore
+    reported every featured track as "1 duplicate artist".
+
+    The strip is guest-only (``feat.``/``ft.``/``featuring``). It deliberately
+    does NOT use the permissive ``strip_featured_artist``, which also folds
+    "&", "and" and "with": "Simon & Garfunkel" is two artists, and the merge
+    action rewrites every track of a variant to the canonical name, so treating
+    them as one spelling would make the merge button delete a real artist.
+
+    Where several spellings collapse to the same act the SHORTEST is kept as the
+    display name, because the longer one is the credit-bearing form. Track
+    counts are summed so the reported totals stay accurate.
+
+    Returned in descending track-count order, the order the caller relies on to
+    pick its first entry as the working canonical name.
+    """
+    from helpers.normalization_service import strip_guest_credit
+
+    counts: dict[str, int] = {}
+    display: dict[str, str] = {}
+    for raw in raw_rows or []:
+        name = str(raw.get("artist") or "").strip()
+        if not name:
+            continue
+        key = strip_guest_credit(name) or name
+        if key not in display or len(name) < len(display[key]):
+            display[key] = name
+        counts[key] = counts.get(key, 0) + int(raw.get("track_count") or 0)
+
+    return [
+        {"artist": display.get(key, key), "track_count": count}
+        for key, count in sorted(counts.items(), key=lambda kv: -kv[1])
+    ]
+
+
 # ===========================================================================
 # DUPLICATE ARTISTS
 # ===========================================================================
@@ -1032,9 +1094,13 @@ def api_get_duplicate_artists(artist: str) -> Any:
                     GROUP BY artist
                     ORDER BY track_count DESC
                 """), {"mbid": artist_mbid}).fetchall()
-                variations_data = [dict(r._mapping) for r in rows]
+                raw_rows = [dict(r._mapping) for r in rows]
 
-                if len(variations_data) > 1:
+                # Collapse guest credits BEFORE deciding whether this is a
+                # duplicate — see ``_collapse_duplicate_artist_rows``.
+                variations_data = _collapse_duplicate_artist_rows(raw_rows)
+
+                if _has_duplicate_artist_variants(variations_data):
                     canonical_mb = variations_data[0].get("artist") or ""
                     try:
                         mb_artist = get_shared_mb_client().get_artist(artist_mbid) or {}

@@ -38,6 +38,50 @@ from services.metadata.album_mbid_guard import (
 logger = structlog.get_logger(__name__)
 
 
+# =============================================================================
+# DISC-NUMBER CONSISTENCY
+# =============================================================================
+#
+# ⭐ WHY A SHARED PREDICATE. Three places used to decide "does this album have a
+# disc-number problem?", and TWO of them asked the wrong question:
+#
+#     disc_number IS NULL OR disc_number = ''      -> "any track is missing one"
+#
+# An ALBUM-level version of that question CANNOT distinguish the two cases,
+# because a single-disc album legitimately has NO disc number at all — the app
+# CLEARS the field on purpose for single-disc releases (see routes/ui_routes.py:
+# disctotal <= 1 strips disc_number "so Navidrome/file tags don't carry a bogus
+# 1/x or 0/x disc position"). So the old rule fired on the app's own correct
+# output, and reported a clean single-disc rip as "missing disc number".
+#
+# Worse, the old rule also MISSED a genuine fault: a stored '0' is neither NULL
+# nor '', so an album mixing '1' and '0' passed as clean.
+#
+# The question that DOES separate clean from broken uses both halves — some
+# tracks carrying a disc value AND others carrying none. That is what
+# ``get_artist_corrections`` always did; the other two now agree with it.
+#
+# '0' counts as ABSENT, matching db/repositories/tracks.py::clear_disc_number,
+# which treats a stored 0 as a bogus value left by a bad rip.
+DISC_NUMBER_PRESENT_SQL = (
+    "(disc_number IS NOT NULL"
+    " AND TRIM(CAST(disc_number AS TEXT)) != ''"
+    " AND CAST(disc_number AS TEXT) != '0')"
+)
+DISC_NUMBER_ABSENT_SQL = (
+    "(disc_number IS NULL"
+    " OR TRIM(CAST(disc_number AS TEXT)) = ''"
+    " OR CAST(disc_number AS TEXT) = '0')"
+)
+
+# An album is inconsistent only when it has BOTH. Usable inside a HAVING, or as
+# a column expression because it is entirely composed of aggregates.
+DISC_NUMBER_INCONSISTENT_SQL = (
+    f"COUNT(*) FILTER (WHERE {DISC_NUMBER_PRESENT_SQL}) > 0"
+    f" AND COUNT(*) FILTER (WHERE {DISC_NUMBER_ABSENT_SQL}) > 0"
+)
+
+
 def delete_track(track_id: str, delete_file: bool = True) -> tuple[dict[str, Any], int]:
     """Delete a track DB row and optionally remove its local file."""
     row = fetch_track_for_delete(None, track_id)
@@ -174,18 +218,32 @@ def apply_album_mbid(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
 
 
 def get_correction_albums(artist_name: str) -> tuple[dict[str, Any], int]:
-    """Return per-album correction data for an artist (for corrections UI)."""
+    """Return per-album correction data for an artist (for corrections UI).
+
+    ``disc_issues`` means the album's disc numbers are INCONSISTENT (some tracks
+    carry one, some do not) — not merely that they are absent. A single-disc
+    album has no disc numbers at all and is perfectly clean; see the
+    ``DISC_NUMBER_*`` notes above for why that distinction has to be made at
+    ALBUM level.
+    """
     artist_name = str(artist_name or "").strip()
     if not artist_name:
         return {"success": False, "error": "artist required", "albums": []}, 400
 
     try:
         with db_session() as session:
-            rows = session.execute(text("""
+            # ``disc_issue_count`` used to be
+            # ``COUNT(*) FILTER (WHERE disc_number IS NULL OR disc_number = '')``
+            # — i.e. "how many tracks are missing one". On a single-disc album
+            # EVERY track is missing one, by design, so this reported a clean
+            # release as a problem. It is now a boolean "genuinely
+            # inconsistent", matching the artist page's disc section.
+            rows = session.execute(text(f"""
                 SELECT
                     album,
                     COUNT(*) AS track_count,
-                    COUNT(*) FILTER (WHERE disc_number IS NULL OR disc_number = '') AS disc_issue_count,
+                    CASE WHEN {DISC_NUMBER_INCONSISTENT_SQL}
+                         THEN 1 ELSE 0 END AS disc_issue_count,
                     COUNT(*) FILTER (WHERE mbid IS NULL OR mbid = '') AS mbid_issue_count,
                     COUNT(*) FILTER (WHERE file_path IS NULL OR file_path = '') AS missing_track_count,
                     COUNT(*) FILTER (WHERE file_path IS NOT NULL AND file_path != '') AS present_track_count,
@@ -621,14 +679,7 @@ def get_artist_corrections(artist_name: str) -> tuple[dict[str, Any], int]:
                 WHERE LOWER({artist_expr}) = LOWER(:artist)
                   AND album IS NOT NULL AND TRIM(album) != ''
                 GROUP BY album
-                HAVING SUM(CASE WHEN disc_number IS NOT NULL
-                                     AND TRIM(CAST(disc_number AS TEXT)) != ''
-                                     AND CAST(disc_number AS TEXT) != '0'
-                                THEN 1 ELSE 0 END) > 0
-                   AND SUM(CASE WHEN disc_number IS NULL
-                                     OR TRIM(CAST(disc_number AS TEXT)) = ''
-                                     OR CAST(disc_number AS TEXT) = '0'
-                                THEN 1 ELSE 0 END) > 0
+                HAVING {DISC_NUMBER_INCONSISTENT_SQL}
                 ORDER BY album
             """), {"artist": artist_name})
             for r in rows.fetchall():

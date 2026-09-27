@@ -125,7 +125,12 @@
   const CORRECTIONS_ENDPOINT = '/api/artists/corrections';
   const PROBLEM_LABELS = {
     duplicate_track_count: 'duplicate track',
-    disc_inconsistent_count: 'missing disc number',
+    // Was 'missing disc number'. That wording described the old (wrong) rule,
+    // which counted tracks ABSENT a disc number — but a single-disc album has
+    // none by design, so the label told the user to "fix" a clean release.
+    // The count is now albums whose disc numbers are INCONSISTENT (some tracks
+    // carry one, some do not), so the label says that.
+    disc_inconsistent_count: 'disc number inconsistency',
     mbid_inconsistent_count: 'missing MusicBrainz ID',
     missing_tracks_count: 'missing audio file',
   };

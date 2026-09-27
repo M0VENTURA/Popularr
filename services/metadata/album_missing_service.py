@@ -17,7 +17,10 @@ from services.enrichment.musicbrainz_service import (
     fetch_musicbrainz_release_metadata,
 )
 from api_clients.musicbrainz_http import escape_lucene_special_chars
-from helpers.normalization_service import normalize_title_for_lucene_query
+from helpers.normalization_service import (
+    normalize_title_for_compare,
+    normalize_title_for_lucene_query,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -671,6 +674,25 @@ def get_title_mismatches(artist: str, album: str) -> dict[str, Any]:
         # Unicode-preserving comparison — Korean/CJK titles match
         # precisely instead of being erased by an ASCII-only strip.
         if _title_match_key(lib_title) == _title_match_key(mb_title):
+            continue
+
+        # A title differing ONLY by a version/cover marker is not a title
+        # mismatch: "(Live)", "(Acoustic)", "(Remix)" and the cover detector's
+        # "(Artist Cover)" describe a performance VARIANT the metadata model
+        # already stores in dedicated columns, not different wording. This uses
+        # the SAME key as the album-page Compare and the Lookup MBID review, so
+        # all three agree — a second, disagreeing rule is what would let the
+        # sections contradict each other.
+        # ⚠️ Falls back to the Unicode-preserving key when the compare key is
+        # EMPTY on either side: ``normalize_title_for_compare`` strips to ASCII,
+        # and two Hangul titles would both reduce to "" and look identical,
+        # silently hiding a real mismatch.
+        compare_key_lib = normalize_title_for_compare(lib_title)
+        compare_key_mb = normalize_title_for_compare(mb_title)
+        if compare_key_lib and compare_key_mb:
+            if compare_key_lib == compare_key_mb:
+                continue
+        elif _title_match_key(lib_title) == _title_match_key(mb_title):
             continue
 
         dur_tolerance = 5

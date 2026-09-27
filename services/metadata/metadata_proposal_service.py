@@ -102,6 +102,57 @@ def _norm(value: Any) -> str:
     return " ".join(_as_text(value).casefold().split())
 
 
+def _genre_names(value: Any) -> set[str]:
+    """Parse a genre value into a case/whitespace-insensitive name set.
+
+    ``tracks.genres`` is TEXT (comma-joined) while ``musicbrainz_genres`` is
+    JSONB, so both are run through the shared tolerant parser instead of being
+    compared as raw strings — otherwise the same genres in different encodings
+    would read as a change.
+    """
+    from services.enrichment.genre_tag_aggregator import parse_json_tags
+
+    names: set[str] = set()
+    for tag in parse_json_tags(value) or []:
+        name = _norm(tag.get("name"))
+        if name:
+            names.add(name)
+    return names
+
+
+def _genre_sets_equal(current: Any, proposed: Any) -> bool:
+    """True when both sides list the SAME genres, regardless of order.
+
+    Order is not meaningful for genres, so "Rock, Metal" and "Metal, Rock" must
+    not raise a bar. A genuine difference (an extra or missing genre) still
+    differs.
+    """
+    left = _genre_names(current)
+    right = _genre_names(proposed)
+    if not left and not right:
+        return True
+    return left == right
+
+
+def _titles_match_ignoring_markers(current: Any, proposed: Any) -> bool:
+    """True when two titles differ ONLY by a version/cover marker.
+
+    "(Live)", "(Acoustic)", "(Remix)" and the cover detector's
+    "(Artist Cover)" describe a performance VARIANT stored in dedicated columns,
+    not different wording — see ``normalize_title_for_compare`` for why the
+    marker is honoured on either side.
+    """
+    from helpers.normalization_service import normalize_title_for_compare
+
+    left = normalize_title_for_compare(_as_text(current))
+    right = normalize_title_for_compare(_as_text(proposed))
+    # Never treat two empty keys as a match: that would silently swallow a real
+    # change when both titles are markers only.
+    if not left or not right:
+        return False
+    return left == right
+
+
 def _load_local_tracks(artist: str, album: str) -> list[dict[str, Any]]:
     """Read the album's local tracks (the only DB access in this module)."""
     try:
@@ -207,6 +258,14 @@ def _album_level_proposals(
             continue
         if _norm(proposed) == _norm(current.get(form_field)):
             continue
+        # Album genres are the same unordered set question as track genres —
+        # "Rock, Metal" vs "Metal, Rock" is not a change (see
+        # ``_genre_sets_equal``). The track-level spec covers this via the
+        # generic loop; album genres bypass that loop, so it is applied here too.
+        if form_field == "album_genres" and _genre_sets_equal(
+            current.get(form_field), proposed
+        ):
+            continue
         label = next(
             (lbl for fid, lbl, _key in _ALBUM_FIELD_SPECS if fid == form_field),
             "Genres" if form_field == "album_genres" else form_field,
@@ -291,13 +350,29 @@ def _track_proposals(
 
         # ``current`` for the MB-derived keys is the matched library value from
         # the comparison; the enrichment keys read the local row directly.
+        #
+        # ⚠️ GENRES MUST BE COMPARED AGAINST THE TRACK'S **OWN** GENRES.
+        #
+        # This used to read ``local["musicbrainz_genres"]`` — the MB-sourced
+        # column — as the "current" side, so the review compared MusicBrainz
+        # against MusicBrainz. A track whose own genres ("Rock, Metal") differed
+        # from the release's was therefore NEVER reported, because the two sides
+        # were the same column: the difference could only show when the stored
+        # MB genres had gone stale, which is not what the user is looking at.
+        # The reported symptom was exactly "it will only compare the
+        # musicbrainz genre table, but the current genres attached to the
+        # tracks".
+        #
+        # ``genres`` is the track's own genre list (TEXT, comma-joined) while
+        # ``musicbrainz_genres`` is JSONB, so the two are compared through the
+        # shared tolerant parser rather than as raw strings.
         current_map: dict[str, str] = {
             "title": _as_text(local.get("title")),
             "track_number": _as_text(local.get("track_number")),
             "disc_number": _as_text(local.get("disc_number") or "1"),
             "mbid": _as_text(local.get("mbid")),
             "writer": _as_text(local.get("writer")),
-            "musicbrainz_genres": _as_text(local.get("musicbrainz_genres")),
+            "musicbrainz_genres": _as_text(local.get("genres")),
         }
         proposed_map: dict[str, str] = {
             "title": _as_text(entry.get("mb_title")),
@@ -325,6 +400,20 @@ def _track_proposals(
                         continue
                 except (TypeError, ValueError):
                     pass
+            # A title differing ONLY by a version/cover marker is not a
+            # change: "(Live)" / "(Acoustic)" / "(Remix)" / "(Artist Cover)"
+            # describe a performance variant that the metadata model stores in
+            # dedicated columns, so overwriting the title to "fix" one would ask
+            # the user to destroy the marker instead. See
+            # ``normalize_title_for_compare`` for the either-side rule.
+            if field == "title" and _titles_match_ignoring_markers(current, proposed):
+                continue
+            # Genres are an unordered SET: "Rock, Metal" and "Metal, Rock" are
+            # the same genres and must not raise a bar. Subset differences still
+            # differ, and the two columns use different encodings (TEXT vs
+            # JSONB), so both sides go through the shared tolerant parser.
+            if field == "musicbrainz_genres" and _genre_sets_equal(current, proposed):
+                continue
             changes.append({
                 "field": field,
                 "label": label,

@@ -193,6 +193,35 @@ def strip_featured_artist(value: str) -> str:
     return FEAT_SUFFIX_RE.sub("", value).strip()
 
 
+# A GUEST credit only: feat./ft./featuring. Deliberately EXCLUDES "with", "w/",
+# "&" and "and", which ``strip_featured_artist`` keeps for the artist field
+# because "X & Y" genuinely credits two artists.
+#
+# This exists for the duplicate-artist check, where the permissive version is
+# UNSAFE: the UI's merge action rewrites every track of the variant it is given
+# to the canonical name, so collapsing "Simon & Garfunkel" onto "Simon" would
+# offer the user a one-click merge that DELETES the second credited artist.
+# Collapsing only guest credits cannot do that — "Powerwolf feat. X" is the same
+# act as "Powerwolf", whereas "A & B" is not "A".
+GUEST_CREDIT_SUFFIX_RE = re.compile(
+    r"\s*(?:\[|\()?\s*(?:feat\.?|ft\.?|featuring)\s+[^\]\)]*?(?:\]|\))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def strip_guest_credit(value: str) -> str:
+    """Remove only a trailing guest credit (``feat.``/``ft.``/``featuring``).
+
+    Returns the input unchanged when stripping would empty it, so a name that is
+    nothing but a credit is never lost.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    cleaned = GUEST_CREDIT_SUFFIX_RE.sub("", text).strip()
+    return cleaned or text
+
+
 TITLE_FEAT_SUFFIX_RE = re.compile(
     r"""
     \s+
@@ -236,6 +265,97 @@ REMASTER_SUFFIX_RE = re.compile(
 
 def strip_single_release_suffix(value: str) -> str:
     return SINGLE_RELEASE_SUFFIX_RE.sub("", value or "").strip()
+
+
+# =============================================================================
+# VERSION / COVER MARKERS IN TITLES
+# =============================================================================
+#
+# ⭐ WHY. The album-page comparison and the Lookup MBID review compare a
+# library title against MusicBrainz's title and report any difference as a
+# change. But a title may carry a marker that describes a PERFORMANCE VARIANT
+# rather than different wording — "(Live)", "(Acoustic)", "(Remix)", or the
+# app's own "(Artist Cover)" annotation that the cover detector writes onto a
+# track. Reporting those as "the title changed" asks the user to overwrite
+# information the metadata model ALREADY stores in dedicated columns
+# (``is_live`` / ``is_acoustic`` / ``is_remix`` / ``is_cover``), so the review
+# fills with bars that save nothing useful.
+#
+# ⚠️ THE MARKER IS INTENTIONALLY DETECTED ON **EITHER** SIDE, and that is a
+# deliberate trade-off, not an oversight. The app CANNOT tell which take a file
+# actually holds: a library "Song (Live)" against an MB release titled "Song"
+# is either (a) the same recording, mis-tagged with the marker, or (b) a live
+# take matched against a studio release. Deciding (b) would need audio
+# evidence the comparison does not have, and the alternative — reporting the
+# difference only when the ``is_live`` FLAG is already set — silently depends on
+# a prior scan having run, so the same data would be reported or ignored
+# depending on scan history. The user chose this behaviour explicitly.
+#
+# ⚠️ SCOPE IS A REAL TRADE-OFF: a genuine recording substitution whose titles
+# differ ONLY by such a marker is no longer flagged. That is a deliberate
+# suppress-the-marker-not-the-recording rule. Wording differences are still
+# always flagged (see the tests), so this cannot silence a real rename.
+#
+# The bracketed forms are matched case-insensitively and tolerate the
+# qualifiers seen in the wild: "(Live)", "(Recorded Live)", "(Live at Leeds)",
+# "(Stripped Acoustic)", "(Artist Cover)".
+_VERSION_MARKER_RE = re.compile(
+    r"""
+    [\(\[]                                  # opening bracket
+    [^)\]]*                                 # optional qualifier, e.g. "Recorded"
+    \b(?:
+        live | acoustic | unplugged | remix | remixed | demo |
+        instrumental | orchestral | karaoke | tribute
+    )\b
+    [^)\]]*                                 # optional qualifier, e.g. "at Leeds"
+    [\)\]]                                  # closing bracket
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# An unparenthesised trailing marker: "Song - Live", "Song – Live", "Song Live".
+# Anchored to the END so "Live and Let Die" is untouched, and the separator is
+# required so "Song Live" (a title) is not mistaken for a bare word.
+_TRAILING_VERSION_MARKER_RE = re.compile(
+    r"(?:\s*[-–—]\s*|\s+)(?:" + "|".join(
+        ("live", "acoustic", "unplugged", "remix", "remixed")
+    ) + r")\s*$",
+    re.IGNORECASE,
+)
+
+# The cover detector writes "(Original Artist Cover)" / "(Artist Cover)".
+_COVER_ANNOTATION_RE = re.compile(r"[\(\[]\s*[^)\]]*?\bcover\b[^)\]]*?[\)\]]", re.IGNORECASE)
+
+
+def has_version_marker(title: str) -> bool:
+    """True when a title carries a version/performance or cover marker.
+
+    Detects bracketed markers ("(Live)", "(Recorded Live)", "(Acoustic)",
+    "(Remix)", "(Artist Cover)") and trailing unparenthesised ones
+    ("Song - Live").
+    """
+    text = str(title or "").strip()
+    if not text:
+        return False
+    return bool(
+        _VERSION_MARKER_RE.search(text)
+        or _COVER_ANNOTATION_RE.search(text)
+        or _TRAILING_VERSION_MARKER_RE.search(text)
+    )
+
+
+def normalize_title_for_compare(title: str) -> str:
+    """Comparison key that IGNORES version/cover markers.
+
+    Used by the metadata comparison so a marker describing a performance
+    variant is not reported as a title change. Markers are REMOVED (not just
+    detected) so ``"Song (Live)"`` and ``"Song"`` produce the same key, and a
+    genuine wording difference still differs.
+    """
+    text = _COVER_ANNOTATION_RE.sub(" ", str(title or ""))
+    text = _VERSION_MARKER_RE.sub(" ", text)
+    text = _TRAILING_VERSION_MARKER_RE.sub("", text)
+    return normalize_string(text)
 
 
 def strip_remaster_suffix(value: str) -> str:

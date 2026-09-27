@@ -28,7 +28,6 @@ budget alone still leaves the artist wrapper firing on total size.
 from __future__ import annotations
 
 import re
-import threading
 from pathlib import Path
 
 import pytest

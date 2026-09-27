@@ -83,6 +83,7 @@ from helpers.normalization_service import (
     extract_edition_annotation as Extract_edition_annotation,
     format_duration_mmss as Format_duration_mmss,
     normalize_string as Normalize_string,
+    normalize_title_for_compare as Normalize_title_for_compare,
     normalize_title_for_lookup as Normalize_title_for_lookup,
     normalize_title_for_lucene_query as Normalize_title_for_lucene_query,
     normalize_title_for_mbid_match as Normalize_title_for_mbid_match,
@@ -2483,7 +2484,17 @@ def _match_mb_tracks_to_library(
             Library_duration = Match.get("duration")
 
             Diff_fields: list[str] = []
-            if Library_title.strip().casefold() != Mb_title.strip().casefold():
+            # ⚠️ A title differing ONLY by a version/cover marker is NOT a
+            # change. "(Live)", "(Acoustic)", "(Remix)" and the cover detector's
+            # "(Artist Cover)" describe a performance VARIANT, which the metadata
+            # model already stores in dedicated columns (``is_live`` /
+            # ``is_acoustic`` / ``is_remix`` / ``is_cover``). Reporting them here
+            # fills the review with bars whose only possible outcome is
+            # overwriting the marker. The key ignores markers on EITHER side so
+            # this rule matches the Lookup MBID review exactly — a second,
+            # disagreeing title rule is what would let Compare and the preview
+            # show different counts. Wording differences still differ.
+            if Normalize_title_for_compare(str(Library_title)) != Normalize_title_for_compare(Mb_title):
                 Diff_fields.append("title")
             if str(Library_track_number or "").split("/")[0].strip() != str(Entry["mb_track_number"]):
                 Diff_fields.append("track_number")

@@ -16,6 +16,7 @@ from sqlalchemy import text
 
 from routes.utils import json_response as _json_response
 from services.metadata import artist_service as corrections
+from services.metadata.artist_service import DISC_NUMBER_INCONSISTENT_SQL
 from services.metadata.release_service import get_cached_missing_releases
 from services.metadata.artist_scan_service import (
     get_missing_releases as scan_get_missing_releases,
@@ -87,31 +88,67 @@ def api_artist_corrections_albums() -> Any:
     return jsonify(data), code
 
 
+# The artist-list badge query, at module level so it can be executed verbatim in
+# tests. It is GRAIN-SENSITIVE: the disc predicate is defined per ALBUM, but this
+# endpoint reports per ARTIST, so that rule runs in an inner per-album group and is
+# rolled up with SUM(). Applying it to the artist-level group directly would
+# compare "has any track with a disc value" against "has any track without"
+# across the artist's whole catalogue — true for anyone owning both a multi-disc
+# and a single-disc release — and would report THOSE artists as broken.
+#
+# ⚠️ GRAIN MIXING IS DELIBERATE, and pinned by a test: ``disc_inconsistent_count``
+# counts ALBUMS (a per-track disc number is meaningless — see the note on the
+# shared predicate), while ``mbid_inconsistent_count`` and ``missing_tracks_count``
+# keep counting TRACKS exactly as they always did. Those two were NOT part of the
+# reported defect, so their numbers must not change.
+ARTIST_CORRECTIONS_SQL = f"""
+    SELECT
+        artist_key,
+        artist_name,
+        SUM(album_disc_inconsistent) AS disc_inconsistent_count,
+        SUM(album_mbid_missing) AS mbid_inconsistent_count,
+        SUM(album_missing_tracks) AS missing_tracks_count
+    FROM (
+        SELECT
+            LOWER(REGEXP_REPLACE(
+                COALESCE(NULLIF(album_artist, ''), artist),
+                '(\\s+[\\[\\(]?\\s*(feat\\.?|ft\\.?|featuring)\\s+.*?[\\]\\)]?$)',
+                '',
+                'i'
+            )) AS artist_key,
+            COALESCE(NULLIF(album_artist, ''), artist) AS artist_name,
+            0 AS duplicate_track_count,
+            CASE WHEN {DISC_NUMBER_INCONSISTENT_SQL}
+                 THEN 1 ELSE 0 END AS album_disc_inconsistent,
+            COUNT(*) FILTER (WHERE mbid IS NULL OR mbid = '') AS album_mbid_missing,
+            COUNT(*) FILTER (WHERE file_path IS NULL OR file_path = '') AS album_missing_tracks
+        FROM tracks
+        GROUP BY artist_key, artist_name, album
+    ) per_album
+    GROUP BY artist_key, artist_name
+    HAVING
+        SUM(album_disc_inconsistent) > 0
+        OR SUM(album_mbid_missing) > 0
+        OR SUM(album_missing_tracks) > 0
+"""
+
+
 @artist_bp.route("/api/artists/corrections")
 def api_artists_corrections() -> Any:
-    """Return per-artist correction indicators for the artist list page."""
+    """Return per-artist correction indicators for the artist list page.
+
+    ``disc_inconsistent_count`` counts ALBUMS whose disc numbers are genuinely
+    inconsistent (some tracks carry one, some do not) — NOT tracks that lack a
+    disc number. A single-disc album has none by design (``routes/ui_routes.py``
+    clears the field for single-disc releases), so the old per-track rule
+    reported every clean single-disc album as "missing disc number".
+
+    See ``ARTIST_CORRECTIONS_SQL`` for why the rule is rolled up from an inner
+    per-album group rather than applied at artist level.
+    """
     try:
         with db_session() as session:
-            result = session.execute(text("""
-                SELECT
-                LOWER(REGEXP_REPLACE(
-                    COALESCE(NULLIF(album_artist, ''), artist),
-                    '(\s+[\[\(]?\s*(feat\.?|ft\.?|featuring)\s+.*?[\]\)]?$)',
-                    '',
-                    'i'
-                )) AS artist_key,
-                COALESCE(NULLIF(album_artist, ''), artist) AS artist_name,
-                0 AS duplicate_track_count,
-                COUNT(*) FILTER (WHERE disc_number IS NULL OR disc_number = '') AS disc_inconsistent_count,
-                COUNT(*) FILTER (WHERE mbid IS NULL OR mbid = '') AS mbid_inconsistent_count,
-                COUNT(*) FILTER (WHERE file_path IS NULL OR file_path = '') AS missing_tracks_count
-            FROM tracks
-            GROUP BY artist_key, artist_name
-            HAVING
-                COUNT(*) FILTER (WHERE disc_number IS NULL OR disc_number = '') > 0
-                OR COUNT(*) FILTER (WHERE mbid IS NULL OR mbid = '') > 0
-                OR COUNT(*) FILTER (WHERE file_path IS NULL OR file_path = '') > 0
-        """))
+            result = session.execute(text(ARTIST_CORRECTIONS_SQL))
         rows = result.fetchall()
         corrections_out = {}
         for row in rows:
