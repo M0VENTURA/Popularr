@@ -303,6 +303,31 @@ def sync_playlist_by_name(
                     songs=len(song_ids),
                     replaced=len(existing),
                 )
+                # ── Verify what Navidrome actually STORED ────────────────
+                # A write can be ACCEPTED yet keep fewer tracks than asked:
+                # after Navidrome's 0.64 "canonical 128-bit IDs" migration,
+                # song IDs cached from an older server no longer resolve, so
+                # the log would claim success while the playlist shows stale
+                # or missing tracks. One extra getPlaylist per CHANGED
+                # playlist converts that silent drift into a warning.
+                stored = _current_song_ids(client, primary_id)
+                if stored is None:
+                    logger.warning(
+                        "[PLAYLISTS] could not verify playlist contents after update",
+                        name=name,
+                        playlist_id=primary_id,
+                    )
+                elif len(stored) != len(song_ids):
+                    logger.warning(
+                        "[PLAYLISTS] Navidrome stored a different number of tracks "
+                        "than requested — stale song IDs are the usual cause "
+                        "(Navidrome re-encoded all IDs in 0.64); re-run the "
+                        "Navidrome import scan to refresh them",
+                        name=name,
+                        playlist_id=primary_id,
+                        requested=len(song_ids),
+                        stored=len(stored),
+                    )
             else:
                 logger.warning(
                     "[PLAYLISTS] updatePlaylist returned failure",
@@ -337,6 +362,20 @@ def sync_playlist_by_name(
                 playlist_id=pid,
                 songs=len(song_ids),
             )
+            # Same post-write verification as the update path, answered from
+            # the create response's own songCount (no extra fetch).
+            _stored_count = int(((data.get("playlist") or {}).get("songCount")) or 0)
+            if _stored_count and _stored_count != len(song_ids):
+                logger.warning(
+                    "[PLAYLISTS] Navidrome stored a different number of tracks "
+                    "than requested — stale song IDs are the usual cause "
+                    "(Navidrome re-encoded all IDs in 0.64); re-run the "
+                    "Navidrome import scan to refresh them",
+                    name=name,
+                    playlist_id=pid,
+                    requested=len(song_ids),
+                    stored=_stored_count,
+                )
         else:
             logger.warning(
                 "[PLAYLISTS] createPlaylist failed",

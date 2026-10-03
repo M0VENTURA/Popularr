@@ -1192,6 +1192,7 @@ def get_playlists_config() -> dict[str, Any]:
     300 qualifying tracks therefore yields a playlist containing its ENTIRE
     qualifying pool rather than a curated top slice.  Lower the max, or raise
     the create threshold, if you want every genre playlist to be a selection.
+    Set it to ``0`` for NO cap (every qualifying track is included).
 
     NOTE: ``exclude_christmas_from_playlists`` keeps Christmas music out of every
     generated playlist EXCEPT those whose name contains
@@ -1203,6 +1204,13 @@ def get_playlists_config() -> dict[str, Any]:
     p = cfg.get("playlists") or {}
     if not isinstance(p, dict):
         p = {}
+    # 0 must survive as 0 ("no cap") — the old ``int(... or 300)`` turned a
+    # configured 0 back into 300, so the documented no-cap option could never
+    # be expressed. Mirrors ``_resolve_genre_max_tracks`` in finalise_stage.
+    try:
+        _genre_max_tracks = int(p.get("genre_playlists_max_tracks", 300))
+    except (TypeError, ValueError):
+        _genre_max_tracks = 300
     return {
         "essential_playlists_enabled": bool(p.get("essential_playlists_enabled", True)),
         "essential_max_tracks": max(1, int(p.get("essential_max_tracks", 50) or 50)),
@@ -1223,9 +1231,7 @@ def get_playlists_config() -> dict[str, Any]:
         "genre_playlists_delete_threshold": max(
             1, int(p.get("genre_playlists_delete_threshold", 80) or 80)
         ),
-        "genre_playlists_max_tracks": max(
-            1, int(p.get("genre_playlists_max_tracks", 300) or 300)
-        ),
+        "genre_playlists_max_tracks": max(0, _genre_max_tracks),
         "new_music_playlist_enabled": bool(p.get("new_music_playlist_enabled", True)),
         "exclude_christmas_from_playlists": bool(
             p.get("exclude_christmas_from_playlists", True)

@@ -2507,7 +2507,7 @@
       <div class="setting-card">
         <div class="setting-info">
           <label class="setting-title" for="playlists_genre_playlists_enabled">Create Genre Top-Tracks Playlists</label>
-          <p class="setting-description">Library-wide <code>{Genre} - Top Tracks.m3u</code> playlists generated once per scan (and refreshed per album when its tracks change): every track at or above the Minimum Stars is assigned its top weighted genres, each genre pool is ranked by <strong>global</strong> popularity (see Track Ordering below), a playlist is only created when the genre clears the Create Threshold, and every qualifying track is included (no top-N cap).</p>
+          <p class="setting-description">Library-wide <code>{Genre} - Top Tracks.m3u</code> playlists generated once per scan (and refreshed per album when its tracks change): every track at or above the Minimum Stars is assigned its top weighted genres, each genre pool is ranked by <strong>global</strong> popularity (see Track Ordering below), a playlist is only created when the genre clears the Create Threshold, and every qualifying track is included up to <strong>Max Tracks Per Playlist</strong> (0 = no cap).</p>
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
@@ -2579,6 +2579,11 @@
           <label for="playlists_genre_max_genres">Genres Per Track</label>
           <input type="number" step="1" min="1" max="10" class="form-control form-control-sm" id="playlists_genre_max_genres" placeholder="3" value="{{ config.get('playlists', {}).get('genre_playlists_max_genres', 3) }}">
           <span class="help-text">How many top weighted genres each track may appear in. Default: <strong>3</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_genre_max_tracks">Max Tracks Per Playlist</label>
+          <input type="number" step="1" min="0" max="10000" class="form-control form-control-sm" id="playlists_genre_max_tracks" placeholder="300" value="{{ config.get('playlists', {}).get('genre_playlists_max_tracks', 300) }}">
+          <span class="help-text">Cap on tracks in each genre playlist after ordering. Set to <strong>0</strong> for no cap — every qualifying track is included. Default: <strong>300</strong></span>
         </div>
       </div>
 

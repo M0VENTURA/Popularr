@@ -288,6 +288,12 @@ function buildConfigObject() {
       genre_playlists_delete_threshold: parseInt(getValue('playlists_genre_delete_threshold', '80'), 10) || 80,
       genre_playlists_min_stars: parseInt(getValue('playlists_genre_min_stars', '4'), 10) || 4,
       genre_playlists_max_genres: parseInt(getValue('playlists_genre_max_genres', '3'), 10) || 3,
+      // ⚠️ 0 means "no cap", so a `|| 300` guard would make it impossible to
+      // express — mirror the max_per_artist collector below.
+      genre_playlists_max_tracks: (() => {
+        const raw = parseInt(getValue('playlists_genre_max_tracks', '300'), 10);
+        return Number.isFinite(raw) && raw >= 0 ? raw : 300;
+      })(),
       playlist_order_mode: getValue('playlists_order_mode', 'prominence') || 'prominence',
       // ⚠️ Math.max(0, raw), NOT `|| 25`: 0 means "no per-artist cap", so a
       // `|| default` guard would make that impossible to express.

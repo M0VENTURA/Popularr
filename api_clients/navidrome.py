@@ -638,6 +638,23 @@ class NavidromeClient:
             # orphaned playlist" and the duplicate stayed in the UI on the
             # next fetch, even though the HTTP delete was accepted).
             if data.get("status") == "failed":
+                # Was SILENT: the genre-playlist sweep treats False as "keep",
+                # so an auth-rejected delete (code 50 — playlist not owned by
+                # the configured non-admin user) left stale playlists behind
+                # with no trace in the logs.
+                _err = data.get("error") or {}
+                _hint = None
+                if int(_err.get("code") or 0) == 50:
+                    _hint = (
+                        "not authorized: the configured Navidrome user is not an "
+                        "admin and does not own this playlist"
+                    )
+                logger.warning(
+                    "Navidrome rejected playlist deletion",
+                    playlist_id=playlist_id,
+                    hint=_hint,
+                    response=data,
+                )
                 return False
             return not data or data.get("status") == "ok"
         except Exception as exc:
@@ -825,11 +842,26 @@ class NavidromeClient:
             data = self._post_subsonic_response("updatePlaylist", timeout=120, **params)
             ok = data.get("status") == "ok"
             if not ok:
+                # code 50 ("not authorized") = Navidrome's ownership rule:
+                # a non-admin user may only modify playlists IT owns
+                # (core/playlists ``checkWritable``). The playlist then keeps
+                # its old tracks forever, so spell out the fix instead of only
+                # dumping the raw response.
+                _err = data.get("error") or {}
+                _hint = None
+                if int(_err.get("code") or 0) == 50:
+                    _hint = (
+                        "not authorized: the configured Navidrome user does not own "
+                        "this playlist and is not an admin — make this user an admin "
+                        "in Navidrome, or delete the playlist there so it is "
+                        "recreated under this user"
+                    )
                 logger.warning(
                     "updatePlaylist songs rejected",
                     playlist_id=playlist_id,
                     removed=current_count,
                     added=len(song_ids or []),
+                    hint=_hint,
                     response=data,
                 )
             return ok

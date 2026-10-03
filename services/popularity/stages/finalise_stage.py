@@ -2237,6 +2237,25 @@ def _sync_essential_playlist(
 _GENRE_PLAYLIST_DEFAULT_MAX_TRACKS = 300
 
 
+def _resolve_genre_max_tracks(cfg: dict[str, Any]) -> int | None:
+    """Max tracks per genre playlist; ``None`` means UNLIMITED.
+
+    ``0`` expresses "no cap" (the documented meaning everywhere else in this
+    config — see ``_resolve_max_per_artist``); a missing/invalid value falls
+    back to ``_GENRE_PLAYLIST_DEFAULT_MAX_TRACKS``.  The old expression
+    (``int(cfg.get(...) or 300)``) silently turned a configured ``0`` back
+    into 300, making the documented no-cap option impossible to express.
+    """
+    raw = cfg.get("genre_playlists_max_tracks", _GENRE_PLAYLIST_DEFAULT_MAX_TRACKS)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _GENRE_PLAYLIST_DEFAULT_MAX_TRACKS
+    if value <= 0:
+        return None
+    return value
+
+
 def _genre_playlists_enabled() -> bool:
     try:
         from helpers.config_helpers import get_config
@@ -2460,6 +2479,12 @@ def _sync_playlist_to_navidrome(
                 and not result.get("unchanged")
             ):
                 synced["unchanged"] += 1
+            elif not result.get("success"):
+                # A returned failure (e.g. Navidrome code 50: playlist not
+                # owned by the configured non-admin user) used to count as
+                # NOTHING — the playlist stayed stale while the scan summary
+                # only ever reported successes.
+                synced["failed"] += 1
         except Exception as exc:
             logger.warning("Navidrome playlist push failed", name=playlist_name, error=str(exc))
             synced["failed"] += 1
@@ -2621,13 +2646,7 @@ def _create_genre_top_track_playlists(
     max_genres = max(1, int(cfg.get("genre_playlists_max_genres", 3) or 3))
     create_threshold = max(1, int(cfg.get("genre_playlists_create_threshold", 100) or 100))
     delete_threshold = max(1, int(cfg.get("genre_playlists_delete_threshold", 80) or 80))
-    max_tracks = max(
-        1,
-        int(
-            cfg.get("genre_playlists_max_tracks", _GENRE_PLAYLIST_DEFAULT_MAX_TRACKS)
-            or _GENRE_PLAYLIST_DEFAULT_MAX_TRACKS
-        ),
-    )
+    max_tracks = _resolve_genre_max_tracks(cfg)  # None = unlimited (0 in config)
     # ⭐ Ordering controls (see _effective_order_score / _apply_artist_cap).
     order_mode = str(cfg.get("playlist_order_mode", "prominence") or "prominence").strip().lower()
     if order_mode not in ("prominence", "stored"):
@@ -2783,7 +2802,8 @@ def _create_genre_top_track_playlists(
             max_per_artist=max_per_artist,
             interleave=interleave_artists,
         )
-        winners = winners[:max_tracks]
+        if max_tracks:  # None/0 = no cap
+            winners = winners[:max_tracks]
 
         _song_ids = [str(t.get("id") or "").strip() for t in winners if str(t.get("id") or "").strip()]
         if not _song_ids:
@@ -2792,6 +2812,15 @@ def _create_genre_top_track_playlists(
         try:
             sync_res = _sync_playlist_to_navidrome(playlist_name, _song_ids)
             if not _playlist_sync_succeeded(sync_res):
+                # Previously a bare `continue`: the playlist silently kept its
+                # old tracks while the scan reported only the successes.
+                logger.warning(
+                    "Genre playlist sync failed — Navidrome keeps its previous contents",
+                    genre=genre,
+                    playlist=playlist_name,
+                    requested=len(_song_ids),
+                    failed_clients=sync_res.get("failed") if isinstance(sync_res, dict) else None,
+                )
                 continue
             keep_playlist_names.add(playlist_name)
             if sync_res.get("skipped"):
