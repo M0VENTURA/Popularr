@@ -107,10 +107,21 @@ def organize_track(track_metadata: dict[str, Any] | int, payload: dict[str, Any]
     # -----------------------------
 
     if queue_item:
+        # Best-effort, but failures must be VISIBLE: a skipped/failed write
+        # means the library file keeps the downloaded file's own tags.
         try:
-            _apply_stored_metadata(queue_item, track_metadata["file_path"])
-        except Exception:
-            pass
+            if not _apply_stored_metadata(queue_item, track_metadata["file_path"]):
+                logger.warning(
+                    "File tags not written before move — library keeps downloaded tags",
+                    queue_id=queue_item.get("id"),
+                    path=track_metadata["file_path"],
+                )
+        except Exception as _tag_exc:
+            logger.warning(
+                "Stored metadata not applied before move",
+                queue_id=queue_item.get("id"),
+                error=str(_tag_exc),
+            )
 
     target = build_target_path(
         track_metadata,
@@ -125,10 +136,15 @@ def organize_track(track_metadata: dict[str, Any] | int, payload: dict[str, Any]
     )
 
 
-def _apply_stored_metadata(queue_item: dict[str, Any], file_path: str) -> None:
-    """Best-effort write of the queue item's stored metadata to a file."""
+def _apply_stored_metadata(queue_item: dict[str, Any], file_path: str) -> bool:
+    """Best-effort write of the queue item's stored metadata to a file.
+
+    Returns False when nothing was written (empty metadata or the tag writer
+    reported failure) so the caller can surface it instead of moving the file
+    with the downloaded file's own tags.
+    """
     if not queue_item or not file_path:
-        return
+        return False
     meta: dict[str, Any] = {
         "title": queue_item.get("title"),
         "artist": queue_item.get("artist"),
@@ -144,10 +160,10 @@ def _apply_stored_metadata(queue_item: dict[str, Any], file_path: str) -> None:
     if queue_item.get("release_mbid") or queue_item.get("release_id"):
         meta["release_mbid"] = queue_item.get("release_mbid") or queue_item.get("release_id")
     if not meta:
-        return
-        
+        return False
+
     from services.metadata.tag_file_service import update_file_metadata
-    update_file_metadata(file_path, meta)
+    return bool(update_file_metadata(file_path, meta))
 
 
 def rename_and_move_file(file_path: str, metadata: dict[str, Any]) -> Dict[str, Any]:

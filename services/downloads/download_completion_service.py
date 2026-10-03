@@ -783,7 +783,16 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
-def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> None:
+def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
+    """Write the queue row's stored metadata onto *file_path* (pre-move).
+
+    Returns True when the tag write succeeded.  A False here means the library
+    file will keep the DOWNLOADED file's own tags — historically the return
+    value was dropped and failures were logged only at DEBUG, so an import
+    could report success while Navidrome showed the peer's metadata (the
+    reported bug).  Failures are now surfaced at WARNING plus one unified
+    queue line so the Logs page shows them.
+    """
     meta: dict[str, Any] = {
         "title": item.get("title"),
         "artist": item.get("artist"),
@@ -856,13 +865,37 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> None:
         logger.debug("Stored MB metadata parse failed", queue_id=item.get("id"), error=str(_stored_exc))
 
     if not meta:
-        return
+        return False
 
+    # ── Tag write outcome must be SURFACED ───────────────────────────────
+    # False/raise here = the config gates (write disabled, ratings-only,
+    # fill-missing-only), an unsupported format, or a writer failure.  All of
+    # them used to be invisible at import time (DEBUG / ignored return), so
+    # the move reported success while the file kept the downloaded file's
+    # tags — exactly what the import shows in Navidrome.
+    _tags_written = False
     try:
         from services.metadata.tag_file_service import update_file_metadata
-        update_file_metadata(file_path, meta)
+        _tags_written = bool(update_file_metadata(file_path, meta))
     except Exception as exc:
-        logger.debug("Could not apply stored metadata to file", queue_id=item.get("id"), path=file_path, error=str(exc))
+        logger.warning(
+            "Could not apply stored metadata to file",
+            queue_id=item.get("id"), path=file_path, error=str(exc),
+        )
+    if not _tags_written:
+        logger.warning(
+            "Imported file keeps its downloaded tags — tag write failed or was skipped",
+            queue_id=item.get("id"), path=file_path,
+        )
+        try:
+            from helpers.logging_config import log_unified
+            log_unified(
+                f"[QUEUE] ⚠ {os.path.basename(file_path)} — file tags NOT written "
+                "(check error.log / tagging config); the library will show the "
+                "downloaded file's own metadata"
+            )
+        except Exception:
+            pass
 
     # ── Persist the MB enrichment to the tracks table ────────────────────
     # The just-moved file may not be re-scanned immediately; write the stored
@@ -916,6 +949,8 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> None:
                 )
     except Exception as exc:
         logger.debug("Could not persist MB metadata to tracks table", queue_id=item.get("id"), error=str(exc))
+
+    return _tags_written
 
 
 def _resolve_track_id_for_import(

@@ -975,7 +975,12 @@ def organize_group_sync(group_id: Any, metadata: dict[str, Any] | None = None) -
                 "track_number": item_track_number,
                 "disc_number": item_disc_number,
             }
-            update_file_metadata(file_path, file_metadata)
+            if not update_file_metadata(file_path, file_metadata):
+                logger.warning(
+                    "Group organize: source tag write failed — copy may keep downloaded tags",
+                    queue_id=item_id,
+                    path=file_path,
+                )
 
             music_root = os.environ.get("MUSIC_ROOT", "/music")
             target_path = build_organize_group_target_path(
@@ -991,6 +996,18 @@ def organize_group_sync(group_id: Any, metadata: dict[str, Any] | None = None) -
             target_path.parent.mkdir(parents=True, exist_ok=True)
             if not target_path.exists():
                 shutil.copy2(file_path, target_path)
+            else:
+                # Duplicate import: the copy is SKIPPED, so the pre-existing
+                # library file never sees the tagged source — write the
+                # metadata onto it directly, or it keeps whatever tags it
+                # arrived with (the reported "downloaded metadata survives
+                # the import" bug for re-imports).
+                if not update_file_metadata(str(target_path), file_metadata):
+                    logger.warning(
+                        "Group organize: existing target tag write failed",
+                        queue_id=item_id,
+                        path=str(target_path),
+                    )
 
             update_queue_item(
                 item_id,
@@ -1036,7 +1053,12 @@ def process_completed_queue_item(queue_item: Dict[str, Any]) -> Dict[str, Any]:
             "disc_number": queue_item.get("disc_number"),
         }
 
-        update_file_metadata(file_path, metadata)
+        if not update_file_metadata(file_path, metadata):
+            logger.warning(
+                "Completed-item tag write failed — moved file keeps downloaded tags",
+                queue_id=queue_id,
+                path=file_path,
+            )
         result = rename_and_move_file(file_path, metadata)
 
         if not result.get("success"):
