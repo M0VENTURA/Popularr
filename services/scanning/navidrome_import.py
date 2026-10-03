@@ -480,6 +480,11 @@ def scan_artist_to_db(
                     canonical_artist_name=canonical_artist_name,
                     writer_json=writer_json,
                     is_new_track=track.get("id") not in cached_ids_for_album,
+                    # Navidrome carries the release MBID on the ALBUM object
+                    # (`musicBrainzId` on AlbumID3 = mf.MbzAlbumID), not on
+                    # the song children — without it every track payload
+                    # carried "" and the upsert wiped the stored value.
+                    album_mbid=str(album.get("musicBrainzId") or "").strip(),
                 )
 
                 album_mbid = str(payload.get("musicbrainz_album_mbid") or "").strip()

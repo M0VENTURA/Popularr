@@ -191,6 +191,25 @@ def extract_track_metadata(
     writers = _extract_writers(track, get_song=get_song)
     writer_json = json.dumps(writers) if writers else json.dumps([])
     album_mbid = get_tag_value("musicbrainz_albumid", "musicbrainz_album_mbid", "musicbrainz_releaseid", "release_mbid") or ""
+    # ⭐ Navidrome (OpenSubsonic) sends the RECORDING MBID as
+    # ``musicBrainzId`` — verified in Navidrome's own source
+    # (``server/subsonic/helpers.go::osChildFromMediaFile``:
+    # ``child.MusicBrainzId = mf.MbzRecordingID``). The old system read it
+    # (``t.get("musicBrainzId", "") or t.get("mbid", "") — Navidrome uses
+    # musicBrainzId field``); the new-system port lost that line, so the
+    # import NEVER pulled a recording MBID from Navidrome and the empty
+    # payload then wiped whatever the scan/download had stored.
+    recording_mbid = str(
+        get_tag_value(
+            "musicBrainzId",
+            "musicbrainzId",
+            "musicbrainz_recordingid",
+            "musicbrainz_trackid",
+            "musicbrainz_track_id",
+            "mbid",
+        )
+        or ""
+    ).strip()
 
     return {
         "duration": track.get("duration"),
@@ -206,10 +225,10 @@ def extract_track_metadata(
         "writer": writer_json,
         "stars": int(track.get("userRating", 0) or 0),
         "file_path": track.get("path", ""),
-        "mbid": track.get("mbid", "") or "",
+        "mbid": recording_mbid,
         "musicbrainz_albumid": album_mbid,
         "musicbrainz_album_mbid": album_mbid,
-        "musicbrainz_trackid": get_tag_value("musicbrainz_recordingid", "musicbrainz_trackid", "musicbrainz_track_id") or "",
+        "musicbrainz_trackid": recording_mbid,
         "musicbrainz_releasegroupid": get_tag_value("musicbrainz_releasegroupid", "musicbrainz_releasegroup_id", "release_group_mbid") or "",
         "musicbrainz_releasetrackid": get_tag_value("musicbrainz_trackid", "musicbrainz_releasetrackid", "musicbrainz_release_track_id", "release_track_mbid") or "",
         "musicbrainz_albumstatus": get_tag_value("releasestatus", "musicbrainz_albumstatus", "musicbrainz_release_status", "release_status") or "",

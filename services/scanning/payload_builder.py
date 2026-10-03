@@ -91,6 +91,19 @@ EXTRACTED_JSONB_FIELDS = (
     "navidrome_genres",
 )
 
+#: MBID identity columns. An EMPTY value for these must be OMITTED from the
+#: payload: the upsert writes ``col=EXCLUDED.col`` for every payload key, so
+#: a "" would WIPE the stored MBID whenever Navidrome does not echo one back
+#: (it only sends ``musicBrainzId``, and only when the file carries the tag).
+#: Omitted ⇒ the existing value survives — the semantics the old system
+#: achieved with ``COALESCE(EXCLUDED.…, tracks.…)``.
+MBID_IDENTITY_FIELDS = frozenset({
+    "mbid", "musicbrainz_trackid", "musicbrainz_albumid",
+    "musicbrainz_album_mbid", "musicbrainz_releasegroupid",
+    "musicbrainz_releasetrackid", "musicbrainz_artistid",
+    "musicbrainz_albumartistid", "musicbrainz_workid",
+})
+
 EXTRACTED_DIRECT_FIELDS = (
     "bpm", "danceability", "stars", "duration", "track_number", "disc_number", "year",
     "bitrate", "sample_rate",
@@ -169,6 +182,7 @@ def build_track_payload(
     writer_json: str | None = None,
     get_song: Callable[[str], dict[str, Any]] | None = None,
     is_new_track: bool = True,
+    album_mbid: str | None = None,
 ) -> dict[str, Any]:
     """Return a DB-ready payload for a Navidrome track.
 
@@ -187,6 +201,9 @@ def build_track_payload(
             to populate fresh scoring columns. When False, skips the defaults
             so that existing popularity scores, star ratings, and single
             detection results are preserved during an incremental metadata sync.
+        album_mbid: Release MBID from the album object Navidrome returned
+            (`musicBrainzId`). Songs do not carry it, so without this every
+            payload's album MBID was empty.
     """
     album_context = album_context or {}
     extracted = extracted or extract_track_metadata(track, get_song=get_song)
@@ -209,13 +226,9 @@ def build_track_payload(
         "navidrome_genre": extracted.get("navidrome_genre", "") or "",
         "file_path": extracted.get("file_path", "") or "",
         "spotify_release_date": extracted.get("year", "") or "",
-        "musicbrainz_album_mbid": extracted.get("musicbrainz_albumid", "") or "",
-        "musicbrainz_artistid": normalize_single_mbid(extracted.get("musicbrainz_artistid", "") or ""),
-        "musicbrainz_artist_id": normalize_single_mbid(
-            extracted.get("musicbrainz_artist_id", "")
-            or extracted.get("musicbrainz_artistid", "")
-            or ""
-        ),
+        # musicbrainz_album_mbid / musicbrainz_artistid are added AFTER the
+        # field loops below, so empty values can be omitted instead of
+        # wiping the stored MBID (see MBID_IDENTITY_FIELDS).
         "writer": _ensure_json_string(writer_json),
         "album_context_live": 1 if album_context.get("is_live") else 0,
         "album_context_unplugged": 1 if album_context.get("is_unplugged") else 0,
@@ -234,9 +247,45 @@ def build_track_payload(
 
     # Attach String mapped fields securely
     for field in EXTRACTED_STRING_FIELDS:
-        payload[field] = extracted.get(field, "") or ""
+        value = extracted.get(field, "") or ""
+        if not value and field in MBID_IDENTITY_FIELDS:
+            continue  # omitted ⇒ the upsert leaves the stored MBID alone
+        payload[field] = value
 
     for field in EXTRACTED_DIRECT_FIELDS:
         payload[field] = extracted.get(field)
+
+    # ── MusicBrainz identity ───────────────────────────────────────────
+    # Recording MBID → the canonical `recording_mbid` column every consumer
+    # queries (queue dedupe, download-import track resolution, popularity).
+    # Written only when Navidrome actually provides one; never with "".
+    _recording_mbid = str(
+        extracted.get("musicbrainz_trackid") or extracted.get("mbid") or ""
+    ).strip()
+    if _recording_mbid:
+        payload["recording_mbid"] = _recording_mbid
+
+    # Album release MBID → prefer the file's own tag, else the album object
+    # Navidrome returned (`musicBrainzId` on AlbumID3 = mf.MbzAlbumID).
+    _album_mbid = str(
+        extracted.get("musicbrainz_albumid") or album_mbid or ""
+    ).strip()
+    if _album_mbid:
+        payload["musicbrainz_album_mbid"] = _album_mbid
+        payload["musicbrainz_albumid"] = _album_mbid
+
+    # Artist MBIDs keep their validated form when present; omitted when not,
+    # so a Navidrome response that does not carry them cannot wipe stored
+    # values the scan resolved earlier.
+    _artist_mbid = normalize_single_mbid(extracted.get("musicbrainz_artistid", "") or "")
+    if _artist_mbid:
+        payload["musicbrainz_artistid"] = _artist_mbid
+    _artist_mbid_alt = normalize_single_mbid(
+        extracted.get("musicbrainz_artist_id", "")
+        or extracted.get("musicbrainz_artistid", "")
+        or ""
+    )
+    if _artist_mbid_alt:
+        payload["musicbrainz_artist_id"] = _artist_mbid_alt
 
     return payload
