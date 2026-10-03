@@ -938,34 +938,76 @@ class NavidromeClient:
         poll_interval_seconds: float = 5.0,
         max_wait_seconds: float = 1800.0,
     ) -> bool:
-        """Trigger a Navidrome library rescan and WAIT for it to complete.
+        """Trigger a Navidrome library rescan and WAIT for verifiable completion.
 
         Navidrome's ``startScan`` is asynchronous — it returns immediately
-        while the scan runs in the background.  This method initiates the
-        scan and then polls ``getScanStatus`` (every ``poll_interval_seconds``,
-        up to ``max_wait_seconds``) until ``scanning`` is False, so callers
-        can safely proceed to import/read the freshly-updated library.
+        while the scan runs in the background — and it is REJECTED
+        (``ErrAlreadyScanning``) when another scan is already running.
 
-        The reported issue: remote syncs were fired repeatedly from every
-        file-tag write, pausing the server and locking the database.  This
-        helper centralises the sync-and-wait so the ONLY automatic sync runs
-        once, BEFORE the full Navidrome import, and completes before any
-        import work begins.
+        Correctness contract (why ``lastScan``, not ``scanning``):
 
-        Returns True when the scan finished (or was not running at all);
-        False on timeout or API failure.
+        * Phase 1 DRAINS any scan already in progress.  Waiting for
+          ``scanning == False`` alone is ambiguous: Navidrome's own handler
+          only waits ~3s for the scanner goroutine to start (then logs
+          "response may be stale"), so the flag can read False *before* our
+          scan has begun — the old implementation returned "complete" right
+          there and the caller then imported STALE rows.
+        * Phase 2 records ``lastScan`` AFTER the drain and waits until it
+          CHANGES.  Any scan completing after that observation must also have
+          STARTED after it, which — combined with the drain — guarantees the
+          scan saw every file tag Popularr wrote before requesting it.
+
+        Returns True only when a scan is verified to have completed after
+        the request; False on timeout, ``startScan`` failure, or API failure.
+        Callers that proceed despite False may read stale Navidrome data.
         """
         import time as _time
 
         try:
+            deadline = _time.time() + max_wait_seconds
+
+            # ── Phase 1: drain — wait out any scan already running ────────
+            baseline_last_scan: Any = None
+            consecutive_status_failures = 0
+            while True:
+                try:
+                    status = self.get_scan_status()
+                except Exception as exc:
+                    logger.warning(
+                        "Navidrome getScanStatus failed while draining",
+                        error=str(exc),
+                    )
+                    status = {}
+                if status.get("success"):
+                    consecutive_status_failures = 0
+                    baseline_last_scan = status.get("lastScan")
+                    if not status.get("scanning"):
+                        break
+                else:
+                    # Navidrome unreachable — fail fast instead of polling a
+                    # dead server for the whole deadline (the old code got
+                    # this fast-fail for free from start_scan).
+                    consecutive_status_failures += 1
+                    if consecutive_status_failures >= 3:
+                        logger.warning(
+                            "Navidrome getScanStatus unreachable — remote sync not verified"
+                        )
+                        return False
+                if _time.time() >= deadline:
+                    logger.warning(
+                        "Navidrome still scanning when trying to trigger a rescan — giving up",
+                        max_wait_seconds=max_wait_seconds,
+                    )
+                    return False
+                _time.sleep(poll_interval_seconds)
+
             if not self.start_scan():
-                logger.warning("Navidrome startScan failed — proceeding without remote sync")
+                logger.warning("Navidrome startScan failed — remote sync not verified")
                 return False
 
-            # Give Navidrome a moment to flip the scanning flag.
-            _time.sleep(min(2.0, poll_interval_seconds))
-
-            deadline = _time.time() + max_wait_seconds
+            # ── Phase 2: wait for lastScan to advance past the baseline ───
+            consecutive_status_failures = 0
+            saw_scanning = False
             while _time.time() < deadline:
                 try:
                     status = self.get_scan_status()
@@ -975,18 +1017,55 @@ class NavidromeClient:
                         error=str(exc),
                     )
                     status = {}
-                if status.get("success") and not status.get("scanning"):
-                    logger.info(
-                        "Navidrome remote scan complete",
-                        count=status.get("count"),
-                        last_scan=status.get("lastScan"),
-                    )
-                    return True
+                if status.get("success"):
+                    consecutive_status_failures = 0
+                    current_last_scan = status.get("lastScan")
+                    if status.get("scanning"):
+                        saw_scanning = True
+                    if (
+                        current_last_scan is not None
+                        and baseline_last_scan is not None
+                        and str(current_last_scan) != str(baseline_last_scan)
+                    ) or (
+                        # Baseline had no lastScan (never scanned) and the
+                        # server now reports one — a scan completed.
+                        current_last_scan is not None
+                        and baseline_last_scan is None
+                    ):
+                        logger.info(
+                            "Navidrome remote scan complete",
+                            count=status.get("count"),
+                            last_scan=current_last_scan,
+                        )
+                        return True
+                    if (
+                        current_last_scan is None
+                        and baseline_last_scan is None
+                        and saw_scanning
+                        and not status.get("scanning")
+                    ):
+                        # Server exposes no lastScan at all — fall back to
+                        # observing the scan run (True→False).  Requiring
+                        # ``saw_scanning`` prevents the old race where
+                        # ``scanning`` was still False BECAUSE THE SCAN HAD
+                        # NOT STARTED YET; without a lastScan to verify
+                        # against, prefer reporting "unverified" (False) over
+                        # a false success.
+                        return True
+                else:
+                    consecutive_status_failures += 1
+                    if consecutive_status_failures >= 3:
+                        logger.warning(
+                            "Navidrome getScanStatus unreachable mid-scan — remote sync not verified"
+                        )
+                        return False
                 _time.sleep(poll_interval_seconds)
 
             logger.warning(
-                "Navidrome remote scan did not finish within timeout",
+                "Navidrome remote scan did not finish within timeout — "
+                "lastScan never advanced past the baseline",
                 max_wait_seconds=max_wait_seconds,
+                baseline_last_scan=baseline_last_scan,
             )
             return False
         except Exception as exc:

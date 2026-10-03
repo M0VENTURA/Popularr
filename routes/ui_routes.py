@@ -1979,6 +1979,23 @@ async def album_detail(album_path: str) -> Any:
             except Exception as _cover_exc:
                 logger.debug("Album save cover embed failed", artist=artist_name, album=album_name, error=str(_cover_exc))
 
+        # ── Ask Navidrome to re-scan (ONE coalesced background request) ────
+        # The save wrote the corrected tags into the AUDIO FILES, but
+        # Navidrome serves its OWN database — without a rescan the next
+        # Popularr import reads Navidrome's PRE-save rows and the upsert
+        # overwrites the metadata just saved ("the import puts the old data
+        # back").  Per-tag-write triggers were removed on 2026-08-30 for
+        # hammering the server; this is ONE fire-and-forget request per
+        # user-initiated save, coalesced so bursts collapse into one scan.
+        # It never blocks the response and is a no-op when Navidrome is
+        # unconfigured.
+        if updated_count > 0 or genre_only_writes > 0 or _cover_embedded or reverted_live_count > 0:
+            try:
+                from services.scanning.navidrome_rescan_service import request_rescan
+                request_rescan("album metadata save")
+            except Exception as _rescan_exc:
+                logger.debug("Post-save Navidrome rescan request failed", error=str(_rescan_exc))
+
         if updated_count > 0:
             await flash(f"Album metadata saved — {updated_count} track(s) updated.", "success")
         # A REFUSED write is reported as a failure, and never allowed to fall

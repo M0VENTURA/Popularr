@@ -92,6 +92,25 @@ def _recreate_test_schema():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_real_navidrome_rescan(monkeypatch):
+    """Route tests must never fire a real Navidrome rescan (or its HTTP).
+
+    Album/track/tag saves request a coalesced background rescan
+    (``services.scanning.navidrome_rescan_service.request_rescan``) since
+    the "import puts the old data back" fix.  Left unpatched, EVERY route
+    test that saves metadata would spawn a daemon thread opening a real
+    connection to the fake ``POPULARLR_NAV_URL``.
+
+    The stub just reports "accepted".  Tests that exercise the rescan
+    logic itself hold a module-level reference captured at import time
+    (before this patch applies) or re-patch with their own recorder.
+    """
+    from services.scanning import navidrome_rescan_service as _rescan_svc
+
+    monkeypatch.setattr(_rescan_svc, "request_rescan", lambda *args, **kwargs: True)
+
+
 @pytest.fixture(scope="session")
 def app():
     """Create and configure the Quart application for testing.

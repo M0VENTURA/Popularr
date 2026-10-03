@@ -45,15 +45,27 @@ misc_api_bp = Blueprint("misc_api", __name__, url_prefix="/api")
 
 
 def _trigger_scan_after_tag_write() -> bool:
-    """REMOVED: remote Navidrome auto-syncs are disabled.
+    """Request ONE coalesced Navidrome rescan after a genre/tag write.
 
-    Previously this fired a Navidrome ``startScan`` in a daemon thread after
-    every genre/tag write, repeatedly pausing the server and locking the
-    database.  The ONLY automatic remote sync now runs once, BEFORE the full
-    Navidrome import (see ``run_navidrome_import_scan`` →
-    ``trigger_and_wait_for_scan``), and waits for completion before importing.
+    Historically this fired a raw ``startScan`` after every tag write,
+    repeatedly pausing the server and locking the database (removed
+    2026-08-30).  It then became a no-op that returned True anyway, so
+    callers reported ``navidrome_scan_triggered: true`` while NOTHING ran —
+    and Navidrome kept serving pre-save rows that the next import wrote
+    back over the edit.
+
+    Now: a single fire-and-forget request to the coalescing rescan service
+    (at most one scan running + one queued follow-up, never blocks), so the
+    reported value is truthful without reintroducing the scan storm.
+    Returns True when the request was accepted (scan running or queued).
     """
-    return True
+    try:
+        from services.scanning.navidrome_rescan_service import request_rescan
+
+        return bool(request_rescan("tag/genre save"))
+    except Exception as exc:
+        logger.debug("Navidrome rescan request failed", error=str(exc))
+        return False
 
 
 # ===========================================================================

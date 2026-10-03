@@ -37,6 +37,53 @@ logger = structlog.get_logger(__name__)
 _PARALLEL_WORKERS = int(os.environ.get("POPULARLR_IMPORT_WORKERS", "4"))
 
 
+def sync_remote_navidrome_before_import(nav_client: Any) -> bool:
+    """Trigger ONE Navidrome server-side scan and WAIT until VERIFIED.
+
+    This is the ONLY automatic remote sync: the frequent per-tag-write
+    triggers were removed (they paused the server and locked the database).
+    The wait ensures freshly written file tags are fully ingested by
+    Navidrome before the import reads them back.
+
+    ⚠️ The return value matters: when False the remote scan was NOT
+    verified (``startScan`` failed — e.g. the Navidrome user is not admin —
+    or the scan never finished).  A caller that proceeds anyway imports
+    Navidrome's PRE-save rows, whose upsert OVERWRITES the metadata just
+    saved on the album page — "the import puts the old data back".  So this
+    says so loudly instead of claiming "scan finished".
+    """
+    if not nav_client:
+        return True  # no client configured — nothing to sync, nothing to verify
+
+    try:
+        log_unified("Navidrome Import - Triggering remote Navidrome scan (waiting for completion)…")
+        remote_sync_ok = bool(nav_client.trigger_and_wait_for_scan())
+        if remote_sync_ok:
+            log_unified("Navidrome Import - Remote Navidrome scan finished")
+        else:
+            log_unified(
+                "⚠️ Navidrome Import - Remote Navidrome scan FAILED or timed out. "
+                "Navidrome may serve STALE metadata — recently saved edits could be "
+                "overwritten by this import. Check that the Navidrome user is an "
+                "admin (startScan requires admin) and that Navidrome can scan."
+            )
+            logger.warning(
+                "Navidrome import proceeding WITHOUT a verified remote scan — "
+                "stale rows may overwrite recently saved metadata"
+            )
+        return remote_sync_ok
+    except Exception as exc:
+        logger.warning(
+            "Remote Navidrome sync failed — proceeding with import",
+            error=str(exc),
+        )
+        log_unified(
+            f"⚠️ Navidrome Import - Remote scan error: {exc}. "
+            "Navidrome may serve STALE metadata to this import."
+        )
+        return False
+
+
 def run_navidrome_import_scan(
     *,
     mode: str = "all",
@@ -83,23 +130,10 @@ def run_navidrome_import_scan(
             )
 
         # ── Remote Navidrome sync BEFORE the import ───────────────────────
-        # Trigger ONE Navidrome server-side library scan and WAIT for it to
-        # finish before importing.  This is the ONLY automatic remote sync:
-        # the frequent per-tag-write triggers were removed (they paused the
-        # server and locked the database).  The wait ensures the freshly
-        # written MusicBrainz tags / new files are fully ingested by
-        # Navidrome before we read them back, so the import sees the latest
-        # state instead of a mid-scan snapshot.
-        if nav_client:
-            try:
-                log_unified("Navidrome Import - Triggering remote Navidrome scan (waiting for completion)…")
-                nav_client.trigger_and_wait_for_scan()
-                log_unified("Navidrome Import - Remote Navidrome scan finished")
-            except Exception as exc:
-                logger.warning(
-                    "Remote Navidrome sync failed — proceeding with import",
-                    error=str(exc),
-                )
+        # Verified drain-and-wait (see sync_remote_navidrome_before_import):
+        # a False return means Navidrome may serve STALE rows whose upsert
+        # would overwrite metadata just saved — the helper logs that loudly.
+        remote_sync_ok = sync_remote_navidrome_before_import(nav_client)
 
         # Check scan marker — skip if nothing changed since last run
         current_marker: int | None = None
@@ -326,7 +360,10 @@ def run_navidrome_import_scan(
             extra={"status": "complete", "exit_code": 0},
         )
 
-        log_unified("Navidrome Import - Complete")
+        log_unified(
+            "Navidrome Import - Complete"
+            + ("" if remote_sync_ok else " (remote scan NOT verified — see warning above)")
+        )
         record_scan("navidrome", "completed", message="Navidrome import complete")
 
     except Exception as exc:
