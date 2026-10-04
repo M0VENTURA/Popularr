@@ -832,6 +832,10 @@ _ALBUM_MB_TAG_COLUMNS: tuple[str, ...] = (
     "media",
     "originalyear",
     "originaldate",
+    # Release/medium totals the album page writes (TRACKTOTAL/DISCTOTAL
+    # TXXX or Vorbis) — a queued import must carry them too.
+    "tracktotal",
+    "disctotal",
 )
 
 
@@ -936,6 +940,17 @@ def update_file_metadata(file_path: str, metadata: Dict[str, Any]) -> bool:
 
     if metadata.get("release_mbid"):
         tag_updates["musicbrainz_albumid"] = metadata.get("release_mbid")
+
+    # Track-level MusicBrainz enrichment carried on the queue row's metadata
+    # JSONB (``add_release_tracks_to_queue_detailed`` persists it): ISRC →
+    # TSRC and the track-artist MBID → MUSICBRAINZ_ARTISTID.  The album page
+    # writes both, so a queued import without them never matched the release
+    # it was downloaded for.
+    if metadata.get("isrc"):
+        tag_updates["isrc"] = metadata.get("isrc")
+
+    if metadata.get("musicbrainz_artistid"):
+        tag_updates["musicbrainz_artistid"] = metadata.get("musicbrainz_artistid")
 
     # MusicBrainz enrichment carried through the queue row's metadata JSONB.
     if metadata.get("writer"):

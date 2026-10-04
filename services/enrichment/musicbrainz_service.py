@@ -346,6 +346,20 @@ def build_artist_credit_string(artist_credit: list[Any]) -> str:
             Parts.append(str(credit))
     return "".join(Parts).strip()
 
+def credit_artist_mbid(artist_credit: Any) -> str | None:
+    """First artist MBID in an artist-credit list, or None.
+
+    Used by the release flatten for the per-track ``artist_mbid`` (the
+    ``musicbrainz_artistid`` the album page and the import write), which
+    previously had no source on this path at all.
+    """
+    for credit in artist_credit or []:
+        if isinstance(credit, dict):
+            artist = credit.get("artist")
+            if isinstance(artist, dict) and artist.get("id"):
+                return str(artist["id"])
+    return None
+
 def primary_album_artist(artist_credit: list[Any] | str) -> str:
     if isinstance(artist_credit, list) and artist_credit:
         First = artist_credit[0]
@@ -1761,6 +1775,11 @@ def _release_extended_fields(release: dict[str, Any], media: Any) -> dict[str, s
 _RELEASE_FETCH_INC = (
     "recordings+artist-credits+release-groups+media+labels"
     "+work-rels+recording-level-rels+work-level-rels+artist-rels+genres"
+    # ``isrcs`` is NOT implied by ``recordings``: without it the per-recording
+    # ISRC never arrives, so the download import could never write TSRC
+    # (verified against the live API — same query with/without returns
+    # isrcs/no-isrcs).
+    "+isrcs"
 )
 
 
@@ -1902,6 +1921,21 @@ def _flatten_release(Release: dict[str, Any], release_id: str) -> dict[str, Any]
                 "mb_recording_mbid": str(Recording.get("id") or ""),
                 "mb_duration": Length,
                 "mb_genres": list(genres),
+                # ── Per-track fields the download import applies ────────────
+                # ``isrc``/``tracktotal``/``artist_mbid`` were never emitted on
+                # this path, so a queue-imported file could never carry TSRC,
+                # TRACKTOTAL or the track-artist MBID even though the album
+                # page writes them (tag parity with the album page).
+                "isrc": _first_isrc(Recording),
+                "tracktotal": (
+                    str(medium.get("track-count"))
+                    if _as_int(medium.get("track-count"), 0) > 0
+                    else None
+                ),
+                "artist_mbid": (
+                    credit_artist_mbid(Recording.get("artist-credit"))
+                    or credit_artist_mbid(Release.get("artist-credit"))
+                ),
             }
             if genres:
                 # Stored as a comma-joined STRING (the tag writer splits on
@@ -1986,6 +2020,9 @@ def _flatten_release(Release: dict[str, Any], release_id: str) -> dict[str, Any]
         "specific_release_title": str(Release.get("title") or ""),
         "compilation": 1 if "compilation" in {t.casefold() for t in Secondary_types} else 0,
         "original_date": str(Release_group.get("first-release-date") or Release.get("date") or ""),
+        # ``disctotal`` = number of discs; the import maps it to the tracks
+        # ``disctotal`` column (the album page's release_fields writes it too).
+        "disctotal": str(len(Media)) if Media else None,
         # ``original_year`` is the STRING form (tags are text and the year
         # writer regexes digits out of it); ``original_release_year`` keeps the
         # int form the scoring/batch paths expect.

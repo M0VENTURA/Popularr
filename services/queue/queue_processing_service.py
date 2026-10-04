@@ -458,6 +458,16 @@ def add_release_tracks_to_queue_detailed(
                     _genres = ", ".join(str(g) for g in track["mb_genres"] if str(g).strip())
                 if _genres:
                     _mb_meta["musicbrainz_genres"] = _genres
+                # Per-track MusicBrainz enrichment for tag parity with the
+                # album page: ISRC, the medium's track count and the
+                # track-artist MBID.  Stored on the row so the import can
+                # apply them without a second MusicBrainz fetch.
+                if track.get("isrc"):
+                    _mb_meta["isrc"] = str(track["isrc"])
+                if track.get("tracktotal"):
+                    _mb_meta["tracktotal"] = str(track["tracktotal"])
+                if track.get("artist_mbid"):
+                    _mb_meta["musicbrainz_artistid"] = str(track["artist_mbid"])
 
                 # Album-scoped release metadata, persisted so the import can
                 # apply the full release identity without re-querying MB.

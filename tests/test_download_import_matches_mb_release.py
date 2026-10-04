@@ -145,10 +145,12 @@ def _release() -> dict:
         },
         "media": [{
             "position": 1,
+            "track-count": 1,
             "tracks": [{
                 "position": 1, "title": "Song One", "length": 200000,
                 "recording": {
                     "id": "rec-a",
+                    "isrcs": ["US5TA2600199"],
                     "artist-credit": [{"name": "Band Alpha",
                                        "artist": {"id": "a1", "name": "Band Alpha"}}],
                 },
@@ -606,3 +608,329 @@ class TestImportReachesAlbumPageParity:
             "all of these for the same release, so a downloaded album would not "
             "match its MBID release"
         )
+
+
+# ---------------------------------------------------------------------------
+# 4. Tag parity: ISRC / track totals / original date / artist MBID
+# ---------------------------------------------------------------------------
+
+class TestFlattenExposesPerTrackParityFields:
+    """The four fields the coverage audit found missing must have a SOURCE."""
+
+    def test_track_entry_carries_isrc_tracktotal_and_artist_mbid(self, mb):
+        payload = mb.fetch_musicbrainz_release_metadata("rel-va-1")
+        tracks = payload.get("tracks") or []
+        assert tracks, "flatten produced no tracks"
+        entry = tracks[0]
+        assert entry.get("isrc") == "US5TA2600199", (
+            "without isrc on the track entry the import can never write TSRC"
+        )
+        assert entry.get("tracktotal") == "1", (
+            "tracktotal must be the medium's track-count as a string"
+        )
+        assert entry.get("artist_mbid") == "a1", (
+            "artist_mbid must be the TRACK artist's MBID (recording credit first)"
+        )
+
+    def test_release_carries_original_date_and_disctotal(self, mb):
+        payload = mb.fetch_musicbrainz_release_metadata("rel-va-1")
+        assert payload.get("original_date") == "1994-06-01", (
+            "original_date is the source for the ORIGINALDATE tag"
+        )
+        assert payload.get("disctotal") == "1", (
+            "disctotal is the number of media (discs)"
+        )
+
+    def test_fetch_inc_requests_isrcs(self, mb, monkeypatch):
+        """``isrcs`` is NOT implied by ``recordings`` — without it no ISRC."""
+        captured = {}
+
+        class _CapturingClient(_FakeMbClient):
+            def get_release(self, release_id, inc="", **kwargs):
+                captured["inc"] = inc
+                return _release()
+
+        import services.enrichment.musicbrainz_service as mbs
+        monkeypatch.setattr(mbs, "get_shared_mb_client", lambda: _CapturingClient())
+        mb.fetch_musicbrainz_release_metadata("rel-va-1")
+        assert "+isrcs" in (captured.get("inc") or ""), (
+            "the release fetch must request isrcs or per-recording ISRC never arrives"
+        )
+
+
+class TestAlbumLevelMappingIncludesNewColumns:
+    """``_album_level_mb_fields`` must map originaldate + disctotal."""
+
+    def test_original_date_and_disctotal_are_mapped(self, mb):
+        from services.downloads.download_completion_service import (
+            _album_level_mb_fields,
+        )
+
+        payload = mb.fetch_musicbrainz_release_metadata("rel-va-1")
+        mapped = _album_level_mb_fields(payload)
+        assert mapped.get("originaldate") == "1994-06-01"
+        assert mapped.get("disctotal") == "1"
+
+    def test_new_columns_are_in_album_level_columns(self):
+        from services.downloads.download_completion_service import (
+            _ALBUM_LEVEL_COLUMNS,
+        )
+
+        assert "originaldate" in _ALBUM_LEVEL_COLUMNS
+        assert "disctotal" in _ALBUM_LEVEL_COLUMNS
+
+
+class TestImportAppliesPerTrackParityFields:
+    """The import must write isrc / tracktotal / originaldate / disctotal /
+    musicbrainz_artistid — the four gaps the coverage audit found."""
+
+    @pytest.fixture(autouse=True)
+    def _capture(self, monkeypatch):
+        from services.downloads import download_completion_service as dcs
+        from services.metadata import tag_file_service as tfs
+        from db.repositories import tracks as tracks_repo
+
+        self.tag_writes = []
+        self.db_writes = []
+        monkeypatch.setattr(
+            tfs, "update_file_metadata",
+            lambda p, m: self.tag_writes.append(dict(m)) or True,
+        )
+        monkeypatch.setattr(
+            tracks_repo, "insert_or_update_track",
+            lambda tid, payload, *a, **k: self.db_writes.append((tid, dict(payload))) or True,
+        )
+        monkeypatch.setattr(
+            dcs, "_resolve_track_id_for_import", lambda **kw: "t-parity-2"
+        )
+        self.dcs = dcs
+        yield
+
+    def _merged(self) -> dict:
+        merged: dict = {}
+        for meta in self.tag_writes:
+            merged.update(meta)
+        return merged
+
+    def test_stored_per_track_fields_are_applied(self, monkeypatch):
+        """Queue-time stored values reach the writer without any MB fetch."""
+        row = _queue_row(metadata=json.dumps({
+            "isrc": "US5TA2600199",
+            "tracktotal": "17",
+            "musicbrainz_artistid": "a1",
+            "album_metadata": {
+                "musicbrainz_albumtype": "album",
+                "musicbrainz_albumstatus": "Official",
+                "musicbrainz_albumartistid": "a1",
+                "musicbrainz_releasegroupid": "rg-x",
+                "releasecountry": "GB",
+                "originalyear": "1994",
+                "originaldate": "1994-06-01",
+                "releasedate": "1999-01-01",
+                "disctotal": "2",
+                "recordlabel": "Label",
+                "catalognumber": "CAT1",
+                "barcode": "0123456789012",
+                "media": "CD",
+            },
+        }))
+        # Make ANY fetch loudly fail: stored values must suffice.
+        from services.enrichment import musicbrainz_service as mbs
+        monkeypatch.setattr(
+            mbs, "fetch_musicbrainz_release_metadata",
+            lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("no fetch")),
+        )
+
+        self.dcs._apply_stored_metadata(row, "/music/stored.flac")
+        merged = self._merged()
+        assert merged.get("isrc") == "US5TA2600199"
+        assert merged.get("tracktotal") == "17"
+        assert merged.get("musicbrainz_artistid") == "a1"
+        assert merged.get("originaldate") == "1994-06-01"
+        assert merged.get("disctotal") == "2"
+
+    def test_missing_per_track_fields_are_refreshed_from_musicbrainz(
+        self, mb, monkeypatch
+    ):
+        """A queue_add row (no metadata JSON) must still get them from MB."""
+        row = _queue_row(metadata=json.dumps({}))
+        self.dcs._apply_stored_metadata(row, "/music/refreshed.flac")
+        merged = self._merged()
+        assert merged.get("isrc") == "US5TA2600199"
+        assert merged.get("tracktotal") == "1"
+        assert merged.get("musicbrainz_artistid") == "a1"
+        # Album-level new columns come from the same fetch.
+        assert merged.get("originaldate") == "1994-06-01"
+        assert merged.get("disctotal") == "1"
+
+    def test_per_track_fields_reach_the_db_payload(self, mb, monkeypatch):
+        row = _queue_row(metadata=json.dumps({}))
+        self.dcs._apply_stored_metadata(row, "/music/db.flac")
+        payloads = [p for _tid, p in self.db_writes]
+        assert payloads, "no tracks-table write happened"
+        merged: dict = {}
+        for p in payloads:
+            merged.update(p)
+        assert merged.get("isrc") == "US5TA2600199"
+        assert merged.get("tracktotal") == "1"
+        assert merged.get("musicbrainz_artistid") == "a1"
+        assert merged.get("originaldate") == "1994-06-01"
+        assert merged.get("disctotal") == "1"
+
+    def test_never_overwrites_stored_values_with_refresh(self, monkeypatch):
+        """Stored isrc wins; the refresh must not replace it."""
+        row = _queue_row(metadata=json.dumps({
+            "isrc": "STORED123456",
+            "tracktotal": "12",
+            "musicbrainz_artistid": "stored-artist",
+        }))
+        self.dcs._apply_stored_metadata(row, "/music/nowin.flac")
+        merged = self._merged()
+        assert merged.get("isrc") == "STORED123456"
+        assert merged.get("tracktotal") == "12"
+        assert merged.get("musicbrainz_artistid") == "stored-artist"
+
+
+class TestUpdateFileMetadataForwardsPerTrackFields:
+    """The WRITER must receive isrc / tracktotal / disctotal / artist MBID."""
+
+    def test_per_track_and_total_fields_reach_the_writer(self, monkeypatch):
+        from services.metadata import tag_file_service as tfs
+
+        captured = {}
+        monkeypatch.setattr(
+            tfs, "write_tags_to_file", lambda p, t: captured.update(t) or True
+        )
+
+        tfs.update_file_metadata("/music/parity2.flac", {
+            "title": "Song One",
+            "isrc": "US5TA2600199",
+            "tracktotal": "17",
+            "disctotal": "2",
+            "musicbrainz_artistid": "a1",
+            "originaldate": "1994-06-01",
+        })
+
+        assert captured, "nothing reached the tag writer"
+        assert captured.get("isrc") == "US5TA2600199"
+        assert captured.get("tracktotal") == "17"
+        assert captured.get("disctotal") == "2"
+        assert captured.get("musicbrainz_artistid") == "a1"
+        assert captured.get("originaldate") == "1994-06-01"
+
+    def test_absent_fields_are_never_forwarded_as_none(self, monkeypatch):
+        """The None-means-suppress contract must hold for the new fields too."""
+        from services.metadata import tag_file_service as tfs
+
+        captured = {}
+        monkeypatch.setattr(
+            tfs, "write_tags_to_file", lambda p, t: captured.update(t) or True
+        )
+
+        tfs.update_file_metadata("/music/parity3.flac", {
+            "title": "Song One",
+            "isrc": None,
+            "tracktotal": None,
+            "musicbrainz_artistid": None,
+        })
+
+        assert "isrc" not in captured
+        assert "tracktotal" not in captured
+        assert "musicbrainz_artistid" not in captured
+
+
+class TestQueueTimePersistsPerTrackEnrichment:
+    """The queue adder must store isrc / tracktotal / artist MBID on the row."""
+
+    @pytest.fixture(autouse=True)
+    def _capture_inserts(self, monkeypatch):
+        from sqlalchemy import event
+        from db.engine import get_engine
+
+        _ensure_queue_table()
+        try:
+            with db_session() as session:
+                session.execute(text("DELETE FROM download_queue"))
+                session.commit()
+        except Exception:
+            pass
+
+        from services.queue import queue_processing_service as qps
+        monkeypatch.setattr(qps, "find_library_track", lambda **kwargs: None)
+
+        self.inserted = []
+
+        def _before(conn, cursor, statement, params, context, executemany):
+            if "INSERT INTO download_queue" in " ".join(statement.split()):
+                self.inserted.append(params)
+
+        engine = get_engine()
+        event.listen(engine, "before_cursor_execute", _before)
+        yield
+        event.remove(engine, "before_cursor_execute", _before)
+
+    def _stored_metadata(self, params) -> dict:
+        if isinstance(params, dict):
+            raw = params.get("metadata")
+        else:
+            raw = next(
+                (v for v in (params or ())
+                 if isinstance(v, str) and v.strip().startswith("{")),
+                None,
+            )
+        if not raw:
+            return {}
+        return json.loads(raw) if isinstance(raw, str) else dict(raw)
+
+    def test_per_track_enrichment_is_persisted(self):
+        from services.queue import queue_processing_service as qps
+
+        result = qps.add_release_tracks_to_queue_detailed(
+            "rel-va-1",
+            [{
+                "title": "Song One",
+                "artist": "Band Alpha",
+                "track_number": 1,
+                "disc_number": 1,
+                "recording_mbid": "rec-a",
+                "isrc": "US5TA2600199",
+                "tracktotal": "17",
+                "artist_mbid": "a1",
+            }],
+            "Various Artists",
+            "Now That's Music",
+            album_artist="Various Artists",
+            year=1999,
+        )
+        assert result.get("queued") is True, result
+        assert self.inserted, "nothing was inserted"
+
+        stored = self._stored_metadata(self.inserted[0])
+        assert stored.get("isrc") == "US5TA2600199"
+        assert stored.get("tracktotal") == "17"
+        assert stored.get("musicbrainz_artistid") == "a1", (
+            "artist_mbid from the flatten must be stored as musicbrainz_artistid"
+        )
+
+    def test_absent_enrichment_is_not_stored(self):
+        from services.queue import queue_processing_service as qps
+
+        qps.add_release_tracks_to_queue_detailed(
+            "rel-va-1",
+            [{
+                "title": "Song Two",
+                "artist": "Band Alpha",
+                "track_number": 2,
+                "recording_mbid": "rec-b",
+            }],
+            "Various Artists",
+            "Now That's Music",
+            album_artist="Various Artists",
+            year=1999,
+        )
+        assert self.inserted, "nothing was inserted"
+        stored = self._stored_metadata(self.inserted[0])
+        assert "isrc" not in stored
+        assert "tracktotal" not in stored
+        assert "musicbrainz_artistid" not in stored
+

@@ -677,7 +677,9 @@ _ALBUM_LEVEL_COLUMNS: tuple[str, ...] = (
     "musicbrainz_releasegroupid",
     "releasecountry",
     "originalyear",
+    "originaldate",
     "releasedate",
+    "disctotal",
     "recordlabel",
     "catalognumber",
     "barcode",
@@ -705,7 +707,9 @@ def _album_level_mb_fields(release: dict[str, Any]) -> dict[str, Any]:
         "musicbrainz_releasegroupid": release.get("release_group_mbid"),
         "releasecountry": release.get("releasecountry"),
         "originalyear": release.get("original_year"),
+        "originaldate": release.get("original_date"),
         "releasedate": release.get("releasedate"),
+        "disctotal": release.get("disctotal"),
         "recordlabel": release.get("recordlabel"),
         "catalognumber": release.get("catalognumber"),
         "barcode": release.get("barcode"),
@@ -1007,8 +1011,59 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
                 meta["musicbrainz_genres"] = str(_stored["musicbrainz_genres"])
             if _stored.get("work_mbid"):
                 meta["musicbrainz_workid"] = str(_stored["work_mbid"])
+            # Per-track MusicBrainz enrichment persisted at queue time — the
+            # album page writes ISRC / TRACKTOTAL / the track-artist MBID, so
+            # a queued import must carry them too (tag parity).  ``None``/empty
+            # keys are simply absent and never forwarded (see the contract at
+            # the top of ``update_file_metadata``).
+            if _stored.get("isrc"):
+                meta["isrc"] = str(_stored["isrc"])
+            if _stored.get("tracktotal"):
+                meta["tracktotal"] = str(_stored["tracktotal"])
+            if _stored.get("musicbrainz_artistid"):
+                meta["musicbrainz_artistid"] = str(_stored["musicbrainz_artistid"])
     except Exception as _stored_exc:
         logger.debug("Stored MB metadata parse failed", queue_id=item.get("id"), error=str(_stored_exc))
+
+    # ── Per-track enrichment for rows that stored none ────────────────────
+    # ``queue_add`` rows (album-page missing-track button, search form) carry
+    # NO metadata JSON, and rows queued before the queue adder persisted
+    # these have neither — so refresh from the same HTTP-layer-cached release
+    # payload the album-level refresh uses, matched to THIS recording, and
+    # fill only what is still missing (tag parity with the album page: TSRC,
+    # TRACKTOTAL, MUSICBRAINZ ARTIST ID).
+    _track_missing = [
+        _k for _k in ("isrc", "tracktotal", "musicbrainz_artistid")
+        if not meta.get(_k)
+    ]
+    if _track_missing and release_mbid:
+        try:
+            from services.enrichment.musicbrainz_service import (
+                fetch_musicbrainz_release_metadata,
+            )
+
+            _release = fetch_musicbrainz_release_metadata(release_mbid)
+            _match = (
+                _match_release_track(_release, item)
+                if isinstance(_release, dict)
+                else None
+            )
+            if _match:
+                _fills = {
+                    "isrc": _match.get("isrc"),
+                    "tracktotal": _match.get("tracktotal"),
+                    "musicbrainz_artistid": _match.get("artist_mbid"),
+                }
+                for _k in _track_missing:
+                    if _fills.get(_k) not in (None, ""):
+                        meta[_k] = str(_fills[_k])
+        except Exception as _track_exc:
+            logger.debug(
+                "Track-level MB enrichment refresh failed — stored values only",
+                queue_id=item.get("id"),
+                release_mbid=release_mbid,
+                error=str(_track_exc),
+            )
 
     if not meta:
         return False
@@ -1060,8 +1115,12 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
             # identity, so the library showed an album that did not match the
             # MBID release it was downloaded for.
             "musicbrainz_albumtype", "musicbrainz_albumstatus",
-            "releasecountry", "originalyear", "releasedate",
-            "recordlabel", "catalognumber", "barcode", "media",
+            "releasecountry", "originalyear", "originaldate", "releasedate",
+            "disctotal", "recordlabel", "catalognumber", "barcode", "media",
+            # Track-level MusicBrainz enrichment: ISRC, the medium's
+            # track-count and the track-artist MBID (written by the album page,
+            # so a downloaded album must carry them too).
+            "isrc", "tracktotal",
             # ``release_mbid`` is a download_queue column, not a tracks column;
             # the tracks-table equivalent is ``musicbrainz_album_mbid``.
             "musicbrainz_album_mbid",
