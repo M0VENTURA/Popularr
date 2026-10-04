@@ -1465,6 +1465,21 @@
       }
     }
 
+    // ── Tracklist findings for the picked release ────────────────────────
+    // The SAME computation the popularity scan's metadata lookup runs:
+    // missing tracks for THIS release (queueable rows in the tracklist) and
+    // local tracks that were downloaded twice (flagged on their rows).
+    // Runs while the busy popup is still up so the lookup never "finishes"
+    // before the tracklist has settled.
+    if (global.busyPopup) {
+      global.busyPopup.update(lookupBusy, 'Checking the tracklist against this release…');
+    }
+    try {
+      await refreshAlbumTrackFindings(resolvedReleaseId);
+    } catch (error) {
+      console.warn('Could not refresh album tracklist findings', error);
+    }
+
     if (staged) {
       const counts = staged.counts || {};
       notifySuccess(
@@ -2649,8 +2664,14 @@
     const missing = (data && data.missing_tracks) || [];
     if (!missing.length) return;
 
+    renderMissingTracks(missing, tbody);
+    updateMissingHeaderBadge(missing.length);
+  }
+
+  /** Render persisted missing rows (deduped) as tracklist sub-rows. */
+  function renderMissingTracks(rows, tbody) {
     const seen = new Set();
-    missing.forEach((row) => {
+    rows.forEach((row) => {
       const comp = missingRowToTrackComp(row);
       // Distinct rows are expected, but a duplicate title + position would
       // render two identical rows.
@@ -2668,18 +2689,114 @@
       };
       appendMissingRow(buildMissingRow(comp, ctx), tbody);
     });
+  }
 
-    // Advertise the count, so the header agrees with what is rendered.
+  /** Show (or hide at zero) the header's "N tracks missing" badge. */
+  function updateMissingHeaderBadge(count) {
     const badge = document.getElementById('albumMissingHeaderBadge');
-    if (badge) {
-      badge.textContent = `${missing.length} track${missing.length === 1 ? '' : 's'} missing`;
+    if (!badge) return;
+    if (count > 0) {
+      badge.textContent = `${count} track${count === 1 ? '' : 's'} missing`;
       badge.classList.remove('d-none');
+    } else {
+      badge.textContent = '';
+      badge.classList.add('d-none');
     }
+  }
+
+  /**
+   * Recompute + render the album page's TRACKLIST FINDINGS: the tracks this
+   * release is missing from the collection, and the local tracks that were
+   * downloaded twice.
+   *
+   * The missing half runs the SAME server computation the popularity scan's
+   * metadata lookup runs (``get_missing_tracks``, persisted so later page
+   * loads keep it) — just triggered by the album page's Lookup MBID instead
+   * of a scan, against the release the user just picked.
+   */
+  async function refreshAlbumTrackFindings(releaseMbid) {
+    const tbody = document.getElementById('albumTracksTbody');
+    if (!tbody) return;
+    const artist = pageArtist();
+    const album = pageAlbum();
+    if (!artist || !album) return;
+
+    if (releaseMbid) {
+      try {
+        const data = await global.api.getJson(
+          `/api/album/missing-tracks?artist=${encodeURIComponent(artist)}`
+          + `&album=${encodeURIComponent(album)}`
+          + `&refresh=1&release_mbid=${encodeURIComponent(releaseMbid)}`
+        );
+        // mb_total == 0 → no release could be fetched (bad id, offline);
+        // keep whatever is rendered rather than replacing a good list with
+        // nothing.
+        if (data && (data.mb_total || 0) > 0) {
+          tbody.querySelectorAll('.mb-missing-row').forEach((r) => r.remove());
+          renderMissingTracks(data.missing_tracks || [], tbody);
+          updateMissingHeaderBadge(data.missing_count || 0);
+        }
+      } catch (_e) {
+        // Non-fatal: the owned tracklist still renders.
+      }
+    }
+
+    // Duplicates are a local library fact — flag them too (idempotent).
+    await loadAlbumDuplicateFlags();
+  }
+
+  /**
+   * Flag tracklist rows whose track exists MORE THAN ONCE on this album
+   * ("downloaded twice") with a red badge. Idempotent: clears previous flags
+   * first, so a refresh can never stack badges.
+   */
+  async function loadAlbumDuplicateFlags() {
+    const tbody = document.getElementById('albumTracksTbody');
+    if (!tbody) return;
+    const artist = pageArtist();
+    const album = pageAlbum();
+    if (!artist || !album) return;
+
+    let data;
+    try {
+      data = await global.api.getJson(
+        `/api/album/duplicate-tracks?artist=${encodeURIComponent(artist)}`
+        + `&album=${encodeURIComponent(album)}`
+      );
+    } catch (_e) {
+      return; // non-fatal
+    }
+
+    tbody.querySelectorAll('.album-duplicate-badge').forEach((b) => b.remove());
+
+    const counts = new Map();
+    ((data && data.duplicates) || []).forEach((group) => {
+      (group.track_ids || []).forEach((id) => {
+        counts.set(String(id), Number(group.count) || 0);
+      });
+    });
+    if (!counts.size) return;
+
+    tbody.querySelectorAll('tr[data-track-id]').forEach((row) => {
+      const count = counts.get(String(row.getAttribute('data-track-id') || ''));
+      if (!count) return;
+      const titleCell = row.cells && row.cells[1];
+      if (!titleCell) return;
+      const badge = document.createElement('span');
+      badge.className = 'badge bg-danger ms-1 album-duplicate-badge';
+      badge.style.fontSize = '0.65rem';
+      badge.textContent = `Duplicate \u00d7${count}`;
+      badge.title = `This track exists ${count} times on this album (downloaded more than once)`;
+      const anchor = titleCell.querySelector('a');
+      if (anchor) anchor.insertAdjacentElement('afterend', badge);
+      else titleCell.insertAdjacentElement('afterbegin', badge);
+    });
   }
 
   document.addEventListener('DOMContentLoaded', () => {
     // Fire-and-forget: a failure here must not stop the page's other wiring.
     loadAlbumMissingTracks();
+    loadAlbumDuplicateFlags();
   });
 
   // ── Public API ──────────────────────────────────────────────────────────

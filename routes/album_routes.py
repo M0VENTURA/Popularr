@@ -693,7 +693,7 @@ def api_album_library_tracks() -> Any:
 
 @album_bp.route("/missing-tracks", methods=["GET"])
 def api_album_missing_tracks() -> Any:
-    """The album's missing tracks — read from the database only.
+    """The album's missing tracks — read from the database only by default.
 
     The MusicBrainz release fetch and the missing-set computation are done by
     the SCAN (``scan_stage_runner`` refreshes ``missing_album_tracks`` per
@@ -701,17 +701,49 @@ def api_album_missing_tracks() -> Any:
     page requests it ONCE PER OWNED ALBUM on load, so opening an artist page
     fired that many MusicBrainz calls — which queued behind the shared 1 req/s
     throttle whenever a scan was running and froze the worker.
+
+    ``refresh=1`` recomputes on demand — the album page's Lookup MBID calls
+    this with the release it just resolved (``release_mbid=<id>``), so the
+    missing list is measured against THAT release (the same computation the
+    popularity scan runs), then rendered into the tracklist. Page loads keep
+    the DB-only path.
+    """
+    artist = request.args.get("artist", "").strip()
+    album = request.args.get("album", "").strip()
+    if not artist or not album:
+        return jsonify({"error": "artist and album required"}), 400
+    refresh = request.args.get("refresh", "").strip().lower() in ("1", "true", "yes", "on")
+    release_mbid = request.args.get("release_mbid", "").strip()
+    try:
+        if refresh:
+            from services.metadata.album_missing_service import get_missing_tracks
+            result = get_missing_tracks(artist, album, release_mbid=release_mbid or None)
+        else:
+            from services.metadata.album_missing_service import get_missing_tracks_from_db
+            result = get_missing_tracks_from_db(artist, album)
+        return jsonify(result)
+    except Exception as exc:
+        logger.error("Failed to get missing tracks", error=str(exc))
+        return jsonify({"error": str(exc)}), 500
+
+
+@album_bp.route("/duplicate-tracks", methods=["GET"])
+def api_album_duplicate_tracks() -> Any:
+    """Tracks on this album that were downloaded more than once.
+
+    Same duplicate definition as the artist-corrections page (identical
+    title/artist/position in the album, version-variant file names excluded),
+    scoped to ONE album so the album page can flag its own tracklist rows.
     """
     artist = request.args.get("artist", "").strip()
     album = request.args.get("album", "").strip()
     if not artist or not album:
         return jsonify({"error": "artist and album required"}), 400
     try:
-        from services.metadata.album_missing_service import get_missing_tracks_from_db
-        result = get_missing_tracks_from_db(artist, album)
-        return jsonify(result)
+        from services.metadata.album_missing_service import find_duplicate_tracks
+        return jsonify(find_duplicate_tracks(artist, album))
     except Exception as exc:
-        logger.error("Failed to get missing tracks", error=str(exc))
+        logger.error("Failed to find duplicate tracks", error=str(exc))
         return jsonify({"error": str(exc)}), 500
 
 

@@ -395,6 +395,17 @@ window.applyAlbumMbid = function (mbid) {
     const tabBtn = document.querySelector('#albumPageTabs [data-bs-target="#tab-details"]');
     if (tabBtn && window.bootstrap) bootstrap.Tab.getOrCreateInstance(tabBtn).show();
 
+    // Tracklist findings for the picked release: the tracks this release is
+    // missing from the collection (queueable rows) and the local tracks that
+    // were downloaded twice — the same computation the popularity scan's
+    // metadata lookup runs. Fire-and-forget: findings must never block the
+    // form preview below.
+    if (typeof _refreshAlbumTrackFindings === 'function') {
+        Promise.resolve()
+            .then(() => _refreshAlbumTrackFindings(mbid))
+            .catch(error => console.warn('Could not refresh album tracklist findings', error));
+    }
+
     // Full metadata preview: every album-level field plus each per-track
     // change a metadata import would write, shown as orange bars. Staged only.
     const review = window.albumMetadataReview;
@@ -1508,38 +1519,8 @@ window.loadAlbumMissingTracks = function () {
         .then(data => {
             const missing = (data && data.missing_tracks) || [];
             if (!missing.length) return;
-
-            const seen = new Set();
-            missing.forEach(row => {
-                const comp = _missingRowToTrackComp(row);
-                // The endpoint returns distinct rows, but a duplicate title +
-                // position would render two identical rows.
-                const key = [comp.mb_disc_number, comp.mb_track_number,
-                             String(comp.mb_title).toLowerCase()].join('\u0000');
-                if (seen.has(key)) return;
-                seen.add(key);
-
-                // Context is built PER ROW: each persisted row carries its own
-                // release id and year, which is more accurate than a page-level
-                // guess, and is what the queue payload needs.
-                const ctx = {
-                    release_mbid: row.release_id || _getLinkedReleaseMbid(),
-                    mb_year: row.year || '',
-                };
-                _appendMissingRow(_buildMissingTrackRow(comp, ctx), tbody);
-            });
-
-            // Advertise the count in the header, and reveal the
-            // "search missing tracks" affordance the template hides until a
-            // count is known.
-            const badge = document.getElementById('albumMissingHeaderBadge');
-            if (badge) {
-                badge.textContent = missing.length + ' track'
-                    + (missing.length === 1 ? '' : 's') + ' missing';
-                badge.classList.remove('d-none');
-            }
-            const searchBtn = document.querySelector('.album-search-missing-btn');
-            if (searchBtn) searchBtn.style.display = '';
+            _renderMissingTracks(missing, tbody);
+            _updateMissingHeaderBadge(missing.length);
         })
         .catch(err => {
             // Non-fatal for the PAGE (the owned tracklist still renders), but
@@ -1548,6 +1529,126 @@ window.loadAlbumMissingTracks = function () {
             console.error('Could not load missing tracks:', err);
         });
 };
+
+/** Render missing rows (deduped) as tracklist sub-rows. */
+function _renderMissingTracks(missing, tbody) {
+    const seen = new Set();
+    missing.forEach(row => {
+        const comp = _missingRowToTrackComp(row);
+        // The endpoint returns distinct rows, but a duplicate title +
+        // position would render two identical rows.
+        const key = [comp.mb_disc_number, comp.mb_track_number,
+                     String(comp.mb_title).toLowerCase()].join('\u0000');
+        if (seen.has(key)) return;
+        seen.add(key);
+
+        // Context is built PER ROW: each persisted row carries its own
+        // release id and year, which is more accurate than a page-level
+        // guess, and is what the queue payload needs.
+        const ctx = {
+            release_mbid: row.release_id || _getLinkedReleaseMbid(),
+            mb_year: row.year || '',
+        };
+        _appendMissingRow(_buildMissingTrackRow(comp, ctx), tbody);
+    });
+}
+
+/**
+ * Show (or hide at zero) the header's "N tracks missing" badge and the
+ * search-missing affordance the template hides until a count is known.
+ */
+function _updateMissingHeaderBadge(count) {
+    const badge = document.getElementById('albumMissingHeaderBadge');
+    if (badge) {
+        if (count > 0) {
+            badge.textContent = count + ' track'
+                + (count === 1 ? '' : 's') + ' missing';
+            badge.classList.remove('d-none');
+        } else {
+            badge.textContent = '';
+            badge.classList.add('d-none');
+        }
+    }
+    const searchBtn = document.querySelector('.album-search-missing-btn');
+    if (searchBtn) searchBtn.style.display = count > 0 ? '' : 'none';
+}
+
+/**
+ * Flag tracklist rows whose track exists MORE THAN ONCE on this album
+ * ("downloaded twice") with a red badge. Idempotent: clears previous flags
+ * first, so a refresh can never stack badges.
+ */
+window.loadAlbumDuplicateFlags = function () {
+    const tbody = document.getElementById('albumTracksTbody');
+    if (!tbody) return Promise.resolve();
+    const artist = window._pageData ? window._pageData.artistName : '';
+    const album = window._pageData ? window._pageData.albumName : '';
+    if (!artist || !album) return Promise.resolve();
+
+    return fetch('/api/album/duplicate-tracks?artist=' + encodeURIComponent(artist)
+        + '&album=' + encodeURIComponent(album))
+        .then(r => (r.ok ? r.json() : {}))
+        .then(data => {
+            tbody.querySelectorAll('.album-duplicate-badge').forEach(b => b.remove());
+            const counts = new Map();
+            ((data && data.duplicates) || []).forEach(group => {
+                (group.track_ids || []).forEach(id => {
+                    counts.set(String(id), Number(group.count) || 0);
+                });
+            });
+            if (!counts.size) return;
+            tbody.querySelectorAll('tr[data-track-id]').forEach(row => {
+                const count = counts.get(String(row.getAttribute('data-track-id') || ''));
+                if (!count) return;
+                const titleCell = row.cells && row.cells[1];
+                if (!titleCell) return;
+                const badge = document.createElement('span');
+                badge.className = 'badge bg-danger ms-1 album-duplicate-badge';
+                badge.style.fontSize = '0.65rem';
+                badge.textContent = 'Duplicate \u00d7' + count;
+                badge.title = 'This track exists ' + count
+                    + ' times on this album (downloaded more than once)';
+                const anchor = titleCell.querySelector('a');
+                if (anchor) anchor.insertAdjacentElement('afterend', badge);
+                else titleCell.insertAdjacentElement('afterbegin', badge);
+            });
+        })
+        .catch(err => console.warn('Could not flag duplicate tracks:', err));
+};
+
+/**
+ * Lookup-time findings: recompute the missing list against the release the
+ * user just picked (the SAME computation the popularity scan's metadata
+ * lookup runs) and re-flag local duplicates. The stored release id is still
+ * the OLD one until the form is saved, which is why the id is passed
+ * explicitly. Non-fatal in every part.
+ */
+function _refreshAlbumTrackFindings(releaseMbid) {
+    const tbody = document.getElementById('albumTracksTbody');
+    if (!tbody) return Promise.resolve();
+    const artist = window._pageData ? window._pageData.artistName : '';
+    const album = window._pageData ? window._pageData.albumName : '';
+    if (!artist || !album) return Promise.resolve();
+
+    const missingWork = releaseMbid
+        ? fetch('/api/album/missing-tracks?artist=' + encodeURIComponent(artist)
+            + '&album=' + encodeURIComponent(album)
+            + '&refresh=1&release_mbid=' + encodeURIComponent(releaseMbid))
+            .then(r => (r.ok ? r.json() : {}))
+            .then(data => {
+                // mb_total == 0 → no release could be fetched (bad id,
+                // offline); keep whatever is rendered rather than
+                // replacing a good list with nothing.
+                if (!data || !(data.mb_total > 0)) return;
+                tbody.querySelectorAll('.mb-missing-row').forEach(r => r.remove());
+                _renderMissingTracks(data.missing_tracks || [], tbody);
+                _updateMissingHeaderBadge(data.missing_count || 0);
+            })
+            .catch(err => console.warn('Could not refresh missing tracks:', err))
+        : Promise.resolve();
+
+    return missingWork.then(() => window.loadAlbumDuplicateFlags());
+}
 
 // ---------------------------------------------------------------------------
 // Match a missing MusicBrainz track to an existing (unmatched) library track
@@ -1727,6 +1828,11 @@ document.addEventListener('DOMContentLoaded', function () {
     // flagged tracks the artist page counted, without needing a Compare run.
     if (typeof window.loadAlbumMissingTracks === 'function') {
         window.loadAlbumMissingTracks();
+    }
+    // Local duplicates (downloaded twice) — a library fact, so it flags on
+    // every load and again after a Lookup MBID.
+    if (typeof window.loadAlbumDuplicateFlags === 'function') {
+        window.loadAlbumDuplicateFlags();
     }
 
     const container = document.getElementById('albumSimilarArtistsContainer');

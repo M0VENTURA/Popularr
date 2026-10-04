@@ -509,8 +509,16 @@ class TestTheLoaderReusesTheExistingRowBuilder:
         src = (LIVE_STATIC / "album_detail.js").read_text(encoding="utf-8")
         loader = src[src.index("window.loadAlbumMissingTracks"):]
         loader = loader[: loader.index("\n};")] if "\n};" in loader else loader
-        assert "_buildMissingTrackRow(" in loader, (
-            "the loader must reuse _buildMissingTrackRow, not hand-roll a row"
+        # The loader renders through the SHARED helper (also used by the
+        # Lookup-MBID refresh) instead of hand-rolling rows — the helper is
+        # the one that must reuse the row builder.
+        assert "_renderMissingTracks(" in loader, (
+            "the loader must render through _renderMissingTracks, not hand-roll a row"
+        )
+        helper = src[src.index("function _renderMissingTracks"):]
+        helper = helper[: helper.index("\n}")]
+        assert "_buildMissingTrackRow(" in helper, (
+            "_renderMissingTracks must reuse _buildMissingTrackRow"
         )
         assert "ignoreMissingTrack" not in loader or "onclick=" not in loader
 
@@ -518,6 +526,13 @@ class TestTheLoaderReusesTheExistingRowBuilder:
         src = (REBUILT_STATIC / "pages" / "album.js").read_text(encoding="utf-8")
         loader = src[src.index("async function loadAlbumMissingTracks"):]
         loader = loader[: loader.index("\n  }")] if "\n  }" in loader else loader
-        assert "buildMissingRow(" in loader, (
-            "the loader must reuse buildMissingRow, not hand-roll a row"
+        # Same contract as the live tree: through the SHARED helper, never
+        # hand-rolled rows — and the helper must reuse the row builder.
+        assert "renderMissingTracks(" in loader, (
+            "the loader must render through renderMissingTracks, not hand-roll a row"
+        )
+        helper = src[src.index("function renderMissingTracks"):]
+        helper = helper[: helper.index("\n  }")]
+        assert "buildMissingRow(" in helper, (
+            "renderMissingTracks must reuse buildMissingRow"
         )

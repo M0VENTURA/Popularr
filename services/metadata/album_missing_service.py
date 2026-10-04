@@ -18,6 +18,7 @@ from services.enrichment.musicbrainz_service import (
 )
 from api_clients.musicbrainz_http import escape_lucene_special_chars
 from helpers.normalization_service import (
+    file_version_variant_key,
     normalize_title_for_compare,
     normalize_title_for_lucene_query,
 )
@@ -108,13 +109,19 @@ def get_library_tracks(artist: str, album: str) -> list[dict[str, Any]]:
     ]
 
 
-def get_missing_tracks(artist: str, album: str) -> dict[str, Any]:
+def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None) -> dict[str, Any]:
     """Check which tracks are in the MusicBrainz release but missing from the library.
 
     Computes the missing set from the MusicBrainz release tracklist, persists
     each missing track to ``missing_album_tracks`` (so the list survives page
     refreshes until the track is downloaded or rejected), and returns only the
     tracks that are still missing AND not rejected (``ignored = FALSE``).
+
+    ``release_mbid``: an EXPLICIT release to measure against — the album
+    page's Lookup MBID resolves one BEFORE the form is saved, so the stored
+    id is still the old release (or empty). When given, it wins over both the
+    stored id and the name search. This is the same computation the
+    popularity scan runs per album, just against the release the user picked.
     """
     with db_session() as session:
         album_key = _album_key(album)
@@ -152,7 +159,13 @@ def get_missing_tracks(artist: str, album: str) -> dict[str, Any]:
         library_rows = _rows_in_album(library_rows)
         library_count = len(library_rows)
 
-    if not mb_mbid:
+    # ⭐ An explicit release (the album page's Lookup MBID just resolved one)
+    # wins over the stored id — and over the name search below — because the
+    # stored value is still the OLD release until the user saves the form.
+    if release_mbid:
+        mb_mbid = str(release_mbid).strip()
+
+    if not mb_mbid and not release_mbid:
         # ✅ Use shared MusicBrainz client singleton instead of raw instantiation
         try:
             query = (
@@ -284,6 +297,85 @@ def get_missing_tracks(artist: str, album: str) -> dict[str, Any]:
         "missing_count": len(visible),
         "mb_total": mb_total,
         "library_count": library_count,
+    }
+
+
+def find_duplicate_tracks(artist: str, album: str) -> dict[str, Any]:
+    """Tracks on THIS album that exist more than once (downloaded twice).
+
+    Same duplicate definition the artist-corrections page uses
+    (``artist_service``): same ``(title, track_artist, track_number,
+    disc_number)`` within the album, at least two rows, and file names that
+    do not carry DIFFERENT version keywords (an instrumental cut beside the
+    vocal is a variant, not a double download — see
+    ``helpers.normalization_service.file_version_variant_key``).
+
+    Returns the groups plus a flat id list so the album page can flag the
+    matching tracklist rows by ``data-track-id``.
+    """
+    album_key = _album_key(album)
+    with db_session() as session:
+        rows = session.execute(
+            text(
+                "SELECT id, album, title, track_number, disc_number, file_path, "
+                "COALESCE(NULLIF(artist, ''), '—') AS track_artist "
+                "FROM tracks "
+                "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)"
+            ),
+            {"artist": artist},
+        ).mappings().all()
+
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for raw in rows:
+        row = dict(raw)
+        if _album_key(str(row.get("album") or "")) != album_key:
+            continue
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        key = (
+            title,
+            str(row.get("track_artist") or ""),
+            str(row.get("track_number") or "").strip(),
+            str(row.get("disc_number") or "").strip(),
+        )
+        grouped.setdefault(key, []).append(row)
+
+    duplicates: list[dict[str, Any]] = []
+    for (title, track_artist, track_number, disc_number), tracks in grouped.items():
+        if len(tracks) < 2:
+            continue
+        variant_keys = {file_version_variant_key(t.get("file_path")) for t in tracks}
+        if len(variant_keys) > 1:
+            # Different file-name variants (vocal vs instrumental, …): these
+            # are different recordings of one title, not a double download.
+            continue
+        duplicates.append({
+            "title": title,
+            "track_artist": track_artist,
+            "track_number": track_number,
+            "disc_number": disc_number,
+            "count": len(tracks),
+            "track_ids": [str(t.get("id") or "") for t in tracks],
+        })
+
+    duplicates.sort(key=lambda g: (g["disc_number"], g["track_number"], g["title"].casefold()))
+    flat_ids = [tid for group in duplicates for tid in group["track_ids"]]
+
+    if duplicates:
+        logger.debug(
+            "Duplicate tracks found on album",
+            artist=artist, album=album,
+            groups=len(duplicates), rows=len(flat_ids),
+        )
+
+    return {
+        "duplicates": duplicates,
+        "duplicate_track_ids": flat_ids,
+        "duplicate_group_count": len(duplicates),
+        # Redundant copies beyond the first of each group — the same number
+        # the corrections page reports as its duplicate count.
+        "duplicate_extra_count": sum(int(g["count"]) - 1 for g in duplicates),
     }
 
 

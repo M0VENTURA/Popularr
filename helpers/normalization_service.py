@@ -2030,3 +2030,29 @@ def album_artist_key_variants(artist: str) -> list[str]:
         if candidate and candidate not in keys:
             keys.append(candidate)
     return keys
+
+
+# =============================================================================
+# DUPLICATE-TRACK DETECTION (shared)
+# =============================================================================
+
+#: File-name keywords that mark a DIFFERENT VERSION of the same song.
+#: Two copies of a title are duplicates only when their file names carry the
+#: SAME variant keywords (or none): ``Song.mp3`` + ``Song (instrumental).mp3``
+#: are two recordings of one title, not a double download. Used by the
+#: artist-corrections duplicate groups (``artist_service``) and the album
+#: page's duplicate flags (``album_missing_service.find_duplicate_tracks``)
+#: so both surfaces always agree on what "duplicate" means.
+DUPLICATE_VARIANT_KEYWORDS: tuple[str, ...] = (
+    "instrumental", "karaoke", "a cappella", "acapella",
+    "acoustic", "demo", "orchestral", "symphonic",
+)
+
+
+def file_version_variant_key(file_path: str) -> frozenset[str]:
+    """The version-variant keywords present in a file's NAME (lowercased)."""
+    name = os.path.basename(str(file_path or "")).lower()
+    return frozenset(
+        kw for kw in DUPLICATE_VARIANT_KEYWORDS
+        if re.search(r"\b" + re.escape(kw) + r"\b", name)
+    )

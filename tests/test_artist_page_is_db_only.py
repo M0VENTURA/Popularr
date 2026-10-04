@@ -328,8 +328,16 @@ class TestMissingTracksEndpointIsDatabaseOnly:
 
         source = inspect.getsource(album_routes)
         assert "get_missing_tracks_from_db" in source
-        # The recompute must not be reachable from the route any more.
-        assert "result = get_missing_tracks(" not in source
+        # The recompute is reachable ONLY behind the explicit `refresh` gate
+        # (the album page's Lookup MBID passes refresh=1 + the release it
+        # just picked); a plain page load stays on the DB-only snapshot —
+        # pinned behaviourally by tests/test_album_lookup_findings.py::
+        # TestAlbumFindingRoutes::test_missing_tracks_page_load_stays_db_only.
+        assert "if refresh:" in source
+        assert (
+            source.index("if refresh:")
+            < source.index("get_missing_tracks(artist, album, release_mbid")
+        ), "the recompute must sit inside the refresh branch, not on the default path"
 
     def test_the_recompute_is_still_available_for_the_scan(self):
         from services.metadata import album_missing_service as svc
