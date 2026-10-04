@@ -112,11 +112,27 @@
     if (field.tagName === 'SELECT') {
       // Only select an option that EXISTS — inventing one would change what
       // the form submits. Mirrors setAlbumTypeIfPresent().
-      const wanted = String(value || '').toLowerCase();
-      const match = Array.from(field.options).find((o) => {
-        const v = String(o.value).toLowerCase();
-        return v && (v === wanted || wanted.includes(v) || v.includes(wanted));
-      });
+      const wanted = String(value || '').toLowerCase().trim();
+      // An empty proposal must leave the select alone: "".includes(v) is true
+      // for EVERY option, so the old containment check fell through to the
+      // first one and silently changed the selection.
+      if (!wanted) return false;
+      const options = Array.from(field.options);
+      // EXACT match first. "album" is a SUBSTRING of "album+soundtrack", so a
+      // single .find() over the containment predicate landed on the bare
+      // "Album" option (which renders before every "Album (…)" option) and
+      // dropped the secondary type — the reported "an album match changes
+      // Album (Soundtrack) back to Album". Only when no exact option exists
+      // does the containment fallback run, and it prefers the MOST SPECIFIC
+      // option so a bare category like "soundtrack" still reaches
+      // "album+soundtrack".
+      const exact = options.find((o) => String(o.value).toLowerCase() === wanted);
+      const match = exact || options
+        .filter((o) => {
+          const v = String(o.value).toLowerCase();
+          return v && (wanted.includes(v) || v.includes(wanted));
+        })
+        .sort((a, b) => String(b.value).length - String(a.value).length)[0];
       if (!match) return false;
       field.value = match.value;
     } else {

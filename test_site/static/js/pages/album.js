@@ -1578,6 +1578,13 @@
    * Only selects an EXISTING option: adding one for an arbitrary MusicBrainz
    * category would silently change what the form submits. "album+live" and
    * friends are matched on their parts so they still land on the Live option.
+   *
+   * Never DOWNGRADES a composite selection from a bare category: the category
+   * is a lossy label (a cached row can carry plain "Album" while the stored
+   * type is "album+soundtrack"), and applying it flipped "Album (Soundtrack)"
+   * back to "Album" so the save wrote the bare primary away. A deliberate
+   * downgrade still happens — the proposal below proposes the bare value and
+   * fillField() lands on it exactly.
    */
   function setAlbumTypeIfPresent(category) {
     const select = document.getElementById('album_type');
@@ -1591,6 +1598,13 @@
       return value && (wanted.includes(value) || value.includes(wanted));
     });
     if (!partial) return false;
+
+    const current = String(select.value || '').toLowerCase();
+    const target = String(partial.value || '').toLowerCase();
+    if (current.includes('+') && !target.includes('+')
+        && current.split('+')[0] === target) {
+      return false;
+    }
 
     select.value = partial.value;
     return true;
