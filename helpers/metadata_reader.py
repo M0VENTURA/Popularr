@@ -72,6 +72,12 @@ def _read_flac_metadata(file_path: str) -> Dict[str, Any]:
         metadata["album"] = _get("ALBUM")
         metadata["album_artist"] = _get("ALBUMARTIST")
         metadata["genre"] = _get("GENRE")
+        # DATE feeds the import identity backfill (_resolve_missing_identity)
+        # and the discovered-file report — previously the reader never exposed
+        # a year at all, so neither could fall back to the source file's tags.
+        date = _get("DATE")
+        if date:
+            metadata["year"] = date
 
         track = _get("TRACKNUMBER")
         if track:
@@ -116,6 +122,13 @@ def _read_mp3_id3_metadata(file_path: str) -> Dict[str, Any]:
 
         if "TCON" in audio:
             metadata["genre"] = str(audio["TCON"].text[0])
+
+        # v2.4 writes TDRC, v2.3 (which this app saves) uses TYER — accept both
+        # so the import identity backfill can read the source file's date.
+        for _date_frame in ("TDRC", "TYER"):
+            if _date_frame in audio:
+                metadata["year"] = str(audio[_date_frame].text[0])
+                break
 
     except Exception:
         pass

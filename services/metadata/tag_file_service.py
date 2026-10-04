@@ -893,20 +893,34 @@ def sync_track_tags_to_file(track_id: str) -> bool:
 
 
 def update_file_metadata(file_path: str, metadata: Dict[str, Any]) -> bool:
+    """Write the caller's metadata onto *file_path*.
+
+    Contract: a key whose value is ``None`` means "not supplied" and the frame
+    is LEFT ALONE; ``""`` still means "explicitly clear this frame" (the
+    single-disc ``disc_number`` clear depends on it).  Every base field used to
+    be unconditionally included, so a queue row that lacked e.g. ``year``
+    delivered ``year=None`` to the writers — which treat ``None`` as a delete —
+    and the import actively WIPED the downloaded file's own date/track-number
+    frames (part of the reported "imported without year/track number" bug).
+    """
     if not file_path:
         return False
 
     tag_updates = {
-        "title": metadata.get("title"),
-        "artist": metadata.get("artist"),
-        "album": metadata.get("album"),
-        "album_artist": metadata.get("album_artist"),
-        "track_number": metadata.get("track_number"),
-        "disc_number": metadata.get("disc_number"),
-        # DATE/YEAR = the EDITION's year when the caller knows one, else the
-        # original (see ``build_tag_updates`` for why). ``originalyear`` /
-        # ``originaldate`` are written below when supplied.
-        "year": metadata.get("release_year") or metadata.get("year"),
+        key: value
+        for key, value in {
+            "title": metadata.get("title"),
+            "artist": metadata.get("artist"),
+            "album": metadata.get("album"),
+            "album_artist": metadata.get("album_artist"),
+            "track_number": metadata.get("track_number"),
+            "disc_number": metadata.get("disc_number"),
+            # DATE/YEAR = the EDITION's year when the caller knows one, else the
+            # original (see ``build_tag_updates`` for why). ``originalyear`` /
+            # ``originaldate`` are written below when supplied.
+            "year": metadata.get("release_year") or metadata.get("year"),
+        }.items()
+        if value is not None
     }
 
     if metadata.get("originalyear"):

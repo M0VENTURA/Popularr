@@ -46,7 +46,7 @@ from sqlalchemy import text
 
 from db.engine import db_session
 from helpers.config_helpers import _SLSKD_MIN_ACCEPT_SCORE
-from helpers.normalization_service import queue_duration_seconds
+from helpers.normalization_service import normalize_string, queue_duration_seconds
 
 logger = structlog.get_logger(__name__)
 
@@ -783,6 +783,152 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
+def _match_release_track(
+    release: dict[str, Any], item: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Find *item*'s track inside a flattened MusicBrainz release.
+
+    Recording-MBID first (exact), then a normalized title comparison.  Returns
+    None when the release does not contain the track — the caller then leaves
+    ``track_number`` unfilled rather than guessing.
+    """
+    tracks = release.get("tracks") or []
+    if not isinstance(tracks, list) or not tracks:
+        return None
+
+    recording_mbid = str(item.get("recording_mbid") or "").strip()
+    if recording_mbid:
+        for track in tracks:
+            if str(track.get("recording_mbid") or "").strip() == recording_mbid:
+                return track
+
+    title = normalize_string(item.get("title") or "")
+    if title:
+        for track in tracks:
+            if normalize_string(str(track.get("title") or "")) == title:
+                return track
+    return None
+
+
+def _resolve_missing_identity(
+    item: dict[str, Any], file_path: str | None = None
+) -> dict[str, Any]:
+    """Fill ``year`` / ``track_number`` / ``disc_number`` the queue row lacks.
+
+    ``queue_add`` used to forward only artist/title/album — the album page's
+    missing-track button and the dashboard sent ``year``/``track_number``/
+    ``release_mbid`` too, but they were dropped, so those rows imported into
+    an ``Unknown - <album>/00. <artist> - <title>`` path (the reported bug).
+    Rows queued that way BEFORE the fix are healed here, at import time.
+
+    Sources, cheapest first — only ever fills EMPTY fields:
+
+    1. the row's own ``release_year`` / ``release_date`` columns;
+    2. the album metadata persisted on the row at queue time;
+    3. a MusicBrainz refresh keyed by the row's release MBID (same HTTP-layer
+       cache the album-level refresh uses) — gives the release year and the
+       tracklist position via recording-MBID/title match;
+    4. the downloaded file's own tags or filename (heals rows that carry no
+       MB identity at all).
+
+    Returns only the fills (``{}`` when nothing is missing).
+    """
+    from services.downloads.download_organize_helpers import _extract_year_for_path
+
+    fills: dict[str, Any] = {}
+
+    def _missing(key: str) -> bool:
+        return item.get(key) in (None, "")
+
+    def _fill_year(*values: Any) -> bool:
+        for value in values:
+            year = _extract_year_for_path(value)
+            if year != "Unknown":
+                fills["year"] = year
+                return True
+        return False
+
+    # 1. the row's own release columns (set by the MB release adder).
+    if _missing("year"):
+        _fill_year(item.get("release_year"), item.get("release_date"))
+
+    # 2. album metadata persisted on the row at queue time.
+    if _missing("year") and "year" not in fills:
+        stored = item.get("metadata")
+        if isinstance(stored, str):
+            try:
+                stored = json.loads(stored or "{}")
+            except Exception:
+                stored = {}
+        album_payload = stored.get("album_metadata") if isinstance(stored, dict) else None
+        if isinstance(album_payload, dict):
+            # releasedate first: the queue ``year`` column carries the EDITION
+            # year (see add_release_tracks_to_queue_detailed), matching the
+            # DATE tag the import writes.
+            _fill_year(album_payload.get("releasedate"), album_payload.get("originalyear"))
+
+    need_year = "year" not in fills and _missing("year")
+    need_track = _missing("track_number")
+
+    # 3. MusicBrainz refresh via the row's release identity (HTTP-layer cached).
+    release_mbid = str(item.get("release_mbid") or item.get("release_id") or "").strip()
+    if release_mbid and (need_year or need_track):
+        try:
+            from services.enrichment.musicbrainz_service import (
+                fetch_musicbrainz_release_metadata,
+            )
+
+            release = fetch_musicbrainz_release_metadata(release_mbid)
+        except Exception as exc:
+            logger.debug(
+                "Identity refresh failed — using stored values only",
+                queue_id=item.get("id"),
+                release_mbid=release_mbid,
+                error=str(exc),
+            )
+            release = None
+        if isinstance(release, dict):
+            if need_year:
+                _fill_year(
+                    release.get("release_year"),
+                    release.get("releasedate"),
+                    release.get("original_year"),
+                )
+            if _missing("track_number"):
+                match = _match_release_track(release, item)
+                if match:
+                    if match.get("track_number") not in (None, ""):
+                        fills["track_number"] = match["track_number"]
+                    if _missing("disc_number") and match.get("disc_number") not in (None, ""):
+                        fills["disc_number"] = match["disc_number"]
+
+    # 4. the downloaded file's own tags / filename — the only source left for
+    #    rows queued with no MB identity at all (pre-fix single-item adds).
+    need_year = "year" not in fills and _missing("year")
+    if (need_year or _missing("track_number")) and file_path and os.path.isfile(file_path):
+        try:
+            from services.downloads.download_scan_service import (
+                _extract_discovered_metadata,
+            )
+
+            discovered = _extract_discovered_metadata(
+                file_path, os.path.basename(file_path)
+            ) or {}
+        except Exception as exc:
+            logger.debug(
+                "Source-file identity read failed",
+                queue_id=item.get("id"),
+                error=str(exc),
+            )
+            discovered = {}
+        if need_year and discovered.get("year"):
+            _fill_year(discovered["year"])
+        if _missing("track_number") and discovered.get("track_number") not in (None, ""):
+            fills["track_number"] = discovered["track_number"]
+
+    return fills
+
+
 def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
     """Write the queue row's stored metadata onto *file_path* (pre-move).
 
@@ -1042,6 +1188,37 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
             logger.warning("Source file missing before copy — resetting to downloading", queue_id=queue_id, path=abs_path)
             _reset_to_downloading(f"source file missing before copy: {abs_path}")
             return {"success": False, "error": "source_file_missing"}
+
+        # Heal identity the queue row is missing BEFORE the tag write and the
+        # path build below.  Rows queued before ``queue_add`` forwarded these
+        # fields would otherwise still import as "Unknown - <album>/00. ...".
+        # Persisting the fills also keeps the stale-"moving" path reconciliation
+        # (_reconcile_stale_moving rebuilds the target from the ROW) agreeing
+        # with the folder the file was actually moved into.
+        try:
+            _identity = _resolve_missing_identity(item, abs_path)
+        except Exception as _id_exc:
+            _identity = {}
+            logger.warning(
+                "Import identity backfill failed",
+                queue_id=queue_id,
+                error=str(_id_exc),
+            )
+        if _identity:
+            item.update(_identity)
+            try:
+                update_queue_item(queue_id, **_identity)
+            except Exception as _persist_exc:
+                logger.debug(
+                    "Could not persist resolved identity",
+                    queue_id=queue_id,
+                    error=str(_persist_exc),
+                )
+            logger.info(
+                "Backfilled missing queue identity before import",
+                queue_id=queue_id,
+                fills=sorted(_identity),
+            )
 
         _apply_stored_metadata(item, abs_path)
 

@@ -174,12 +174,37 @@ def add_to_queue(
 
 
 def queue_add(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Add ONE track to the queue from a UI payload.
+
+    ⚠️ Forward the FULL identity payload, not just artist/title/album.
+    ``queue_add_batch`` already forwarded ``year``/``track_number``/``release_mbid``
+    …, but this single-item path used to drop them.  The album page's
+    missing-track button, the dashboard upcoming-release button and the search
+    form all send those fields — dropping them created rows whose ``year`` was
+    NULL (imported into an ``Unknown - <album>`` folder) and whose
+    ``track_number`` was NULL (``00. <artist> - <title>`` file), with no
+    ``release_mbid`` left for the import to refresh the release identity from
+    (the reported bug).
+
+    Empty strings normalize to ``None`` so a ``String(t.track_number || '')``
+    dataset value stores NULL rather than an unparseable "".
+    """
     return add_to_queue(
         artist=str(payload.get("artist") or "").strip(),
         title=str(payload.get("title") or "").strip(),
         album=str(payload.get("album")).strip() if payload.get("album") else None,
         source=str(payload.get("source", "soulseek")),
         priority=int(payload.get("priority", 5)),
+        track_number=payload.get("track_number") or None,
+        disc_number=payload.get("disc_number") or None,
+        album_artist=payload.get("album_artist") or None,
+        year=payload.get("year") or None,
+        release_id=payload.get("release_id") or None,
+        release_mbid=payload.get("release_mbid") or None,
+        recording_mbid=payload.get("recording_mbid") or None,
+        duration=payload.get("duration") or None,
+        import_group=payload.get("import_group") or None,
+        import_type=payload.get("import_type") or None,
     )
 
 
