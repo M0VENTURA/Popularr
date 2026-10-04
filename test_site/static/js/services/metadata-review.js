@@ -278,8 +278,14 @@
     const lines = entry.changes.map((change) => {
       const label = change.label || change.field;
       const current = change.current ? '<em>' + esc(change.current) + '</em>' : '<em>empty</em>';
+      // The work-relationship cover verdict rides on the change (currently the
+      // title) so a "(Cover Version)" marker can be judged — and Ignored —
+      // before it is applied.
+      const note = change.note
+        ? ' <span class="text-muted fst-italic">(' + esc(change.note) + ')</span>'
+        : '';
       return '<div><span class="text-muted">' + esc(label) + ':</span> ' +
-        current + ' → <strong>' + esc(change.proposed) + '</strong></div>';
+        current + ' → <strong>' + esc(change.proposed) + '</strong>' + note + '</div>';
     }).join('');
 
     tr.innerHTML =

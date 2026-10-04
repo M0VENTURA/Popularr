@@ -58,12 +58,12 @@ def _local(**overrides):
     return row
 
 
-def _comparison(mb_title="Song", rec="rec-1"):
+def _comparison(mb_title="Song", rec="rec-1", mb_track_number=1):
     return [{
         "library_track_id": "t1",
         "matched": True,
         "mb_title": mb_title,
-        "mb_track_number": 1,
+        "mb_track_number": mb_track_number,
         "mb_disc_number": 1,
         "mb_recording_mbid": rec,
     }]
@@ -250,10 +250,6 @@ class TestCoverAndVersionMarkersAreIgnored:
         ("Song (Demo)", "Song"),
         ("Song (Instrumental)", "Song"),
         ("Song (Orchestral)", "Song"),
-        # The annotations the cover detector writes onto a track.
-        ("Song (Artist Cover)", "Song"),
-        ("Song (Nirvana Cover)", "Song"),
-        ("Song (Original Artist Cover)", "Song"),
         # Qualified and unparenthesised variants seen in the wild.
         ("Song (Recorded Live)", "Song"),
         ("Song (Live at Leeds)", "Song"),
@@ -266,16 +262,19 @@ class TestCoverAndVersionMarkersAreIgnored:
         ("Song (Live)", "Song (Acoustic)"),
     ])
     def test_the_marker_alone_does_not_raise_a_title_change(self, lib, mb):
-        """The reported symptom, on BOTH comparison paths.
+        """The original report, still true for PERFORMANCE markers.
 
-        `(Live)`/`(Acoustic)`/`(Remix)` and `(Artist Cover)` describe a
-        performance VARIANT, which the metadata model stores in dedicated
-        columns — so the title must not be reported as changed.
+        `(Live)`/`(Acoustic)`/`(Remix)` describe a performance VARIANT, which
+        the metadata model stores in dedicated columns — so the title must not
+        be reported as changed.
+
+        COVER markers deliberately moved to
+        ``TestCoverMarkersAreReportedAndJudged``: see that class for why.
         """
         assert "title" not in _fields(
             _local(title=lib), _comparison(mb_title=mb),
             _metadata(mb_title=mb),
-        ), "the track-proposal path must ignore the marker"
+        ), "the track-proposal path must ignore the performance marker"
         assert "title" not in _diff_fields(lib, mb), (
             "the shared matcher (the Compare button) must ignore it too"
         )
@@ -322,6 +321,141 @@ class TestCoverAndVersionMarkersAreIgnored:
         assert "title" not in _fields(
             local, _comparison(mb_title="New Name"), _metadata(mb_title="New Name"),
         )
+
+
+class TestCoverMarkersAreReportedAndJudged:
+    """A COVER claim must surface so the user can review it.
+
+    Reported:
+
+        "I want this to pick up if the track name is different even if it
+         shows (Cover Version) as this can be selected to skip if this is a
+         false cover. Though if the work relationship is downloaded during
+         this lookup then it should know whether a cover is likely based on
+         the relationship status."
+
+    A cover marker is not a cosmetic variant like ``(Live)``: it asserts WHO
+    performed the recording, and only the work relationship fetched with the
+    lookup can confirm that.  Swallowing it left the user with no way to spot
+    a false cover at all.
+    """
+
+    @pytest.mark.parametrize("lib,mb", [
+        ("Song (Artist Cover)", "Song"),
+        ("Song (Nirvana Cover)", "Song"),
+        ("Song (Original Artist Cover)", "Song"),
+        # The spelling from the report itself.
+        ("Song (Cover Version)", "Song"),
+        ("Song", "Song (Cover Version)"),
+        # Marked on both sides, differently worded.
+        ("Song (Artist Cover)", "Song (Cover Version)"),
+    ])
+    def test_a_cover_marker_raises_a_title_change_on_both_paths(self, lib, mb):
+        assert "title" in _fields(
+            _local(title=lib), _comparison(mb_title=mb), _metadata(mb_title=mb),
+        ), "the Lookup-MBID preview must show a cover-marker difference"
+        assert "title" in _diff_fields(lib, mb), (
+            "the Compare button must agree with the preview — a second, "
+            "independently-written title rule is what lets them drift"
+        )
+
+    @pytest.mark.parametrize("lib,mb", [
+        ("Song (Live)", "Song"),
+        ("Song (Acoustic)", "Song"),
+        ("Song (Remix)", "Song"),
+        ("Song", "Song (Live)"),
+    ])
+    def test_a_performance_marker_is_still_ignored(self, lib, mb):
+        """CONTROL — the new rule must not report every marker again."""
+        assert "title" not in _fields(
+            _local(title=lib), _comparison(mb_title=mb), _metadata(mb_title=mb),
+        ), f"{lib!r} vs {mb!r} is a performance variant, not a rename"
+
+    def test_an_identical_title_is_still_quiet(self):
+        """CONTROL — no bar when nothing differs at all."""
+        assert "title" not in _fields(
+            _local(title="Song"), _comparison(mb_title="Song"),
+            _metadata(mb_title="Song"),
+        )
+
+
+def _metadata_with(mb_track_extra, mb_title="Song"):
+    """``_metadata`` with extra keys merged onto its single track entry."""
+    meta = _metadata(mb_title=mb_title)
+    meta["tracks"][0].update(mb_track_extra)
+    return meta
+
+
+def _title_note(local_title, mb_title, mb_track_extra):
+    """The ``note`` carried by the reported title change (None = no change)."""
+    out = _track_proposals(
+        [_local(title=local_title)],
+        _comparison(mb_title=mb_title),
+        _metadata_with(mb_track_extra, mb_title=mb_title),
+    )
+    if not out:
+        return None
+    change = next(
+        (c for c in out[0]["changes"] if c["field"] == "title"), None
+    )
+    assert change is not None, "the title change must be reported"
+    return change.get("note")
+
+
+class TestTheWorkRelationshipCoverVerdict:
+    """The verdict rides ON the title bar, so a false cover can be judged."""
+
+    def test_a_work_credited_to_another_artist_is_a_cover(self):
+        note = _title_note(
+            "Song (Cover Version)", "Song",
+            {"is_cover": True, "original_cover_artist": "Nirvana",
+             "work_mbid": "work-1"},
+        )
+        assert note == "cover of Nirvana (work relationship)", (
+            "the work relationship says another artist wrote the work, so the "
+            "bar must say it is a cover"
+        )
+
+    def test_a_cover_without_a_named_original_artist_still_says_cover(self):
+        note = _title_note(
+            "Song (Cover Version)", "Song",
+            {"is_cover": True, "work_mbid": "work-1"},
+        )
+        assert note and note.startswith("cover")
+
+    def test_a_work_by_the_same_artist_disproves_a_cover_marker(self):
+        """The false-cover case from the report."""
+        note = _title_note(
+            "Song (Cover Version)", "Song",
+            {"work_mbid": "work-1"},
+        )
+        assert note == "not a cover (work relationship)", (
+            "a work relationship exists and credits the same artist, so the "
+            "(Cover Version) marker is unsupported and the user must be told"
+        )
+
+    def test_no_work_relationship_means_no_verdict(self):
+        """Only claim something when the lookup actually fetched the work."""
+        assert _title_note("Song (Cover Version)", "Song", {}) is None, (
+            "without a work relationship there is nothing to base a verdict on"
+        )
+
+    def test_no_marker_and_no_cover_means_no_note(self):
+        """CONTROL — an ordinary wording difference must not grow a note."""
+        assert _title_note("Old Name", "New Name", {"work_mbid": "work-1"}) is None
+
+    def test_the_note_is_attached_only_to_the_title_change(self):
+        out = _track_proposals(
+            [_local(title="Song (Cover Version)", track_number="1")],
+            _comparison(mb_title="Song", mb_track_number=2),
+            _metadata_with({"work_mbid": "work-1"}, mb_title="Song"),
+        )
+        assert out, "the track must be proposed"
+        for change in out[0]["changes"]:
+            if change["field"] != "title":
+                assert "note" not in change, (
+                    "the cover verdict belongs on the title bar only"
+                )
 
 
 class TestTheMarkerKeyItself:

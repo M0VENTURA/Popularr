@@ -83,13 +83,13 @@ from helpers.normalization_service import (
     extract_edition_annotation as Extract_edition_annotation,
     format_duration_mmss as Format_duration_mmss,
     normalize_string as Normalize_string,
-    normalize_title_for_compare as Normalize_title_for_compare,
     normalize_title_for_lookup as Normalize_title_for_lookup,
     normalize_title_for_lucene_query as Normalize_title_for_lucene_query,
     normalize_title_for_mbid_match as Normalize_title_for_mbid_match,
     strip_featured_artist as Strip_featured_artist,
     strip_search_keywords as Strip_search_keywords,
     strip_single_release_suffix as Strip_single_release_suffix,
+    titles_match_for_review as Titles_match_for_review,
     track_duration_seconds as Track_duration_seconds,
 )
 
@@ -2521,17 +2521,18 @@ def _match_mb_tracks_to_library(
             Library_duration = Match.get("duration")
 
             Diff_fields: list[str] = []
-            # ⚠️ A title differing ONLY by a version/cover marker is NOT a
-            # change. "(Live)", "(Acoustic)", "(Remix)" and the cover detector's
-            # "(Artist Cover)" describe a performance VARIANT, which the metadata
-            # model already stores in dedicated columns (``is_live`` /
-            # ``is_acoustic`` / ``is_remix`` / ``is_cover``). Reporting them here
-            # fills the review with bars whose only possible outcome is
-            # overwriting the marker. The key ignores markers on EITHER side so
-            # this rule matches the Lookup MBID review exactly — a second,
-            # disagreeing title rule is what would let Compare and the preview
-            # show different counts. Wording differences still differ.
-            if Normalize_title_for_compare(str(Library_title)) != Normalize_title_for_compare(Mb_title):
+            # ⚠️ ONE title rule, shared with the Lookup-MBID preview through
+            # ``titles_match_for_review``. A PERFORMANCE marker ((Live),
+            # (Acoustic), (Remix)) is not a change — the model keeps those in
+            # ``is_live`` / ``is_acoustic`` / ``is_remix``, so reporting one
+            # would only ever overwrite the marker. A COVER marker IS a change:
+            # "(Cover Version)" claims who performed the recording and only the
+            # work relationship can confirm it, so the review must show it and
+            # let the user skip it when the claim is false. A second,
+            # independently-written title rule is what would let Compare and the
+            # preview show different counts for the same album. Wording
+            # differences still differ.
+            if not Titles_match_for_review(Library_title, Mb_title):
                 Diff_fields.append("title")
             if str(Library_track_number or "").split("/")[0].strip() != str(Entry["mb_track_number"]):
                 Diff_fields.append("track_number")

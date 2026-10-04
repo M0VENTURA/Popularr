@@ -358,6 +358,55 @@ def normalize_title_for_compare(title: str) -> str:
     return normalize_string(text)
 
 
+def has_cover_marker(title: str) -> bool:
+    """True when a title carries a bracketed COVER annotation.
+
+    Matches the forms the cover detector writes — ``(Artist Cover)``,
+    ``(Original Artist Cover)``, ``(Nirvana Cover)`` — and the tagger spelling
+    seen in the wild, ``(Cover Version)``.
+
+    Unlike ``has_version_marker`` this looks ONLY for a cover claim. ``(Live)``
+    and ``(Acoustic)`` describe a performance variant that the metadata model
+    keeps in ``is_live`` / ``is_acoustic``; a cover claim asserts WHO
+    performed the recording, which is exactly what the work relationship
+    fetched during an MBID lookup can confirm or refute.
+    """
+    return bool(_COVER_ANNOTATION_RE.search(str(title or "")))
+
+
+def titles_match_for_review(current: Any, proposed: Any) -> bool:
+    """True when two titles should be treated as the SAME by the MB review.
+
+    One rule, two call sites: the Lookup-MBID preview
+    (``metadata_proposal_service``) and the Compare button
+    (``musicbrainz_service._match_mb_tracks_to_library``).  They must never
+    disagree, or the review and the Compare report different change counts for
+    the same album — the second independent title rule is precisely what would
+    let that drift.
+
+    * A difference that is ONLY a performance marker — ``(Live)``,
+      ``(Acoustic)``, ``(Remix)`` … — is NOT reported: the model already keeps
+      those in ``is_live`` / ``is_acoustic`` / ``is_remix``, so the only
+      outcome of reporting one would be overwriting the marker.
+
+    * A difference involving a COVER marker IS reported. "(Cover Version)"
+      claims who performed the recording, and only the work relationship
+      fetched with the lookup can confirm it — so the review must surface the
+      difference (with that verdict attached) and let the user skip it when the
+      claim is false, instead of swallowing it silently.
+
+    Two empty keys never count as a match: a title that normalises away to
+    nothing must not swallow the change either.
+    """
+    if has_cover_marker(current) or has_cover_marker(proposed):
+        return False
+    left = normalize_title_for_compare(current)
+    right = normalize_title_for_compare(proposed)
+    if not left or not right:
+        return False
+    return left == right
+
+
 def strip_remaster_suffix(value: str) -> str:
     return REMASTER_SUFFIX_RE.sub("", value or "").strip()
 

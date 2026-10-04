@@ -37,6 +37,7 @@ import structlog
 from sqlalchemy import text
 
 from db.engine import db_session
+from helpers.normalization_service import has_cover_marker, titles_match_for_review
 
 logger = structlog.get_logger(__name__)
 
@@ -134,23 +135,28 @@ def _genre_sets_equal(current: Any, proposed: Any) -> bool:
     return left == right
 
 
-def _titles_match_ignoring_markers(current: Any, proposed: Any) -> bool:
-    """True when two titles differ ONLY by a version/cover marker.
+def _cover_verdict(mb_track: dict[str, Any], current: str, proposed: str) -> str:
+    """Cover verdict for a title change, from the WORK RELATIONSHIP.
 
-    "(Live)", "(Acoustic)", "(Remix)" and the cover detector's
-    "(Artist Cover)" describe a performance VARIANT stored in dedicated columns,
-    not different wording — see ``normalize_title_for_compare`` for why the
-    marker is honoured on either side.
+    ``_flatten_release`` derives ``is_cover`` by comparing the work's artist
+    credit against the track artist, so this is only as good as the work
+    relationships the release fetch actually returned — when the recording
+    carries no work at all we say NOTHING rather than guess.
+
+    Returned on the title change because that is the bar a cover claim shows up
+    on: a local "(Cover Version)" against MusicBrainz's bare title is exactly
+    the difference a user has to adjudicate, and the work relationship is what
+    says whether the claim is real.
     """
-    from helpers.normalization_service import normalize_title_for_compare
-
-    left = normalize_title_for_compare(_as_text(current))
-    right = normalize_title_for_compare(_as_text(proposed))
-    # Never treat two empty keys as a match: that would silently swallow a real
-    # change when both titles are markers only.
-    if not left or not right:
-        return False
-    return left == right
+    if mb_track.get("is_cover"):
+        original = _as_text(mb_track.get("original_cover_artist"))
+        return f"cover of {original} (work relationship)" if original else "cover (work relationship)"
+    if not _as_text(mb_track.get("work_mbid")):
+        # No work relationship → nothing to base a verdict on.
+        return ""
+    if has_cover_marker(current) or has_cover_marker(proposed):
+        return "not a cover (work relationship)"
+    return ""
 
 
 def _load_local_tracks(artist: str, album: str) -> list[dict[str, Any]]:
@@ -400,13 +406,18 @@ def _track_proposals(
                         continue
                 except (TypeError, ValueError):
                     pass
-            # A title differing ONLY by a version/cover marker is not a
-            # change: "(Live)" / "(Acoustic)" / "(Remix)" / "(Artist Cover)"
-            # describe a performance variant that the metadata model stores in
-            # dedicated columns, so overwriting the title to "fix" one would ask
-            # the user to destroy the marker instead. See
-            # ``normalize_title_for_compare`` for the either-side rule.
-            if field == "title" and _titles_match_ignoring_markers(current, proposed):
+            # A title differing ONLY by a PERFORMANCE marker is not a change:
+            # "(Live)" / "(Acoustic)" / "(Remix)" describe a variant the model
+            # already stores in dedicated columns, so the only outcome of
+            # reporting one would be overwriting the marker.
+            #
+            # A COVER marker is deliberately NOT suppressed: "(Cover Version)"
+            # claims who performed the recording, and only the work
+            # relationship fetched with this lookup can confirm it — so the
+            # difference surfaces (with that verdict attached) and can be
+            # skipped when the claim is false.  Shared with the Compare button
+            # through ``titles_match_for_review`` so the two can never disagree.
+            if field == "title" and titles_match_for_review(current, proposed):
                 continue
             # Genres are an unordered SET: "Rock, Metal" and "Metal, Rock" are
             # the same genres and must not raise a bar. Subset differences still
@@ -414,12 +425,20 @@ def _track_proposals(
             # JSONB), so both sides go through the shared tolerant parser.
             if field == "musicbrainz_genres" and _genre_sets_equal(current, proposed):
                 continue
-            changes.append({
+            change = {
                 "field": field,
                 "label": label,
                 "current": current,
                 "proposed": proposed,
-            })
+            }
+            if field == "title":
+                # The work-relationship verdict rides on the bar so the user
+                # can tell a genuine cover from a stray "(Cover Version)"
+                # marker before deciding to apply or Ignore it.
+                note = _cover_verdict(mb_track, current, proposed)
+                if note:
+                    change["note"] = note
+            changes.append(change)
 
         # ── Cover verdict (a structured change, not a string swap) ──────────
         if "is_cover" not in ignored and mb_track.get("is_cover"):
