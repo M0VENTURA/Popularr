@@ -196,6 +196,52 @@ class Track(Base):
     verification_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     verification_error: Mapped[str | None] = mapped_column(String)
 
+    # ── Registry sync ────────────────────────────────────────────────────────
+    # Columns db/schema.py's COLUMN_REGISTRY declares (and _ensure_columns
+    # grows in production) that Track.__table__ was MISSING. The test suite
+    # builds its tracks table from THIS model, so every query naming them
+    # failed with "no such column" in tests while production had them — the
+    # same drift class as the 2026-09-28 genre-column fix (86b1ea4c).
+    # `composer` is the reverse direction: migration 001 created it in
+    # production, but neither the registry nor the ORM declared it.
+    composer: Mapped[str | None] = mapped_column(String)
+    lyricist: Mapped[str | None] = mapped_column(String)
+    albumversion: Mapped[str | None] = mapped_column(String)
+    asin: Mapped[str | None] = mapped_column(String)
+    barcode: Mapped[str | None] = mapped_column(String)
+    catalognumber: Mapped[str | None] = mapped_column(String)
+    copyright: Mapped[str | None] = mapped_column(String)
+    discsubtitle: Mapped[str | None] = mapped_column(String)
+    disctotal: Mapped[str | None] = mapped_column(String)
+    tracktotal: Mapped[str | None] = mapped_column(String)
+    explicitstatus: Mapped[str | None] = mapped_column(String)
+    iswc: Mapped[str | None] = mapped_column(String)
+    language: Mapped[str | None] = mapped_column(String)
+    media: Mapped[str | None] = mapped_column(String)
+    original_title: Mapped[str | None] = mapped_column(String)
+    originaldate: Mapped[str | None] = mapped_column(String)
+    originalyear: Mapped[str | None] = mapped_column(String)
+    recordlabel: Mapped[str | None] = mapped_column(String)
+    release_title: Mapped[str | None] = mapped_column(String)
+    releasedate: Mapped[str | None] = mapped_column(String)
+    releasestatus: Mapped[str | None] = mapped_column(String)
+    releasetype: Mapped[str | None] = mapped_column(String)
+    script: Mapped[str | None] = mapped_column(String)
+    spotify_album_type: Mapped[str | None] = mapped_column(String)
+    discogs_album_id: Mapped[str | None] = mapped_column(String)
+    navidrome_added_at: Mapped[datetime | None] = mapped_column(DateTime)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP")
+    )
+    musicbrainz_last_updated: Mapped[datetime | None] = mapped_column(DateTime)
+    lastfm_last_updated: Mapped[datetime | None] = mapped_column(DateTime)
+    listenbrainz_last_updated: Mapped[datetime | None] = mapped_column(DateTime)
+    discogs_last_updated: Mapped[datetime | None] = mapped_column(DateTime)
+    lastfm_listeners: Mapped[int | None] = mapped_column(Integer)
+    listenbrainz_listens: Mapped[int | None] = mapped_column(Integer)
+    listenbrainz_users: Mapped[int | None] = mapped_column(Integer)
+    lastfm_playcount: Mapped[int | None] = mapped_column(BigInteger)
+
     def __repr__(self) -> str:
         return f"<Track(id={self.id!r}, title={self.title!r}, artist={self.artist!r})>"
 

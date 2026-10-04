@@ -26,6 +26,18 @@ WRITER_ROLES = {
     "textwriter",
     "lyricswriter",
     "lyrics_writer",
+    # OpenSubsonic contributor roles whose NAMES are worth collecting into the
+    # writer credits. mixer/producer/conductor/… have no tracks column of
+    # their own — the `writer` JSONB is the credits store — so without these
+    # roles the raw tags the user sees in Navidrome (mixer: Lou Giordano,
+    # producer: Chad Istvan) were dropped entirely.
+    "mixer",
+    "producer",
+    "conductor",
+    "engineer",
+    "djmixer",
+    "remixer",
+    "performer",
 }
 
 
@@ -166,6 +178,31 @@ def _extract_writers(track: dict[str, Any], get_song: Callable[[str], dict[str, 
     return writers
 
 
+def _contributor_names(track: dict[str, Any], role: str) -> str:
+    """Join contributor names for ONE role from OpenSubsonic ``contributors``.
+
+    Navidrome exposes per-role credits (mixer, producer, composer, …) only in
+    ``[{role, subRole, artist: {id, name}}]`` — the raw file tags the user
+    sees (``mixer: Lou Giordano``) have no top-level key in the response.
+    """
+    entries = track.get("contributors")
+    if not isinstance(entries, list):
+        return ""
+    names: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("role") or "").strip().lower() != role:
+            continue
+        artist = entry.get("artist")
+        name = str(artist.get("name") or "") if isinstance(artist, dict) else str(artist or "")
+        name = name or str(entry.get("name") or "")
+        name = name.strip()
+        if name and name not in names:
+            names.append(name)
+    return "; ".join(names)
+
+
 def extract_track_metadata(
     track: dict[str, Any],
     *,
@@ -188,6 +225,13 @@ def extract_track_metadata(
         return ""
 
     navidrome_genres, navidrome_genre = _extract_genres(track)
+    # OpenSubsonic sends ``moods`` as an ARRAY; the raw file tag reads
+    # "Heavy; Energetic; Melodic" — join with "; " to mirror it.
+    _moods = track.get("moods")
+    if isinstance(_moods, list):
+        mood_value = "; ".join(str(m).strip() for m in _moods if str(m or "").strip())
+    else:
+        mood_value = str(track.get("mood") or "").strip()
     writers = _extract_writers(track, get_song=get_song)
     writer_json = json.dumps(writers) if writers else json.dumps([])
     album_mbid = get_tag_value("musicbrainz_albumid", "musicbrainz_album_mbid", "musicbrainz_releaseid", "release_mbid") or ""
@@ -222,6 +266,7 @@ def extract_track_metadata(
         "sample_rate": track.get("samplingRate"),
         "navidrome_genres": navidrome_genres,
         "navidrome_genre": navidrome_genre,
+        "mood": mood_value,
         "writer": writer_json,
         "stars": int(track.get("userRating", 0) or 0),
         "file_path": track.get("path", ""),
@@ -281,7 +326,7 @@ def extract_track_metadata(
         "movementtotal": get_tag_value("movementtotal", "mvcn") or "",
         "key": get_tag_value("key", "initialkey") or "",
         "explicitstatus": get_tag_value("explicitstatus", "explicit", "itunesadvisory") or "",
-        "composer": get_tag_value("composer", "composers") or "",
+        "composer": get_tag_value("composer", "composers", "displayComposer") or _contributor_names(track, "composer") or "",
         "lyricist": get_tag_value("lyricist", "lyricists", "textwriter") or "",
         "conductor": get_tag_value("conductor") or "",
         "remixer": get_tag_value("remixer", "mixartist", "tpe4") or "",
@@ -312,3 +357,62 @@ def extract_track_metadata(
         "comment": get_tag_value("comment", "comments", "description") or "",
         "navidrome_added_at": track.get("created"),
     }
+
+
+def _format_item_date(value: Any) -> str:
+    """Render an OpenSubsonic ItemDate ``{year, month, day}`` as YYYY[-MM[-DD]]."""
+    if not isinstance(value, dict):
+        return ""
+    year = str(value.get("year") or "").strip()
+    if not year:
+        return ""
+    month = str(value.get("month") or "").strip()
+    day = str(value.get("day") or "").strip()
+    if month:
+        return f"{year}-{month.zfill(2)}-{day.zfill(2)}" if day else f"{year}-{month.zfill(2)}"
+    return year
+
+
+def extract_album_metadata(album: dict[str, Any]) -> dict[str, Any]:
+    """Album-level tags Navidrome exposes on AlbumID3 — songs never carry them.
+
+    The raw tags the album page shows (record labels, release type, original
+    dates) live on the ALBUM object's OpenSubsonic extension
+    (``recordLabels``/``releaseTypes``/``originalReleaseDate``), so a
+    song-only extraction can never collect them. Returned as tracks-table
+    column names, ready for ``build_track_payload(album_tags=...)``.
+    """
+    if not isinstance(album, dict):
+        return {}
+    out: dict[str, Any] = {}
+
+    # recordLabels: [{name: "Bridge Nine Records"}] → recordlabel + label
+    # (the file's own ``label``/``recordlabel`` tags collapse into this one
+    # API list; both columns mirror it, matching the extractor's fallback).
+    labels: list[str] = []
+    raw_labels = album.get("recordLabels")
+    if isinstance(raw_labels, list):
+        for entry in raw_labels:
+            name = str((entry or {}).get("name") if isinstance(entry, dict) else entry or "").strip()
+            if name and name not in labels:
+                labels.append(name)
+    if labels:
+        # Only `recordlabel` is a tracks column — there is no `label` column
+        # anywhere (registry, ORM or migration 001), so a `label` key here
+        # would be filtered out of every payload.
+        out["recordlabel"] = "; ".join(labels)
+
+    # releaseTypes: ["album", "live"] → Popularr's composite "album+live".
+    raw_types = album.get("releaseTypes")
+    if isinstance(raw_types, list):
+        types = [str(t).strip().lower() for t in raw_types if str(t or "").strip()]
+        if types:
+            out["releasetype"] = "+".join(types)
+
+    # originalReleaseDate {year, month, day} → originalyear + originaldate.
+    original = album.get("originalReleaseDate")
+    if isinstance(original, dict) and original.get("year"):
+        out["originalyear"] = str(original.get("year")).strip()
+        out["originaldate"] = _format_item_date(original)
+
+    return out

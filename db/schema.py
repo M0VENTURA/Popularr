@@ -305,6 +305,10 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "pending_mb_updates": "TEXT", "mb_ignored_fields": "TEXT",
         "verification_status": "TEXT", "verification_checked_at": "TIMESTAMP", "verification_error": "TEXT",
         "navidrome_added_at": "TIMESTAMP",
+        # Created by migration 001 in production; the registry and ORM both
+        # lacked it (composer credits are written by the import's
+        # displayComposer mapping).
+        "composer": "TEXT",
     },
     "download_queue": {
         "source": "TEXT DEFAULT 'soulseek'", "source_id": "TEXT", "search_query": "TEXT",

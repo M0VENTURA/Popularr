@@ -77,6 +77,7 @@ EXTRACTED_STRING_FIELDS = (
     "composersort", "lyricistsort", "artists", "albumartists", "encodedby", "encodersettings",
     "website", "license", "isrc", "comment",
     "is_cover", "original_cover_artist",
+    "mood",
 )
 
 # Fields that MUST be valid JSON lists/arrays for Postgres JSONB columns
@@ -103,6 +104,22 @@ MBID_IDENTITY_FIELDS = frozenset({
     "musicbrainz_releasetrackid", "musicbrainz_artistid",
     "musicbrainz_albumartistid", "musicbrainz_workid",
 })
+
+#: Everything else an empty value must NOT overwrite: raw tags the user can
+#: SEE in Navidrome but its Subsonic response never carries (catalognumber,
+#: media, script, releasecountry, releasestatus — only OpenSubsonic's field
+#: set is on the wire), plus album-page/download enrichment of the same class
+#: (record label, dates, mood, credits, cover attribution). An import that
+#: cannot re-read them must keep the stored value instead of blanking it.
+#: ⚠️ Only real COLUMNs belong here — non-columns are filtered out anyway.
+PRESERVE_WHEN_EMPTY_FIELDS = MBID_IDENTITY_FIELDS | {
+    # Only real COLUMNs belong here (others are filtered out anyway):
+    "catalognumber", "media", "script", "releasecountry", "releasestatus",
+    "recordlabel", "releasedate", "originalyear", "originaldate",
+    "mood",  # written by the Essentia mood scan
+    "composer", "lyricist",  # credits: refilled when the API sends them
+    "is_cover", "original_cover_artist",
+}
 
 EXTRACTED_DIRECT_FIELDS = (
     "bpm", "danceability", "stars", "duration", "track_number", "disc_number", "year",
@@ -183,6 +200,7 @@ def build_track_payload(
     get_song: Callable[[str], dict[str, Any]] | None = None,
     is_new_track: bool = True,
     album_mbid: str | None = None,
+    album_tags: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a DB-ready payload for a Navidrome track.
 
@@ -204,6 +222,9 @@ def build_track_payload(
         album_mbid: Release MBID from the album object Navidrome returned
             (`musicBrainzId`). Songs do not carry it, so without this every
             payload's album MBID was empty.
+        album_tags: Album-level raw tags from ``extract_album_metadata``
+            (record labels, release type, original dates) — AlbumID3 carries
+            them, songs never do.
     """
     album_context = album_context or {}
     extracted = extracted or extract_track_metadata(track, get_song=get_song)
@@ -248,7 +269,7 @@ def build_track_payload(
     # Attach String mapped fields securely
     for field in EXTRACTED_STRING_FIELDS:
         value = extracted.get(field, "") or ""
-        if not value and field in MBID_IDENTITY_FIELDS:
+        if not value and field in PRESERVE_WHEN_EMPTY_FIELDS:
             continue  # omitted ⇒ the upsert leaves the stored MBID alone
         payload[field] = value
 
@@ -287,5 +308,15 @@ def build_track_payload(
     )
     if _artist_mbid_alt:
         payload["musicbrainz_artist_id"] = _artist_mbid_alt
+
+    # ── Album-object tags ────────────────────────────────────────────────
+    # recordLabels / releaseTypes / original dates live on AlbumID3, never
+    # on the song child. Fill only where the payload is still empty so a
+    # song-level value (the file's own tag) always wins.
+    for _col, _val in (album_tags or {}).items():
+        if _val in (None, ""):
+            continue
+        if not str(payload.get(_col) or "").strip():
+            payload[_col] = _val
 
     return payload

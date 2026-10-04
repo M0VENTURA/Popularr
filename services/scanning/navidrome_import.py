@@ -40,7 +40,7 @@ from services.scanning.cleanup import (
     sanitize_artist_rows_safe,
 )
 from services.scanning.filters import should_skip_album, should_skip_cached_album
-from services.scanning.metadata_extractor import extract_track_metadata
+from services.scanning.metadata_extractor import extract_album_metadata, extract_track_metadata
 from services.scanning.scan_state import is_stop_requested
 from services.scanning.payload_builder import build_track_payload
 
@@ -485,6 +485,9 @@ def scan_artist_to_db(
                     # the song children — without it every track payload
                     # carried "" and the upsert wiped the stored value.
                     album_mbid=str(album.get("musicBrainzId") or "").strip(),
+                    # Record labels / release type / original dates: the
+                    # album object carries them, the song children never do.
+                    album_tags=extract_album_metadata(album),
                 )
 
                 album_mbid = str(payload.get("musicbrainz_album_mbid") or "").strip()
