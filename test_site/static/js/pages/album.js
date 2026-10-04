@@ -1059,6 +1059,67 @@
   global.renameAlbumFiles = renameAlbumFiles;
 
   /**
+   * Rename only the SELECTED tracks to the configured naming format.
+   *
+   * Serves the bulk toolbar's "Rename Selected" button. Same endpoint as
+   * renameAlbumFiles, narrowed by ``track_ids``; FLAC→MP3 conversion follows
+   * ``downloads.conversion`` on the server.
+   */
+  async function renameSelectedTracks(btn) {
+    const ids = selectedTrackIds();
+    if (!ids.length) {
+      notifyError('Please select at least one track.');
+      return;
+    }
+    const artist = pageArtist();
+    const album = pageAlbum();
+    if (!artist || !album) {
+      notifyError('Cannot rename files without an artist and album.');
+      return;
+    }
+
+    const confirmed = global.ui && global.ui.confirm
+      ? await global.ui.confirm({
+        title: 'Rename selected files',
+        message: `Rename ${ids.length} selected file${ids.length === 1 ? '' : 's'} in "${album}" to the configured naming format?`,
+        detail: 'Flac files are converted to MP3 first when conversion is enabled in Config → Downloads.',
+        tone: 'warning',
+        confirmLabel: 'Rename',
+      })
+      : window.confirm(`Rename ${ids.length} selected file(s) to the configured naming format?`);
+    if (!confirmed) return;
+
+    const run = async () => {
+      const data = await global.api.postJson(
+        `/api/album/${encodeURIComponent(artist)}/${encodeURIComponent(album)}/rename-files`,
+        { track_ids: ids }
+      );
+      if (!data || data.success !== true) {
+        notifyError((data && data.error) || 'Rename failed.');
+        return;
+      }
+      if (!data.renamed_count) {
+        notifyInfo('Selected files are already at the correct paths.');
+        return;
+      }
+      notifySuccess(data.message || `Renamed ${data.renamed_count} file(s).`);
+      if (Array.isArray(data.errors) && data.errors.length) {
+        notifyError(`${data.errors.length} file(s) could not be renamed — see the logs.`);
+      }
+      // The rows are server-rendered with file paths — reload so they agree.
+      setTimeout(() => global.location.reload(), 1200);
+    };
+
+    if (global.busyPopup) {
+      return global.busyPopup.showAndRun('Renaming selected files…', run)
+        .catch((error) => notifyError('Error: ' + error.message));
+    }
+    return run().catch((error) => notifyError('Error: ' + error.message));
+  }
+
+  global.renameSelectedTracks = renameSelectedTracks;
+
+  /**
    * Open the "Change Album Art" dialog: search external sources, paste a URL,
    * or upload a file.
    *
@@ -2341,8 +2402,13 @@
   });
 
   function selectedTrackIds() {
-    return Array.from(document.querySelectorAll('.track-checkbox:checked'))
-      .map((cb) => cb.dataset.trackId);
+    // Set: a track must never be acted on twice even if markup ever renders
+    // its row twice (the class of bug behind the 2026-08-17 double-rename).
+    return [...new Set(
+      Array.from(document.querySelectorAll('.track-checkbox:checked'))
+        .map((cb) => cb.dataset.trackId)
+        .filter(Boolean)
+    )];
   }
 
   function confirmBulkDeleteTracks() {

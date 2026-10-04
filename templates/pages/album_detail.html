@@ -249,6 +249,16 @@
             <button type="button" class="btn btn-sm btn-outline-warning py-0 px-2" onclick="alignTracklist()"><i class="bi bi-list-check"></i> Align</button>
           </div>
         </div>
+        {# Bulk-selection toolbar — hidden until updateBulkActionsUI() sees a
+           checked .track-checkbox; renders above the table because it is not
+           a table row. Checkbox lives INSIDE the existing first cell so the
+           column count (and every colspan the JS sub-rows rely on) stays put. #}
+        <div id="bulkActionsToolbar" class="d-none align-items-center justify-content-between mb-2 gap-2 flex-wrap">
+          <span class="text-muted small"><strong id="selectedCount">0</strong> track(s) selected</span>
+          <button class="btn btn-sm btn-outline-primary" id="renameSelectedBtn" onclick="renameSelectedTracks(this)" title="Rename the selected files to the configured naming format (converts FLAC to MP3 when that is enabled in Config)">
+            <i class="bi bi-files me-1"></i> Rename Selected
+          </button>
+        </div>
         <div class="table-responsive">
           {# NOT data-mobile-cards. This table's rows are only partly server-rendered:
              album_detail.js injects missing/update/extra sub-rows whose cells are
@@ -258,7 +268,10 @@
           <table class="table table-hover table-dark align-middle mb-0">
             <thead>
               <tr class="text-muted small">
-                <th style="width: 45px;" class="text-center">#</th>
+                <th style="width: 56px;" class="text-center text-nowrap">
+                  <input type="checkbox" id="selectAllTracksCheckbox" onclick="toggleSelectAll(this)" title="Select all tracks" aria-label="Select all tracks">
+                  <span class="ms-1">#</span>
+                </th>
                 <th>Title</th>
                 <th class="text-center" style="width: 100px;">Duration</th>
                 <th class="text-center" style="width: 120px;">Rating</th>
@@ -268,7 +281,10 @@
             <tbody id="albumTracksTbody">
               {% for track in tracks %}
               <tr data-track-id="{{ track.id }}" data-track-title="{{ track.title|e }}" data-track-artist="{{ (track.artist or artist_name)|e }}">
-                <td class="text-center text-muted">{{ track.track_number or loop.index }}</td>
+                <td class="text-center text-muted">
+                  <input type="checkbox" class="track-checkbox me-1" data-track-id="{{ track.id }}" aria-label="Select {{ track.title|e }}">
+                  {{ track.track_number or loop.index }}
+                </td>
                 <td>
                   <a href="{{ url_for('ui.track_detail', track_id=track.id) }}" class="fw-bold text-light text-decoration-none">
                     {{ track.title }}

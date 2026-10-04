@@ -1767,8 +1767,70 @@ window.updateBulkActionsUI = function () {
 };
 
 function _getSelectedTrackIds() {
-    return Array.from(document.querySelectorAll('.track-checkbox:checked')).map(cb => cb.dataset.trackId);
+    // Set: never act twice on one track even if markup ever renders its row
+    // twice (the class of bug behind the 2026-08-17 double-rename).
+    return [...new Set(
+        Array.from(document.querySelectorAll('.track-checkbox:checked'))
+            .map(cb => cb.dataset.trackId)
+            .filter(Boolean)
+    )];
 }
+
+// Per-row checkbox updates without an inline onchange — matches the rebuilt
+// tree's delegated listener, and covers rows injected after load.
+document.addEventListener('change', function (e) {
+    if (e.target.classList && e.target.classList.contains('track-checkbox')) {
+        window.updateBulkActionsUI();
+    }
+});
+
+/**
+ * Rename only the SELECTED tracks to the configured naming format.
+ *
+ * Serves the bulk toolbar's "Rename Selected" button. Same endpoint as the
+ * album-wide rename, narrowed by ``track_ids``; FLAC→MP3 conversion follows
+ * ``downloads.conversion`` on the server.
+ */
+window.renameSelectedTracks = function (btn) {
+    const ids = _getSelectedTrackIds();
+    if (ids.length === 0) {
+        alert('Please select at least one track.');
+        return;
+    }
+    const artist = window._pageData ? window._pageData.artistName : '';
+    const album = window._pageData ? window._pageData.albumName : '';
+    if (!artist || !album) {
+        alert('Cannot rename files without an artist and album.');
+        return;
+    }
+    if (!confirm(
+        `Rename ${ids.length} selected file(s) in "${album}" to the configured naming format?\n\n`
+        + 'Flac files are converted to MP3 first when conversion is enabled in Config > Downloads.'
+    )) return;
+
+    fetch(`/api/album/${encodeURIComponent(artist)}/${encodeURIComponent(album)}/rename-files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ track_ids: ids }),
+    })
+        .then(r => r.json())
+        .then(data => {
+            if (!data || data.success !== true) {
+                alert((data && data.error) || 'Rename failed.');
+                return;
+            }
+            if (!data.renamed_count) {
+                alert('Selected files are already at the correct paths.');
+                return;
+            }
+            alert((data.message || `Renamed ${data.renamed_count} file(s).`)
+                + ((data.errors && data.errors.length)
+                    ? `\n${data.errors.length} file(s) could not be renamed — see the logs.`
+                    : ''));
+            setTimeout(() => window.location.reload(), 1200);
+        })
+        .catch(err => alert('Rename failed: ' + err));
+};
 
 window.confirmBulkDeleteTracks = function () {
     const ids = _getSelectedTrackIds();

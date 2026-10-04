@@ -101,12 +101,20 @@ def _sanitize_release_name(album_name: str) -> str:
 def rename_album_files_service(
     artist: str,
     album: str,
+    track_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Rename all files in an album based on the configured naming format."""
+    """Rename files in an album based on the configured naming format.
+
+    ``track_ids`` narrows the run to the tracks SELECTED on the album page
+    (bulk "Rename Selected"); ``None`` renames every track in the album (the
+    Actions ▸ Rename Files behaviour).  An empty list renames nothing — it
+    must never mean "everything".
+    """
     import shutil
 
     from helpers.config_helpers import get_config
     from services.downloads.download_organize_helpers import (
+        _AUDIO_EXTS,
         _sanitize_path_component,
         _normalize_album_artist_for_path,
     )
@@ -161,7 +169,12 @@ def rename_album_files_service(
         if rel.endswith("/"):
             rel = rel + f"{fmt_vars['track_number']}. {fmt_vars['artist']} - {fmt_vars['title']}"
         rel = rel.strip("/")
-        if not os.path.splitext(os.path.basename(rel))[1]:
+        # ⚠️ NOT `not splitext(basename)[1]`: the default format renders
+        # "01. One" and splitext happily reports ". One" as the extension, so
+        # the real `.flac`/`.mp3` was NEVER appended — the renamed file lost
+        # its extension entirely (probe-proven). Append unless the basename
+        # already ends in a KNOWN audio extension.
+        if os.path.splitext(os.path.basename(rel))[1].lower() not in _AUDIO_EXTS:
             rel = f"{rel}{ext}"
         return rel
 
@@ -184,7 +197,18 @@ def rename_album_files_service(
         logger.error("Failed to load tracks for rename", artist=artist, album=album, error=str(exc), exc_info=True)
         return {"success": False, "error": f"Failed to load album tracks: {exc}"}
 
+    if track_ids is not None:
+        # Selection mode: only the tracks the user ticked. An empty selection
+        # renames NOTHING (never everything) — the route rejects it too.
+        wanted = {str(t).strip() for t in (track_ids or []) if str(t or "").strip()}
+        rows = [r for r in rows if str(r._mapping.get("id") or "").strip() in wanted]
+
     if not rows:
+        if track_ids is not None:
+            return {
+                "success": False,
+                "error": "None of the selected tracks matched this album",
+            }
         logger.debug("No tracks found for rename", artist=artist, album=album)
         return {"success": False, "error": "No tracks found for this album"}
 

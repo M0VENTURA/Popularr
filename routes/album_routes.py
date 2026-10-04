@@ -64,10 +64,26 @@ def _pop_status(result: Any, default: int = 200) -> tuple[dict[str, Any], int]:
 
 
 @album_bp.route("/<path:artist>/<path:album>/rename-files", methods=["POST"])
-def api_album_rename_files(artist: str, album: str) -> Any:
-    """Rename all files in an album based on current metadata."""
+async def api_album_rename_files(artist: str, album: str) -> Any:
+    """Rename files in an album based on current metadata.
+
+    Optional JSON body ``{"track_ids": [...]}`` limits the rename to the
+    tracks SELECTED on the album page (bulk "Rename Selected"). Without a
+    body every track in the album is renamed — the Actions ▸ Rename Files
+    behaviour.  FLAC→MP3 conversion follows ``downloads.conversion``
+    inside the service.
+    """
     artist, album = unquote(artist), unquote(album)
-    result = rename_album_files_service(artist, album)
+    # Quart's get_json is a COROUTINE — a sync handler gets a coroutine object
+    # and `in payload` raises TypeError, so this handler must be async.
+    payload = (await request.get_json(silent=True)) or {}
+    if "track_ids" in payload:
+        track_ids = payload.get("track_ids")
+        if not isinstance(track_ids, list) or not track_ids:
+            return jsonify({"success": False, "error": "track_ids must be a non-empty list"}), 400
+    else:
+        track_ids = None
+    result = rename_album_files_service(artist, album, track_ids=track_ids)
     return jsonify(result), 200
 
 
