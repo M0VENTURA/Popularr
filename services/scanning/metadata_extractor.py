@@ -325,7 +325,7 @@ def extract_track_metadata(
         "movementname": get_tag_value("movementname", "mvnm") or "",
         "movementtotal": get_tag_value("movementtotal", "mvcn") or "",
         "key": get_tag_value("key", "initialkey") or "",
-        "explicitstatus": get_tag_value("explicitstatus", "explicit", "itunesadvisory") or "",
+        "explicitstatus": get_tag_value("explicitstatus", "explicitStatus", "explicit", "itunesadvisory") or "",
         "composer": get_tag_value("composer", "composers", "displayComposer") or _contributor_names(track, "composer") or "",
         "lyricist": get_tag_value("lyricist", "lyricists", "textwriter") or "",
         "conductor": get_tag_value("conductor") or "",
@@ -414,5 +414,12 @@ def extract_album_metadata(album: dict[str, Any]) -> dict[str, Any]:
     if isinstance(original, dict) and original.get("year"):
         out["originalyear"] = str(original.get("year")).strip()
         out["originaldate"] = _format_item_date(original)
+
+    # AlbumID3.version (e.g. "Deluxe Edition") → albumversion.  The song
+    # child never carries it, so without this the column could only ever be
+    # preserved, never refreshed from Navidrome.
+    version = str(album.get("version") or "").strip()
+    if version:
+        out["albumversion"] = version
 
     return out

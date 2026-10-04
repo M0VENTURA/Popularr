@@ -111,6 +111,15 @@ MBID_IDENTITY_FIELDS = frozenset({
 #: set is on the wire), plus album-page/download enrichment of the same class
 #: (record label, dates, mood, credits, cover attribution). An import that
 #: cannot re-read them must keep the stored value instead of blanking it.
+#:
+#: ⚠️ The wire set is the Subsonic ``Child`` + ``AlbumID3`` structs as
+#: Navidrome actually serialises them (``server/subsonic/responses/``).  A
+#: field absent there is UNREACHABLE no matter what the file tag holds —
+#: Navidrome reads the tag but does not echo it.  ``barcode``/``tracktotal``/
+#: ``disctotal``/``asin`` were missing from this set, so every re-import
+#: BLANKED them (verified with a DB round-trip: stored ``8809928957340`` /
+#: ``17`` / ``2`` all became ``''``), silently undoing the album-page and
+#: download-import enrichment.
 #: ⚠️ Only real COLUMNs belong here — non-columns are filtered out anyway.
 PRESERVE_WHEN_EMPTY_FIELDS = MBID_IDENTITY_FIELDS | {
     # Only real COLUMNs belong here (others are filtered out anyway):
@@ -119,6 +128,11 @@ PRESERVE_WHEN_EMPTY_FIELDS = MBID_IDENTITY_FIELDS | {
     "mood",  # written by the Essentia mood scan
     "composer", "lyricist",  # credits: refilled when the API sends them
     "is_cover", "original_cover_artist",
+    # Present in the file but NOT in Child/AlbumID3 — Navidrome keeps them
+    # internally (``model.MediaFile.Tags``) without exposing them, so an
+    # import can never re-read them and must not blank them:
+    "barcode", "asin", "tracktotal", "disctotal", "copyright", "language",
+    "discsubtitle", "albumversion", "musicbrainz_albumstatus", "work",
 }
 
 EXTRACTED_DIRECT_FIELDS = (

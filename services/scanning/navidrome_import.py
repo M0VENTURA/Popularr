@@ -227,15 +227,39 @@ def extract_and_backfill_track_metadata(
 
 
 def prefetch_artist_state(*, canonical_artist_name: str) -> dict[str, Any]:
-    """Read existing DB state needed for one artist scan."""
+    """Read existing DB state needed for one artist scan.
+
+    Also flags albums whose stored rows are missing one of the CRITICAL
+    fields the Navidrome response carries (duration, track number, year,
+    file path) so the ``missing`` scan mode re-imports them.
+
+    ⚠️ This set used to be returned EMPTY unconditionally — the old system
+    built it (``old_system/deprecated/navidrome_import.py``) but the port
+    dropped that half, so ``filter_missing=True`` hit
+    ``should_skip_album``'s "not in albums_needing_reimport" branch and
+    skipped EVERY album: the missing-fields mode silently imported nothing.
+    """
     existing_track_ids: set[str] = set()
     existing_album_tracks: dict[str, set[str]] = {}
     existing_album_artists: dict[str, str] = {}
+    albums_needing_reimport: set[str] = set()
+
+    def _missing(value: Any) -> bool:
+        """NULL / empty / non-positive numeric = the field never landed."""
+        if value is None:
+            return True
+        text = str(value).strip()
+        if text == "":
+            return True
+        try:
+            return float(text) <= 0
+        except ValueError:
+            return False
 
     with db_session() as session:
         result = session.execute(
             text("""
-                SELECT id, album, album_artist
+                SELECT id, album, album_artist, duration, track_number, year, file_path
                 FROM tracks
                 WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
             """),
@@ -253,13 +277,18 @@ def prefetch_artist_state(*, canonical_artist_name: str) -> dict[str, Any]:
                 existing_album_tracks.setdefault(strip_album_edition_marker(str(album)), set()).add(str(track_id))
             if album and album_artist:
                 existing_album_artists[strip_album_edition_marker(str(album))] = str(album_artist)
+            # Any critical field still empty → this album needs a re-import
+            # when ``filter_missing`` is on (all four ARE on the wire, so a
+            # re-import genuinely fills them).
+            if album and any(_missing(value) for value in row[3:]):
+                albums_needing_reimport.add(strip_album_edition_marker(str(album)))
 
     return {
         "existing_track_ids": existing_track_ids,
         "navidrome_track_ids": set(),
         "existing_album_tracks": existing_album_tracks,
         "existing_album_artists": existing_album_artists,
-        "albums_needing_reimport": set(),
+        "albums_needing_reimport": albums_needing_reimport,
     }
 
 
