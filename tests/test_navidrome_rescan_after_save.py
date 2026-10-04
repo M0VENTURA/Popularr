@@ -95,6 +95,12 @@ def rescan(monkeypatch):
         Thread = _CapturedThread
 
     monkeypatch.setattr(svc, "threading", _StubThreading)
+    # Never really sleep: the rate limit would otherwise cost the suite five
+    # minutes.  Recorded instead so rate-limit tests can assert the wait.
+    # ``raising=False`` so a service that does not sleep at all is a
+    # BEHAVIOURAL test failure (nothing recorded), not a fixture error.
+    slept: list[float] = []
+    monkeypatch.setattr(svc, "sleep", slept.append, raising=False)
     # Fresh coalescer state per test (the real state dict is module-global).
     monkeypatch.setattr(
         svc, "_state", {"running": False, "pending": False, "reason": None}
@@ -129,6 +135,7 @@ def rescan(monkeypatch):
     # a class block's own store target shadows the enclosing function scope
     # for reads.  Bind it after the class instead.
     _Harness.spawned = spawned
+    _Harness.slept = slept
     return _Harness()
 
 
@@ -249,6 +256,127 @@ class TestRequestRescan:
         assert rescan.request("save") is True
         rescan.run_worker()   # must swallow the error, not raise
         assert get_rescan_state()["running"] is False
+
+
+class TestRateLimitBetweenRuns:
+    """A TRICKLE of saves must not keep Navidrome scanning back-to-back.
+
+    The ``pending`` flag collapses a *burst*, but it did nothing for a
+    trickle — the reported log showed 12 full-library rescans in 35 minutes
+    with gaps as short as 44 seconds, Navidrome's ``getScanStatus`` started
+    timing out, and Popularr's UI stalled behind those slow responses.
+    """
+
+    @staticmethod
+    def _interval(module) -> float:
+        """The service's minimum interval between runs.
+
+        Asserts rather than returning ``None`` so a service that lost the
+        rate limit entirely fails HERE, with a message, instead of with an
+        AttributeError further down the test.
+        """
+        value = getattr(module, "MIN_SCAN_INTERVAL_SECONDS", None)
+        assert isinstance(value, (int, float)) and value > 0, (
+            "navidrome_rescan_service must expose a positive "
+            "MIN_SCAN_INTERVAL_SECONDS — without it a trickle of saves keeps "
+            "Navidrome scanning back-to-back"
+        )
+        return float(value)
+
+    def test_a_lone_save_is_never_delayed(self, rescan):
+        """Only FOLLOW-UPS are rate limited: a single edit refreshes at once."""
+        rescan.configure()
+        rescan.request("save")
+        rescan.run_worker()
+
+        assert rescan.slept == [], "a lone run must not be deferred"
+        assert rescan.client.calls == 1
+
+    def test_a_followup_run_waits_out_the_minimum_interval(self, rescan, monkeypatch):
+        """The queued save is still scanned — just not immediately."""
+        rescan.configure()
+        logs: list[str] = []
+        monkeypatch.setattr(rescan.module, "log_unified", lambda m, **k: logs.append(m))
+
+        rescan.request("save-1")
+        rescan.request("save-2")   # lands while the first run is scanning
+        rescan.run_worker()
+
+        assert rescan.client.calls == 2, (
+            "rate limiting must DELAY the queued save, never drop it"
+        )
+        assert len(rescan.slept) == 1, "the follow-up must be deferred exactly once"
+        assert rescan.slept[0] == pytest.approx(self._interval(rescan.module), abs=1.0), (
+            f"expected a wait of MIN_SCAN_INTERVAL_SECONDS before the follow-up, "
+            f"got {rescan.slept[0]}"
+        )
+        assert any("rate limit" in m for m in logs), (
+            "the deferral must be visible in the scan log, or an operator sees "
+            "Navidrome go stale with no explanation"
+        )
+
+    def test_a_slow_run_pays_its_own_cooldown(self, rescan, monkeypatch):
+        """The interval is measured from the run's START, so a run that already
+        outlasted it needs no extra wait before the follow-up."""
+        rescan.configure()
+        interval = self._interval(rescan.module)
+        clock = {"t": 0.0}
+        monkeypatch.setattr(rescan.module, "monotonic", lambda: clock["t"])
+
+        original_run = rescan.module._run_once
+
+        def _slow_run(reason):
+            clock["t"] += interval + 60
+            return original_run(reason)
+
+        monkeypatch.setattr(rescan.module, "_run_once", _slow_run)
+
+        rescan.request("save-1")
+        rescan.request("save-2")
+        rescan.run_worker()
+
+        assert rescan.client.calls == 2
+        assert rescan.slept == [], (
+            "a run that already lasted longer than the interval must not be "
+            "padded with another full wait"
+        )
+
+    def test_a_short_run_waits_out_only_the_remainder(self, rescan, monkeypatch):
+        """Wait = interval − elapsed, not the whole interval again."""
+        rescan.configure()
+        interval = self._interval(rescan.module)
+        clock = {"t": 0.0}
+        monkeypatch.setattr(rescan.module, "monotonic", lambda: clock["t"])
+
+        original_run = rescan.module._run_once
+
+        def _run(reason):
+            clock["t"] += 60.0
+            return original_run(reason)
+
+        monkeypatch.setattr(rescan.module, "_run_once", _run)
+
+        rescan.request("save-1")
+        rescan.request("save-2")
+        rescan.run_worker()
+
+        assert rescan.slept, "the follow-up must be deferred"
+        assert rescan.slept[0] == pytest.approx(interval - 60.0, abs=1.0), (
+            f"expected the remainder only ({interval - 60.0}s), got {rescan.slept[0]}"
+        )
+
+    def test_state_resets_and_the_coalescer_is_reusable(self, rescan):
+        rescan.configure()
+        rescan.request("save-1")
+        rescan.request("save-2")
+        rescan.run_worker()
+
+        assert get_rescan_state() == {
+            "running": False, "pending": False, "reason": None,
+        }, "a deferred run must still leave the coalescer idle"
+        # …and the next save must be able to start a fresh worker.
+        assert rescan.request("save-3") is True
+        assert len(rescan.spawned) == 1
 
 
 # ===========================================================================
