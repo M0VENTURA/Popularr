@@ -1630,6 +1630,15 @@
     const tabBtn = document.querySelector('#albumPageTabs [data-bs-target="#tab-details"]');
     if (tabBtn && global.bootstrap) global.bootstrap.Tab.getOrCreateInstance(tabBtn).show();
 
+    // Tracklist findings for the picked release: the missing rows and the
+    // "downloaded twice" flags. Live's applyAlbumMbid has always done this
+    // here — without it THIS path rendered nothing at all, so any caller that
+    // arrives with a concrete release id (the release picker, an inline
+    // handler) left the tracklist looking complete.
+    Promise.resolve()
+      .then(() => refreshAlbumTrackFindings(mbid))
+      .catch((error) => console.warn('Could not refresh album tracklist findings', error));
+
     // Full metadata preview — staged only, written by the form's own submit.
     if (global.albumMetadataReview) {
       global.albumMetadataReview.applyProposal(mbid)
@@ -2853,24 +2862,40 @@
     const album = pageAlbum();
     if (!artist || !album) return;
 
-    if (releaseMbid) {
-      try {
-        const data = await global.api.getJson(
-          `/api/album/missing-tracks?artist=${encodeURIComponent(artist)}`
-          + `&album=${encodeURIComponent(album)}`
-          + `&refresh=1&release_mbid=${encodeURIComponent(releaseMbid)}`
-        );
-        // mb_total == 0 → no release could be fetched (bad id, offline);
-        // keep whatever is rendered rather than replacing a good list with
-        // nothing.
-        if (data && (data.mb_total || 0) > 0) {
-          tbody.querySelectorAll('.mb-missing-row').forEach((r) => r.remove());
-          renderMissingTracks(data.missing_tracks || [], tbody);
-          updateMissingHeaderBadge(data.missing_count || 0);
-        }
-      } catch (_e) {
-        // Non-fatal: the owned tracklist still renders.
+    // ⚠️ THE FETCH RUNS EVEN WITH NO RELEASE ID.
+    //
+    // This used to be `if (releaseMbid) { … }`, so the whole missing half was
+    // skipped — silently — whenever the best-release probe failed (throttled
+    // MusicBrainz, an offline group browse, a slow edition resolution). The
+    // proposal in applyAlbumMatch already falls back to `release.id` in that
+    // situation, so the preview worked while the tracklist quietly stayed
+    // blank: exactly "missing tracks not populating after the lookup".
+    //
+    // With no id the SERVER falls back — `get_missing_tracks` uses the stored
+    // album MBID, then a name search — which is the same computation the
+    // page-load path runs, and strictly better than showing nothing.
+    try {
+      const data = await global.api.getJson(
+        `/api/album/missing-tracks?artist=${encodeURIComponent(artist)}`
+        + `&album=${encodeURIComponent(album)}`
+        // Both shapes ask for a recompute; only the scope differs. The id'd
+        // form is the one the album page's Lookup MBID contract pins.
+        + (releaseMbid
+          ? `&refresh=1&release_mbid=${encodeURIComponent(releaseMbid)}`
+          : '&refresh=1')
+      );
+      // mb_total == 0 → no release could be fetched (bad id, offline);
+      // keep whatever is rendered rather than replacing a good list with
+      // nothing.
+      if (data && (data.mb_total || 0) > 0) {
+        tbody.querySelectorAll('.mb-missing-row').forEach((r) => r.remove());
+        renderMissingTracks(data.missing_tracks || [], tbody);
+        updateMissingHeaderBadge(data.missing_count || 0);
       }
+    } catch (error) {
+      // Non-fatal: the owned tracklist still renders — but LOUDLY, because a
+      // silent swallow here is what hid the blank tracklist in the first place.
+      console.warn('Could not refresh album tracklist findings:', error);
     }
 
     // Duplicates are a local library fact — flag them too (idempotent).
@@ -2947,6 +2972,7 @@
     applySelectedAlbumSourceTags,
     openAlbumLookupModal,
     applyAlbumMbid,
+    refreshAlbumTrackFindings,
     compareWithMusicBrainz,
     clearMBComparison: clearComparison,
     updateAllTracksFromMB,
@@ -2973,6 +2999,7 @@
   global.applySelectedAlbumSourceTags = applySelectedAlbumSourceTags;
   global.openAlbumLookupModal = openAlbumLookupModal;
   global.applyAlbumMbid = applyAlbumMbid;
+  global.refreshAlbumTrackFindings = refreshAlbumTrackFindings;
   global.compareWithMusicBrainz = compareWithMusicBrainz;
   global.clearMBComparison = clearComparison;
   global.applyMBField = applyMBField;
