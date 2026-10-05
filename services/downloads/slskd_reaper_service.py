@@ -70,6 +70,7 @@ def reap_stalled_transfers() -> dict[str, int]:
     stats = {"checked": 0, "cancelled_transfers": 0, "requeued_items": 0}
     try:
         from api_clients.slskd_http import get_slskd_client
+        from services.downloads.download_pipeline_service import _block_peer
         from services.downloads.slskd_service import SlskdService
 
         client = get_slskd_client()
@@ -101,6 +102,7 @@ def reap_stalled_transfers() -> dict[str, int]:
 
             username = str(transfer.get("username") or "")
             transfer_id = str(transfer.get("id") or "")
+            filename = str(transfer.get("filename") or "")
             if username and transfer_id:
                 if slskd.cancel_download(username, transfer_id, remove=True):
                     stats["cancelled_transfers"] += 1
@@ -111,6 +113,25 @@ def reap_stalled_transfers() -> dict[str, int]:
                         filename=transfer.get("filename"),
                         progress=progress,
                     )
+
+            # EVERY other failure path already blocks the (peer, file) pair:
+            # no free upload slots, ``download_file`` returning False, and a
+            # mismatched download. The stall path did NOT — so the next search
+            # re-selected the same dead peer and stalled again: ATEEZ
+            # "HIGHER"/"Seeker" picked roqinghejing, sat at progress=0 for 15
+            # minutes, was reaped, and repeated, every ~45 minutes, forever.
+            #
+            # Blocking here (same TTL and key as everywhere else) means the
+            # next cycle either selects a different file or reports
+            # ``no_results`` and backs off, instead of burning another stall.
+            if username and filename:
+                _block_peer(username, filename)
+                logger.warning(
+                    "Blocked peer after stalled transfer",
+                    username=username,
+                    filename=filename,
+                    progress=progress,
+                )
 
             item = _find_owning_item(transfer, active_items)
             if item:
