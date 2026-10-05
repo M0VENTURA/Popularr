@@ -261,6 +261,9 @@
           <button class="btn btn-sm btn-outline-primary" id="renameSelectedBtn" onclick="renameSelectedTracks(this)" title="Rename the selected files to the configured naming format (converts FLAC to MP3 when that is enabled in Config)">
             <i class="bi bi-files me-1"></i> Rename Selected
           </button>
+          <button class="btn btn-sm btn-outline-danger" id="bulkDeleteSelectedBtn" onclick="confirmBulkDeleteTracks()" title="Delete the selected tracks — from the database, or from the database and disk">
+            <i class="bi bi-trash me-1"></i> Delete Selected
+          </button>
         </div>
         <div class="table-responsive">
           {# NOT data-mobile-cards. This table's rows are only partly server-rendered:
@@ -668,6 +671,7 @@
 {% include 'components/modals/_manual_match.html' ignore missing %}
 {% include 'components/modals/_soulseek_manual_search.html' ignore missing %}
 {% include 'components/modals/_release_picker.html' ignore missing %}
+{% include 'components/modals/_bulk_delete.html' ignore missing %}
 {#
   REMOVED: {% include 'components/modals/_musicbrainz_release_match.html' %}
 

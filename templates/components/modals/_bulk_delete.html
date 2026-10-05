@@ -1,0 +1,42 @@
+{#
+  Bulk delete — opened from the album page's selection toolbar
+  ("Delete Selected" → confirmBulkDeleteTracks() in album_detail.js).
+
+  Two outcomes, because they are not equally reversible: a database row can
+  come back from a Navidrome re-import, an audio file cannot. The JS fills
+  #deleteTrackCount before showing this, and _performBulkDelete() posts
+  /api/v1/albums/<artist>/<album>/bulk-delete with {track_ids, delete_files}.
+
+  The markup is driven entirely by that JS — #bulkDeleteModal and
+  #deleteTrackCount are the contract, so neither may be renamed.
+#}
+<div class="modal fade" id="bulkDeleteModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title"><i class="bi bi-trash text-danger me-1"></i> Delete selected tracks</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">
+                    Delete <strong id="deleteTrackCount">0</strong> selected track(s) from this album?
+                </p>
+                <p class="small text-muted mb-0">
+                    <strong>Database only</strong> removes the rows and keeps the audio — a Navidrome
+                    rescan can bring the rows back.<br>
+                    <strong>Files + database</strong> deletes the audio permanently.
+                    <span class="text-danger">That cannot be undone.</span>
+                </p>
+            </div>
+            <div class="modal-footer border-secondary flex-wrap gap-2">
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-sm btn-outline-warning" onclick="deleteDatabaseOnly()" title="Remove the database rows but keep the audio files on disk">
+                    <i class="bi bi-database me-1"></i> Database only
+                </button>
+                <button type="button" class="btn btn-sm btn-danger" onclick="deleteWithFiles()" title="Permanently delete the audio files as well">
+                    <i class="bi bi-trash me-1"></i> Files + database
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
