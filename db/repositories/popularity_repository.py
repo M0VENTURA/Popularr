@@ -298,7 +298,22 @@ def upsert_tracks_bulk(track_payloads: list[dict]) -> bool:
             ok = True
             for payload in track_payloads:
                 try:
-                    _execute_save(session, payload)
+                    # ⚠️ A SAVEPOINT PER ROW — this is the reported "one bad
+                    # track skips every other song on that album".
+                    #
+                    # Every row shares this transaction, and in PostgreSQL a
+                    # FAILED statement puts the whole transaction into an
+                    # aborted state: the catch below would log "row skipped"
+                    # for the offending row and then every remaining row would
+                    # fail with InFailedSqlTransaction ("commands ignored
+                    # until end of transaction block"), so the album's other
+                    # writes were silently discarded.  ROLLBACK TO SAVEPOINT
+                    # undoes only the bad row and leaves the transaction usable.
+                    #
+                    # SQLite tolerates a failed statement, which is precisely
+                    # why the test suite never reproduced this.
+                    with session.begin_nested():
+                        _execute_save(session, payload)
                 except Exception as exc:
                     # ⚠️ WARNING, not DEBUG, and it names the track + the DB's
                     # own reason. This was ``logger.debug``, so a rejected

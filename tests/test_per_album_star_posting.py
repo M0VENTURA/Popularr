@@ -995,6 +995,16 @@ class TestUpsertTracksBulk:
             self.executed.append((sql, params))
             return _FakeResult([])
 
+        @contextmanager
+        def begin_nested(self):
+            """SAVEPOINT — ``upsert_tracks_bulk`` wraps every row in one.
+
+            A failed row must roll back to its own savepoint instead of
+            aborting the shared transaction (Postgres would reject every
+            later row with ``InFailedSqlTransaction``).
+            """
+            yield
+
         def commit(self):
             self.commit_count += 1
 

@@ -97,6 +97,16 @@ class _FakeSession:
                 raise ValueError('invalid input syntax for type json')
         return _Result()
 
+    def begin_nested(self):
+        """SAVEPOINT — ``upsert_tracks_bulk`` wraps every row in one.
+
+        Without it a refused row aborts the shared transaction and Postgres
+        rejects every later row with ``InFailedSqlTransaction``.
+        """
+        from contextlib import nullcontext
+
+        return nullcontext()
+
     def __enter__(self):
         return self
 
