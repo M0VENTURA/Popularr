@@ -2004,6 +2004,18 @@ document.addEventListener('DOMContentLoaded', function () {
         window.loadAlbumDuplicateFlags();
     }
 
+    // A save redirects back with #tab-details. Bootstrap 5 does not restore a
+    // tab from the URL on its own, so without this the reload always landed on
+    // the default TRACKS tab and the save appeared to switch contexts.
+    // The ``location &&`` matters: a test/SSR harness may not define it, and a
+    // throw here would take the rest of this handler down with it.
+    if (window.location && window.location.hash === '#tab-details' && window.bootstrap) {
+        const detailsBtn = document.querySelector(
+            '#albumPageTabs [data-bs-target="#tab-details"]'
+        );
+        if (detailsBtn) bootstrap.Tab.getOrCreateInstance(detailsBtn).show();
+    }
+
     const container = document.getElementById('albumSimilarArtistsContainer');
     if (!container) return;
 

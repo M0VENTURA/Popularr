@@ -3003,6 +3003,18 @@
     // Fire-and-forget: a failure here must not stop the page's other wiring.
     loadAlbumMissingTracks();
     loadAlbumDuplicateFlags();
+
+    // A save redirects back with #tab-details. Bootstrap 5 does not restore a
+    // tab from the URL on its own, so without this the reload always landed on
+    // the default TRACKS tab and the save appeared to switch contexts.
+    // The ``location &&`` matters: a test harness may not define it, and a
+    // throw here would take the rest of this handler down with it.
+    if (global.location && global.location.hash === '#tab-details' && global.bootstrap) {
+      const detailsBtn = document.querySelector(
+        '#albumPageTabs [data-bs-target="#tab-details"]'
+      );
+      if (detailsBtn) global.bootstrap.Tab.getOrCreateInstance(detailsBtn).show();
+    }
   });
 
   // ── Public API ──────────────────────────────────────────────────────────

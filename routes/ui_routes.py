@@ -2079,7 +2079,18 @@ async def album_detail(album_path: str) -> Any:
         redirect_artist = new_artist or artist_name
         redirect_album = new_title or album_name
         redirect_year = f"/{album_year_filter}" if album_year_filter is not None else ""
-        return redirect(url_for("ui.album_detail", album_path=f"{redirect_artist}/{redirect_album}{redirect_year}"))
+        # Fragment: the save is submitted from the EDIT ALBUM tab, but the
+        # reload always came back on the default TRACKS tab — so the user saved
+        # and was immediately dropped on the tracklist with a different Save
+        # affordance waiting ("saves once, then asks to save twice").  The JS
+        # in both album pages restores the tab from this hash.
+        return redirect(
+            url_for(
+                "ui.album_detail",
+                album_path=f"{redirect_artist}/{redirect_album}{redirect_year}",
+            )
+            + "#tab-details"
+        )
 
     first_track = tracks[0] if tracks else {}
 
