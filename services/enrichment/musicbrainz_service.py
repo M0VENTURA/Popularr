@@ -2456,10 +2456,107 @@ def get_musicbrainz_best_release(
 # Track matching engine 
 # ---------------------------------------------------------------------------
 
+def _titles_agree_for_pairing(library_title: Any, mb_title: Any) -> bool:
+    """Are these two titles naming the same song?
+
+    A blank on either side cannot disagree (an untagged file, or a MusicBrainz
+    track with no title), so it counts as agreement — the caller still has the
+    track number and the length to fall back on.
+    """
+    library = Normalize_title_for_lookup(str(library_title or ""))
+    musicbrainz = Normalize_title_for_lookup(str(mb_title or ""))
+    if not library or not musicbrainz:
+        return True
+    if library == musicbrainz:
+        return True
+    return _similarity(library, musicbrainz) >= _TRACKLIST_TITLE_FLOOR
+
+
+def _lengths_agree_for_pairing(library_duration: Any, mb_duration: Any) -> bool | None:
+    """``True``/``False`` when BOTH lengths are known, ``None`` when unknown.
+
+    Both sides are normalised through ``track_duration_seconds`` (library rows
+    hold seconds, MusicBrainz reports milliseconds) and judged with the same
+    ``DURATION_TOLERANCE_SECONDS`` the review reports a duration difference
+    with, so "worth pairing" and "worth reporting" can never disagree.
+    """
+    library = Track_duration_seconds(library_duration)
+    musicbrainz = Track_duration_seconds(mb_duration)
+    if library is None or musicbrainz is None:
+        return None
+    return abs(library - musicbrainz) <= DURATION_TOLERANCE_SECONDS
+
+
+def _track_number_pairing_allowed(
+    library_title: Any,
+    mb_title: Any,
+    library_duration: Any,
+    mb_duration: Any,
+) -> bool:
+    """May a shared track NUMBER decide this pairing?
+
+    Reported: *"Track matching is relying too much on track number and not
+    track name and length."* A number says where a track sits in one edition of
+    a release, not what it is — two editions of the same album routinely order
+    their tracks differently, and a file mis-numbered by a rip lands on
+    whatever happens to sit at that position in the chosen release. The example
+    in the report paired ``Heaven Can Wait (live)`` with
+    ``Rock and Roll Dreams Come Through (radio edit)`` purely because both
+    carried the same number.
+
+    So the number is a tie-breaker, never proof. It is allowed only when
+    nothing contradicts it:
+
+    * the names agree — the normal case, and the usual reason the numbers
+      agree too;
+    * or the names disagree but at least one length is unknown, so there is
+      nothing left to check against (an untagged file whose title came from
+      its filename shares no words with the MusicBrainz title);
+    * or the names disagree but both lengths say the same recording.
+
+    Different name AND different length means a different recording, and the
+    number loses.
+    """
+    if _titles_agree_for_pairing(library_title, mb_title):
+        return True
+    lengths = _lengths_agree_for_pairing(library_duration, mb_duration)
+    if lengths is None:
+        return True
+    return bool(lengths)
+
+
 def _match_mb_tracks_to_library(
     mb_tracks: list[dict[str, Any]],
     library_tracks: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Pair a release's tracklist with the tracks already in the library.
+
+    Reported: *"Track matching is relying too much on track number and not
+    track name and length"* — with ``Heaven Can Wait (live)`` (5:00) matched to
+    ``Rock and Roll Dreams Come Through (radio edit)`` purely because both
+    carried the same track number, so the review offered to rewrite a correct
+    title, MBID and writer into a different recording.
+
+    Matching order, per track:
+
+      1. same normalized title — the name is the only signal that says what
+         the track IS;
+      2. same track number (and disc), but only while ``_track_number_pairing_allowed``
+         says the name and the length do not contradict it. A blank number on
+         either side is not an identity: ``str(None or "")`` compared equal and
+         handed the first remaining track to a tracklist entry with no position;
+      3. fuzzy title similarity >= ``_TRACKLIST_TITLE_FLOOR``.
+
+    Asking the NAME first means a track only falls back to its number when
+    nothing in the library is named after it; combined with the name/length
+    veto in step 2, that is what stops an unrelated track from claiming
+    ``Heaven Can Wait (live)`` just because it shares its number. A library
+    track is claimed at most once.
+
+    Unmatched MusicBrainz tracks come back with ``matched=False`` — never a
+    guessed pairing, because a wrong pairing writes a wrong recording MBID
+    straight into the file's tags.
+    """
     Remaining = list(library_tracks)
     Comparison: list[dict[str, Any]] = []
 
@@ -2473,15 +2570,42 @@ def _match_mb_tracks_to_library(
         Mb_disc = str(mb_track.get("mb_disc_number") or 1)
         Mb_number = str(mb_track.get("mb_track_number") or "")
         Mb_title = str(mb_track.get("mb_title") or "")
+        Mb_norm = Normalize_title_for_lookup(Mb_title)
+        Mb_duration = mb_track.get("mb_duration")
+        if Mb_duration is None:
+            Mb_duration = mb_track.get("duration")
 
+        # 1) The NAME. The only signal that says what the track is, so it is
+        #    asked before the number: a mis-numbered file must not be stolen
+        #    from the track it is actually named after.
         Match = next(
             (
                 row for row in Remaining
-                if _disc_of(row) == Mb_disc and _track_num_of(row) == Mb_number
+                if Mb_norm
+                and Normalize_title_for_lookup(str(row.get("title") or "")) == Mb_norm
             ),
             None,
         )
 
+        # 2) The NUMBER — and only when name/length do not contradict it.
+        #    Both sides must actually state one: two blank numbers used to
+        #    compare equal and pair the first remaining file with a tracklist
+        #    entry that has no position at all.
+        if Match is None and Mb_number:
+            for row in Remaining:
+                if _disc_of(row) != Mb_disc or _track_num_of(row) != Mb_number:
+                    continue
+                if not _track_number_pairing_allowed(
+                    row.get("title"),
+                    Mb_title,
+                    row.get("duration"),
+                    Mb_duration,
+                ):
+                    continue
+                Match = row
+                break
+
+        # 3) Fuzzy title, but only while the track numbers cannot disagree.
         if Match is None:
             Same_disc = [row for row in Remaining if _disc_of(row) == Mb_disc] or Remaining
             Best_row: dict[str, Any] | None = None
@@ -2489,7 +2613,7 @@ def _match_mb_tracks_to_library(
             for row in Same_disc:
                 Score = _similarity(
                     Normalize_title_for_lookup(str(row.get("title") or "")),
-                    Normalize_title_for_lookup(Mb_title),
+                    Mb_norm,
                 )
                 if Score > Best_score:
                     Best_row, Best_score = row, Score
@@ -2630,13 +2754,19 @@ def match_mb_tracks_to_files(
     carry ``title``/``position``, while comparing ``mb_trk["title"]`` against a
     ``number`` key that no MusicBrainz track ever has.
 
-    Matching order per MusicBrainz track:
-      1. same track number (and disc, when BOTH sides state one),
-      2. same normalized title,
+    Selection runs as three passes over the WHOLE tracklist, in this order:
+      1. same normalized title — the name is the only signal that says what the
+         track actually is;
+      2. same track number (and disc, when BOTH sides state one), but only
+         while the name and the length do not contradict it — see
+         ``_track_number_pairing_allowed``;
       3. fuzzy title similarity >= ``_TRACKLIST_TITLE_FLOOR``.
     A local file is claimed at most once, so two identical titles on one
     release resolve in tracklist order rather than both collapsing onto the
-    first file.
+    first file. Running each pass over the whole tracklist — instead of fully
+    resolving one track before looking at the next — is what stops an earlier
+    MusicBrainz track from claiming a file by number before the track that file
+    is named after is even considered.
 
     Never invents metadata: an unmatched MusicBrainz track comes back with
     ``matched=False`` and no ``file_path``, and a local file matching no track
@@ -2678,10 +2808,13 @@ def match_mb_tracks_to_files(
     Remaining = list(files)
     Entries: list[dict[str, Any]] = []
 
-    for mb_track in release_metadata.get("tracks") or []:
-        if not isinstance(mb_track, dict):
-            continue
+    Mb_tracks = [
+        track
+        for track in (release_metadata.get("tracks") or [])
+        if isinstance(track, dict)
+    ]
 
+    def _identity(mb_track: dict[str, Any]) -> dict[str, Any]:
         Mb_title = str(mb_track.get("mb_title") or mb_track.get("title") or "").strip()
         Mb_number = mb_track.get("mb_track_number")
         if Mb_number is None:
@@ -2689,9 +2822,102 @@ def match_mb_tracks_to_files(
         Mb_disc = mb_track.get("mb_disc_number")
         if Mb_disc is None:
             Mb_disc = mb_track.get("disc_number")
-        Mb_track_num = _track_number(Mb_number)
-        Mb_disc_num = _disc_number(Mb_disc)
-        Mb_norm = Normalize_title_for_lookup(Mb_title)
+        return {
+            "title": Mb_title,
+            "norm": Normalize_title_for_lookup(Mb_title),
+            "number": _track_number(Mb_number),
+            "number_raw": Mb_number,
+            "disc": _disc_number(Mb_disc),
+            # The RAW disc survives into the entry: a file with no disc tag
+            # must still learn the release's own disc number.
+            "disc_raw": Mb_disc,
+            "duration": mb_track.get("mb_duration"),
+        }
+
+    Identities = [_identity(track) for track in Mb_tracks]
+    # ``chosen[i]`` is the library row claimed by ``Mb_tracks[i]``, in
+    # tracklist order. Selection runs as THREE PASSES over the whole tracklist
+    # rather than one pass that fully resolves each track before moving on:
+    # otherwise an earlier MusicBrainz track is free to claim a file by number
+    # before the track that file is actually named after ever gets a look in.
+    Chosen: list[dict[str, Any] | None] = [None] * len(Mb_tracks)
+
+    # ── Pass 1: the NAME. It is the only signal that says what the track IS.
+    for index, identity in enumerate(Identities):
+        if not identity["norm"]:
+            continue
+        for candidate in Remaining:
+            if (
+                Normalize_title_for_lookup(str(candidate.get("title") or ""))
+                == identity["norm"]
+            ):
+                Chosen[index] = candidate
+                Remaining.remove(candidate)
+                break
+
+    # ── Pass 2: the NUMBER, and only when name/length do not contradict it.
+    #    ``helpers.metadata_reader`` only surfaces a track_number for files
+    #    whose TRACKNUMBER tag is set, so this is the identity for a
+    #    well-tagged download — but never on its own: see
+    #    ``_track_number_pairing_allowed``.
+    for index, identity in enumerate(Identities):
+        if Chosen[index] is not None or identity["number"] is None:
+            continue
+        for candidate in Remaining:
+            if _track_number(candidate.get("track_number")) != identity["number"]:
+                continue
+            # A blank disc on the FILE is a wildcard: the reader does not
+            # populate disc_number at all for FLAC/MP3, so requiring a match
+            # would reject every disc-2 file of a 2-disc release.
+            Candidate_disc = _disc_number(candidate.get("disc_number"))
+            if (
+                identity["disc"] is not None
+                and Candidate_disc is not None
+                and Candidate_disc != identity["disc"]
+            ):
+                continue
+            if not _track_number_pairing_allowed(
+                candidate.get("title"),
+                identity["title"],
+                candidate.get("duration"),
+                identity["duration"],
+            ):
+                continue
+            Chosen[index] = candidate
+            Remaining.remove(candidate)
+            break
+
+    # ── Pass 3: fuzzy title, but only while the track numbers cannot
+    #    disagree.
+    for index, identity in enumerate(Identities):
+        if Chosen[index] is not None or not identity["norm"]:
+            continue
+        Best_candidate: dict[str, Any] | None = None
+        Best_score = 0.0
+        for candidate in Remaining:
+            Candidate_num = _track_number(candidate.get("track_number"))
+            if (
+                Candidate_num is not None
+                and identity["number"] is not None
+                and Candidate_num != identity["number"]
+            ):
+                continue
+            score = _similarity(
+                Normalize_title_for_lookup(str(candidate.get("title") or "")),
+                identity["norm"],
+            )
+            if score > Best_score:
+                Best_candidate, Best_score = candidate, score
+        if Best_candidate is not None and Best_score >= _TRACKLIST_TITLE_FLOOR:
+            Chosen[index] = Best_candidate
+            Remaining.remove(Best_candidate)
+
+    for mb_track, identity, Match in zip(Mb_tracks, Identities, Chosen):
+        Mb_title = identity["title"]
+        Mb_number = identity["number_raw"]
+        Mb_track_num = identity["number"]
+        Mb_disc = identity["disc_raw"]
+        Mb_disc_num = identity["disc"]
 
         Entry: dict[str, Any] = {
             "mb_track_number": Mb_track_num,
@@ -2704,62 +2930,9 @@ def match_mb_tracks_to_files(
             "file_path": "",
         }
 
-        Match: dict[str, Any] | None = None
-
-        # 1) Track number. ``helpers.metadata_reader`` only surfaces a
-        #    track_number for files whose TRACKNUMBER tag is set, so this is
-        #    the only reliable identity for a well-tagged download.
-        if Mb_track_num is not None:
-            for candidate in Remaining:
-                if _track_number(candidate.get("track_number")) != Mb_track_num:
-                    continue
-                # A blank disc on the FILE is a wildcard: the reader does not
-                # populate disc_number at all for FLAC/MP3, so requiring a
-                # match would reject every disc-2 file of a 2-disc release.
-                Candidate_disc = _disc_number(candidate.get("disc_number"))
-                if (
-                    Mb_disc_num is not None
-                    and Candidate_disc is not None
-                    and Candidate_disc != Mb_disc_num
-                ):
-                    continue
-                Match = candidate
-                break
-
-        # 2) Exact normalized title — covers files with no track number, which
-        #    is exactly the untagged/unordered folder case.
-        if Match is None and Mb_norm:
-            for candidate in Remaining:
-                if Normalize_title_for_lookup(str(candidate.get("title") or "")) == Mb_norm:
-                    Match = candidate
-                    break
-
-        # 3) Fuzzy title, but only while the track numbers cannot disagree.
-        if Match is None and Mb_norm:
-            Best_candidate: dict[str, Any] | None = None
-            Best_score = 0.0
-            for candidate in Remaining:
-                Candidate_num = _track_number(candidate.get("track_number"))
-                if (
-                    Candidate_num is not None
-                    and Mb_track_num is not None
-                    and Candidate_num != Mb_track_num
-                ):
-                    continue
-                score = _similarity(
-                    Normalize_title_for_lookup(str(candidate.get("title") or "")),
-                    Mb_norm,
-                )
-                if score > Best_score:
-                    Best_candidate, Best_score = candidate, score
-            if Best_candidate is not None and Best_score >= _TRACKLIST_TITLE_FLOOR:
-                Match = Best_candidate
-
         if Match is None:
             Entries.append(Entry)
             continue
-
-        Remaining.remove(Match)
 
         # The FILE keeps its own artist when it names one (a per-track featured
         # or collaboration credit is real data); the MusicBrainz values decide
