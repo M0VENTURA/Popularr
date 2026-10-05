@@ -1298,6 +1298,150 @@ def _values_equal(a: Any, b: Any) -> bool:
     return a == b
 
 
+def _fetch_album_mb_backfill(
+    album_mbid: str,
+    album_type: str,
+    release_values: dict[str, str],
+) -> dict[str, Any]:
+    """MusicBrainz backfill for one album save — BLOCKING, call via a thread.
+
+    Returns the album-level values to merge (each only filled when the caller
+    passed nothing) plus the per-recording track map
+    (``recording_mbid -> {writer, is_cover, original_cover_artist,
+    musicbrainz_genres, work_mbid}``).
+
+    ⚠️ This runs two calls through the shared MusicBrainz client, whose
+    ``_strict_throttle`` SLEEPS to reserve a slot in a 1 req/s budget shared
+    with any running scan (the production log shows 30-40s calls). Running it
+    inline on ``album_detail``'s event loop is what made saving metadata time
+    out and stalled every other request in the same hypercorn worker.
+    """
+    out: dict[str, Any] = {
+        "albumartist_mbid": "",
+        "albumtype": album_type,
+        "albumstatus": release_values.get("releasestatus") or "",
+        "releasecountry": release_values.get("releasecountry") or "",
+        "originalyear": release_values.get("originalyear") or "",
+        "track_map": {},
+    }
+    if not album_mbid:
+        return out
+    try:
+        from services.enrichment.musicbrainz_service import (
+            fetch_musicbrainz_release_metadata,
+            get_shared_mb_client,
+        )
+
+        mb_release = fetch_musicbrainz_release_metadata(album_mbid)
+        if not mb_release:
+            return out
+
+        # Re-fetch the raw release for artist-credit MBIDs (the metadata helper
+        # returns display names only).
+        raw = get_shared_mb_client().get_release(
+            album_mbid, inc="artist-credits+release-groups",
+        )
+        if raw:
+            credit = raw.get("artist-credit") or []
+            if credit:
+                first = credit[0]
+                art = first.get("artist") or {}
+                if isinstance(art, dict):
+                    out["albumartist_mbid"] = str(art.get("id") or "")
+            if not out["albumtype"]:
+                out["albumtype"] = (
+                    ((raw.get("release-group") or {}).get("primary-type") or "")
+                    or album_type
+                )
+            if not out["albumstatus"]:
+                out["albumstatus"] = str(raw.get("status") or "")
+            if not out["releasecountry"]:
+                out["releasecountry"] = str(raw.get("country") or "")
+            if not out["originalyear"]:
+                out["originalyear"] = (
+                    ((raw.get("release-group") or {}).get("first-release-date") or "")
+                )[:4]
+
+        # Per-recording enrichment: writer / cover / genre data per track.
+        for mt in (mb_release.get("tracks") or []):
+            recording = str(mt.get("recording_mbid") or "").strip()
+            if not recording:
+                continue
+            entry: dict[str, Any] = {}
+            if mt.get("writer"):
+                entry["writer"] = mt["writer"]
+            if mt.get("is_cover"):
+                entry["is_cover"] = True
+                if mt.get("original_cover_artist"):
+                    entry["original_cover_artist"] = mt["original_cover_artist"]
+            if mt.get("musicbrainz_genres"):
+                entry["musicbrainz_genres"] = mt["musicbrainz_genres"]
+            if mt.get("work_mbid"):
+                entry["work_mbid"] = mt["work_mbid"]
+            if entry:
+                out["track_map"][recording] = entry
+    except Exception as exc:
+        logger.debug("Album MB backfill failed", error=str(exc))
+    return out
+
+
+def _resolve_album_cover_bytes(
+    cover_url: str,
+    album_mbid: str,
+    album_rg_mbid: str,
+) -> tuple[bytes | None, str]:
+    """Fetch the image bytes for an album save — BLOCKING, call via a thread.
+
+    Handles the three shapes the album page can submit: an inline ``data:``
+    URL, a plain HTTP(S) URL (the reported gap: a URL-set cover never reached
+    the album art or the audio files), or neither — in which case the Cover Art
+    Archive is asked for the release MBID (then the release group).
+
+    Returns ``(bytes, mime_type)``; ``bytes`` is ``None`` when nothing could
+    be resolved, and failures are logged rather than raised so a bad URL can
+    never fail the save.
+    """
+    if str(cover_url).startswith("data:"):
+        import base64 as _b64
+
+        header, _, b64p = cover_url.partition(",")
+        mime = header[5:].split(";")[0] or "image/jpeg"
+        try:
+            return _b64.b64decode(b64p), mime
+        except Exception:
+            return None, "image/jpeg"
+
+    if str(cover_url).startswith("http"):
+        import httpx as _httpx
+
+        try:
+            resp = _httpx.get(cover_url, timeout=10)
+            if resp.status_code == 200 and resp.content:
+                return resp.content, (
+                    resp.headers.get("content-type") or "image/jpeg"
+                )
+        except Exception as exc:
+            logger.debug("Album cover URL download failed", url=cover_url, error=str(exc))
+        return None, "image/jpeg"
+
+    if album_mbid:
+        # Prefer the Cover Art Archive via the release MBID.
+        from api_clients.coverartarchive import (
+            get_release_front_image_bytes,
+            get_release_group_front_image_bytes,
+        )
+
+        try:
+            image = get_release_front_image_bytes(album_mbid, size="500")
+            if image is None and album_rg_mbid:
+                image = get_release_group_front_image_bytes(album_rg_mbid, size="500")
+            if image:
+                return image, "image/jpeg"
+        except Exception as exc:
+            logger.debug("Cover Art Archive fetch failed", release_mbid=album_mbid, error=str(exc))
+    return None, "image/jpeg"
+
+
 @ui_bp.route("/album/<path:album_path>", methods=["GET", "POST"])
 async def album_detail(album_path: str) -> Any:
     raw_path = str(album_path or "")
@@ -1550,63 +1694,28 @@ async def album_detail(album_path: str) -> Any:
         # musicbrainz_genres, work_mbid} — used to update covers + writers on
         # every track of the album when saving from the release picker.
         _mb_track_map: dict[str, dict[str, Any]] = {}
-        if album_mbid:
-            try:
-                from services.enrichment.musicbrainz_service import (
-                    build_artist_credit_string,
-                    fetch_musicbrainz_release_metadata,
-                    primary_album_artist,
-                )
-                _mb_release = fetch_musicbrainz_release_metadata(album_mbid)
-                if _mb_release:
-                    # Re-fetch raw release for artist-credit MBIDs (the
-                    # metadata helper returns display names only).
-                    from services.enrichment.musicbrainz_service import get_shared_mb_client
-                    _raw = get_shared_mb_client().get_release(
-                        album_mbid, inc="artist-credits+release-groups",
-                    )
-                    if _raw:
-                        _credit = _raw.get("artist-credit") or []
-                        if _credit:
-                            _first = _credit[0]
-                            _art = _first.get("artist") or {}
-                            if isinstance(_art, dict):
-                                _mb_albumartist_mbid = str(_art.get("id") or "")
-                        if not _mb_albumtype:
-                            _mb_albumtype = (
-                                ((_raw.get("release-group") or {}).get("primary-type") or "")
-                                or album_type
-                            )
-                        if not _mb_albumstatus:
-                            _mb_albumstatus = str(_raw.get("status") or "")
-                        if not _mb_releasecountry:
-                            _mb_releasecountry = str(_raw.get("country") or "")
-                        if not _mb_originalyear:
-                            _mb_originalyear = (
-                                ((_raw.get("release-group") or {}).get("first-release-date") or "")
-                            )[:4]
-
-                    # Per-recording enrichment: the enriched fetch includes
-                    # writer / cover / genre data per track.
-                    for _mt in (_mb_release.get("tracks") or []):
-                        _rmbid = str(_mt.get("recording_mbid") or "").strip()
-                        if not _rmbid:
-                            continue
-                        _entry: dict[str, Any] = {}
-                        if _mt.get("writer"):
-                            _entry["writer"] = _mt["writer"]
-                        if _mt.get("is_cover"):
-                            _entry["is_cover"] = True
-                            if _mt.get("original_cover_artist"):
-                                _entry["original_cover_artist"] = _mt["original_cover_artist"]
-                        if _mt.get("musicbrainz_genres"):
-                            _entry["musicbrainz_genres"] = _mt["musicbrainz_genres"]
-                        if _mt.get("work_mbid"):
-                            _entry["work_mbid"] = _mt["work_mbid"]
-                        if _entry:
-                            _mb_track_map[_rmbid] = _entry
-            except Exception as _mb_exc:
-                logger.debug("Album MB backfill failed", error=str(_mb_exc))
+        # ⚠️ ONLY WHEN THE RELEASE CHANGED — and off the event loop.
+        #
+        # This backfill belongs to the release picker (the values it fills are
+        # the ones a newly-linked release contributes). Re-fetching the SAME
+        # release on every ordinary edit costs two MusicBrainz calls whose
+        # shared throttle SLEEPS to hold a slot in a 1 req/s budget — tens of
+        # seconds while a scan runs. In an ``async`` handler that stalled the
+        # whole worker, which is the reported "timeouts when saving metadata".
+        _prev_mbids = {
+            str(t.get("musicbrainz_album_mbid") or "").strip() for t in tracks
+        }
+        _prev_mbid = next((m for m in sorted(_prev_mbids) if m), "")
+        if album_mbid and album_mbid != _prev_mbid:
+            _back = await asyncio.to_thread(
+                _fetch_album_mb_backfill, album_mbid, _mb_albumtype, release_values
+            )
+            _mb_albumartist_mbid = _back.get("albumartist_mbid") or _mb_albumartist_mbid
+            _mb_albumtype = _back.get("albumtype") or _mb_albumtype
+            _mb_albumstatus = _back.get("albumstatus") or _mb_albumstatus
+            _mb_releasecountry = _back.get("releasecountry") or _mb_releasecountry
+            _mb_originalyear = _back.get("originalyear") or _mb_originalyear
+            _mb_track_map = _back.get("track_map") or _mb_track_map
 
         updated_count = 0
         reverted_live_count = 0
@@ -1948,36 +2057,11 @@ async def album_detail(album_path: str) -> Any:
                     apply_album_art_to_tracks,
                     save_album_art_to_db,
                 )
-                _cover_bytes: bytes | None = None
-                _cover_mime = "image/jpeg"
-                if str(cover_url).startswith("data:"):
-                    import base64 as _b64
-                    _header, _, _b64p = cover_url.partition(",")
-                    _cover_mime = _header[5:].split(";")[0] or "image/jpeg"
-                    try:
-                        _cover_bytes = _b64.b64decode(_b64p)
-                    except Exception:
-                        _cover_bytes = None
-                elif str(cover_url).startswith("http"):
-                    # A plain HTTP(S) cover URL — download the image directly
-                    # (the reported gap: a URL-set cover never reached the
-                    # album page image or the audio files because only data:
-                    # URLs and CAA-via-MBID were handled).
-                    import httpx as _httpx
-                    try:
-                        _resp = _httpx.get(cover_url, timeout=10)
-                        if _resp.status_code == 200 and _resp.content:
-                            _cover_bytes = _resp.content
-                            _cover_mime = _resp.headers.get("content-type", "image/jpeg") or "image/jpeg"
-                    except Exception as _http_exc:
-                        logger.debug("Album cover URL download failed", url=cover_url, error=str(_http_exc))
-                elif album_mbid:
-                    # Prefer Cover Art Archive via the release MBID.
-                    from api_clients.coverartarchive import get_release_front_image_bytes
-                    _cover_bytes = get_release_front_image_bytes(album_mbid, size="500")
-                    if _cover_bytes is None and album_rg_mbid:
-                        from api_clients.coverartarchive import get_release_group_front_image_bytes
-                        _cover_bytes = get_release_group_front_image_bytes(album_rg_mbid, size="500")
+                # Blocking (an HTTP fetch, or the Cover Art Archive) — run it
+                # in a thread so a slow image host cannot stall the worker.
+                _cover_bytes, _cover_mime = await asyncio.to_thread(
+                    _resolve_album_cover_bytes, cover_url, album_mbid, album_rg_mbid
+                )
                 if _cover_bytes:
                     save_album_art_to_db(artist_name, album_name, _cover_bytes, source="url", mime_type=_cover_mime)
                     _cover_embedded = apply_album_art_to_tracks(

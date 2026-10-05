@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import re
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 ROUTES_DIR = REPO_ROOT / "routes"
@@ -114,7 +115,6 @@ _KNOWN_OFFENDERS = frozenset({
     "track_routes.py::api_track_ignore_mb_field",
     "track_routes.py::api_track_match_missing",
     "track_routes.py::api_track_update_metadata",
-    "ui_routes.py::album_detail",
     "ui_routes.py::artist_corrections",
     "ui_routes.py::artist_genre_management",
     "ui_routes.py::artists",
@@ -262,4 +262,40 @@ def test_artist_detail_is_offloaded_and_not_an_offender():
     assert not _blocking_uses(handler), (
         "artist_detail must not touch db_session / network helpers directly - "
         "those belong in the offloaded builder"
+    )
+
+
+def test_album_detail_is_offloaded_and_not_an_offender():
+    """Pin the save-timeout fix.
+
+    Reported: *"I keep getting timeouts when saving metadata"*. The handler
+    ran two MusicBrainz calls (the shared 1 req/s throttle SLEEPS to hold a
+    slot, and a running scan owns that budget) plus a cover download straight
+    on the event loop — so one save stalled EVERY request in the worker.
+    """
+    src = (ROUTES_DIR / "ui_routes.py").read_text(encoding="utf-8")
+
+    # The blocking work now lives in plain functions, called through a thread.
+    # (``\s*`` because the call arguments wrap onto the next line.)
+    assert "def _fetch_album_mb_backfill" in src
+    assert re.search(r"asyncio\.to_thread\(\s*_fetch_album_mb_backfill", src), (
+        "the MusicBrainz backfill is no longer off the event loop"
+    )
+    assert "def _resolve_album_cover_bytes" in src
+    assert re.search(r"asyncio\.to_thread\(\s*_resolve_album_cover_bytes", src), (
+        "the cover download is no longer off the event loop"
+    )
+
+    assert "ui_routes.py::album_detail" not in _KNOWN_OFFENDERS, (
+        "album_detail must not be re-added to the allow-list - it is fixed"
+    )
+
+    tree = ast.parse(src)
+    handler = next(
+        n for n in tree.body
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "album_detail"
+    )
+    assert _has_offload(handler), (
+        "album_detail no longer offloads its blocking work — the save would "
+        "stall the worker again under a scan"
     )

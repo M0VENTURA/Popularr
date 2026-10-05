@@ -181,3 +181,27 @@ class TestAlbumFieldsAreApplied:
         assert album_save.index('payload["year"] = release_year') > idx, (
             "the publication order changed — original_year must win"
         )
+
+
+class TestTheMusicBrainzBackfillIsGated:
+    """The reported save timeouts: two throttled MB calls ran on EVERY save.
+
+    The backfill exists for the release picker — its values are the ones a
+    newly-linked release contributes — so re-fetching the SAME release while
+    only editing the type, year or genres bought nothing and cost seconds to
+    tens of seconds (the shared MusicBrainz throttle sleeps for its slot, and a
+    running scan owns that budget).
+    """
+
+    def test_it_only_fetches_when_the_release_changed(self, ui_source: str):
+        anchor = ui_source.index("_prev_mbids = {")
+        window = ui_source[anchor: anchor + 700]
+
+        assert "album_mbid != _prev_mbid" in window, (
+            "the backfill no longer checks whether the release actually "
+            "changed — every save would pay for two MusicBrainz calls again"
+        )
+        assert "asyncio.to_thread" in window, (
+            "the fetch must not run on the event loop: in an async handler it "
+            "stalls every other request in the worker"
+        )
