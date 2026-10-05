@@ -357,28 +357,34 @@ def _track_proposals(
         # ``current`` for the MB-derived keys is the matched library value from
         # the comparison; the enrichment keys read the local row directly.
         #
-        # ⚠️ GENRES MUST BE COMPARED AGAINST THE TRACK'S **OWN** GENRES.
+        # ⚠️ GENRES COMPARE THE ``musicbrainz_genres`` COLUMN — NEVER ``genres``.
         #
-        # This used to read ``local["musicbrainz_genres"]`` — the MB-sourced
-        # column — as the "current" side, so the review compared MusicBrainz
-        # against MusicBrainz. A track whose own genres ("Rock, Metal") differed
-        # from the release's was therefore NEVER reported, because the two sides
-        # were the same column: the difference could only show when the stored
-        # MB genres had gone stale, which is not what the user is looking at.
-        # The reported symptom was exactly "it will only compare the
-        # musicbrainz genre table, but the current genres attached to the
-        # tracks".
+        # Reported: *"The changes show Genres, but the Genres should only be
+        # comparing and adjusting the MusicBrainz genres field, not the main
+        # genres field."* The bar showed the track's own genres ("… heavy metal,
+        # In Love, Other, rock opera") as the current side against
+        # MusicBrainz's — a comparison the review cannot act on, because the
+        # save path writes ``musicbrainz_genres`` only (``_STAGED_WRITABLE`` in
+        # routes/ui_routes.py) and the track's own genres are an aggregate of
+        # several sources, not something MusicBrainz is authoritative about.
         #
-        # ``genres`` is the track's own genre list (TEXT, comma-joined) while
-        # ``musicbrainz_genres`` is JSONB, so the two are compared through the
-        # shared tolerant parser rather than as raw strings.
+        # This is a deliberate REVERSAL of an earlier fix that switched the
+        # current side to ``local["genres"]`` because a track whose own genres
+        # differed from the release's was never reported. Both readings were
+        # asked for at different times; the contract now is that the bar means
+        # "your STORED MusicBrainz genres are stale", and the main genres are
+        # neither shown nor involved.
+        #
+        # ``musicbrainz_genres`` is JSONB while the freshly fetched value is a
+        # plain string, so both sides go through the shared tolerant parser
+        # rather than being compared as raw strings.
         current_map: dict[str, str] = {
             "title": _as_text(local.get("title")),
             "track_number": _as_text(local.get("track_number")),
             "disc_number": _as_text(local.get("disc_number") or "1"),
             "mbid": _as_text(local.get("mbid")),
             "writer": _as_text(local.get("writer")),
-            "musicbrainz_genres": _as_text(local.get("genres")),
+            "musicbrainz_genres": _as_text(local.get("musicbrainz_genres")),
         }
         proposed_map: dict[str, str] = {
             "title": _as_text(entry.get("mb_title")),

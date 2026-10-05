@@ -123,49 +123,90 @@ def _diff_fields(lib_title, mb_title):
 # 1. Genres must be compared against the TRACK's genres
 # ---------------------------------------------------------------------------
 
-class TestGenresCompareAgainstTheTracksOwnGenres:
-    def test_the_current_side_is_the_tracks_genres_not_the_mb_column(self):
-        """The reported defect: MB was compared against MB.
+class TestGenresCompareTheMusicBrainzColumn:
+    """The Genres bar is about ``musicbrainz_genres``, not the main field.
 
-        `musicbrainz_genres` holds MusicBrainz's own genres, so using it as the
-        "current" side compares a value with itself and can only ever differ
-        when the STORED mb genres are stale — never when the track's real genres
-        disagree with the release's.
-        """
+    Reported:
+
+        "The changes show Genres, but the Genres should only be comparing and
+         adjusting the MusicBrainz genres field not the main genres field."
+
+    with a bar reading *arena rock, … symphonic rock, heavy metal, In Love,
+    Other, rock opera* → *arena rock, … symphonic rock* — i.e. the track's own
+    aggregated genres against MusicBrainz's.
+
+    The save path has ALWAYS written ``musicbrainz_genres`` only
+    (``_STAGED_WRITABLE``), so showing ``genres`` as the current side implied a
+    write that never happens while hiding whether the MB column itself is
+    stale. This deliberately REVERSES the earlier fix that moved the comparison
+    the other way; see the comment in metadata_proposal_service.
+    """
+
+    def test_the_main_genres_are_never_the_current_side(self):
+        """The reported example: own genres differ, MB column already matches."""
         fields_probe = _fields(
-            _local(genres="Rock, Metal", musicbrainz_genres="Rock"),
+            _local(
+                genres="arena rock, ballad, classic rock, hard rock, piano rock, "
+                        "pop, pop rock, rock, soft rock, symphonic rock, "
+                        "heavy metal, In Love, Other, rock opera",
+                musicbrainz_genres="arena rock, ballad, classic rock, hard rock, "
+                                   "piano rock, pop, pop rock, rock, soft rock, "
+                                   "symphonic rock",
+            ),
             _comparison(),
-            _metadata(mb_genres="Rock"),
+            _metadata(mb_genres="arena rock, ballad, classic rock, hard rock, "
+                                "piano rock, pop, pop rock, rock, soft rock, "
+                                "symphonic rock"),
         )
-        assert "musicbrainz_genres" in fields_probe, (
-            "the track's own genres ('Rock, Metal') differ from MusicBrainz's "
-            "('Rock'), so a genre change MUST be reported — with the MB column "
-            "as the 'current' side the two sides are identical and it vanishes"
+        assert "musicbrainz_genres" not in fields_probe, (
+            "the main genres are an aggregate of several sources and must not "
+            "raise a MusicBrainz bar — only a stale MB column may"
         )
 
-    def test_the_reported_current_value_is_the_tracks_genres(self):
+    def test_the_reported_current_value_is_the_stored_mb_column(self):
         out = _track_proposals(
-            [_local(genres="Rock, Metal", musicbrainz_genres="Rock")],
+            [_local(musicbrainz_genres="Rock", genres="Rock, Metal, In Love")],
+            _comparison(),
+            _metadata(mb_genres="Rock, Metal"),
+        )
+        change = next(
+            c for c in out[0]["changes"] if c["field"] == "musicbrainz_genres"
+        )
+        assert change["current"] == "Rock", (
+            "the bar must show the stored MusicBrainz genres, not the track's "
+            "own genres — applying writes the MB column"
+        )
+        assert change["proposed"] == "Rock, Metal"
+
+    def test_a_stale_mb_column_is_still_reported(self):
+        """CONTROL — the bar must still appear when the MB column is out of date."""
+        assert "musicbrainz_genres" in _fields(
+            _local(musicbrainz_genres="Rock", genres="Rock, Metal"),
+            _comparison(),
+            _metadata(mb_genres="Rock, Metal"),
+        )
+
+    def test_an_unpopulated_mb_column_is_filled_in(self):
+        """The common first case: the column was never written at all."""
+        out = _track_proposals(
+            [_local(musicbrainz_genres="", genres="Rock, Metal")],
             _comparison(),
             _metadata(mb_genres="Rock"),
         )
         change = next(
             c for c in out[0]["changes"] if c["field"] == "musicbrainz_genres"
         )
-        assert change["current"] == "Rock, Metal", (
-            "the review must show the track's ACTUAL genres as the current value, "
-            "or the user cannot tell what they are replacing"
-        )
+        assert change["current"] == ""
         assert change["proposed"] == "Rock"
 
     def test_identical_genres_are_not_reported(self):
         """CONTROL — the common case must stay quiet."""
         assert "musicbrainz_genres" not in _fields(
-            _local(genres="Rock, Metal"), _comparison(),
+            _local(musicbrainz_genres="Rock, Metal"), _comparison(),
             _metadata(mb_genres="Rock, Metal"),
         )
 
-    @pytest.mark.parametrize("lib_genres,mb_genres", [
+    @pytest.mark.parametrize("stored,mb_genres", [
         # ⚠️ THESE must run through the PROPOSAL PATH, not just the helper.
         # Testing `_genre_sets_equal` on its own does not cover the wiring: the
         # oracle proved a mutation swapping the set comparison for a plain
@@ -179,32 +220,34 @@ class TestGenresCompareAgainstTheTracksOwnGenres:
         ("Rock, Metal", "Metal, Rock"),
     ])
     def test_the_same_genres_in_a_different_order_are_not_reported(
-        self, lib_genres, mb_genres
+        self, stored, mb_genres
     ):
-        """Genres are an unordered SET, and the two columns differ in TYPE.
+        """Genres are an unordered SET, and the two sides differ in TYPE.
 
-        `tracks.genres` is TEXT (comma-joined) while `musicbrainz_genres` is
-        JSONB, so a plain string comparison reports a change for the same genres
-        written two ways.
+        ``musicbrainz_genres`` is JSONB while the freshly fetched value is a
+        plain string, so a plain string comparison reports a change for the
+        same genres written two ways.
         """
         assert "musicbrainz_genres" not in _fields(
-            _local(genres=lib_genres), _comparison(),
+            _local(musicbrainz_genres=stored), _comparison(),
             _metadata(mb_genres=mb_genres),
         ), (
-            f"{lib_genres!r} and {mb_genres!r} are the same genres; a title-style "
+            f"{stored!r} and {mb_genres!r} are the same genres; a title-style "
             "string comparison would wrongly report a change"
         )
 
     def test_a_real_genre_difference_is_still_reported_end_to_end(self):
         """CONTROL through the proposal path — set-equality must not be a no-op."""
         assert "musicbrainz_genres" in _fields(
-            _local(genres="Rock"), _comparison(), _metadata(mb_genres="Rock, Metal"),
+            _local(musicbrainz_genres="Rock"), _comparison(),
+            _metadata(mb_genres="Rock, Metal"),
         )
 
     def test_no_local_genres_at_all_is_not_reported_as_a_removal(self):
         """A track with no genres yet is "unset", not "differs by all of them"."""
         assert "musicbrainz_genres" not in _fields(
-            _local(genres=""), _comparison(), _metadata(mb_genres=""),
+            _local(musicbrainz_genres="", genres=""), _comparison(),
+            _metadata(mb_genres=""),
         )
 
     @pytest.mark.parametrize("left,right", [
