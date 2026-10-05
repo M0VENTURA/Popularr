@@ -467,15 +467,42 @@ class TestTheWorkRelationshipCoverVerdict:
         assert note and note.startswith("cover")
 
     def test_a_work_by_the_same_artist_disproves_a_cover_marker(self):
-        """The false-cover case from the report."""
+        """The false-cover case from the report.
+
+        The work HAS an artist-credit (``work_artist``) and ``is_cover`` was
+        therefore computed and came back False — that is what makes the
+        negative verdict legitimate.
+        """
         note = _title_note(
             "Song (Cover Version)", "Song",
-            {"work_mbid": "work-1"},
+            {"work_mbid": "work-1", "work_artist": "Nirvana"},
         )
         assert note == "not a cover (work relationship)", (
             "a work relationship exists and credits the same artist, so the "
             "(Cover Version) marker is unsupported and the user must be told"
         )
+
+    def test_a_work_with_no_artist_credit_says_nothing(self):
+        """No credit → the comparison never ran → silence, not a verdict.
+
+        REPORTED: covers on Various-Artists compilations were labelled "not a
+        cover (work relationship)". ``_flatten_release`` only sets ``is_cover``
+        when ``work['artist-credit']`` exists; a work without one leaves it
+        ABSENT, and absent is not False.
+        """
+        assert _title_note(
+            "Song (Cover Version)", "Song", {"work_mbid": "work-1"},
+        ) is None, (
+            "a work we could not compare must not produce a negative verdict — "
+            "that is the reported mislabel"
+        )
+
+    def test_no_artist_credit_is_not_the_same_as_a_missing_work(self):
+        """CONTROL — both return nothing, for two DIFFERENT reasons."""
+        assert _title_note("Song (Cover Version)", "Song", {}) is None
+        assert _title_note(
+            "Song (Cover Version)", "Song", {"work_mbid": "work-1"},
+        ) is None
 
     def test_no_work_relationship_means_no_verdict(self):
         """Only claim something when the lookup actually fetched the work."""

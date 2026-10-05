@@ -154,6 +154,13 @@ def _cover_verdict(mb_track: dict[str, Any], current: str, proposed: str) -> str
     if not _as_text(mb_track.get("work_mbid")):
         # No work relationship → nothing to base a verdict on.
         return ""
+    if not _as_text(mb_track.get("work_artist")):
+        # A work with NO artist-credit means ``_flatten_release`` never ran the
+        # comparison, so ``is_cover`` is ABSENT rather than False. Claiming
+        # "not a cover" from that asserts a negative out of missing data — which
+        # is how covers on Various-Artists compilations were mislabelled: the
+        # work existed, no credit came back, and silence became certainty.
+        return ""
     if has_cover_marker(current) or has_cover_marker(proposed):
         return "not a cover (work relationship)"
     return ""
