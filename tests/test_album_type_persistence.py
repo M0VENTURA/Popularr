@@ -526,3 +526,100 @@ class TestAlbumTypeProtectedFromNavidromeSync:
         assert "musicbrainz_albumtype=EXCLUDED.musicbrainz_albumtype" not in statement
         assert "releasetype=EXCLUDED.releasetype" not in statement
 
+
+# ---------------------------------------------------------------------------
+# The scan's own album-type write must FILL, never overwrite
+# ---------------------------------------------------------------------------
+class TestAlbumTypePersistenceIsFillOnly:
+    """The popularity scan must not undo the Album Type the user just chose.
+
+    Reported: *"I'm updating the metadata for albums, but something is
+    bringing back the old versions ... Everything I set"* — with **Album Type**
+    named explicitly, and noticed "a few hours later, seems to be from a
+    Navidrome scan".
+
+    The mechanism: the album page's select READS ``musicbrainz_albumtype``
+    first (``album_data`` prefers it) and its Save WRITES it — while this scan
+    used to overwrite every track whose stored value merely *differed* from
+    MusicBrainz's. So a type chosen on the page was reverted to MusicBrainz's
+    value by the next popularity scan.
+    """
+
+    _COLUMNS = ("musicbrainz_albumtype", "spotify_album_type", "releasetype")
+
+    def _seed(self, track_id: str, albumtype: str) -> None:
+        from sqlalchemy import text
+
+        from db.engine import db_session
+        from db.models import Track
+
+        with db_session() as session:
+            Track.__table__.create(session.get_bind(), checkfirst=True)
+            # Another test file may have created a reduced `tracks`; repair the
+            # columns this test needs rather than trusting collection order.
+            present = {
+                str(row[1])
+                for row in session.execute(text("PRAGMA table_info(tracks)")).fetchall()
+            }
+            for column in (*self._COLUMNS,):
+                if column not in present:
+                    session.execute(text(
+                        f"ALTER TABLE tracks ADD COLUMN {column} TEXT"
+                    ))
+            session.execute(text("DELETE FROM tracks WHERE id = :id"), {"id": track_id})
+            session.execute(
+                text(
+                    "INSERT INTO tracks (id, artist, album_artist, album, title, "
+                    " musicbrainz_albumtype, spotify_album_type, releasetype) "
+                    "VALUES (:id, 'Muse', 'Muse', 'Absolution', 'Song', "
+                    "        :t, :t, :t)"
+                ),
+                {"id": track_id, "t": albumtype},
+            )
+            session.commit()
+
+    def _read(self, track_id: str) -> str:
+        from sqlalchemy import text
+
+        from db.engine import db_session
+
+        with db_session() as session:
+            row = session.execute(
+                text(
+                    "SELECT musicbrainz_albumtype, spotify_album_type, releasetype "
+                    "FROM tracks WHERE id = :id"
+                ),
+                {"id": track_id},
+            ).first()
+        return "" if row is None else str(row[0] or "")
+
+    def _persist(self, track_id: str, detected: str) -> None:
+        import services.popularity.stages.album_stage as album_stage
+
+        album_stage._persist_album_type_to_tracks(
+            "Muse",
+            "Absolution",
+            tracks=[{"id": track_id}],
+            album_type=detected,
+            release_group_mbid=None,
+        )
+
+    def test_a_set_type_survives_a_disagreeing_musicbrainz_value(self):
+        """The reported revert: the page says Soundtrack, the scan says Album."""
+        self._seed("type-manual", "album+soundtrack")
+
+        self._persist("type-manual", "album")
+
+        assert self._read("type-manual") == "album+soundtrack", (
+            "a type the user chose was overwritten by MusicBrainz's value on "
+            "the next scan — the select read it back as the old version"
+        )
+
+    def test_a_track_with_no_type_is_still_filled(self):
+        """CONTROL — fill-only must not stop the detection populating the field."""
+        self._seed("type-empty", "")
+
+        self._persist("type-empty", "album")
+
+        assert self._read("type-empty") == "album"
+

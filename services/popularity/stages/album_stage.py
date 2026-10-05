@@ -1690,16 +1690,28 @@ def _persist_album_type_to_tracks(
         return
 
     primary = normalize_primary_release_type(album_type)
+    # ⚠️ FILL-ONLY — this is the reported "my Album Type edit comes back".
+    #
+    # The album page's Edit form writes ``musicbrainz_albumtype`` and
+    # ``spotify_album_type``, and its select READS ``musicbrainz_albumtype``
+    # first (``album_data`` prefers it), so every popularity scan that found a
+    # different MusicBrainz value overwrote the user's choice and the select
+    # snapped back to the old version a few hours later.
+    #
+    # A row with no type is still filled — that is what the detection exists
+    # for, and it is how the field gets populated for albums nobody edited.
+    # Once a value is on the row it belongs to whoever set it last (the scan's
+    # first detection, or a human via Edit / Lookup MBID).
     pending = [
         str(track.get("id"))
         for track in tracks or []
-        if track.get("id") and str(track.get("musicbrainz_albumtype") or "") != album_type
+        if track.get("id") and not str(track.get("musicbrainz_albumtype") or "").strip()
     ]
     updated = 0
     if not pending:
         Logger.info(
             "[ENRICH] album type track persistence skipped",
-            reason="every track already carries this album type",
+            reason="every track already carries an album type (fill-only)",
             track_count=len(tracks or []),
             **context,
         )
@@ -1714,6 +1726,7 @@ def _persist_album_type_to_tracks(
                                 releasetype = :primary,
                                 musicbrainz_albumtype = :album_type
                             WHERE CAST(id AS TEXT) IN :track_ids
+                              AND COALESCE(NULLIF(TRIM(musicbrainz_albumtype), ''), '') = ''
                         """).bindparams(bindparam("track_ids", expanding=True)),
                         {
                             "album_type": album_type,

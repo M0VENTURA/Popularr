@@ -45,7 +45,10 @@ from helpers.config_helpers import (
 from helpers.logging_config import resolve_log_dir, set_log_level
 from helpers.normalization_service import strip_featured_artist
 from helpers.track_ordering import disc_sort_value, sort_album_tracks
-from services.catalog.album_classification_service import classify_album_type
+from services.catalog.album_classification_service import (
+    classify_album_type,
+    normalize_primary_release_type,
+)
 from services.enrichment.genre_tag_aggregator import (
     get_album_genre_sources,
     get_artist_genre_sources,
@@ -1704,6 +1707,12 @@ async def album_detail(album_path: str) -> Any:
             if album_type:
                 payload["spotify_album_type"] = album_type
                 payload["musicbrainz_albumtype"] = album_type
+                # ``releasetype`` is what the FILE carries (and what Navidrome
+                # reads back), so a type chosen here must reach it too — and it
+                # is the PRIMARY form, the same normalisation the scan writes.
+                # Without it the file kept the old release type, so the album
+                # page's choice was contradicted everywhere outside the DB.
+                payload["releasetype"] = normalize_primary_release_type(album_type)
 
             if track_artist and track_artist != track.get("artist"):
                 payload["artist"] = track_artist

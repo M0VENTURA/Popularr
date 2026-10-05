@@ -162,6 +162,10 @@ class TestAlbumFieldsAreApplied:
             'payload["musicbrainz_artistid"] = artist_mbid',
             'payload["discogs_album_id"] = discogs_id',
             'payload["musicbrainz_albumtype"] = album_type',
+            # The FILE tag too — it is what Navidrome reads back, so a type
+            # chosen on the album page must reach it or everything outside the
+            # DB keeps showing the old release type.
+            'payload["releasetype"] = normalize_primary_release_type(album_type)',
             'payload["writer"] = track_composer',
         ],
     )
