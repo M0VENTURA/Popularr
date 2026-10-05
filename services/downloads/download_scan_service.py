@@ -274,11 +274,28 @@ def enqueue_discovered_files(files: list[DiscoveredFile]) -> dict[str, int]:
                     logger.debug("Duplicate prune skipped", error=str(_exc))
             continue
 
+        # The three identity values the insert uses, computed ONCE so this
+        # pre-check and the insert can never disagree about who the track is.
+        artist = str(meta["artist"] or "Unidentified Artist")
+        title = str(meta["title"] or f.filename)
+        album = str(meta["album"] or "Unidentified Release")
+
+        # The insert dedupes on (artist, title) and logs at INFO when it hits.
+        # The two checks above look at the FILE, so a file whose TRACK is
+        # already queued — under a path neither of them recognised — fell
+        # through to the insert every single scan and re-logged
+        # "Duplicate skipped: already in queue" for the same row, forever.
+        # Ask the identical question first and count it instead.
+        from db.repositories.queue import find_blocking_queue_item
+        if find_blocking_queue_item(artist=artist, title=title, source="discovered"):
+            already_in_queue += 1
+            continue
+
         # ✅ FIX: import_group set to None so files don't all bundle together
         insert_discovered_file(
-            artist=str(meta["artist"] or "Unidentified Artist"),
-            title=str(meta["title"] or f.filename),
-            album=str(meta["album"] or "Unidentified Release"),
+            artist=artist,
+            title=title,
+            album=album,
             album_artist=None,
             track_number=meta.get("track_number"),
             disc_number=None,

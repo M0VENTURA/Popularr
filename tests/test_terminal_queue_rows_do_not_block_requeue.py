@@ -658,8 +658,14 @@ class TestNoHandWrittenStatusLists:
     #: Functions whose status list decides whether a NEW add is a duplicate.
     #: Every one of these previously hand-wrote terminal statuses into that
     #: decision, which is the reported bug.
+    #:
+    #: The queue entry is the extracted HELPER, not ``insert_queue_item``:
+    #: the decision moved there so the discovery scan can ask the same
+    #: question before it inserts. ``insert_queue_item`` delegates to it —
+    #: pinned by ``test_the_insert_still_delegates_to_the_shared_decision``
+    #: below, so it cannot quietly re-decide for itself.
     DEDUPE_DECISIONS = (
-        ("db/repositories/queue.py", "insert_queue_item"),
+        ("db/repositories/queue.py", "find_blocking_queue_item"),
         ("services/queue/queue_processing_service.py", "add_release_tracks_to_queue_detailed"),
     )
 
@@ -677,6 +683,26 @@ class TestNoHandWrittenStatusLists:
                 "without consulting BLOCKING_REQUEUE_STATUSES — that is how "
                 "terminal rows started blocking re-adds"
             )
+
+    def test_the_insert_still_delegates_to_the_shared_decision(self):
+        """The decision moved into a helper — the insert must not re-decide.
+
+        Otherwise the guard above could pass while ``insert_queue_item`` grew
+        its own hand-written list beside the helper it calls.
+        """
+        import inspect
+
+        from db.repositories import queue as queue_repo
+
+        source = inspect.getsource(queue_repo.insert_queue_item)
+        assert "find_blocking_queue_item(" in source, (
+            "insert_queue_item must ask the shared decision rather than "
+            "inline its own status list"
+        )
+        assert "status IN (" not in source, (
+            "insert_queue_item has grown its own status list — use "
+            "find_blocking_queue_item"
+        )
 
     def test_no_dedupe_decision_lists_a_terminal_status_literally(self):
         """A literal terminal status inside the dedupe SQL is the exact shape of

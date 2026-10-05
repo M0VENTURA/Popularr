@@ -119,6 +119,61 @@ def get_queue_file_path(queue_id: int) -> str | None:
 # CORE MUTATIONS
 # =============================================================================
 
+def find_blocking_queue_item(
+    *,
+    artist: str,
+    title: str,
+    source: str = "soulseek",
+    session: Any = None,
+) -> dict[str, Any] | None:
+    """The row that would make :func:`insert_queue_item` skip, or ``None``.
+
+    ONE definition, two callers: the insert itself, and the discovery scan —
+    which used to ask a different question (by file path only) and so fell
+    through to the insert every cycle, logging "Duplicate skipped: already in
+    queue" for the same row every few minutes forever.
+
+    The status list is ``BLOCKING_REQUEUE_STATUSES`` and must never be
+    written out by hand: it deliberately excludes completed/imported/
+    in_collection, which are INVISIBLE in the queue — adding a track the user
+    could not see used to report "already in the queue" and insert nothing
+    ("files I'm adding to download aren't showing").
+
+    ``source`` decides the locality half of the rule: a ``local``/``discovered``
+    caller matches only local/discovered rows, anything else matches only
+    non-local ones.
+    """
+    from services.queue.queue_constraints import BLOCKING_REQUEUE_STATUSES
+
+    _blocking = ",".join(f"'{s}'" for s in sorted(BLOCKING_REQUEUE_STATUSES))
+    _is_local = str(source or "").lower() in ("local", "discovered")
+    _sql = text(f"""
+        SELECT * FROM download_queue
+        WHERE LOWER(artist) = LOWER(:artist)
+          AND LOWER(title) = LOWER(:title)
+          AND status IN ({_blocking})
+          AND (LOWER(COALESCE(source, '')) IN ('local', 'discovered')) = :is_local
+        ORDER BY created_at ASC
+        LIMIT 1
+    """)
+    _params = {"artist": artist, "title": title, "is_local": _is_local}
+
+    def _run(_session: Any) -> dict[str, Any] | None:
+        row = _session.execute(_sql, _params).fetchone()
+        return dict(row._mapping) if row else None
+
+    if session is not None:
+        return _run(session)
+    try:
+        with db_session() as own_session:
+            return _run(own_session)
+    except Exception as exc:
+        logger.error(
+            "Find blocking queue item failed", artist=artist, title=title, error=str(exc)
+        )
+        return None
+
+
 def insert_queue_item(
     artist: str,
     title: str,
@@ -139,38 +194,19 @@ def insert_queue_item(
         # upcoming releases) created multiple rows for the same track — "20
         # versions of one song".
         #
-        # ⚠️ The status list comes from BLOCKING_REQUEUE_STATUSES and must NOT
-        # be written out by hand. It USED to include completed/unmatched/
-        # imported/in_collection, which are INVISIBLE in the queue — so adding a
-        # track the user could not see reported "already in the queue" and
-        # inserted nothing ("files I'm adding to download aren't showing").
-        from services.queue.queue_constraints import BLOCKING_REQUEUE_STATUSES
-
-        _blocking = ",".join(
-            f"'{s}'" for s in sorted(BLOCKING_REQUEUE_STATUSES)
+        # The query lives in find_blocking_queue_item so the discovery scan
+        # can ask the SAME question before it inserts (see that docstring).
+        existing_row = find_blocking_queue_item(
+            artist=artist, title=title, source=source, session=session,
         )
-        _is_local = str(source or "").lower() in ("local", "discovered")
-        existing = session.execute(
-            text(f"""
-                SELECT * FROM download_queue
-                WHERE LOWER(artist) = LOWER(:artist)
-                  AND LOWER(title) = LOWER(:title)
-                  AND status IN ({_blocking})
-                  AND (LOWER(COALESCE(source, '')) IN ('local', 'discovered')) = :is_local
-                ORDER BY created_at ASC
-                LIMIT 1
-            """),
-            {"artist": artist, "title": title, "is_local": _is_local},
-        ).fetchone()
 
-        if existing is not None:
-            row = dict(existing._mapping)
-            row["already_queued"] = True
+        if existing_row is not None:
+            existing_row["already_queued"] = True
             logger.info(
                 "Duplicate skipped: already in queue",
-                artist=artist, title=title, queue_id=row.get("id"),
+                artist=artist, title=title, queue_id=existing_row.get("id"),
             )
-            return row
+            return existing_row
 
         _status = str(kwargs.get("status") or "queued")
         if str(kwargs.get("source") or "soulseek").lower() in ("local", "discovered"):
