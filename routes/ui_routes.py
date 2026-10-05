@@ -44,6 +44,7 @@ from helpers.config_helpers import (
 )
 from helpers.logging_config import resolve_log_dir, set_log_level
 from helpers.normalization_service import strip_featured_artist
+from helpers.track_ordering import sort_album_tracks
 from services.catalog.album_classification_service import classify_album_type
 from services.enrichment.genre_tag_aggregator import (
     get_album_genre_sources,
@@ -888,14 +889,7 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
             round(sum(stars) / len(stars), 2) if stars else None
         )
 
-        album_entry["tracks"] = sorted(
-            album_tracks,
-            key=lambda t: (
-                safe_int(t.get("disc_number")) or 1,
-                safe_int(t.get("track_number")) or 0,
-                str(t.get("title") or "").lower(),
-            ),
-        )
+        album_entry["tracks"] = sort_album_tracks(album_tracks)
 
     albums = sorted(
         albums_by_key.values(),
@@ -1346,6 +1340,12 @@ async def album_detail(album_path: str) -> Any:
             {"artist": artist_name, "album": album_name},
         )
         tracks = [dict(r._mapping) for r in result.fetchall()]
+
+    # ⚠️ The ORDER BY above is only a PRE-SORT. ``disc_number``/``track_number``
+    # are TEXT and ``COALESCE`` does not treat '' as missing, so a blank DISC
+    # tag sorts ahead of '1' — which is how Track 13 ended up above Track 1.
+    # The order the user sees is decided here, where it is testable.
+    tracks = sort_album_tracks(tracks)
 
     def _track_year(t: dict[str, Any]) -> int | None:
         raw = str(t.get("year") or "").strip()
