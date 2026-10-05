@@ -61,10 +61,36 @@ def _queue_table(db_session):
             created_at TEXT, updated_at TEXT
         )
     """))
+    # The suite shares one SQLite file and other tests create a REDUCED
+    # download_queue, so IF NOT EXISTS can leave a column behind that this
+    # test's inserts (or the dedupe's ORDER BY created_at) need.
+    present = {
+        row[1] for row in db_session.execute(
+            text("PRAGMA table_info(download_queue)")
+        ).fetchall()
+    }
+    for column in (
+        # Every column insert_queue_item writes, plus what the dedupe orders by
+        # — another test may have created a reduced table first, and SQLite
+        # lets us add what it is missing rather than fight over the schema.
+        "artist", "title", "album", "source", "priority", "track_number",
+        "disc_number", "album_artist", "year", "release_id", "release_mbid",
+        "recording_mbid", "duration", "import_group", "import_type", "status",
+        "file_path", "found_filename", "created_at", "updated_at",
+    ):
+        if column not in present:
+            db_session.execute(text(
+                f"ALTER TABLE download_queue ADD COLUMN {column} TEXT"
+            ))
     db_session.commit()
     yield db_session
-    db_session.execute(text("DELETE FROM download_queue"))
-    db_session.commit()
+    try:
+        db_session.execute(text("DELETE FROM download_queue"))
+        db_session.commit()
+    except Exception:
+        # Another test may have recreated the schema underneath us; failing in
+        # teardown would blame the test that actually passed.
+        pass
 
 
 # ---------------------------------------------------------------------------

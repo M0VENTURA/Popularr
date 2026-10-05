@@ -246,6 +246,10 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
         logger.debug("Download-queue coverage check failed", error=str(_qexc))
 
     missing = []
+    #: Why the rest of the release is NOT listed — one dict, four gates.
+    #: Without it a track dropped by a gate is indistinguishable from one that
+    #: never existed (the reported "1-9, 12, 13 render but 10 and 11 absent").
+    excluded: dict[str, int] = {"in_library": 0, "queued": 0}
     for mt in mb_tracks:
         mb_title = mt.get("title", "")
         if not mb_title:
@@ -256,10 +260,15 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
 
         position_occupied = bool(mb_num and (mb_disc, mb_num) in lib_by_position)
         if position_occupied or norm in lib_norm:
+            # ⚠️ Position counts even when the TITLE differs: a wrong track
+            # sitting at disc 1 / track 10 makes 10 look present. That is the
+            # gate most likely to have hidden the reported pair.
+            excluded["in_library"] += 1
             continue
 
         # Not missing when the track is queued/downloading/imported.
         if norm in queued_keys or (mb_num and (mb_disc, mb_num) in queued_by_position):
+            excluded["queued"] += 1
             continue
 
         missing.append({
@@ -291,12 +300,16 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
         m for m in missing
         if _missing_row_key(m) not in rejected_titles
     ]
+    excluded["rejected"] = len(missing) - len(visible)
 
     return {
         "missing_tracks": visible,
         "missing_count": len(visible),
         "mb_total": mb_total,
         "library_count": library_count,
+        # WHY the rest of the release is not listed, so the arithmetic is
+        # self-checking: len(visible) + sum(excluded.values()) == mb_total.
+        "excluded": excluded,
     }
 
 

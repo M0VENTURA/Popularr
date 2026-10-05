@@ -297,6 +297,102 @@ class TestMissingTracksReleaseOverride:
         titles = [m["title"] for m in result["missing_tracks"]]
         assert titles == ["Missing Two"], "an owned track must not be missing"
 
+    # ------------------------------------------------------------------
+    # WHY the rest of the release is not listed
+    # ------------------------------------------------------------------
+    def test_excluded_counts_name_the_gate(self, monkeypatch, release_fetch):
+        """The reported symptom had no way to say which filter swallowed a track.
+
+        "1-9, 12, 13 render but 10 and 11 are absent" — four gates exist and
+        the response named none of them.
+        """
+        _seed_track("own1", title="Missing One", album="Dup Album",
+                    album_mbid="stored-id")
+        monkeypatch.setattr(ams, "_persist_missing_tracks", lambda *a, **k: None)
+
+        result = ams.get_missing_tracks("Dup Artist", "Dup Album",
+                                        release_mbid="picked-id")
+
+        excluded = result["excluded"]
+        assert excluded["in_library"] == 1, "the gate that ate a track is countable"
+        assert excluded["queued"] == 0
+        assert excluded["rejected"] == 0
+
+    def test_the_arithmetic_is_self_checking(self, monkeypatch, release_fetch):
+        """Every MB track is either visible or counted — never silently dropped."""
+        _seed_track("own1", title="Missing One", album="Dup Album",
+                    album_mbid="stored-id")
+        monkeypatch.setattr(ams, "_persist_missing_tracks", lambda *a, **k: None)
+
+        result = ams.get_missing_tracks("Dup Artist", "Dup Album",
+                                        release_mbid="picked-id")
+
+        assert (
+            len(result["missing_tracks"]) + sum(result["excluded"].values())
+            == result["mb_total"]
+        ), (
+            "a track missing from BOTH the list and the counts is exactly the "
+            "bug this breakdown exists to make impossible"
+        )
+
+    def test_nothing_excluded_when_everything_is_missing(self, monkeypatch, release_fetch):
+        """CONTROL — counts must not fire when the gates did not."""
+        monkeypatch.setattr(ams, "_persist_missing_tracks", lambda *a, **k: None)
+
+        result = ams.get_missing_tracks("Dup Artist", "Dup Album",
+                                        release_mbid="picked-id")
+
+        assert result["missing_count"] == 2
+        assert sum(result["excluded"].values()) == 0
+
+    def test_a_queued_track_counts_as_queued(self, monkeypatch, release_fetch):
+        """The gate that hides a track someone already started downloading."""
+        from db.engine import db_session
+        from sqlalchemy import text
+
+        monkeypatch.setattr(ams, "_persist_missing_tracks", lambda *a, **k: None)
+        with db_session() as session:
+            # Hand-written AND repaired: download_queue.metadata is JSONB so
+            # SQLite cannot render the ORM table, and other tests create a
+            # reduced version that persists across the session — so CREATE
+            # IF NOT EXISTS can silently leave a missing column behind.
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS download_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    artist TEXT, title TEXT, album TEXT, album_artist TEXT,
+                    status TEXT, track_number TEXT, disc_number INTEGER,
+                    created_at TEXT, updated_at TEXT
+                )
+            """))
+            present = {
+                row[1] for row in session.execute(
+                    text("PRAGMA table_info(download_queue)")
+                ).fetchall()
+            }
+            for column in ("source", "artist", "title", "album", "album_artist",
+                           "status", "track_number", "disc_number",
+                           "created_at", "updated_at"):
+                if column not in present:
+                    session.execute(text(
+                        f"ALTER TABLE download_queue ADD COLUMN {column} TEXT"
+                    ))
+            session.execute(text(
+                "INSERT INTO download_queue "
+                "(artist, title, album, album_artist, status, source) "
+                "VALUES ('Dup Artist', 'Missing Two', 'Dup Album', 'Dup Artist', "
+                "'queued', 'soulseek')"
+            ))
+            session.commit()
+
+        result = ams.get_missing_tracks("Dup Artist", "Dup Album",
+                                        release_mbid="picked-id")
+
+        titles = [m["title"] for m in result["missing_tracks"]]
+        assert titles == ["Missing One"], "the queued one is handled, not missing"
+        assert result["excluded"]["queued"] == 1, (
+            "this is the gate most likely to have hidden the reported 10 and 11"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 3. Routes

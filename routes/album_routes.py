@@ -734,6 +734,18 @@ def api_album_missing_tracks() -> Any:
         if refresh:
             from services.metadata.album_missing_service import get_missing_tracks
             result = get_missing_tracks(artist, album, release_mbid=release_mbid or None)
+            # ONE line that names the gate. "10 and 11 are absent" is
+            # answerable from this — in_library / queued / rejected — instead
+            # of by guessing which of the four filters swallowed them.
+            logger.info(
+                "[ALBUM] missing-tracks refresh",
+                artist=artist,
+                album=album,
+                mb_total=result.get("mb_total"),
+                library_count=result.get("library_count"),
+                missing_count=result.get("missing_count"),
+                excluded=result.get("excluded"),
+            )
         else:
             from services.metadata.album_missing_service import get_missing_tracks_from_db
             result = get_missing_tracks_from_db(artist, album)
