@@ -89,6 +89,68 @@ _XML_ERROR_CODE_RE = re.compile(r'\bcode\s*=\s*"(\d+)"', re.IGNORECASE)
 _XML_ERROR_MESSAGE_RE = re.compile(r'\bmessage\s*=\s*"([^"]*)"', re.IGNORECASE)
 
 
+def _playlist_denied_hint(
+    playlist_name: str | None,
+    owner: str | None,
+    configured_user: str | None,
+) -> str:
+    """Explain a Subsonic code 50 from ``updatePlaylist`` in terms that fit.
+
+    Navidrome answers 50 for TWO failures — see ``server/subsonic/api.go``::
+
+        case errors.Is(err, model.ErrNotAuthorized),
+             errors.Is(err, model.ErrPlaylistNotEditable):
+            // Subsonic has no code for "read-only resource"
+            err = newError(responses.ErrorAuthorizationFail)
+
+    i.e. "not an admin AND not the owner" (``checkWritable``) **and** "the
+    playlist's tracks are not editable" — a smart ``.nsp`` or synced playlist
+    (``checkTracksEditable``, which our track replace reaches because it has
+    track changes).
+
+    Which one it is depends on facts the caller already has. If the playlist is
+    owned by the configured user, ownership cannot be the problem — so a 50
+    from an owner/admin means READ-ONLY, and "make yourself an admin" could
+    never be the fix. That wrong advice is exactly what was reported.
+    """
+    name = str(playlist_name or "").strip()
+    owner = str(owner or "").strip()
+    me = str(configured_user or "").strip()
+
+    if owner and me and owner.casefold() == me.casefold():
+        where = f" ({name})" if name else ""
+        return (
+            "read-only playlist" + where + ": Navidrome will not let anyone "
+            "edit its tracks (a smart/.nsp or synced playlist) and reports that "
+            "as code 50 'not authorized' — PERMISSIONS ARE NOT THE PROBLEM, so "
+            "making this user an admin will not help. Delete this playlist in "
+            "Navidrome (or the .nsp that defines it) so Popularr recreates it "
+            "as a regular playlist"
+        )
+
+    scope = f"playlist '{name}' " if name else "this playlist "
+    fix = (
+        "Navidrome reports BOTH as code 50. Make this user an admin in "
+        "Navidrome, or delete the playlist there so it is recreated under "
+        "this user"
+    )
+    if owner and me:
+        # Don't ASSERT this user is not an admin — we don't know, and the
+        # reported case was an admin. State the two possibilities instead.
+        return (
+            f"not authorized: {scope}is owned by '{owner}', not '{me}'. Either "
+            "it is an ownership limit (only an admin may edit a playlist they "
+            "do not own) or the playlist's tracks are not editable (a smart/"
+            f".nsp or synced playlist). {fix}"
+        )
+    return (
+        "not authorized: the configured Navidrome user does not own this "
+        "playlist and is not an admin. Either it is an ownership limit or the "
+        f"playlist's tracks are not editable (a smart/.nsp or synced "
+        f"playlist). {fix}"
+    )
+
+
 def _md5_hex(value: str) -> str:
     """Return the hex MD5 digest of a string."""
     return hashlib.md5(value.encode("utf-8")).hexdigest()
@@ -803,6 +865,8 @@ class NavidromeClient:
         playlist_id: str,
         song_ids: list[str],
         current_count: int | None = None,
+        owner: str | None = None,
+        playlist_name: str | None = None,
     ) -> bool:
         """Replace a playlist's songs in place.
 
@@ -842,23 +906,20 @@ class NavidromeClient:
             data = self._post_subsonic_response("updatePlaylist", timeout=120, **params)
             ok = data.get("status") == "ok"
             if not ok:
-                # code 50 ("not authorized") = Navidrome's ownership rule:
-                # a non-admin user may only modify playlists IT owns
-                # (core/playlists ``checkWritable``). The playlist then keeps
-                # its old tracks forever, so spell out the fix instead of only
-                # dumping the raw response.
+                # Code 50 covers TWO failures — see ``_playlist_denied_hint``.
+                # The playlist then keeps its old tracks forever, so spell out
+                # WHICH one instead of only dumping the raw response.
                 _err = data.get("error") or {}
                 _hint = None
                 if int(_err.get("code") or 0) == 50:
-                    _hint = (
-                        "not authorized: the configured Navidrome user does not own "
-                        "this playlist and is not an admin — make this user an admin "
-                        "in Navidrome, or delete the playlist there so it is "
-                        "recreated under this user"
+                    _hint = _playlist_denied_hint(
+                        playlist_name, owner, self.username
                     )
                 logger.warning(
                     "updatePlaylist songs rejected",
                     playlist_id=playlist_id,
+                    playlist=playlist_name,
+                    owner=owner,
                     removed=current_count,
                     added=len(song_ids or []),
                     hint=_hint,

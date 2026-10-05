@@ -288,6 +288,10 @@ def sync_playlist_by_name(
                 primary_id,
                 song_ids,
                 current_count=len(existing),
+                # The match above already read these off the live playlist —
+                # they are what lets a code 50 say WHICH cause it was.
+                owner=str(primary.get("owner") or ""),
+                playlist_name=name,
             )
             result["updated"] = bool(ok)
             result["success"] = bool(ok)

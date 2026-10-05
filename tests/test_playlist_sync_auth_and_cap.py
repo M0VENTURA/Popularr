@@ -152,7 +152,8 @@ class _FakeNavClient:
     def fetch_playlist(self, playlist_id):
         return {"tracks": [{"id": sid} for sid in self.stored]}
 
-    def update_playlist_songs(self, playlist_id, song_ids, current_count=None):
+    def update_playlist_songs(self, playlist_id, song_ids, current_count=None,
+                              owner=None, playlist_name=None):
         self.update_calls.append(list(song_ids))
         if self.update_ok and self.stored_after_update is not None:
             self.stored = list(self.stored_after_update)
@@ -438,3 +439,105 @@ class TestGenreMaxTracksConfigContract:
             lambda: {"playlists": {"genre_playlists_max_tracks": 0}},
         )
         assert config_helpers.get_playlists_config()["genre_playlists_max_tracks"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 5. Code 50 must say WHICH cause it was
+# ---------------------------------------------------------------------------
+
+class TestCode50DistinguishesReadOnlyFromOwnership:
+    """Navidrome reports two different failures as the SAME code 50.
+
+    ``server/subsonic/api.go`` maps ``ErrNotAuthorized`` **and**
+    ``ErrPlaylistNotEditable`` to ``ErrorAuthorizationFail`` because
+    "Subsonic has no code for read-only resource". Our replace has track
+    changes, so it reaches ``checkTracksEditable`` — both checks. An admin
+    cannot fail the first one, so telling an admin to make themselves an admin
+    could never be the fix. Reported exactly that way: *"The user is the
+    admin."*
+    """
+
+    def test_owner_match_is_reported_as_read_only_not_permissions(self):
+        hint = nav_mod._playlist_denied_hint("New Music", "moventura", "moventura")
+
+        assert "read-only playlist" in hint
+        assert "New Music" in hint
+        assert "PERMISSIONS ARE NOT THE PROBLEM" in hint, (
+            "an owner (and an admin) must be told the playlist itself is "
+            "read-only, not that their permissions are wrong"
+        )
+        assert "does not own it and is not an admin" not in hint, (
+            "the ownership wording must not fire when the caller IS the owner"
+        )
+
+    def test_owner_mismatch_names_both_causes_and_the_owner(self):
+        hint = nav_mod._playlist_denied_hint(
+            "Rock - Top Tracks", "someoneelse", "moventura"
+        )
+
+        assert "someoneelse" in hint and "moventura" in hint, (
+            "the operator needs to see WHO owns it and who the app is acting as"
+        )
+        assert "only an admin may edit a playlist they do not own" in hint
+        assert "not editable" in hint, "both branches of code 50 must be named"
+
+    def test_unknown_owner_keeps_both_causes(self):
+        hint = nav_mod._playlist_denied_hint(None, None, "moventura")
+
+        assert "admin" in hint and "does not own" in hint, (
+            "guidance must stay actionable when we know nothing about the playlist"
+        )
+        assert "not editable" in hint
+
+    def test_case_differences_do_not_hide_ownership(self):
+        """Navidrome's owner name is not guaranteed to match our casing."""
+        hint = nav_mod._playlist_denied_hint("X", "Moventura", "moventura")
+
+        assert "read-only playlist" in hint
+
+    def test_the_client_passes_owner_and_name_into_the_hint(self, monkeypatch):
+        rec = _RecLogger()
+        monkeypatch.setattr(nav_mod, "logger", rec)
+        client = nav_mod.NavidromeClient("http://navidrome:4533", "moventura", "pass")
+        monkeypatch.setattr(
+            client, "_post_subsonic_response",
+            lambda *a, **k: {"status": "failed", "error": {"code": 50,
+                                                            "message": "nope"}},
+        )
+
+        ok = client.update_playlist_songs(
+            "pl-1", ["a"], current_count=10,
+            owner="moventura", playlist_name="New Music",
+        )
+
+        assert ok is False
+        warn = rec.warnings("updatePlaylist songs rejected")[0]
+        assert warn[2].get("owner") == "moventura", (
+            "a pasted log line must be self-diagnosing"
+        )
+        assert warn[2].get("playlist") == "New Music"
+        assert "read-only playlist" in (warn[2].get("hint") or "")
+
+    def test_the_service_hands_the_playlist_owner_to_the_client(self, monkeypatch):
+        """The owner sits on the payload the name match already read."""
+        seen: dict = {}
+
+        class _Spy(_FakeNavClient):
+            def update_playlist_songs(self, playlist_id, song_ids,
+                                      current_count=None, **kwargs):
+                seen.update(kwargs)
+                return True
+
+        client = _Spy(
+            playlists=[{"id": "pl1", "name": "New Music", "owner": "moventura"}],
+            stored=["old-1"],
+            stored_after_update=["a", "b"],
+        )
+
+        result = pns.sync_playlist_by_name(client, "New Music", ["a", "b"])
+
+        assert result["updated"] is True
+        assert seen.get("owner") == "moventura", (
+            "without the owner the hint cannot tell read-only from not-allowed"
+        )
+        assert seen.get("playlist_name") == "New Music"
