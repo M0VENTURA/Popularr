@@ -71,6 +71,17 @@ other genre path in the app. The common case is unaffected: the scan writes
 **Combined** sources always clear it (Last.fm + MusicBrainz, Last.fm + Discogs,
 etc.).
 
+### Spelling variants are not changes
+
+The "already matches" skip uses `_genre_sets_equal`, which ignores case and
+whitespace but not punctuation — so MusicBrainz's `hip-hop` read as a change
+against a stored `Hip Hop` and the track was written (database row *and*
+physical file tags, per the fan-out rule). The comparison now falls back to
+names reduced to bare letters and digits, so `hip hop`, `Hip-Hop` and `hiphop`
+are one genre. The genres still have to **match**: a genuinely different genre
+still writes, which a control test pins so the tolerance cannot quietly
+disable the sync.
+
 ## Tests
 
 `tests/test_va_track_genres.py` — 21 tests:

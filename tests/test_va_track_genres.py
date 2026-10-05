@@ -164,6 +164,31 @@ class TestWhatIsWritten:
         )
         assert writes == [], "an unchanged row must not be written (file churn)"
 
+    def test_a_spelling_variant_of_the_same_genre_is_not_rewritten(self, monkeypatch):
+        """MusicBrainz's ``hip-hop`` against a stored ``Hip Hop`` is not a change.
+
+        ``_genre_sets_equal`` normalises case and whitespace but not
+        punctuation, so on its own this rewrote the row — and, because a track
+        write fans out to the file tags, the physical file too — for a
+        difference nobody can see.
+        """
+        writes = _patch_writer(monkeypatch, aggregate=lambda *a, **k: ["hip-hop"])
+        gas.sync_various_artists_track_genres(
+            [_track(genres="Hip Hop", lastfm_genres="hip-hop")], album="X"
+        )
+        assert writes == [], "a spelling variant of the same genre must not write"
+
+    def test_a_genuinely_different_genre_still_writes(self, monkeypatch):
+        """CONTROL — the spelling tolerance must not hide a real change."""
+        writes = _patch_writer(monkeypatch, aggregate=lambda *a, **k: ["Jazz"])
+        gas.sync_various_artists_track_genres(
+            [_track(genres="Hip Hop", lastfm_genres="hip-hop")], album="X"
+        )
+        assert writes == [{"genres": "Jazz", "track_id": "t1"}], (
+            "tolerating 'hip hop'/'hip-hop' must not make the sync refuse to "
+            "replace a track's genre with a different one"
+        )
+
     def test_the_aggregator_may_return_nothing_and_nothing_is_written(self, monkeypatch):
         writes = _patch_writer(monkeypatch, aggregate=lambda *a, **k: [])
         gas.sync_various_artists_track_genres(

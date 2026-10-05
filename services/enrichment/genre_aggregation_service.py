@@ -670,6 +670,36 @@ def va_track_source_map(track: dict[str, Any]) -> dict[str, list[str]]:
     return source_map
 
 
+def _genre_spelling_canon(value: Any) -> list[str]:
+    """Genre names reduced to bare letters/digits, so ``Hip Hop`` == ``hip-hop``."""
+    from services.metadata.metadata_proposal_service import _genre_names
+
+    return sorted(
+        "".join(ch for ch in name.casefold() if ch.isalnum())
+        for name in _genre_names(value)
+        if name
+    )
+
+
+def _same_genre_value(existing: Any, proposed: str) -> bool:
+    """True when the track already carries these genres, in any spelling.
+
+    ``_genre_sets_equal`` normalises case and whitespace but not punctuation,
+    so MusicBrainz's ``hip-hop`` read as a change against a stored ``Hip Hop``
+    and the track was rewritten — a database row and a physical file-tag
+    rewrite for a difference that is only a spelling variant of one genre.
+    The genres still have to MATCH; only the spelling is allowed to differ.
+    """
+    try:
+        from services.metadata.metadata_proposal_service import _genre_sets_equal
+
+        if _genre_sets_equal(existing, proposed):
+            return True
+        return _genre_spelling_canon(existing) == _genre_spelling_canon(proposed)
+    except Exception:
+        return str(proposed).strip().casefold() == str(existing or "").strip().casefold()
+
+
 def sync_various_artists_track_genres(
     tracks: list[dict[str, Any]], album: str = ""
 ) -> int:
@@ -717,14 +747,8 @@ def sync_various_artists_track_genres(
             continue
 
         genres_str = ", ".join(top_genres)
-        try:
-            from services.metadata.metadata_proposal_service import _genre_sets_equal
-
-            if _genre_sets_equal(genres_str, track.get("genres")):
-                continue
-        except Exception:
-            if str(genres_str).strip().casefold() == str(track.get("genres") or "").strip().casefold():
-                continue
+        if _same_genre_value(track.get("genres"), genres_str):
+            continue
 
         try:
             with db_session() as session:
