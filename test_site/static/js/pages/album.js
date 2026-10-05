@@ -1940,15 +1940,28 @@
     const row = document.createElement('tr');
     row.className = 'text-muted missing-track-row mb-missing-row';
     row.style.opacity = '0.6';
+    // The row carries its own ordering key, exactly like the library rows do,
+    // so `placeMissingRow` can position it whichever entry point built it.
+    row.dataset.trackNumber = String(trackComp.mb_track_number || '');
+    row.dataset.discNumber = String(trackComp.mb_disc_number || 1);
 
     const trackNum = esc(String(trackComp.mb_track_number || ''));
+    // Rendered in the Duration column and normalised the way the library rows
+    // are, so a missing track carries the same fields as the tracks beside it.
+    const shownDuration = esc(fmtDuration(trackComp.mb_duration) || '—');
+    // EXACTLY five cells, one per <th> (#, Title, Duration, Rating, Actions).
+    // This used to emit SIX — an empty # cell, the number in the Title column,
+    // a colspan=3 title, then the buttons — so every column after the first
+    // shifted left, the title sat under "Duration", and the action buttons
+    // hung outside the table altogether.
     row.innerHTML = `
-      <td></td>
-      <td class="fst-italic">${trackNum || '?'}</td>
-      <td colspan="3" class="fst-italic">
+      <td class="text-center text-muted fst-italic">${trackNum || '?'}</td>
+      <td class="fst-italic">
         ${esc(trackComp.mb_title || '')}
         <span class="badge bg-warning text-dark ms-2" style="font-size:0.65rem;">Missing</span>
       </td>
+      <td class="text-center text-muted small fst-italic">${shownDuration}</td>
+      <td class="text-center text-warning"><span class="text-muted">—</span></td>
       <td class="text-end">
         <div class="btn-group btn-group-sm">
           <button class="btn btn-outline-success py-0 px-2 mb-queue-missing" title="Add to download queue">
@@ -1999,39 +2012,72 @@
     return row;
   }
 
+  // Sort key for lining a MusicBrainz track up with the library rows beside it:
+  // disc first, then track number. The comparison array is in MusicBrainz
+  // tracklist order, which is NOT always the order this table renders in — so
+  // "the previous comparison entry" is frequently not "the row above this one".
+  // A plain number so the decision can be exercised without a DOM; rows with no
+  // usable number sort last (9999), matching the "?" shown.
+  function missingOrderKey(disc, number) {
+    const parsedDisc = Number(disc);
+    const parsedNumber = Number(String(number == null ? '' : number).split('/')[0]);
+    const discPart = Number.isFinite(parsedDisc) && parsedDisc > 0 ? parsedDisc : 1;
+    const numberPart = Number.isFinite(parsedNumber) && parsedNumber > 0 ? parsedNumber : 9999;
+    return discPart * 10000 + numberPart;
+  }
+
+  function rowOrderKey(row) {
+    return missingOrderKey(row.dataset.discNumber, row.dataset.trackNumber);
+  }
+
+  /**
+   * Put a missing row inline with the library rows, by disc + track number.
+   *
+   * Used by BOTH entry points — the manual Compare/Lookup-MBID result and the
+   * persisted list loaded on page load — so a missing track can never end up
+   * appended at the bottom (the old `appendMissingRow`) or wherever the
+   * comparison array happened to stop.
+   */
+  function placeMissingRow(row, tbody, key) {
+    const libraryRows = Array.from(tbody.querySelectorAll('tr[data-track-id]'));
+
+    // Before the first library row that comes AFTER this track.
+    const next = libraryRows.find((candidate) => rowOrderKey(candidate) > key);
+    if (next) {
+      next.insertAdjacentElement('beforebegin', row);
+      return;
+    }
+
+    // Past the end of the album: sit behind the last library row, but ahead
+    // of any sub-row (update / extra / earlier missing) hanging off it.
+    let anchor = libraryRows[libraryRows.length - 1];
+    if (!anchor) {
+      tbody.appendChild(row);
+      return;
+    }
+    let sibling = anchor.nextElementSibling;
+    while (sibling && (sibling.classList.contains('mb-update-row')
+      || sibling.classList.contains('mb-missing-row')
+      || sibling.classList.contains('mb-extra-row'))) {
+      anchor = sibling;
+      sibling = sibling.nextElementSibling;
+    }
+    anchor.insertAdjacentElement('afterend', row);
+  }
+
   function injectMissingRows(missingTracks, data) {
     const tbody = document.getElementById('albumTracksTbody');
     if (!tbody) return;
 
-    missingTracks.forEach((trackComp) => {
-      const index = data.comparison.indexOf(trackComp);
-      let insertAfterRow = null;
-
-      for (let i = index - 1; i >= 0; i--) {
-        const prev = data.comparison[i];
-        if (prev.matched && prev.library_track_id) {
-          const candidate = tbody.querySelector(
-            `tr[data-track-id="${CSS.escape(String(prev.library_track_id))}"]`
-          );
-          if (candidate) { insertAfterRow = candidate; break; }
-        }
-      }
-
-      const row = buildMissingRow(trackComp, data);
-      if (insertAfterRow) {
-        let next = insertAfterRow.nextElementSibling;
-        while (next && (next.classList.contains('mb-update-row')
-          || next.classList.contains('mb-missing-row'))) {
-          insertAfterRow = next;
-          next = next.nextElementSibling;
-        }
-        insertAfterRow.insertAdjacentElement('afterend', row);
-      } else {
-        const firstRow = tbody.querySelector('tr[data-track-id]');
-        if (firstRow) firstRow.insertAdjacentElement('beforebegin', row);
-        else tbody.appendChild(row);
-      }
-    });
+    // Ascending track order: each row is placed against the library rows AND
+    // the missing rows already in the table, so they interleave rather than
+    // pile up wherever the comparison happened to stop.
+    missingTracks
+      .map((comp) => ({ comp, key: missingOrderKey(comp.mb_disc_number, comp.mb_track_number) }))
+      .sort((a, b) => a.key - b.key)
+      .forEach(({ comp, key }) => {
+        placeMissingRow(buildMissingRow(comp, data), tbody, key);
+      });
   }
 
   function markExtraTracks(extraTracks) {
@@ -2707,18 +2753,15 @@
   }
 
   /**
-   * Append a missing row AFTER the last real track row.
+   * Insert one already-built missing row inline with the library rows.
    *
-   * Deliberately NOT `injectMissingRows`: that positions each row relative to
-   * `data.comparison`, and these rows are in no comparison (they come from the
-   * DB, not a Compare run). Its `indexOf` returns -1, which would insert before
-   * the FIRST row every time — REVERSING the list.
+   * Kept so existing callers keep a home; the placement itself lives in
+   * `placeMissingRow`, which orders by disc + track number. The old version
+   * appended after the LAST track row, which is why a page-load render put
+   * every missing track at the bottom of the table instead of inline.
    */
   function appendMissingRow(row, tbody) {
-    const rows = tbody.querySelectorAll('tr[data-track-id]');
-    const last = rows.length ? rows[rows.length - 1] : null;
-    if (last) last.insertAdjacentElement('afterend', row);
-    else tbody.appendChild(row);
+    placeMissingRow(row, tbody, rowOrderKey(row));
   }
 
   async function loadAlbumMissingTracks() {
@@ -2748,17 +2791,18 @@
     updateMissingHeaderBadge(missing.length);
   }
 
-  /** Render persisted missing rows (deduped) as tracklist sub-rows. */
+  /** Render persisted missing rows (deduped) in track order. */
   function renderMissingTracks(rows, tbody) {
     const seen = new Set();
+    const entries = [];
     rows.forEach((row) => {
       const comp = missingRowToTrackComp(row);
       // Distinct rows are expected, but a duplicate title + position would
       // render two identical rows.
-      const key = [comp.mb_disc_number, comp.mb_track_number,
+      const dedupeKey = [comp.mb_disc_number, comp.mb_track_number,
         String(comp.mb_title).toLowerCase()].join('\u0000');
-      if (seen.has(key)) return;
-      seen.add(key);
+      if (seen.has(dedupeKey)) return;
+      seen.add(dedupeKey);
 
       // Context is built PER ROW: each persisted row carries its own release id
       // and year, which is more accurate than a page-level guess and is what
@@ -2767,8 +2811,16 @@
         release_mbid: row.release_id || null,
         mb_year: row.year || '',
       };
-      appendMissingRow(buildMissingRow(comp, ctx), tbody);
+      entries.push({
+        row: buildMissingRow(comp, ctx),
+        key: missingOrderKey(comp.mb_disc_number, comp.mb_track_number),
+      });
     });
+
+    // Ascending, so rows landing past the end of the album keep their order too.
+    entries
+      .sort((a, b) => a.key - b.key)
+      .forEach((entry) => placeMissingRow(entry.row, tbody, entry.key));
   }
 
   /** Show (or hide at zero) the header's "N tracks missing" badge. */

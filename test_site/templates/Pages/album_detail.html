@@ -283,7 +283,11 @@
             </thead>
             <tbody id="albumTracksTbody">
               {% for track in tracks %}
-              <tr data-track-id="{{ track.id }}" data-track-title="{{ track.title|e }}" data-track-artist="{{ (track.artist or artist_name)|e }}">
+              {# data-track-number / data-disc-number are what lets album.js line an
+                 injected missing row up with the library rows around it: the
+                 MusicBrainz comparison array is in tracklist order, which is not
+                 always the order this table renders in. #}
+              <tr data-track-id="{{ track.id }}" data-track-title="{{ track.title|e }}" data-track-artist="{{ (track.artist or artist_name)|e }}" data-track-number="{{ track.track_number or loop.index }}" data-disc-number="{{ track.disc_number or 1 }}">
                 <td class="text-center text-muted">
                   <input type="checkbox" class="track-checkbox me-1" data-track-id="{{ track.id }}" aria-label="Select {{ track.title|e }}">
                   {{ track.track_number or loop.index }}
