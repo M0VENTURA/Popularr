@@ -1768,6 +1768,34 @@ def get_download_conversion_config() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# FLAC conversion modes
+# ---------------------------------------------------------------------------
+#: ``downloads.conversion.mode`` → the container it converts FLAC into.
+#: ``"none"`` (move as-is) is deliberately absent: it converts nothing.
+_FLAC_CONVERSION_MODES = {
+    "flac_to_mp3": "mp3",
+    "flac_to_m4a": "m4a",
+}
+
+
+def conversion_target(mode: Any) -> str:
+    """``"mp3"`` / ``"m4a"`` for a conversion mode, ``""`` when it is off.
+
+    One mapping replaces every inline ``mode == "flac_to_mp3"`` comparison in
+    the codebase — each one written by hand is a place a NEW mode silently
+    falls back to the default. ``download_organize_helpers`` WHITELISTS the
+    modes it accepts, so before this existed an unknown value was dropped back
+    to ``flac_to_mp3`` rather than rejected.
+    """
+    return _FLAC_CONVERSION_MODES.get(str(mode or "").strip().lower(), "")
+
+
+def is_flac_conversion(mode: Any) -> bool:
+    """True when ``mode`` converts FLAC files rather than moving them as-is."""
+    return bool(conversion_target(mode))
+
+
+# ---------------------------------------------------------------------------
 # Generic feature flags (features.*)
 # ---------------------------------------------------------------------------
 

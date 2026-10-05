@@ -1161,6 +1161,7 @@ def transfer_and_verify_download(
     *,
     convert_flac_to_mp3: bool = False,
     mp3_bitrate: int = 320,
+    conversion_target: str = "mp3",
 ) -> dict[str, Any]:
     import subprocess
     from services.downloads.download_verification_service import (
@@ -1171,24 +1172,36 @@ def transfer_and_verify_download(
 
     final_dest = dest_path
     source_ext = os.path.splitext(source_path)[1].lower()
+    target_format = conversion_target if conversion_target in ("mp3", "m4a") else "mp3"
 
     if convert_flac_to_mp3 and source_ext == ".flac":
-        final_dest = os.path.splitext(dest_path)[0] + ".mp3"
+        final_dest = os.path.splitext(dest_path)[0] + f".{target_format}"
         os.makedirs(os.path.dirname(final_dest), exist_ok=True)
+        # MP3 keeps ID3v2.3 (what Navidrome/picard expect); M4A carries the
+        # same tags in its atoms, so only the codec differs.
+        codec_args = (
+            ["-c:a", "aac", "-b:a", f"{mp3_bitrate}k"]
+            if target_format == "m4a"
+            else ["-c:a", "libmp3lame", "-b:a", f"{mp3_bitrate}k", "-id3v2_version", "3"]
+        )
         try:
             subprocess.run(
-                ["ffmpeg", "-y", "-i", source_path,
-                 "-c:a", "libmp3lame", "-b:a", f"{mp3_bitrate}k",
-                 "-id3v2_version", "3", final_dest],
+                ["ffmpeg", "-y", "-i", source_path, *codec_args, final_dest],
                 capture_output=True, timeout=300, check=True,
             )
-            logger.info("Converted FLAC to MP3", source=source_path, dest=final_dest)
+            logger.info(
+                "Converted FLAC to %s" % target_format.upper(),
+                source=source_path, dest=final_dest,
+            )
             try:
                 os.remove(source_path)
             except Exception:
                 pass
         except Exception as exc:
-            logger.error("FLAC to MP3 conversion failed", source=source_path, error=str(exc))
+            logger.error(
+                "FLAC to %s conversion failed" % target_format.upper(),
+                source=source_path, error=str(exc),
+            )
             return {"success": False, "error": f"Conversion failed: {exc}"}
     else:
         tr = transfer_download_to_music(source_path, final_dest)

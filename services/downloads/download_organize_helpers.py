@@ -19,7 +19,7 @@ from typing import Any, Dict
 
 import structlog
 
-from helpers.config_helpers import get_config
+from helpers.config_helpers import conversion_target, get_config, is_flac_conversion
 
 logger = structlog.get_logger(__name__)
 
@@ -167,7 +167,10 @@ def _read_download_conversion_settings() -> dict[str, Any]:
         if isinstance(conversion_cfg, dict):
             settings["enabled"] = bool(conversion_cfg.get("enabled", settings["enabled"]))
             mode = str(conversion_cfg.get("mode", settings["mode"]) or settings["mode"]).strip().lower()
-            if mode in ("flac_to_mp3", "none"):
+            # WHITELIST of accepted modes: anything else was silently dropped
+            # back to the default, so a new mode had to be added HERE as well
+            # as everywhere it is read (see helpers.config_helpers).
+            if is_flac_conversion(mode) or mode == "none":
                 settings["mode"] = mode
             try:
                 bitrate = int(conversion_cfg.get("mp3_bitrate_kbps", settings["mp3_bitrate_kbps"]))
@@ -233,31 +236,43 @@ def _resolve_downloads_root() -> str:
 
 
 def _convert_flac_and_handle_original(source_path: str, dest_path: str, settings: dict[str, Any]) -> bool:
-    """Convert FLAC -> MP3 via ffmpeg into *dest_path*, then handle the original per config."""
+    """Convert FLAC into the configured format via ffmpeg, then handle the original per config.
+
+    The target container comes from ``conversion_target(mode)`` — MP3
+    (libmp3lame + ID3v2.3) or M4A (AAC), so both share the original-handling
+    logic below instead of it being duplicated per format.
+    """
     source_path = str(source_path).replace("\\", "/")
     bitrate_kbps = int(settings.get("mp3_bitrate_kbps", 320) or 320)
+    target = conversion_target(settings.get("mode")) or "mp3"
+    label = f"FLAC to {target.upper()}"
+    codec_args = (
+        ["-codec:a", "aac", "-b:a", f"{bitrate_kbps}k"]
+        if target == "m4a"
+        else ["-codec:a", "libmp3lame", "-b:a", f"{bitrate_kbps}k", "-id3v2_version", "3"]
+    )
     cmd = [
         "ffmpeg", "-y", "-i", source_path,
-        "-vn", "-codec:a", "libmp3lame", "-b:a", f"{bitrate_kbps}k",
-        "-map_metadata", "0", "-id3v2_version", "3", dest_path,
+        "-vn", *codec_args,
+        "-map_metadata", "0", dest_path,
     ]
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, check=False, timeout=_TRANSFER_TIMEOUT_SECONDS
         )
     except subprocess.TimeoutExpired:
-        logger.warning("FLAC to MP3 conversion timed out", timeout_seconds=_TRANSFER_TIMEOUT_SECONDS, source=source_path)
+        logger.warning(f"{label} conversion timed out", timeout_seconds=_TRANSFER_TIMEOUT_SECONDS, source=source_path)
         return False
     except FileNotFoundError:
-        logger.warning("ffmpeg is required for FLAC to MP3 conversion but is not available in PATH")
+        logger.warning(f"ffmpeg is required for {label} conversion but is not available in PATH")
         return False
     except Exception as exc:
-        logger.warning("FLAC to MP3 conversion launch failed", error=str(exc))
+        logger.warning(f"{label} conversion launch failed", error=str(exc))
         return False
 
     if proc.returncode != 0:
         stderr_tail = (proc.stderr or "").strip().splitlines()[-5:]
-        logger.warning("FLAC to MP3 conversion failed", stderr=" | ".join(stderr_tail))
+        logger.warning(f"{label} conversion failed", stderr=" | ".join(stderr_tail))
         return False
 
     downloads_root = _resolve_downloads_root()
@@ -274,7 +289,7 @@ def _convert_flac_and_handle_original(source_path: str, dest_path: str, settings
     except Exception as archive_err:
         logger.warning("Conversion succeeded but original handling failed", source=source_path, error=str(archive_err))
 
-    logger.info("Converted FLAC to MP3 successfully", source=source_path, dest=dest_path)
+    logger.info(f"Converted {label} successfully", source=source_path, dest=dest_path)
     return True
 
 
@@ -310,9 +325,10 @@ def move_track_to_library(track: dict[str, Any], release_metadata: dict[str, Any
 
     conversion_settings = _read_download_conversion_settings()
     source_ext = os.path.splitext(file_path)[1].lower()
+    target_format = conversion_target(conversion_settings.get("mode"))
     converting = bool(
         conversion_settings.get("enabled")
-        and conversion_settings.get("mode") == "flac_to_mp3"
+        and target_format
         and source_ext == ".flac"
     )
 
@@ -328,8 +344,8 @@ def move_track_to_library(track: dict[str, Any], release_metadata: dict[str, Any
         disc_number=track.get("disc_number"),
     )
 
-    if converting:
-        target_path = f"{os.path.splitext(target_path)[0]}.mp3"
+    if converting and target_format:
+        target_path = f"{os.path.splitext(target_path)[0]}.{target_format}"
 
     if os.path.exists(target_path):
         if _titles_match(_read_file_title(target_path), track.get("title")):
@@ -348,7 +364,7 @@ def move_track_to_library(track: dict[str, Any], release_metadata: dict[str, Any
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         if converting:
             if not _convert_flac_and_handle_original(file_path, target_path, conversion_settings):
-                return {"success": False, "error": "FLAC to MP3 conversion failed"}
+                return {"success": False, "error": f"{target_format.upper()} conversion failed"}
             return {"success": True, "target_path": target_path, "converted": True}
         shutil.move(file_path, target_path)
     except Exception as exc:

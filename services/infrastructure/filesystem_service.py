@@ -21,7 +21,7 @@ from typing import Any
 
 import structlog
 
-from helpers.config_helpers import get_config, get_supported_audio_formats
+from helpers.config_helpers import conversion_target, get_config, get_supported_audio_formats
 
 SUPPORTED_AUDIO_FORMATS = get_supported_audio_formats()
 logger = structlog.get_logger(__name__)
@@ -42,11 +42,16 @@ def get_import_destination_path(
         settings = cfg.get("download_conversion", {})
 
     source_ext = os.path.splitext(source_path or "")[1].lower()
-    should_convert = (settings.get("mode") == "flac_to_mp3" and source_ext == ".flac")
+    # ``download_conversion.mode`` and ``downloads.conversion.mode`` share the
+    # same vocabulary, so both are resolved through the one mapping — an inline
+    # comparison against a single mode here would send a FLAC to the wrong
+    # extension as soon as another mode exists.
+    target = conversion_target(settings.get("mode"))
+    should_convert = bool(target) and source_ext == ".flac"
 
     if should_convert:
         dest_root, _ = os.path.splitext(dest_path)
-        return f"{dest_root}.mp3"
+        return f"{dest_root}.{target}"
 
     return dest_path
 

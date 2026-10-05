@@ -253,7 +253,10 @@ def write_tags_to_file(file_path: str, tags: Dict[str, Any]) -> bool:
 
     suffix = Path(file_path).suffix.lower()
 
-    if suffix in (".mp3", ".flac"):
+    # MP4/M4A carries the same metadata in atoms rather than ID3 frames or
+    # Vorbis comments; without this branch every m4a write logged "Unsupported
+    # file format" and did nothing.
+    if suffix in (".mp3", ".flac", ".m4a", ".mp4"):
         ok = _write_tags_atomic(file_path, tags)
     else:
         logger.warning("Unsupported file format: %s", suffix)
@@ -305,8 +308,13 @@ def _write_tags_atomic(file_path: str, tags: Dict[str, Any]) -> bool:
 
         if suffix == ".mp3":
             ok = write_id3_tags(tmp_path, tags)
-        else:
+        elif suffix in (".m4a", ".mp4"):
+            ok = write_mp4_tags(tmp_path, tags)
+        elif suffix == ".flac":
             ok = write_flac_tags(tmp_path, tags)
+        else:
+            logger.error("Unsupported file format: %s", suffix)
+            return False
 
         if not ok:
             return False
@@ -1046,6 +1054,130 @@ def embed_album_art(file_path: str, image_data: bytes, mime_type: str = "image/j
 # =============================================================================
 
 
+# =============================================================================
+# MP4 / M4A
+# =============================================================================
+
+#: Fields that map onto a NATIVE MP4 atom (mutagen stores text atoms as a
+#: list of strings, so the value built here is already in mutagen's shape).
+_MP4_TEXT_ATOMS = {
+    "title": "\xa9nam",
+    "artist": "\xa9ART",
+    "album": "\xa9alb",
+    "album_artist": "aART",
+    "year": "\xa9day",
+    "genre": "\xa9gen",
+    "genres": "\xa9gen",
+    "composer": "\xa9wrt",
+    "comment": "\xa9cmt",
+}
+
+#: Fields MP4 has no native atom for, stored as iTunes freeform atoms
+#: (``----:com.apple.iTunes:<name>``) — the same scheme Picard and MusicBrainz
+#: use, so the values round-trip through other taggers.
+_MP4_FREEFORM_ATOMS = {
+    "musicbrainz_trackid": "MusicBrainz Track Id",
+    "musicbrainz_albumid": "MusicBrainz Album Id",
+    "musicbrainz_releasegroupid": "MusicBrainz Release Group Id",
+    "musicbrainz_artistid": "MusicBrainz Artist Id",
+    "musicbrainz_releasetrackid": "MusicBrainz Release Track Id",
+    "musicbrainz_workid": "MusicBrainz Work Id",
+    "originalyear": "Original Year",
+    "originaldate": "Original Date",
+    "original_title": "Original Title",
+    "original_cover_artist": "Original Album Artist",
+    "isrc": "ISRC",
+    "iswc": "ISWC",
+    "writer": "Writer",
+    "lyricist": "Lyricist",
+    "is_cover": "Cover",
+}
+
+#: Pair-valued atoms: ``(track, total)`` / ``(disc, total)``.  We never know
+#: the total, and 0 is MP4's "unknown".
+_MP4_PAIR_ATOMS = {
+    "track_number": "trkn",
+    "disc_number": "disk",
+}
+
+
+def _mp4_tag_items(tags: Dict[str, Any]) -> Dict[str, Any]:
+    """Turn the writer's logical field names into MP4 atoms mutagen can store.
+
+    Kept separate from the write so the mapping is testable without a real
+    audio file. Returns atom → value, where a value of ``None`` means "clear
+    this atom" (the same contract the ID3/Vorbis writers follow: ``""`` clears,
+    an absent key is left alone).
+
+    ``rating`` is deliberately absent: MP4 has no standard rating atom, so a
+    star rating written here would be invisible to every player.
+    """
+    from helpers.track_ordering import leading_int
+
+    items: Dict[str, Any] = {}
+
+    for field, atom in _MP4_TEXT_ATOMS.items():
+        if field not in tags or tags[field] is None:
+            continue
+        text = str(tags[field]).strip()
+        items[atom] = [text] if text else None
+
+    for field, atom in _MP4_PAIR_ATOMS.items():
+        if field not in tags or tags[field] is None:
+            continue
+        number = leading_int(tags[field])
+        items[atom] = [(number, 0)] if number is not None else None
+
+    for field, atom in _MP4_FREEFORM_ATOMS.items():
+        if field not in tags or tags[field] is None:
+            continue
+        text = str(tags[field]).strip()
+        key = f"----:com.apple.iTunes:{atom}"
+        items[key] = text.encode("utf-8") if text else None
+
+    return items
+
+
+def write_mp4_tags(file_path: str, tags: Dict[str, Any]) -> bool:
+    """Write the caller's metadata onto an MP4/M4A file.
+
+    Same contract as :func:`write_id3_tags` / :func:`write_flac_tags`: a
+    ``None`` value clears the atom, a missing key leaves it alone.
+    """
+    if not MUTAGEN_AVAILABLE:
+        logger.error("Mutagen not available for MP4 writing")
+        return False
+
+    try:
+        from mutagen.mp4 import MP4  # type: ignore[import-untyped]
+
+        audio = MP4(file_path)
+        if audio.tags is None:
+            audio.add_tags()
+
+        for atom, value in _mp4_tag_items(tags).items():
+            if value is None:
+                audio.tags.pop(atom, None)
+                continue
+            audio.tags[atom] = value
+
+        audio.save()
+        return True
+    except Exception as exc:
+        logger.error("Failed to write MP4 tags to %s: %s", file_path, exc, exc_info=True)
+        return False
+
+
+def convert_flac_to_m4a(flac_path: str, bitrate: str = "256k") -> str | None:
+    """Convert a FLAC file to M4A (AAC) using ffmpeg.
+
+    Mirrors :func:`convert_flac_to_mp3` so both share the caller contract:
+    returns the new path or ``None`` on failure, and deletes the original FLAC
+    after a successful conversion.
+    """
+    return _convert_flac(flac_path, target="m4a", bitrate=bitrate)
+
+
 def convert_flac_to_mp3(flac_path: str, bitrate: str = "320k") -> str | None:
     """Convert a FLAC file to MP3 using ffmpeg.
 
@@ -1057,7 +1189,23 @@ def convert_flac_to_mp3(flac_path: str, bitrate: str = "320k") -> str | None:
         Path to the converted MP3 file, or ``None`` on failure.
         The original FLAC file is deleted after a successful conversion.
     """
+    return _convert_flac(flac_path, target="mp3", bitrate=bitrate)
+
+
+def _convert_flac(flac_path: str, *, target: str, bitrate: str) -> str | None:
+    """Convert a FLAC file to *target* (``"mp3"`` or ``"m4a"``) using ffmpeg.
+
+    Shared by :func:`convert_flac_to_mp3` and :func:`convert_flac_to_m4a` so
+    the existence/ffmpeg checks, the timeout, the failure reporting and the
+    "delete the original afterwards" behaviour stay in one place — the only
+    difference between the two is the codec arguments.
+    """
     import subprocess
+
+    if target not in ("mp3", "m4a"):
+        logger.error("Unsupported conversion target: %s", target)
+        return None
+    label = f"FLAC→{target.upper()}"
 
     if not os.path.exists(flac_path):
         logger.error("FLAC file not found: %s", flac_path)
@@ -1066,26 +1214,33 @@ def convert_flac_to_mp3(flac_path: str, bitrate: str = "320k") -> str | None:
     try:
         subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5, check=True)
     except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        logger.error("ffmpeg not available — cannot convert FLAC to MP3")
+        logger.error("ffmpeg not available — cannot convert %s", label)
         return None
 
-    mp3_path = os.path.splitext(flac_path)[0] + ".mp3"
+    out_path = os.path.splitext(flac_path)[0] + f".{target}"
+    # MP3 keeps the VBR-quality setting it always used; AAC has no -q:a
+    # equivalent, so it takes an explicit bitrate instead.
+    codec_args = (
+        ["-c:a", "aac", "-b:a", bitrate]
+        if target == "m4a"
+        else ["-b:a", bitrate, "-q:a", "0"]
+    )
     cmd = [
         "ffmpeg", "-i", flac_path,
-        "-b:a", bitrate, "-q:a", "0",
-        "-v", "error", "-y", mp3_path,
+        *codec_args,
+        "-v", "error", "-y", out_path,
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=300, text=True)
         if result.returncode != 0:
-            logger.error("FLAC→MP3 conversion failed: %s", result.stderr)
+            logger.error("%s conversion failed: %s", label, result.stderr)
             return None
-        if not os.path.exists(mp3_path):
+        if not os.path.exists(out_path):
             logger.error("Conversion succeeded but output file not found")
             return None
 
-        size_mb = os.path.getsize(mp3_path) / (1024 * 1024)
-        logger.info("Converted FLAC→MP3: %s (%.1f MB)", mp3_path, size_mb)
+        size_mb = os.path.getsize(out_path) / (1024 * 1024)
+        logger.info("Converted %s: %s (%.1f MB)", label, out_path, size_mb)
 
         try:
             os.remove(flac_path)
@@ -1093,10 +1248,10 @@ def convert_flac_to_mp3(flac_path: str, bitrate: str = "320k") -> str | None:
         except Exception as exc:
             logger.warning("Could not delete original FLAC: %s", exc)
 
-        return mp3_path
+        return out_path
     except subprocess.TimeoutExpired:
-        logger.error("FLAC→MP3 conversion timed out after 300s: %s", flac_path)
+        logger.error("%s conversion timed out after 300s: %s", label, flac_path)
         return None
     except Exception as exc:
-        logger.error("FLAC→MP3 conversion error: %s", exc, exc_info=True)
+        logger.error("%s conversion error: %s", label, exc, exc_info=True)
         return None

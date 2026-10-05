@@ -112,7 +112,7 @@ def rename_album_files_service(
     """
     import shutil
 
-    from helpers.config_helpers import get_config
+    from helpers.config_helpers import conversion_target, get_config, is_flac_conversion
     from services.downloads.download_organize_helpers import (
         _AUDIO_EXTS,
         _sanitize_path_component,
@@ -129,9 +129,10 @@ def rename_album_files_service(
     fallback_format = "{album_artist}/{year} - {album}/{track_number}. {artist} - {title}"
 
     conversion_cfg = downloads_cfg.get("conversion", {}) or {}
-    conversion_enabled = bool(conversion_cfg.get("enabled", False)) and (
-        str(conversion_cfg.get("mode", "flac_to_mp3")) == "flac_to_mp3"
+    conversion_enabled = bool(conversion_cfg.get("enabled", False)) and is_flac_conversion(
+        conversion_cfg.get("mode", "flac_to_mp3")
     )
+    conversion_format = conversion_target(conversion_cfg.get("mode", "flac_to_mp3")) or "mp3"
     try:
         mp3_bitrate = max(96, min(320, int(conversion_cfg.get("mp3_bitrate_kbps", 320) or 320)))
     except (TypeError, ValueError):
@@ -254,17 +255,23 @@ def rename_album_files_service(
         actual_src = src_path
         if conversion_enabled and ext.lower() == ".flac":
             try:
-                from services.metadata.tag_file_service import convert_flac_to_mp3
+                from services.metadata.tag_file_service import (
+                    convert_flac_to_m4a,
+                    convert_flac_to_mp3,
+                )
 
-                converted = convert_flac_to_mp3(src_path, bitrate=f"{mp3_bitrate}k")
+                if conversion_format == "m4a":
+                    converted = convert_flac_to_m4a(src_path, bitrate=f"{mp3_bitrate}k")
+                else:
+                    converted = convert_flac_to_mp3(src_path, bitrate=f"{mp3_bitrate}k")
                 if not converted or not os.path.isfile(converted):
-                    _msg = f"{fmt_vars['title']}: FLAC→MP3 conversion failed (is ffmpeg installed?)"
+                    _msg = f"{fmt_vars['title']}: FLAC→{conversion_format.upper()} conversion failed (is ffmpeg installed?)"
                     errors.append(_msg)
                     logger.warning("Conversion failed", track=fmt_vars["title"], src=src_path)
                     continue
                 actual_src = converted
                 if os.path.splitext(rel_target)[1].lower() == ".flac":
-                    rel_target = os.path.splitext(rel_target)[0] + ".mp3"
+                    rel_target = os.path.splitext(rel_target)[0] + f".{conversion_format}"
             except Exception as exc:
                 _msg = f"{fmt_vars['title']}: conversion failed ({exc})"
                 errors.append(_msg)

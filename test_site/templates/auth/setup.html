@@ -192,6 +192,7 @@
             <label class="form-label form-label-sm" for="setupConversionMode">Mode</label>
             <select class="form-select form-select-sm" id="setupConversionMode">
               <option value="flac_to_mp3" {% if defaults.get('conversion_mode', 'flac_to_mp3') == 'flac_to_mp3' %}selected{% endif %}>FLAC to MP3</option>
+              <option value="flac_to_m4a" {% if defaults.get('conversion_mode', 'flac_to_mp3') == 'flac_to_m4a' %}selected{% endif %}>FLAC to M4A (AAC)</option>
               <option value="none" {% if defaults.get('conversion_mode', 'flac_to_mp3') == 'none' %}selected{% endif %}>Disabled (Move as-is)</option>
             </select>
           </div>

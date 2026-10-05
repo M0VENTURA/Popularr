@@ -1015,6 +1015,7 @@
           {% set conversion_mode = config.get('downloads', {}).get('conversion', {}).get('mode', 'flac_to_mp3') %}
           <select class="form-select" id="downloads_conversion_mode">
             <option value="flac_to_mp3" {% if conversion_mode == 'flac_to_mp3' %}selected{% endif %}>FLAC to MP3</option>
+            <option value="flac_to_m4a" {% if conversion_mode == 'flac_to_m4a' %}selected{% endif %}>FLAC to M4A (AAC)</option>
             <option value="none" {% if conversion_mode == 'none' %}selected{% endif %}>Disabled (Move as-is)</option>
           </select>
           <small class="form-text text-muted">Which conversion to run when enabled.</small>
