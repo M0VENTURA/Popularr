@@ -634,6 +634,120 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
     return {"success": True, "artist": artist, "album": album, "genres": recommended}
 
 
+#: Columns feeding a VARIOUS-ARTISTS track's genre vote, and the source key
+#: ``aggregate_genres`` weights them under.
+#:
+#: ``navidrome_genres`` is DELIBERATELY absent. On a compilation each track has
+#: a different performer, so the album-level write is skipped (it would hand
+#: one blended list to every performer) — and with no per-track writer at all,
+#: a VA track's ``genres`` was frozen at whatever Navidrome imported while
+#: ``musicbrainz_genres`` / ``lastfm_genres`` / … sat right next to it.
+VA_GENRE_SOURCES: tuple[tuple[str, str], ...] = (
+    ("musicbrainz_genres", "musicbrainz"),
+    ("discogs_genres", "discogs"),
+    ("audiodb_genres", "audiodb"),
+    ("essentia_genres", "essentia"),
+    ("listenbrainz_genres", "listenbrainz"),
+    ("lastfm_genres", "lastfm"),
+    ("spotify_genres", "spotify"),
+    ("wikidata_genres", "wikidata"),
+    ("manual_genres", "manual"),
+)
+
+
+def va_track_source_map(track: dict[str, Any]) -> dict[str, list[str]]:
+    """One VA track's genre sources, without Navidrome's own tag.
+
+    Pure: no aggregation, no writes, so the source set can be tested on its own.
+    An empty result means "this track has nothing but Navidrome" — the caller
+    must leave such a track alone rather than blank it.
+    """
+    source_map: dict[str, list[str]] = {}
+    for column, source in VA_GENRE_SOURCES:
+        values = _parse_genre_input(track.get(column))
+        if values:
+            source_map.setdefault(source, []).extend(values)
+    return source_map
+
+
+def sync_various_artists_track_genres(
+    tracks: list[dict[str, Any]], album: str = ""
+) -> int:
+    """Give each track of a VA compilation the genres ITS OWN sources rate.
+
+    The album-level write in ``sync_album_file_tags`` is correctly skipped for a
+    compilation — it hands one blended list to every performer — but nothing
+    replaced it, so a VA track's ``genres`` never moved off the Navidrome value
+    the import wrote. This is the per-track replacement: each row is judged on
+    its own sources and written by its own id, never album-wide.
+
+    ``nav_genres=None`` is deliberate: Navidrome normally acts as the
+    tie-breaker, and the whole point here is that it must not decide.
+
+    Two rules keep it safe:
+
+    * a track with no online source is left untouched (its Navidrome value is
+      better than a blank one), and so is a track whose value already matches —
+      no pointless write, no file-tag churn;
+    * ``aggregate_genres`` applies ``genres.min_weight`` (0.25), so a lone
+      Last.fm (0.10) / ListenBrainz (0.15) / Spotify (0.05) source cannot define
+      a track by itself — the same rule every other genre path follows.
+      MusicBrainz (0.40), Discogs (0.25) and Manual (0.30) each clear it alone.
+
+    Returns the number of tracks actually updated.
+    """
+    updated = 0
+    for track in tracks:
+        track_id = track.get("id")
+        if not track_id:
+            continue
+
+        source_map = va_track_source_map(track)
+        if not source_map:
+            continue
+
+        top_genres = aggregate_genres(
+            source_map,
+            max_genres=2,
+            context_title=str(track.get("title") or ""),
+            context_album=str(album or ""),
+            nav_genres=None,
+        )
+        if not top_genres:
+            continue
+
+        genres_str = ", ".join(top_genres)
+        try:
+            from services.metadata.metadata_proposal_service import _genre_sets_equal
+
+            if _genre_sets_equal(genres_str, track.get("genres")):
+                continue
+        except Exception:
+            if str(genres_str).strip().casefold() == str(track.get("genres") or "").strip().casefold():
+                continue
+
+        try:
+            with db_session() as session:
+                session.execute(
+                    text("UPDATE tracks SET genres = :genres WHERE id = :track_id"),
+                    {"genres": genres_str, "track_id": track_id},
+                )
+            track["genres"] = genres_str
+            updated += 1
+        except Exception as exc:
+            logger.debug(
+                "Various-artist track genre sync failed",
+                track_id=track_id, error=str(exc),
+            )
+
+    if updated:
+        logger.info(
+            "Synced various-artist track genres",
+            album=album, tracks=len(tracks), updated=updated,
+        )
+    return updated
+
+
 def sync_confident_genres(
     artist: str,
     album: str,

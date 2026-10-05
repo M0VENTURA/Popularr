@@ -533,14 +533,22 @@ def sync_album_file_tags(artist: str, album: str) -> dict[str, Any]:
     # computed by the scan's track stage are left exactly as they are.
     # -------------------------------------------------------------------------
     try:
-        from services.enrichment.genre_aggregation_service import get_track_recommendations
+        from services.enrichment.genre_aggregation_service import (
+            get_track_recommendations,
+            sync_various_artists_track_genres,
+        )
         from db.engine import db_session
         from sqlalchemy import text
 
         if is_various_artists_album(tracks, artist, album):
+            # The ALBUM-level write stays skipped — it hands one blended list
+            # to every performer — but nothing replaced it, so a VA track's
+            # genres were frozen at whatever Navidrome imported. Each track now
+            # gets ITS OWN aggregated genres, with Navidrome excluded.
+            updated = sync_various_artists_track_genres(tracks, album=album)
             logger.debug(
-                "Skipped album-level genre overwrite on a various-artists album",
-                artist=artist, album=album, tracks=len(tracks),
+                "Per-track genre sync on a various-artists album",
+                artist=artist, album=album, tracks=len(tracks), updated=updated,
             )
         else:
             rec_data = get_track_recommendations(artist, album)
