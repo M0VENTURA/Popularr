@@ -1958,6 +1958,21 @@
     // Rendered in the Duration column and normalised the way the library rows
     // are, so a missing track carries the same fields as the tracks beside it.
     const shownDuration = esc(fmtDuration(trackComp.mb_duration) || '—');
+    // A track the queue is already working on is listed with THAT state
+    // instead of being hidden: a stalled search or transfer used to remove it
+    // from the page entirely ("missing tracks 10 and 11 are still
+    // outstanding"), leaving no way to see it or act on it.
+    const queueStatus = String(trackComp.queue_status || '');
+    const isQueued = queueStatus !== '';
+    const missingBadge = isQueued
+      ? `<span class="badge bg-info text-dark ms-2" style="font-size:0.65rem;"`
+        + ` title="In the download queue (${esc(queueStatus)})">`
+        + `${esc(queueStatusLabel(queueStatus))}</span>`
+      : `<span class="badge bg-warning text-dark ms-2" style="font-size:0.65rem;">Missing</span>`;
+    const addTitle = isQueued
+      ? `Already in the download queue (${esc(queueStatus)})`
+      : 'Add to download queue';
+    const addDisabled = isQueued ? 'disabled' : '';
     // EXACTLY five cells, one per <th> (#, Title, Duration, Rating, Actions).
     // This used to emit SIX — an empty # cell, the number in the Title column,
     // a colspan=3 title, then the buttons — so every column after the first
@@ -1967,13 +1982,13 @@
       <td class="text-center text-muted fst-italic">${trackNum || '?'}</td>
       <td class="fst-italic">
         ${esc(trackComp.mb_title || '')}
-        <span class="badge bg-warning text-dark ms-2" style="font-size:0.65rem;">Missing</span>
+        ${missingBadge}
       </td>
       <td class="text-center text-muted small fst-italic">${shownDuration}</td>
       <td class="text-center text-warning"><span class="text-muted">—</span></td>
       <td class="text-end">
         <div class="btn-group btn-group-sm">
-          <button class="btn btn-outline-success py-0 px-2 mb-queue-missing" title="Add to download queue">
+          <button class="btn btn-outline-success py-0 px-2 mb-queue-missing" title="${addTitle}" ${addDisabled}>
             <i class="bi bi-download"></i>
           </button>
           <button class="btn btn-outline-primary py-0 px-2 mb-match-existing"
@@ -2758,6 +2773,8 @@
       mb_disc_number: row.disc_number != null ? row.disc_number : 1,
       mb_recording_mbid: row.recording_mbid || '',
       mb_duration: row.duration,
+      // An undelivered queue row: listed, but not offered for download twice.
+      queue_status: row.queue_status || '',
     };
   }
 
@@ -2794,10 +2811,11 @@
     }
 
     const missing = (data && data.missing_tracks) || [];
-    if (!missing.length) return;
-
-    renderMissingTracks(missing, tbody);
-    updateMissingHeaderBadge(missing.length);
+    // Even with nothing to render, the "N not shown" note must appear: a page
+    // where every track was delivered or dismissed otherwise looks exactly
+    // like a complete album.
+    if (missing.length) renderMissingTracks(missing, tbody);
+    updateMissingHeaderBadge(missing.length, data && data.excluded);
   }
 
   /** Render persisted missing rows (deduped) in track order. */
@@ -2832,12 +2850,43 @@
       .forEach((entry) => placeMissingRow(entry.row, tbody, entry.key));
   }
 
-  /** Show (or hide at zero) the header's "N tracks missing" badge. */
-  function updateMissingHeaderBadge(count) {
+  /** "Searching" / "Downloading" for a queue row's status value. */
+  function queueStatusLabel(status) {
+    const text = String(status || '').replace(/_/g, ' ');
+    return text ? text.charAt(0).toUpperCase() + text.slice(1) : 'Queued';
+  }
+
+  /** Human-readable breakdown of the tracks a gate withheld. */
+  function excludedParts(excluded) {
+    const labels = {
+      in_library: 'already in the library',
+      queued: 'delivered',
+      rejected: 'dismissed',
+    };
+    const parts = [];
+    Object.keys(labels).forEach((key) => {
+      const n = Number((excluded || {})[key] || 0);
+      if (n > 0) parts.push(`${n} ${labels[key]}`);
+    });
+    return parts;
+  }
+
+  /**
+   * Show (or hide at zero) the header's "N tracks missing" badge.
+   *
+   * `excluded` is appended as "· N not shown" — without it a track dropped by
+   * a gate looks exactly like a release that never had that track.
+   */
+  function updateMissingHeaderBadge(count, excluded) {
     const badge = document.getElementById('albumMissingHeaderBadge');
     if (!badge) return;
-    if (count > 0) {
-      badge.textContent = `${count} track${count === 1 ? '' : 's'} missing`;
+    const hidden = excludedParts(excluded);
+    if (count > 0 || hidden.length) {
+      const bits = [];
+      if (count > 0) bits.push(`${count} track${count === 1 ? '' : 's'} missing`);
+      if (hidden.length) bits.push(`${hidden.join(', ')} not shown`);
+      badge.textContent = bits.join(' · ');
+      badge.title = hidden.length ? `Not shown: ${hidden.join(', ')}` : '';
       badge.classList.remove('d-none');
     } else {
       badge.textContent = '';
@@ -2890,7 +2939,7 @@
       if (data && (data.mb_total || 0) > 0) {
         tbody.querySelectorAll('.mb-missing-row').forEach((r) => r.remove());
         renderMissingTracks(data.missing_tracks || [], tbody);
-        updateMissingHeaderBadge(data.missing_count || 0);
+        updateMissingHeaderBadge(data.missing_count || 0, data.excluded);
       }
     } catch (error) {
       // Non-fatal: the owned tracklist still renders — but LOUDLY, because a

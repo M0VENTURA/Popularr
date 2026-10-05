@@ -1153,6 +1153,22 @@ function _buildMissingTrackRow(trackComp, data) {
     // instead of leaving that column blank.
     const shownDuration = escapeHtml(_fmtDuration(trackComp.mb_duration) || '—');
 
+    // A track the queue is already working on is listed with THAT state
+    // instead of being hidden: a stalled search or transfer used to remove it
+    // from the page entirely ("missing tracks 10 and 11 are still
+    // outstanding"), leaving no way to see it or act on it.
+    const queueStatus = String(trackComp.queue_status || '');
+    const isQueued = queueStatus !== '';
+    const missingBadge = isQueued
+        ? `<span class="badge bg-info text-dark ms-2" style="font-size: 0.65rem;"`
+            + ` title="In the download queue (${escapeHtml(queueStatus)})">`
+            + `${escapeHtml(_queueStatusLabel(queueStatus))}</span>`
+        : `<span class="badge bg-warning text-dark ms-2" style="font-size: 0.65rem;">Missing</span>`;
+    const addTitle = isQueued
+        ? `Already in the download queue (${escapeHtml(queueStatus)})`
+        : 'Add to download queue';
+    const addDisabled = isQueued ? 'disabled' : '';
+
     const row = document.createElement('tr');
     row.className = 'text-muted missing-track-row mb-missing-row';
     row.style.opacity = '0.6';
@@ -1168,13 +1184,14 @@ function _buildMissingTrackRow(trackComp, data) {
         <td class="text-center text-muted fst-italic">${safeTrackNum || '?'}</td>
         <td class="fst-italic">
             ${safeTitle}
-            <span class="badge bg-warning text-dark ms-2" style="font-size: 0.65rem;">Missing</span>
+            ${missingBadge}
         </td>
         <td class="text-center text-muted small fst-italic">${shownDuration}</td>
         <td class="text-center text-warning"><span class="text-muted">—</span></td>
         <td class="text-end">
             <div class="btn-group btn-group-sm">
-                <button class="btn btn-outline-success py-0 px-2" title="Add to download queue"
+                <button class="btn btn-outline-success py-0 px-2" title="${addTitle}"
+                    ${addDisabled}
                     data-artist="${escapeHtml(pageArtist)}" data-album-artist="${escapeHtml(pageArtist)}"
                     data-title="${safeTitle}" data-album="${escapeHtml(pageAlbum)}"
                     data-track-number="${safeTrackNum}" data-disc-number="${safeDiscNum}"
@@ -1540,6 +1557,9 @@ function _missingRowToTrackComp(row) {
         mb_duration: row.duration,
         // Kept for the manual match flow, which reads the track artist.
         track_artist: row.track_artist || '',
+        // An undelivered queue row: the track IS listed, it is just not
+        // offered for download a second time.
+        queue_status: row.queue_status || '',
     };
 }
 
@@ -1573,9 +1593,11 @@ window.loadAlbumMissingTracks = function () {
         .then(r => (r.ok ? r.json() : {}))
         .then(data => {
             const missing = (data && data.missing_tracks) || [];
-            if (!missing.length) return;
-            _renderMissingTracks(missing, tbody);
-            _updateMissingHeaderBadge(missing.length);
+            // Even with nothing to render, the "N not shown" note must appear:
+            // a page where every track was delivered or dismissed otherwise
+            // looks exactly like a complete album.
+            if (missing.length) _renderMissingTracks(missing, tbody);
+            _updateMissingHeaderBadge(missing.length, data && data.excluded);
         })
         .catch(err => {
             // Non-fatal for the PAGE (the owned tracklist still renders), but
@@ -1608,16 +1630,31 @@ function _renderMissingTracks(missing, tbody) {
     });
 }
 
+/** "Searching" / "Downloading" for a queue row's status value. */
+function _queueStatusLabel(status) {
+    const text = String(status || '').replace(/_/g, ' ');
+    return text ? text.charAt(0).toUpperCase() + text.slice(1) : 'Queued';
+}
+
 /**
  * Show (or hide at zero) the header's "N tracks missing" badge and the
  * search-missing affordance the template hides until a count is known.
+ *
+ * `excluded` is appended as "· N not shown" — without it a track dropped by a
+ * gate looks exactly like a release that never had that track.
  */
-function _updateMissingHeaderBadge(count) {
+function _updateMissingHeaderBadge(count, excluded) {
     const badge = document.getElementById('albumMissingHeaderBadge');
+    const hidden = _excludedParts(excluded);
     if (badge) {
-        if (count > 0) {
-            badge.textContent = count + ' track'
-                + (count === 1 ? '' : 's') + ' missing';
+        if (count > 0 || hidden.length) {
+            const bits = [];
+            if (count > 0) {
+                bits.push(count + ' track' + (count === 1 ? '' : 's') + ' missing');
+            }
+            if (hidden.length) bits.push(hidden.join(', ') + ' not shown');
+            badge.textContent = bits.join(' · ');
+            badge.title = hidden.length ? 'Not shown: ' + hidden.join(', ') : '';
             badge.classList.remove('d-none');
         } else {
             badge.textContent = '';
@@ -1626,6 +1663,21 @@ function _updateMissingHeaderBadge(count) {
     }
     const searchBtn = document.querySelector('.album-search-missing-btn');
     if (searchBtn) searchBtn.style.display = count > 0 ? '' : 'none';
+}
+
+/** Human-readable breakdown of the tracks a gate withheld. */
+function _excludedParts(excluded) {
+    const labels = {
+        in_library: 'already in the library',
+        queued: 'delivered',
+        rejected: 'dismissed',
+    };
+    const parts = [];
+    Object.keys(labels).forEach(key => {
+        const n = Number((excluded || {})[key] || 0);
+        if (n > 0) parts.push(n + ' ' + labels[key]);
+    });
+    return parts;
 }
 
 /**
@@ -1697,7 +1749,7 @@ function _refreshAlbumTrackFindings(releaseMbid) {
                 if (!data || !(data.mb_total > 0)) return;
                 tbody.querySelectorAll('.mb-missing-row').forEach(r => r.remove());
                 _renderMissingTracks(data.missing_tracks || [], tbody);
-                _updateMissingHeaderBadge(data.missing_count || 0);
+                _updateMissingHeaderBadge(data.missing_count || 0, data.excluded);
             })
             .catch(err => console.warn('Could not refresh missing tracks:', err))
         : Promise.resolve();

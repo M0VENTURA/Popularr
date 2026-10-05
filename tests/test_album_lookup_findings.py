@@ -80,6 +80,46 @@ def _ensure_support_tables() -> None:
 _ensure_support_tables()
 
 
+def _queue_insert(artist: str, title: str, album: str, status: str) -> None:
+    """Insert one ``download_queue`` row, repairing the shared table first.
+
+    The queue table is hand-created by whichever test file imported first, so a
+    reduced shape (no ``source``/``status``/``created_at``) can persist across
+    the session — CREATE IF NOT EXISTS then leaves columns behind and the insert
+    fails with "no column named ...".
+    """
+    with db_session() as session:
+        session.execute(text("""
+            CREATE TABLE IF NOT EXISTS download_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                artist TEXT, title TEXT, album TEXT, album_artist TEXT,
+                status TEXT, track_number TEXT, disc_number INTEGER,
+                created_at TEXT, updated_at TEXT
+            )
+        """))
+        present = {
+            str(row[1])
+            for row in session.execute(text("PRAGMA table_info(download_queue)")).fetchall()
+        }
+        for column in ("source", "artist", "title", "album", "album_artist",
+                       "status", "track_number", "disc_number",
+                       "created_at", "updated_at"):
+            if column not in present:
+                session.execute(text(
+                    f"ALTER TABLE download_queue ADD COLUMN {column} TEXT"
+                ))
+        session.execute(
+            text(
+                "INSERT INTO download_queue "
+                "(artist, title, album, album_artist, status, source) "
+                "VALUES (:artist, :title, :album, :album_artist, :status, 'soulseek')"
+            ),
+            {"artist": artist, "title": title, "album": album,
+             "album_artist": artist, "status": status},
+        )
+        session.commit()
+
+
 @pytest.fixture(autouse=True)
 def _isolated_tracks():
     def _wipe() -> None:
@@ -345,52 +385,66 @@ class TestMissingTracksReleaseOverride:
         assert result["missing_count"] == 2
         assert sum(result["excluded"].values()) == 0
 
-    def test_a_queued_track_counts_as_queued(self, monkeypatch, release_fetch):
-        """The gate that hides a track someone already started downloading."""
-        from db.engine import db_session
-        from sqlalchemy import text
+    def test_an_undelivered_queue_row_is_still_listed(self, monkeypatch, release_fetch):
+        """A track nobody has downloaded is MISSING, however long the queue takes.
 
+        The reported bug: a queue row that never progresses removed the track
+        from the page permanently ("missing tracks 10 and 11 are still
+        outstanding") while a stalled search or transfer kept the row alive.
+        """
         monkeypatch.setattr(ams, "_persist_missing_tracks", lambda *a, **k: None)
-        with db_session() as session:
-            # Hand-written AND repaired: download_queue.metadata is JSONB so
-            # SQLite cannot render the ORM table, and other tests create a
-            # reduced version that persists across the session — so CREATE
-            # IF NOT EXISTS can silently leave a missing column behind.
-            session.execute(text("""
-                CREATE TABLE IF NOT EXISTS download_queue (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    artist TEXT, title TEXT, album TEXT, album_artist TEXT,
-                    status TEXT, track_number TEXT, disc_number INTEGER,
-                    created_at TEXT, updated_at TEXT
-                )
-            """))
-            present = {
-                row[1] for row in session.execute(
-                    text("PRAGMA table_info(download_queue)")
-                ).fetchall()
-            }
-            for column in ("source", "artist", "title", "album", "album_artist",
-                           "status", "track_number", "disc_number",
-                           "created_at", "updated_at"):
-                if column not in present:
-                    session.execute(text(
-                        f"ALTER TABLE download_queue ADD COLUMN {column} TEXT"
-                    ))
-            session.execute(text(
-                "INSERT INTO download_queue "
-                "(artist, title, album, album_artist, status, source) "
-                "VALUES ('Dup Artist', 'Missing Two', 'Dup Album', 'Dup Artist', "
-                "'queued', 'soulseek')"
-            ))
-            session.commit()
+        _queue_insert("Dup Artist", "Missing Two", "Dup Album", "queued")
 
         result = ams.get_missing_tracks("Dup Artist", "Dup Album",
                                         release_mbid="picked-id")
 
         titles = [m["title"] for m in result["missing_tracks"]]
-        assert titles == ["Missing One"], "the queued one is handled, not missing"
+        assert titles == ["Missing One", "Missing Two"], (
+            "an undelivered queue row must not make the track invisible"
+        )
+        queued = [m for m in result["missing_tracks"] if m["title"] == "Missing Two"]
+        assert queued[0].get("queue_status") == "queued", (
+            "the row carries WHY it is not offered for download again"
+        )
+        assert result["excluded"]["queued"] == 0, (
+            "only a DELIVERED track is excluded — this one has not arrived"
+        )
+
+    def test_a_delivered_queue_row_stays_hidden(self, monkeypatch, release_fetch):
+        """CONTROL — an imported track is in the library, so it is not missing."""
+        monkeypatch.setattr(ams, "_persist_missing_tracks", lambda *a, **k: None)
+        _queue_insert("Dup Artist", "Missing Two", "Dup Album", "imported")
+
+        result = ams.get_missing_tracks("Dup Artist", "Dup Album",
+                                        release_mbid="picked-id")
+
+        titles = [m["title"] for m in result["missing_tracks"]]
+        assert titles == ["Missing One"], "the delivered one is handled, not missing"
         assert result["excluded"]["queued"] == 1, (
-            "this is the gate most likely to have hidden the reported 10 and 11"
+            "the gate that keeps a finished download off the list still counts"
+        )
+
+    def test_a_queue_row_with_no_album_cannot_hide_this_albums_track(
+        self, monkeypatch, release_fetch,
+    ):
+        """An unattributable queue row must not grant coverage to every album.
+
+        The coverage query is scoped to the ARTIST and the album is matched in
+        Python, so on a **Various Artists** album it spans the whole library —
+        and a row with an empty ``album`` slipped past the guard and hid tracks
+        for every VA release at once (the reported album is VA).  The row below
+        deliberately reuses this album's own title: on the old code it was
+        credited here and took the track off the list.
+        """
+        monkeypatch.setattr(ams, "_persist_missing_tracks", lambda *a, **k: None)
+        _queue_insert("Dup Artist", "Missing Two", "", "queued")
+
+        result = ams.get_missing_tracks("Dup Artist", "Dup Album",
+                                        release_mbid="picked-id")
+
+        titles = [m["title"] for m in result["missing_tracks"]]
+        assert titles == ["Missing One", "Missing Two"], (
+            "a row that names no album belongs to no album"
         )
 
 
@@ -503,3 +557,60 @@ class TestAlbumJsWiring:
         assert 'data-track-id="{{ track.id }}"' in html, (
             f"{rel}: duplicate flags badge rows by data-track-id"
         )
+
+
+# ---------------------------------------------------------------------------
+# 4. The DB-only page-load path must still say what it withheld
+# ---------------------------------------------------------------------------
+class TestThePageLoadPathSaysWhatWasDismissed:
+    """``ignored = TRUE`` is permanent — so it has to be visible somewhere.
+
+    The reject button sets the flag and **nothing in the codebase ever sets it
+    back**, so a dismissed pair vanishes for good.  Before this the page-load
+    response said nothing about it: two hidden tracks and a release that never
+    had them were indistinguishable on screen.
+    """
+
+    def test_a_dismissed_track_is_counted_but_not_returned(self):
+        with db_session() as session:
+            # The shared in-memory DB is disposed on ANY OperationalError (the
+            # documented trap), so tables created at IMPORT time can be gone by
+            # now — an earlier file's failing query is all it takes. Recreate
+            # before touching them rather than depending on collection order.
+            bind = session.get_bind()
+            MissingAlbumTrack.__table__.create(bind, checkfirst=True)
+            Track.__table__.create(bind, checkfirst=True)
+            session.execute(text(
+                "DELETE FROM missing_album_tracks WHERE LOWER(artist_name) = 'dup artist'"
+            ))
+            session.execute(
+                text(
+                    "INSERT INTO missing_album_tracks "
+                    "(id, artist_name, album_name, title, track_number, "
+                    " disc_number, ignored) "
+                    "VALUES (:id, 'Dup Artist', 'Dup Album', :title, :num, 1, :ig)"
+                ),
+                {"id": 991001, "title": "Forgotten Years", "num": "10", "ig": 1},
+            )
+            session.execute(
+                text(
+                    "INSERT INTO missing_album_tracks "
+                    "(id, artist_name, album_name, title, track_number, "
+                    " disc_number, ignored) "
+                    "VALUES (:id, 'Dup Artist', 'Dup Album', :title, :num, 1, :ig)"
+                ),
+                {"id": 991002, "title": "Power and the Passion", "num": "11", "ig": 0},
+            )
+            session.commit()
+
+        result = ams.get_missing_tracks_from_db("Dup Artist", "Dup Album")
+
+        titles = [m["title"] for m in result["missing_tracks"]]
+        assert titles == ["Power and the Passion"], (
+            "a dismissed track stays off the list"
+        )
+        assert result["excluded"] == {"rejected": 1}, (
+            "the page-load path must still be able to say '1 not shown', or a "
+            "permanently dismissed pair looks like a release without those tracks"
+        )
+        assert result["missing_count"] == 1

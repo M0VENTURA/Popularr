@@ -109,6 +109,67 @@ def get_library_tracks(artist: str, album: str) -> list[dict[str, Any]]:
     ]
 
 
+def _queued_coverage(
+    artist: str, album: str,
+) -> tuple[dict[str, str], dict[tuple[int, str], str]]:
+    """Queue rows that may deliver THIS album's tracks, keyed to their status.
+
+    Returns ``(title_key -> status, (disc, track_number) -> status)``.
+
+    ⚠️ ATTRIBUTION. The query is scoped to the ARTIST and the album is matched
+    in Python, which on a **Various Artists** album spans the whole library —
+    so a row whose ``album`` is empty used to slip past the
+    ``if q_album and ...`` guard and grant coverage to EVERY album by that
+    artist.  A row that does not name an album cannot be attributed to one, so
+    it now contributes nothing; re-queueing such a track is harmless because
+    ``find_blocking_queue_item`` de-duplicates by identity.
+    """
+    title_keys: dict[str, str] = {}
+    positions: dict[tuple[int, str], str] = {}
+    try:
+        from db.engine import db_session as _q_session
+        from sqlalchemy import text as _q_text
+
+        _album_norm = _album_key(album)
+        with _q_session() as session:
+            q_rows = session.execute(
+                _q_text("""
+                    SELECT title, track_number, disc_number, status, album
+                    FROM download_queue
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                      AND status IN ('queued', 'searching', 'downloading',
+                                     'processing', 'moving', 'imported',
+                                     'in_collection', 'matched', 'completed')
+                """),
+                {"artist": artist},
+            ).mappings().all() or []
+        for q in q_rows:
+            # Match the queue row's album against the requested album, tolerating
+            # a leading year prefix ("2024 - 樂-STAR" ≈ "樂-STAR").
+            q_album = str(q.get("album") or "").strip()
+            if not q_album or _album_key(q_album) != _album_norm:
+                continue
+            status = str(q.get("status") or "queued")
+            qt = q.get("title") or ""
+            if qt:
+                title_keys.setdefault(_title_match_key(qt), status)
+            qtn = str(q.get("track_number") or "").strip()
+            qd = int(q.get("disc_number") or 1) if q.get("disc_number") not in (None, "", "0", 0) else 1
+            if qtn:
+                positions.setdefault((qd, qtn), status)
+    except Exception as _qexc:
+        logger.debug("Download-queue coverage check failed", error=str(_qexc))
+    return title_keys, positions
+
+
+#: Queue statuses that mean the track has been DELIVERED (or is already owned),
+#: so listing it as missing would be wrong: the file is in the library, or is
+#: seconds away from being imported there.
+_DELIVERED_QUEUE_STATUSES = frozenset(
+    {"imported", "completed", "matched", "in_collection"}
+)
+
+
 def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None) -> dict[str, Any]:
     """Check which tracks are in the MusicBrainz release but missing from the library.
 
@@ -205,45 +266,20 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
             lib_by_position[(disc, tn)] = title or ""
 
     # ── Download-queue coverage ───────────────────────────────────────────
-    # A track that has been IMPORTED (download finished), is currently
-    # downloading, or is QUEUED for this album is NOT "missing" — it is
-    # already handled.  Without this, a freshly-downloaded track stayed on
-    # the missing list until a re-scan because the library-match could fail
-    # on title/album normalisation.
-    queued_keys: set[str] = set()
-    queued_by_position: set[tuple[int, str]] = set()
-    try:
-        from db.engine import db_session as _q_session
-        from sqlalchemy import text as _q_text
-
-        _album_norm = _album_key(album)
-        with _q_session() as session:
-            q_rows = session.execute(
-                _q_text("""
-                    SELECT title, track_number, disc_number, status, album
-                    FROM download_queue
-                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
-                      AND status IN ('queued', 'searching', 'downloading',
-                                     'processing', 'moving', 'imported',
-                                     'in_collection', 'matched', 'completed')
-                """),
-                {"artist": artist},
-            ).mappings().all() or []
-        for q in q_rows:
-            # Match the queue row's album against the requested album, tolerating
-            # a leading year prefix ("2024 - 樂-STAR" ≈ "樂-STAR").
-            q_album = str(q.get("album") or "").strip()
-            if q_album and _album_key(q_album) != _album_norm:
-                continue
-            qt = q.get("title") or ""
-            if qt:
-                queued_keys.add(_title_match_key(qt))
-            qtn = str(q.get("track_number") or "").strip()
-            qd = int(q.get("disc_number") or 1) if q.get("disc_number") not in (None, "", "0", 0) else 1
-            if qtn:
-                queued_by_position.add((qd, qtn))
-    except Exception as _qexc:
-        logger.debug("Download-queue coverage check failed", error=str(_qexc))
+    # Two different questions, deliberately answered differently:
+    #
+    #   * DELIVERED (imported / completed / matched / in_collection) — the
+    #     track is (or is about to be) in the library, so it is NOT missing.
+    #     Without this a freshly-downloaded track stayed on the missing list
+    #     until a re-scan because the library-match could fail on title or
+    #     album normalisation.
+    #   * NOT YET DELIVERED (queued / searching / downloading / …) — the user
+    #     does NOT have the file, so the track stays on the list and carries
+    #     its ``queue_status``.  Hiding it was the reported bug: a queue row
+    #     that never progresses (multi-minute searches, a stalled transfer)
+    #     removed the track from the page FOREVER — "missing tracks 10 and 11
+    #     are still outstanding" — with nothing on screen to explain it.
+    queued_titles, queued_positions = _queued_coverage(artist, album)
 
     missing = []
     #: Why the rest of the release is NOT listed — one dict, four gates.
@@ -266,12 +302,14 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
             excluded["in_library"] += 1
             continue
 
-        # Not missing when the track is queued/downloading/imported.
-        if norm in queued_keys or (mb_num and (mb_disc, mb_num) in queued_by_position):
+        queue_status = queued_titles.get(norm) or (
+            queued_positions.get((mb_disc, mb_num)) if mb_num else None
+        )
+        if queue_status and queue_status in _DELIVERED_QUEUE_STATUSES:
             excluded["queued"] += 1
             continue
 
-        missing.append({
+        entry = {
             "title": mb_title,
             "track_number": mt.get("track_number"),
             "disc_number": mt.get("disc_number", 1),
@@ -280,12 +318,17 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
             "year": mb_release.get("release_year") or mb_release.get("year"),
             "release_id": mb_mbid,
             "duration": mt.get("duration"),
-        })
+        }
+        if queue_status:
+            entry["queue_status"] = queue_status
+        missing.append(entry)
 
     # Persist missing tracks so they survive refreshes.  A track already
     # present (by title + disc position) is skipped; a track previously
-    # rejected (ignored=TRUE) is deleted so it can be re-detected if the
-    # user re-runs the comparison (reject is a soft dismiss, not permanent).
+    # rejected (``ignored = TRUE``) is left alone so a soft dismiss is not
+    # undone by the next refresh.  NOTE: nothing in the codebase ever CLEARS
+    # that flag, so a dismissal is permanent — which is why the response
+    # counts it (``excluded['rejected']``) and the page says "N not shown".
     try:
         _persist_missing_tracks(artist, album, missing)
     except Exception as exc:
@@ -413,8 +456,11 @@ def persist_missing_from_comparison(
     MusicBrainz is throttled to 1 req/s, shared with any running scan.
 
     Falls back to the derivation-free path: it only reads the local tracklist to
-    honour the download-queue coverage rule, so a track already downloaded or
-    queued is never re-listed as missing.
+    honour the download-queue coverage rule, so a track the queue has already
+    DELIVERED is never re-listed as missing.  A track it has not delivered yet
+    (queued / searching / downloading) IS listed — it carries no
+    ``queue_status`` here because this path only decides what to persist, but
+    the row survives a reload instead of vanishing with the queue stall.
 
     Returns the number of rows written. Raises only for a genuine DB failure;
     the caller decides whether that is fatal (it is not — the comparison the
@@ -431,39 +477,12 @@ def persist_missing_from_comparison(
         or ""
     )
 
-    # Queue coverage, so a downloaded/queued track is not re-listed. Read-only.
-    queued_keys: set[str] = set()
-    queued_by_position: set[tuple[int, str]] = set()
-    try:
-        from db.engine import db_session as _q_session
-        from sqlalchemy import text as _q_text
-
-        album_norm = _album_key(album)
-        with _q_session() as session:
-            q_rows = session.execute(
-                _q_text("""
-                    SELECT title, track_number, disc_number, album
-                    FROM download_queue
-                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
-                      AND status IN ('queued', 'searching', 'downloading',
-                                     'processing', 'moving', 'imported',
-                                     'in_collection', 'matched', 'completed')
-                """),
-                {"artist": artist},
-            ).mappings().all() or []
-        for q in q_rows:
-            q_album = _as_text(q.get("album"))
-            if q_album and _album_key(q_album) != album_norm:
-                continue
-            qt = q.get("title") or ""
-            if qt:
-                queued_keys.add(_title_match_key(qt))
-            qtn = str(q.get("track_number") or "").strip()
-            qd = int(q.get("disc_number") or 1) if q.get("disc_number") not in (None, "", "0", 0) else 1
-            if qtn:
-                queued_by_position.add((qd, qtn))
-    except Exception as exc:
-        logger.debug("Queue coverage check failed for comparison persist", error=str(exc))
+    # Queue coverage — shared with ``get_missing_tracks`` so the two paths can
+    # never disagree about what "handled" means.  Only a DELIVERED row is
+    # skipped here: an undelivered one (queued / searching / downloading) is
+    # kept, so the track survives a page reload instead of vanishing the
+    # moment the user reloads after a lookup.
+    queued_titles, queued_positions = _queued_coverage(artist, album)
 
     missing: list[dict[str, Any]] = []
     for entry in comparison_rows:
@@ -476,7 +495,10 @@ def persist_missing_from_comparison(
         mb_num = str(entry.get("mb_track_number") or "").strip()
         norm = _title_match_key(title)
 
-        if norm in queued_keys or (mb_num and (mb_disc, mb_num) in queued_by_position):
+        queue_status = queued_titles.get(norm) or (
+            queued_positions.get((mb_disc, mb_num)) if mb_num else None
+        )
+        if queue_status and queue_status in _DELIVERED_QUEUE_STATUSES:
             continue
 
         missing.append({
@@ -536,6 +558,20 @@ def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
                 ),
                 {"artist": artist, "album": album},
             ).scalar() or 0
+
+            # How many tracks the user dismissed.  The page must be able to
+            # say "N more not shown" — otherwise a rejected pair (ignored =
+            # TRUE, which NOTHING ever clears) looks identical to a release
+            # that never had those tracks.
+            dismissed = session.execute(
+                text(
+                    "SELECT COUNT(*) FROM missing_album_tracks "
+                    "WHERE LOWER(artist_name) = LOWER(:artist) "
+                    "  AND LOWER(album_name) = LOWER(:album) "
+                    "  AND COALESCE(ignored, FALSE) = TRUE"
+                ),
+                {"artist": artist, "album": album},
+            ).scalar() or 0
     except Exception as exc:
         logger.error(
             "Get persisted missing tracks failed",
@@ -549,6 +585,9 @@ def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
         "missing_count": len(missing),
         "mb_total": int(library_count) + len(missing),
         "library_count": int(library_count),
+        # Only the gate this path can actually KNOW about — the others need a
+        # MusicBrainz release, and a page load must stay a pure DB read.
+        "excluded": {"rejected": int(dismissed)},
     }
 
 
