@@ -453,7 +453,31 @@ if __name__ == "__main__":
     else:
         print("  ⚠ Partial schema bootstrap — some tables may be deferred")
 
-    result = verify_all_tables_exist()
+    # ⚠️ The verification must be as tolerant as the init above.
+    #
+    # `init_database_and_schema()` retries four times and swallows transient
+    # startup errors, but this SECOND connection was unguarded: when
+    # PostgreSQL is not reachable yet the run died with a full psycopg2
+    # traceback — even though `entrypoint.sh` invokes this with `|| true` and
+    # the runtime bootstrap retries later. Two facts make that the common case
+    # rather than an edge case:
+    #   * `wait_for_db()` returns IMMEDIATELY when no PG_HOST is configured
+    #     (the DATABASE_URL-driven setup), so nothing waits for the server;
+    #   * the entrypoint's fallback branch re-runs this WITHOUT `>/dev/null`,
+    #     which is exactly where the traceback surfaced.
+    # A one-line explanation is the honest outcome; the exit code stays
+    # non-zero because "verified" would be a lie.
+    try:
+        result = verify_all_tables_exist()
+    except Exception as exc:
+        if not is_transient_pg_startup_error(exc):
+            raise
+        print(
+            "  ⚠ PostgreSQL not reachable yet — table verification deferred "
+            "to the runtime bootstrap (it retries once connected): "
+            f"{type(exc).__name__}"
+        )
+        raise SystemExit(1) from None
     if result.get("ok"):
         print(f"  ✓ All {len(COLUMN_REGISTRY)} table groups verified")
     else:
