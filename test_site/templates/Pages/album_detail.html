@@ -441,6 +441,19 @@
                 <label for="album_discogs_id" class="form-label small">Discogs Release ID</label>
                 <input type="text" class="form-control bg-dark text-light border-secondary" id="album_discogs_id" name="album_discogs_id" value="{{ album_data.discogs_album_id or album_data.discogs_release_id or '' }}">
               </div>
+              {# Last.fm has no album id — the release page is addressed by
+                 artist + album, so the link is derived and needs no column.
+                 Each segment is encoded on its own so the two slashes stay
+                 path separators. #}
+              <div class="col-12 col-md-6">
+                <label class="form-label small">Last.fm Release</label>
+                <a class="btn btn-sm btn-outline-info w-100 text-start text-truncate"
+                   href="https://www.last.fm/music/{{ artist_name|urlencode }}/{{ album_name|urlencode }}"
+                   target="_blank" rel="noopener noreferrer"
+                   title="Open '{{ album_name }}' on Last.fm">
+                  <i class="bi bi-box-arrow-up-right me-1"></i>{{ artist_name }} — {{ album_name }}
+                </a>
+              </div>
             </div>
 
             <!-- Staged Album Genres -->

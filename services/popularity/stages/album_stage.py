@@ -2735,6 +2735,114 @@ def _run_full_enrichment(
     return metadata, similar
 
 
+def _resolve_discogs_album_id(artist: str, album: str) -> str | None:
+    """Discogs release id for this album, or ``None`` when it cannot be found.
+
+    Reported: *"Discogs album ID doesn't seem to be populating correctly during
+    scans."* Nothing in any scan path wrote ``tracks.discogs_album_id`` — it
+    could only ever be set by hand from the album page — so every album came
+    back from a scan with a blank Discogs field.
+
+    Two sources, cheapest first:
+
+    1. the artist's cached Discogs release list. The scan already fetches it
+       (``artist_release_cache``), so matching a title against it costs no
+       API call and no rate-limit budget;
+    2. one Discogs search when the cache is stale or empty.
+
+    Only an EXACT title match (after the same normalisation both sides use)
+    is accepted — a wrong release id is worse than a blank one, and this
+    writes straight to every track of the album.
+    """
+    from helpers.normalization_service import normalize_title_for_lookup
+    from services.enrichment.discogs_service import (
+        _sanitize_release_name,
+        lookup_discogs_album,
+    )
+    from services.popularity.release_cache_service import get_cached_artist_release_rows
+
+    wanted = normalize_title_for_lookup(_sanitize_release_name(album))
+    if not wanted:
+        return None
+
+    try:
+        rows = get_cached_artist_release_rows(artist, "discogs") or []
+    except Exception:
+        rows = []
+    for row in rows:
+        cached_title = normalize_title_for_lookup(
+            _sanitize_release_name(str(row.get("title") or ""))
+        )
+        if cached_title and cached_title == wanted:
+            release_id = str(row.get("release_id") or "").strip()
+            if release_id:
+                return release_id
+
+    try:
+        payload = lookup_discogs_album(artist, album)
+    except Exception as exc:
+        Logger.debug(
+            "[ENRICH] Discogs release search failed",
+            artist=artist,
+            album=album,
+            error=_safe_error(exc),
+        )
+        return None
+    if not payload.get("success"):
+        return None
+    for hit in payload.get("results") or []:
+        hit_title = normalize_title_for_lookup(
+            _sanitize_release_name(str(hit.get("title") or ""))
+        )
+        if hit_title and hit_title == wanted:
+            release_id = str(hit.get("id") or "").strip()
+            if release_id:
+                return release_id
+    return None
+
+
+def _record_discogs_album_id(artist: str, album: str, token: str | None) -> None:
+    """Resolve the album's Discogs release id and fill it in where missing.
+
+    Never overwrites: ``album_missing_discogs_id`` short-circuits an album that
+    is already complete (so a re-scan costs one indexed SELECT, not a Discogs
+    search) and ``fill_album_discogs_id`` only touches rows whose column is
+    still empty. Failures are logged at debug and swallowed — a missing
+    Discogs id must never abort the enrichment that is already running.
+    """
+    if not token:
+        return
+    try:
+        from db.repositories.metadata import (
+            album_missing_discogs_id,
+            fill_album_discogs_id,
+        )
+
+        if not album_missing_discogs_id(artist=artist, album=album):
+            return
+        resolved = _resolve_discogs_album_id(artist, album)
+        if not resolved:
+            return
+        updated = fill_album_discogs_id(
+            artist=artist, album=album, discogs_id=resolved
+        )
+        if updated:
+            Logger.info(
+                "[ENRICH] Discogs release id resolved",
+                artist=artist,
+                album=album,
+                discogs_id=resolved,
+                tracks_updated=updated,
+            )
+    except Exception as exc:
+        Logger.debug(
+            "[ENRICH] Discogs release id skipped",
+            artist=artist,
+            album=album,
+            error=_safe_error(exc),
+        )
+
+
 def enrich_album_extras(
     *,
     artist: str,
@@ -2750,6 +2858,7 @@ def enrich_album_extras(
     if not _mb_type_is_corroborated(detected_type, album, album_tracks, context):
         detected_type = "album"
 
+    discogs_token = _get_discogs_token()
     metadata, similar = _run_full_enrichment(
         artist,
         album,
@@ -2757,7 +2866,7 @@ def enrich_album_extras(
         album_tracks,
         detected_type,
         options,
-        _get_discogs_token(),
+        discogs_token,
         album_artist=None,
         release_group_mbid=None
     )
@@ -2775,6 +2884,12 @@ def enrich_album_extras(
         extra_context["audiodb_genres"] = external_genres["audiodb_genres"]
     if external_genres.get("wikidata_genres"):
         extra_context["wikidata_genres"] = external_genres["wikidata_genres"]
+
+    # The scan never resolved a Discogs release id, so `discogs_album_id` stayed
+    # NULL until someone set it by hand on the album page. Last, because it is
+    # the only step here that can spend an API call — and only for an album
+    # that is still missing one.
+    _record_discogs_album_id(artist, album, discogs_token)
 
     return extra_context, similar, metadata
 

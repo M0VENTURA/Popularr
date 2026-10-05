@@ -252,6 +252,53 @@ def update_album_discogs_fields(conn: Any = None, artist: str = "", album: str =
         return result.rowcount or 0
 
 
+def album_missing_discogs_id(artist: str = "", album: str = "") -> bool:
+    """Does this album still have a track with no ``discogs_album_id``?
+
+    The scan resolves a Discogs release id once per album, so this is the
+    cheap short-circuit that stops it re-resolving (and re-searching Discogs)
+    for an album that has already been filled in on a previous run.
+    """
+    if not artist or not album:
+        return False
+    with db_session() as session:
+        row = session.execute(
+            text("""
+                SELECT 1 FROM tracks
+                WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
+                  AND album = :album
+                  AND COALESCE(discogs_album_id, '') = ''
+                LIMIT 1
+            """),
+            {"artist": artist, "album": album},
+        ).first()
+        return row is not None
+
+
+def fill_album_discogs_id(artist: str = "", album: str = "", discogs_id: str = "") -> int:
+    """Backfill ``discogs_album_id`` for an album's tracks — ONLY where empty.
+
+    Written by the scan (``album_stage``) as well as the album page, so the
+    guard is per ROW: an id the user set by hand, or one resolved by an earlier
+    run, is never clobbered, while a half-populated album is completed rather
+    than skipped. Returns the number of rows actually updated.
+    """
+    if not artist or not album or not discogs_id:
+        return 0
+    with db_session() as session:
+        result = session.execute(
+            text("""
+                UPDATE tracks
+                SET discogs_album_id = :did
+                WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
+                  AND album = :album
+                  AND COALESCE(discogs_album_id, '') = ''
+            """),
+            {"did": discogs_id, "artist": artist, "album": album},
+        )
+        return result.rowcount or 0
+
+
 def ignore_missing_track_db(
     conn: Any = None,
     missing_id: str | None = None,
