@@ -75,6 +75,14 @@ _TRACK_FIELD_SPECS: tuple[tuple[str, str, str], ...] = (
     ("mbid", "MusicBrainz Recording ID", "mb_recording_mbid"),
     ("writer", "Writer", "writer"),
     ("musicbrainz_genres", "Genres", "musicbrainz_genres"),
+    # The TRACK artist — the album's own artist is proposed at album level
+    # (``_ALBUM_FIELD_SPECS``), so a lookup must be able to show BOTH: the
+    # performer on this recording and the credit across the release.
+    #
+    # Sourced from the enrichment entry (the recording's credit, falling back
+    # to the release's joined credit — see ``_flatten_release``), NOT from the
+    # album, so a compilation proposes each performer's own name.
+    ("artist", "Track Artist", "artist"),
 )
 
 #: Track-level enrichment keys reported separately because they are not a
@@ -392,6 +400,7 @@ def _track_proposals(
             "mbid": _as_text(local.get("mbid")),
             "writer": _as_text(local.get("writer")),
             "musicbrainz_genres": _as_text(local.get("musicbrainz_genres")),
+            "artist": _as_text(local.get("artist")),
         }
         proposed_map: dict[str, str] = {
             "title": _as_text(entry.get("mb_title")),
@@ -400,6 +409,7 @@ def _track_proposals(
             "mbid": rec_mbid,
             "writer": _as_text(mb_track.get("writer")),
             "musicbrainz_genres": _as_text(mb_track.get("musicbrainz_genres")),
+            "artist": _as_text(mb_track.get("artist")),
         }
 
         for field, label, _key in _TRACK_FIELD_SPECS:
@@ -407,6 +417,14 @@ def _track_proposals(
                 continue
             proposed = proposed_map.get(field, "")
             if not proposed:
+                continue
+            # A track artist equal to the ALBUM artist is either the flatten's
+            # fallback (a compilation's recording had no credit of its own, so
+            # it fell back to the release credit) or nothing to change.
+            # Proposing it is exactly how "Various Artists" got stamped onto
+            # every track of a compilation — see
+            # tests/test_va_track_artist_preserved.py.
+            if field == "artist" and _norm(proposed) == _norm(local.get("album_artist")):
                 continue
             current = current_map.get(field, "")
             if _norm(proposed) == _norm(current):

@@ -230,6 +230,18 @@ class TestStagedFieldsReachTheDatabase:
         ]}})
         assert any(p.get("musicbrainz_genres") == "Hardcore" for p in captured.db_payloads)
 
+    async def test_staged_artist_is_written(self, client, captured):
+        """The TRACK artist must survive Apply — the album artist is a
+        DIFFERENT staged field (``album_artist``), and before this it was the
+        only one of the two a lookup could propose."""
+        await _post(client, {"t1": {"changes": [
+            {"field": "artist", "label": "Track Artist",
+             "current": "Old Performer", "proposed": "New Performer"},
+        ]}})
+        assert any(p.get("artist") == "New Performer" for p in captured.db_payloads), (
+            f"the staged track artist never reached the DB; payloads={captured.db_payloads}"
+        )
+
     async def test_a_cover_verdict_is_written(self, client, captured):
         await _post(client, {"t1": {"changes": [
             {"field": "is_cover", "label": "Cover", "current": "not a cover",
@@ -305,6 +317,17 @@ class TestStagedFieldsReachTheFiles:
         written = _field_writes(captured, "musicbrainz_genres")
         assert any("Hardcore" in str(v) for v in written), (
             f"a staged genre reached the DB but not the file; tag writes={captured.file_writes}"
+        )
+
+    async def test_staged_artist_reaches_the_file(self, client, captured):
+        """Staging must fan out to the tag, not only to the DB."""
+        await _post(client, {"t1": {"changes": [
+            {"field": "artist", "label": "Track Artist",
+             "current": "Old Performer", "proposed": "New Performer"},
+        ]}})
+        assert "New Performer" in _field_writes(captured, "artist"), (
+            f"a staged track artist reached the DB but not the file; "
+            f"tag writes={captured.file_writes}"
         )
 
 

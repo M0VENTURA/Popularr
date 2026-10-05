@@ -1463,6 +1463,7 @@ async def album_detail(album_path: str) -> Any:
         _STAGED_WRITABLE = frozenset({
             "title", "track_number", "disc_number", "mbid",
             "writer", "musicbrainz_genres", "is_cover", "original_cover_artist",
+            "artist",
         })
 
         # A SAVED review clears the stashed recommendations for this album —
