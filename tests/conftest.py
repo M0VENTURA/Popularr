@@ -111,6 +111,34 @@ def _no_real_navidrome_rescan(monkeypatch):
     monkeypatch.setattr(_rescan_svc, "request_rescan", lambda *args, **kwargs: True)
 
 
+@pytest.fixture(autouse=True)
+def _reset_host_timeout_cooldowns():
+    """No host may still be "cooling down" from the previous test.
+
+    ``api_clients.http_utils`` opens a per-host window after two consecutive
+    requests time out on every attempt (so a dead peer costs the scan ~0s
+    instead of attempts x read-timeout). That window is deliberately GLOBAL — it
+    is the whole point — which means one test's simulated outage would otherwise
+    make the next test's *successful* call to the same host raise
+    ``httpx.ReadTimeout`` and fail for no reason it can see.
+    """
+    from api_clients import http_utils
+
+    # getattr-guarded: if the cooldown were ever removed, its own tests must
+    # fail on their assertions rather than every test erroring in this fixture.
+    windows = getattr(http_utils, "_HOST_TIMEOUT_COOLDOWN", None)
+    strikes = getattr(http_utils, "_HOST_TIMEOUT_STRIKES", None)
+    if windows is not None:
+        windows.clear()
+    if strikes is not None:
+        strikes.clear()
+    yield
+    if windows is not None:
+        windows.clear()
+    if strikes is not None:
+        strikes.clear()
+
+
 @pytest.fixture(scope="session")
 def app():
     """Create and configure the Quart application for testing.

@@ -39,6 +39,65 @@ _CONNECT_TIMEOUT_SECONDS = 10.0
 _MAX_RETRY_AFTER = 60.0
 _TOTAL_RETRY_WAIT_BUDGET = 40.0
 
+#: ── Per-host timeout cooldown ────────────────────────────────────────────────
+#:
+#: A host that answers NOTHING costs ``attempts x read-timeout`` per call:
+#: 4 attempts x 20s = ~80s for ListenBrainz, on EVERY request. During a scan
+#: that consumed the whole 900s per-album budget in retries alone and the album
+#: was then abandoned having processed 0 tracks, while the log filled with
+#: ReadTimeout after ReadTimeout.
+#:
+#: Once a host has failed twice with every attempt timing out, the next request
+#: to it fails IMMEDIATELY with the same exception the caller already handles
+#: (``httpx.ReadTimeout``) — so no caller changes and no new failure mode, just
+#: ~80s returned to the scan. The window is per HOST, not per client, so one
+#: dead provider (ListenBrainz) cannot stall the others (MusicBrainz, Navidrome).
+_HOST_TIMEOUT_COOLDOWN: dict[str, float] = {}
+_HOST_TIMEOUT_STRIKES: dict[str, int] = {}
+_HOST_COOLDOWN_SECONDS = 60.0
+#: Two, not one: a single transient timeout must not make a host untouchable —
+#: Navidrome imports would stall for a minute over one slow cover-art fetch.
+_HOST_COOLDOWN_STRIKES = 2
+_COOLDOWN_LOCK = threading.Lock()
+
+
+def _host_is_cooling_down(host: str) -> float:
+    """Seconds left in *host*'s cooldown, or ``0`` when it is not cooling."""
+    if not host:
+        return 0.0
+    now = time.monotonic()
+    with _COOLDOWN_LOCK:
+        until = _HOST_TIMEOUT_COOLDOWN.get(host, 0.0)
+    return max(0.0, until - now)
+
+
+def _note_host_success(host: str) -> None:
+    if not host:
+        return
+    with _COOLDOWN_LOCK:
+        _HOST_TIMEOUT_STRIKES.pop(host, None)
+
+
+def _note_host_timeout(host: str) -> None:
+    """Record a request whose attempts ALL timed out; open the window at 2."""
+    if not host:
+        return
+    global _HOST_TIMEOUT_STRIKES
+    with _COOLDOWN_LOCK:
+        strikes = _HOST_TIMEOUT_STRIKES.get(host, 0) + 1
+        _HOST_TIMEOUT_STRIKES[host] = strikes
+        if strikes < _HOST_COOLDOWN_STRIKES:
+            return
+        _HOST_TIMEOUT_STRIKES.pop(host, None)
+        _HOST_TIMEOUT_COOLDOWN[host] = time.monotonic() + _HOST_COOLDOWN_SECONDS
+    # NOTE: this module's ``logger`` is the stdlib one, so the context goes in
+    # the message rather than as kwargs (structlog-style calls raise here).
+    logger.warning(
+        "[HTTP] host cooldown opened — failing fast for "
+        f"{_HOST_COOLDOWN_SECONDS:.0f}s: {strikes} consecutive requests to "
+        f"{host} timed out on every attempt"
+    )
+
 
 def _build_pool_limits() -> httpx.Limits:
     """Build ``httpx.Limits`` for the shared session, httpx-version-safe."""
@@ -114,6 +173,17 @@ class _RetryTransport(httpx.BaseTransport):
             retry_if_exception,
             stop_after_attempt,
         )
+
+        #: Set when this request is answered at all; used to decide whether a
+        #: timeout means "this host is down" rather than "this endpoint is slow".
+        host = (request.url.host or "").lower()
+        remaining = _host_is_cooling_down(host)
+        if remaining > 0:
+            # Same exception the caller already handles for this host, minus
+            # another ~80s of attempts that cannot succeed.
+            raise httpx.ReadTimeout(
+                f"{host} is in a timeout cooldown ({remaining:.0f}s left)"
+            )
 
         class _RetryableStatus(Exception):
             """Marker raised when the peer returned a retryable status code."""
@@ -281,8 +351,18 @@ class _RetryTransport(httpx.BaseTransport):
         try:
             for attempt in retrying:
                 with attempt:
-                    return _attempt()
+                    response = _attempt()
+                    _note_host_success(host)
+                    return response
         except _RetryBudgetExceeded:
+            if last_status_response is not None:
+                return last_status_response
+            raise
+        except httpx.TimeoutException:
+            # Every attempt timed out: the peer is not answering at all, not
+            # "one slow response". Record it so the next call to this host can
+            # fail fast instead of re-paying attempts x read-timeout.
+            _note_host_timeout(host)
             if last_status_response is not None:
                 return last_status_response
             raise
