@@ -90,9 +90,11 @@ def test_guard_accepts_album_plus_live_for_the_bug_album():
     )
 
 
-def test_bug_album_corroborates_through_the_canonical_detector():
-    """The delegation target itself must accept the bug album."""
-    assert is_live_or_alternate_album(BUG_ALBUM) is True
+# NOTE: ``test_bug_album_corroborates_through_the_canonical_detector`` used to
+# be defined BOTH here and again after ``test_is_live_or_alternate_album_is_the
+# _correct_delegation_target``. Identical bodies, so Python silently kept only
+# the second and the first could never run — a test that cannot fail protects
+# nothing. The surviving copy sits with the delegation tests, where it belongs.
 
 
 def test_acoustic_secondary_still_corroborates():

@@ -28,7 +28,7 @@ class TestCloseArtistEssentialSection:
 
         created = []
         monkeypatch.setattr(
-            srr, "_create_essential_m3u",
+            srr, "_sync_essential_playlist",
             lambda artist, featured_rows=None: created.append((artist, featured_rows)),
         )
         monkeypatch.setattr(srr, "_essential_playlists_enabled", lambda options: True)
@@ -93,7 +93,7 @@ class TestCloseArtistEssentialSection:
 
         created = []
         monkeypatch.setattr(
-            srr, "_create_essential_m3u",
+            srr, "_sync_essential_playlist",
             lambda artist, featured_rows=None: created.append(artist),
         )
         monkeypatch.setattr(srr, "_essential_playlists_enabled", lambda options: False)
@@ -114,7 +114,7 @@ class TestCloseArtistEssentialSection:
             if len(calls) == 1:
                 raise RuntimeError("db down")
 
-        monkeypatch.setattr(srr, "_create_essential_m3u", flaky)
+        monkeypatch.setattr(srr, "_sync_essential_playlist", flaky)
         monkeypatch.setattr(srr, "_essential_playlists_enabled", lambda options: True)
         monkeypatch.setattr(srr, "_fetch_essential_featured_rows", lambda: [])
 
@@ -166,8 +166,8 @@ class TestFinaliseSkipsRunnerHandledArtists:
 
         created = []
         monkeypatch.setattr(
-            fs, "_create_essential_m3u",
-            lambda artist, featured_rows=None: created.append((artist, featured_rows)),
+            fs, "_sync_essential_playlist",
+            lambda artist, **kwargs: created.append((artist, kwargs.get("featured_rows"))),
         )
         monkeypatch.setattr(fs, "_essential_playlists_enabled", lambda opts: True)
         monkeypatch.setattr(fs, "_genre_playlists_active", lambda: False)

@@ -10,7 +10,11 @@ collapsed onto "Valhalla" and the wrong file was moved/imported.
 Covers every matcher that pairs a downloaded file with a queue item:
 - ``_metadata_matches_queue_item`` (embedded tags)
 - ``match_engine.filename_matches_queue_item`` (filename/path)
-- ``queue_matching_helpers.filename_matches_queue_item`` (filename/path)
+
+``filename_matches_queue_item`` used to live in
+``services.queue.queue_matching_helpers``; it now lives in
+``services.downloads.match_engine`` (one function, one home), so the old
+import path is gone — these tests import the current one.
 """
 
 from __future__ import annotations
@@ -147,23 +151,23 @@ class TestMatchEngineFilenameEditionGate:
         ) is True
 
 
-class TestQueueMatchingHelpersFilenameEditionGate:
+class TestFilenameEditionGateOnQueueItems:
     def test_edition_file_never_matches_plain_queue(self):
-        from services.queue.queue_matching_helpers import filename_matches_queue_item
+        from services.downloads.match_engine import filename_matches_queue_item
 
         assert filename_matches_queue_item(
             "/downloads/Feuerschwanz - Valhalla (Epic Edition).flac", _PLAIN_ITEM
         ) is False
 
     def test_edition_file_matches_edition_queue(self):
-        from services.queue.queue_matching_helpers import filename_matches_queue_item
+        from services.downloads.match_engine import filename_matches_queue_item
 
         assert filename_matches_queue_item(
             "/downloads/Feuerschwanz - Valhalla (Epic Edition).flac", _EDITION_ITEM
         ) is True
 
     def test_plain_file_still_matches_plain_queue(self):
-        from services.queue.queue_matching_helpers import filename_matches_queue_item
+        from services.downloads.match_engine import filename_matches_queue_item
 
         assert filename_matches_queue_item(
             "/downloads/Feuerschwanz - Valhalla.flac", _PLAIN_ITEM
