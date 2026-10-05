@@ -3670,8 +3670,17 @@ def post_album_star_ratings(
 
             _pop_only = bool(options.get("popularity_only"))
             singles_detected = [] if _pop_only else [t for t in album_results if t.get("is_single")]
-            if singles_detected:
-                log_unified(f"Singles Detection - Detected {len(singles_detected)} single(s) in '{album}'")
+            # Reported for EVERY album, not only when something was detected.
+            # Gating on ``singles_detected`` meant an album that yielded no
+            # singles left no trace in the Scanner tab, so while the status bar
+            # said "Singles Detection" the log looked exactly like a hung stage
+            # and the only proof of life was the raw info log.
+            if _pop_only:
+                log_unified(f"Singles Detection - skipped (popularity only) in '{album}'")
+            else:
+                log_unified(
+                    f"Singles Detection - Detected {len(singles_detected)} single(s) in '{album}'"
+                )
 
             rows: list[dict[str, Any]] = []
             for t in album_results:

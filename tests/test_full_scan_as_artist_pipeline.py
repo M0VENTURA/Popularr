@@ -130,6 +130,34 @@ class TestFullScanAsArtistPipeline:
         assert final["extra"]["status"] == "complete"
         assert final["extra"]["percent_complete"] == 100
 
+    def test_the_first_artist_of_a_large_scan_is_not_stuck_at_zero(self, monkeypatch):
+        """One artist's share is ``100 / total_artists``; ``int()`` erased it.
+
+        Reported live: ``full scan — 0% · Singles Detection · Afi - The Art of
+        Drowning — Initiation`` — the status bar read 0% while the stage was
+        demonstrably working. With 400 artists the first artist is 0.25% of the
+        whole scan, so its entire first stage sits below 1% and truncating to an
+        integer threw away every bit of progress that had happened.
+        """
+        artists = [f"Artist {i:03d}" for i in range(400)]
+        pp, recorder, _calls = _patch_env(monkeypatch, artists)
+
+        pp._run_full_scan_as_artist_pipeline()
+
+        running = [c for c in recorder.calls if c["is_running"] and c["current_artist"]]
+        assert running, "no progress writes were recorded"
+        first = running[0]["extra"]["percent_complete"]
+
+        assert isinstance(first, (int, float)), type(first)
+        assert 0 < first < 1, (
+            f"the first artist of a {len(artists)}-artist scan reported {first!r}; "
+            "the status bar would still read 0%"
+        )
+
+        pcts = [c["extra"]["percent_complete"] for c in running]
+        assert all(pcts[i] <= pcts[i + 1] for i in range(len(pcts) - 1))
+        assert running[-1]["extra"]["percent_complete"] == 100
+
     def test_force_flag_propagated(self, monkeypatch):
         pp, recorder, calls = _patch_env(monkeypatch, ["Artist A"])
 

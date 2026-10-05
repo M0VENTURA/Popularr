@@ -747,6 +747,20 @@ async function loadUpcomingReleasesTable() {
 // ===== Active Scans Progress Panel =====
 /* One-line summary for the sticky bottom status bar (global bar lives in
    base.html; the global log modal is driven by main.js). */
+// Render a scan percentage for a text label.
+//
+// progress_service now returns real decimals: one artist's share of a full
+// scan is 100/total_artists, so on a large library the first artists are a
+// fraction of a percent. Truncating that to an integer is what made the status
+// bar sit on "0%" while the scan was demonstrably working, so anything inside
+// (0, 1) is shown as "<1%" — visibly moving, still honest about the precision.
+// Progress BARS must keep using the raw number for their width.
+function formatScanPercent(pct) {
+  const value = Number(pct) || 0;
+  if (value > 0 && value < 1) return '<1%';
+  return `${Math.round(value)}%`;
+}
+
 function updateScanStatusBar(active) {
   const line = document.getElementById("scanStatusLine");
   const icon = document.getElementById("scanStatusIcon");
@@ -761,7 +775,7 @@ function updateScanStatusBar(active) {
   const name = SCAN_TYPE_DISPLAY_NAMES[scan.scan_type] || scan.scan_type;
   const pct = Math.min(scan.percent_complete ?? scan.progress ?? 0, 100);
   const stage = scan.current_stage ? ` · ${scan.current_stage}` : "";
-  line.textContent = `${name} — ${pct}%` + stage + (scan.current_item ? ` · ${scan.current_item}` : "");
+  line.textContent = `${name} — ${formatScanPercent(pct)}` + stage + (scan.current_item ? ` · ${scan.current_item}` : "");
   icon.className = "scan-status-active";
   icon.innerHTML = '<i class="bi bi-activity"></i>';
 }

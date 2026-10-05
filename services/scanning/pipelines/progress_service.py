@@ -54,6 +54,27 @@ def _build_progress_path(scan_type: str) -> str:
     return os.path.join(get_state_directory(), f"{scan_type}_progress.json")
 
 
+def _as_percent(value: Any) -> float:
+    """Normalise a stored ``percent_complete`` for the API.
+
+    Deliberately NOT ``int()``. One artist's share of a full scan is
+    ``100 / total_artists``, so on a large library the first artists report a
+    genuine fraction of a percent — truncating to ``int`` turned that into a
+    flat ``0`` and the status bar read "0%" for minutes at a time while real
+    work was happening.
+
+    Three decimals, not two: a 5 000-artist library puts the first album
+    boundary at 0.005%, and rounding that to 2 dp would collapse it straight
+    back to the ``0`` this function exists to prevent. The UI renders the
+    ``(0, 1)`` band as "<1%", so the extra precision is never shown as noise.
+    """
+    try:
+        pct = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return round(max(0.0, min(100.0, pct)), 3)
+
+
 def _normalise_entry(scan_type: str, state: dict[str, Any]) -> dict[str, Any]:
     """
     Convert raw progress JSON into a consistent API entry.
@@ -88,7 +109,7 @@ def _normalise_entry(scan_type: str, state: dict[str, Any]) -> dict[str, Any]:
     return {
         "scan_type": state.get("scan_type") or scan_type,
         "is_running": bool(state.get("is_running", False)),
-        "percent_complete": int(state.get("percent_complete", 0) or 0),
+        "percent_complete": _as_percent(state.get("percent_complete", 0)),
         "current_stage": state.get("current_stage"),
         "current_artist": state.get("current_artist"),
         "current_album": state.get("current_album"),

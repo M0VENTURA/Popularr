@@ -505,17 +505,26 @@ def _run_full_scan_as_artist_pipeline(
                         frac = min(1.0, max(0.0, float(track_fraction)))
                     else:
                         frac = min(1.0, (int(idx) + 1) / float(t)) if t else 1.0
-                    overall = int(_base + si * _sw + frac * _sw)
+                    # ── Overall percentage ─────────────────────────────────
+                    # Kept as a FLOAT and only rounded for display. The old
+                    # ``int(...)`` truncation is what made a large library's
+                    # status bar sit on "0%" for whole artists: one artist's
+                    # share is ``100/total``, so with a few thousand artists the
+                    # first several artists never reach 1% and ``int`` threw
+                    # away every bit of progress that had actually happened.
+                    # The API rounds to 3 dp and the UI renders the (0, 1) band
+                    # as "<1%" instead of pretending nothing has moved.
+                    overall = _base + si * _sw + frac * _sw
                     # The final callback for the last artist's last stage must
-                    # land exactly on 100% — float truncation (e.g. 99.97 → 99)
-                    # would otherwise leave the footer at 99% after completion.
+                    # land exactly on 100% — the summed bands would otherwise
+                    # leave the footer a rounding step short of completion.
                     if (
                         _i == total - 1
                         and si == len(_STAGE_IDX) - 1
                         and frac >= 1.0
                     ):
-                        overall = 100
-                    overall = max(0, min(100, overall))
+                        overall = 100.0
+                    overall = round(max(0.0, min(100.0, overall)), 3)
 
                     # ── Write throttle ─────────────────────────────────────
                     # The runner fires this callback per track now (live

@@ -35,6 +35,51 @@ from services.popularity.pipeline import run_popularity_scan
 
 logger = structlog.get_logger(__name__)
 
+# Display names for the album loop's stage bands. The status bar shows these,
+# and until now the SCAN LOG said nothing at all about a band change — so an
+# operator watching "Singles Detection" in the bar saw a silent Scanner tab and
+# had to open the raw info log to prove the stage was doing anything.
+_STAGE_LABELS = {
+    "metadata": "Metadata",
+    "popularity": "Popularity",
+    "singles": "Singles Detection",
+}
+
+
+def stage_for_album_index(album_index: int, total_albums: int) -> str:
+    """Map an album's position in the loop to its stage band.
+
+    The artist pipeline runs one combined pass, so the bands stand in for the
+    four dashboard stages: the first quarter of albums reads "Metadata", the
+    middle half "Popularity" and the last quarter "Singles Detection".
+    """
+    band = max(1, (total_albums + 3) // 4)
+    if album_index < band:
+        return "metadata"
+    if album_index >= (total_albums or 1) - band:
+        return "singles"
+    return "popularity"
+
+
+def announce_stage_change(
+    stage: str,
+    state: dict[str, Any],
+    artist_name: str,
+    item: str | None = None,
+) -> None:
+    """Log a stage-band transition exactly once per artist.
+
+    ``state`` carries ``last_stage``; the caller fires per track as well as per
+    album, so without this the log would repeat the same line hundreds of times.
+    """
+    if stage == state.get("last_stage"):
+        return
+    state["last_stage"] = stage
+    log_unified(
+        f"[SCAN_PIPELINE] Stage: {_STAGE_LABELS.get(stage, stage)}"
+        f" — {artist_name} / {item or ''}"
+    )
+
 # Runtime state & concurrency guard
 scan_process_navidrome: dict[str, Any] | None = None
 _artist_scan_lock = threading.Lock()
@@ -137,14 +182,13 @@ def _run_artist_scan_pipeline_inner(
         else:
             log_unified(f"Navidrome import skipped for '{artist_name}' (no Navidrome artist ID found)")
 
+        # Remembers the band already announced for THIS artist run so the log
+        # gets one line per stage instead of one per track.
+        _stage_state: dict[str, Any] = {}
+
         def _stage_band_cb(album_index: int, total_albums: int, current_item: str | None = None, track_fraction: float | None = None) -> None:
-            band = max(1, (total_albums + 3) // 4)
-            if album_index < band:
-                stage = "metadata"
-            elif album_index >= (total_albums or 1) - band:
-                stage = "singles"
-            else:
-                stage = "popularity"
+            stage = stage_for_album_index(album_index, total_albums)
+            announce_stage_change(stage, _stage_state, artist_name, current_item)
             _cb(stage, album_index, total_albums, current_item, track_fraction)
 
         run_popularity_scan(

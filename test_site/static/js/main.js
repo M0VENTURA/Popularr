@@ -321,6 +321,22 @@
 
   // ── Sticky scan bar ─────────────────────────────────────────────────────
 
+  /**
+   * Render a scan percentage for a text label.
+   *
+   * progress_service returns real decimals: one artist's share of a full scan
+   * is 100/total_artists, so on a large library the first artists are a fraction
+   * of a percent. Truncating to an integer is what made the status bar sit on
+   * "0%" while the scan was working, so anything inside (0, 1) shows as "<1%".
+   * Progress BARS must keep using the raw number for their width.
+   * Kept identical to the copy in pages/dashboard.js — do not let them drift.
+   */
+  function formatScanPercent(pct) {
+    const value = Number(pct) || 0;
+    if (value > 0 && value < 1) return '<1%';
+    return `${Math.round(value)}%`;
+  }
+
   /** The dashboard's own polling (dashboard.js) owns the bar there. */
   function updateGlobalScanBar(data) {
     if (document.getElementById('dashboardFlags')) return;
@@ -344,7 +360,7 @@
     const pct = Math.min(scan.percent_complete ?? scan.progress ?? 0, 100);
     const name = String(scan.scan_type || 'scan').replace(/_/g, ' ');
     const stage = scan.current_stage ? ` · ${scan.current_stage}` : '';
-    line.textContent = `${name} — ${pct}%${stage}` +
+    line.textContent = `${name} — ${formatScanPercent(pct)}${stage}` +
       (scan.current_item ? ` · ${scan.current_item}` : '');
     icon.className = 'scan-status-active';
     icon.innerHTML = '<i class="bi bi-activity"></i>';
