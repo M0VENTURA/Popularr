@@ -31,7 +31,15 @@
 
 <div class="container-fluid mt-4">
     {% set artist_parts = track.artist|split_artist_collabs %}
-    {% set hero_art_url = '/api/album/' ~ (track.artist|path_segment) ~ '/' ~ (track.album|path_segment) ~ '/art?s=160' %}
+    {#
+      ALBUM urls (page + art) are keyed by the ALBUM ARTIST: the album route
+      matches COALESCE(NULLIF(album_artist,''), artist) exactly. Building them
+      from the TRACK artist broke every compilation and every featured credit
+      ("Various Artists" is the album, "Midnight Oil" the track). Not split:
+      the route wants the stored string whole.
+    #}
+    {% set album_link_artist = track.album_artist or track.artist %}
+    {% set hero_art_url = '/api/album/' ~ (album_link_artist|path_segment) ~ '/' ~ (track.album|path_segment) ~ '/art?s=160' %}
 
     <nav aria-label="breadcrumb">
         <ol class="breadcrumb">
@@ -42,7 +50,7 @@
                     <a href="javascript:void(0)" onclick="navigateToArtist('{{ artist_name|escapejs }}', event)">{{ artist_name }}</a>{% if not loop.last %} / {% endif %}
                 {% endfor %}
             </li>
-            <li class="breadcrumb-item"><a href="/album/{{ (artist_parts[0] if artist_parts else track.artist)|path_segment }}/{{ track.album|path_segment }}">{{ track.album }}</a></li>
+            <li class="breadcrumb-item"><a href="/album/{{ album_link_artist|path_segment }}/{{ track.album|path_segment }}">{{ track.album }}</a></li>
             <li class="breadcrumb-item active" aria-current="page">{{ track.title }}</li>
         </ol>
     </nav>
@@ -62,7 +70,7 @@
             <div class="d-flex align-items-start gap-3 mb-3">
                 <div class="flex-shrink-0">
                     <div class="album-art-container hero-cover position-relative shadow-sm">
-                        <img id="trackAlbumArtImage" src="/api/album/{{ track.artist|path_segment }}/{{ track.album|path_segment }}/art?s=160"
+                        <img id="trackAlbumArtImage" src="/api/album/{{ album_link_artist|path_segment }}/{{ track.album|path_segment }}/art?s=160"
                              alt="{{ track.album }}"
                              style="width: 100%; height: 100%; object-fit: cover; border-radius: 6px;"
                              onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22200%22 height=%22200%22%3E%3Crect fill=%22%232a2a2a%22 width=%22200%22 height=%22200%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 text-anchor=%22middle%22 dy=%22.3em%22 fill=%22%23666%22 font-size=%2216%22%3ENo Image%3C/text%3E%3C/svg%3E';">
@@ -77,7 +85,7 @@
                         {% endfor %}
                         {% if track.album %}
                         <span class="text-muted mx-1">·</span>
-                        <a href="/album/{{ (artist_parts[0] if artist_parts else track.artist)|path_segment }}/{{ track.album|path_segment }}" class="text-decoration-none text-info fw-semibold">{{ track.album }}</a>
+                        <a href="/album/{{ album_link_artist|path_segment }}/{{ track.album|path_segment }}" class="text-decoration-none text-info fw-semibold">{{ track.album }}</a>
                         {% endif %}
                     </div>
                     {% if track.is_single == 1 %}

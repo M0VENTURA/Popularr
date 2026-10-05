@@ -44,7 +44,8 @@ import structlog
 from helpers.normalization_service import (
     edition_annotations_compatible, 
     normalize_match_text,
-    normalize_core_filename
+    normalize_core_filename,
+    strip_brackets
 )
 from services.downloads.download_matching_service import get_release_tracks
 from services.queue.queue_scoring import _tokenize_meaningful
@@ -234,7 +235,14 @@ def filename_matches_queue_item(
 
     artist_norm = normalize_match_text(artist)
     album_artist_norm = normalize_match_text(album_artist)
-    title_norm = normalize_match_text(title)
+    # The gate above already proved both sides carry the SAME edition
+    # annotation (or neither), so it carries no discriminating information
+    # here. It MUST be dropped from this side too: ``normalize_core_filename``
+    # strips brackets from the FILENAME, while ``normalize_match_text`` only
+    # turns them into spaces and keeps the words. Without this the score
+    # compared "valhalla epic edition" against "feuerschwanz valhalla" and an
+    # edition download could never match its OWN queue item.
+    title_norm = normalize_match_text(strip_brackets(title))
     path_norm = normalize_core_filename(os.path.basename(file_path))
 
     if not title_norm or not path_norm:

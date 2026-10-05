@@ -220,3 +220,75 @@ class TestSoulseekCandidateScorerEditionGate:
         assert _score_soulseek_candidate(
             "/downloads/Feuerschwanz - Valhalla.flac", _PLAIN_ITEM
         ) > 0.0
+
+
+class TestTheTwoSidesOfTheScoreAgree:
+    """The asymmetry that made an edition file miss its OWN queue item.
+
+    ``normalize_core_filename`` REMOVES the bracketed annotation from the
+    filename; ``normalize_match_text`` only turns the brackets into spaces and
+    keeps the words. The two sides of ``filename_matches_queue_item`` were
+    therefore scored as
+
+        queue title : 'valhalla epic edition'
+        filename    : 'feuerschwanz valhalla'
+
+    which can never clear the threshold — so the gate passed and the score
+    still said no. The edition gate runs FIRST and proves both sides carry the
+    SAME annotation (or neither), so dropping it from the title side loses no
+    discriminating information.
+    """
+
+    def test_the_filename_side_drops_the_annotation(self):
+        from helpers.normalization_service import normalize_core_filename
+
+        assert "epic edition" not in normalize_core_filename(
+            "Feuerschwanz - Valhalla (Epic Edition)"
+        )
+
+    def test_the_title_side_drops_it_too(self):
+        from helpers.normalization_service import (
+            normalize_match_text,
+            strip_brackets,
+        )
+
+        scored = normalize_match_text(strip_brackets("Valhalla (Epic Edition)"))
+        assert "epic edition" not in scored
+        assert scored == normalize_match_text("Valhalla")
+
+    def test_a_title_without_brackets_is_untouched(self):
+        """The change must be a no-op outside the asymmetric case."""
+        from helpers.normalization_service import (
+            normalize_match_text,
+            strip_brackets,
+        )
+
+        assert normalize_match_text(strip_brackets("Valhalla")) == (
+            normalize_match_text("Valhalla")
+        )
+
+    def test_the_gate_still_refuses_a_mismatched_edition(self):
+        """Why stripping is safe: the gate already rejected the mismatch."""
+        from helpers.normalization_service import edition_annotations_compatible
+
+        assert edition_annotations_compatible(
+            "Valhalla", "Valhalla (Epic Edition)"
+        ) is False
+
+    def test_the_matcher_scores_the_title_with_the_same_bracket_handling(self):
+        """The actual fix — the four tests above only document WHY.
+
+        ``filename_matches_queue_item`` must normalise the queue title the same
+        way ``normalize_core_filename`` normalises the filename.
+        """
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "services" / "downloads" / "match_engine.py"
+        ).read_text(encoding="utf-8")
+
+        assert "normalize_match_text(strip_brackets(title))" in source, (
+            "the filename side strips brackets while the title side does not — "
+            "an edition file will stop matching its own queue item again"
+        )
