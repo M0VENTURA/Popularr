@@ -12,6 +12,7 @@ Raw HTTP is handled by api_clients.slskd_http.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 import traceback
@@ -525,7 +526,7 @@ class SlskdService:
 
         return results
 
-    def filter_results_by_quality(self, responses: list[SearchResponse], min_bitrate: int = 192, min_sample_rate: int = 44100, max_results: int = 50) -> list[dict]:
+    def filter_results_by_quality(self, responses: list[SearchResponse], min_bitrate: int = 192, min_sample_rate: int = 44100, max_results: int = 50, query: str = "") -> list[dict]:
         qualified = []
         for response in responses:
             for file in response.files:
@@ -546,7 +547,33 @@ class SlskdService:
                         "upload_speed": getattr(response, "upload_speed", None),
                         "queue_length": getattr(response, "queue_length", None),
                     })
-        qualified.sort(key=lambda item: (-item["bitrate"], -item["sample_rate"]))
+        # Rank by how much the file matches the QUERY we just ran, and only
+        # then by quality.
+        #
+        # This used to sort purely by bitrate and keep the first ``max_results``.
+        # Every poll re-filters the WHOLE result set, so that cap decided what
+        # the queue ever got to see: for a broad fallback query (a bare title,
+        # the artist's first word) the top 50 by bitrate are rarely the file
+        # being searched for, the scorer was handed an arbitrary 50, and the
+        # answer was ``no_qualifying_result (50 candidates)`` — day after day,
+        # for the same track. Relevance first, quality second, cap unchanged.
+        query_tokens = [
+            t for t in re.findall(r"[a-z0-9]+", (query or "").lower())
+            if len(t) >= 2
+        ]
+        if query_tokens:
+            def _rank(item: dict) -> tuple[int, int, int]:
+                file_tokens = set(
+                    re.findall(r"[a-z0-9]+", str(item.get("filename") or "").lower())
+                )
+                return (
+                    -sum(1 for token in query_tokens if token in file_tokens),
+                    -int(item.get("bitrate") or 0),
+                    -int(item.get("sample_rate") or 0),
+                )
+            qualified.sort(key=_rank)
+        else:
+            qualified.sort(key=lambda item: (-item["bitrate"], -item["sample_rate"]))
         return qualified[:max_results]
 
     def search_and_filter(self, query: str, min_bitrate: int | None = None, wait_seconds: int | None = None, poll_interval: float = 1.0, timeout: Optional[int] = None) -> list[dict]:
@@ -578,7 +605,7 @@ class SlskdService:
                 break
             time.sleep(delay)
             responses, _state, is_complete = self.get_search_results(search_id, timeout=timeout)
-            for item in self.filter_results_by_quality(responses, min_bitrate=min_bitrate):
+            for item in self.filter_results_by_quality(responses, min_bitrate=min_bitrate, query=query):
                 key = (item["username"], item["filename"])
                 if key not in seen:
                     seen.add(key)
@@ -588,7 +615,7 @@ class SlskdService:
                 
         if not accumulated:
             responses, _state, _complete = self.get_search_results(search_id, timeout=timeout)
-            for item in self.filter_results_by_quality(responses, min_bitrate=min_bitrate):
+            for item in self.filter_results_by_quality(responses, min_bitrate=min_bitrate, query=query):
                 key = (item["username"], item["filename"])
                 if key not in seen:
                     seen.add(key)

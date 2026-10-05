@@ -487,6 +487,19 @@ def _year_mismatch_rejects(filename: str, expected_year: Any) -> bool:
     return abs(queue_year - path_year) > 1
 
 
+def _note_reject(rejects: dict[str, int] | None, reason: str) -> None:
+    """Count why a candidate was hard-rejected.
+
+    Every gate below logs at DEBUG, so a queue item stuck in
+    ``no_qualifying_result`` said "50 candidates" and nothing else — it was
+    impossible to tell a year gate from an album gate without turning on debug
+    logging for a whole run. The counts are surfaced ONCE, at WARNING, by
+    :func:`_select_best_result` when nothing qualifies.
+    """
+    if rejects is not None:
+        rejects[reason] = rejects.get(reason, 0) + 1
+
+
 def _score_result(
     result: dict[str, Any],
     expected_artist: str,
@@ -494,6 +507,7 @@ def _score_result(
     expected_album: str | None = None,
     expected_duration: int | None = None,
     expected_year: Any = None,
+    rejects: dict[str, int] | None = None,
 ) -> float:
     score = 0.0
     filename = str(result.get("filename", ""))
@@ -501,6 +515,7 @@ def _score_result(
 
     if _year_mismatch_rejects(filename, expected_year):
         logger.debug("Rejected candidate — year mismatch", filename=filename[:180], expected_year=expected_year)
+        _note_reject(rejects, "year_mismatch")
         return 0.0
 
     exp_artist = _sanitize_slskd_query(expected_artist or "")
@@ -619,6 +634,7 @@ def _score_result(
         
     if not artist_evidenced:
         logger.debug("Rejected candidate — no artist evidence", filename=filename[:180], expected_artist=expected_artist)
+        _note_reject(rejects, "no_artist_evidence")
         return 0.0
 
     # Hangul/CJK artist credit: the script-mismatched artist contributes
@@ -684,6 +700,7 @@ def _score_result(
             filename=filename[:180], expected_title=expected_title,
             parsed_title=str(parts.get("title") or ""), title_score=round(title_score, 2),
         )
+        _note_reject(rejects, "title_mismatch")
         return 0.0
 
     if title_score > 0.7:
@@ -720,6 +737,7 @@ def _score_result(
                     album_score=round(album_score, 2),
                     title_score=round(title_score, 2),
                 )
+                _note_reject(rejects, "album_mismatch")
                 return 0.0
 
         if album_score > 0.6:
@@ -784,9 +802,13 @@ def _select_best_result(
     min_score: float = 45.0,
 ) -> dict[str, Any] | None:
     scored: list[tuple[float, dict]] = []
+    rejects: dict[str, int] = {}
 
     for r in results:
-        s = _score_result(r, expected_artist, expected_title, expected_album, expected_duration, expected_year)
+        s = _score_result(
+            r, expected_artist, expected_title, expected_album,
+            expected_duration, expected_year, rejects=rejects,
+        )
         scored.append((s, r))
 
     scored.sort(key=lambda pair: -pair[0])
@@ -796,7 +818,24 @@ def _select_best_result(
         logger.debug("Best result found", score=best_score, filename=best.get("filename", "")[:80], candidates=len(scored))
         return best
 
-    logger.debug("No result met min_score", min_score=min_score, artist=expected_artist, title=expected_title, top_score=scored[0][0] if scored else 0)
+    # ONE line that says which gate fired. Every rejection reason above is a
+    # DEBUG line, so without this the failure is just "50 candidates" — the
+    # shape of the reported "no_qualifying_result" loops that ran for days.
+    top_score, top = scored[0] if scored else (0.0, {})
+    below_floor = sum(1 for s, _ in scored if 0 < s < min_score)
+    if below_floor:
+        rejects["below_floor"] = below_floor
+    logger.warning(
+        "No result met min_score — no qualifying download candidate",
+        artist=expected_artist,
+        title=expected_title,
+        album=expected_album,
+        min_score=min_score,
+        top_score=round(float(top_score), 1),
+        candidates=len(scored),
+        rejected=rejects,
+        top_candidate=str(top.get("filename") or "")[:200],
+    )
     return None
 
 
