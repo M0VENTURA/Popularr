@@ -264,6 +264,48 @@ def _resolve_album_budget() -> float | None:
     return None if resolved <= 0 else float(resolved)
 
 
+#: Album-phase workers that hit the per-album budget and are STILL RUNNING.
+#: One module-level list on purpose: the three ``_bounded_album_phase`` call
+#: sites live in different scopes, and the cap only means something if it is a
+#: property of the RUN — otherwise every scope starts its own count at zero.
+_abandoned_album_workers: list[Any] = []
+
+
+def _track_abandoned_album_worker(report: dict[str, Any]) -> None:
+    """Register a straggler from *report* and drain down to the configured cap.
+
+    ``_bounded_call_report`` gives up at the budget but the daemon thread it
+    spawned keeps running, holding a DB-pool connection and a rate-limiter slot.
+    The artist-level path has always handed these to
+    ``_drain_abandoned_workers``; the album path returned only the sentinel, so
+    album stragglers piled up unchecked — which is the same cascade, one level
+    down: the next album waited on a pool the previous one had not let go of.
+
+    The wait is still bounded (deadline + iteration ceiling), so draining can
+    never become a new way for one album to stall the scan.
+    """
+    worker = report.get("thread")
+    if worker is not None:
+        _abandoned_album_workers.append(worker)
+
+    try:
+        from services.scanning.abandoned_workers import (
+            drain_abandoned_workers,
+            resolve_max_live_abandoned,
+        )
+
+        drain_abandoned_workers(
+            _abandoned_album_workers,
+            0,
+            resolve_max_live_abandoned(),
+            label="[SCAN]",
+        )
+    except Exception as exc:
+        # Never let the bookkeeping become a new failure mode for a phase that
+        # has already been abandoned.
+        logger.debug("Abandoned album worker drain failed", error=str(exc))
+
+
 def _bounded_album_phase(
     func: Callable[..., T],
     *args: Any,
@@ -342,6 +384,11 @@ def _bounded_album_phase(
         return report
 
     if report.get("abandoned"):
+        # The worker is STILL RUNNING and the budget only stopped WAITING for
+        # it — hand it to the drain before the next album starts, so a slow
+        # provider cannot keep occupying the pool it just exhausted.
+        _track_abandoned_album_worker(report)
+
         # Propagate ONLY the abandonment, in the shape the callers already
         # understand (they test ``result.get("abandoned")`` / non-list).
         return {

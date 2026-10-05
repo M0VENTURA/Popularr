@@ -28,140 +28,33 @@ from services.scanning.scan_state import (
 
 logger = structlog.get_logger(__name__)
 
-#: How long to wait for an abandoned artist's worker to notice its
-#: cancellation before moving on, in seconds.  Bounded on purpose: cancellation
-#: is cooperative, so a worker blocked in a syscall may never observe it, and
-#: waiting indefinitely would reintroduce the frozen scan the budget prevents.
-_ABANDONED_GRACE_SECONDS = 5.0
-
-#: Hard ceiling on ANY single drain wait, regardless of configuration. The
-#: drain must never be able to stall the scan, so this is NOT configurable.
-_ABANDONED_MAX_WAIT_SECONDS = 60.0
-
-#: Default cap on simultaneously-live abandoned workers. One artist's worker
-#: still winding down is harmless; a growing pile contends for the DB pool and
-#: the shared rate limiter, which is what turned a slow artist into a cascade.
-_DEFAULT_MAX_LIVE_ABANDONED = 1
-
-
-def _resolve_max_live_abandoned() -> int:
-    """Read the abandoned-worker cap from config (``features`` block).
-
-    Clamped to 0-16.  ``0`` means "never wait" — every abandoned worker is left
-    to unwind on its own, which is the pre-fix behaviour available for a
-    deliberately unattended/oversubscribed host.
-    """
-    try:
-        from helpers.config_helpers import get_feature
-
-        value = int(
-            get_feature(
-                "full_scan_max_abandoned_workers",
-                _DEFAULT_MAX_LIVE_ABANDONED,
-            )
-            or 0
-        )
-    except Exception:
-        value = _DEFAULT_MAX_LIVE_ABANDONED
-    return max(0, min(value, 16))
-
-
-def _live_abandoned_workers(workers: list[Any]) -> list[Any]:
-    """Drop finished workers in place and return the still-running ones."""
-    workers[:] = [w for w in workers if getattr(w, "is_alive", lambda: False)()]
-    return workers
-
-
-def _effective_grace_seconds(grace_seconds: float) -> float:
-    """Clamp a requested grace period to the hard ceiling.
-
-    Factored out so the clamp can be asserted directly and cheaply: verifying
-    it by TIMING a 1-hour wait would make the suite take an hour.
-    """
-    try:
-        requested = float(grace_seconds)
-    except (TypeError, ValueError):
-        return _ABANDONED_GRACE_SECONDS
-    if requested < 0:
-        return 0.0
-    return min(requested, _ABANDONED_MAX_WAIT_SECONDS)
-
-
-def _drain_abandoned_workers(
-    workers: list[Any],
-    artist_position: int,
-    max_live: int,
-    *,
-    grace_seconds: float = _ABANDONED_GRACE_SECONDS,
-) -> dict[str, int]:
-    """Wait (briefly, bounded) until few enough abandoned workers remain.
-
-    Called after an artist is abandoned and asked to cancel.  The wait is a
-    GRACE PERIOD, not a join: an artist cancelled at an album boundary needs a
-    moment to unwind, but a worker stuck in a blocked syscall must never be
-    able to stall the scan — that is the whole reason the budget exists.
-
-    Termination is guaranteed by TWO independent bounds (a deadline AND an
-    iteration ceiling), so neither a pathological clock nor a worker that
-    ignores cancellation can hang the caller.
-
-    Returns ``{"live": n, "finished": m, "forced": k}`` where ``forced`` counts
-    workers abandoned while still running because the cap could not be met.
-    """
-    stats = {"live": 0, "finished": 0, "forced": 0}
-
-    if max_live <= 0:
-        # Cap disabled: never wait.  Report the true outstanding count so the
-        # condition stays visible in the log rather than being hidden.
-        live = _live_abandoned_workers(workers)
-        stats["live"] = len(live)
-        stats["forced"] = len(live)
-        if live:
-            logger.warning(
-                "[FULL_SCAN] Abandoned workers still running (cap disabled)",
-                live=len(live),
-                artists=[getattr(w, "name", "?") for w in live],
-            )
-        return stats
-
-    effective_grace = _effective_grace_seconds(grace_seconds)
-    deadline = time.monotonic() + effective_grace
-    max_iterations = int(effective_grace / 0.25) + 4
-    iterations = 0
-
-    while iterations < max_iterations:
-        iterations += 1
-        if len(_live_abandoned_workers(workers)) <= max_live:
-            break
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(0.25)
-
-    live = _live_abandoned_workers(workers)
-    stats["live"] = len(live)
-
-    if len(live) > max_live:
-        # The grace period expired with stragglers left.  Log loudly: this is
-        # the case where the cascade could still resume, so it must be visible
-        # rather than silently tolerated.
-        stats["forced"] = len(live) - max_live
-        logger.warning(
-            "[FULL_SCAN] Abandoned workers still running after grace period — "
-            "these can slow the next artists",
-            live=len(live),
-            cap=max_live,
-            grace_seconds=effective_grace,
-            artists=[getattr(w, "name", "?") for w in live],
-        )
-    else:
-        logger.debug(
-            "[FULL_SCAN] Abandoned workers drained to cap",
-            live=len(live),
-            cap=max_live,
-            position=artist_position,
-        )
-
-    return stats
+#: The bounded-drain machinery moved to ``services.scanning.abandoned_workers``
+#: so the album-level drain in ``services.popularity.scan_stage_runner`` can use
+#: it without this module importing that one (or vice versa — this file already
+#: imports ``_bounded_call_report`` from it lazily).  The underscore aliases are
+#: deliberate: tests monkeypatch ``popularity_pipeline._drain_abandoned_workers``
+#: and read the constants off this module, so both spellings must keep working.
+from services.scanning.abandoned_workers import (
+    ABANDONED_GRACE_SECONDS as _ABANDONED_GRACE_SECONDS,
+)
+from services.scanning.abandoned_workers import (
+    ABANDONED_MAX_WAIT_SECONDS as _ABANDONED_MAX_WAIT_SECONDS,
+)
+from services.scanning.abandoned_workers import (
+    DEFAULT_MAX_LIVE_ABANDONED as _DEFAULT_MAX_LIVE_ABANDONED,
+)
+from services.scanning.abandoned_workers import (
+    drain_abandoned_workers as _drain_abandoned_workers,
+)
+from services.scanning.abandoned_workers import (
+    effective_grace_seconds as _effective_grace_seconds,
+)
+from services.scanning.abandoned_workers import (
+    live_abandoned_workers as _live_abandoned_workers,
+)
+from services.scanning.abandoned_workers import (
+    resolve_max_live_abandoned as _resolve_max_live_abandoned,
+)
 
 
 def is_popularity_scan_active() -> bool:
