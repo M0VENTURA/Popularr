@@ -74,11 +74,18 @@ class TestGenresAreCounted:
 
         Without this the genres reached the database and the page still said
         nothing had changed.
+
+        The write itself now lives in ``_apply_album_track_genres`` (phase 1 of
+        the save); what the route must still do is TAKE the rowcount and count
+        it — hence the unpack rather than the old inline assignment.
         """
         assert "genre_only_writes = 0" in album_save
-        assert "_genre_rows = update_track_genres(" in album_save
+        assert "_genre_rows, _genre_failed = _apply_album_track_genres(" in album_save
         assert "if _genre_rows:" in album_save
         assert "genre_only_writes += 1" in album_save
+        # Failures are counted too, or a rejected JSONB write reads as a
+        # successful no-op save.
+        assert "genre_write_failures += 1" in album_save
 
     def test_genre_only_save_reports_success(self, ui_source: str):
         """A genres-only save reports the genre write, not "no changes"."""

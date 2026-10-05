@@ -1385,6 +1385,115 @@ def _fetch_album_mb_backfill(
     return out
 
 
+def _apply_album_track_genres(
+    track_id: Any,
+    track: dict[str, Any],
+    genres_str: str,
+) -> tuple[int, int]:
+    """Write one track's genre chips to the DB and to its file tag.
+
+    Returns ``(rows_written, failed)``. Kept together on purpose: the file
+    write is part of "the genres the user chose", so splitting it would mean
+    carrying the genre list into a later pass.
+
+    Genres bypass ``payload`` and are counted separately — otherwise a
+    genres-only save reports "No changes were made". A JSONB rejection or a
+    connection blip must not vanish silently either: it is counted and logged
+    at WARNING.
+    """
+    genres_list = [
+        g.strip()
+        for g in re.split(r"[,;/\\]+", genres_str)
+        if g.strip()
+    ]
+    if not genres_list:
+        return 0, 0
+
+    rows = 0
+    failed = 0
+    from db.repositories.metadata import update_track_genres
+
+    try:
+        rows = update_track_genres(
+            track_id=track_id, genres_str=", ".join(genres_list),
+        ) or 0
+    except Exception as genre_err:
+        failed = 1
+        logger.warning(
+            "Album save: genre write FAILED",
+            track_id=track_id, error=str(genre_err),
+        )
+
+    file_path = resolve_music_file_path(track.get("file_path"))
+    if file_path:
+        try:
+            update_file_tags(file_path, {"genres": genres_list})
+        except Exception as tag_err:
+            logger.debug("Tag write failed", track_id=track_id, error=str(tag_err))
+    return rows, failed
+
+
+def _persist_album_track_payload(track_id: Any, payload: dict[str, Any]) -> tuple[bool, str]:
+    """Write one track's payload to the DB. Returns ``(ok, error)``.
+
+    ⚠️ The failure is COUNTED by the caller, not swallowed. This used to be a
+    bare DEBUG log, so a rejected write (e.g. "invalid input syntax for type
+    json" against a JSONB genre column) left ``updated_count`` at 0 and the
+    page flashed "No changes were made." — telling the user their edit was a
+    no-op when in fact the save FAILED, with the only trace an ERROR in the
+    POSTGRES log.
+    """
+    try:
+        insert_or_update_track(track_id, payload)
+        return True, ""
+    except Exception as db_err:
+        logger.warning(
+            "Album save: DB update FAILED",
+            track_id=track_id, error=str(db_err),
+        )
+        return False, str(db_err)
+
+
+def _write_album_track_file_tags(
+    track_id: Any,
+    track: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    strip_disc_numbers: bool,
+    disc_staged: bool,
+) -> tuple[bool, str]:
+    """Write one track's tags to its audio file. Returns ``(ok, file_path)``.
+
+    Carries the two conventions the DB payload cannot express:
+
+    * the "Cover" genre, mirroring the standalone cover-detection area;
+    * the single-disc ``disc_number=""`` clear — ``build_tag_updates`` drops
+      empty values, so it must be pushed explicitly. Skipped when the review
+      supplied a disc number: the strip is an album-level heuristic while a
+      staged value is a confirmed correction, and this line used to undo that
+      correction on the file after the DB had accepted it.
+    """
+    resolved = resolve_music_file_path(track.get("file_path"))
+    if not resolved:
+        return False, resolved
+    try:
+        file_tags = build_tag_updates(payload)
+        if payload.get("is_cover"):
+            existing = file_tags.get("genres") or file_tags.get("genre")
+            if isinstance(existing, list):
+                if "cover" not in [str(g).lower() for g in existing]:
+                    file_tags["genre"] = "; ".join([str(g) for g in existing] + ["Cover"])
+            else:
+                file_tags["genre"] = "Cover"
+        if strip_disc_numbers and not disc_staged:
+            file_tags["disc_number"] = ""
+        if file_tags:
+            return bool(update_file_tags(resolved, file_tags)), resolved
+    except Exception as tag_err:
+        logger.debug("File tag write failed", track_id=track_id, error=str(tag_err))
+    return False, resolved
+
+
 def _resolve_album_cover_bytes(
     cover_url: str,
     album_mbid: str,
@@ -1901,85 +2010,31 @@ async def album_detail(album_path: str) -> Any:
                     payload["disc_number"] = "1"
 
             if genres_str:
-                genres_list = [
-                    g.strip()
-                    for g in re.split(r"[,;/\\]+", genres_str)
-                    if g.strip()
-                ]
-                genres_str_clean = ", ".join(genres_list)
+                # Phase 1 — genres: DB rows + the file's own genre tag.
+                _genre_rows, _genre_failed = _apply_album_track_genres(
+                    track_id, track, genres_str,
+                )
+                # Genres bypass ``payload``, so they must be counted here or
+                # a genres-only save is reported as "No changes were made".
+                if _genre_rows:
+                    genre_only_writes += 1
+                if _genre_failed:
+                    genre_write_failures += 1
 
-                if genres_list:
-                    from db.repositories.metadata import update_track_genres
-                    try:
-                        _genre_rows = update_track_genres(track_id=track_id, genres_str=genres_str_clean)
-                    except Exception as genre_err:
-                        # The genre columns are JSONB; a value the DB rejects
-                        # (or a connection blip) must not vanish silently — it
-                        # would make a genres-only save look like a no-op.
-                        _genre_rows = 0
-                        genre_write_failures += 1
-                        logger.warning(
-                            "Album save: genre write FAILED",
-                            track_id=track_id, error=str(genre_err),
-                        )
-                    # Genres bypass ``payload``, so they must be counted here or
-                    # a genres-only save is reported as "No changes were made".
-                    if _genre_rows:
-                        genre_only_writes += 1
-
-                    file_path = resolve_music_file_path(track.get("file_path"))
-                    if file_path:
-                        try:
-                            update_file_tags(file_path, {"genres": genres_list})
-                        except Exception as tag_err:
-                            logger.debug("Tag write failed", track_id=track_id, error=str(tag_err))
-
+            # Phase 2 — persist: the DB row (album fields, then the staged
+            # review on top, so a per-track value the user kept always wins).
             if len(payload) > 1:
-                try:
-                    insert_or_update_track(track_id, payload)
+                if _persist_album_track_payload(track_id, payload)[0]:
                     updated_count += 1
-                except Exception as db_err:
-                    # ⚠️ COUNTED, not swallowed. This used to be a bare DEBUG
-                    # log, so a rejected write (e.g. "invalid input syntax for
-                    # type json" against a JSONB genre column) left
-                    # ``updated_count`` at 0 and the page then flashed
-                    # "No changes were made." — telling the user their edit was
-                    # a no-op when in fact the save FAILED. A silent DEBUG log
-                    # also made the failure invisible in a normal log tail.
+                else:
                     db_failures += 1
-                    logger.warning(
-                        "Album save: DB update FAILED",
-                        track_id=track_id, error=str(db_err),
-                    )
 
-            _resolved_file = resolve_music_file_path(track.get("file_path"))
-            _file_write_ok = False
-            
-            if _resolved_file:
-                try:
-                    _file_tags = build_tag_updates(payload)
-                    # Cover convention: add the "Cover" genre to the file
-                    # tags (mirrors the standalone cover-detection area).
-                    if payload.get("is_cover"):
-                        _existing_genres = _file_tags.get("genres") or _file_tags.get("genre")
-                        if isinstance(_existing_genres, list):
-                            if "cover" not in [str(g).lower() for g in _existing_genres]:
-                                _file_tags["genre"] = "; ".join([str(g) for g in _existing_genres] + ["Cover"])
-                        else:
-                            _file_tags["genre"] = "Cover"
-                    # Single-disc strip: build_tag_updates drops EMPTY values,
-                    # so push disc_number="" explicitly to clear the frame.
-                    # Skipped when the review supplied a disc number — the
-                    # strip is an album-level heuristic, the staged value is a
-                    # confirmed correction, and this is the line that used to
-                    # undo it on the file after the DB had accepted it.
-                    if _strip_disc_numbers and not _disc_staged:
-                        _file_tags["disc_number"] = ""
-                    if _file_tags:
-                        _file_write_ok = bool(update_file_tags(_resolved_file, _file_tags))
-                except Exception as tag_err:
-                    logger.debug("File tag write failed", track_id=track_id, error=str(tag_err))
-                    
+            # Phase 3 — file tags: the cover genre and the single-disc clear.
+            _file_write_ok, _resolved_file = _write_album_track_file_tags(
+                track_id, track, payload,
+                strip_disc_numbers=_strip_disc_numbers,
+                disc_staged=_disc_staged,
+            )
             if not _file_write_ok:
                 file_sync_failures += 1
                 logger.warning(
