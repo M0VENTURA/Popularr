@@ -395,7 +395,15 @@ def _register_default_jobs(scheduler: BackgroundScheduler, cfg: dict[str, Any]) 
                 func=_download_queue_processor_tick,
                 max_instances=1,
                 coalesce=True,
-                misfire_grace_time=30,
+                # Inherit job_defaults' 300s rather than overriding it down to
+                # 30 — which is what this job used to do, and 30 is BELOW the
+                # default. The reported "Run time of job \"Process download
+                # queue\" was missed by 0:00:38" is exactly that: a tick that
+                # ran 38s long passed the 30s grace by 8s, so APScheduler
+                # DISCARDED the next run and downloads idled a whole extra
+                # interval for no reason. A late tick is safe — `coalesce`
+                # collapses any backlog into a single run and `max_instances`
+                # forbids overlap, so lateness can never make ticks pile up.
             )
         except Exception as exc:
             logger.warning("APScheduler failed to register download_queue_processor", error=str(exc))
