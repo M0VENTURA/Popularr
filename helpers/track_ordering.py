@@ -54,19 +54,35 @@ def leading_int(value: Any) -> int | None:
     return int(digits) if digits else None
 
 
+def disc_sort_value(track: dict[str, Any]) -> int:
+    """The numeric disc used for BOTH ordering and grouping.
+
+    A blank, absent or ``0`` disc is disc 1. That is reported behaviour rather
+    than an accident: bad source tags left a ``0`` behind and the album page
+    showed a "disc 1 and disc 0" split on single-disc releases
+    (``test_disc_zero_normalised_to_one``). Keeping it in ONE place is what
+    stops the group header a user scrolls past and the order they see the rows
+    in from ever disagreeing.
+
+        '2' -> 2    '01' -> 1    '1/2' -> 1    '0' -> 1    '' -> 1    None -> 1
+    """
+    disc = leading_int(track.get("disc_number"))
+    if disc is None or disc < 1:
+        return 1
+    return disc
+
+
 def album_track_sort_key(track: dict[str, Any]) -> tuple[int, int, str]:
     """Sort key: ``(disc, track, title)`` with blanks and blanks-only handled.
 
-    * **disc** — numeric, and a blank/zero/absent disc is disc 1. This is the
-      line that fixes "Track 13 before Track 1": without it an empty DISC tag
-      sorts ahead of every ``'1'``.
+    * **disc** — :func:`disc_sort_value`. Without it an empty DISC tag sorts
+      ahead of every ``'1'``, which is the line that fixes "Track 13 before
+      Track 1".
     * **track** — numeric, unnumbered tracks sort AFTER numbered ones rather
       than in front of them.
     * **title** — the tie-break for duplicate or missing numbers.
     """
-    disc = leading_int(track.get("disc_number"))
-    if not disc or disc < 1:
-        disc = 1
+    disc = disc_sort_value(track)
 
     number = leading_int(track.get("track_number"))
     return (disc, number if number is not None else _UNNUMBERED,

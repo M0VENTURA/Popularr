@@ -44,7 +44,7 @@ from helpers.config_helpers import (
 )
 from helpers.logging_config import resolve_log_dir, set_log_level
 from helpers.normalization_service import strip_featured_artist
-from helpers.track_ordering import sort_album_tracks
+from helpers.track_ordering import disc_sort_value, sort_album_tracks
 from services.catalog.album_classification_service import classify_album_type
 from services.enrichment.genre_tag_aggregator import (
     get_album_genre_sources,
@@ -2278,13 +2278,19 @@ async def album_detail(album_path: str) -> Any:
 
     tracks_by_disc: dict[int, list[dict[str, Any]]] = {}
     for track in tracks:
-        # Normalise a bogus disc_number of 0 (bad source tags / imports) to
-        # disc 1 — a "0" disc must never render as its own "disc 0" group on
-        # a single-disc album (the reported "disc 1 and disc 0" split).
-        disc_number = safe_int(track.get("disc_number"))
-        if not disc_number or disc_number < 1:
-            disc_number = 1
+        # disc_sort_value is the SINGLE definition of "what disc is this" —
+        # shared with album_track_sort_key, so the group header and the row
+        # order can never disagree. It keeps the reported behaviour: a bogus
+        # disc_number of 0 (bad source tags / imports) folds into disc 1
+        # rather than rendering as its own "disc 0" group on a single-disc
+        # album (the reported "disc 1 and disc 0" split).
+        disc_number = disc_sort_value(track)
+        track["disc_group"] = disc_number
         tracks_by_disc.setdefault(disc_number, []).append(track)
+
+    # Group headers only when there is something to group — a single-disc
+    # album must not grow a header that says "Disc 1" above one row.
+    show_disc_headers = len(tracks_by_disc) > 1
 
     album_genres = collect_album_genres()
 
@@ -2337,6 +2343,7 @@ async def album_detail(album_path: str) -> Any:
         album_data=album_data,
         tracks=tracks,
         tracks_by_disc=tracks_by_disc,
+        show_disc_headers=show_disc_headers,
         album_genres=album_genres,
         genre_sources=genre_sources,
         hero_genres=hero_genres,

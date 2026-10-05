@@ -283,6 +283,22 @@
             </thead>
             <tbody id="albumTracksTbody">
               {% for track in tracks %}
+              {# loop.changed must be EVALUATED on every row (hence the set
+                 above the test): it remembers the PREVIOUS row's value, and
+                 short-circuiting on loop.first leaves row 1 un-recorded, which
+                 makes row 2 look like a new group too. #}
+              {% set disc_changed = loop.changed(track.disc_group) %}
+              {% if show_disc_headers and (loop.first or disc_changed) %}
+              {# Section header for a multi-disc album. It deliberately carries
+                 no data-track-id: every row lookup in album_detail.js keys on
+                 that attribute, so this row is invisible to placement,
+                 selection and the duplicate badges. #}
+              <tr class="disc-group-row">
+                <td colspan="5" class="border-0 pt-3 pb-1">
+                  <span class="text-muted text-uppercase fw-semibold" style="font-size:.7rem;letter-spacing:.08em;">Disc {{ track.disc_group }}</span>
+                </td>
+              </tr>
+              {% endif %}
               {# data-track-number / data-disc-number are what lets album_detail.js
                  line an injected missing row up with the library rows around it:
                  the MusicBrainz comparison array is in tracklist order, which is
