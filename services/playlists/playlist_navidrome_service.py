@@ -322,15 +322,34 @@ def sync_playlist_by_name(
                         playlist_id=primary_id,
                     )
                 elif len(stored) != len(song_ids):
+                    # WHICH ids were dropped. A count alone cannot separate the
+                    # two very different causes: a STALE id (a Navidrome import
+                    # refreshes it) from a song Navidrome has not INDEXED yet
+                    # (only a Navidrome scan can — the import is powerless,
+                    # which is why "re-run the import" can be followed and the
+                    # warning still return). The ids are also what the caller
+                    # needs to name the affected tracks.
+                    _requested = set(song_ids)
+                    _stored = set(stored)
+                    dropped = [i for i in song_ids if i not in _stored]
+                    extra = [i for i in stored if i not in _requested]
+                    result["dropped_ids"] = dropped
+                    result["extra_ids"] = extra
                     logger.warning(
                         "[PLAYLISTS] Navidrome stored a different number of tracks "
                         "than requested — stale song IDs are the usual cause "
                         "(Navidrome re-encoded all IDs in 0.64); re-run the "
-                        "Navidrome import scan to refresh them",
+                        "Navidrome import scan to refresh them. If they survive "
+                        "an import, Navidrome has not indexed those files yet — "
+                        "rescan Navidrome first",
                         name=name,
                         playlist_id=primary_id,
                         requested=len(song_ids),
                         stored=len(stored),
+                        dropped=len(dropped),
+                        dropped_ids=dropped[:8],
+                        extra=len(extra),
+                        extra_ids=extra[:8],
                     )
             else:
                 logger.warning(

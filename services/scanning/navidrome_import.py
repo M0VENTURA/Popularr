@@ -649,6 +649,27 @@ def scan_artist_to_db(
                         navidrome_tracks=[],
                     )
 
+        # ⚠️ THIS IMPORT MAY HAVE JUST REWRITTEN ``tracks.id`` — the id IS the
+        # Navidrome song id, so a 0.64 re-encoding or a re-adopted row changes
+        # it. The genre / Top-Tracks playlists are built from a CACHED snapshot
+        # of those rows (``_GENRE_ROWS_CACHE``, 120s), and nothing else in the
+        # import path cleared it: a finalise inside that window pushed the ids
+        # the import had just replaced, and the sync reported "stored a
+        # different number of tracks than requested" AFTER a clean re-import —
+        # the warning telling the operator to re-run the import they had
+        # already run.
+        try:
+            from services.popularity.stages.finalise_stage import (
+                invalidate_genre_playlist_rows,
+            )
+
+            invalidate_genre_playlist_rows()
+        except Exception as _inv_exc:
+            logger.debug(
+                "Genre playlist row cache invalidation skipped",
+                error=str(_inv_exc),
+            )
+
         if diff_mode and changed_album_names is not None:
             return {"changed": True, "changed_albums": len(changed_album_names)}
 

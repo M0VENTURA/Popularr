@@ -1978,7 +1978,7 @@ def _create_new_music_playlist() -> int:
         return 0
 
     try:
-        sync_res = _sync_playlist_to_navidrome("New Music", _song_ids)
+        sync_res = _sync_playlist_to_navidrome("New Music", _song_ids, rows=winners)
         if not _playlist_sync_succeeded(sync_res):
             return 0
         if not sync_res.get("skipped"):
@@ -2211,7 +2211,7 @@ def _sync_essential_playlist(
         return False
 
     try:
-        sync_res = _sync_playlist_to_navidrome(playlist_name, _song_ids)
+        sync_res = _sync_playlist_to_navidrome(playlist_name, _song_ids, rows=winners)
         if not _playlist_sync_succeeded(sync_res):
             return False
         if sync_res.get("skipped"):
@@ -2421,9 +2421,42 @@ def _sweep_orphaned_genre_playlists_from_navidrome(keep_playlist_names: set[str]
         logger.warning("Genre playlist Navidrome sweep failed", error=str(exc))
 
 
+def _log_dropped_playlist_tracks(
+    playlist_name: str,
+    dropped_ids: list[str],
+    rows: list[dict[str, Any]] | None,
+) -> None:
+    """Name the tracks Navidrome refused to store.
+
+    The service only has ids; the CALLER has the rows that produced them, so
+    this turns ``dropped=['3f9…']`` into *"Stabbing Westward - Shame"* — the
+    difference between a warning you can act on and one you can only re-run the
+    import against and hope.
+    """
+    by_id = {str(r.get("id") or ""): r for r in (rows or [])}
+    named: list[str] = []
+    for track_id in dropped_ids[:8]:
+        row = by_id.get(track_id)
+        if row:
+            who = str(row.get("artist") or row.get("album_artist") or "").strip()
+            title = str(row.get("title") or "").strip()
+            named.append(f"{who} - {title}" if who else title)
+        else:
+            named.append(f"<unknown id {track_id}>")
+    logger.warning(
+        "[PLAYLISTS] Navidrome did not store these track(s) in the playlist",
+        playlist=playlist_name,
+        dropped=len(dropped_ids),
+        tracks=named,
+        hint="stale ids are refreshed by a Navidrome import; ids for files "
+             "Navidrome has not indexed yet need a Navidrome scan first",
+    )
+
+
 def _sync_playlist_to_navidrome(
     playlist_name: str,
     song_ids: list[str],
+    rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, int]:
     synced = {
         "updated": 0,
@@ -2471,6 +2504,12 @@ def _sync_playlist_to_navidrome(
             if result.get("unchanged"):
                 synced["unchanged"] += 1
             synced["deduped"] += int(result.get("deduped") or 0)
+
+            # The service verified what Navidrome actually STORED; if it kept
+            # fewer tracks than we asked for, say which ones they were.
+            _dropped = [str(i) for i in (result.get("dropped_ids") or [])]
+            if _dropped:
+                _log_dropped_playlist_tracks(playlist_name, _dropped, rows)
 
             if (
                 result.get("success")
@@ -2810,7 +2849,7 @@ def _create_genre_top_track_playlists(
             continue
 
         try:
-            sync_res = _sync_playlist_to_navidrome(playlist_name, _song_ids)
+            sync_res = _sync_playlist_to_navidrome(playlist_name, _song_ids, rows=winners)
             if not _playlist_sync_succeeded(sync_res):
                 # Previously a bare `continue`: the playlist silently kept its
                 # old tracks while the scan reported only the successes.
