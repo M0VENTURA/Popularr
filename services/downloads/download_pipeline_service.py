@@ -362,11 +362,20 @@ def build_search_query(item: dict) -> str:
 
 def _build_fallback_search_queries(item: dict, primary_query: str) -> list[str]:
     from helpers.config_helpers import _FEAT_SUFFIX_RE
-    from helpers.normalization_service import strip_brackets
+    from helpers.normalization_service import is_track_artist_placeholder, strip_brackets
 
     artist = (item.get("artist") or "").strip()
     album_artist = (item.get("album_artist") or "").strip()
     title = (item.get("title") or "").strip()
+
+    # A compilation's album artist is a PLACEHOLDER ("Various Artists"),
+    # never a performer. Seeding it into a fallback query searches for a name
+    # no shared file carries, and — worse — if such a query ever WON it would
+    # bind the wrong artist, the exact failure recorded in
+    # tests/test_compilation_track_artist.py. The row's own ``artist`` is the
+    # track's credit; only a real album artist earns a fallback.
+    if is_track_artist_placeholder(album_artist):
+        album_artist = ""
 
     if not title:
         return []

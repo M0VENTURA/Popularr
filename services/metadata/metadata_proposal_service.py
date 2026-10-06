@@ -338,6 +338,16 @@ def _duration_checks(comparison: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "disc_number": _as_text(entry.get("mb_disc_number")),
             "recording_mbid": _as_text(entry.get("mb_recording_mbid")),
             "duration": _as_text(entry.get("mb_duration") or entry.get("duration")),
+            # WHO to search for.  The row is a matched library track, so its
+            # own credit is the performer; the MusicBrainz recording credit is
+            # the fallback for a row whose artist was never stored.  The album
+            # artist is NEVER used: on a compilation it is "Various Artists",
+            # which matches nothing — and a title-only query binds a
+            # wrong-artist hit (the lesson recorded in
+            # tests/test_compilation_track_artist.py).
+            "artist": _as_text(
+                entry.get("library_artist") or entry.get("mb_artist")
+            ),
         })
     return checks
 

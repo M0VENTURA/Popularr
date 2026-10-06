@@ -373,7 +373,11 @@
     btn.innerHTML = '<i class="bi bi-download me-1"></i>Redownload correct version';
     btn.addEventListener('click', () => {
       const payload = {
-        artist: pageArtist(),
+        // The row's own artist, not the album's: ``check.artist`` comes from
+        // the server's duration checks (library credit, MB credit as
+        // fallback).  The album artist stays as the fallback only — on a
+        // compilation it is "Various Artists", which finds nothing.
+        artist: check.artist || pageArtist(),
         album_artist: pageArtist(),
         album: pageAlbum(),
         title: check.title || '',

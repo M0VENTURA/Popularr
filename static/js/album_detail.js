@@ -1192,7 +1192,8 @@ function _buildMissingTrackRow(trackComp, data) {
             <div class="btn-group btn-group-sm">
                 <button class="btn btn-outline-success py-0 px-2" title="${addTitle}"
                     ${addDisabled}
-                    data-artist="${escapeHtml(pageArtist)}" data-album-artist="${escapeHtml(pageArtist)}"
+                    data-artist="${escapeHtml(trackComp.track_artist || trackComp.mb_artist || pageArtist)}"
+                    data-album-artist="${escapeHtml(pageArtist)}"
                     data-title="${safeTitle}" data-album="${escapeHtml(pageAlbum)}"
                     data-track-number="${safeTrackNum}" data-disc-number="${safeDiscNum}"
                     data-year="${safeYear}" data-release-id="${safeReleaseId}"

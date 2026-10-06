@@ -2005,7 +2005,10 @@
     // Payload held in a closure rather than serialised into ten data-*
     // attributes — no escaping needed and no attribute-size limits.
     const payload = {
-      artist: pageArtist(),
+      // The TRACK's performer, never the album's artist: on a compilation
+      // pageArtist() is "Various Artists", and a queue row searched under it
+      // finds nothing (see tests/test_compilation_track_artist.py).
+      artist: trackComp.track_artist || trackComp.mb_artist || pageArtist(),
       album_artist: pageArtist(),
       album: pageAlbum(),
       title: trackComp.mb_title || '',

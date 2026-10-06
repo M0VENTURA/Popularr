@@ -2629,6 +2629,14 @@ def _match_mb_tracks_to_library(
             "mb_title": Mb_title,
             "mb_recording_mbid": str(mb_track.get("mb_recording_mbid") or ""),
             "mb_duration": mb_track.get("mb_duration"),
+            # WHO performs this recording — the credit MusicBrainz gives the
+            # recording itself, which on a compilation is the individual band,
+            # never the release's "Various Artists".  Consumers need it because
+            # a queue row is searched by (artist, title): album_missing_service
+            # reads ``entry["mb_artist"]`` when it stores ``track_artist``, and
+            # until this key existed it silently fell back to the ALBUM artist,
+            # so every compilation track was queued as "Various Artists".
+            "mb_artist": str(mb_track.get("artist") or ""),
             "matched": Match is not None,
         }
 
@@ -2699,6 +2707,12 @@ def _match_mb_tracks_to_library(
                 "library_disc_number": Library_disc_number,
                 "library_mbid": Library_mbid,
                 "library_duration": Library_duration,
+                # The file's own credit — the performer of THIS recording, and
+                # what a "redownload the correct version" row has to ask
+                # Soulseek for.  Deliberately not the album artist: on a
+                # compilation that is a placeholder (see
+                # helpers.normalization_service.is_track_artist_placeholder).
+                "library_artist": str(Match.get("artist") or ""),
                 "diff_fields": Diff_fields,
                 "needs_update": bool(Diff_fields),
             })
@@ -2710,6 +2724,7 @@ def _match_mb_tracks_to_library(
                 "library_disc_number": None,
                 "library_mbid": "",
                 "library_duration": None,
+                "library_artist": "",
                 "diff_fields": [],
                 "needs_update": False,
             })

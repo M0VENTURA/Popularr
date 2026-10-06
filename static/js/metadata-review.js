@@ -350,7 +350,12 @@
     btn.type = 'button';
     btn.className = 'btn btn-outline-success btn-sm py-0 px-2 ms-auto';
     btn.title = 'Search Soulseek for the correct version of this recording';
-    btn.dataset.artist = pageArtist();
+    // WHO to search for: the row's own artist. ``check.artist`` is the
+    // library track's credit (MusicBrainz recording credit as fallback) from
+    // the server's duration checks — the album artist is only the fallback
+    // for a payload that predates that field, because on a compilation it is
+    // "Various Artists" and that query finds nothing.
+    btn.dataset.artist = check.artist || pageArtist();
     btn.dataset.album = pageAlbum();
     btn.dataset.title = check.title || '';
     btn.dataset.trackNumber = check.track_number || '';
