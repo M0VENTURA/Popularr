@@ -1669,7 +1669,6 @@ function _updateMissingHeaderBadge(count, excluded) {
 function _excludedParts(excluded) {
     const labels = {
         in_library: 'already in the library',
-        queued: 'delivered',
         rejected: 'dismissed',
     };
     const parts = [];

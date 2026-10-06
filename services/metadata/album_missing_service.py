@@ -162,14 +162,6 @@ def _queued_coverage(
     return title_keys, positions
 
 
-#: Queue statuses that mean the track has been DELIVERED (or is already owned),
-#: so listing it as missing would be wrong: the file is in the library, or is
-#: seconds away from being imported there.
-_DELIVERED_QUEUE_STATUSES = frozenset(
-    {"imported", "completed", "matched", "in_collection"}
-)
-
-
 def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None) -> dict[str, Any]:
     """Check which tracks are in the MusicBrainz release but missing from the library.
 
@@ -285,7 +277,7 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
     #: Why the rest of the release is NOT listed — one dict, four gates.
     #: Without it a track dropped by a gate is indistinguishable from one that
     #: never existed (the reported "1-9, 12, 13 render but 10 and 11 absent").
-    excluded: dict[str, int] = {"in_library": 0, "queued": 0}
+    excluded: dict[str, int] = {"in_library": 0}
     for mt in mb_tracks:
         mb_title = mt.get("title", "")
         if not mb_title:
@@ -305,9 +297,13 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
         queue_status = queued_titles.get(norm) or (
             queued_positions.get((mb_disc, mb_num)) if mb_num else None
         )
-        if queue_status and queue_status in _DELIVERED_QUEUE_STATUSES:
-            excluded["queued"] += 1
-            continue
+        # ⚠️ A queue status NEVER hides a track — ``in_library`` is the only
+        # visibility gate, and the status rides along as an annotation (the UI
+        # renders it as a badge). A row marked ``imported``/``completed`` that
+        # did not actually land in this album used to be invisible, and an
+        # invisible track cannot be edited: *"11 already in the library,
+        # 2 delivered not shown … it makes them hard to edit with the correct
+        # information."*
 
         entry = {
             "title": mb_title,
@@ -455,12 +451,11 @@ def persist_missing_from_comparison(
     tracks), so re-deriving it would pay those calls a second time — and
     MusicBrainz is throttled to 1 req/s, shared with any running scan.
 
-    Falls back to the derivation-free path: it only reads the local tracklist to
-    honour the download-queue coverage rule, so a track the queue has already
-    DELIVERED is never re-listed as missing.  A track it has not delivered yet
-    (queued / searching / downloading) IS listed — it carries no
-    ``queue_status`` here because this path only decides what to persist, but
-    the row survives a reload instead of vanishing with the queue stall.
+    Falls back to the derivation-free path: it only reads the local tracklist.
+    Queue status is consulted nowhere as a reason to hide a track —
+    ``in_library`` is the sole visibility gate — because a row marked delivered
+    that never landed in this album produced tracks that were neither listed
+    nor editable.
 
     Returns the number of rows written. Raises only for a genuine DB failure;
     the caller decides whether that is fatal (it is not — the comparison the
@@ -477,28 +472,12 @@ def persist_missing_from_comparison(
         or ""
     )
 
-    # Queue coverage — shared with ``get_missing_tracks`` so the two paths can
-    # never disagree about what "handled" means.  Only a DELIVERED row is
-    # skipped here: an undelivered one (queued / searching / downloading) is
-    # kept, so the track survives a page reload instead of vanishing the
-    # moment the user reloads after a lookup.
-    queued_titles, queued_positions = _queued_coverage(artist, album)
-
     missing: list[dict[str, Any]] = []
     for entry in comparison_rows:
         if entry.get("matched"):
             continue
         title = _as_text(entry.get("mb_title"))
         if not title:
-            continue
-        mb_disc = int(entry.get("mb_disc_number") or 1)
-        mb_num = str(entry.get("mb_track_number") or "").strip()
-        norm = _title_match_key(title)
-
-        queue_status = queued_titles.get(norm) or (
-            queued_positions.get((mb_disc, mb_num)) if mb_num else None
-        )
-        if queue_status and queue_status in _DELIVERED_QUEUE_STATUSES:
             continue
 
         missing.append({

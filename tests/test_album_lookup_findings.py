@@ -355,8 +355,10 @@ class TestMissingTracksReleaseOverride:
 
         excluded = result["excluded"]
         assert excluded["in_library"] == 1, "the gate that ate a track is countable"
-        assert excluded["queued"] == 0
         assert excluded["rejected"] == 0
+        assert "queued" not in excluded, (
+            "a queue status is an annotation now, never a visibility gate"
+        )
 
     def test_the_arithmetic_is_self_checking(self, monkeypatch, release_fetch):
         """Every MB track is either visible or counted — never silently dropped."""
@@ -406,12 +408,19 @@ class TestMissingTracksReleaseOverride:
         assert queued[0].get("queue_status") == "queued", (
             "the row carries WHY it is not offered for download again"
         )
-        assert result["excluded"]["queued"] == 0, (
-            "only a DELIVERED track is excluded — this one has not arrived"
+        assert "queued" not in result["excluded"], (
+            "no queue status is an exclusion reason any more — in_library is "
+            "the only visibility gate"
         )
 
-    def test_a_delivered_queue_row_stays_hidden(self, monkeypatch, release_fetch):
-        """CONTROL — an imported track is in the library, so it is not missing."""
+    def test_a_delivered_queue_row_is_listed(self, monkeypatch, release_fetch):
+        """A row marked delivered that is NOT in the library must stay visible.
+
+        Reported: *"11 already in the library, 2 delivered not shown … it makes
+        them hard to edit with the correct information."*  ``in_library`` is
+        the only visibility gate; the queue status rides along so the UI can
+        badge it.
+        """
         monkeypatch.setattr(ams, "_persist_missing_tracks", lambda *a, **k: None)
         _queue_insert("Dup Artist", "Missing Two", "Dup Album", "imported")
 
@@ -419,9 +428,15 @@ class TestMissingTracksReleaseOverride:
                                         release_mbid="picked-id")
 
         titles = [m["title"] for m in result["missing_tracks"]]
-        assert titles == ["Missing One"], "the delivered one is handled, not missing"
-        assert result["excluded"]["queued"] == 1, (
-            "the gate that keeps a finished download off the list still counts"
+        assert titles == ["Missing One", "Missing Two"], (
+            "a delivered-but-not-in-library track must stay editable"
+        )
+        listed = [m for m in result["missing_tracks"] if m["title"] == "Missing Two"]
+        assert listed[0].get("queue_status") == "imported", (
+            "the status still rides along so the UI can badge it"
+        )
+        assert "queued" not in result["excluded"], (
+            "the delivered gate is gone — in_library is the only visibility gate"
         )
 
     def test_a_queue_row_with_no_album_cannot_hide_this_albums_track(

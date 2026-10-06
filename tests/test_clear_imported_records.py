@@ -232,15 +232,25 @@ class TestClearImportedBehaviour:
 # ---------------------------------------------------------------------------
 
 class TestTheImportedRowWasWhatBlockedTheRedownload:
-    """⭐ Pins the MECHANISM so the UI button is not mistaken for the whole fix.
+    """⭐ HISTORY — and the rule that replaced it.
 
-    An ``imported`` queue row counts as queue coverage in
-    ``album_missing_service``, so the track is skipped from the missing set and
-    "Download Missing Tracks" never offers it. Deleting only the library rows
-    therefore does NOT restore it — the queue row must go too.
+    An ``imported`` queue row used to count as queue coverage, so the track was
+    skipped from the missing set and "Download Missing Tracks" never offered
+    it: deleting only the library rows did NOT restore it — the queue row had
+    to go too.
+
+    That suppression is now REMOVED. A delivered row that never landed in this
+    album was invisible, and an invisible track cannot be edited (reported:
+    *"11 already in the library, 2 delivered not shown … it makes them hard to
+    edit with the correct information"*), and the original bug cannot recur —
+    the track shows whether or not a stale imported row exists.
+
+    What actually prevents the double-download this class cared about is the
+    ROW, not the list's silence: the entry carries ``queue_status``, so the UI
+    badges it and disables the download button.
     """
 
-    def test_the_missing_service_counts_imported_as_coverage(self):
+    def test_an_imported_queue_row_no_longer_suppresses_the_track(self):
         from pathlib import Path
 
         source = (
@@ -248,43 +258,60 @@ class TestTheImportedRowWasWhatBlockedTheRedownload:
             / "services" / "metadata" / "album_missing_service.py"
         ).read_text(encoding="utf-8")
 
-        assert "get_missing_tracks" in source
-        # Locate the queue-coverage query and assert 'imported' is in its status list.
-        idx = source.index("Download-queue coverage")
-        window = source[idx: idx + 2000]
-        assert "'imported'" in window or '"imported"' in window, (
-            "imported must be counted as queue coverage, which is WHY a stale "
-            "imported row suppresses the missing-track list"
+        # The status list is still queried — the badge needs to know it …
+        assert "'imported'" in source
+        # … but nothing hides a track on a queue status any more.
+        assert "_DELIVERED_QUEUE_STATUSES" not in source, (
+            "the delivered gate is back: an imported row would hide the track "
+            "again instead of badging it"
+        )
+        assert 'excluded["queued"]' not in source, (
+            "in_library is the only visibility gate now"
+        )
+
+    def test_the_rule_is_the_library_not_the_queue(self):
+        """Restate the rule the service now implements, in isolation.
+
+        Visibility comes from the library; the queue only decorates. The
+        double-download protection is the disabled button on a row that
+        carries ``queue_status`` — not the track being absent.
+        """
+        library = {"Some Song"}
+        queue_rows = [{"title": "Lost Song", "status": "imported"}]
+
+        missing = [t for t in ("Lost Song",) if t not in library]
+
+        assert missing == ["Lost Song"], "not in the library → on the list"
+        assert any(r["title"] == "Lost Song" for r in queue_rows), (
+            "the row still exists, so the UI can badge it and disable the button"
         )
 
     def test_clearing_imported_restores_the_track_to_the_missing_set(self):
-        """The end-to-end consequence, expressed on the coverage rule itself.
+        """Retitled intent: clearing imported no longer DECIDES visibility.
 
-        Reproduces the rule the service uses rather than driving MusicBrainz: a
-        track is skipped when a queue row covers it. With the imported row
-        present it is skipped; after clearing imported rows it is not.
+        It used to: the service skipped any track a queue row covered, so
+        clearing imported rows was the only way to get the track back on the
+        list. Visibility is now decided by the library alone (see
+        ``test_the_rule_is_the_library_not_the_queue``), so the track is listed
+        either way — what clearing the row changes is only whether the entry
+        carries a ``queue_status`` to badge it with.
         """
-        coverage_statuses = {
-            "queued", "searching", "downloading", "processing", "moving",
-            "imported", "in_collection", "matched", "completed",
-        }
+        library: set[str] = set()          # nothing in the library yet
+        release_tracks = ["Lost Song"]     # what MusicBrainz says the release has
+        queue_rows = [{"title": "Lost Song", "status": "imported"}]
 
-        def is_covered(queue_rows, title):
-            return any(
-                row["title"] == title and row["status"] in coverage_statuses
-                for row in queue_rows
-            )
+        # Visibility comes from the LIBRARY only — the queue is never consulted.
+        listed = [t for t in release_tracks if t not in library]
+        assert listed == ["Lost Song"], "listed regardless of the imported row"
 
-        rows = [{"title": "Lost Song", "status": "imported"}]
-        assert is_covered(rows, "Lost Song"), "fixture sanity"
-
-        # After the user clears the imported rows, nothing covers the track, so it
-        # becomes visible as missing and can be downloaded again.
-        remaining = [r for r in rows if r["status"] != "imported"]
-        assert not is_covered(remaining, "Lost Song"), (
-            "the track is still reported as covered after clearing imported, so "
-            "it would still never be offered for download"
+        # Clearing the imported row changes nothing about that: the track is
+        # still not in the library, so it stays listed (the row only stops
+        # carrying a status to badge it with).
+        queue_rows.clear()
+        assert [t for t in release_tracks if t not in library] == listed, (
+            "clearing imported must not be what makes a track visible"
         )
+        assert queue_rows == [], "sanity: the row is gone"
 
 
 # ---------------------------------------------------------------------------
