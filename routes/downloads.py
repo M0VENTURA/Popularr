@@ -76,6 +76,7 @@ from services.downloads.download_processing_service import (
 )
 from services.downloads.match_orchestrator import apply_mbid_match_batch
 from services.downloads.slskd_service import SlskdService
+from services.metadata.artist_scan_service import fetch_missing_release_tracklist
 from services.queue.queue_constraints import (
     ACTIVE_SECTION,
     FAILED_SECTION,
@@ -144,6 +145,41 @@ async def api_associate_folder_to_release() -> Any:
         return jsonify({"success": False, "error": "folder_path and mb_id (release/release-group URL or ID) are required"}), 400
         
     return jsonify(await asyncio.to_thread(associate_folder_to_release, folder_path, mb_id))
+
+
+@downloads_bp.route("/api/downloads/folder/match-tracklist")
+async def api_folder_match_tracklist() -> Any:
+    """Track titles for the release a download folder is matched to.
+
+    A matched folder's row shows WHICH release it was associated with, but a
+    match is only verifiable if you can see what is inside it: the row's own
+    artist/album line comes from the files' tags, which is exactly what a
+    wrong match leaves looking plausible. This backs the row's expander.
+
+    Cache-first via ``missing_releases.tracklist`` (one indexed SELECT for a
+    release that has been looked at before); only an uncached release reaches
+    MusicBrainz, so opening rows does not monopolise the shared 1 req/s
+    throttle.
+    """
+    release_mbid = request.args.get("release_mbid", "").strip()
+    if not release_mbid:
+        return jsonify({"success": False, "error": "release_mbid is required"}), 400
+
+    try:
+        titles = await asyncio.to_thread(fetch_missing_release_tracklist, release_mbid, "")
+    except Exception as exc:
+        logger.warning(
+            "Folder match tracklist lookup failed",
+            release_mbid=release_mbid,
+            error=str(exc),
+        )
+        titles = []
+
+    return jsonify({
+        "success": True,
+        "release_mbid": release_mbid,
+        "tracklist": titles,
+    })
 
 
 @downloads_bp.route("/api/downloads/confirm-match", methods=["POST"])

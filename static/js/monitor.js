@@ -126,6 +126,113 @@
 })();
 
 // ===== Unmatched Folders (Disk Scanning) =====
+
+// ── Matched release details ───────────────────────────────────────────────
+//
+// A row's artist/album line comes from the FILES' tags — it says nothing
+// about which MusicBrainz release the folder was actually matched to (a
+// folder matched to "MTV2 Headbangers Ball, Volume 2" still read "Killswitch
+// Engage — The End of Heartache", so the row claimed "Matched ✓" while
+// showing no sign of WHAT it matched). These two helpers render the STORED
+// match — release title, artist, year, MBID — and its tracklist, so a match
+// can be verified right where it was made.
+//
+// Tracklists are cached per release MBID for the session: a re-render after
+// confirm/delete/queue refresh shows them instantly instead of re-asking
+// MusicBrainz (shared 1 req/s throttle).
+const matchedTracklistCache = Object.create(null);
+
+function matchedReleaseHtml(f) {
+  const match = f.match || null;
+  const releaseId = (match && match.release_mbid) || f.release_mbid || '';
+  if (!releaseId) return '';
+
+  const title = (match && match.release_title) || f.album || 'Unknown release';
+  const matchedArtist = (match && match.artist) || f.artist || '';
+  const year = (match && match.release_year) || '';
+  const cached = matchedTracklistCache[releaseId];
+  const tracks = Array.isArray(cached) && cached.length ? cached : null;
+
+  let body = '';
+  if (tracks) {
+    body = `<ol class="small ms-4 mb-0 mt-1">${tracks
+      .map((t) => `<li>${escapeHtml(t)}</li>`)
+      .join('')}</ol>`;
+  } else if (cached === null) {
+    body = '<div class="small text-muted mt-1">No tracklist found for this release.</div>';
+  }
+
+  return `
+            <div class="small mt-1">
+              <span class="badge bg-success me-1">Matched to</span>
+              <strong>${escapeHtml(title)}</strong>${year ? ` (${escapeHtml(String(year))})` : ''}${matchedArtist ? ` <span class="text-muted">— ${escapeHtml(matchedArtist)}</span>` : ''}
+              <span class="text-muted d-block" style="font-size:0.65rem; word-break:break-all;">${escapeHtml(releaseId)}</span>
+            </div>
+            <details class="mt-1 matched-tracklist" data-release-id="${escapeHtml(releaseId)}"${tracks ? ' open' : ''}>
+              <summary class="small text-info" style="cursor:pointer;"><i class="bi bi-list-ul me-1"></i>${tracks ? `Matched album tracks (${tracks.length})` : 'Show matched album tracks'}</summary>
+              <div class="matched-tracklist-body">${body}</div>
+            </details>`;
+}
+
+/**
+ * Fill one matched folder's tracklist (cache-first; fetched only on first
+ * open so page load never fans out into one MusicBrainz request per row).
+ */
+async function loadMatchedTracklist(detailsEl) {
+  const releaseId = detailsEl.getAttribute('data-release-id') || '';
+  if (!releaseId) return;
+
+  const render = () => {
+    const cached = matchedTracklistCache[releaseId];
+    const body = detailsEl.querySelector('.matched-tracklist-body');
+    const summary = detailsEl.querySelector('summary');
+    if (!body) return;
+    if (Array.isArray(cached) && cached.length) {
+      body.innerHTML = `<ol class="small ms-4 mb-0 mt-1">${cached
+        .map((t) => `<li>${escapeHtml(t)}</li>`)
+        .join('')}</ol>`;
+      if (summary) {
+        summary.innerHTML = `<i class="bi bi-list-ul me-1"></i>Matched album tracks (${cached.length})`;
+      }
+    } else {
+      body.innerHTML = '<div class="small text-muted mt-1">No tracklist found for this release.</div>';
+    }
+  };
+
+  if (matchedTracklistCache[releaseId] !== undefined) {
+    render();
+    return;
+  }
+
+  const body = detailsEl.querySelector('.matched-tracklist-body');
+  if (body) body.innerHTML = '<div class="small text-muted mt-1">Loading tracks…</div>';
+  try {
+    const resp = await fetch(
+      `/api/downloads/folder/match-tracklist?release_mbid=${encodeURIComponent(releaseId)}`
+    );
+    const data = await resp.json();
+    matchedTracklistCache[releaseId] = Array.isArray(data && data.tracklist)
+      ? data.tracklist
+      : null;
+  } catch (error) {
+    // Not cached — a later open retries instead of showing a dead end.
+    console.error('[monitor] match tracklist load failed:', error);
+    if (body) {
+      body.innerHTML = '<div class="small text-warning mt-1">Could not load tracks — click to retry.</div>';
+    }
+    return;
+  }
+  render();
+}
+
+function bindMatchedTracklistToggles(listEl) {
+  listEl.querySelectorAll('details.matched-tracklist').forEach((detailsEl) => {
+    detailsEl.addEventListener('toggle', () => {
+      if (detailsEl.open) loadMatchedTracklist(detailsEl);
+    });
+  });
+}
+
 async function renderUnmatchedFolders(options) {
   const section = document.getElementById('unmatchedFoldersSection');
   const list = document.getElementById('unmatchedFoldersList');
@@ -170,6 +277,7 @@ async function renderUnmatchedFolders(options) {
                     <div class="flex-grow-1" style="min-width:0;">
                         <div class="text-truncate"><i class="bi bi-folder2 me-1 text-muted"></i><strong>${escapeHtml(f.display_name || f.name)}</strong>${statusBadge}</div>
                         ${f.artist && f.album ? `<div class="text-muted small mt-1">${escapeHtml(f.artist)} — ${escapeHtml(f.album)}</div>` : ''}
+                        ${matchedReleaseHtml(f)}
                     </div>
                     <div class="d-flex flex-shrink-0 gap-1 flex-wrap justify-content-end">${actionsHtml}</div>
                 </div>
@@ -188,6 +296,7 @@ async function renderUnmatchedFolders(options) {
     }
 
     list.innerHTML = html;
+    bindMatchedTracklistToggles(list);
     attachUnmatchedFolderActions(list);
   } catch (error) {
     console.error('Error loading unmatched folders:', error);
@@ -251,9 +360,28 @@ function openFolderMbSearch(folderPath, isChange, detectedArtist, detectedAlbum)
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ folder_path: window._folderMatchTarget.folder_path, mb_id: selected.id }),
-    }).then(() => {
-      if (typeof window.renderUnmatchedFolders === 'function') window.renderUnmatchedFolders({ forceRender: true });
-    });
+    })
+      .then((resp) => (resp && typeof resp.json === 'function' ? resp.json() : null))
+      .catch(() => null)
+      .then(async (data) => {
+        if (typeof window.renderUnmatchedFolders === 'function') {
+          await window.renderUnmatchedFolders({ forceRender: true });
+        }
+        // The point of a manual match is seeing WHAT it matched: open the
+        // new association's tracklist straight away rather than leaving the
+        // row saying only "Matched ✓".
+        const releaseId =
+          (data && (data.release_mbid || (data.match && data.match.release_mbid))) || '';
+        if (!releaseId) return;
+        const details = Array.from(document.querySelectorAll('details.matched-tracklist')).find(
+          (el) => el.getAttribute('data-release-id') === releaseId
+        );
+        if (details) {
+          details.open = true;
+          loadMatchedTracklist(details);
+        }
+      })
+      .catch((error) => console.error('[monitor] folder associate failed:', error));
   };
 
   window._mbSearchIncludeOwned = true;
