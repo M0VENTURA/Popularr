@@ -1385,16 +1385,16 @@ def _fetch_album_mb_backfill(
     return out
 
 
-def _apply_album_track_genres(
-    track_id: Any,
-    track: dict[str, Any],
-    genres_str: str,
-) -> tuple[int, int]:
-    """Write one track's genre chips to the DB and to its file tag.
+def _apply_album_track_genres(track_id: Any, genres_str: str) -> tuple[int, int]:
+    """Write one track's genre chips to the **database only**.
 
-    Returns ``(rows_written, failed)``. Kept together on purpose: the file
-    write is part of "the genres the user chose", so splitting it would mean
-    carrying the genre list into a later pass.
+    Returns ``(rows_written, failed)``.
+
+    ⚠️ Deliberately does NOT touch the audio file. File genres belong to the
+    popularity scan, which syncs them DB → file via
+    ``album_tag_sync_service.sync_album_file_tags``; writing them here meant
+    two writers for the same tag, and the save's own value only survives a
+    Navidrome import because the file had been updated too.
 
     Genres bypass ``payload`` and are counted separately — otherwise a
     genres-only save reports "No changes were made". A JSONB rejection or a
@@ -1423,13 +1423,6 @@ def _apply_album_track_genres(
             "Album save: genre write FAILED",
             track_id=track_id, error=str(genre_err),
         )
-
-    file_path = resolve_music_file_path(track.get("file_path"))
-    if file_path:
-        try:
-            update_file_tags(file_path, {"genres": genres_list})
-        except Exception as tag_err:
-            logger.debug("Tag write failed", track_id=track_id, error=str(tag_err))
     return rows, failed
 
 
@@ -2010,9 +2003,11 @@ async def album_detail(album_path: str) -> Any:
                     payload["disc_number"] = "1"
 
             if genres_str:
-                # Phase 1 — genres: DB rows + the file's own genre tag.
+                # Phase 1 — genres: the DATABASE columns only. The file's
+                # genre tag is the popularity scan's job (DB → file), so this
+                # pass never writes it.
                 _genre_rows, _genre_failed = _apply_album_track_genres(
-                    track_id, track, genres_str,
+                    track_id, genres_str,
                 )
                 # Genres bypass ``payload``, so they must be counted here or
                 # a genres-only save is reported as "No changes were made".
@@ -2138,7 +2133,11 @@ async def album_detail(album_path: str) -> Any:
         # user-initiated save, coalesced so bursts collapse into one scan.
         # It never blocks the response and is a no-op when Navidrome is
         # unconfigured.
-        if updated_count > 0 or genre_only_writes > 0 or _cover_embedded or reverted_live_count > 0:
+        #
+        # ⚠️ ``genre_only_writes`` is deliberately NOT here: genres are
+        # database-only now, so a genres-only save changes no file and there
+        # would be nothing for Navidrome to re-read.
+        if updated_count > 0 or _cover_embedded or reverted_live_count > 0:
             try:
                 from services.scanning.navidrome_rescan_service import request_rescan
                 request_rescan("album metadata save")

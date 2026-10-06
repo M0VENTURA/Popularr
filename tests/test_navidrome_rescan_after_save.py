@@ -508,15 +508,25 @@ class TestAlbumSaveRequestsRescan:
             "a save that changed nothing must not trigger a Navidrome scan"
         )
 
-    async def test_a_genre_only_save_requests_a_rescan(self, client, album_save):
+    async def test_a_genre_only_save_does_not_request_a_rescan(self, client, album_save):
+        """Genres are database-only now — there is no file to re-read.
+
+        This test used to assert the opposite (*"genres reach the audio files,
+        so Navidrome must rescan"*). The save no longer writes a genre tag —
+        the popularity scan owns DB → file — and ``genres``/``manual_genres``
+        are protected from the sync, so the value cannot be reverted either.
+        Requesting a scan here would now cost a full Navidrome rescan for a
+        change Navidrome was never told to look at.
+        """
         resp = await _post(client, {
             "album_title": "Not Your Kingdom",
             "album_artist": "Madball",
             "album_genres": "Hardcore, Punk",
         })
         assert resp.status_code in (302, 200)
-        assert album_save.rescan_calls == ["album metadata save"], (
-            "genres reach the audio files, so Navidrome must rescan"
+        assert album_save.rescan_calls == [], (
+            "a genres-only save changes no file, so asking Navidrome to "
+            "rescan costs a scan and buys nothing"
         )
 
 

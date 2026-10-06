@@ -349,7 +349,15 @@ _POPULARITY_PROTECTED_COLUMNS: frozenset[str] = frozenset({
     # Single detection
     "is_single", "single_confidence", "single_sources",
     "single_detection_last_updated", "single_manual_override",
-    # Genres / tags (owned by the popularity pipeline's enrichment pass)
+    # Genres / tags (owned by the popularity pipeline's enrichment pass, and
+    # by the album page's genre box — see _apply_album_track_genres)
+    #
+    # ⚠️ ``genres`` / ``manual_genres`` are here because the album save writes
+    # them to the DATABASE ONLY: the file's genre tag is written by the
+    # popularity scan (sync_album_file_tags, DB → file). Without this the
+    # upsert wrote ``genres=EXCLUDED.genres`` from Navidrome's view of the
+    # file — which lags the edit — and silently reverted it on the next import.
+    "genres", "manual_genres",
     "spotify_genres", "lastfm_tags", "listenbrainz_genres",
     "discogs_genres", "musicbrainz_genres", "audiodb_genres", "essentia_genres",
     # Album type (owned by the album stage's enrichment pass — a Navidrome

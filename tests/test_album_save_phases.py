@@ -115,42 +115,53 @@ class TestPersistPhase:
 
 class TestGenresPhase:
     def test_rows_and_failures_are_reported_separately(self, monkeypatch):
-        monkeypatch.setattr(
-            ui, "resolve_music_file_path", lambda p: "",
-        )
         _patch_genres(monkeypatch, rows=3)
 
-        rows, failed = ui._apply_album_track_genres("t1", {"file_path": "x"}, "Rock, Punk")
+        rows, failed = ui._apply_album_track_genres("t1", "Rock, Punk")
 
         assert (rows, failed) == (3, 0)
-        assert ui._apply_album_track_genres("t1", {"file_path": "x"}, "  ") == (0, 0), (
+        assert ui._apply_album_track_genres("t1", "  ") == (0, 0), (
             "no genres → nothing to write"
         )
 
     def test_a_rejected_write_is_counted(self, monkeypatch):
-        monkeypatch.setattr(ui, "resolve_music_file_path", lambda p: "")
         _patch_genres(monkeypatch, rows=0, raise_error=True)
 
-        rows, failed = ui._apply_album_track_genres("t1", {"file_path": "x"}, "Rock")
+        rows, failed = ui._apply_album_track_genres("t1", "Rock")
 
         assert (rows, failed) == (0, 1), (
             "a JSONB rejection must be counted, or a genres-only save looks "
             "like a successful no-op"
         )
 
-    def test_the_file_tag_is_written_too(self, monkeypatch):
-        seen: list[tuple[str, dict]] = []
-        monkeypatch.setattr(ui, "resolve_music_file_path", lambda p: "/music/a.mp3")
-        monkeypatch.setattr(ui, "update_file_tags", lambda path, tags: seen.append((path, tags)) or True)
+    def test_the_save_does_not_touch_the_file(self, monkeypatch):
+        """File genres belong to the POPULARITY SCAN, not to this pass.
+
+        ``sync_album_file_tags`` owns DB → file. When the save wrote them too
+        there were two writers for one tag, and the edit only survived an
+        import because the file happened to be updated alongside it.
+        """
+        def _fail(_path, _tags):
+            raise AssertionError("the album save must not write genre tags")
+
+        monkeypatch.setattr(ui, "update_file_tags", _fail)
         _patch_genres(monkeypatch, rows=1)
 
-        ui._apply_album_track_genres("t1", {"file_path": "x"}, "Rock; Punk")
+        rows, failed = ui._apply_album_track_genres("t1", "Rock; Punk")
 
-        assert seen and seen[0][0] == "/music/a.mp3"
-        assert seen[0][1] == {"genres": ["Rock", "Punk"]}, (
-            "the genre file write lives in THIS phase — splitting it out "
-            "would drop it silently"
+        assert (rows, failed) == (1, 0), (
+            "the database write must still happen even though the file is off-limits"
         )
+
+    def test_the_file_helpers_are_not_even_reached(self, monkeypatch):
+        """No path resolution either — this phase is database-only end to end."""
+        def _fail(_path):
+            raise AssertionError("the album save must not resolve a file path for genres")
+
+        monkeypatch.setattr(ui, "resolve_music_file_path", _fail)
+        _patch_genres(monkeypatch, rows=1)
+
+        assert ui._apply_album_track_genres("t1", "Rock") == (1, 0)
 
 
 class TestFileTagPhase:
@@ -197,6 +208,97 @@ class TestFileTagPhase:
         assert "disc_number" not in seen[1], (
             "a staged disc number is a confirmed correction and must not be "
             "cleared by the album-level heuristic"
+        )
+
+
+class TestGenresSurviveANavidromeImport:
+    """The other half of "database-only": the database has to keep the value.
+
+    The album save writes ``genres``/``manual_genres`` and no longer touches
+    the file, so Navidrome's view of that tag is now *stale* by construction.
+    The sync's ``UPDATE … SET genres=EXCLUDED.genres`` would then write the old
+    file value straight back — the reported "my edit reverts a few hours
+    later". These columns join the protected set so the write is skipped on a
+    ``_navidrome_sync`` upsert.
+    """
+
+    def test_both_columns_are_protected(self):
+        from db.repositories.popularity_repository import _POPULARITY_PROTECTED_COLUMNS
+
+        for col in ("genres", "manual_genres"):
+            assert col in _POPULARITY_PROTECTED_COLUMNS, (
+                f"{col} must be protected from _navidrome_sync overwrites — "
+                "the album save writes it to the database only, so a sync "
+                "would revert it to whatever the file still holds"
+            )
+
+    def test_a_sync_does_not_write_them(self, monkeypatch):
+        import db.repositories.popularity_repository as repo
+
+        seen: dict[str, str] = {}
+
+        class _FakeResult:
+            def fetchall(self):
+                return []
+
+        class _FakeSession:
+            def execute(self, statement, params=None):
+                seen["sql"] = str(statement)
+                seen["params"] = str(params)
+                return _FakeResult()
+
+        monkeypatch.setattr(
+            repo, "get_tracks_table_columns",
+            lambda session=None: {"id", "title", "genres", "manual_genres"},
+        )
+        monkeypatch.setattr(
+            repo, "get_tracks_table_column_types",
+            lambda session=None: {"id": "text", "title": "text",
+                                  "genres": "text", "manual_genres": "jsonb"},
+        )
+
+        repo._execute_save(_FakeSession(), {
+            "_navidrome_sync": True,
+            "id": "t1",
+            "title": "Song",
+            "genres": "Rock",
+            "manual_genres": '["Rock"]',
+        })
+
+        sql = seen["sql"]
+        assert "genres=EXCLUDED.genres" not in sql, (
+            f"a Navidrome sync would overwrite the album save's genres: {sql}"
+        )
+        assert "manual_genres=EXCLUDED.manual_genres" not in sql
+
+    def test_a_real_save_still_writes_them(self, monkeypatch):
+        """CONTROL — protection must apply to syncs, not to every writer."""
+        import db.repositories.popularity_repository as repo
+
+        seen: dict[str, str] = {}
+
+        class _FakeResult:
+            def fetchall(self):
+                return []
+
+        class _FakeSession:
+            def execute(self, statement, params=None):
+                seen["sql"] = str(statement)
+                return _FakeResult()
+
+        monkeypatch.setattr(
+            repo, "get_tracks_table_columns",
+            lambda session=None: {"id", "title", "genres"},
+        )
+        monkeypatch.setattr(
+            repo, "get_tracks_table_column_types",
+            lambda session=None: {"id": "text", "title": "text", "genres": "text"},
+        )
+
+        repo._execute_save(_FakeSession(), {"id": "t1", "title": "Song", "genres": "Rock"})
+
+        assert "genres=EXCLUDED.genres" in seen["sql"], (
+            "an ordinary save must still write genres"
         )
 
 
