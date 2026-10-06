@@ -327,7 +327,7 @@ class TestGenresSurviveANavidromeImport:
 def _patch_genres(monkeypatch: pytest.MonkeyPatch, *, rows: int, raise_error: bool = False):
     """Replace the DB genre writer with a controllable one."""
 
-    def _write(*, track_id, genres_str):
+    def _write(*, track_id, genres_str, **_kwargs):
         if raise_error:
             raise ValueError("invalid input syntax for type json")
         return rows

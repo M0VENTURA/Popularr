@@ -1424,8 +1424,73 @@ def _fetch_album_mb_backfill(
     return out
 
 
+#: Columns that count as GENRE EVIDENCE for one track. When any of them
+#: holds a value, the track's own genres outrank the ALBUM's genre list on
+#: save: that list is itself an aggregate of these columns across the album
+#: (see ``collect_top_genres``), so writing it back flattened every track to
+#: the album blend — the reported "album genres overwrite track genres when
+#: an album is saved" — and fabricated ``manual_genres``, which the next
+#: aggregation then read as per-track evidence, making the overwrite stick.
+_TRACK_GENRE_EVIDENCE_FIELDS: tuple[str, ...] = (
+    "genres",
+    "manual_genres",
+    "navidrome_genres",
+    "musicbrainz_genres",
+    "lastfm_tags",
+    "listenbrainz_genres",
+    "discogs_genres",
+    "spotify_genres",
+    "essentia_genres",
+    "audiodb_genres",
+    "wikidata_genres",
+)
+
+
+def _has_genre_value(raw: Any) -> bool:
+    """True when a stored genre column actually holds genres.
+
+    JSONB columns come back as lists, TEXT as strings; empty containers and
+    the literal markers ``[]`` / ``null`` count as no evidence at all.
+    """
+    if raw is None:
+        return False
+    if isinstance(raw, (list, tuple, set)):
+        return any(str(v).strip() for v in raw)
+    if isinstance(raw, dict):
+        return bool(raw)
+    text_val = str(raw).strip()
+    if not text_val:
+        return False
+    return text_val.casefold() not in {"[]", "{}", "null", "none"}
+
+
+def _track_keeps_its_own_genres(
+    track: dict[str, Any],
+    staged: dict[str, Any] | None = None,
+) -> bool:
+    """Whether this track's genres outrank the album's genre list.
+
+    "Genres attached to tracks for MusicBrainz, Last.fm, etc should have a
+    greater preference than genres saved to albums." A track with ANY genre
+    evidence of its own keeps it; only a track with no genres at all receives
+    the album's list — a fill, never an overwrite.
+
+    ``staged`` is the Lookup-MBID review for this track: a per-track
+    ``musicbrainz_genres`` lands in its column later in the SAME loop, so it
+    must count as evidence now — otherwise the album list wins the race and
+    the reviewed value arrives next to a ``genres`` that contradicts it.
+    """
+    if any(_has_genre_value(track.get(field)) for field in _TRACK_GENRE_EVIDENCE_FIELDS):
+        return True
+    return bool(staged) and _has_genre_value(staged.get("musicbrainz_genres"))
+
+
 def _apply_album_track_genres(track_id: Any, genres_str: str) -> tuple[int, int]:
     """Write one track's genre chips to the **database only**.
+
+    Only ever called for a track with NO genre evidence of its own — see
+    ``_track_keeps_its_own_genres`` — so this is a fill, and the value lands
+    in ``genres`` alone (never ``manual_genres``, which is per-track).
 
     Returns ``(rows_written, failed)``.
 
@@ -1453,8 +1518,13 @@ def _apply_album_track_genres(track_id: Any, genres_str: str) -> tuple[int, int]
     from db.repositories.metadata import update_track_genres
 
     try:
+        # ``write_manual=False``: the album's list may fill a track's display
+        # genres but must never become its ``manual_genres`` — that column is
+        # a per-track SOURCE the aggregators read back, so stamping it with
+        # the album blend would fabricate manual genres for every track.
         rows = update_track_genres(
             track_id=track_id, genres_str=", ".join(genres_list),
+            write_manual=False,
         ) or 0
     except Exception as genre_err:
         failed = 1
@@ -2027,6 +2097,9 @@ async def album_detail(album_path: str) -> Any:
         # album whose ONLY edit was the genre chips therefore wrote the genres
         # and still reported "No changes were made."  Counted separately here.
         genre_only_writes = 0
+        # Tracks that KEPT their own track-level genres because they outrank
+        # the album's list (see ``_track_keeps_its_own_genres``).
+        genre_tracks_kept = 0
         # File-tag work is COLLECTED here and run as one concurrent phase after
         # the loop — see ``_write_album_track_files_concurrently``.
         _file_jobs: list[tuple[Any, dict, dict, bool, bool]] = []
@@ -2205,15 +2278,22 @@ async def album_detail(album_path: str) -> Any:
                 # Phase 1 — genres: the DATABASE columns only. The file's
                 # genre tag is the popularity scan's job (DB → file), so this
                 # pass never writes it.
-                _genre_rows, _genre_failed = _apply_album_track_genres(
-                    track_id, genres_str,
-                )
-                # Genres bypass ``payload``, so they must be counted here or
-                # a genres-only save is reported as "No changes were made".
-                if _genre_rows:
-                    genre_only_writes += 1
-                if _genre_failed:
-                    genre_write_failures += 1
+                #
+                # Track-level genres WIN: a track with its own evidence
+                # (MusicBrainz, Last.fm, Navidrome, manual, …) keeps it, and
+                # the album's list is only a FILL for tracks that have none.
+                if _track_keeps_its_own_genres(track, _staged_for_track):
+                    genre_tracks_kept += 1
+                else:
+                    _genre_rows, _genre_failed = _apply_album_track_genres(
+                        track_id, genres_str,
+                    )
+                    # Genres bypass ``payload``, so they must be counted here or
+                    # a genres-only save is reported as "No changes were made".
+                    if _genre_rows:
+                        genre_only_writes += 1
+                    if _genre_failed:
+                        genre_write_failures += 1
 
             # Phase 2 — persist: the DB row (album fields, then the staged
             # review on top, so a per-track value the user kept always wins).
@@ -2415,9 +2495,23 @@ async def album_detail(album_path: str) -> Any:
             # was the genre chips did reach the DB even though ``updated_count``
             # is 0.  Reporting "No changes were made." there was simply wrong.
             if genre_only_writes:
+                _kept_note = (
+                    f" · {genre_tracks_kept} track(s) kept their own track-level genres."
+                    if genre_tracks_kept
+                    else ""
+                )
                 await flash(
-                    f"Album genres saved — {genre_only_writes} track(s) updated.",
+                    f"Album genres saved — {genre_only_writes} track(s) updated.{_kept_note}",
                     "success",
+                )
+            elif genre_tracks_kept:
+                # Every track already had genres of its own. "No changes were
+                # made" would read as the genre edit silently failing — it was
+                # refused, on purpose, in favour of the tracks' own values.
+                await flash(
+                    "Album genres not applied — every track has its own "
+                    f"track-level genres ({genre_tracks_kept} kept).",
+                    "info",
                 )
             elif not tracks:
                 # There is genuinely nothing to write: the album matched no

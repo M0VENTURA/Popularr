@@ -175,8 +175,21 @@ def fetch_album_tracks_for_tag_update(conn: Any = None, artist: str = "", album:
         return result.fetchall() or []
 
 
-def update_track_genres(conn: Any = None, track_id: Any = None, genres_str: str = "") -> int:
+def update_track_genres(
+    conn: Any = None,
+    track_id: Any = None,
+    genres_str: str = "",
+    *,
+    write_manual: bool = True,
+) -> int:
     """Set a track's genres.
+
+    ``write_manual=False`` writes ONLY the display column. An ALBUM-wide genre
+    list must never become a track's ``manual_genres``: that column is a
+    per-track SOURCE read back by ``collect_top_genres`` and the aggregators,
+    so stamping it with the album blend makes every track claim the same
+    manual genres on the next aggregation — the overwrite then disguised
+    itself as track-level evidence and stuck for good.
 
     ⚠️ ``genres`` is TEXT but ``manual_genres`` is **JSONB**, and both are fed
     the same comma-separated string here. A raw UPDATE bypasses ``save_to_db``
@@ -186,17 +199,27 @@ def update_track_genres(conn: Any = None, track_id: Any = None, genres_str: str 
     """
     from db.repositories.popularity_repository import coerce_json_value
 
-    with db_session() as session:
-        result = session.execute(text("""
+    params: dict[str, Any] = {"genres": genres_str, "id": track_id}
+    if write_manual:
+        # Keep this statement and its coerced parameter together:
+        # tests/test_genre_jsonb_write_contract.py scans each raw UPDATE for
+        # the coercion that makes the JSONB write legal.
+        sql = """
             UPDATE tracks
             SET genres = :genres,
                 manual_genres = :genres_json
             WHERE id = :id
-        """), {
-            "genres": genres_str,
-            "genres_json": coerce_json_value(genres_str),
-            "id": track_id,
-        })
+        """
+        params["genres_json"] = coerce_json_value(genres_str)
+    else:
+        sql = """
+            UPDATE tracks
+            SET genres = :genres
+            WHERE id = :id
+        """
+
+    with db_session() as session:
+        result = session.execute(text(sql), params)
         return result.rowcount or 0
 
 

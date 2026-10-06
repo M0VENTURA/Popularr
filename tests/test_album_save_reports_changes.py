@@ -65,7 +65,11 @@ ZERO_CONDITION = "updated_count == 0"
 def _nothing_to_save_block(ui_source: str) -> str:
     """The zero-counters branch, from its condition through the fallbacks."""
     idx = ui_source.index(ZERO_CONDITION)
-    return ui_source[idx: idx + 1600]
+    # 2400, not 1600: the branch gained a kept-genres fallback ("every track
+    # has its own track-level genres"), which pushed the final
+    # "No changes were made." past the old window. What these tests protect is
+    # the ORDER of the ladder, and that needs the whole ladder in view.
+    return ui_source[idx: idx + 2400]
 
 
 class TestGenresAreCounted:
