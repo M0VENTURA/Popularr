@@ -7,6 +7,7 @@ import glob
 import json
 import os
 import re
+import time
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -1525,6 +1526,54 @@ def _write_album_track_file_tags(
     return False, resolved
 
 
+async def _write_album_track_files_concurrently(
+    jobs: list[tuple[Any, dict, dict, bool, bool]],
+) -> list[tuple[bool, str]]:
+    """Run one album save's per-track FILE writes concurrently. AWAITABLE.
+
+    Each job is ``(track_id, track, payload, strip_disc_numbers, disc_staged)``
+    — the exact arguments of :func:`_write_album_track_file_tags`, which does
+    the work in a worker thread so the event loop stays free.
+
+    ⚠️ WHY THIS EXISTS. The save used to write each file inside its per-track
+    loop, so an album cost N SEQUENTIAL disk passes (each one reads the file
+    twice to honour ``preserve_file_timestamps`` and then rewrites it). The
+    loop was the wall clock behind the reported **Cloudflare 524** — an album
+    save that took longer than Cloudflare's 100s origin timeout. Tracks are
+    independent files and every write is an atomic temp+replace, so they can
+    run together; the semaphore bounds how many hit one disk at once.
+
+    Returns one ``(ok, file_path)`` per job, IN ORDER, so the caller's failure
+    counter still attributes the right file to the right track. One track
+    blowing up must not cost the rest of the album its tags.
+    """
+    if not jobs:
+        return []
+
+    semaphore = asyncio.Semaphore(_FILE_WRITE_CONCURRENCY)
+
+    async def _one(job: tuple[Any, dict, dict, bool, bool]) -> tuple[bool, str]:
+        async with semaphore:
+            track_id, track, payload, strip_disc_numbers, disc_staged = job
+            try:
+                # ``strip_disc_numbers``/``disc_staged`` are KEYWORD-ONLY on
+                # the phase, so they cannot ride along in an ``*job`` splat.
+                return await asyncio.to_thread(
+                    _write_album_track_file_tags,
+                    track_id, track, payload,
+                    strip_disc_numbers=strip_disc_numbers,
+                    disc_staged=disc_staged,
+                )
+            except Exception as exc:  # defensive: keep the other tracks going
+                logger.warning(
+                    "File tag write CRASHED",
+                    track_id=track_id, error=str(exc),
+                )
+                return (False, "")
+
+    return list(await asyncio.gather(*(_one(job) for job in jobs)))
+
+
 def _resolve_album_cover_bytes(
     cover_url: str,
     album_mbid: str,
@@ -1581,6 +1630,27 @@ def _resolve_album_cover_bytes(
             logger.debug("Cover Art Archive fetch failed", release_mbid=album_mbid, error=str(exc))
     return None, "image/jpeg"
 
+
+#: How long an album save may wait for the MusicBrainz enrichment.
+#:
+#: The backfill runs two calls through the SHARED MusicBrainz client, whose
+#: throttle sleeps to claim a slot in a 1 req/s budget a running scan also
+#: spends (production has seen 30-40s calls). Cloudflare ends an unanswered
+#: origin request after 100s (error 524 — the reported "timeout when
+#: saving"), so the enrichment is given a deadline and the save continues
+#: with the values the form already carries: those fields are additive, and a
+#: later save or scan fills anything a deadline dropped.
+_MB_BACKFILL_DEADLINE_SECONDS = 15.0
+
+#: How many of the album's audio files are rewritten at the same time.
+#:
+#: One write reads the file twice (``preserve_file_timestamps`` compares the
+#: bytes before/after) and then rewrites it — measured at ~370ms for an 8MB
+#: MP3 on a local disk, seconds each on a NAS. Doing that once per track in
+#: sequence is what made an album-sized save outlive the same 100s timeout.
+#: Four keeps the wall clock near a quarter of the sequential cost while
+#: leaving the disk (and a network mount) enough headroom to stay fast.
+_FILE_WRITE_CONCURRENCY = 4
 
 # A release-group MBID is the identity of a RELEASE — the same album NAME can
 # belong to several of them (a re-issue, a deluxe edition), and a single
@@ -1903,14 +1973,40 @@ async def album_detail(album_path: str) -> Any:
         # shared throttle SLEEPS to hold a slot in a 1 req/s budget — tens of
         # seconds while a scan runs. In an ``async`` handler that stalled the
         # whole worker, which is the reported "timeouts when saving metadata".
+        #
+        # It is ALSO bounded (see ``_MB_BACKFILL_DEADLINE_SECONDS``): off the
+        # event loop is not the same as off the critical path — a saturated
+        # throttle would still hold THIS response past Cloudflare's 100s origin
+        # timeout (the reported error 524). ``wait_for`` abandons the await,
+        # not the work: the worker thread finishes on its own and its result is
+        # dropped, so nothing is left half-written. Losing it costs only the
+        # additive enrichment — the form already carries the album-level
+        # fields, and a later save or scan fills the rest.
+        _save_started = time.monotonic()
+        _mb_backfill_ms = 0.0
         _prev_mbids = {
             str(t.get("musicbrainz_album_mbid") or "").strip() for t in tracks
         }
         _prev_mbid = next((m for m in sorted(_prev_mbids) if m), "")
         if album_mbid and album_mbid != _prev_mbid:
-            _back = await asyncio.to_thread(
-                _fetch_album_mb_backfill, album_mbid, _mb_albumtype, release_values
-            )
+            _mb_started = time.monotonic()
+            try:
+                _back = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _fetch_album_mb_backfill,
+                        album_mbid, _mb_albumtype, release_values,
+                    ),
+                    timeout=_MB_BACKFILL_DEADLINE_SECONDS,
+                )
+            except (asyncio.TimeoutError, TimeoutError):
+                logger.warning(
+                    "Album save: MusicBrainz backfill hit its deadline — "
+                    "saving with the values the form provided",
+                    release_mbid=album_mbid,
+                    deadline_seconds=_MB_BACKFILL_DEADLINE_SECONDS,
+                )
+                _back = {}
+            _mb_backfill_ms = (time.monotonic() - _mb_started) * 1000.0
             _mb_albumartist_mbid = _back.get("albumartist_mbid") or _mb_albumartist_mbid
             _mb_albumtype = _back.get("albumtype") or _mb_albumtype
             _mb_albumstatus = _back.get("albumstatus") or _mb_albumstatus
@@ -1931,7 +2027,11 @@ async def album_detail(album_path: str) -> Any:
         # album whose ONLY edit was the genre chips therefore wrote the genres
         # and still reported "No changes were made."  Counted separately here.
         genre_only_writes = 0
+        # File-tag work is COLLECTED here and run as one concurrent phase after
+        # the loop — see ``_write_album_track_files_concurrently``.
+        _file_jobs: list[tuple[Any, dict, dict, bool, bool]] = []
 
+        _write_loop_started = time.monotonic()
         for track in tracks:
             track_id = track.get("id")
             if not track_id:
@@ -2124,17 +2224,17 @@ async def album_detail(album_path: str) -> Any:
                     db_failures += 1
 
             # Phase 3 — file tags: the cover genre and the single-disc clear.
-            _file_write_ok, _resolved_file = _write_album_track_file_tags(
-                track_id, track, payload,
-                strip_disc_numbers=_strip_disc_numbers,
-                disc_staged=_disc_staged,
+            #
+            # QUEUED, not written inline: the write below reads the file twice
+            # (``preserve_file_timestamps`` compares the bytes) and rewrites it,
+            # so doing it here made the loop one N-fold sequence of disk passes
+            # — the wall clock behind the reported **Cloudflare 524** on save.
+            # The job carries the payload built above; nothing mutates it after
+            # this point, so the worker sees exactly what this track was saved
+            # with.
+            _file_jobs.append(
+                (track_id, track, payload, _strip_disc_numbers, _disc_staged)
             )
-            if not _file_write_ok:
-                file_sync_failures += 1
-                logger.warning(
-                    "File tag write SKIPPED - DB updated only",
-                    track_id=track_id, file_path=_resolved_file,
-                )
 
             # ── Live-state revert: ONLY when the album is RECLASSIFIED ──────
             #
@@ -2193,6 +2293,22 @@ async def album_detail(album_path: str) -> Any:
                             reverted_live_count += 1
                     except Exception as revert_err:
                         logger.debug("Live-state revert failed", track_id=track_id, error=str(revert_err))
+
+        # ── Phase 3: every track's file tags, concurrently ────────────────
+        # The database half of the save is already durable at this point, so
+        # the files are the only thing left holding the response open.
+        _write_loop_ms = (time.monotonic() - _write_loop_started) * 1000.0
+        _file_started = time.monotonic()
+        _file_results = await _write_album_track_files_concurrently(_file_jobs)
+        _file_write_ms = (time.monotonic() - _file_started) * 1000.0
+        # Results come back IN ORDER, so the failure still names its own file.
+        for _job, (_file_write_ok, _resolved_file) in zip(_file_jobs, _file_results):
+            if not _file_write_ok:
+                file_sync_failures += 1
+                logger.warning(
+                    "File tag write SKIPPED - DB updated only",
+                    track_id=_job[0], file_path=_resolved_file,
+                )
 
         # ── Album-level cover art: download + embed ──────────────────────
         # The MB lookup fills ``cover_art_url`` (a CAA URL string).  Saving
@@ -2260,7 +2376,8 @@ async def album_detail(album_path: str) -> Any:
                 f"⚠️ Genres could not be saved for {genre_write_failures} track(s).",
                 "danger",
             )
-        if file_sync_failures > 0:            await flash(
+        if file_sync_failures > 0:
+            await flash(
                 f"⚠️ {file_sync_failures} track(s) updated in the database but NOT in the audio "
                 "files (could not write tags).",
                 "warning",
@@ -2312,6 +2429,26 @@ async def album_detail(album_path: str) -> Any:
                 )
             else:
                 await flash("No changes were made.", "info")
+
+        # One line saying WHERE a save spent its time. Every slow phase of
+        # this handler has produced a timeout report at some point — first the
+        # MusicBrainz calls on the event loop, then the wall clock that
+        # outlived Cloudflare's 100s origin timeout (error 524) — and without
+        # numbers the next one is a guess. ``file_tags_ms`` is the concurrent
+        # phase's TOTAL wall time, not the sum of its writes.
+        logger.info(
+            "Album save phases",
+            artist=artist_name,
+            album=album_name,
+            tracks=len(tracks),
+            updated=updated_count,
+            db_failures=db_failures,
+            file_failures=file_sync_failures,
+            mb_backfill_ms=round(_mb_backfill_ms, 1),
+            write_loop_ms=round(_write_loop_ms, 1),
+            file_tags_ms=round(_file_write_ms, 1),
+            total_ms=round((time.monotonic() - _save_started) * 1000.0, 1),
+        )
 
         redirect_artist = new_artist or artist_name
         redirect_album = new_title or album_name

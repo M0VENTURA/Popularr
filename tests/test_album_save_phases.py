@@ -69,10 +69,32 @@ class TestThePhasesRunInAnOrderThatPreservesTheReview:
     def test_the_three_phases_are_called_in_one_pass(self):
         genres = ROUTE_SOURCE.index("_apply_album_track_genres(")
         persist = ROUTE_SOURCE.index("_persist_album_track_payload(track_id, payload)")
-        file_tags = ROUTE_SOURCE.index("_write_album_track_file_tags(")
+        # The FILE phase no longer sits inside the per-track loop: it became
+        # ONE concurrent phase after it (Cloudflare 524 — N sequential disk
+        # passes outlived the origin timeout), so the route's own call site is
+        # the gather and the helper below is what touches the file. What must
+        # not change is the ORDER of the phases relative to the database.
+        file_phase = ROUTE_SOURCE.index("_write_album_track_files_concurrently(")
 
-        assert genres < persist < file_tags, (
+        assert genres < persist < file_phase, (
             "the loop's write order changed (genres → persist → file tags)"
+        )
+
+    def test_the_file_phase_still_writes_through_the_phase_helper(self):
+        """Concurrency must not invent a second writer.
+
+        The gather runs the SAME phase the loop used to call, off the event
+        loop in a worker thread — if it ever opened the file itself, the
+        tag-write policy gates (``write_tags_to_file``, ``ratings_only``,
+        ``fill_missing_only``) would be bypassed for album saves.
+        """
+        # Compared whitespace-insensitively: the call wraps across lines, and a
+        # reformat must not turn a passing check into a false failure.
+        flat = " ".join(UI_SOURCE.split())
+        assert "asyncio.to_thread( _write_album_track_file_tags," in flat, (
+            "the concurrent file phase does not go through "
+            "_write_album_track_file_tags — the album save would write tags "
+            "outside the tagging policy"
         )
 
     def test_the_route_does_no_writing_inline(self):
@@ -313,3 +335,164 @@ def _patch_genres(monkeypatch: pytest.MonkeyPatch, *, rows: int, raise_error: bo
     import db.repositories.metadata as meta
 
     monkeypatch.setattr(meta, "update_track_genres", _write)
+
+
+# ===========================================================================
+# 4. The save must answer inside Cloudflare's origin timeout (error 524)
+# ===========================================================================
+class TestTheSaveCannotOutliveTheOriginTimeout:
+    """A save is a request, and requests have a deadline.
+
+    Reported: *"I keep getting a cloudflare timeout error when saving"* —
+    error **524**, which Cloudflare raises when the origin has not answered
+    within 100s. Two things in this handler could get there on their own:
+
+    * the MusicBrainz backfill, whose shared throttle SLEEPS for a slot in a
+      1 req/s budget a running scan is spending (30-40s calls in production);
+    * the per-track file writes — one reads the file twice to honour
+      ``preserve_file_timestamps`` and then rewrites it (~370ms for an 8MB MP3
+      on a local disk), done once per track IN SEQUENCE inside the loop.
+    """
+
+    def test_the_backfill_deadline_sits_inside_the_origin_timeout(self):
+        assert ui._MB_BACKFILL_DEADLINE_SECONDS < 100, (
+            "the enrichment deadline must leave room for the rest of the save "
+            "inside Cloudflare's 100s — a deadline that reaches the limit "
+            "just moves the 524 somewhere else"
+        )
+
+    def test_the_fetch_is_wrapped_and_still_off_the_event_loop(self):
+        window = ROUTE_SOURCE[ROUTE_SOURCE.index("_prev_mbids = {"):][:700]
+
+        assert "album_mbid != _prev_mbid" in window, (
+            "the release-change gate was lost — every save would pay for two "
+            "MusicBrainz calls again"
+        )
+        assert "asyncio.to_thread" in window, (
+            "the fetch must not run on the event loop"
+        )
+        assert "asyncio.wait_for" in window and (
+            "timeout=_MB_BACKFILL_DEADLINE_SECONDS" in window
+        ), (
+            "the backfill is unbounded again: off the event loop is not the "
+            "same as off the critical path, and a saturated throttle would "
+            "still hold the response until Cloudflare gave up"
+        )
+
+    def test_a_timeout_saves_with_the_form_values_rather_than_failing(self):
+        """The save must SURVIVE the deadline — not 500.
+
+        The enrichment is additive (artist MBID, type, status, country, year
+        and the per-recording map); everything the user actually edited is
+        already in the form. Dropping it is a degraded save, raising is a
+        lost one.
+        """
+        flat = " ".join(ROUTE_SOURCE.split())
+        assert "except (asyncio.TimeoutError, TimeoutError)" in flat
+        assert "_back = {}" in flat, (
+            "a timed-out backfill must fall back to empty enrichment, or the "
+            "field merges below would raise on a missing key"
+        )
+
+    def test_the_route_collects_file_jobs_instead_of_writing_inline(self):
+        """Phase 3 is queued in the loop and run once, after it."""
+        queue_at = ROUTE_SOURCE.index("_file_jobs.append(")
+        persist_at = ROUTE_SOURCE.index("_persist_album_track_payload(track_id, payload)")
+        run_at = ROUTE_SOURCE.index("_write_album_track_files_concurrently(")
+
+        assert persist_at < queue_at < run_at, (
+            "the file phase must stay AFTER the database writes and be "
+            "started once for the album, not once per track"
+        )
+
+    def test_the_save_logs_where_it_spent_its_time(self):
+        """Without numbers, the next timeout report is a guess.
+
+        Every slow phase here has produced one at some point (event-loop MB
+        calls, then the wall clock behind the 524), so the handler reports its
+        own phases.
+        """
+        flat = " ".join(UI_SOURCE.split())
+        assert '"Album save phases"' in flat
+        for field in (
+            "mb_backfill_ms=", "write_loop_ms=", "file_tags_ms=", "total_ms=",
+        ):
+            assert field in flat, f"the phase log is missing {field}"
+
+
+class TestTheFilePhaseRunsConcurrentlyButBounded:
+    """Concurrency is the fix — but only if it is real AND capped."""
+
+    @staticmethod
+    def _jobs(count: int):
+        return [(f"t{i}", {"id": f"t{i}"}, {"id": f"t{i}"}, False, False)
+                for i in range(count)]
+
+    async def test_writes_overlap_and_stay_within_the_cap(self, monkeypatch):
+        import threading
+        import time as _time
+
+        lock = threading.Lock()
+        state = {"active": 0, "peak": 0}
+
+        def _slow(track_id, track, payload, *, strip_disc_numbers, disc_staged):
+            with lock:
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+            _time.sleep(0.2)
+            with lock:
+                state["active"] -= 1
+            return (True, f"/music/{track_id}.mp3")
+
+        monkeypatch.setattr(ui, "_write_album_track_file_tags", _slow)
+
+        started = _time.monotonic()
+        results = await ui._write_album_track_files_concurrently(self._jobs(8))
+        elapsed = _time.monotonic() - started
+
+        assert state["peak"] >= 2, (
+            "the file writes are sequential again — that is exactly the wall "
+            "clock the 524 was caused by"
+        )
+        assert state["peak"] <= ui._FILE_WRITE_CONCURRENCY, (
+            "the semaphore is not bounding the writes: one album could put "
+            "every track on the disk (or the network mount) at once"
+        )
+        # Sequential would be 8 × 0.2s = 1.6s; four at a time is ~0.4s.
+        assert elapsed < 1.0, (
+            f"8 writes took {elapsed:.2f}s — the phase is not overlapping"
+        )
+
+    async def test_results_stay_in_job_order(self, monkeypatch):
+        """The caller attributes a failure to ITS file by position."""
+        def _echo(track_id, track, payload, *, strip_disc_numbers, disc_staged):
+            return (True, f"/music/{track_id}.mp3")
+
+        monkeypatch.setattr(ui, "_write_album_track_file_tags", _echo)
+
+        results = await ui._write_album_track_files_concurrently(self._jobs(5))
+
+        assert [path for _ok, path in results] == [
+            f"/music/t{i}.mp3" for i in range(5)
+        ]
+
+    async def test_one_crashing_track_does_not_lose_the_rest(self, monkeypatch):
+        """A single bad file must not cost the album its other tags."""
+        def _sometimes(track_id, track, payload, *, strip_disc_numbers, disc_staged):
+            if track_id == "t2":
+                raise RuntimeError("disk went away")
+            return (True, f"/music/{track_id}.mp3")
+
+        monkeypatch.setattr(ui, "_write_album_track_file_tags", _sometimes)
+
+        results = await ui._write_album_track_files_concurrently(self._jobs(4))
+
+        assert results[2] == (False, ""), (
+            "the crashing track must report a failure the counter can see"
+        )
+        assert all(ok for ok, _ in results[:2] + results[3:]), (
+            "the other tracks must still be written"
+        )
+
+    async def test_an_empty_album_writes_nothing(self):
+        assert await ui._write_album_track_files_concurrently([]) == []
