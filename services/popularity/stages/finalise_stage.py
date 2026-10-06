@@ -370,6 +370,81 @@ def _compute_album_z(score: float, scores: list[float]) -> tuple[float, float]:
     return calculate_robust_zscore(score, scores, min_count=3)
 
 
+#: Smallest same-fate cohort that may replace the album pool. Equals
+#: ``_compute_album_z``'s ``min_count``: a smaller pool returns 0.0 anyway, so
+#: falling back to the album is both safe and honest.
+_LB_COHORT_MIN_TRACKS = 3
+
+
+def _lb_unusable_cohort(
+    album_rows: list[dict[str, Any]],
+) -> tuple[set[str], list[float]]:
+    """Track ids whose ListenBrainz source is unusable, and their scores.
+
+    "Unusable" means zero listens, or the Log-MAD audit REJECTS them against
+    this album's own LF/LB pairs — exactly the test ``track_stage`` applies
+    when it zeroes the count, so a track classified here is treated the same
+    way it was scored.
+
+    Returns ``(track_ids, scores)``: the ids let the caller flag one track, the
+    scores are the cohort's rating pool. A track with an unusable source is
+    scored from Last.fm ALONE, so rating it against an album median its
+    siblings lifted with healthy ListenBrainz points measures it against a
+    distribution it is not part of (the reported "Prison Sex" case: 57.3 on a
+    median of ~57 → +0.05 → 3★, while two-source siblings sat at 60-62).
+    """
+    unusable: set[str] = set()
+    scores: list[float] = []
+    if not album_rows:
+        return unusable, scores
+
+    try:
+        from services.popularity.popularity_config import get_log_ratio_config
+        from services.popularity.popularity_math import evaluate_log_ratio_deviation
+
+        cfg = get_log_ratio_config()
+        threshold = float(cfg.get("divergence_threshold", 0.85))
+        reject_lb_min_lf = int(cfg.get("reject_lb_min_lf", 100))
+    except Exception as exc:
+        logger.debug("LB cohort config unavailable", error=str(exc))
+        threshold, reject_lb_min_lf = None, None
+
+    pairs = [
+        (int(r.get("lastfm_listeners") or 0), int(r.get("listenbrainz_listens") or 0))
+        for r in album_rows
+        if int(r.get("lastfm_listeners") or 0) > 0
+        and int(r.get("listenbrainz_listens") or 0) > 0
+    ]
+
+    for row in album_rows:
+        lb = int(row.get("listenbrainz_listens") or 0)
+        if lb <= 0:
+            bad = True
+        elif pairs and threshold is not None:
+            try:
+                bad = evaluate_log_ratio_deviation(
+                    lastfm_listeners=int(row.get("lastfm_listeners") or 0),
+                    listenbrainz_listens=lb,
+                    album_lf_lb_pairs=pairs,
+                    divergence_threshold=threshold,
+                    reject_lb_min_lf=reject_lb_min_lf,
+                ) == "REJECT_LB"
+            except Exception:
+                bad = False
+        else:
+            bad = False
+
+        if not bad:
+            continue
+        key = str(row.get("track_id") or row.get("id") or "").strip()
+        if key:
+            unusable.add(key)
+        score = float(row.get("popularity_score") or row.get("final_score") or 0)
+        if score > 0:
+            scores.append(score)
+    return unusable, scores
+
+
 def _compute_artist_z(score: float, artist_scores: list[float]) -> tuple[float, float]:
     """Robust artist-catalogue z (median + scaled-MAD) -- and the spread used."""
     return calculate_robust_zscore(score, artist_scores, min_count=5)
@@ -929,6 +1004,8 @@ def _assign_stars(
     artist_listen_distribution: list[float] | None = None,
     generic_compilation_artist: bool = False,
     is_live_album: bool = False,
+    source_unusable: bool = False,
+    cohort_scores: list[float] | None = None,
 ) -> int:
     """Assign 1-5 star rating to a single track.
 
@@ -968,6 +1045,26 @@ def _assign_stars(
 
     organic = score >= _org_score or int(track.get("lastfm_listeners") or 0) >= _org_listeners
 
+    # Cohort rating (optional): a track whose ListenBrainz source was rejected
+    # is scored from Last.fm alone, so the album pool — lifted by its
+    # siblings' healthy ListenBrainz component — is not the distribution it
+    # belongs to. It is rated among the tracks that share its fate instead,
+    # and only when that cohort is large enough to be one (otherwise the
+    # fallback IS the album pool: unchanged behaviour). Computed HERE because
+    # the z-scores below are the first readers.
+    #
+    # Compilations are excluded deliberately: their stars come from the
+    # credited artist's ONLINE catalogue or absolute thresholds (the local
+    # catalogue branch is hard-disabled below), which are not album-relative,
+    # so there is no album pool for a cohort to replace.
+    _cohort_pool = list(cohort_scores or [])
+    _use_lb_cohort = (
+        bool(source_unusable)
+        and not is_compilation
+        and len(_cohort_pool) >= _LB_COHORT_MIN_TRACKS
+    )
+    _album_pool = _cohort_pool if _use_lb_cohort else album_scores
+
     if is_compilation:
         # Both z-scores are computed against the SAME credited-artist
         # catalogue distribution -- there is no separate "album" pool that
@@ -975,7 +1072,7 @@ def _assign_stars(
         album_z, album_spread = _compute_artist_z(score, artist_scores)
         artist_z, artist_spread = album_z, album_spread
     else:
-        album_z, album_spread = _compute_album_z(score, album_scores)
+        album_z, album_spread = _compute_album_z(score, _album_pool)
         artist_z, artist_spread = _compute_artist_z(score, artist_scores)
 
     popularity_marked = bool(track.get("popularity_marked"))
@@ -986,7 +1083,7 @@ def _assign_stars(
         live_stars, live_reason = _live_album_stars(
             track,
             score,
-            album_scores,
+            _album_pool,
             artist_scores,
             single_confidence,
             organic,
@@ -1226,8 +1323,8 @@ def _assign_stars(
 
     base_stars = _album_z_band_star(
         score=score,
-        album_scores=album_scores,
-        reference_scores=album_scores,
+        album_scores=_album_pool,
+        reference_scores=_album_pool,
         artist_scores=artist_scores,
         is_live=is_live,
         single_confidence=single_confidence,
@@ -1245,7 +1342,7 @@ def _assign_stars(
             album_top_n = max(1, int(album_model.get("album_top_n") or 1))
             if catalog_cutoff is not None and score < float(catalog_cutoff):
                 five_star_eligible = False
-            if _album_rank(score, album_scores) > album_top_n:
+            if _album_rank(score, _album_pool) > album_top_n:
                 five_star_eligible = False
 
         # Ratio ("shape of popularity") gate. The z-bounds above answer "is
@@ -3381,6 +3478,12 @@ def post_album_star_ratings(
             logger.debug("Artist listen distribution failed", artist=artist, error=str(exc))
 
         # 1. Assign star ratings in memory
+        #
+        # The same-fate cohort, built ONCE per album: tracks whose
+        # ListenBrainz source is unusable (zero, or rejected by the Log-MAD
+        # audit) are rated among each other instead of against a median their
+        # two-source siblings lifted (the reported "Prison Sex" case).
+        _lb_unusable_ids, _lb_cohort_scores = _lb_unusable_cohort(album_results)
         for track in album_results:
             try:
                 if is_compilation:
@@ -3405,6 +3508,10 @@ def post_album_star_ratings(
                     artist_listen_distribution=_artist_listen_distribution,
                     generic_compilation_artist=generic_compilation_artist,
                     is_live_album=is_live_album,
+                    source_unusable=(
+                        str(track.get("track_id") or "").strip() in _lb_unusable_ids
+                    ),
+                    cohort_scores=_lb_cohort_scores,
                 )
             except Exception as exc:
                 track_id = str(track.get("track_id") or "").strip()
