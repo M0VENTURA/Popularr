@@ -279,6 +279,72 @@ class TestGenresCompareTheMusicBrainzColumn:
         assert _genre_sets_equal(left, right) is False
 
 
+class TestAJsonbListIsNotARepr:
+    """Reported: *"the genre matching … needs to be corrected as it's finding
+    it needs to be updated but it's matching with the same information"*.
+
+    ``musicbrainz_genres`` is JSONB, so the driver hands back a Python
+    ``list`` — and ``str(list)`` is a REPR (``['Rock', 'Metal']``), which is
+    NOT JSON. The tolerant parser rejected it, comma-split the fallback, and
+    produced the names ``['Rock'`` and ``'Metal']``: the same genres spelled
+    differently, so EVERY genre row proposed changing a value into itself
+    (``["children's music", 'classical'] → children's music, classical``).
+
+    The other cases in this module feed STRINGS, which is exactly why none of
+    them caught it: this class feeds what Postgres actually returns.
+    """
+
+    LIST_STORED = [
+        "children's music", "classical", "electronic",
+        "musical", "pop", "punk",
+    ]
+    COMMA = "children's music, classical, electronic, musical, pop, punk"
+
+    def test_the_exact_reported_row_proposes_nothing(self):
+        assert "musicbrainz_genres" not in _fields(
+            _local(musicbrainz_genres=self.LIST_STORED), _comparison(),
+            _metadata(mb_genres=self.COMMA),
+        ), (
+            "the same genres as a list and as a string must not ask to be "
+            "changed — that is the reported false update"
+        )
+
+    def test_a_repr_is_read_as_the_list_it_is(self):
+        # Imported here, not at module level: with the fix stashed the name
+        # does not exist, and a module-level import would collapse the whole
+        # file into one collection error — no test could then say WHICH rule
+        # it was checking.
+        from services.metadata.metadata_proposal_service import _genres_text
+
+        assert _genre_sets_equal(str(["Rock", "Metal"]), "Metal, Rock") is True
+        assert _genres_text(str(["Rock", "Metal"])) == "Rock, Metal"
+
+    def test_the_displayed_value_is_never_a_python_repr(self):
+        """The bar must show genres a human can line up, not ``str(list)``."""
+        out = _track_proposals(
+            [_local(musicbrainz_genres=self.LIST_STORED)],
+            _comparison(),
+            _metadata(mb_genres=self.COMMA + ", rock"),
+        )
+        change = next(
+            c for c in out[0]["changes"] if c["field"] == "musicbrainz_genres"
+        )
+        assert change["current"] == self.COMMA
+        assert not change["current"].startswith("[")
+        assert not change["proposed"].startswith("[")
+
+    def test_a_real_difference_with_a_list_is_still_reported(self):
+        """CONTROL — suppressing the repr must not suppress the signal."""
+        assert "musicbrainz_genres" in _fields(
+            _local(musicbrainz_genres=["Rock"]), _comparison(),
+            _metadata(mb_genres="Rock, Metal"),
+        )
+
+    def test_an_extra_genre_from_a_list_is_still_reported(self):
+        """CONTROL at the helper — the set rule still sees a real delta."""
+        assert _genre_sets_equal(self.LIST_STORED, self.COMMA + ", rock") is False
+
+
 # ---------------------------------------------------------------------------
 # 2 & 3. Version / cover markers in titles
 # ---------------------------------------------------------------------------

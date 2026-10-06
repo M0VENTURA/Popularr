@@ -31,6 +31,7 @@ Design notes
 
 from __future__ import annotations
 
+import ast
 from typing import Any
 
 import structlog
@@ -111,6 +112,57 @@ def _norm(value: Any) -> str:
     return " ".join(_as_text(value).casefold().split())
 
 
+def _genre_value(value: Any) -> Any:
+    """Give the shared parser something it can read, for ANY genre encoding.
+
+    ``musicbrainz_genres`` is JSONB, so the driver hands back a Python
+    ``list`` — and stringifying a list is a REPR (``['Rock', 'Metal']``),
+    which is NOT JSON. The tolerant parser then rejects it, falls back to
+    comma-splitting, and yields the names ``['Rock'`` and ``'Metal']``: the
+    same genres spelled differently, so the review proposed changing a value
+    into itself — the reported *"it's matching with the same information"*.
+
+    A list is already the structure the parser wants (names, or tags as
+    dicts), so it is passed straight through; a string that looks like a
+    list is read as the list it is.
+    """
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    text = _as_text(value)
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            parsed = None
+        if isinstance(parsed, (list, tuple)):
+            return list(parsed)
+    return text
+
+
+def _genre_list(value: Any) -> list[str]:
+    """Genre names from any encoding, in source order, without decoration."""
+    from services.enrichment.genre_tag_aggregator import parse_json_tags
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for tag in parse_json_tags(_genre_value(value)) or []:
+        name = _as_text(tag.get("name"))
+        key = name.casefold()
+        if name and key not in seen:
+            seen.add(key)
+            names.append(name)
+    return names
+
+
+def _genres_text(value: Any) -> str:
+    """The same names as one comma-joined string — what the review DISPLAYS.
+
+    Both sides of the comparison go through this, so the bar shows two
+    spellings a human can line up instead of a Python repr on one side.
+    """
+    return ", ".join(_genre_list(value))
+
+
 def _genre_names(value: Any) -> set[str]:
     """Parse a genre value into a case/whitespace-insensitive name set.
 
@@ -119,14 +171,7 @@ def _genre_names(value: Any) -> set[str]:
     compared as raw strings — otherwise the same genres in different encodings
     would read as a change.
     """
-    from services.enrichment.genre_tag_aggregator import parse_json_tags
-
-    names: set[str] = set()
-    for tag in parse_json_tags(value) or []:
-        name = _norm(tag.get("name"))
-        if name:
-            names.add(name)
-    return names
+    return {_norm(name) for name in _genre_list(value)}
 
 
 def _genre_sets_equal(current: Any, proposed: Any) -> bool:
@@ -416,7 +461,10 @@ def _track_proposals(
             "disc_number": _as_text(local.get("disc_number") or "1"),
             "mbid": _as_text(local.get("mbid")),
             "writer": _as_text(local.get("writer")),
-            "musicbrainz_genres": _as_text(local.get("musicbrainz_genres")),
+            # Rendered, not merely stringified: a JSONB list rendered with
+            # ``str()`` is a Python repr, which is what the review was showing
+            # (and mis-comparing) for every genre row.
+            "musicbrainz_genres": _genres_text(local.get("musicbrainz_genres")),
             "artist": _as_text(local.get("artist")),
         }
         proposed_map: dict[str, str] = {
@@ -425,7 +473,7 @@ def _track_proposals(
             "disc_number": _as_text(entry.get("mb_disc_number")),
             "mbid": rec_mbid,
             "writer": _as_text(mb_track.get("writer")),
-            "musicbrainz_genres": _as_text(mb_track.get("musicbrainz_genres")),
+            "musicbrainz_genres": _genres_text(mb_track.get("musicbrainz_genres")),
             "artist": _as_text(mb_track.get("artist")),
         }
 
