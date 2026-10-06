@@ -818,18 +818,61 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
         except (TypeError, ValueError):
             return None
 
+    # ⚠️ Group by RELEASE, not by year. A compilation credits its source
+    # recordings, so the tracks of ONE release carry many different years —
+    # `2003 - Battlefield Vietnam` holds tracks tagged 1963 … 2004 — and
+    # "name + year" split that single release into several cards (the reported
+    # `/2004` and `/1963` links being the same release, same MBID).
+    def _release_group_of(t: dict[str, Any]) -> str:
+        return str(t.get("musicbrainz_releasegroupid") or "").strip()
+
+    release_groups_by_name: dict[str, set[str]] = {}
+    for t in tracks:
+        _n = str(t.get("album") or "").strip().lower()
+        _rg = _release_group_of(t)
+        if _n and _rg:
+            release_groups_by_name.setdefault(_n, set()).add(_rg)
+
+    tracks_by_key: dict[str, list[dict[str, Any]]] = {}
+
     for track in tracks:
         album_name = str(track.get("album") or "").strip()
         if not album_name:
             continue
 
         track_year = _leading_year(track)
-        album_key = f"{album_name.lower().strip()}::{track_year or ''}"
+        _name_key = album_name.lower().strip()
+        _rgs = release_groups_by_name.get(_name_key) or set()
+        rg = _release_group_of(track)
+
+        if len(_rgs) == 1:
+            # One release → ONE card, whatever the per-track years say.
+            entry_rg = next(iter(_rgs))
+            album_key = f"{_name_key}::rg:{entry_rg}"
+        elif len(_rgs) > 1:
+            # Several releases share this name: one card EACH, so every one
+            # stays browsable (and editable) from the artist page. A track
+            # with no group falls back to its year rather than joining a
+            # stranger's release.
+            entry_rg = rg
+            album_key = (
+                f"{_name_key}::rg:{rg}" if rg
+                else f"{_name_key}::{track_year or ''}"
+            )
+        else:
+            entry_rg = ""
+            album_key = f"{_name_key}::{track_year or ''}"
+
+        tracks_by_key.setdefault(album_key, []).append(track)
 
         if album_key not in albums_by_key:
             albums_by_key[album_key] = {
                 "album": album_name,
                 "album_year": track_year,
+                # The RELEASE this card represents — the album page is scoped
+                # by it (``/album/<artist>/<album>/<rg>``), which is what keeps
+                # several releases sharing a name browsable side by side.
+                "release_group_mbid": entry_rg,
                 "track_count": 0,
                 "avg_stars": None,
                 "total_duration": 0,
@@ -873,14 +916,9 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
             album_entry["last_updated"] = updated
 
     for album_key, album_entry in albums_by_key.items():
-        key_name = album_key.rsplit("::", 1)[0]
-        key_year = album_entry.get("album_year")
-        
-        album_tracks = [
-            track for track in tracks
-            if str(track.get("album") or "").strip().lower() == key_name
-            and (key_year is None or _leading_year(track) == key_year)
-        ]
+        # The same key that grouped them — never a re-derivation. Filtering by
+        # name + year here would put the wrong tracks on a release-group card.
+        album_tracks = tracks_by_key.get(album_key, [])
 
         stars = [
             safe_float(track.get("stars"))
@@ -1544,6 +1582,16 @@ def _resolve_album_cover_bytes(
     return None, "image/jpeg"
 
 
+# A release-group MBID is the identity of a RELEASE — the same album NAME can
+# belong to several of them (a re-issue, a deluxe edition), and a single
+# release's tracks can carry several different YEARS (a compilation credits the
+# original recordings). Scoping by release group therefore beats scoping by
+# year: digits in the path segment keep meaning a year, so existing links work.
+_RG_SEGMENT_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
 @ui_bp.route("/album/<path:album_path>", methods=["GET", "POST"])
 async def album_detail(album_path: str) -> Any:
     raw_path = str(album_path or "")
@@ -1562,14 +1610,26 @@ async def album_detail(album_path: str) -> Any:
     artist_name = unquote(artist or "").strip()
     album_name = unquote(album or "").strip()
     album_year_seg = unquote(year_seg or "").strip()
-    
+
+    # The final path segment is a SCOPE: a UUID selects one release group,
+    # digits select a year (kept for existing links), anything else selects
+    # nothing.
+    album_rg_filter = (
+        album_year_seg if _RG_SEGMENT_RE.fullmatch(album_year_seg) else ""
+    )
+
     try:
         album_year_filter = int(album_year_seg) if album_year_seg.isdigit() else None
     except (TypeError, ValueError):
         album_year_filter = None
-        
+
+    # Distinguish "the URL asked for a year" from "a year was chosen for me" —
+    # the latter happens below when no scope is given at all.
+    explicit_year = album_year_filter is not None
+
     if album_year_filter is not None and not (1900 <= album_year_filter <= 2100):
         album_year_filter = None
+        explicit_year = False
         
     cfg = get_config()
 
@@ -1606,25 +1666,64 @@ async def album_detail(album_path: str) -> Any:
         except (TypeError, ValueError):
             return None
 
-    # ── Same-name albums across years ────────────────────────────────────
-    # When the URL has NO year segment and the (artist, album) matches tracks
-    # from MULTIPLE distinct years (a band re-releasing an album, or two
-    # different albums sharing a name), the tracks are NOT merged into one
-    # page — each year is its own album.  Default to the most recent year so
-    # the page matches the latest release; a year selector links to the
-    # year-scoped URLs (``/album/<artist>/<album>/<year>``).
+    # ── Scoping one album page ────────────────────────────────────────────
+    #
+    # ⚠️ YEARS ARE A BAD IDENTITY FOR AN ALBUM. A compilation credits the
+    # original recordings, so ONE release's tracks carry many different years
+    # (`2003 - Battlefield Vietnam` holds tracks tagged 1963 … 2004) and the
+    # old year-based split chopped that release into several pages — the
+    # reported `/2004` and `/1963` being the same release, same MBID.
+    #
+    # Release group first, year only as a fallback:
+    #   * an explicit RG segment -> that release;
+    #   * an explicit year segment -> the old behaviour (existing links);
+    #   * exactly one RG on the rows -> NO split, whatever the years say;
+    #   * several RGs sharing the name -> the one holding the most tracks;
+    #   * no RG data at all -> the year split, as before.
+    def _release_group_of(t: dict[str, Any]) -> str:
+        return str(t.get("musicbrainz_releasegroupid") or "").strip()
+
     all_album_years = sorted(
         {y for y in (_track_year(t) for t in tracks) if y is not None},
         reverse=True,
     )
-    if album_year_filter is None:
-        if len(all_album_years) > 1:
-            album_year_filter = all_album_years[0]
+    release_groups = sorted({_release_group_of(t) for t in tracks} - {""})
 
-    if album_year_filter is not None and tracks:
+    if album_rg_filter:
+        scoped = [t for t in tracks if _release_group_of(t) == album_rg_filter]
+        if scoped:
+            tracks = scoped
+    elif len(release_groups) == 1:
+        # ONE release group → ONE page, even when the URL carries a year.
+        # An old /<year> link used to slice this release into pieces (the
+        # reported bug), and the dashboard still builds those links.
+        pass
+    elif explicit_year and album_year_filter is not None:
         year_tracks = [t for t in tracks if _track_year(t) == album_year_filter]
         if year_tracks:
             tracks = year_tracks
+    elif len(release_groups) > 1:
+        counts: dict[str, int] = {}
+        for t in tracks:
+            rg = _release_group_of(t)
+            if rg:
+                counts[rg] = counts.get(rg, 0) + 1
+        _primary = max(counts, key=lambda r: counts[r])
+        scoped = [
+            t for t in tracks
+            if not _release_group_of(t) or _release_group_of(t) == _primary
+        ]
+        if scoped:
+            tracks = scoped
+            album_rg_filter = _primary
+    else:
+        # No release-group data at all: keep the year split.
+        if album_year_filter is None and len(all_album_years) > 1:
+            album_year_filter = all_album_years[0]
+        if album_year_filter is not None and tracks:
+            year_tracks = [t for t in tracks if _track_year(t) == album_year_filter]
+            if year_tracks:
+                tracks = year_tracks
 
     tracks = [_coerce_track_numerics(t) for t in tracks]
 
@@ -2216,7 +2315,14 @@ async def album_detail(album_path: str) -> Any:
 
         redirect_artist = new_artist or artist_name
         redirect_album = new_title or album_name
-        redirect_year = f"/{album_year_filter}" if album_year_filter is not None else ""
+        # Scope the redirect the way the page is scoped. A release GROUP is the
+        # identity and the canonical URL, so it wins; a year only follows a
+        # page that is genuinely year-scoped (no release-group data).
+        _redirect_scope = ""
+        if album_rg_filter:
+            _redirect_scope = f"/{album_rg_filter}"
+        elif album_year_filter is not None:
+            _redirect_scope = f"/{album_year_filter}"
         # Fragment: the save is submitted from the EDIT ALBUM tab, but the
         # reload always came back on the default TRACKS tab — so the user saved
         # and was immediately dropped on the tracklist with a different Save
@@ -2225,7 +2331,7 @@ async def album_detail(album_path: str) -> Any:
         return redirect(
             url_for(
                 "ui.album_detail",
-                album_path=f"{redirect_artist}/{redirect_album}{redirect_year}",
+                album_path=f"{redirect_artist}/{redirect_album}{_redirect_scope}",
             )
             + "#tab-details"
         )

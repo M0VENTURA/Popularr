@@ -1,8 +1,13 @@
 {% macro render_album_row(album, artist_name, is_missing=False, parent_id='accordion-albums') %}
 {% set safe_artist = artist_name|safe_id %}
 {% set safe_album = (album.get('album') or album.get('title') or '')|safe_id %}
-{% set album_release_year = album.get('album_year') or (album.get('first_release_date') or '')[:4] or 0 %}
-{# Include the year in the accordion id so self-titled albums (three
+{% set album_release_year = album.get('album_year') or (album.get('first_release_date') or '')[:4] or 0 %}{# Scope for album links: prefer the RELEASE GROUP — the album page splits by
+   it, so several releases sharing one name each stay browsable (and the
+   year-based split was chopping a single compilation into pages, because its
+   tracks carry the years of their source recordings). Fall back to the year
+   only when there is no release-group data at all. #}
+{% set album_rg = (album.get('release_group_mbid') or '')|trim %}
+{% set album_scope = ('/' ~ album_rg) if album_rg else (('/' ~ album.get('album_year')) if album.get('album_year') else '') %}{# Include the year in the accordion id so self-titled albums (three
    "Weezer" albums, one per year) don't collide on the same collapse id. #}
 {% set album_id = safe_artist + '_' + safe_album + '_' + album_release_year %}
 {% set album_is_downloading = album.get('is_downloading') %}
@@ -54,7 +59,7 @@
           {% if is_missing %}
             <span class="fw-semibold">{{ album.get('title', '') }}</span>
           {% else %}
-            <a href="/album/{{ artist_name|path_segment }}/{{ (album.get('album') or album.get('title') or '')|path_segment }}{% if album.get('album_year') %}/{{ album.get('album_year') }}{% endif %}" class="fw-semibold text-decoration-none" onclick="event.stopPropagation();">
+            <a href="/album/{{ artist_name|path_segment }}/{{ (album.get('album') or album.get('title') or '')|path_segment }}{{ album_scope }}" class="fw-semibold text-decoration-none" onclick="event.stopPropagation();">
               {{ album.get('album') or album.get('title') }}
             </a>
           {% endif %}
@@ -117,11 +122,11 @@
         </span>
         <!-- Actions (stop propagation so button clicks don't toggle accordion) -->
         <div class="d-flex gap-1 flex-shrink-0" onclick="event.stopPropagation();">
-          <a href="/album/{{ artist_name|path_segment }}/{{ (album.get('album') or album.get('title') or '')|path_segment }}{% if album.get('album_year') %}/{{ album.get('album_year') }}{% endif %}" class="btn btn-outline-secondary btn-sm" title="Open album page" onclick="event.stopPropagation();">
+          <a href="/album/{{ artist_name|path_segment }}/{{ (album.get('album') or album.get('title') or '')|path_segment }}{{ album_scope }}" class="btn btn-outline-secondary btn-sm" title="Open album page" onclick="event.stopPropagation();">
             <i class="bi bi-box-arrow-up-right"></i>
           </a>
           {% if not is_missing and album.get('musicbrainz_album_mbid') %}
-          <a href="/album/{{ artist_name|path_segment }}/{{ (album.get('album') or album.get('title') or '')|path_segment }}{% if album.get('album_year') %}/{{ album.get('album_year') }}{% endif %}#missing-tracks" class="btn btn-outline-warning btn-sm album-search-missing-btn" style="display:none;" title="Search missing tracks on album page" onclick="event.stopPropagation();">
+          <a href="/album/{{ artist_name|path_segment }}/{{ (album.get('album') or album.get('title') or '')|path_segment }}{{ album_scope }}#missing-tracks" class="btn btn-outline-warning btn-sm album-search-missing-btn" style="display:none;" title="Search missing tracks on album page" onclick="event.stopPropagation();">
             <i class="bi bi-search"></i>
           </a>
           {% endif %}
