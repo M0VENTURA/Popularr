@@ -331,6 +331,13 @@ def _duration_checks(comparison: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "track_number": _as_text(entry.get("library_track_number")),
             "library_duration": _as_text(entry.get("library_duration_display")),
             "mb_duration": _as_text(entry.get("mb_duration_display")),
+            # Everything a queue row needs to ask Soulseek for the CORRECT
+            # version: the recording's MBID (identity), the disc, and the raw
+            # duration in milliseconds — "3:53" is a display string the queue
+            # cannot store.
+            "disc_number": _as_text(entry.get("mb_disc_number")),
+            "recording_mbid": _as_text(entry.get("mb_recording_mbid")),
+            "duration": _as_text(entry.get("mb_duration") or entry.get("duration")),
         })
     return checks
 
@@ -525,7 +532,8 @@ def propose_album_metadata(
                          "changes": [{"field", "label", "current", "proposed"}, ...]},
                         ...],
           "duration_checks": [{"track_id", "title", "track_number",
-                              "library_duration", "mb_duration"}, ...],
+                              "library_duration", "mb_duration",
+                              "disc_number", "recording_mbid", "duration"}, ...],
           "counts":    {"album_changes": n, "tracks_changed": m, "track_changes": k,
                         "duration_mismatches": d},
           "missing":   [{"mb_track_number", "mb_title", ...}, ...],

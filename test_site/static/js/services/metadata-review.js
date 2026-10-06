@@ -355,6 +355,40 @@
    * recording (a radio edit, a live take), which is exactly what a review
    * should surface rather than quietly "correct" the tags around.
    */
+  /**
+   * "Redownload the correct version" — the fix for a wrong-version file is a
+   * different FILE, not different tags.
+   *
+   * Built with ``createElement``/``setAttribute`` rather than string
+   * concatenation: a track title must never be able to break out of an HTML
+   * attribute. The payload mirrors what the missing-track rows send, and the
+   * queue function itself lives in ``album.js`` (exported on
+   * ``global.albumDetail``) so its dedupe and busy handling stay in one place.
+   */
+  function buildRedownloadButton(check) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-outline-success btn-sm py-0 px-2 ms-auto';
+    btn.title = 'Search Soulseek for the correct version of this recording';
+    btn.innerHTML = '<i class="bi bi-download me-1"></i>Redownload correct version';
+    btn.addEventListener('click', () => {
+      const payload = {
+        artist: pageArtist(),
+        album_artist: pageArtist(),
+        album: pageAlbum(),
+        title: check.title || '',
+        track_number: check.track_number || null,
+        disc_number: check.disc_number || null,
+        year: null,
+        release_id: null, // queueMissingTrack falls back to the linked release
+        recording_mbid: check.recording_mbid || null,
+        duration: check.duration ? parseInt(check.duration, 10) : null,
+      };
+      global.albumDetail.queueMissingTrack(payload, btn);
+    });
+    return btn;
+  }
+
   function renderDurationChecks(checks) {
     const tbody = document.getElementById('albumTracksTbody');
     if (!tbody) return;
@@ -387,6 +421,8 @@
             '</small>' +
           '</div>' +
         '</td>';
+      const holder = tr.querySelector('.d-flex');
+      if (holder) holder.appendChild(buildRedownloadButton(check));
       insertAfter.insertAdjacentElement('afterend', tr);
     });
   }

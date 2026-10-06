@@ -365,6 +365,34 @@ class TestTheLookupReviewReportsDuration:
         assert checks[0]["library_duration"] == "3:00"
         assert checks[0]["mb_duration"] == "4:00"
 
+    def test_the_check_carries_everything_the_queue_needs(self):
+        """A wrong-version file is fixed by a different FILE, not by tags.
+
+        The row therefore offers "Redownload correct version", which posts to
+        ``/api/queue/add`` (Soulseek). That request needs the recording MBID
+        for identity, the disc, and a RAW duration — the displayed ``4:00`` is
+        a string the queue cannot store.
+        """
+        from services.metadata.metadata_proposal_service import _duration_checks
+
+        comparison = [
+            {
+                "matched": True, "library_track_id": "t2",
+                "library_title": "B", "library_track_number": "2",
+                "library_duration_display": "3:53", "mb_duration_display": "4:00",
+                "mb_disc_number": 1, "mb_recording_mbid": "rec-42",
+                "mb_duration": 240000,
+                "diff_fields": ["duration"],
+            },
+        ]
+        check = _duration_checks(comparison)[0]
+
+        assert check["recording_mbid"] == "rec-42", "the recording is the identity"
+        assert check["disc_number"] == "1"
+        assert check["duration"] == "240000", (
+            f"the queue needs milliseconds, got {check['duration']!r}"
+        )
+
     def test_duration_is_never_staged_as_a_writable_change(self):
         """A file's length cannot be written by a metadata import.
 

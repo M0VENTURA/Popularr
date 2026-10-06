@@ -3034,6 +3034,10 @@
     applyAlbumMbid,
     refreshAlbumTrackFindings,
     compareWithMusicBrainz,
+    // Exported for metadata-review's "Redownload correct version" button —
+    // the queue/dedupe/busy handling must stay in one place rather than being
+    // re-implemented per caller.
+    queueMissingTrack,
     clearMBComparison: clearComparison,
     updateAllTracksFromMB,
     toggleSelectAll,

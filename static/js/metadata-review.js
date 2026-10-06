@@ -337,6 +337,33 @@
    * recording (a radio edit, a live take), which is exactly what a review
    * should surface rather than quietly "correct" the tags around.
    */
+  /**
+   * "Redownload the correct version" — the fix for a wrong-version file is a
+   * different FILE, not different tags.
+   *
+   * Built with ``createElement``/``setAttribute`` rather than string
+   * concatenation: a track title must never be able to break out of an HTML
+   * attribute, and the payload keys mirror what the missing-track rows send.
+   */
+  function buildRedownloadButton(check) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-outline-success btn-sm py-0 px-2 ms-auto';
+    btn.title = 'Search Soulseek for the correct version of this recording';
+    btn.dataset.artist = pageArtist();
+    btn.dataset.album = pageAlbum();
+    btn.dataset.title = check.title || '';
+    btn.dataset.trackNumber = check.track_number || '';
+    btn.dataset.discNumber = check.disc_number || '';
+    btn.dataset.recordingMbid = check.recording_mbid || '';
+    btn.dataset.duration = check.duration || '';
+    btn.innerHTML = '<i class="bi bi-download me-1"></i>Redownload correct version';
+    // ``queueMissingTrack`` is the same path the missing rows use — dedupe,
+    // busy popup and the "already_queued is not an insert" rule included.
+    btn.addEventListener('click', () => window.queueMissingTrack(btn));
+    return btn;
+  }
+
   function renderDurationChecks(checks) {
     const tbody = document.getElementById('albumTracksTbody');
     if (!tbody) return;
@@ -369,6 +396,8 @@
             '</small>' +
           '</div>' +
         '</td>';
+      const holder = tr.querySelector('.d-flex');
+      if (holder) holder.appendChild(buildRedownloadButton(check));
       insertAfter.insertAdjacentElement('afterend', tr);
     });
   }
