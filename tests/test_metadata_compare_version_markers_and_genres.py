@@ -630,3 +630,84 @@ class TestTheMarkerKeyItself:
             normalize_title_for_compare("Song One (Live)")
             != normalize_title_for_compare("Song Two (Live)")
         )
+
+
+class TestWriterUsesTheNameListRule:
+    """Reported: **Writer:** *["Marianne Faithfull", …]* → **Marianne Faithfull,
+    Joe Mavety, …** — the writer lookup, "a similar issue to the genre
+    matching".
+
+    ``tracks.writer`` is a TEXT column that stores a **JSON array**, while
+    ``_flatten_release`` hands back a comma string. The field had no set rule,
+    so it was compared as a plain string: the SAME writers spelled two ways
+    always read as a change — the exact defect the genre rows had, on a field
+    that never got the rule. Both sides are now rendered through the shared
+    name-list parser, so the bar also shows two lines a human can line up
+    instead of a raw JSON array opposite a comma string.
+    """
+
+    STORED = '["Marianne Faithfull", "Joe Mavety", "Barry Reynolds"]'
+    PROPOSED = "Marianne Faithfull, Joe Mavety, Barry Reynolds"
+    # The pair from the report: the stored list carries one more name.
+    STORED_EXTRA = (
+        '["Marianne Faithfull", "Joe Mavety", "Barry Reynolds", "Ralph Sall"]'
+    )
+
+    @staticmethod
+    def _writer_fields(stored: str, proposed: str) -> set[str]:
+        out = _track_proposals(
+            [_local(writer=stored)],
+            _comparison(),
+            _metadata_with({"writer": proposed}),
+        )
+        return {c["field"] for c in (out[0]["changes"] if out else [])}
+
+    @staticmethod
+    def _writer_change(stored: str, proposed: str) -> dict | None:
+        out = _track_proposals(
+            [_local(writer=stored)],
+            _comparison(),
+            _metadata_with({"writer": proposed}),
+        )
+        for change in out[0]["changes"] if out else []:
+            if change["field"] == "writer":
+                return change
+        return None
+
+    def test_the_same_writers_in_a_different_encoding_are_not_reported(self):
+        assert "writer" not in self._writer_fields(self.STORED, self.PROPOSED), (
+            "a JSON array and a comma string list the same writers — comparing "
+            "them as strings is what made every lookup propose a no-op change"
+        )
+
+    @pytest.mark.parametrize("stored,proposed", [
+        ('["Rock Band", "Other Writer"]', "Other Writer, Rock Band"),  # order
+        ('["  Rock Band  "]', "Rock Band"),                            # spacing
+        ('["rock band"]', "Rock Band"),                                # case
+    ])
+    def test_order_spacing_and_case_do_not_matter(self, stored, proposed):
+        assert "writer" not in self._writer_fields(stored, proposed)
+
+    def test_the_reported_pair_still_reports(self):
+        """CONTROL — the bar in the report lists a name MusicBrainz drops.
+
+        ``Ralph Sall`` is in the stored array and not in the proposal, so this
+        is a genuine difference; suppressing it would hide a real edit.
+        """
+        assert "writer" in self._writer_fields(self.STORED_EXTRA, self.PROPOSED)
+
+    def test_the_displayed_writer_is_a_clean_line_on_both_sides(self):
+        """The report showed a raw JSON array against a comma string."""
+        change = self._writer_change(self.STORED_EXTRA, self.PROPOSED)
+
+        assert change is not None
+        assert change["current"].startswith("Marianne Faithfull")
+        assert "Ralph Sall" in change["current"], (
+            "the dropped name must be visible — that is what the bar is for"
+        )
+        assert not change["current"].startswith("[")
+        assert not change["proposed"].startswith("[")
+
+    def test_an_empty_stored_writer_is_still_filled(self):
+        """CONTROL — set-equality must not swallow a real addition."""
+        assert "writer" in self._writer_fields("", self.PROPOSED)

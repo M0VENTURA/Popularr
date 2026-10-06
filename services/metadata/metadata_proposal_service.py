@@ -460,7 +460,12 @@ def _track_proposals(
             "track_number": _as_text(local.get("track_number")),
             "disc_number": _as_text(local.get("disc_number") or "1"),
             "mbid": _as_text(local.get("mbid")),
-            "writer": _as_text(local.get("writer")),
+            # A name LIST, exactly like genres: the column is TEXT but holds a
+            # JSON array (``["A", "B"]``) while MusicBrainz hands back a comma
+            # string. Rendered rather than stringified so the review puts the
+            # same spelling on both sides — the reported writer bar showed a
+            # raw JSON array opposite a comma string.
+            "writer": _genres_text(local.get("writer")),
             # Rendered, not merely stringified: a JSONB list rendered with
             # ``str()`` is a Python repr, which is what the review was showing
             # (and mis-comparing) for every genre row.
@@ -472,7 +477,7 @@ def _track_proposals(
             "track_number": _as_text(entry.get("mb_track_number")),
             "disc_number": _as_text(entry.get("mb_disc_number")),
             "mbid": rec_mbid,
-            "writer": _as_text(mb_track.get("writer")),
+            "writer": _genres_text(mb_track.get("writer")),
             "musicbrainz_genres": _genres_text(mb_track.get("musicbrainz_genres")),
             "artist": _as_text(mb_track.get("artist")),
         }
@@ -520,6 +525,16 @@ def _track_proposals(
             # differ, and the two columns use different encodings (TEXT vs
             # JSONB), so both sides go through the shared tolerant parser.
             if field == "musicbrainz_genres" and _genre_sets_equal(current, proposed):
+                continue
+            # ``writer`` has the same SHAPE — several names in one value, order
+            # not meaningful — and the same encoding split (a JSON array in the
+            # column, a comma string from MusicBrainz), so it shares the rule
+            # rather than growing a second parser. Without it a plain string
+            # compare reported a change for the identical writer list spelled
+            # two ways: the reported *writer* bar. A name that genuinely
+            # appears or disappears still differs — that is the bar doing its
+            # job.
+            if field == "writer" and _genre_sets_equal(current, proposed):
                 continue
             change = {
                 "field": field,
