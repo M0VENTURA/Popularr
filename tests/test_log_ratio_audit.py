@@ -165,6 +165,148 @@ class TestApplyLogRatioAuditToStoredScore:
         assert score is None
 
 
+class TestARejectedSourceDoesNotLoseItsWeightShare:
+    """Reported: *"it zeroed out the LB component (LB: 0.0), but the scoring
+    function did not redistribute the missing 30% weight back to Last.fm"* —
+    with a proposed fix that sets ``eff_lf_weight = lf_weight + lb_weight``.
+
+    The renormalization is ALREADY there: the scorer divides by
+    ``sum(ACTIVE weights)``, so a rejected source's share goes to whatever
+    survives, and ``REJECT_LB`` forces ``lf_weight, lb_weight = 1.0, 0.0``.
+    The report's own log line proves it — ``Final: 57.3 (LF: 57.3 | LB: 0.0)``
+    has Final **equal** to the LF component; had 30% been dropped, Final could
+    not exceed ``0.7 × 57.3 ≈ 40``.
+
+    Nothing in the suite pinned that arithmetic, which is why it could be
+    reported as missing. These tests do.
+    """
+
+    # The reported track: 477,200 Last.fm listeners against 290 LB listens.
+    REPORTED_LF, REPORTED_LB = 477_200, 290
+    ALBUM_LF = [350_000, 340_000, 330_000, 477_200, 300_000]
+    ALBUM_LB = [350_000, 345_000, 348_000, 290, 352_000]
+    ALBUM_PAIRS = list(zip(ALBUM_LF, ALBUM_LB))
+
+    @staticmethod
+    def _score(**kwargs):
+        from services.popularity.popularity_math import (
+            calculate_combined_popularity_score,
+        )
+
+        return calculate_combined_popularity_score(age_source_value=0, **kwargs)
+
+    def test_the_audit_actually_rejects_the_reported_pair(self):
+        """The premise of the report — the audit fires on these numbers."""
+        from services.popularity.popularity_math import evaluate_log_ratio_deviation
+
+        assert evaluate_log_ratio_deviation(
+            lastfm_listeners=self.REPORTED_LF,
+            listenbrainz_listens=self.REPORTED_LB,
+            album_lf_lb_pairs=self.ALBUM_PAIRS,
+        ) == "REJECT_LB"
+
+    def test_reject_lb_gives_lastfm_the_whole_weight(self):
+        # ``track_stage`` zeroes LB before the call when the audit rejects it.
+        scored = self._score(
+            lastfm_listeners=self.REPORTED_LF,
+            listenbrainz_listens=0,
+            album_lf_listeners=self.ALBUM_LF,
+            album_lb_listens=self.ALBUM_LB,
+            source_audit="REJECT_LB",
+        )
+
+        assert abs(scored["combined_score"] - scored["lastfm_score"]) < 1e-3, (
+            "Last.fm must carry 100% when ListenBrainz is rejected"
+        )
+
+    def test_reject_lb_wins_even_when_a_healthy_lb_value_is_passed(self):
+        """The verdict, not the data, decides — belt and braces.
+
+        ``track_stage`` zeroes LB first, but the scorer is also called from
+        paths that pass the real value; the REJECT verdict must still make
+        Last.fm the ONLY evidence rather than letting a healthy-looking LB
+        pull the blend back up.
+        """
+        scored = self._score(
+            lastfm_listeners=self.REPORTED_LF,
+            listenbrainz_listens=350_000,   # a perfectly good LB value
+            album_lf_listeners=self.ALBUM_LF,
+            album_lb_listens=self.ALBUM_LB,
+            source_audit="REJECT_LB",
+        )
+
+        assert abs(scored["combined_score"] - scored["lastfm_score"]) < 1e-3, (
+            "a rejected source must contribute nothing, whatever its number"
+        )
+        assert scored["combined_score"] < scored["listenbrainz_score"], (
+            "if LB still moved the score the verdict would be decorative"
+        )
+
+    def test_it_is_not_the_seventy_percent_the_report_describes(self):
+        """CONTROL — the specific arithmetic the report says is missing."""
+        scored = self._score(
+            lastfm_listeners=self.REPORTED_LF,
+            listenbrainz_listens=0,
+            album_lf_listeners=self.ALBUM_LF,
+            album_lb_listens=self.ALBUM_LB,
+            source_audit="REJECT_LB",
+        )
+        seventy = 0.7 * scored["lastfm_score"]
+
+        assert abs(scored["combined_score"] - seventy) > 1.0, (
+            "a score at ~70% of the LF component WOULD be the reported bug"
+        )
+
+    def test_reject_lf_gives_listenbrainz_the_whole_weight(self):
+        """CONTROL — the rule is symmetric, not an LF special case."""
+        scored = self._score(
+            lastfm_listeners=193,
+            listenbrainz_listens=1437,
+            album_lf_listeners=[14_200, 830, 193],
+            album_lb_listens=[1332, 842, 1437],
+            source_audit="REJECT_LF",
+        )
+
+        assert abs(scored["combined_score"] - scored["listenbrainz_score"]) < 1e-3
+
+    def test_the_post_scoring_reblend_renormalizes_too(self):
+        """The singles-scan path re-blends a STORED score — same rule."""
+        from services.popularity.popularity_math import (
+            apply_log_ratio_audit_to_stored_score,
+        )
+
+        _verdict, score = apply_log_ratio_audit_to_stored_score(
+            lastfm_listeners=self.REPORTED_LF,
+            listenbrainz_listens=self.REPORTED_LB,
+            album_lf_lb_pairs=self.ALBUM_PAIRS,
+            lastfm_score=57.3,
+            listenbrainz_score=88.7,
+            age_score=42.0,
+        )
+
+        assert score is not None
+        assert abs(score["combined_score"] - 57.3) < 1e-3, (
+            "the stored-score re-blend must give Last.fm the whole weight too"
+        )
+
+    def test_a_valid_track_still_blends_both_sources(self):
+        """CONTROL — renormalization must not turn every score into one source."""
+        scored = self._score(
+            lastfm_listeners=350_000,
+            listenbrainz_listens=350_000,
+            album_lf_listeners=self.ALBUM_LF,
+            album_lb_listens=self.ALBUM_LB,
+            source_audit="VALID",
+        )
+
+        lf, lb = scored["lastfm_score"], scored["listenbrainz_score"]
+        assert scored["lastfm_score"] > 0 and scored["listenbrainz_score"] > 0
+        assert abs(scored["combined_score"] - lf) > 1.0, (
+            "with both sources live the blend must not collapse to Last.fm"
+        )
+        assert min(lf, lb) <= scored["combined_score"] <= max(lf, lb)
+
+
 class TestCombinedScoreSourceAudit:
     def _score(self, lf, lb, audit="VALID", **kwargs):
         from services.popularity.popularity_math import calculate_combined_popularity_score
