@@ -36,6 +36,7 @@ from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from sqlalchemy.exc import IntegrityError
 
 from db.engine import get_engine
+from helpers.logging_config import log_queue
 
 logger = structlog.get_logger(__name__)
 
@@ -251,7 +252,11 @@ def _download_queue_processor_tick() -> None:
                 process_cycle()
             except Exception as _exc:
                 logger.warning("download_queue_processor cycle failed", error=str(_exc))
-                
+                # services/scheduler is NOT in the logging routing table, so
+                # the line above only reaches unified. The queue's own log
+                # needs it too — "the queue stopped" is a queue.log question.
+                log_queue("[QUEUE] cycle failed", error=str(_exc))
+
         _th.Thread(
             target=_run_cycle,
             name="queue-cycle",
@@ -259,6 +264,7 @@ def _download_queue_processor_tick() -> None:
         ).start()
     except Exception as _exc:
         logger.warning("download_queue_processor spawn failed", error=str(_exc))
+        log_queue("[QUEUE] cycle spawn failed", error=str(_exc))
 
 
 def _register_default_jobs(scheduler: BackgroundScheduler, cfg: dict[str, Any]) -> None:

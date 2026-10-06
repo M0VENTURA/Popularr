@@ -815,7 +815,20 @@ def _select_best_result(
 
     if scored and scored[0][0] >= min_score:
         best_score, best = scored[0]
-        logger.debug("Best result found", score=best_score, filename=best.get("filename", "")[:80], candidates=len(scored))
+        # INFO, not DEBUG — this module's level is INFO, so the old line was
+        # DROPPED: queue.log could say WHY nothing matched (the WARNING below)
+        # but never WHAT it chose when it did, which is the "matching of songs"
+        # that was missing from the log. Artist and title ride along because a
+        # bare filename cannot be attributed to a track in a log tail.
+        logger.info(
+            "Selected download candidate",
+            artist=expected_artist,
+            title=expected_title,
+            album=expected_album,
+            score=round(float(best_score), 1),
+            filename=str(best.get("filename") or "")[:200],
+            candidates=len(scored),
+        )
         return best
 
     # ONE line that says which gate fired. Every rejection reason above is a
