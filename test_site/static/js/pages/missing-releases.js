@@ -290,7 +290,7 @@
             <td class="text-end">
               <button type="button" class="btn btn-sm btn-outline-success queue-missing-track-btn"
                       data-action="mr-queue-track"
-                      data-artist="${esc(t.artist || artist)}"
+                      data-artist="${esc(t.track_artist || t.artist || artist)}"
                       data-album-artist="${esc(artist)}"
                       data-title="${esc(t.title)}"
                       data-album="${esc(album)}"
@@ -402,7 +402,13 @@
       for (const track of missing) {
         try {
           const result = await global.api.postJson(QUEUE_ADD_ENDPOINT, {
-            artist: track.artist || artist,
+            // `track_artist` is what /api/album/missing-tracks returns — the
+            // field is named after the DB column. Reading `.artist` (which the
+            // response does NOT carry) silently fell through to the album
+            // artist, so every compilation track was queued as "Various
+            // Artists" and Soulseek searched under it. The album artist still
+            // travels, in its own field, below.
+            artist: track.track_artist || track.artist || artist,
             title: track.title,
             album,
             album_artist: artist,

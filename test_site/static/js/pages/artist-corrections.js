@@ -378,7 +378,13 @@
     return global.buttonState.withBusy(button, '', async () => {
       try {
         const result = await global.api.postJson('/api/queue/add', {
-          artist: m.album_artist || m.artist,
+          // Prefer the TRACK's own artist: these rows carry both `artist`
+          // (the performer, from `tracks.artist`) and `album_artist`, and the
+          // old order put the album artist first — on a compilation that
+          // queued the track as "Various Artists" and Soulseek searched under
+          // it instead of the band.
+          artist: m.artist || m.album_artist,
+          album_artist: m.album_artist || m.artist,
           album: m.album,
           title: m.mb_title,
           track_number: m.track_number,
@@ -628,7 +634,13 @@
     return global.buttonState.withBusy(button, '', async () => {
       try {
         const result = await global.api.postJson('/api/queue/add', {
-          artist: track.album_artist || track.artist,
+          // These rows come from /api/album/missing-tracks, whose field is
+          // `track_artist` (the DB column name) — it carries NEITHER `artist`
+          // nor `album_artist`, so the old `track.album_artist || track.artist`
+          // read as undefined and the row was queued with no artist at all.
+          // `album_artist` still travels, in its own field, for folder layout.
+          artist: track.track_artist || track.artist || artistName,
+          album_artist: track.album_artist || artistName,
           album: track.album,
           title: track.title,
           track_number: track.track_number,
