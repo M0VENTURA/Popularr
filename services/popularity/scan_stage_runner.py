@@ -2269,11 +2269,33 @@ def run_scan(
                                 _cur["release_track_title"] = _entry.get("release_track_title") or ""
 
                             if _entry and _entry.get("listenbrainz_listens"):
-                                _cur["listenbrainz_listens"] = int(_entry["listenbrainz_listens"] or 0)
-                                _cur["listenbrainz_users"] = int(_entry.get("listenbrainz_users") or 0)
+                                # ⚠️ MAX, not assignment. For a compilation the
+                                # release-bound count is FRAGMENTED — ListenBrainz
+                                # reports listens per (recording, release), so
+                                # "Burn" on a soundtrack can read 577 while the
+                                # recording's GLOBAL count is ~150k. Assigning
+                                # here used to overwrite the larger, already
+                                # prefetched global with that fragment, which is
+                                # why compilation tracks scored far too low
+                                # against their true popularity. The higher of
+                                # the two wins, and the pair (listens + users)
+                                # stays from the source that won.
+                                _rel_listens = int(_entry["listenbrainz_listens"] or 0)
+                                _rel_users = int(_entry.get("listenbrainz_users") or 0)
+                                _known_listens = int(_cur.get("listenbrainz_listens") or 0)
+                                if _rel_listens >= _known_listens:
+                                    _cur["listenbrainz_listens"] = _rel_listens
+                                    _cur["listenbrainz_users"] = _rel_users
+                                    _lb_won = "release"
+                                else:
+                                    _lb_won = "recording-global"
                                 _cur["_album_tracklist"] = True
                                 _cur["source"] = "album_tracklist"
-                                log_unified(f"[scan_runner] Album-tracklist LB match for '{_t.get('title')}' ({artist} - {album}): {_cur['listenbrainz_listens']} listens")
+                                log_unified(
+                                    f"[scan_runner] Album-tracklist LB match for '{_t.get('title')}' "
+                                    f"({artist} - {album}): {_cur['listenbrainz_listens']} listens "
+                                    f"(release={_rel_listens}, kept={_lb_won})"
+                                )
                             if _album_release_mbid:
                                 _cur["_album_tracklist"] = True
                                 _cur["source"] = "album_tracklist"
