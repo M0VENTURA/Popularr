@@ -19,6 +19,7 @@ from services.enrichment.musicbrainz_service import (
 from api_clients.musicbrainz_http import escape_lucene_special_chars
 from helpers.normalization_service import (
     file_version_variant_key,
+    is_track_artist_placeholder,
     normalize_title_for_compare,
     normalize_title_for_lucene_query,
 )
@@ -604,7 +605,7 @@ def _persist_missing_tracks(artist: str, album: str, missing: list[dict[str, Any
     with db_session() as session:
         existing = session.execute(
             text(
-                "SELECT id, title, track_number, disc_number, ignored "
+                "SELECT id, title, track_number, disc_number, track_artist, ignored "
                 "FROM missing_album_tracks "
                 "WHERE LOWER(artist_name) = LOWER(:artist) "
                 "  AND LOWER(album_name) = LOWER(:album)"
@@ -629,11 +630,46 @@ def _persist_missing_tracks(artist: str, album: str, missing: list[dict[str, Any
         # Filtering here makes the insert correct regardless of whether that
         # constraint exists.
         existing_keys = {_missing_row_key(row) for row in existing}
+        existing_by_key = {_missing_row_key(row): row for row in existing}
 
         inserted = 0
+        refreshed = 0
         for m in missing:
             key = _missing_row_key(m)
             if key in existing_keys:
+                # ⚠️ REFRESH the artist even though the row itself survives.
+                # This branch used to ``continue`` on sight, so a row written
+                # BEFORE the queue started storing the recording's own credit
+                # kept its placeholder for ever: the album page read
+                # ``track_artist`` and queued the track as "Various Artists"
+                # (reported: "missing tracks are still adding various artists
+                # to the queue search" — and the report was right that it is
+                # the way missing tracks are POPULATED).
+                #
+                # The computed value wins, with one guard: a placeholder must
+                # never overwrite a real performer a previous run stored. MB
+                # returns no credit for some recordings, and that fallback is
+                # the album artist — losing a good value to it would put the
+                # bug back one step.
+                _new_artist = str(m.get("track_artist") or "").strip()
+                _old_artist = str(
+                    existing_by_key[key].get("track_artist") or ""
+                ).strip()
+                if _new_artist and _new_artist != _old_artist and (
+                    not _old_artist
+                    or not is_track_artist_placeholder(_new_artist)
+                ):
+                    session.execute(
+                        text(
+                            "UPDATE missing_album_tracks "
+                            "SET track_artist = :track_artist WHERE id = :id"
+                        ),
+                        {
+                            "track_artist": _new_artist,
+                            "id": existing_by_key[key].get("id"),
+                        },
+                    )
+                    refreshed += 1
                 continue
 
             tn = str(m.get("track_number") or "").strip()
@@ -670,6 +706,16 @@ def _persist_missing_tracks(artist: str, album: str, missing: list[dict[str, Any
 
         session.commit()
 
+    if refreshed:
+        # One line per album so an operator can see the repair happen rather
+        # than wonder why the queue is still searching for "Various Artists"
+        # after a scan.
+        logger.info(
+            "Refreshed stale missing-track artists",
+            artist=artist,
+            album=album,
+            refreshed=refreshed,
+        )
     if inserted:
         logger.debug(
             "Persisted missing tracks",

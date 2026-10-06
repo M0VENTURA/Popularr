@@ -155,3 +155,203 @@ class TestGetMissingTracksRowMapping:
             elif _cur_disc == "0":
                 payload["disc_number"] = ""
         assert payload.get("disc_number") == ""
+
+
+# ===========================================================================
+# The upsert must repair a stale track artist, not skip the row
+# ===========================================================================
+class _FakeResult:
+    def __init__(self, rows=None):
+        self._rows = list(rows or [])
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeSession:
+    """Just enough of ``db_session`` to drive ``_persist_missing_tracks``."""
+
+    def __init__(self, existing):
+        self._existing = list(existing)
+        self.statements: list[tuple[str, dict]] = []
+        self.committed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        sql_text = str(sql)
+        self.statements.append((sql_text, dict(params or {})))
+        if "SELECT" in sql_text and "FROM missing_album_tracks" in sql_text:
+            return _FakeResult(self._existing)
+        return _FakeResult([])
+
+    def commit(self):
+        self.committed = True
+
+    def updates(self) -> list[tuple[str, dict]]:
+        return [
+            (sql, params) for sql, params in self.statements
+            if sql.lstrip().upper().startswith("UPDATE")
+        ]
+
+    def inserts(self) -> list[tuple[str, dict]]:
+        return [
+            (sql, params) for sql, params in self.statements
+            if sql.lstrip().upper().startswith("INSERT")
+        ]
+
+
+def _persist(monkeypatch, existing, missing) -> _FakeSession:
+    """Run ``_persist_missing_tracks`` against a fake session and return it."""
+    from services.metadata import album_missing_service as ams_mod
+
+    session = _FakeSession(existing)
+    monkeypatch.setattr(ams_mod, "db_session", lambda: session)
+    ams_mod._persist_missing_tracks("Various Artists", "A Very Special Christmas", missing)
+    return session
+
+
+def _existing_row(**overrides):
+    row = {
+        "id": 7,
+        "title": "Do You Hear What I Hear?",
+        "track_number": "4",
+        "disc_number": 1,
+        "track_artist": "Various Artists",
+        "ignored": False,
+    }
+    row.update(overrides)
+    return row
+
+
+def _incoming(**overrides):
+    item = {
+        "title": "Do You Hear What I Hear?",
+        "track_number": "4",
+        "disc_number": 1,
+        "track_artist": "Whitney Houston",
+        "year": "1987",
+        "release_id": "rel-1",
+        "recording_mbid": "rec-1",
+        "duration": 150000,
+    }
+    item.update(overrides)
+    return item
+
+
+class TestAPersistedRowNeverKeepsTheAlbumArtist:
+    """Reported: *"Missing tracks are still adding 'various artists' to the
+    queue search — I think it's due to the way missing tracks are populated."*
+
+    The computation was already fixed to store the recording's own credit, but
+    the upsert skipped any row whose ``(disc, track, title)`` already existed —
+    so rows written before that fix kept their placeholder, the album page read
+    ``track_artist`` and queued the track under "Various Artists". The report's
+    diagnosis was right: it is the POPULATION.
+    """
+
+    def test_a_stored_placeholder_is_refreshed_to_the_performer(self, monkeypatch):
+        session = _persist(
+            monkeypatch,
+            [_existing_row(track_artist="Various Artists")],
+            [_incoming(track_artist="Whitney Houston")],
+        )
+
+        updates = session.updates()
+        assert updates, "the stale placeholder was left in place"
+        sql, params = updates[0]
+        assert "SET track_artist" in sql
+        assert params == {"track_artist": "Whitney Houston", "id": 7}, (
+            "the queue reads track_artist — it must be repaired, not re-inserted"
+        )
+
+    def test_an_empty_stored_artist_is_filled(self, monkeypatch):
+        session = _persist(
+            monkeypatch,
+            [_existing_row(track_artist="")],
+            [_incoming(track_artist="Whitney Houston")],
+        )
+
+        assert session.updates()[0][1]["track_artist"] == "Whitney Houston"
+
+    def test_a_real_performer_is_not_downgraded(self, monkeypatch):
+        """CONTROL — MB returns no credit for some recordings, and its
+        fallback IS the album artist; storing that would undo a good value."""
+        session = _persist(
+            monkeypatch,
+            [_existing_row(track_artist="Whitney Houston")],
+            [_incoming(track_artist="Various Artists")],
+        )
+
+        assert not session.updates(), (
+            "a placeholder must never overwrite a real performer"
+        )
+        assert not session.inserts(), "the row must not be duplicated either"
+
+    def test_an_unchanged_artist_is_not_rewritten(self, monkeypatch):
+        """CONTROL — no churn when nothing differs."""
+        session = _persist(
+            monkeypatch,
+            [_existing_row(track_artist="Whitney Houston")],
+            [_incoming(track_artist="Whitney Houston")],
+        )
+
+        assert not session.updates()
+
+    def test_a_new_missing_track_is_still_inserted(self, monkeypatch):
+        """CONTROL — the repair must not turn the upsert into a no-op."""
+        session = _persist(
+            monkeypatch,
+            [_existing_row()],
+            [_incoming(title="Poor Jack", track_number="16")],
+        )
+
+        assert session.inserts(), "a genuinely new missing row must be inserted"
+
+    def test_a_row_that_disappeared_is_still_deleted(self, monkeypatch):
+        """CONTROL — the staleness removal must survive the new pass."""
+        session = _persist(monkeypatch, [_existing_row()], [])
+
+        deletes = [
+            sql for sql, _ in session.statements
+            if sql.lstrip().upper().startswith("DELETE")
+        ]
+        assert deletes, "a missing row that is no longer missing must go away"
+
+    def test_the_repair_is_logged(self, monkeypatch):
+        """So an operator can see it happen instead of guessing."""
+        from services.metadata import album_missing_service as ams_mod
+
+        calls: list[tuple[str, dict]] = []
+
+        class _Rec:
+            def info(self, event, **kw):
+                calls.append((str(event), kw))
+
+            def debug(self, event, **kw):
+                calls.append((str(event), kw))
+
+            def warning(self, event, **kw):
+                calls.append((str(event), kw))
+
+        monkeypatch.setattr(ams_mod, "logger", _Rec())
+        _persist(
+            monkeypatch,
+            [_existing_row(track_artist="Various Artists")],
+            [_incoming(track_artist="Whitney Houston")],
+        )
+
+        assert any(
+            name == "Refreshed stale missing-track artists" and kw.get("refreshed") == 1
+            for name, kw in calls
+        ), "a silent repair leaves the next report unanswerable"
