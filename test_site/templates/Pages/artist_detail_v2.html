@@ -188,8 +188,7 @@
           <ul class="dropdown-menu dropdown-menu-end">
             <li><a class="dropdown-item" href="{{ url_for('ui.artist_corrections', name=artist_name) }}"><i class="bi bi-wrench me-2"></i> Corrections</a></li>
             <li><a class="dropdown-item" href="{{ url_for('ui.artist_genre_management', name=artist_name) }}"><i class="bi bi-tags me-2"></i> Genre Management</a></li>
-            <li><a class="dropdown-item" href="javascript:void(0)" onclick="openEditArtistIdsModal()"><i class="bi bi-pencil me-2"></i> Edit External IDs</a></li>
-            <li><hr class="dropdown-divider"></li>
+            <li><a class="dropdown-item" href="javascript:void(0)" onclick="openEditArtistIdsModal()"><i class="bi bi-pencil me-2"></i> Edit External IDs</a></li>            <li><a class="dropdown-item" href="{{ url_for('artist.api_artist_popularity_report', artist=artist_name) }}" title="CSV of every track: Last.fm + ListenBrainz listens, source scores, combined score and stars — most popular first"><i class="bi bi-bar-chart-line me-2"></i> Download Popularity Report</a></li>            <li><hr class="dropdown-divider"></li>
             <li><button class="dropdown-item" type="button" onclick="forceArtistMetadataRefresh()"><i class="bi bi-arrow-repeat me-2"></i> Force Metadata Refresh</button></li>
           </ul>
         </div>

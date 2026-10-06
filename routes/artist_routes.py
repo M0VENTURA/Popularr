@@ -8,9 +8,11 @@ Handles:
 
 from __future__ import annotations
 
+import asyncio
+import re
 from typing import Any
 
-from quart import Blueprint, request, jsonify
+from quart import Blueprint, request, jsonify, Response
 import structlog
 from sqlalchemy import text
 
@@ -556,3 +558,109 @@ def api_missing_overview() -> Any:
         "gap_albums": gap_albums,
         "artists_with_missing_releases": missing_artists,
     })
+
+
+# =============================
+# POPULARITY REPORT (CSV download)
+# =============================
+
+#: Columns of the report, in file order. ``rank`` is assigned after the query
+#: has sorted; every other name is a real ``tracks`` column (checked against
+#: ``db.schema.COLUMN_REGISTRY`` — selecting one that does not exist would 500).
+_POPULARITY_REPORT_COLUMNS = (
+    "rank",
+    "title",
+    "artist",
+    "album",
+    "disc_number",
+    "track_number",
+    "year",
+    "final_score",
+    "popularity",
+    "stars",
+    "lastfm_listeners",
+    "lastfm_playcount",
+    "lastfm_score",
+    "listenbrainz_listens",
+    "listenbrainz_users",
+    "listenbrainz_score",
+    "is_single",
+    "single_confidence",
+    "single_confidence_score",
+    "is_live",
+    "popularity_frozen",
+)
+
+#: Most popular first. ``final_score`` is THE popularity number the page and the
+#: scan log both report (``popularity`` and ``stars`` only ever act as
+#: fallbacks when it is null — the page's own ordering uses the same chain);
+#: the title tiebreak keeps two equally-scored tracks in a stable order.
+_POPULARITY_REPORT_SQL = """
+    SELECT title, artist, album, disc_number, track_number, year,
+           final_score, popularity, stars,
+           lastfm_listeners, lastfm_playcount, lastfm_score,
+           listenbrainz_listens, listenbrainz_users, listenbrainz_score,
+           is_single, single_confidence, single_confidence_score,
+           is_live, popularity_frozen
+    FROM tracks
+    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+    ORDER BY COALESCE(final_score, popularity, stars, 0) DESC,
+             LOWER(COALESCE(title, ''))
+"""
+
+
+def _build_popularity_report(artist: str) -> str:
+    """CSV text for one artist, most popular first. BLOCKING — run in a thread."""
+    import csv as _csv
+    import io as _io
+
+    with db_session() as session:
+        rows = session.execute(
+            text(_POPULARITY_REPORT_SQL), {"artist": artist}
+        ).mappings().all()
+
+    buffer = _io.StringIO(newline="")
+    writer = _csv.writer(buffer)
+    writer.writerow(_POPULARITY_REPORT_COLUMNS)
+    for position, row in enumerate(rows, start=1):
+        # ``None`` becomes an empty cell; everything else is written as stored.
+        writer.writerow(
+            [position] + [row.get(column) for column in _POPULARITY_REPORT_COLUMNS[1:]]
+        )
+    return buffer.getvalue()
+
+
+@artist_bp.route("/api/artist/popularity-report")
+async def api_artist_popularity_report() -> Any:
+    """Download every track for one artist as CSV, ordered most popular first.
+
+    Backs the test-site artist page's "Download Popularity Report" action: the
+    full popularity row set — Last.fm listeners/playcount, ListenBrainz
+    listens/users, both source scores, the combined score, the star rating and
+    the single-detection verdict — so the numbers can be sorted and filtered in
+    a spreadsheet instead of read off a screen.
+    """
+    artist = str(request.args.get("artist") or "").strip()
+    if not artist:
+        return jsonify({"error": "artist is required"}), 400
+
+    # The query reads every track the artist owns, so it runs OFF the event
+    # loop — the async ratchet exempts a handler only when it offloads.
+    try:
+        report = await asyncio.to_thread(_build_popularity_report, artist)
+    except Exception as exc:
+        logger.error("Popularity report failed", artist=artist, error=str(exc))
+        return jsonify({"error": str(exc)}), 500
+
+    safe_artist = re.sub(r"[^A-Za-z0-9 _-]", "", artist).strip() or "artist"
+    return Response(
+        # ``\ufeff`` (UTF-8 BOM): titles carry accents, and without it Excel
+        # reads the file as the local codepage and mangles them.
+        "\ufeff" + report,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{safe_artist} - popularity report.csv"'
+            )
+        },
+    )
