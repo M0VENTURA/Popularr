@@ -2574,7 +2574,10 @@ def _log_dropped_playlist_tracks(
         dropped=len(dropped_ids),
         tracks=named,
         hint="stale ids are refreshed by a Navidrome import; ids for files "
-             "Navidrome has not indexed yet need a Navidrome scan first",
+             "Navidrome has not indexed yet need a Navidrome scan first "
+             "(run a scan from Navidrome's admin UI, or shorten its "
+             "ScanSchedule setting — e.g. @every 1m — so newly downloaded "
+             "files are indexed before the next playlist sync)",
     )
 
 
