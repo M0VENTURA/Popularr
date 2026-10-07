@@ -38,6 +38,7 @@ sys.path.insert(0, str(REPO_ROOT))
 RUNNER_SOURCE = (REPO_ROOT / "services" / "popularity" / "scan_stage_runner.py").read_text(encoding="utf-8")
 ALBUM_STAGE_SOURCE = (REPO_ROOT / "services" / "popularity" / "stages" / "album_stage.py").read_text(encoding="utf-8")
 PIPELINE_SOURCE = (REPO_ROOT / "services" / "scanning" / "pipelines" / "popularity_pipeline.py").read_text(encoding="utf-8")
+ROUTES_SOURCE = (REPO_ROOT / "routes" / "scan_routes" / "artist_album.py").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -196,3 +197,100 @@ class TestTheDashboardOffersTheMode:
     def test_the_pipeline_dispatch_has_the_documented_branch(self):
         assert 'elif mode == "finalise":' in PIPELINE_SOURCE
         assert 'kwargs["finalise_only"] = True' in PIPELINE_SOURCE
+
+
+# ---------------------------------------------------------------------------
+# 4. The artist and album pages offer it too (rebuilt tree)
+# ---------------------------------------------------------------------------
+
+class TestTheArtistAndAlbumPagesOfferTheMode:
+    """Both pages render the SAME shared selector partial.
+
+    The rebuilt tree is the only tree this change touches, so the assertions
+    name the ``test_site`` copies explicitly and a CONTROL pins that the live
+    tree is left alone.
+    """
+
+    SELECTOR = "test_site/templates/components/_scan_selector.html"
+
+    def test_the_shared_selector_has_the_option(self):
+        source = (REPO_ROOT / self.SELECTOR).read_text(encoding="utf-8")
+        assert '<option value="finalise">Finalise</option>' in source
+        assert 'name="scan_type"' in source, (
+            "the option is useless without the field the scan routes read"
+        )
+
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "test_site/templates/Pages/artist_detail_v2.html",
+            "test_site/templates/Pages/album_detail.html",
+        ],
+    )
+    def test_the_pages_include_the_shared_selector(self, rel: str):
+        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert "components/_scan_selector.html" in source, (
+            f"{rel} does not include the selector, so it cannot offer Finalise"
+        )
+
+    def test_the_route_dispatches_finalise_for_artist_and_album(self):
+        """One branch in scan_artist_custom, one in scan_album_custom."""
+        assert ROUTES_SOURCE.count(
+            'elif scan_type in {"popularity", "metadata", "singles", "finalise"}:'
+        ) == 2, "both the artist and album routes must accept finalise"
+
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "templates/components/_scan_selector.html",
+            "templates/pages/artist_detail.html",
+            "static/js/artist_detail.js",
+        ],
+    )
+    def test_the_live_tree_is_untouched(self, rel: str):
+        """CONTROL — the change is scoped to the rebuilt tree."""
+        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert '<option value="finalise">Finalise</option>' not in source, rel
+
+
+class TestTheTargetedScanMapsFinaliseToTheDashboardFlags:
+    """An artist/album Finalise must behave EXACTLY like the dashboard's."""
+
+    @staticmethod
+    def _kwargs(**overrides):
+        from services.scanning.pipelines.popularity_pipeline import (
+            _build_targeted_popularity_kwargs,
+        )
+        return _build_targeted_popularity_kwargs(**overrides)
+
+    def test_finalise_maps_to_singles_plus_finalise(self):
+        kwargs = self._kwargs(artist="An Artist", force=False, scan_type="finalise")
+        assert kwargs["finalise_only"] is True, (
+            "without the finalise flag the runner's skip gates stay ON and the "
+            "pass would skip already-scanned albums instead of finalising them"
+        )
+        assert kwargs["singles_only"] is True, (
+            "the stored-score reuse lives on the singles machinery"
+        )
+        assert "popularity_only" not in kwargs
+        assert "metadata_only" not in kwargs
+        assert kwargs["artist_filter"] == "An Artist"
+
+    def test_the_album_filter_survives(self):
+        kwargs = self._kwargs(artist="A", album="B", force=False, scan_type="finalise")
+        assert kwargs["album_filter"] == "B"
+        assert kwargs["finalise_only"] is True
+
+    @pytest.mark.parametrize(
+        "scan_type,flag",
+        [
+            ("popularity", "popularity_only"),
+            ("singles", "singles_only"),
+            ("metadata", "metadata_only"),
+        ],
+    )
+    def test_the_other_modes_are_unchanged(self, scan_type: str, flag: str):
+        """CONTROL — no other targeted mode may inherit the finalise gate."""
+        kwargs = self._kwargs(artist="A", force=True, scan_type=scan_type)
+        assert kwargs[flag] is True
+        assert "finalise_only" not in kwargs, f"{scan_type} must not carry the gate"

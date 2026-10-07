@@ -756,6 +756,16 @@ def _build_targeted_popularity_kwargs(
         # "Popularity" scan mode).
         kwargs["popularity_only"] = True
 
+    elif scan_type == "finalise":
+        # Finalise: finalise every album for this artist/album straight from
+        # the data already in the database — file-tag sync, star ratings and
+        # playlists — recomputing popularity/singles ONLY where they are
+        # MISSING. Mirrors the dashboard's "Finalise" mode exactly: it rides
+        # the singles machinery for the stored-score reuse and adds the
+        # finalise gates.
+        kwargs["singles_only"] = True
+        kwargs["finalise_only"] = True
+
     return kwargs
 
 

@@ -159,7 +159,7 @@ async def scan_artist_custom():
     elif scan_type == "navidrome":
         run_async(run_navidrome_artist_pipeline, artist, force)
 
-    elif scan_type in {"popularity", "metadata", "singles"}:
+    elif scan_type in {"popularity", "metadata", "singles", "finalise"}:
         started = _start_targeted_popularity_scan(
             run_popularity_artist_scan,
             artist,
@@ -205,7 +205,7 @@ async def scan_album_custom():
     elif scan_type == "navidrome":
         run_async(run_navidrome_album_pipeline, artist, album, force)
 
-    elif scan_type in {"popularity", "metadata", "singles"}:
+    elif scan_type in {"popularity", "metadata", "singles", "finalise"}:
         started = _start_targeted_popularity_scan(
             run_popularity_album_scan,
             artist,
