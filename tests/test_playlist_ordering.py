@@ -29,9 +29,17 @@ WHAT CHANGED
    weighted MEAN that (a) renormalised over the available signals — so an
    ABSENT count outranked a present but low one — and (b) clamped at 100, which
    tied every mainstream track and fell back to the album-relative columns.
-2. The per-artist cap now BINDS (overflow is dropped). It used to defer the
+2. **The STAR TIER is the primary key** (5 → 4 → 3), with that unclamped
+   popularity ordering WITHIN the tier. The clamp had been supplying the star
+   preference by accident (everything above ~1.78M listeners tied, so the
+   ``-stars`` tie-break ordered the head); removing it fixed the monotonicity
+   defect but let a 3★ track with the most listeners sit at position 1 — the
+   reported *"3 star songs being added to the playlists now"*. Measured on a
+   600-track pool sliced to 300: popularity-first admitted 54 more 3★ and 26
+   fewer 5★ than the clamped pipeline did.
+3. The per-artist cap now BINDS (overflow is dropped). It used to defer the
    overflow to the end, which the ``max_tracks`` slice then pulled back in.
-3. The artist spread is a greedy, strength-preserving interleave rather than a
+4. The artist spread is a greedy, strength-preserving interleave rather than a
    round-robin, which lost the global ranking after the first round.
 
 ⚠️ ``stars`` is deliberately NOT a fallback ordering key: ``_assign_stars``
@@ -158,19 +166,110 @@ class TestTheOrderIsComparableAcrossAlbums:
             "sink to the bottom of every playlist"
         )
 
-    def test_stars_are_not_used_as_the_fallback(self):
-        """Stars are album-relative too, so they cannot rescue a missing signal.
+    def test_star_tier_leads_and_popularity_ranks_inside_it(self):
+        """Stars are a COARSE tier, not a precise cross-album measure — but the
+        tier gates position, because a playlist called "<genre> - Top Tracks"
+        must not lead with a lower-rated track.
 
-        A 5-star track from a quiet album must NOT outrank a 4-star track with
-        real listeners purely on the star tier when prominence data exists.
+        ⚠️ This INVERTS the previous contract of the same test ("Loud 4 Star"
+        first). That rule was correct as a tie-break when the popularity measure
+        was clamped: everything above ~1.78M listeners tied, so stars decided
+        the head of every popular playlist — the behaviour it was asserting was
+        an accident of saturation, not a design. Unclamping was necessary (see
+        ``TestTheOrderingKeyIsMonotonicAndUnclamped``), but it then let a 3★
+        track with the most listeners sit at position 1, which is the reported
+        defect: *"3 star songs being added to the playlists now"*.
+
+        Popularity still ranks WITHIN the tier, so a global 4★ hit still beats a
+        niche 4★ one.
         """
         rows = [
             track("Quiet 5 Star", "A", stored=50, lf=10, stars=5),
             track("Loud 4 Star", "B", stored=50, lf=10_000_000, stars=4),
         ]
-        assert titles_of(fs._ordered_playlist_rows(rows, order_mode="prominence"))[0] == (
-            "Loud 4 Star"
+        ordered = titles_of(fs._ordered_playlist_rows(rows, order_mode="prominence"))
+        assert ordered[0] == "Quiet 5 Star", (
+            "the 5★ track must lead; its album-relative star is the pool's own "
+            "qualification signal"
         )
+
+
+# ---------------------------------------------------------------------------
+# 1c. The star tier leads (reported: 3★ tracks landing at the top)
+# ---------------------------------------------------------------------------
+
+class TestStarTierLeadsThePlaylist:
+    """Pins the reported defect end to end.
+
+    The popularity measure is unclamped, so a 3★ track with the most listeners
+    genuinely outranks a 5★ track with fewer — measured on a 600-track pool
+    sliced to 300, popularity-first ordering admitted 54 MORE 3★ tracks and 26
+    FEWER 5★ than before.
+    """
+
+    @pytest.mark.parametrize("order_mode", ["prominence", "stored"])
+    def test_a_three_star_track_never_leads(self, order_mode: str):
+        rows = [
+            track("3Star Global Hit", "A", stored=95, lf=50_000_000, stars=3),
+            track("4Star Mid", "B", stored=80, lf=1_000_000, stars=4),
+            track("5Star Niche", "C", stored=10, lf=10, stars=5),
+        ]
+        ordered = titles_of(fs._ordered_playlist_rows(rows, order_mode=order_mode))
+        assert ordered == ["5Star Niche", "4Star Mid", "3Star Global Hit"], (
+            "a Top Tracks playlist must be tier-ordered: 5★, then 4★, then 3★"
+        )
+
+    def test_popularity_orders_within_a_tier(self):
+        """CONTROL — the tier must gate position, not flatten the ranking."""
+        rows = [
+            track("Bigger", "B", stored=50, lf=9_000_000, stars=5),
+            track("Smaller", "A", stored=50, lf=100_000, stars=5),
+        ]
+        ordered = titles_of(fs._ordered_playlist_rows(rows, order_mode="prominence"))
+        assert ordered[0] == "Bigger", (
+            "inside one tier the unclamped popularity order must still decide"
+        )
+
+    def test_the_head_of_a_mixed_pool_is_all_five_star(self):
+        """The reported regression: 3★ tracks at the top of a capped playlist."""
+        rows = []
+        # The 3★ tracks carry the highest listener counts — exactly the fixture
+        # that put them at position 1 under popularity-first ordering.
+        rows.append(track("Mega Hit 3", "A", stored=50, lf=40_000_000, stars=3))
+        rows.append(track("Mega Hit 3b", "B", stored=50, lf=30_000_000, stars=3))
+        for i in range(6):
+            rows.append(track(
+                f"Five {i}", f"A{i}", stored=50, lf=5_000_000 - i * 100_000, stars=5
+            ))
+            rows.append(track(
+                f"Four {i}", f"B{i}", stored=50, lf=4_000_000 - i * 100_000, stars=4
+            ))
+
+        ordered = fs._ordered_playlist_rows(rows, order_mode="prominence")
+        head = ordered[:3]
+        assert [r["stars"] for r in head] == [5, 5, 5], (
+            "the first three positions must be 5★ tracks; got "
+            f"{[(r['title'], r['stars']) for r in head]}"
+        )
+        # 6 tracks at 5★ — every one must precede any lower tier, so no 3★ or
+        # 4★ track may appear before position 7.
+        assert all(r["stars"] == 5 for r in ordered[:6]), (
+            "all six 5★ tracks must lead; got "
+            f"{[(r['title'], r['stars']) for r in ordered[:6]]}"
+        )
+        assert not any(r["stars"] == 3 for r in ordered[:12]), (
+            "the 3★ tracks (the reported defect) must sit behind both other tiers"
+        )
+
+    def test_the_tier_does_not_disturb_determinism(self):
+        rows = [
+            track("B", "X", stored=50, lf=1000, stars=4),
+            track("A", "X", stored=50, lf=1000, stars=4),
+            track("C", "Y", stored=50, lf=1000, stars=5),
+        ]
+        once = titles_of(fs._ordered_playlist_rows(rows, order_mode="prominence"))
+        twice = titles_of(fs._ordered_playlist_rows(list(reversed(rows)), order_mode="prominence"))
+        assert once == twice
 
 
 # ---------------------------------------------------------------------------

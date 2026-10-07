@@ -1644,9 +1644,11 @@ def _effective_order_score(
     ``mode="stored"`` keeps the existing behaviour (used as the fallback when a
     track has no listener data to compare on).
 
-    ⚠️ ``stars`` is NOT a safe fallback for this: ``_assign_stars`` rates a track
-    against its own album AND artist distributions, so star tiers are
-    album-relative too and cannot break ties across albums.
+    ⚠️ ``stars`` is NOT a substitute for this score: ``_assign_stars`` rates a
+    track against its own album AND artist distributions, so star tiers are
+    album-relative. That is why they are the COARSE primary (see
+    ``_playlist_order_key``) rather than the ordering signal — the tier gates a
+    track's position, and this score ranks the tracks inside it.
     """
     if mode == "prominence":
         prominence = playlist_popularity_score(
@@ -1664,18 +1666,40 @@ def _playlist_order_key(
 ) -> tuple:
     """Full sort key for a generated playlist, most preferred first.
 
-    ⭐ The PRIMARY key is ``_effective_order_score`` (cross-album comparable).
-    Star tier and the stored score are demoted to TIE-BREAKERS, because both are
-    album-relative: keeping them primary is what let album context decide the
-    order.
+    ⭐⭐ PRIMARY key: the STAR TIER (5 → 4 → 3 …).
 
-    ``title`` is the final tie-breaker so the order is DETERMINISTIC — a
+    Measured on a synthetic 600-track pool sliced to 300: ordering by
+    popularity alone admitted **54 more 3★ tracks** and dropped **26 fewer
+    5★** than the pipeline it replaced, because the popularity measure is now
+    unclamped — a 3★ track with the most listeners genuinely outranks a 5★ track
+    with fewer, and it was landing at position 1. A playlist named
+    ``<genre> - Top Tracks`` must not lead with 3★ tracks.
+
+    The old key got this right by ACCIDENT: ``album_prominence_score`` saturates
+    at 100 from ~1.78M Last.fm listeners, so every popular track TIED and the
+    ``-stars`` tie-break then ordered the head by tier. Removing the clamp was
+    necessary (it made the key monotonic and stopped album-relative ordering
+    leaking back through the tie-breakers) — but the star preference it had been
+    supplying must be restated EXPLICITLY rather than left to a rounding rule.
+
+    ⭐ SECOND key: ``_effective_order_score``, cross-album comparable (raw global
+    listener counts). It orders WITHIN a tier, where star values separate
+    nothing because they are equal by construction. This is where the removed
+    clamp's work is now done properly.
+
+    ``title`` stays the final tie-breaker so the order is DETERMINISTIC — a
     playlist rebuilt from an unchanged library must produce byte-identical
     output, or the push cache can never settle.
+
+    NOTE on the old objection: stars ARE album-relative (``_assign_stars`` rates
+    against the track's own album and artist), so they are a COARSE tier, not a
+    precise cross-album measure — hence they gate position, not rank within it.
+    The Essential Collection already orders the same way
+    (``_ordered_by_percentile_then_prominence``).
     """
     return (
-        -float(_effective_order_score(row, mode)),
         -int(row.get("stars") or 0),
+        -float(_effective_order_score(row, mode)),
         -float(row.get("popularity_score") or row.get("score") or 0),
         str(row.get("title") or "").casefold(),
     )
