@@ -890,12 +890,34 @@ def _resolve_compilation_flags(
        compilation was rated as a studio album.
     """
     row = album_results[0] if album_results else {}
-    type_text = str(
-        row.get("spotify_album_type")
-        or row.get("musicbrainz_album_type")
-        or row.get("album_type")
-        or row.get("detected_album_type")
-        or ""
+    # ⭐⭐ JOIN every type column — never ``or``-chain them.
+    #
+    # The chain used to read ``spotify_album_type`` FIRST and stop there, so an
+    # album whose sources DISAGREE lost its compilation marking: measured, with
+    # ``spotify_album_type="album"`` and
+    # ``musicbrainz_album_type="album+compilation"`` this returned
+    # ``(False, False)``, and the end-of-run ``finalise_scan`` then re-rated the
+    # album as a STUDIO album — the reported "marked as album+compilation but
+    # stuck with the star ratings". Every other consumer puts MusicBrainz first
+    # (``ui_routes.first_value`` for the album page,
+    # ``release_categories.category_for_album_row``), so the page displayed
+    # "Album (Compilation)" while the rating path disagreed.
+    #
+    # ``classify_compilation_category`` itself JOINS spotify + MusicBrainz, so
+    # joining here cannot invent a classification the shared helper would
+    # reject: any source that reports "compilation" wins, whichever column
+    # carries it. Both key spellings are read because the DB column is
+    # ``musicbrainz_albumtype`` while the in-memory album row built by
+    # ``load_stage`` uses ``musicbrainz_album_type``.
+    type_text = " ".join(
+        str(value or "").strip()
+        for value in (
+            row.get("musicbrainz_album_type"),
+            row.get("musicbrainz_albumtype"),
+            row.get("spotify_album_type"),
+            row.get("album_type"),
+            row.get("detected_album_type"),
+        )
     ).strip()
     album_artist = str(row.get("album_artist") or artist or "").strip()
     generic_artist = album_artist.casefold() in _VA_ALBUM_ARTIST_NAMES

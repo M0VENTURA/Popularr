@@ -249,3 +249,72 @@ class TestCompilationIsRatedOnTheTrackArtist:
         source = inspect.getsource(fs.post_album_star_ratings)
         assert "COMPILATION: per-track-artist rating" in source
         assert "CAT-Z" in source
+
+
+class TestTheCompilationMarkingIsNotDroppedByADisagreeingType:
+    """A MusicBrainz "compilation" must survive a plain Spotify album type.
+
+    Reported: a best-of was marked ``album+compilation`` but was STUCK with the
+    (studio-album) star ratings — the end-of-run ``finalise_scan`` passes no
+    compilation verdict, so ``_resolve_compilation_flags`` decided it. That
+    helper read ``spotify_album_type`` FIRST and stopped there, so a plain
+    Spotify "album" hid the MusicBrainz marking and the album was re-rated as a
+    studio album — while the album page (which prefers MusicBrainz) showed
+    "Album (Compilation)".
+    """
+
+    ALBUM = "Fingerprints: The Best of Powderfinger 1994-2000"
+
+    def _rows(self, **type_fields):
+        row = {
+            "artist": "Powderfinger",
+            "album_artist": "Powderfinger",
+            "album": self.ALBUM,
+            "title": "My Happiness",
+        }
+        row.update(type_fields)
+        return [row]
+
+    def _flags(self, **type_fields):
+        from services.popularity.stages.finalise_stage import _resolve_compilation_flags
+
+        return _resolve_compilation_flags(
+            album_results=self._rows(**type_fields),
+            artist="Powderfinger",
+            album=self.ALBUM,
+        )
+
+    def test_a_musicbrainz_compilation_survives_a_plain_spotify_type(self):
+        is_comp, is_va = self._flags(
+            spotify_album_type="album",
+            musicbrainz_album_type="album+compilation",
+        )
+        assert is_comp is True, (
+            "the album is marked album+compilation; a disagreeing Spotify "
+            "'album' must not drop the compilation verdict"
+        )
+        assert is_va is False, "one credited artist => single-artist compilation"
+
+    def test_the_db_column_spelling_is_also_read(self):
+        """The DB column is ``musicbrainz_albumtype`` (no underscore)."""
+        is_comp, _ = self._flags(
+            spotify_album_type="album",
+            musicbrainz_albumtype="album+compilation",
+        )
+        assert is_comp is True
+
+    def test_a_spotify_compilation_survives_a_plain_musicbrainz_type(self):
+        """Either source reporting "compilation" is enough (as the shared
+        ``classify_compilation_category`` treats the two joined)."""
+        is_comp, _ = self._flags(
+            spotify_album_type="album+compilation",
+            musicbrainz_album_type="album",
+        )
+        assert is_comp is True
+
+    def test_a_plain_album_stays_plain(self):
+        """CONTROL — agreeing plain types must not become a compilation."""
+        is_comp, is_va = self._flags(
+            spotify_album_type="album", musicbrainz_album_type="album",
+        )
+        assert (is_comp, is_va) == (False, False)
