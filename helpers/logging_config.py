@@ -122,7 +122,9 @@ def log_unified(message: str, **kwargs: Any) -> None:
         rendered = message + " " + " ".join(f"{k}={v!r}" for k, v in kwargs.items())
     else:
         rendered = message
-    logging.getLogger("popularr.unified").info(rendered)
+    _lg = logging.getLogger("popularr.unified")
+    _lg.propagate = False  # unified_scan.log ONLY (see log_queue)
+    _lg.info(rendered)
 
 
 def debug_enabled() -> bool:
@@ -153,17 +155,31 @@ def log_scan_detail(message: str, **kwargs: Any) -> None:
 
 
 def log_queue(message: str, **kwargs: Any) -> None:
-    """Write a download-queue event to ``queue.log``."""
+    """Write a download-queue event to ``queue.log``.
+
+    ``propagate`` is re-asserted before every emit: these lines must live in
+    ``queue.log`` ONLY — a third-party logging reconfiguration (or a stale
+    build) that flipped propagation back on would otherwise duplicate every
+    queue/search line into ``info.log``/``debug.log`` via the root handlers.
+    """
     if kwargs:
         message = message + " " + " ".join(f"{k}={v!r}" for k, v in kwargs.items())
-    logging.getLogger("popularr.queue").info(message)
+    _lg = logging.getLogger("popularr.queue")
+    _lg.propagate = False
+    _lg.info(message)
 
 
 def log_search(message: str, **kwargs: Any) -> None:
-    """Write a Soulseek search event to ``search.log``."""
+    """Write a Soulseek search event to ``search.log``.
+
+    Same emit-time guard as :func:`log_queue` — search lines belong in
+    ``search.log`` ONLY, never in the info/debug logs.
+    """
     if kwargs:
         message = message + " " + " ".join(f"{k}={v!r}" for k, v in kwargs.items())
-    logging.getLogger("popularr.search").info(message)
+    _lg = logging.getLogger("popularr.search")
+    _lg.propagate = False
+    _lg.info(message)
 
 
 class SafePrefixFormatter(logging.Formatter):
