@@ -36,6 +36,7 @@ import time
 import pytest
 
 from services.infrastructure.api_rate_limiter import (
+    DISCOGS_MIN_INTERVAL,
     MUSICBRAINZ_MIN_INTERVAL,
     APIRateLimiter,
 )
@@ -86,6 +87,84 @@ def test_a_second_process_cannot_use_the_same_slot(state_file, monkeypatch) -> N
         "the second process sent its request without waiting — the 1 req/s "
         "budget is being enforced per process, which is how a scan ends up "
         "several times over the MusicBrainz limit"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1b. Discogs: the same deployment-wide budget, previously process-local only
+# ---------------------------------------------------------------------------
+
+def test_a_second_process_cannot_use_the_same_discogs_slot(state_file, monkeypatch) -> None:
+    """Discogs' local module lock enforced 1 req/s PER PROCESS.
+
+    The app + the queue worker are separate processes, so the real rate was
+    2+ req/s against a 60 req/min budget — the reported Discogs read
+    timeouts.  The shared slot makes it deployment-wide, exactly like MB.
+    """
+    first = APIRateLimiter(state_file=state_file)
+    second = APIRateLimiter(state_file=state_file)
+
+    recorder = _SleepRecorder(monkeypatch)
+
+    first.throttle_discogs()
+    assert recorder.total == pytest.approx(0.0, abs=0.05), "the first request should not wait"
+
+    second.throttle_discogs()
+    assert recorder.total >= DISCOGS_MIN_INTERVAL * 0.9, (
+        "the second process used the Discogs slot without waiting"
+    )
+
+
+def test_throttle_discogs_reserves_the_discogs_key(state_file, monkeypatch) -> None:
+    limiter = APIRateLimiter(state_file=state_file)
+    recorded: dict = {}
+
+    def _fake_reserve(provider, interval, count_key):
+        recorded.update(provider=provider, interval=interval, key=count_key)
+        return 0.0
+
+    monkeypatch.setattr(limiter, "_reserve_shared_slot", _fake_reserve)
+    limiter.throttle_discogs()
+
+    assert recorded == {
+        "provider": "discogs",
+        "interval": DISCOGS_MIN_INTERVAL,
+        "key": "discogs_daily_count",
+    }
+
+
+def test_discogs_http_asks_the_shared_limiter_first(monkeypatch) -> None:
+    import api_clients.discogs_http as dh
+
+    calls: list[str] = []
+
+    class _StubLimiter:
+        def throttle_discogs(self) -> None:
+            calls.append("shared")
+
+    monkeypatch.setattr(dh, "_rate_limiter", _StubLimiter())
+    monkeypatch.setattr(dh, "_DISCOGS_LAST_REQUEST_TIME", 0.0)
+    recorder = _SleepRecorder(monkeypatch)
+
+    dh.throttle_discogs()
+
+    assert calls == ["shared"], "the shared (cross-process) limiter must be used"
+    assert recorder.total == 0.0, "the local fallback must not sleep when shared works"
+    assert dh._DISCOGS_LAST_REQUEST_TIME == 0.0, "local bookkeeping must stay untouched"
+
+
+def test_discogs_http_falls_back_to_the_local_lock(monkeypatch) -> None:
+    import api_clients.discogs_http as dh
+
+    monkeypatch.setattr(dh, "_rate_limiter", None)
+    # A request right NOW: elapsed ≈ 0, so the local 1 req/s lock must sleep.
+    monkeypatch.setattr(dh, "_DISCOGS_LAST_REQUEST_TIME", time.time())
+    recorder = _SleepRecorder(monkeypatch)
+
+    dh.throttle_discogs()
+
+    assert recorder.total >= DISCOGS_MIN_INTERVAL * 0.9, (
+        "without the shared limiter the process-local 1 req/s lock must still apply"
     )
 
 

@@ -17,8 +17,14 @@ import structlog
 
 from api_clients import session as shared_session, timeout_safe_session
 from api_clients.http_utils import create_retry_client
+from services.infrastructure.api_rate_limiter import get_rate_limiter
 
 logger = structlog.get_logger(__name__)
+
+try:
+    _rate_limiter = get_rate_limiter()
+except Exception:
+    _rate_limiter = None
 
 DISCOGS_BASE_URL = "https://api.discogs.com"
 DEFAULT_USER_AGENT = "Popularr/1.0 +https://github.com/M0VENTURA/Popularr"
@@ -64,6 +70,21 @@ def _set_rate_limit_window(wait_seconds: float) -> None:
 def throttle_discogs() -> None:
     """Respect Discogs request pacing and any active 429 cooldown without blocking locks."""
     global _DISCOGS_LAST_REQUEST_TIME
+
+    # Deployment-wide budget FIRST: the app and the queue worker are separate
+    # processes, so the module-local lock below alone enforced 1 req/s per
+    # PROCESS (2+ rps combined) — the burst that Discogs answers with read
+    # timeouts.  The shared limiter makes the reservation cross-process, with
+    # the local lock kept as fallback when the limiter is unavailable.
+    if _rate_limiter:
+        try:
+            _rate_limiter.throttle_discogs()
+            return
+        except Exception as exc:
+            logger.debug(
+                "External Discogs rate limiter failed, using local fallback",
+                error=str(exc),
+            )
 
     sleep_time = 0.0
     with _DISCOGS_THROTTLE_LOCK:

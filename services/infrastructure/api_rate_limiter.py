@@ -1,7 +1,8 @@
 """Cross-provider API rate limiter.
 
 This manages thread-safe API request throttling and state tracking
-across external providers (MusicBrainz, ListenBrainz, Last.fm, Spotify).
+across external providers (MusicBrainz, ListenBrainz, Last.fm, Spotify,
+Discogs).
 
 ⚠️ THE BUDGET IS PER DEPLOYMENT, NOT PER PROCESS
 ------------------------------------------------
@@ -49,6 +50,10 @@ LASTFM_DAILY_LIMIT = 50000
 MUSICBRAINZ_MIN_INTERVAL = 1.0
 LISTENBRAINZ_MIN_INTERVAL = 1.0
 LISTENBRAINZ_DAILY_LIMIT = 50000
+# Discogs allows 60 req/min sustained; its local module lock could only
+# enforce that PER PROCESS, and the app + queue worker run as separate
+# processes — the shared slot makes the 1 req/s budget deployment-wide.
+DISCOGS_MIN_INTERVAL = 1.0
 
 _shared_lock_warned = False
 
@@ -118,6 +123,7 @@ class APIRateLimiter:
         self._mb_lock = threading.Lock()
         self._lastfm_lock = threading.Lock()
         self._listenbrainz_lock = threading.Lock()
+        self._discogs_lock = threading.Lock()
 
     def _load_state(self) -> dict[str, Any]:
         if os.path.exists(self.state_file):
@@ -130,6 +136,7 @@ class APIRateLimiter:
                     state["lastfm_daily_count"] = 0
                     state["musicbrainz_daily_count"] = 0
                     state["listenbrainz_daily_count"] = 0
+                    state["discogs_daily_count"] = 0
                     state["last_reset"] = datetime.now().isoformat()
                     self.state = state
                     self._save_state(force=True)
@@ -141,10 +148,12 @@ class APIRateLimiter:
             "lastfm_daily_count": 0,
             "musicbrainz_daily_count": 0,
             "listenbrainz_daily_count": 0,
+            "discogs_daily_count": 0,
             "spotify_recent_requests": [],
             "lastfm_last_request": 0.0,
             "musicbrainz_last_request": 0.0,
             "listenbrainz_last_request": 0.0,
+            "discogs_last_request": 0.0,
             "last_reset": datetime.now().isoformat(),
         }
 
@@ -216,6 +225,7 @@ class APIRateLimiter:
                 state["lastfm_daily_count"] = 0
                 state["musicbrainz_daily_count"] = 0
                 state["listenbrainz_daily_count"] = 0
+                state["discogs_daily_count"] = 0
                 state["last_reset"] = datetime.now().isoformat()
 
             last_request = float(state.get(f"{provider}_last_request") or 0.0)
@@ -250,6 +260,16 @@ class APIRateLimiter:
         with self._listenbrainz_lock:
             wait_time = self._reserve_shared_slot(
                 "listenbrainz", LISTENBRAINZ_MIN_INTERVAL, "listenbrainz_daily_count"
+            )
+
+        if wait_time > 0:
+            time.sleep(wait_time)
+
+    def throttle_discogs(self) -> None:
+        """Hold Discogs to 1 req/s ACROSS processes (shared state file)."""
+        with self._discogs_lock:
+            wait_time = self._reserve_shared_slot(
+                "discogs", DISCOGS_MIN_INTERVAL, "discogs_daily_count"
             )
 
         if wait_time > 0:
