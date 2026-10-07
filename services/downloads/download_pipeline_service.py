@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -861,6 +862,158 @@ def _select_best_result(
     return None
 
 
+# =============================================================================
+# LIBRARY-FIRST REUSE
+# =============================================================================
+#
+# A recording that is ALREADY in the main music directory does not need to be
+# downloaded again — compilations re-ship the same track constantly. Before
+# any Soulseek search, the queue looks for an identical recording in the
+# library, copies it into the downloads folder and pushes it through the
+# normal completion path (stored metadata written, file moved into place) as
+# if it had been downloaded.
+
+
+def _library_track_format(album_name: str) -> tuple[bool, bool]:
+    """``(is_live_or_alternate, is_acoustic)`` — the format comparison."""
+    from services.catalog.album_classification_service import (
+        detect_live_album_type,
+        is_live_or_alternate_album,
+    )
+
+    name = (album_name or "").strip()
+    return (
+        bool(is_live_or_alternate_album(name)),
+        detect_live_album_type(name) == "acoustic",
+    )
+
+
+def _library_reuse_source(item: dict[str, Any]) -> str | None:
+    """The library file that can stand in for this download, if there is one.
+
+    All of the request's rules must hold:
+
+    * same title and same performer (normalised comparison);
+    * the queue row's duration is KNOWN and the library copy matches the
+      track length within 2% — the length check is what separates the same
+      recording from an edit, a remix or a different take;
+    * the SAME FORMAT: a studio track never stands in for a live or acoustic
+      one, and vice versa ("Live in Tokyo" is not a substitute for the
+      studio album);
+    * the file exists on disk.
+    """
+    title = (item.get("title") or "").strip()
+    artist = (item.get("artist") or "").strip()
+    if not title or not artist:
+        return None
+
+    expected_duration = queue_duration_seconds(item.get("duration")) if item.get("duration") else None
+    if not expected_duration:
+        # Without the queue row's length the "matches the track length" rule
+        # cannot be verified — never reuse on a guess.
+        return None
+
+    wanted_format = _library_track_format(item.get("album") or "")
+
+    rows: list[Any] = []
+    try:
+        with db_session() as session:
+            rows = session.execute(
+                text(
+                    "SELECT title, artist, album_artist, album, duration, file_path "
+                    "FROM tracks "
+                    "WHERE LOWER(TRIM(title)) = LOWER(:title)"
+                ),
+                {"title": title},
+            ).fetchall() or []
+    except Exception as exc:
+        logger.debug("Library reuse lookup failed", title=title, error=str(exc))
+        return None
+
+    from services.metadata.tag_file_service import resolve_music_file_path
+
+    for row in rows:
+        cand_title = str(row[0] or "")
+        performer = str(row[1] or "").strip() or str(row[2] or "").strip()
+        cand_album = str(row[3] or "")
+        cand_path = str(row[5] or "")
+
+        if not performer or _normalise(performer) != _normalise(artist):
+            continue
+        if _similarity(cand_title, title) < 0.95:
+            continue
+        if _library_track_format(cand_album) != wanted_format:
+            continue
+
+        try:
+            cand_seconds = float(row[4] or 0)
+        except (TypeError, ValueError):
+            continue
+        if cand_seconds <= 0:
+            continue
+        if cand_seconds > 10_000:  # stored as milliseconds (MusicBrainz length)
+            cand_seconds /= 1000.0
+        if min(cand_seconds, expected_duration) / max(cand_seconds, expected_duration) < 0.98:
+            continue
+
+        resolved = resolve_music_file_path(cand_path)
+        if resolved and os.path.isfile(resolved) and os.path.getsize(resolved) > 0:
+            return resolved
+    return None
+
+
+def _stage_library_copy(item: dict[str, Any], source_path: str) -> dict[str, Any]:
+    """Copy a library file into the downloads folder as a queued download.
+
+    The row is put into ``downloading`` with NO ``file_path`` — the file then
+    travels the NORMAL completion route (``check_completed_downloads``:
+    stored metadata written, file moved into the library, row ``imported``),
+    exactly like a file Soulseek delivered. Deliberately NO completion call
+    lives here: the queue's move helpers must not become reachable from a
+    scan entry point (``tests/test_scan_never_moves_files`` guards that — a
+    metadata pass may never relocate audio), and the decoupled completion IS
+    the "as if it were a downloaded file" path.
+    """
+    from services.downloads.download_folder_service import resolve_downloads_dir
+
+    artist = (item.get("artist") or "Unknown").strip()
+    title = (item.get("title") or "").strip()
+    album = (item.get("album") or "Unknown").strip()
+
+    def _safe(value: str, fallback: str) -> str:
+        return re.sub(r'[\\/:*?"<>|]', "_", value).strip(" .") or fallback
+
+    staging_dir = os.path.join(
+        resolve_downloads_dir(),
+        _safe(f"{artist} - {album}", "reused"),
+    )
+    os.makedirs(staging_dir, exist_ok=True)
+
+    # A name the completion matcher recognises: {artist} - {title}{ext}.
+    ext = os.path.splitext(os.path.basename(source_path))[1] or ".flac"
+    staged = os.path.join(staging_dir, f"{_safe(title, 'track')}{ext}")
+    if os.path.abspath(staged) == os.path.abspath(source_path):
+        return {"success": False, "status": "library_reuse_failed", "error": "source_inside_downloads"}
+    shutil.copy2(source_path, staged)
+
+    update_queue_item(int(item["id"]), status="downloading")
+    _log_queue_event(
+        "library_reuse",
+        f"{artist} - {title} → reused from library: {source_path}",
+        item.get("id"),
+    )
+    log_unified(
+        f"[QUEUE] {artist} - {title} → library reuse (copied, not downloaded): "
+        f"{os.path.basename(source_path)}"
+    )
+    return {
+        "success": True,
+        "status": "library_reuse",
+        "source_path": source_path,
+        "staged_path": staged,
+    }
+
+
 def process_queue_item(item: dict, slskd: SlskdService) -> dict:
     queue_id = item.get("id")
     logger.debug("Processing queue item", queue_id=queue_id)
@@ -882,6 +1035,36 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
         item = clean_mangled_queue_item(item)
     except Exception as exc:
         logger.debug("Pre-search cleaner skipped", error=str(exc))
+
+    # ── Library-first: reuse an identical recording instead of downloading
+    # Checked BEFORE the search — finding the track here saves the whole
+    # search + download, which is the point of the feature. The copy is
+    # STAGED into the downloads folder and the normal completion cycle
+    # imports it like any download; any failure falls through to the Soulseek
+    # path, so a broken reuse must never stop the item from being downloaded.
+    _reuse_source = None
+    try:
+        _reuse_source = _library_reuse_source(item)
+    except Exception as exc:
+        logger.debug("Library reuse lookup failed", queue_id=queue_id, error=str(exc))
+    if _reuse_source:
+        try:
+            _reuse_result = _stage_library_copy(item, _reuse_source)
+            if _reuse_result.get("success"):
+                return _reuse_result
+            logger.warning(
+                "Library reuse could not be staged — falling back to a search",
+                queue_id=queue_id,
+                source=_reuse_source,
+                error=_reuse_result.get("error"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Library reuse failed — falling back to a search",
+                queue_id=queue_id,
+                source=_reuse_source,
+                error=str(exc),
+            )
 
     expected_artist = (item.get("artist") or "").strip()
     expected_title = (item.get("title") or "").strip()
