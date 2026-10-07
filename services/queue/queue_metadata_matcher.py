@@ -210,6 +210,18 @@ def _metadata_matches_queue_item(file_path: str, queue_item: QueueItem, threshol
             # claimed on duration alone.
             if artist_score > 0.0:
                 return True
+            if (
+                queue_is_compilation
+                and title_score >= 0.99
+                and not _variant_conflict(queue_variants, file_variants)
+            ):
+                # VA queue row ("Various Artists"): the real credited artist
+                # can NEVER string-match the placeholder, so exact title +
+                # strict duration IS the verification.  Reported case:
+                # "Weak and Powerless" / "Unholy Confessions" queued under
+                # Various Artists were deleted the moment their file tags
+                # named A Perfect Circle / Avenged Sevenfold.
+                return True
             if file_artist_generic or queue_is_compilation:
                 # Artist unknown / compilation → defer to filename matching.
                 return None

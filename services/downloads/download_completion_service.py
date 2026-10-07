@@ -510,6 +510,15 @@ def _file_artist_matches_queue_item(file_path: str, queue_item: dict[str, Any]) 
     if not queue_artists:
         return None
 
+    # Mirror of the file-side guard above: when the QUEUE side is the
+    # compilation placeholder ("Various Artists" …), the downloaded file
+    # legitimately carries the real credited artist (A Perfect Circle on a
+    # "MTV2 Headbangers Ball" row), which can never string-match VA — the
+    # verifier must defer to title/duration matching instead of deleting a
+    # correct download as an "artist mismatch".
+    if all(qa in _GENERIC_COMPILATION_ARTISTS for qa in queue_artists):
+        return None
+
     for fa in file_artists:
         for qa in queue_artists:
             if fa == qa or (fa and qa and (fa in qa or qa in fa)):

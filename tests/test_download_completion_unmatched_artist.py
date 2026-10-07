@@ -212,6 +212,123 @@ class TestCompletionArtistGate:
         finally:
             os.remove(path)
 
+    def test_va_queue_item_with_concrete_file_artist_defers(self):
+        """Reported: "Weak and Powerless" (A Perfect Circle) queued under
+        ``Various Artists`` was DELETED because the real artist could never
+        string-match the VA placeholder.  The verifier must defer to the
+        title/duration matcher instead of returning ``False``."""
+        from services.downloads.download_completion_service import (
+            _file_artist_matches_queue_item,
+        )
+
+        va_item = {
+            "artist": "Various Artists",
+            "album_artist": "Various Artists",
+            "title": "Weak and Powerless",
+            "album": "MTV2 Headbangers Ball",
+            "duration": 233,
+        }
+        path = _flac_path(
+            "test_mb_unmatched_gate_va_queue",
+            {"title": "Weak and Powerless", "artist": "A Perfect Circle"},
+        )
+        try:
+            assert _file_artist_matches_queue_item(path, va_item) is None, (
+                "a VA queue row has no artist to match — defer (None), never "
+                "reject a correctly titled download"
+            )
+        finally:
+            os.remove(path)
+
+
+class TestVaQueueItemsVerifyTitleAndDurationOnly:
+    """The matcher half of the VA fix: accept on exact title + duration.
+
+    Previously a VA queue row could only be accepted when the file's artist
+    matched "Various Artists" itself (artist_score > 0) — real credits scored
+    0.0 and the download fell through to filename matching, which also
+    requires the queue artist in the path, so correct files were rejected.
+    """
+
+    def _va_item(self) -> dict:
+        return {
+            "artist": "Various Artists",
+            "album_artist": "Various Artists",
+            "title": "Weak and Powerless",
+            "album": "MTV2 Headbangers Ball",
+            "track_number": "4",
+            # read_mp3_metadata derives duration from the AUDIO, not the
+            # duration tag, and the harness file is 30 s of silence.
+            "duration": 30,
+        }
+
+    def test_va_queue_accepts_exact_title_and_strict_duration(self):
+        path = _flac_path(
+            "test_va_match_ok",
+            {
+                "title": "Weak and Powerless",
+                "artist": "A Perfect Circle",
+                "duration": "30000",
+            },
+        )
+        try:
+            assert _metadata_matches_queue_item(path, self._va_item()) is True, (
+                "exact title + strict duration must be enough for a VA row"
+            )
+        finally:
+            os.remove(path)
+
+    def test_va_queue_still_rejects_a_different_duration(self):
+        wrong_length = {**self._va_item(), "duration": 90}
+        path = _flac_path(
+            "test_va_match_bad_duration",
+            {
+                "title": "Weak and Powerless",
+                "artist": "A Perfect Circle",
+                "duration": "90000",
+            },
+        )
+        try:
+            assert _metadata_matches_queue_item(path, wrong_length) is False, (
+                "title-only agreement with a wildly different length is the "
+                "wrong track"
+            )
+        finally:
+            os.remove(path)
+
+    def test_va_queue_still_rejects_a_different_title(self):
+        path = _flac_path(
+            "test_va_match_bad_title",
+            {
+                "title": "The Nurse Who Loved Me",
+                "artist": "A Perfect Circle",
+                "duration": "30000",
+            },
+        )
+        try:
+            assert _metadata_matches_queue_item(path, self._va_item()) is False, (
+                "the VA deferral must never turn into a title-free accept"
+            )
+        finally:
+            os.remove(path)
+
+    def test_concrete_queue_items_keep_their_strict_artist_rule(self):
+        """Regression: concrete-vs-concrete mismatches still hard-reject."""
+        concrete = {
+            "artist": "Metallica",
+            "album_artist": "Metallica",
+            "title": "Enter Sandman",
+            "duration": 30,  # matches the harness audio length
+        }
+        path = _flac_path(
+            "test_concrete_still_strict",
+            {"title": "Enter Sandman", "artist": "A Different Band", "duration": "30000"},
+        )
+        try:
+            assert _metadata_matches_queue_item(path, concrete) is False
+        finally:
+            os.remove(path)
+
 
 class TestMatchingFileExistsUnconfirmed:
     """The re-download loop guard: a matching file on disk stops the retry."""
