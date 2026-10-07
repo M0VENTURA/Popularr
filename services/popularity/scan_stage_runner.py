@@ -1357,6 +1357,7 @@ def run_scan(
     singles_with_missing_popularity: bool = False,
     popularity_only: bool = False,
     metadata_only: bool = False,
+    finalise_only: bool = False,
     clear_single_detection_sources: list | None = None,
     stop_progress_file: str | None = None,
     caller_scan_type: str | None = None,
@@ -1374,6 +1375,7 @@ def run_scan(
         "singles_with_missing_popularity": singles_with_missing_popularity,
         "popularity_only": popularity_only,
         "metadata_only": metadata_only,
+        "finalise_only": finalise_only,
         "clear_single_detection_sources": clear_single_detection_sources,
         "stop_progress_file": stop_progress_file,
         "caller_scan_type": caller_scan_type,
@@ -1433,7 +1435,11 @@ def run_scan(
     # ([MB] call started/completed, [ENRICH]/[SCAN] section tracing) is
     # debug-gated, so at the default log level this banner plus the per-stage
     # sections below are the whole scan narrative.
-    _scan_mode_label = "Forced Scan" if force else ("Singles Pass" if _singles_pass else "Normal Scan")
+    _scan_mode_label = (
+        "Finalise Pass" if options.get("finalise_only")
+        else "Forced Scan" if force
+        else ("Singles Pass" if _singles_pass else "Normal Scan")
+    )
     if _banner_album:
         _scan_mode_label += " (single album)"
     try:
@@ -1935,12 +1941,18 @@ def run_scan(
         _mode_meta = bool(options.get("metadata_only"))
         _mode_pop = bool(options.get("popularity_only"))
         _mode_singles = bool(options.get("singles_only") or options.get("singles_with_missing_popularity"))
+        _mode_finalise = bool(options.get("finalise_only"))
         _album_is_old = _album_release_is_old(tracks)
 
         skip_album = False
         force_metadata_for_this_album = False
 
-        if not force and not album_filter:
+        # A finalise pass processes EVERY album — the per-album file-tag sync
+        # below is the whole point, and the freshness / skip-unchanged gates
+        # would leave every already-scanned album (i.e. almost all of them)
+        # never finalised. What work each album does is decided per TRACK
+        # (stored score reuse + singles freshness), not by skipping it here.
+        if not force and not album_filter and not _mode_finalise:
             try:
                 if _mode_meta:
                     skip_days = int(get_feature("metadata_skip_days", 0) or 0)
@@ -2415,6 +2427,15 @@ def run_scan(
                     _pop_scored_recently = (was_album_scanned(artist, album, "popularity", _pop_window) or was_album_scanned(artist, album, "combined", _pop_window))
                     _pop_due = not _pop_scored_recently
 
+            if _mode_finalise:
+                # "…only running the popularity … for files that are missing
+                # the information." A stored score is reused whenever
+                # ``_has_stored_popularity`` holds (track_stage), and
+                # ``refresh_popularity_if_due`` would widen that to a window
+                # refresh — finalise must never touch a score that exists.
+                # A track with NO stored score computes regardless of this flag.
+                _pop_due = False
+
             # -------------------------------------------------------------
             # Album-authoritative release year.
             #
@@ -2681,7 +2702,7 @@ def run_scan(
                 logger.debug("Could not read metadata_update config", error=str(exc))
                 _stash_only = False
 
-            if _stash_only and not options.get("popularity_only") and not options.get("singles_detection_only"):
+            if _stash_only and not options.get("popularity_only") and not options.get("singles_detection_only") and not _mode_finalise:
                 try:
                     _release_mbid = ""
                     for _ctx in track_contexts:
@@ -2756,7 +2777,7 @@ def run_scan(
             # that cost per PAGE LOAD per owned album instead — and the release
             # SEARCH it falls back to when an album has no stored MBID was paid
             # one-per-album every time the artist page was opened.
-            if not options.get("popularity_only") and not options.get("singles_detection_only"):
+            if not options.get("popularity_only") and not options.get("singles_detection_only") and not _mode_finalise:
                 try:
                     _missing = get_missing_tracks(artist=artist, album=album)
                     if _missing and _missing.get("missing_count"):

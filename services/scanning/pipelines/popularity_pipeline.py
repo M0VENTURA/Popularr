@@ -157,6 +157,20 @@ def run_popularity_mode(
             scan_type = "popularity_scan"
             kwargs["popularity_only"] = True
 
+        elif mode == "finalise":
+            # Dashboard "Finalise": run the finalise pass (file-tag sync,
+            # star ratings, playlists) for EVERY album straight from the data
+            # already in the database. The singles machinery reuses stored
+            # scores (track_stage's ``_has_stored_popularity``) and freshness
+            # gates, so popularity is recomputed only where it is MISSING and
+            # singles detection only where it is missing/stale — and the
+            # runner forces ``_pop_due`` off so a window never refreshes a
+            # score that already exists. Progress checkpoints under the same
+            # ``popularity_scan`` family as every other non-full mode.
+            scan_type = "popularity_scan"
+            kwargs["singles_only"] = True
+            kwargs["finalise_only"] = True
+
         else:
             logger.warning(
                 "Unknown popularity scan mode — defaulting to full scan",

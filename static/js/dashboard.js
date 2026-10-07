@@ -254,6 +254,8 @@ const SCAN_TYPE_DISPLAY_NAMES = {
   popularity: "Popularity Scan",
   singles: "Singles Detection",
   singles_detection: "Singles Detection",
+  finalise: "Finalise Scan",
+  finalise_scan: "Finalise Scan",
   essentia: "Essentia Mood Scan",
   mood: "Mood Scan",
   combined: "Combined Scan",

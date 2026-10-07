@@ -1008,8 +1008,10 @@ class TestTheZeroTrackSummaryTellsTheTruth:
         """Pins the FACT behind the corrected advice, so the wording cannot be
         'simplified' back into an untrue statement."""
         source = SCANNER.read_text(encoding="utf-8")
-        # The up-to-date skip is the only thing gated on `force`.
-        skip_idx = source.index("if not force and not album_filter:")
+        # The up-to-date skip is the only thing gated on `force` (the finalise
+        # pass now bypasses this same gate — it must never skip an album —
+        # but `force` remains one of its two conditions).
+        skip_idx = source.index("if not force and not album_filter and not _mode_finalise:")
         assert skip_idx, "the freshness skip must remain gated on force"
         # The budget is resolved unconditionally, outside any `force` guard.
         budget_idx = source.index("_album_budget = _resolve_album_budget()")

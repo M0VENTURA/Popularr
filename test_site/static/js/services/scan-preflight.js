@@ -55,6 +55,8 @@
     library_scan: 'Library Scan',
     navidrome_scan: 'Navidrome Import',
     popularity_scan: 'Popularity Scan',
+    finalise: 'Finalise Scan',
+    finalise_scan: 'Finalise Scan',
     singles_scan: 'Singles Detection',
     metadata_lookup_scan: 'Metadata Scan',
     essentia_mood_scan: 'Essentia Mood Scan',

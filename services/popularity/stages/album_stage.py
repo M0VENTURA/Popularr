@@ -2932,6 +2932,7 @@ def enrich_album(
         or options.get("singles_detection_only")
     )
     popularity_pass = bool(options.get("popularity_only"))
+    finalise_pass = bool(options.get("finalise_only"))
     defer_full = bool(options.get("defer_full_enrichment"))
     metadata: dict[str, Any] = {"country": None, "bio": None, "image_url": None}
     similar: dict[str, list[Any]] = {"lastfm": [], "listenbrainz": []}
@@ -2965,7 +2966,11 @@ def enrich_album(
             return _result(detected_type, is_heterogeneous)
 
         try:
-            if popularity_pass:
+            if popularity_pass or finalise_pass:
+                # Finalise is DB-only: the stored type (or a title heuristic)
+                # decides, with NO release-group resolution and NO writes —
+                # ``_resolve_album_type`` + ``_persist_album_type_to_tracks``
+                # below are enrichment work, not finalise work.
                 detected_type = _detect_album_type(artist, album, album_artist or None, spotify_type or None)
                 is_heterogeneous = any(marker in detected_type.casefold() for marker in _HETEROGENEOUS_MARKERS)
             else:
