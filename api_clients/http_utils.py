@@ -389,8 +389,16 @@ def create_retry_client(
     status_forcelist: tuple[int, ...] = (429, 500, 502, 503, 504),
     verify: bool = True,
     timeout: float = 30.0,
+    follow_redirects: bool = True,
 ) -> httpx.Client:
-    """Create an ``httpx.Client`` preconfigured with retry/backoff."""
+    """Create an ``httpx.Client`` preconfigured with retry/backoff.
+
+    ``follow_redirects`` defaults ON because httpx does NOT follow redirects
+    by default, and the APIs we talk to use them: MusicBrainz 301-redirects
+    merged/deleted MBIDs to their new location, and treating that as a
+    permanent ``301 Moved Permanently`` failure meant every lookup of a
+    merged recording returned nothing.
+    """
     transport = _RetryTransport(
         retries=retries,
         backoff=backoff,
@@ -413,6 +421,7 @@ def create_retry_client(
         headers=headers,
         verify=verify,
         limits=_build_pool_limits(),
+        follow_redirects=follow_redirects,
     )
 
     return client

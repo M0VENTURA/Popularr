@@ -168,6 +168,15 @@ class MusicBrainzHttpClient:
                     timeout=timeout,
                 )
                 response.raise_for_status()
+                if str(response.url.path) != str(httpx.URL(url).path):
+                    # Merged entities 301 to their new location; the redirect
+                    # is now followed (create_retry_client), but record it so
+                    # the stored MBID's obsolescence is visible in the logs.
+                    logger.info(
+                        "MusicBrainz endpoint redirected (merged MBID)",
+                        endpoint=endpoint,
+                        resolved_path=str(response.url.path),
+                    )
                 payload = response.json()
                 return payload if isinstance(payload, dict) else {}
                 
