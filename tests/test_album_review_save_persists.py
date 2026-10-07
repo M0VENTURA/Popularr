@@ -300,23 +300,28 @@ class TestStagedFieldsReachTheFiles:
         ]}})
         assert "F. Cricien" in _field_writes(captured, "writer")
 
-    async def test_staged_genres_reach_the_file(self, client, captured):
-        """A staged genre must land on the FILE, not only in the column.
+    async def test_staged_genres_stay_out_of_the_file(self, client, captured):
+        """A staged genre reaches the DATABASE only.
 
-        ``musicbrainz_genres`` reaches the writer as its own frame (it is in
-        ``_COLUMN_TO_TAG_FIELD``), which is what carries an MB genre to disk.
-        The separate ``genres``/``manual_genres`` columns are driven by the
-        ALBUM-genres box via ``update_track_genres``, so a per-track staged
-        genre is NOT expected to populate those — asserting on ``genres`` here
-        would have been the wrong key and failed on correct code.
+        Reported: "genres should only be written to the files during the
+        metadata popularity or finalise scan" — a Lookup MBID review that
+        pushed its per-track ``musicbrainz_genres`` into the file-tag phase
+        made the LOOKUP one of the genre writers. The DB half is pinned by
+        ``test_staged_genres_are_written``; this pins the file half staying
+        clean (the writer still understands ``musicbrainz_genres`` for the
+        scan paths that own it).
         """
         await _post(client, {"t1": {"changes": [
             {"field": "musicbrainz_genres", "label": "Genres",
              "current": "", "proposed": "Hardcore"},
         ]}})
-        written = _field_writes(captured, "musicbrainz_genres")
-        assert any("Hardcore" in str(v) for v in written), (
-            f"a staged genre reached the DB but not the file; tag writes={captured.file_writes}"
+        genre_writes = [
+            (path, tags)
+            for path, tags in captured.file_writes
+            if any(key in tags for key in ("genres", "genre", "musicbrainz_genres"))
+        ]
+        assert not genre_writes, (
+            f"the lookup wrote genre tags to files: {genre_writes}"
         )
 
     async def test_staged_artist_reaches_the_file(self, client, captured):

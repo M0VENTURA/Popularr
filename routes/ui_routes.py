@@ -1445,6 +1445,30 @@ _TRACK_GENRE_EVIDENCE_FIELDS: tuple[str, ...] = (
     "wikidata_genres",
 )
 
+#: Genre-family keys a tag payload can carry. They are dropped from every
+#: FILE write the album save makes: the save — and the Lookup MBID review that
+#: stages per-track values into it — may only write the DATABASE. Genres reach
+#: the files from the popularity / finalise scan's
+#: ``sync_album_file_tags`` (and from the two explicit genre actions,
+#: ``apply_genres_to_album`` / ``bulk_tag_tracks``). The "Cover" marker is set
+#: AFTER this strip and is unaffected — it is the cover convention, not genre
+#: data.
+_FILE_GENRE_TAG_FIELDS: tuple[str, ...] = (
+    "genre",
+    "genres",
+    "musicbrainz_genres",
+    "lastfm_genres",
+    "lastfm_tags",
+    "navidrome_genres",
+    "manual_genres",
+    "discogs_genres",
+    "listenbrainz_genres",
+    "essentia_genres",
+    "spotify_genres",
+    "audiodb_genres",
+    "wikidata_genres",
+)
+
 
 def _has_genre_value(raw: Any) -> bool:
     """True when a stored genre column actually holds genres.
@@ -1580,6 +1604,13 @@ def _write_album_track_file_tags(
         return False, resolved
     try:
         file_tags = build_tag_updates(payload)
+        # Genres never leave this path for the FILES: a Lookup MBID review
+        # stages per-track ``musicbrainz_genres`` into the same payload, and
+        # writing them here made the LOOKUP the genre writer — genres may only
+        # be written to files by the popularity / finalise scan's sync. The DB
+        # payload (Phase 2) is untouched: the values still land in the tables.
+        for _genre_field in _FILE_GENRE_TAG_FIELDS:
+            file_tags.pop(_genre_field, None)
         if payload.get("is_cover"):
             existing = file_tags.get("genres") or file_tags.get("genre")
             if isinstance(existing, list):
