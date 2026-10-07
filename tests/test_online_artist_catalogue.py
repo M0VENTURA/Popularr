@@ -177,8 +177,14 @@ class TestTheRankLookup:
         assert info["total"] == 0
         assert info["source"] == "none"
 
-    def test_an_uncharted_title_is_reported_beyond_the_list(self, monkeypatch):
-        """A real artist with a song that never charted -> last place."""
+    def test_an_uncharted_title_is_unknown_never_a_fake_rank(self, monkeypatch):
+        """A real artist with a song that never charted -> rank 0 (unknown).
+
+        A synthetic ``rank > total`` (the old "bottom of the ladder" sentinel)
+        made the rating layer pin uncharted tracks to 1\u2605 no matter how
+        popular they are on their own; ``rank == 0`` is the documented
+        "unknown" contract, so the caller falls back to score thresholds.
+        """
         _stub_cache(monkeypatch, {
             "hit": {"lastfm_listeners": 5000},
             "album track": {"lastfm_listeners": 900},
@@ -186,8 +192,8 @@ class TestTheRankLookup:
 
         info = ps.get_online_artist_track_rank("A", "Obscure B-side", _FakeLastFm([]))
 
-        assert info["rank"] == 3
-        assert info["total"] == 2
+        assert info["rank"] == 0, "an uncharted title must claim no chart position"
+        assert info["total"] == 2, "the catalogue size stays for diagnostics"
         assert info["percentile"] == 1.0
         assert info["source"] == "lastfm_artist_top_tracks_beyond"
 

@@ -61,6 +61,25 @@ def _rank(rank, total, source="lastfm_artist_top_tracks"):
     }
 
 
+def _stub_catalogue(monkeypatch, entries):
+    """Patch the catalogue FETCH (one level below the rank lookup).
+
+    The real ``get_online_artist_track_rank`` then runs against the controlled
+    chart, so end-to-end tests exercise the actual sentinel/match logic rather
+    than a stubbed return value.
+    """
+    import services.popularity.popularity_sources as ps
+
+    calls: list[str] = []
+
+    def _fake(artist, lastfm_client=None, limit=200):
+        calls.append(artist)
+        return list(entries)
+
+    monkeypatch.setattr(ps, "get_online_artist_catalogue", _fake)
+    return calls
+
+
 #: The 5★/4★/3★/2★ cut-offs, matching ``_DEFAULT_COMPILATION_ONLINE_CATALOGUE``.
 RULES = {
     "enabled": 1,
@@ -201,22 +220,130 @@ class TestALookupMissNeverDemotes:
         assert stars == 0
         assert detail["source"] == "none"
 
-    def test_a_title_beyond_the_catalogue_lands_at_the_bottom(self, monkeypatch):
-        """A real artist but an uncharted title -> 1★, not 5★."""
+    def test_a_title_beyond_the_catalogue_is_unknown_not_one_star(self, monkeypatch):
+        """An uncharted title must NOT be forced to 1\u2605 by list membership.
+
+        Reported: soundtrack cues scoring 73-82 landed at 1\u2605 purely because
+        Last.fm's top-tracks chart omits them. rank 0 -> stars 0 -> the caller
+        falls back to the score thresholds instead of demoting the track.
+        """
         _stub_rank(
             monkeypatch,
             {"deep cut": {
-                "rank": 51, "total": 50, "percentile": 1.0,
+                "rank": 0, "total": 50, "percentile": 1.0,
                 "listeners": 0, "top_listeners": 50000,
                 "source": "lastfm_artist_top_tracks_beyond",
             }},
         )
 
-        stars, _ = fs._online_catalogue_stars(
+        stars, detail = fs._online_catalogue_stars(
             credited_artist="A", track_title="Deep Cut", rules=RULES
         )
 
-        assert stars == 1
+        assert stars == 0, "unknown must fall back, never demote to 1\u2605"
+        assert detail["source"] == "lastfm_artist_top_tracks_beyond"
+
+    @pytest.mark.parametrize(
+        "artist",
+        [
+            "[dialogue]",
+            "[instrumental]",
+            "Various Artists",
+            "various",
+            "Unknown Artist",
+        ],
+    )
+    def test_pseudo_artist_returns_unknown_without_a_request(
+        self, monkeypatch, artist
+    ):
+        """Placeholder credits have no chart -- and must not borrow one.
+
+        Reported: a "[dialogue]" credit came back with online_rank #25/191
+        and rated tracks against a chart that does not belong to any real
+        credited artist.
+        """
+        import services.popularity.popularity_sources as ps
+
+        called = []
+        monkeypatch.setattr(
+            ps, "get_online_artist_track_rank",
+            lambda *a, **k: called.append(1) or _rank(1, 50),
+        )
+
+        stars, detail = fs._online_catalogue_stars(
+            credited_artist=artist, track_title="Song", rules=RULES
+        )
+
+        assert stars == 0
+        assert detail["source"] == "pseudo_artist"
+        assert called == [], "a placeholder artist must not trigger a lookup"
+
+
+# ---------------------------------------------------------------------------
+# 2b. End to end: unknown/uncharted must reach the SCORE thresholds
+# ---------------------------------------------------------------------------
+
+
+class TestAnUnknownCatalogueFallsBackToScoreThresholds:
+    """The caller's safety net: stars 0 -> absolute thresholds, never 1★ by default.
+
+    ``_assign_stars`` with ``is_compilation=True`` always engages the online
+    branch (``has_usable_catalogue`` is deliberately bypassed), so these tests
+    pin the FULL path: stubbed rank lookup -> fallback ladder -> rating mode.
+    """
+
+    def test_an_uncharted_high_scoring_cue_rates_three_stars(self, monkeypatch):
+        """Reported case: "Reunion" scored 73.2 but charted nowhere -> was 1★.
+
+        The absolute non-single ladder rates >= 70 at 3★, which is what the
+        score actually earned. The stub sits one level below the rank lookup so
+        the REAL not-found sentinel runs.
+        """
+        _stub_catalogue(monkeypatch, [
+            ("debut", 5000), ("hit", 4000), ("album track 1", 900),
+            ("album track 2", 800), ("album track 3", 700),
+        ])
+
+        track = {
+            "artist": "Marilyn Manson",
+            "title": "Reunion",
+            "popularity_score": 73.2,
+            "lastfm_listeners": 20000,
+            "single_confidence": "low",
+        }
+
+        stars = fs._assign_stars(track, [73.2], [73.2], is_compilation=True)
+
+        assert stars == 3, "an uncharted title must be judged by its own score"
+        assert track["_compilation_rating_mode"] == "absolute_thin_catalogue_fallback"
+        assert "_compilation_online_rank" not in track, (
+            "a rank-0 miss must not be recorded as a chart position"
+        )
+
+    def test_a_dialogue_credit_rates_by_score_not_a_foreign_chart(self, monkeypatch):
+        """A "[dialogue]" credit must not consult any online chart at all.
+
+        The stub sits one level below the rank lookup, so if the guard is
+        removed the real lookup WILL run and the call gets recorded.
+        """
+        calls = _stub_catalogue(monkeypatch, [
+            ("debut", 5000), ("hit", 4000), ("album track 1", 900),
+            ("album track 2", 800), ("album track 3", 700),
+        ])
+
+        track = {
+            "artist": "[dialogue]",
+            "title": "Umbrella",
+            "popularity_score": 52.0,
+            "lastfm_listeners": 8000,
+            "single_confidence": "low",
+        }
+
+        stars = fs._assign_stars(track, [52.0], [52.0], is_compilation=True)
+
+        assert calls == [], "a placeholder artist must not fetch any chart"
+        assert stars == 2, "52.0 hits the >= 35 score band of the fallback ladder"
+        assert track["_compilation_rating_mode"] == "absolute_thin_catalogue_fallback"
 
 
 # ---------------------------------------------------------------------------

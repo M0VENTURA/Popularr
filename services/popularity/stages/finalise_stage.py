@@ -767,6 +767,29 @@ _VA_ALBUM_ARTIST_NAMES = frozenset({
     "compilation", "soundtrack", "soundtracks",
 })
 
+#: Credited "artists" that name no real performer and therefore cannot have
+#: an online chart: the VA placeholders above plus generic unknowns. Bracket
+#: credits like ``[dialogue]`` are handled by shape, not by name.
+_UNRATABLE_TRACK_ARTISTS = _VA_ALBUM_ARTIST_NAMES | frozenset({
+    "unknown artist", "unknown", "none", "n/a", "not available",
+})
+
+
+def _is_online_rankable_artist(name: str) -> bool:
+    """True when ``name`` could plausibly be a real, chartable artist.
+
+    Compilation credits carry placeholder artists -- "[dialogue]",
+    "Various Artists", "Unknown Artist". Asking Last.fm to chart those is
+    either a wasted request or, worse, a fuzzy match against some OTHER
+    artist's catalogue, which would rate the track by foreign chart data.
+    """
+    text = str(name or "").strip()
+    if not text:
+        return False
+    if text.startswith("[") and text.endswith("]"):
+        return False
+    return text.casefold() not in _UNRATABLE_TRACK_ARTISTS
+
 
 def _online_catalogue_stars(
     *,
@@ -795,6 +818,11 @@ def _online_catalogue_stars(
     detail: dict[str, Any] = {"source": "none"}
     if not bool(rules.get("enabled", 1)):
         return 0, detail
+
+    if not _is_online_rankable_artist(credited_artist):
+        # "[dialogue]"/"Various Artists" and friends name no real artist --
+        # never spend a request (or borrow someone else's chart) for them.
+        return 0, {"source": "pseudo_artist"}
 
     try:
         from services.popularity.popularity_sources import get_online_artist_track_rank

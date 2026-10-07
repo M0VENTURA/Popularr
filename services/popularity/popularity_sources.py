@@ -870,9 +870,12 @@ def get_online_artist_track_rank(
     "source"}`` where ``rank`` is 1-based (1 = the artist's most popular song
     worldwide) and ``percentile`` is ``rank / total`` (0.02 = top 2%).
 
-    ``rank``/``total`` are ``0``/``0`` when the artist has no online catalogue
-    or the title is not in it -- callers must treat that as "unknown", never as
-    "unpopular", so a lookup miss cannot demote a track.
+    ``rank`` is ``0`` when the artist has no online catalogue
+    (``source="none"``) or the title is not charted in it
+    (``source="lastfm_artist_top_tracks_beyond"``; ``total`` still reports the
+    catalogue size so the miss stays diagnosable) -- callers must treat
+    ``rank == 0`` as "unknown", never as "unpopular", so a lookup miss cannot
+    demote a track.
     """
     empty = {
         "rank": 0, "total": 0, "percentile": 0.0,
@@ -904,11 +907,14 @@ def get_online_artist_track_rank(
                 "source": "lastfm_artist_top_tracks",
             }
 
-    # Not found: the artist HAS a catalogue but this title is not among its
-    # charted tracks. Report it as a long-tail track rather than a miss, so it
-    # lands at the bottom of the ladder instead of being skipped entirely.
+    # Not found: the artist HAS a catalogue but this title is not charted in
+    # it. Report rank 0 ("unknown") -- the contract in this function's
+    # docstring -- so the rating layer falls back to score-based thresholds
+    # instead of pinning the track to a fake last place. A list-membership
+    # miss alone must never demote a track (soundtrack cues are routinely
+    # absent from an artist's top-tracks chart while still being popular).
     return {
-        "rank": len(catalogue) + 1,
+        "rank": 0,
         "total": len(catalogue),
         "percentile": 1.0,
         "listeners": 0,
