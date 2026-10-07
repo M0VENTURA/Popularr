@@ -251,15 +251,31 @@ def _ignored_fields(row: dict[str, Any]) -> set[str]:
     return {str(item) for item in parsed}
 
 
-def _album_genres(mb_tracks: list[dict[str, Any]]) -> str:
-    """Union of every recording's MusicBrainz genres, in first-seen order."""
+def _album_genres(metadata: dict[str, Any]) -> str:
+    """Album genres: release-GROUP genres, then the RELEASE's own genres,
+    then the union of the release's recording genres (fallback).
+
+    Reported: "the album genres should be pulled from the release group and
+    the specific release" — only the recordings were unioned before, so an
+    album whose recordings carry no genres proposed nothing even when the
+    release group is fully tagged (metal, symphonic metal …). Deduplicates
+    case-insensitively, keeping first-seen order.
+    """
     seen: list[str] = []
-    for track in mb_tracks:
-        raw = track.get("musicbrainz_genres") or ""
-        for genre in str(raw).split(","):
+    seen_keys: set[str] = set()
+
+    def _add(raw: Any) -> None:
+        for genre in str(raw or "").split(","):
             genre = genre.strip()
-            if genre and genre.casefold() not in {g.casefold() for g in seen}:
+            key = genre.casefold()
+            if genre and key not in seen_keys:
+                seen_keys.add(key)
                 seen.append(genre)
+
+    _add(metadata.get("release_group_genres"))
+    _add(metadata.get("release_genres"))
+    for track in metadata.get("tracks") or []:
+        _add(track.get("musicbrainz_genres"))
     return ", ".join(seen)
 
 
@@ -286,7 +302,7 @@ def _album_level_proposals(
     if not resolved.get("album_title"):
         resolved["album_title"] = _as_text(metadata.get("release_title"))
 
-    resolved["album_genres"] = _album_genres(metadata.get("tracks") or [])
+    resolved["album_genres"] = _album_genres(metadata)
 
     # "Current" values, read from the representative row.  A couple of the
     # form fields do not map 1:1 onto a column name.

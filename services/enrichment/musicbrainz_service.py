@@ -1821,6 +1821,21 @@ def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None
     return _flatten_release(Release, release_id)
 
 
+def _join_genre_names(raw: Any) -> str:
+    """Comma-joined curated genre names from a MusicBrainz ``genres`` array.
+
+    Deduplicates case-insensitively, keeping first-seen spelling/order — the
+    same contract the per-track ``musicbrainz_genres`` string follows.
+    """
+    names: list[str] = []
+    for item in raw or []:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            if name and name.casefold() not in {n.casefold() for n in names}:
+                names.append(name)
+    return ", ".join(names)
+
+
 def _flatten_release(Release: dict[str, Any], release_id: str) -> dict[str, Any]:
     """Flatten a raw MusicBrainz release into the app's release payload.
 
@@ -2017,6 +2032,15 @@ def _flatten_release(Release: dict[str, Any], release_id: str) -> dict[str, Any]
         "release_group_mbid": str(Release_group.get("id") or ""),
         "release_group_title": str(Release_group.get("title") or ""),
         "release_title": str(Release.get("title") or ""),
+        # Album-level MusicBrainz genres, surfaced from the SAME fetch.
+        # With ``inc=genres`` MusicBrainz attaches the release group's
+        # curated genres to the embedded release-group (verified against the
+        # live API) and its own to the release — both were dropped here, so
+        # album genre proposals could only union the recordings' genres.
+        # Reported: "the album genres should be pulled from the release group
+        # and the specific release".
+        "release_group_genres": _join_genre_names(Release_group.get("genres")),
+        "release_genres": _join_genre_names(Release.get("genres")),
         "specific_release_title": str(Release.get("title") or ""),
         "compilation": 1 if "compilation" in {t.casefold() for t in Secondary_types} else 0,
         "original_date": str(Release_group.get("first-release-date") or Release.get("date") or ""),
