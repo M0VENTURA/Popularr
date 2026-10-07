@@ -87,8 +87,21 @@ def _recreate_test_schema():
     """
     from db.engine import get_engine
     from db.models import Track
+    from db.schema import TABLES_TO_ENSURE
+    from sqlalchemy import text as _text
 
-    Track.__table__.create(get_engine(), checkfirst=True)
+    engine = get_engine()
+    Track.__table__.create(engine, checkfirst=True)
+    # The import's cover-art embed reads ``album_art`` (its shortcut reads
+    # ``missing_releases``). A miss used to be fatal TWICE over: db_session
+    # DISPOSES the shared in-memory engine on OperationalError, wiping every
+    # table — so the NEXT test's teardown died with "no such table: tracks".
+    # Recreated here for the same reason ``tracks`` itself is.
+    with engine.begin() as conn:
+        for _name in ("album_art", "missing_releases"):
+            _ddl = TABLES_TO_ENSURE.get(_name)
+            if _ddl:
+                conn.execute(_text(_ddl))
     yield
 
 

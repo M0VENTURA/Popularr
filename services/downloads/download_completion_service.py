@@ -933,6 +933,71 @@ def _resolve_missing_identity(
     return fills
 
 
+def _sniff_image_mime(data: bytes) -> str:
+    """Image MIME from magic bytes — never trust a URL's extension."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _fetch_import_art(item: dict[str, Any]) -> Optional[tuple[bytes, str]]:
+    """Album art for a freshly downloaded file, or ``None``.
+
+    Sources, in order: the queue row's own cover URL (a manual MusicBrainz
+    match stores one), the album-art cache/providers (stored → Navidrome →
+    MusicBrainz/Cover Art Archive → Discogs …), and finally Cover Art
+    Archive by the release MBID. Everything is wrapped: art is enrichment,
+    never a reason to fail an import.
+    """
+    url = str(item.get("cover_art_url") or "").strip()
+    if url:
+        try:
+            import httpx
+
+            resp = httpx.get(url, timeout=10)
+            if resp.status_code == 200 and resp.content:
+                return resp.content, _sniff_image_mime(resp.content)
+        except Exception as exc:
+            logger.debug(
+                "Queue cover URL fetch failed",
+                queue_id=item.get("id"), url=url, error=str(exc),
+            )
+
+    artist = str(item.get("album_artist") or item.get("artist") or "").strip()
+    album = str(item.get("album") or "").strip()
+    if artist and album:
+        try:
+            from services.enrichment.album_art_service import get_or_fetch_album_art
+
+            data, mime = get_or_fetch_album_art(artist, album)
+            if data:
+                return data, (mime or _sniff_image_mime(data))
+        except Exception as exc:
+            logger.debug(
+                "Album art lookup failed",
+                queue_id=item.get("id"), artist=artist, album=album, error=str(exc),
+            )
+
+    release_mbid = str(item.get("release_mbid") or item.get("release_id") or "").strip()
+    if release_mbid:
+        try:
+            from api_clients.coverartarchive import get_release_front_image_bytes
+
+            data = get_release_front_image_bytes(release_mbid)
+            if data:
+                return data, _sniff_image_mime(data)
+        except Exception as exc:
+            logger.debug(
+                "CAA art lookup failed",
+                queue_id=item.get("id"), release_mbid=release_mbid, error=str(exc),
+            )
+    return None
+
+
 def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
     """Write the queue row's stored metadata onto *file_path* (pre-move).
 
@@ -1097,6 +1162,40 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
             )
         except Exception:
             pass
+
+    # ── Album art ────────────────────────────────────────────────────────
+    # The downloaded file carries whatever art (usually none) its source had,
+    # and art used to arrive only if a LATER scan happened to run its art pass
+    # — the reported "album art isn't always downloading with the metadata for
+    # the downloaded tracks". Embed the ALBUM's art right here, on every
+    # import. It runs AFTER the tag write because the writer may rebuild
+    # frames, which would drop art embedded first.
+    #
+    # Only for a file that can actually RECEIVE the art: a synthetic path
+    # must never trigger the provider/URL lookups (tests pass fake paths —
+    # and in the shared in-memory test DB a single missing-table error DISPOSES
+    # the engine, wiping every table for the next test's teardown).
+    try:
+        _art = _fetch_import_art(item) if os.path.isfile(file_path) else None
+        if _art:
+            from services.metadata.tag_file_service import embed_album_art
+
+            _art_bytes, _art_mime = _art
+            if embed_album_art(file_path, _art_bytes, _art_mime):
+                logger.debug(
+                    "Album art embedded on import",
+                    queue_id=item.get("id"), path=file_path, mime=_art_mime,
+                )
+            else:
+                logger.warning(
+                    "Album art embed failed",
+                    queue_id=item.get("id"), path=file_path,
+                )
+    except Exception as _art_exc:
+        logger.warning(
+            "Album art embed skipped",
+            queue_id=item.get("id"), error=str(_art_exc),
+        )
 
     # ── Persist the MB enrichment to the tracks table ────────────────────
     # The just-moved file may not be re-scanned immediately; write the stored
