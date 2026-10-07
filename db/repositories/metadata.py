@@ -57,6 +57,26 @@ def set_album_favourite_db(conn: Any = None, artist: str = "", album: str = "", 
             )
 
 
+def _as_bytes(value: Any) -> Any:
+    """Return a stored blob as ``bytes``, never a ``memoryview``.
+
+    ``album_art.image_data`` is BYTEA, and psycopg2 returns BYTEA as a
+    ``memoryview``. mutagen rejects that outright (``TypeError: data has to be
+    bytes``), and other consumers compare or serialise the value — so the
+    conversion belongs at this read boundary, where the type contract is
+    defined, rather than at each caller.
+
+    ``None`` and a ``str`` pass through unchanged (a ``str`` cannot be encoded
+    blindly; it means a path or a base64 payload, and callers must decide).
+    """
+    if value is None or isinstance(value, bytes):
+        return value
+    try:
+        return bytes(value)
+    except (TypeError, ValueError):
+        return value
+
+
 def fetch_album_art_blob(conn: Any = None, artist: str = "", album: str = ""):
     with db_session() as session:
         result = session.execute(text("""
@@ -70,7 +90,7 @@ def fetch_album_art_blob(conn: Any = None, artist: str = "", album: str = ""):
         row = result.fetchone()
         if not row:
             return None, None
-        return (row[0], row[1] or "image/jpeg")
+        return (_as_bytes(row[0]), row[1] or "image/jpeg")
 
 
 def fetch_album_art_record(conn: Any = None, artist: str = "", album: str = ""):
@@ -94,7 +114,7 @@ def fetch_album_art_record(conn: Any = None, artist: str = "", album: str = ""):
         row = result.fetchone()
         if not row:
             return None, None, ""
-        return (row[0], row[1] or "image/jpeg", str(row[2] or ""))
+        return (_as_bytes(row[0]), row[1] or "image/jpeg", str(row[2] or ""))
 
 
 def save_album_art_db(conn: Any = None, artist: str = "", album: str = "",

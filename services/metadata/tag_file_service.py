@@ -1016,6 +1016,33 @@ def embed_album_art(file_path: str, image_data: bytes, mime_type: str = "image/j
     if not file_path or not os.path.exists(file_path) or not image_data:
         return False
 
+    # ⚠️⚠️ mutagen requires EXACTLY ``bytes``.
+    #
+    # Both writers below hand the data to mutagen, whose ``BinaryFrame.data``
+    # setter raises ``TypeError("data has to be bytes")`` for a ``bytearray``, a
+    # ``memoryview`` or a ``str`` — and a blob read back from PostgreSQL arrives
+    # as a **memoryview** (``album_art.image_data`` is BYTEA and psycopg2 returns
+    # BYTEA that way).
+    #
+    # ``write_tags_to_file`` earlier in this SAME module already coerces
+    # (``data=bytes(value)``); this function did not, so every track of an album
+    # whose stored art had been kept as-is — source ``navidrome``, or a user
+    # ``upload``/``url``, i.e. exactly the sources ``navidrome_art_may_replace``
+    # protects — failed on import with "data has to be bytes" while the
+    # album-page art path (which goes through ``write_tags_to_file``) worked.
+    #
+    # A ``str`` is REFUSED rather than encoded: it means a path or a base64
+    # payload, and encoding it would silently embed garbage into the file.
+    if not isinstance(image_data, bytes):
+        if isinstance(image_data, (bytearray, memoryview)):
+            image_data = bytes(image_data)
+        else:
+            logger.error(
+                "Failed to embed album art in %s: image data is %s, not bytes",
+                file_path, type(image_data).__name__,
+            )
+            return False
+
     ext = Path(file_path).suffix.lower()
     try:
         if ext == ".mp3":
