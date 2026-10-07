@@ -1015,7 +1015,7 @@ def _fetch_similar_artists(artist: str, options: dict[str, Any]) -> dict[str, li
                             text(
                                 "SELECT NULLIF(TRIM(musicbrainz_artistid), '') AS mbid "
                                 "FROM tracks "
-                                "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
+                                "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
                                 "AND COALESCE(NULLIF(TRIM(musicbrainz_artistid), ''), '') <> '' "
                                 "LIMIT 1"
                             ),
@@ -1151,7 +1151,7 @@ def _fetch_discogs_artist_id(artist: str, options: dict[str, Any]) -> None:
                 result = session.execute(
                     text(
                         "UPDATE tracks SET discogs_artist_id = :did "
-                        "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
+                        "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
                         "AND (discogs_artist_id IS NULL OR TRIM(CAST(discogs_artist_id AS TEXT)) = '')"
                     ),
                     {"did": discogs_artist_id, "artist": artist},
@@ -1176,7 +1176,7 @@ def _fetch_musicbrainz_artist_id(artist: str) -> None:
                     text(
                         "SELECT NULLIF(TRIM(musicbrainz_artistid), '') AS mbid "
                         "FROM tracks "
-                        "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
+                        "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
                         "AND COALESCE(NULLIF(TRIM(musicbrainz_artistid), ''), '') <> '' "
                         "LIMIT 1"
                     ),
@@ -1232,7 +1232,7 @@ def _fetch_external_genres(artist: str) -> dict[str, list[str]]:
                     text(
                         "SELECT NULLIF(TRIM(musicbrainz_artistid), '') AS mbid "
                         "FROM tracks "
-                        "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
+                        "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
                         "AND COALESCE(NULLIF(TRIM(musicbrainz_artistid), ''), '') <> '' "
                         "LIMIT 1"
                     ),
@@ -1659,8 +1659,8 @@ def _needs_release_mbid(artist: str, album: str) -> bool:
             row = session.execute(
                 text(
                     "SELECT 1 FROM tracks "
-                    "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
-                    "AND album = :album "
+                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                    "AND LOWER(album) = LOWER(:album) "
                     "AND (musicbrainz_album_mbid IS NULL OR TRIM(musicbrainz_album_mbid) = '') "
                     "LIMIT 1"
                 ),
@@ -1764,8 +1764,8 @@ def _persist_album_type_to_tracks(
                     text("""
                         UPDATE tracks
                         SET musicbrainz_releasegroupid = :release_group_mbid
-                        WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
-                          AND album = :album
+                        WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                          AND LOWER(album) = LOWER(:album)
                           AND (musicbrainz_releasegroupid IS NULL OR TRIM(musicbrainz_releasegroupid) = '')
                     """),
                     {"release_group_mbid": release_group_mbid, "artist": artist, "album": album},
@@ -1820,8 +1820,8 @@ def _persist_album_type_to_tracks(
                         UPDATE tracks
                         SET musicbrainz_album_mbid = :release_mbid,
                             musicbrainz_albumid = :release_mbid
-                        WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
-                          AND album = :album
+                        WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                          AND LOWER(album) = LOWER(:album)
                           AND (musicbrainz_album_mbid IS NULL OR TRIM(musicbrainz_album_mbid) = '')
                     """),
                     {"release_mbid": release_mbid, "artist": artist, "album": album},
@@ -1853,8 +1853,8 @@ def _resolve_album_release_mbid(artist: str, album: str) -> str:
                 text(
                     "SELECT musicbrainz_album_mbid "
                     "FROM tracks "
-                    "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
-                    "  AND album = :album "
+                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                    "  AND LOWER(album) = LOWER(:album) "
                     "  AND musicbrainz_album_mbid IS NOT NULL "
                     "  AND TRIM(musicbrainz_album_mbid) <> '' "
                     "LIMIT 1"
@@ -1981,8 +1981,8 @@ def _persist_release_extended_fields(
                         f"""
                         UPDATE tracks
                         SET {set_clause}
-                        WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
-                          AND album = :album
+                        WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                          AND LOWER(album) = LOWER(:album)
                         """
                     ),
                     params,
@@ -2594,8 +2594,8 @@ def _correct_soundtrack_album_artist(
                     text("""
                         UPDATE tracks
                         SET album_artist = :new_album_artist
-                        WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
-                          AND album = :album
+                        WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                          AND LOWER(album) = LOWER(:album)
                           AND LOWER(TRIM(album_artist)) IN ('soundtrack', 'soundtracks')
                     """),
                     {

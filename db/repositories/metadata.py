@@ -245,11 +245,15 @@ def update_album_mbid_fields(conn: Any = None, artist: str = "", album: str = ""
         if not updates:
             return 0
 
+        # Case-insensitive scoping: callers pass the artist/album name as THEY
+        # know it, while the rows carry whatever the file/import stored ("Afi"
+        # vs "AFI"). The exact match updated 0 rows and every caller reported
+        # ``rows_updated=0`` while claiming success.
         result = session.execute(text(f"""
             UPDATE tracks
             SET {', '.join(updates)}
-            WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
-              AND album = :album
+            WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+              AND LOWER(album) = LOWER(:album)
         """), params)
         return result.rowcount or 0
 

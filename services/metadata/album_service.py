@@ -67,8 +67,8 @@ def _album_file_paths(artist: str, album: str) -> list[str]:
             rows = session.execute(
                 text("""
                     SELECT file_path FROM tracks
-                    WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
-                      AND album = :album
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                      AND LOWER(album) = LOWER(:album)
                 """),
                 {"artist": artist, "album": album},
             ).fetchall() or []
@@ -942,10 +942,15 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
 
     file_updated = 0
     with db_session() as session:
+        # Case-insensitive scoping: the caller's artist/album name and the
+        # stored value may differ only in casing ("Afi" vs "AFI"), and the
+        # exact match returned rows_updated=0 — the IDs were accepted and
+        # then written nowhere.
         result = session.execute(
             text(
                 f"UPDATE tracks SET {', '.join(updates)} "
-                "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist AND album = :album"
+                "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                "AND LOWER(album) = LOWER(:album)"
             ),
             bind_values,
         )
@@ -959,7 +964,8 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
             for r in session.execute(
                 text(
                     "SELECT id, file_path FROM tracks "
-                    "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist AND album = :album"
+                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                    "AND LOWER(album) = LOWER(:album)"
                 ),
                 {"artist": artist, "album": album},
             ).fetchall() or []:

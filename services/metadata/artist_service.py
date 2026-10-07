@@ -160,7 +160,8 @@ def apply_album_mbid(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
             with db_session() as session:
                 rows = session.execute(text("""
                     SELECT file_path FROM tracks
-                    WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist AND album = :album
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                      AND LOWER(album) = LOWER(:album)
                 """), {"artist": artist_name, "album": album_name}).fetchall() or []
             file_paths = [str(r[0] or "") for r in rows]
         except Exception:
@@ -193,7 +194,8 @@ def apply_album_mbid(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
             with db_session() as session:
                 result = session.execute(text("""
                     SELECT file_path FROM tracks
-                    WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist AND album = :album
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                      AND LOWER(album) = LOWER(:album)
                 """), {"artist": artist_name, "album": album_name})
                 for row in result.fetchall() or []:
                     fp = str(row[0] or "").strip()

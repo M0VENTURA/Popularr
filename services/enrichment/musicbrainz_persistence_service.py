@@ -10,7 +10,7 @@ import re
 from typing import Any
 
 import structlog
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from api_clients.musicbrainz_http import MUSICBRAINZ_UUID_RE, escape_lucene_special_chars
 from services.enrichment.musicbrainz_service import get_shared_mb_client
@@ -91,7 +91,11 @@ def lookup_and_save_artist_mbid(artist: str, db_connection: Any = None) -> str:
             to_fix = [
                 row.get("id")
                 for row in session.execute(
-                    text("SELECT id, musicbrainz_artistid FROM tracks WHERE artist = :artist"),
+                    # Case-insensitive: the scan context's artist name and the
+                    # stored value differ only in casing ("Afi" vs "AFI"), and
+                    # an exact match returned NOTHING — so the artist MBID the
+                    # lookup had just found was never written to any row.
+                    text("SELECT id, musicbrainz_artistid FROM tracks WHERE LOWER(artist) = LOWER(:artist)"),
                     {"artist": artist},
                 ).mappings().all()
                 if not _has_valid_artist_mbid(row.get("musicbrainz_artistid"))
@@ -99,7 +103,7 @@ def lookup_and_save_artist_mbid(artist: str, db_connection: Any = None) -> str:
 
             feat_re = re.compile(r"\s+(?:feat\.?|featuring|ft\.?)\s+", re.IGNORECASE)
             for row in session.execute(
-                text("SELECT id, artist, musicbrainz_artistid FROM tracks WHERE artist LIKE :pattern"),
+                text("SELECT id, artist, musicbrainz_artistid FROM tracks WHERE LOWER(artist) LIKE LOWER(:pattern)"),
                 {"pattern": f"{artist} %"},
             ).mappings().all():
                 if feat_re.search(str(row.get("artist") or "")):
@@ -109,9 +113,11 @@ def lookup_and_save_artist_mbid(artist: str, db_connection: Any = None) -> str:
             to_fix = list(dict.fromkeys(to_fix))
             if to_fix:
                 for index in range(0, len(to_fix), 500):
-                    # ✅ NATIVE SQL TUPLE BINDING: Faster and avoids messy string formatting
-                    chunk = tuple(to_fix[index:index + 500])
-                    
+                    # Expanding bind: a raw tuple only expands under psycopg2 —
+                    # on SQLite it rendered ``IN ?`` and the whole save raised
+                    # a syntax error. The expansion is identical on Postgres.
+                    chunk = list(to_fix[index:index + 500])
+
                     session.execute(
                         text("""
                             UPDATE tracks SET
@@ -120,7 +126,7 @@ def lookup_and_save_artist_mbid(artist: str, db_connection: Any = None) -> str:
                                     ELSE musicbrainz_artistid 
                                 END
                             WHERE id IN :ids
-                        """),
+                        """).bindparams(bindparam("ids", expanding=True)),
                         {"mbid": mbid, "ids": chunk},
                     )
                     
