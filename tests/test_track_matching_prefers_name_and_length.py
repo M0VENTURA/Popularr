@@ -288,3 +288,90 @@ class TestThePairingRule:
         agree = _require(_titles_agree_for_pairing, "_titles_agree_for_pairing")
         assert isinstance(agree(left, right), bool)
         assert agree(left, left) is True
+
+
+# ===========================================================================
+# Report: "2 and 10 were incorrectly trying to swap"
+# ===========================================================================
+class TestSameCoreTitleRowsAreNotCrossPaired:
+    """One release carries BOTH "My Mind's Eye" (2) and "(radio edit)" (10).
+
+    ``normalize_title_for_lookup`` strips the bracketed marker, so both
+    library rows TIED at the name step and ROW ORDER decided the pairing —
+    cross-pairing two correct rows and proposing to swap their track
+    numbers, titles and recording MBIDs between them.
+    """
+
+    def _tracklist(self):
+        return [
+            mb("My Mind's Eye", 2, 195000, rec="rec-plain"),
+            mb("My Mind's Eye (radio edit)", 10, 218000, rec="rec-radio"),
+        ]
+
+    def _rows(self, reverse=False):
+        rows = [
+            {
+                **library(
+                    "My Mind's Eye (radio edit)", "10", 218, tid="radio"
+                ),
+                "mbid": "rec-radio",
+            },
+            {
+                **library("My Mind's Eye", "2", 195, tid="plain"),
+                "mbid": "rec-plain",
+            },
+        ]
+        return list(reversed(rows)) if reverse else rows
+
+    def test_the_radio_edit_row_listed_first_still_pairs_by_identity(self):
+        comparison = compare(self._tracklist(), self._rows())
+
+        assert claimed(comparison[0]) == "plain"
+        assert claimed(comparison[1]) == "radio"
+
+    def test_no_swap_is_proposed_either_way_round(self):
+        for rows in (self._rows(), self._rows(reverse=True)):
+            comparison = compare(self._tracklist(), rows)
+            for entry in comparison:
+                assert entry["diff_fields"] == [], entry
+                assert entry["needs_update"] is False
+
+    def test_the_folder_matcher_agrees(self):
+        entries = match_mb_tracks_to_files(
+            {"tracks": self._tracklist()},
+            [
+                {
+                    "file_path": "/d/10. Sirenia - My Mind's Eye (radio edit).mp3",
+                    "track_number": 10,
+                    "title": "My Mind's Eye (radio edit)",
+                    "duration": 218,
+                },
+                {
+                    "file_path": "/d/02. Sirenia - My Mind's Eye.mp3",
+                    "track_number": 2,
+                    "title": "My Mind's Eye",
+                    "duration": 195,
+                },
+            ],
+        )
+
+        assert entries[0]["file_path"].endswith("02. Sirenia - My Mind's Eye.mp3")
+        assert entries[1]["file_path"].endswith(
+            "10. Sirenia - My Mind's Eye (radio edit).mp3"
+        )
+
+    def test_duplicate_verbatim_titles_fall_back_to_the_number(self):
+        """Verbatim titles cannot separate twin rows — the position can."""
+        comparison = compare(
+            [
+                mb("My Mind's Eye", 2, 195000, rec="rec-2"),
+                mb("My Mind's Eye", 10, 218000, rec="rec-10"),
+            ],
+            [
+                library("My Mind's Eye", "10", 218, tid="t10"),
+                library("My Mind's Eye", "2", 195, tid="t2"),
+            ],
+        )
+
+        assert claimed(comparison[0]) == "t2"
+        assert claimed(comparison[1]) == "t10"

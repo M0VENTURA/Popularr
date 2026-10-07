@@ -2578,14 +2578,46 @@ def _match_mb_tracks_to_library(
         # 1) The NAME. The only signal that says what the track is, so it is
         #    asked before the number: a mis-numbered file must not be stolen
         #    from the track it is actually named after.
-        Match = next(
-            (
-                row for row in Remaining
-                if Mb_norm
-                and Normalize_title_for_lookup(str(row.get("title") or "")) == Mb_norm
-            ),
-            None,
-        )
+        #
+        #    TIES inside this step used to be settled by ROW ORDER:
+        #    ``Normalize_title_for_lookup`` strips bracketed markers, so
+        #    "My Mind's Eye" and "My Mind's Eye (radio edit)" compare EQUAL
+        #    and the first remaining row won — cross-pairing two genuinely
+        #    different tracks (reported: tracks 2 and 10 were "incorrectly
+        #    trying to swap" their numbers, titles and recording MBIDs).
+        #    Break a tie by a verbatim title match first, then by the row
+        #    already sitting at this disc/track position (still gated by
+        #    ``_track_number_pairing_allowed``), then by row order.
+        Named = [
+            row for row in Remaining
+            if Mb_norm
+            and Normalize_title_for_lookup(str(row.get("title") or "")) == Mb_norm
+        ]
+        Match = None
+        if Named:
+            Mb_verbatim = Normalize_title_for_mbid_match(Mb_title)
+            Exact = (
+                [
+                    row for row in Named
+                    if Mb_verbatim
+                    and Normalize_title_for_mbid_match(str(row.get("title") or ""))
+                    == Mb_verbatim
+                ]
+                or Named
+            )
+            Positioned = (
+                [
+                    row for row in Exact
+                    if Mb_number
+                    and _disc_of(row) == Mb_disc
+                    and _track_num_of(row) == Mb_number
+                    and _track_number_pairing_allowed(
+                        row.get("title"), Mb_title, row.get("duration"), Mb_duration
+                    )
+                ]
+                or Exact
+            )
+            Match = Positioned[0]
 
         # 2) The NUMBER — and only when name/length do not contradict it.
         #    Both sides must actually state one: two blank numbers used to
@@ -2840,6 +2872,10 @@ def match_mb_tracks_to_files(
         return {
             "title": Mb_title,
             "norm": Normalize_title_for_lookup(Mb_title),
+            # Bracket-PRESERVING twin of ``norm``: stripped equality cannot
+            # tell "X (radio edit)" from "X", so pass 1 needs it to break
+            # ties between two rows of the same core title.
+            "verbatim": Normalize_title_for_mbid_match(Mb_title),
             "number": _track_number(Mb_number),
             "number_raw": Mb_number,
             "disc": _disc_number(Mb_disc),
@@ -2858,17 +2894,52 @@ def match_mb_tracks_to_files(
     Chosen: list[dict[str, Any] | None] = [None] * len(Mb_tracks)
 
     # ── Pass 1: the NAME. It is the only signal that says what the track IS.
+    #    TIES (stripped equality cannot tell "X (radio edit)" from "X") are
+    #    broken by a verbatim title first, then by the candidate already
+    #    sitting at this track position (gated by
+    #    ``_track_number_pairing_allowed``) — never by folder order, which
+    #    cross-paired two same-core-title rows (reported: tracks 2 and 10
+    #    were "incorrectly trying to swap").
     for index, identity in enumerate(Identities):
         if not identity["norm"]:
             continue
-        for candidate in Remaining:
-            if (
-                Normalize_title_for_lookup(str(candidate.get("title") or ""))
-                == identity["norm"]
-            ):
-                Chosen[index] = candidate
-                Remaining.remove(candidate)
-                break
+        Named = [
+            candidate for candidate in Remaining
+            if Normalize_title_for_lookup(str(candidate.get("title") or ""))
+            == identity["norm"]
+        ]
+        if not Named:
+            continue
+        Exact = (
+            [
+                candidate for candidate in Named
+                if identity["verbatim"]
+                and Normalize_title_for_mbid_match(str(candidate.get("title") or ""))
+                == identity["verbatim"]
+            ]
+            or Named
+        )
+        Positioned = (
+            [
+                candidate for candidate in Exact
+                if identity["number"] is not None
+                and _track_number(candidate.get("track_number")) == identity["number"]
+                and (
+                    identity["disc"] is None
+                    or _disc_number(candidate.get("disc_number")) is None
+                    or _disc_number(candidate.get("disc_number")) == identity["disc"]
+                )
+                and _track_number_pairing_allowed(
+                    candidate.get("title"),
+                    identity["title"],
+                    candidate.get("duration"),
+                    identity["duration"],
+                )
+            ]
+            or Exact
+        )
+        Chosen[index] = Positioned[0]
+        Remaining.remove(Positioned[0])
 
     # ── Pass 2: the NUMBER, and only when name/length do not contradict it.
     #    ``helpers.metadata_reader`` only surfaces a track_number for files
