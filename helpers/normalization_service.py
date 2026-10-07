@@ -1389,6 +1389,12 @@ def album_names_match(requested: str, candidate: str) -> bool:
     cut must land on a separator, which is what keeps "Absolution" from matching
     "Absolution II". See the notes above for why.
 
+    ⚠️ A TRAILING separator subtitle is a DIFFERENT album, never a spelling of
+    the requested one — reported: scanning "MTV Headbangers Ball" also scanned
+    "MTV Headbangers Ball - Volume 2" (and the mirror: requesting the volume
+    pulled the base album). Tolerance runs to NUMBERED PREFIXES ("17: X" ↔
+    "17" ↔ "X"), not to sequels.
+
     ⚠️ Callers must handle MULTIPLE matches. Asking for "Greatest Hits" matches
     both "17: Greatest Hits" and "18: Greatest Hits", so this cannot identify a
     single album on its own — never assume exactly one hit.
@@ -1405,18 +1411,29 @@ def album_names_match(requested: str, candidate: str) -> bool:
 
     sep = _ALBUM_SEPARATOR
 
-    # `have` is `want` plus a separator-introduced suffix ("17" -> "17: X").
-    if len(have) > len(want) and have.startswith(want) and have[len(want)] == sep:
+    # `want` is `have` plus a separator-introduced suffix ("17" -> "17: X")
+    # — but ONLY when the short side is a BARE NUMBER. Navidrome may tag the
+    # album by its number alone (the reported Ricky Martin case), while a
+    # wordy short side is a different album: "MTV Headbangers Ball - Volume 2"
+    # must not pull the base "MTV Headbangers Ball" either.
+    if (
+        len(want) > len(have)
+        and want.startswith(have)
+        and want[len(have)] == sep
+        and have.isdigit()
+    ):
         return True
-    # `want` is `have` plus a separator-introduced suffix ("17: X" -> "17").
-    if len(want) > len(have) and want.startswith(have) and want[len(have)] == sep:
-        return True
-    # `have` is a separator-introduced SUFFIX of `want` ("X" vs "17: X").
+    # `want` is a separator-introduced SUFFIX of `have` ("X" vs "17: X").
     if len(want) > len(have) and want.endswith(have) and want[len(want) - len(have) - 1] == sep:
         return True
-    # `want` is a separator-introduced suffix of `have`.
+    # `want` is a separator-introduced suffix of `have` ("17: X" vs "X").
     if len(have) > len(want) and have.endswith(want) and have[len(have) - len(want) - 1] == sep:
         return True
+    # NOTE: the former FIRST rule — `have` is `want` plus a trailing
+    # separator suffix — is deliberately GONE. It is what made the base
+    # album's scan swallow "… - Volume 2": a trailing subtitle describes a
+    # SEQUEL/SIBLING release, and over-matching is the dangerous direction
+    # (the module doctrine above).
     return False
 
 

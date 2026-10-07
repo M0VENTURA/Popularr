@@ -197,3 +197,47 @@ class TestBothFilterSitesUseTheSameRule:
             "a filter matching several albums must be reported rather than "
             "silently importing all of them"
         )
+
+
+class TestSequelVolumesAreDifferentAlbums:
+    """REPORTED: "an album scan for Various Artists - MTV Headbangers Ball
+    also scanned MTV Headbangers Ball volume 2, even though they are both
+    different albums".
+
+    The base request matched the volume because the volume's name is the
+    base plus a SEPARATOR-introduced trailing suffix ("- Volume 2",
+    ", Volume 2", ": Volume 2", "(Volume 2)") — the tolerant rule that used
+    to run in that direction. A trailing subtitle is a sequel, never a
+    spelling of the requested album.
+    """
+
+    VOLUMES = [
+        "MTV Headbangers Ball - Volume 2",
+        "MTV Headbangers Ball, Volume 2",
+        "MTV Headbangers Ball: Volume 2",
+        "MTV Headbangers Ball (Volume 2)",
+    ]
+
+    @pytest.mark.parametrize("candidate", VOLUMES)
+    def test_a_trailing_volume_suffix_does_not_match_the_base_request(
+        self, candidate
+    ):
+        assert album_names_match("MTV Headbangers Ball", candidate) is False
+        assert _skipped(candidate, "MTV Headbangers Ball") is True, (
+            "scanning the base album must not scan its volume too"
+        )
+
+    @pytest.mark.parametrize("requested", VOLUMES)
+    def test_requesting_the_volume_does_not_pull_the_base_album(self, requested):
+        """The mirror direction — the volume's scan must stay scoped too."""
+        assert album_names_match(requested, "MTV Headbangers Ball") is False
+        assert _skipped("MTV Headbangers Ball", requested) is True
+
+    def test_the_base_album_still_matches_itself(self):
+        assert _skipped("MTV Headbangers Ball", "MTV Headbangers Ball") is False
+
+    def test_the_number_short_form_survives_the_tightening(self):
+        """The reported Ricky Martin case pins the BARE-NUMBER tolerance:
+        Navidrome tags "17: Greatest Hits" as just "17"."""
+        assert album_names_match("17: Greatest Hits", "17") is True
+        assert _skipped("17", "17: Greatest Hits") is False
