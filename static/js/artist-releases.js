@@ -435,42 +435,51 @@
   }
 
   function importMissingRelease(artist, album, button, summary) {
-    var original = button.innerHTML;
-    button.disabled = true;
-    button.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
-
     /*
-      The route signature is
-          /api/artist/import-release  {artist, release_id, title}
-      — NOT {album, mbid}. `title` is the RELEASE-GROUP title the user clicked,
-      and `release_id` is the MusicBrainz release-group id.
+      MusicBrainz search → Soulseek download (the queue).
 
-      The macro puts data-release-id on the IMPORT BUTTON (not on the summary),
-      so the button is the primary source and the summary is the fallback.
+      This used to POST /api/artist/import-release, which despite the
+      "Import queued for …" toast does NOT queue anything: it calls
+      ``artist_scan_service.import_release()`` — "Import a missing release as
+      placeholder track records" — writing one ``tracks`` row per track with
+      ``file_path: NULL`` and then deleting the ``missing_releases`` row.
+
+      The artist page builds its OWNED releases from ``SELECT * FROM tracks``
+      with no file-path guard, so those placeholder rows made the release
+      appear under Releases INSTANTLY, before a single file existed, while its
+      missing-releases entry was already gone — neither downloaded nor in the
+      library, and the toast promised a queue that was never created.
+
+      2026-08-19 already retired this endpoint from every button
+      (documentation/Change Logs/Main/2026-08-19-missing-releases-mb-only-and-import-via-soulseek.md),
+      but only in the files it touched; this module is the one the ROUTED
+      artist page loads (pages/artist_detail_v2.html), so the placeholder
+      behaviour survived here.
+
+      Canonical flow, identical to the missing-releases page: open the shared
+      MusicBrainz picker prepopulated with the entry, then queue the release the
+      user picks through Soulseek — the flow that actually produces playable
+      files.
+
+      ``button``/``summary`` stay in the signature because the caller passes
+      them; the picker is its own feedback, so the button is no longer disabled
+      (it is only ever hidden behind the modal anyway).
     */
-    var releaseId = (button.dataset && button.dataset.releaseId)
-      || (summary && summary.getAttribute('data-release-id'))
-      || '';
+    if (typeof global.openGlobalMbSearch !== 'function') {
+      toastError('MusicBrainz search is not available on this page.');
+      return;
+    }
 
-    postJson('/api/artist/import-release', {
-      artist: artist,
-      release_id: releaseId,
-      title: album,
-    })
-      .then(function (data) {
-        button.disabled = false;
-        button.innerHTML = original;
-        if (data && (data.success || data.queued || data.download_id)) {
-          toastSuccess('Import queued for “' + album + '”.');
-        } else {
-          toastError((data && (data.error || data.message)) || 'Import failed.');
-        }
-      })
-      .catch(function () {
-        button.disabled = false;
-        button.innerHTML = original;
-        toastError('Import failed.');
-      });
+    global.openGlobalMbSearch(artist, album, function (selectedRelease) {
+      if (!selectedRelease) return;
+      if (typeof global.downloadMbRelease === 'function') {
+        global.downloadMbRelease(selectedRelease.id, selectedRelease.title, selectedRelease.artist, 'slskd');
+      } else if (typeof global.downloadReleaseViaSoulseek === 'function') {
+        global.downloadReleaseViaSoulseek(selectedRelease.id, selectedRelease.title, selectedRelease.artist);
+      } else {
+        toastError('Soulseek download is not available on this page.');
+      }
+    });
   }
 
   function searchMusicBrainzForAlbum(artist, album) {
