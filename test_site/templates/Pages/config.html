@@ -2606,7 +2606,7 @@
         <div class="input-card">
           <label for="playlists_max_per_artist">Max Tracks Per Artist</label>
           <input type="number" step="1" min="0" max="500" class="form-control form-control-sm" id="playlists_max_per_artist" placeholder="25" value="{{ config.get('playlists', {}).get('genre_playlists_max_per_artist', 25) }}">
-          <span class="help-text">Stops one prolific artist filling a genre playlist. Overflow tracks move to the end rather than being dropped. Set to <strong>0</strong> for no limit. Default: <strong>25</strong></span>
+          <span class="help-text">Stops one prolific artist filling a genre playlist: no artist may contribute more than this many tracks. Set to <strong>0</strong> for no limit. Default: <strong>25</strong></span>
         </div>
         <div class="input-card">
           <label for="playlists_interleave_artists">Spread Artists Through The List</label>

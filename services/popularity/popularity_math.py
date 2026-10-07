@@ -388,6 +388,57 @@ def album_prominence_score(
     return min(100.0, max(0.0, weighted / total_w))
 
 
+def playlist_popularity_score(
+    lastfm_listeners: int,
+    listenbrainz_listens: int,
+) -> float:
+    """Cross-album popularity score for ORDERING a playlist, most popular first.
+
+    ⭐⭐ WHY THIS IS NOT ``album_prominence_score``
+    ----------------------------------------------
+    ``album_prominence_score`` is the era BENCHMARK measure, and both of its
+    defining properties are wrong for ordering. Both were MEASURED as defects in
+    the genre playlists:
+
+    1. **It renormalises the weights over whichever signals are present, which
+       rewards MISSING data.** An absent signal is dropped (no penalty) while a
+       present-but-low one is averaged in (a penalty), so a track with MORE
+       listens on BOTH sources ranked BELOW one with less: 5,000,000 LF with no
+       ListenBrainz scored 100.0, while 9,000,000 LF + 10,000 LB scored only
+       **83.8**; and 200,000 LF + 5,000 LB (73.3) ranked below 200,000 LF with
+       no LB data (84.8).
+    2. **Its 0-100 clamp saturates.** ``log10(n+1) * 16`` reaches 100 at about
+       1.78M Last.fm listeners, so every mainstream track tied at exactly
+       100.0 and the order among them fell through to the album-relative
+       ``stars``/stored score and then the TITLE — reintroducing the very
+       album-context ranking the prominence mode exists to remove.
+
+    This function takes the **maximum** of the two UNBOUNDED log scores, which
+    is the strongest evidence either source gives about the track:
+
+    * **monotonic** — if A >= B on both sources then score(A) >= score(B), so a
+      more popular track can never sort below a less popular one;
+    * **non-saturating** — the log is never clamped, so there is no mass tie;
+    * **imputation-free** — an absent signal contributes 0, so it can neither
+      lift a track above its known signal (the renormalisation bug) nor drag it
+      below it.
+
+    The two platforms cover different populations, so a track that is huge on
+    either one is popular; ``max`` also means a weak count on one source can
+    never outvote a strong count on the other for the SAME track.
+
+    Returns 0.0 when neither source has a count, so the caller can fall back to
+    the stored score instead of sinking the track.
+    """
+    lf = int(lastfm_listeners or 0)
+    lb = int(listenbrainz_listens or 0)
+    if lf <= 0 and lb <= 0:
+        return 0.0
+    lf_score = math.log10(lf + 1) * LOG_SCALE_MULTIPLIER if lf > 0 else 0.0
+    lb_score = math.log10(lb + 1) * LOG_SCALE_MULTIPLIER if lb > 0 else 0.0
+    return max(lf_score, lb_score)
+
+
 def album_prominence_median(track_rows: list[dict[str, Any]]) -> float:
     """Median album-prominence score across a set of track rows."""
     scores = [

@@ -102,6 +102,7 @@ from services.popularity.popularity_math import (
     calculate_percentile_star_rating,
     is_live_album_context,
     live_album_star_from_artist_z,
+    playlist_popularity_score,
     fmt_count as _fmt_count,
 )
 from services.popularity.popularity_zscore import composite_listener_z
@@ -1611,11 +1612,12 @@ def _effective_order_score(
     album-relative score "is only meaningful within one album's own
     distribution" — and that function was never called.
 
-    ``mode="prominence"`` uses ``album_prominence_score``, a log-scaled blend of
-    the track's RAW ``lastfm_listeners`` and ``listenbrainz_listens``. Those are
-    absolute global counts, so the value means the same thing on every album and
-    is safe to sort across the whole library. This is the same measure
-    ``_build_album_model`` already uses for cross-album benchmark comparison.
+    ``mode="prominence"`` uses ``playlist_popularity_score``: the MAXIMUM of
+    the track's two RAW global counts, each log-scaled and UNCLAMPED. Those are
+    absolute counts, so the value means the same thing on every album, and the
+    ``max`` keeps it monotonic in both signals with no saturation — see that
+    function's docstring for the two playlist defects the weighted mean caused
+    (it rewarded MISSING ListenBrainz data and saturated at 100).
 
     ``mode="stored"`` keeps the existing behaviour (used as the fallback when a
     track has no listener data to compare on).
@@ -1625,7 +1627,7 @@ def _effective_order_score(
     album-relative too and cannot break ties across albums.
     """
     if mode == "prominence":
-        prominence = album_prominence_score(
+        prominence = playlist_popularity_score(
             int(row.get("lastfm_listeners") or 0),
             int(row.get("listenbrainz_listens") or 0),
         )
@@ -1663,31 +1665,38 @@ def _apply_artist_cap(
 ) -> list[dict[str, Any]]:
     """Limit how many tracks ONE credited artist may contribute.
 
-    ⭐ Without a cap, ranking by prominence alone lets a prolific artist with a
+    ⭐ Without a cap, ranking by popularity alone lets a prolific artist with a
     consistent catalogue monopolise a genre playlist. Measured on a synthetic
     400-track pool (2 artists x 100 tracks, 20 artists x 10): the two large
-    artists took **200 of 300 tracks (67%)**, because ``_popularity_order`` has
-    no artist key and no cap.
+    artists took **200 of 300 tracks (67%)**.
 
-    ⚠️ The cap must NOT shrink the playlist. Overflow tracks are DEFERRED to the
-    end in their original relative order rather than dropped, so a genre with
-    only one qualifying artist still yields a full playlist. ``max_per_artist``
-    of ``None`` or ``<= 0`` means unlimited.
+    ⚠️⚠️ CONTRACT CHANGE (this revision): the cap now BINDS — overflow is
+    DROPPED, not deferred. It previously deferred the overflow to the end "so a
+    genre with only one qualifying artist still yields a full playlist", but
+    the caller then SLICES the ordered list to ``genre_playlists_max_tracks``,
+    so the deferred tracks came straight back: measured, ``Max Tracks Per
+    Artist = 25`` on a 300-track playlist handed the dominant artist **60 slots
+    (200 of 300 with spreading off)** while the Config page promises the cap
+    "stops one prolific artist filling a genre playlist". A quota that cannot
+    bind is not a quota.
+
+    ⚠️ The cost, documented rather than hidden: a genre whose qualifying pool is
+    dominated by fewer artists than ``ceil(max_tracks / max_per_artist)`` now
+    yields a SHORTER playlist. That is the cap working as configured — set the
+    option to ``0`` for no limit, which restores the previous behaviour
+    exactly. ``None`` or ``<= 0`` means unlimited.
     """
     if not max_per_artist or max_per_artist <= 0:
         return ordered
 
     counts: dict[str, int] = {}
     kept: list[dict[str, Any]] = []
-    deferred: list[dict[str, Any]] = []
     for row in ordered:
         key = _normalise_artist_key(row.get("artist") or row.get("album_artist") or "")
         if counts.get(key, 0) < max_per_artist:
             counts[key] = counts.get(key, 0) + 1
             kept.append(row)
-        else:
-            deferred.append(row)
-    return kept + deferred
+    return kept
 
 
 def _interleave_artists(ordered: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1695,33 +1704,73 @@ def _interleave_artists(ordered: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     ⭐ Purpose: a playlist that is a pure score ranking arrives ALBUM-BLOCKED —
     the top tracks of one record sit next to each other and the list is
-    effectively "album by album". Round-robinning by artist gives the ranking a
-    listenable shape without changing WHICH tracks are included, only their
-    order.
+    effectively "album by album". Spreading the artists gives the ranking a
+    listenable shape without changing WHICH tracks are included.
 
-    ⚠️ Each artist's own tracks stay in ranked order (the round-robin takes
-    them in turn), and the artist's FIRST pick always appears before its second,
-    so the highest-ranked track still leads. This is a re-order, never a
-    re-rank.
+    ⭐⭐ WHY NOT A ROUND-ROBIN: a plain round-robin emits each artist's #2 after
+    EVERY artist's #1, so the global ranking is only correct for the first
+    round. Measured on a 3-artist pool the pool's 2nd-strongest track was pushed
+    behind its 6th-strongest, because the round-robin had already moved on to a
+    weaker track from another artist.
+
+    This takes, at each step, the STRONGEST remaining track whose artist did not
+    just play — so the list stays as close to the true ranking as the
+    no-consecutive-artist rule allows. A run is only broken when no other artist
+    remains (a single-artist tail).
+
+    ⚠️ A re-order, never a re-rank: membership is untouched, each artist's own
+    tracks keep their relative order, and the overall winner still leads.
     """
     from collections import defaultdict
 
-    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in ordered:
-        buckets[_normalise_artist_key(row.get("artist") or row.get("album_artist") or "")].append(row)
+    buckets: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
+    artist_order: list[str] = []
+    for rank, row in enumerate(ordered):
+        key = _normalise_artist_key(row.get("artist") or row.get("album_artist") or "")
+        if key not in buckets:
+            artist_order.append(key)
+        buckets[key].append((rank, row))
 
-    if len(buckets) <= 1:
+    if len(artist_order) <= 1:
         return list(ordered)
 
+    positions: dict[str, int] = {key: 0 for key in artist_order}
     out: list[dict[str, Any]] = []
-    while True:
-        progressed = False
-        for bucket in buckets.values():
-            if bucket:
-                out.append(bucket.pop(0))
-                progressed = True
-        if not progressed:
+    last_key: str | None = None
+
+    for _ in range(len(ordered)):
+        pick_key: str | None = None
+        pick_rank: int | None = None
+
+        # Preferred: the strongest head whose artist did not just play.
+        for key in artist_order:
+            pos = positions[key]
+            bucket = buckets[key]
+            if pos >= len(bucket) or key == last_key:
+                continue
+            rank = bucket[pos][0]
+            if pick_rank is None or rank < pick_rank:
+                pick_rank, pick_key = rank, key
+
+        # Unavoidable run (every remaining artist is the one that just played).
+        if pick_key is None:
+            for key in artist_order:
+                pos = positions[key]
+                bucket = buckets[key]
+                if pos >= len(bucket):
+                    continue
+                rank = bucket[pos][0]
+                if pick_rank is None or rank < pick_rank:
+                    pick_rank, pick_key = rank, key
+
+        if pick_key is None:
             break
+
+        pos = positions[pick_key]
+        out.append(buckets[pick_key][pos][1])
+        positions[pick_key] = pos + 1
+        last_key = pick_key
+
     return out
 
 
@@ -1736,7 +1785,7 @@ def _ordered_playlist_rows(
 
     Order of operations is deliberate:
       1. RANK on the cross-album-comparable key.
-      2. CAP each artist, deferring (never dropping) the overflow.
+      2. CAP each artist, DROPPING the overflow so the quota really binds.
       3. Optionally INTERLEAVE artists, which only re-orders step 2's result.
     """
     ordered = sorted(winners, key=lambda r: _playlist_order_key(r, order_mode))
@@ -2963,6 +3012,8 @@ def _create_genre_top_track_playlists(
         # Previously this was `winners.sort(key=_popularity_order)` — a pure
         # stored-score ranking, where the stored score is album-relative, so the
         # order reflected album context rather than the tracks.
+        # ⚠️ The cap DROPS the overflow now (it used to defer it, which the
+        # `max_tracks` slice below then pulled straight back in).
         winners = _ordered_playlist_rows(
             winners,
             order_mode=order_mode,

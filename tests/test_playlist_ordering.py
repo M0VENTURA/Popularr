@@ -21,15 +21,18 @@ distribution") — and was never called.
 
 WHAT CHANGED
 ------------
-1. Ordering now uses ``album_prominence_score``, a log-scaled blend of the RAW
-   global ``lastfm_listeners`` / ``listenbrainz_listens``. Those counts are
-   absolute, so the value means the same thing on every album. Same measure
-   ``_build_album_model`` already uses for cross-album comparison.
-2. A per-artist cap stops one prolific artist monopolising a genre playlist
-   (measured: 2 artists took 200/300 tracks). Overflow is DEFERRED, never
-   dropped, so the cap cannot shrink a playlist.
-3. An optional interleave spreads artists through the ranking, since a pure
-   score ranking arrives album-blocked.
+1. Ordering now uses ``playlist_popularity_score``: the MAXIMUM of the raw
+   global ``lastfm_listeners`` / ``listenbrainz_listens`` log scores, each
+   UNCLAMPED. Those counts are absolute, so the value means the same thing on
+   every album; the ``max`` keeps the order monotonic in both signals and
+   removes the 0-100 saturation. It replaces ``album_prominence_score``, a
+   weighted MEAN that (a) renormalised over the available signals — so an
+   ABSENT count outranked a present but low one — and (b) clamped at 100, which
+   tied every mainstream track and fell back to the album-relative columns.
+2. The per-artist cap now BINDS (overflow is dropped). It used to defer the
+   overflow to the end, which the ``max_tracks`` slice then pulled back in.
+3. The artist spread is a greedy, strength-preserving interleave rather than a
+   round-robin, which lost the global ranking after the first round.
 
 ⚠️ ``stars`` is deliberately NOT a fallback ordering key: ``_assign_stars``
 rates against the track's own album AND artist distributions, so star tiers are
@@ -171,6 +174,68 @@ class TestTheOrderIsComparableAcrossAlbums:
 
 
 # ---------------------------------------------------------------------------
+# 1b. The ORDERING KEY: monotonic, non-saturating, imputation-free
+# ---------------------------------------------------------------------------
+
+class TestTheOrderingKeyIsMonotonicAndUnclamped:
+    """The weighted MEAN this replaced had two measured defects.
+
+    ``album_prominence_score`` renormalises over whichever signals are present,
+    so an ABSENT ListenBrainz count was dropped (no penalty) while a present but
+    low one was averaged in (a penalty) — and its 0-100 clamp saturated every
+    mainstream track at exactly 100, which pushed the order back onto the
+    album-relative star/stored tie-breakers.
+    """
+
+    def test_more_popular_on_both_sources_never_ranks_lower(self):
+        rows = [
+            track("Everything", "A", stored=50, lf=9_000_000, lb=1_000_000),
+            track("Less", "B", stored=50, lf=5_000_000, lb=100_000),
+        ]
+        assert titles_of(fs._ordered_playlist_rows(rows, order_mode="prominence")) == [
+            "Everything", "Less",
+        ], "a track ahead on BOTH signals must not sort below the other"
+
+    def test_missing_listenbrainz_data_is_not_rewarded(self):
+        """The exact measured inversion: 5M/0 beat 9M/10k under the old mean."""
+        rows = [
+            track("No LB data", "A", stored=50, lf=5_000_000),
+            track("Real LB data", "B", stored=50, lf=9_000_000, lb=10_000),
+        ]
+        assert titles_of(fs._ordered_playlist_rows(rows, order_mode="prominence"))[0] == (
+            "Real LB data"
+        ), "having ListenBrainz data must never rank a track lower"
+
+    def test_a_weak_listenbrainz_count_cannot_demote_a_track(self):
+        """A low LB on an otherwise-strong track must not drag it below a peer."""
+        rows = [
+            track("With weak LB", "A", stored=50, lf=200_000, lb=5_000),
+            track("Without LB", "B", stored=50, lf=200_000),
+        ]
+        ordered = titles_of(
+            fs._ordered_playlist_rows(rows, order_mode="prominence")
+        )
+        assert ordered[0] == "With weak LB", (
+            "equal Last.fm counts: the LB-augmented track must not fall behind "
+            "the one whose LB count is MISSING (the old mean demoted it "
+            "73.3 vs 84.8)"
+        )
+
+    def test_the_key_does_not_saturate(self):
+        """5M and 50M listeners must be distinguishable (the clamp tied them)."""
+        big = fs._effective_order_score(
+            {"lastfm_listeners": 50_000_000, "listenbrainz_listens": 0}, "prominence"
+        )
+        small = fs._effective_order_score(
+            {"lastfm_listeners": 5_000_000, "listenbrainz_listens": 0}, "prominence"
+        )
+        assert big > small, (
+            "both scored exactly 100.0 under the 0-100 clamp, so the tie-break "
+            "fell back to the album-relative star/score columns"
+        )
+
+
+# ---------------------------------------------------------------------------
 # 2. The per-artist cap
 # ---------------------------------------------------------------------------
 
@@ -195,26 +260,43 @@ class TestThePerArtistCap:
             "the cap must let other artists through after 2 tracks"
         )
 
-    def test_the_cap_defers_rather_than_drops(self):
+    def test_the_cap_limits_the_playlist(self):
+        """The cap now BINDS: overflow is dropped, not deferred.
+
+        It used to defer the overflow to the end, but the genre builder then
+        slices the ordered list to ``genre_playlists_max_tracks``, so the
+        deferred tracks came straight back and the "Max Tracks Per Artist"
+        control could not do what its label promises.
+        """
         rows = [track(f"Big {i}", "Prolific", stored=90 - i, lf=100_000 - i)
                 for i in range(10)]
         ordered = fs._ordered_playlist_rows(
             rows, order_mode="prominence", max_per_artist=2
         )
-        assert len(ordered) == len(rows), (
-            "the cap must not shorten the playlist, or a single-artist genre "
-            "would lose tracks it is entitled to"
-        )
-        assert set(titles_of(ordered)) == set(titles_of(rows))
+        assert len(ordered) == 2, "the cap must bound the emitted playlist"
+        assert artists_of(ordered) == ["Prolific", "Prolific"]
 
-    def test_overflow_goes_to_the_end_in_ranked_order(self):
+    def test_the_overflow_is_dropped_not_appended(self):
+        """The dropped tracks are the artist's WEAKEST, not an arbitrary set."""
         rows = [track(f"Big {i}", "Prolific", stored=90 - i, lf=100_000 - i)
                 for i in range(5)]
         rows += [track("Minor", "MinorArtist", stored=1, lf=1)]
         ordered = fs._ordered_playlist_rows(
             rows, order_mode="prominence", max_per_artist=1
         )
-        assert titles_of(ordered) == ["Big 0", "Minor", "Big 1", "Big 2", "Big 3", "Big 4"]
+        assert titles_of(ordered) == ["Big 0", "Minor"]
+
+    def test_a_single_artist_pool_still_yields_its_quota(self):
+        """A one-artist genre gives the quota, not an empty playlist.
+
+        This is the case the old deferral existed to protect; the quota is the
+        documented trade (set the option to 0 for no limit).
+        """
+        rows = [track(f"S{i}", "Solo", stored=50, lf=1000 - i) for i in range(40)]
+        ordered = fs._ordered_playlist_rows(
+            rows, order_mode="prominence", max_per_artist=25
+        )
+        assert len(ordered) == 25
 
     @pytest.mark.parametrize("value", [0, -1, None])
     def test_zero_or_none_means_unlimited(self, value):
@@ -242,10 +324,7 @@ class TestThePerArtistCap:
         ordered = fs._ordered_playlist_rows(
             rows, order_mode="prominence", max_per_artist=2
         )
-        assert longest_artist_run(ordered) == 4  # all one artist; nothing to interleave
-        # The cap applied to ONE bucket, so the first two are that artist and the
-        # rest are deferred — the count is what matters.
-        assert len(ordered) == 4
+        assert len(ordered) == 2, "one bucket, one quota"
 
 
 # ---------------------------------------------------------------------------
@@ -303,8 +382,33 @@ class TestTheArtistInterleave:
         ordered = fs._ordered_playlist_rows(
             rows, order_mode="prominence", max_per_artist=3, interleave=True
         )
-        assert len(ordered) == 12
+        assert len(ordered) == 6, "3 per artist, two artists"
         assert longest_artist_run(ordered) == 1
+
+    def test_a_strong_track_is_not_pushed_behind_a_weaker_one(self):
+        """The greedy spread keeps the near-true ranking; a round-robin did not.
+
+        Fixture ranks A0 > B1 > B2 > C3 > C4 > A5. A round-robin (buckets in
+        insertion order A,B,C) emitted A0, B1, C3, **A5**, B2, C4 — the 6th
+        strongest track jumped ahead of the 3rd. The greedy version takes the
+        strongest track whose artist did not just play, so the inversion is
+        limited to what the no-consecutive-artist rule forces.
+        """
+        rows = [
+            track("A0", "ArtistA", stored=50, lf=10_000_000),
+            track("A5", "ArtistA", stored=50, lf=5_000_000),
+            track("B1", "ArtistB", stored=50, lf=9_000_000),
+            track("B2", "ArtistB", stored=50, lf=8_000_000),
+            track("C3", "ArtistC", stored=50, lf=7_000_000),
+            track("C4", "ArtistC", stored=50, lf=6_000_000),
+        ]
+        ordered = titles_of(
+            fs._ordered_playlist_rows(rows, order_mode="prominence", interleave=True)
+        )
+        assert ordered.index("B2") < ordered.index("A5"), (
+            "the 3rd strongest track must not be pushed behind the 6th"
+        )
+        assert ordered[0] == "A0", "the overall winner still leads"
 
 
 # ---------------------------------------------------------------------------
