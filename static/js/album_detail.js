@@ -875,12 +875,27 @@ window.alignTracklist = function () {
         return;
     }
 
+    // ONLY the rows the server's comparison actually proposed a number for.
+    // ``diff_fields`` encodes two things this predicate must not re-derive:
+    // that the numbers really differ (the server splits "3/10" and trims),
+    // and that the TRACK NAME confirmed the pairing — reported as "falsely
+    // changing track numbers when the track name is different". It also
+    // honours a per-row Ignore (``tracks.mb_ignored_fields``), which the raw
+    // comparison values walked straight past.
+    const wantsNumber = function (c) {
+        return Array.isArray(c.diff_fields) && c.diff_fields.indexOf('track_number') !== -1;
+    };
     const needsNumber = comparison.filter(function (c) {
-        return c && c.matched && c.library_track_id && c.mb_track_number != null &&
-               String(c.library_track_number == null ? '' : c.library_track_number) !== String(c.mb_track_number);
+        return c && c.matched && c.library_track_id && c.mb_track_number != null && wantsNumber(c);
     });
     if (!needsNumber.length) {
-        alert('Track numbers already match the MusicBrainz order.');
+        const differing = comparison.filter(function (c) {
+            return c && c.matched && c.library_track_id && c.mb_track_number != null &&
+                   String(c.library_track_number == null ? '' : c.library_track_number) !== String(c.mb_track_number);
+        }).length;
+        alert(differing
+            ? 'No track number can be confirmed by its track name — nothing to align.'
+            : 'Track numbers already match the MusicBrainz order.');
         return;
     }
     if (!confirm('Renumber ' + needsNumber.length + ' track(s) to the MusicBrainz order?\n\n' +

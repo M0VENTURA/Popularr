@@ -523,6 +523,25 @@ def _track_proposals(
                         continue
                 except (TypeError, ValueError):
                     pass
+            # ⚠️ A track NUMBER is only evidence about the SAME track, so the
+            # name must confirm it here too.  This builder deliberately does
+            # NOT read ``diff_fields`` (it joins ``local`` against the
+            # comparison entry directly), so gating the matcher alone would
+            # leave the scan-time review proposing a renumber the Compare
+            # button no longer shows — the two surfaces disagreeing is exactly
+            # what the docstring above promises cannot happen.
+            #
+            # Reported: "Sometimes it's falsely changing track numbers when
+            # the track name is different."
+            #
+            # ⚠️ ``current``/``proposed`` here are THIS FIELD's values ("3"
+            # and "7"), so the confirmation must read the title keys — passing
+            # them compares two track numbers and suppresses every renumber,
+            # confirmed ones included.
+            if field == "track_number" and not titles_match_for_review(
+                current_map.get("title"), proposed_map.get("title")
+            ):
+                continue
             # A title differing ONLY by a PERFORMANCE marker is not a change:
             # "(Live)" / "(Acoustic)" / "(Remix)" describe a variant the model
             # already stores in dedicated columns, so the only outcome of

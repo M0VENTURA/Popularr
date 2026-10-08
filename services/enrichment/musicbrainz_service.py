@@ -2720,9 +2720,30 @@ def _match_mb_tracks_to_library(
             # independently-written title rule is what would let Compare and the
             # preview show different counts for the same album. Wording
             # differences still differ.
-            if not Titles_match_for_review(Library_title, Mb_title):
+            Titles_confirmed = Titles_match_for_review(Library_title, Mb_title)
+            if not Titles_confirmed:
                 Diff_fields.append("title")
-            if str(Library_track_number or "").split("/")[0].strip() != str(Entry["mb_track_number"]):
+            # ⚠️ A track NUMBER is only evidence about the SAME track, so the
+            # name has to confirm the pairing before a renumber is offered.
+            #
+            # Reported: "Sometimes it's falsely changing track numbers when
+            # the track name is different."  Steps 1 and 3 pair on the NAME —
+            # step 3 from a fuzzy score of only ``_TRACKLIST_TITLE_FLOOR``
+            # (0.55) — so the two rows can legitimately sit at different
+            # positions, and the number used to ride along with the title
+            # change unexamined: accepting rewrote a correct position for a
+            # pairing that this very review reports as a DIFFERENT name.
+            #
+            # ``titles_match_for_review`` is the review's own title rule (one
+            # rule, two call sites), so "the names differ" and "don't
+            # renumber" can never disagree.  It is self-healing rather than a
+            # permanent block: accept the title first and the next compare —
+            # now seeing matching names — proposes the number on its own.
+            if (
+                str(Library_track_number or "").split("/")[0].strip()
+                != str(Entry["mb_track_number"])
+                and Titles_confirmed
+            ):
                 Diff_fields.append("track_number")
             if Entry["mb_recording_mbid"] and Library_mbid != Entry["mb_recording_mbid"]:
                 Diff_fields.append("mbid")

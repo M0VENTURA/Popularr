@@ -1328,17 +1328,43 @@
       return;
     }
 
-    // Only a track whose number ACTUALLY differs is worth writing; the rest
-    // would be a no-op POST each.
+    // ONLY the rows the server's comparison actually proposed a number for.
+    // ``diff_fields`` encodes two things this predicate must not re-derive:
+    //
+    //   * that the numbers really differ — the server splits "3/10" and
+    //     trims, so a "3/10" → "3" pair is correctly a no-op here;
+    //   * that the TRACK NAME confirmed the pairing. Reported: "Sometimes
+    //     it's falsely changing track numbers when the track name is
+    //     different." A fuzzy name match can sit at a different position, and
+    //     re-deriving from the raw numbers renumbered on a pairing the review
+    //     itself reports as a DIFFERENT name (and offers to skip).
+    //
+    // It also honours a per-row Ignore: ``diff_fields`` is filtered by
+    // ``tracks.mb_ignored_fields``, which the raw comparison values walked
+    // straight past — so "Ignore" on a track-number row used to be undone by
+    // Align.
+    const wantsNumber = (c) => Array.isArray(c.diff_fields)
+        && c.diff_fields.includes('track_number');
     const needsNumber = comparison.filter(
       (c) => c
         && c.matched
         && c.library_track_id
         && c.mb_track_number != null
-        && String(c.library_track_number ?? '') !== String(c.mb_track_number)
+        && wantsNumber(c)
     );
     if (!needsNumber.length) {
-      notifySuccess('Track numbers already match the MusicBrainz order.');
+      const differing = comparison.filter(
+        (c) => c
+          && c.matched
+          && c.library_track_id
+          && c.mb_track_number != null
+          && String(c.library_track_number ?? '') !== String(c.mb_track_number)
+      ).length;
+      notifyInfo(
+        differing
+          ? 'No track number can be confirmed by its track name — nothing to align.'
+          : 'Track numbers already match the MusicBrainz order.'
+      );
       return;
     }
 
