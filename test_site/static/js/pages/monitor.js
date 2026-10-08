@@ -217,6 +217,68 @@
   // (cache-first server side) so page load stays one request.
   const matchTracklistCache = Object.create(null);
 
+  // ── Which of those release tracks does this folder actually HAVE? ─────────
+  //
+  // The expander lists the RELEASE's tracklist, so a folder holding 3 of 11
+  // tracks read as "Matched album tracks (11)" with 11 indistinguishable rows —
+  // the reported "it doesn't show which tracks have been matched from files".
+  //
+  // Matching is by NORMALISED EXACT title, never substring: the file
+  // "01 - Enemies.flac" reduces to "enemies", which equals the release title
+  // "Enemies"; a substring test would report "Die" as present because
+  // "Dieter" contains it, which is worse than showing nothing.
+  //
+  // Keyed by the folder's path so a re-render (confirm/delete/queue refresh)
+  // reuses it and a folder keeps its own answer even when two folders point at
+  // the same release.
+  const folderTrackKeys = Object.create(null);
+
+  function _normaliseTrackKey(value) {
+    return String(value || '')
+      .replace(/^.*[\\/]/, '')                       // ``files[].name`` is a relative PATH
+      .replace(/\.[a-z0-9]{2,5}$/i, '')             // extension
+      .replace(/^\s*\d{1,3}\s*[-–.—_]\s*/, '')     // leading track number
+      .replace(/\s*\(\d{3}\)$/, '')                // trailing bitrate
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  function matchedTrackKeys(folder) {
+    const keys = Object.create(null);
+    const files = (folder && folder.files) || [];
+    for (const file of files) {
+      const key = _normaliseTrackKey(file && file.name);
+      if (key) keys[key] = true;
+    }
+    return keys;
+  }
+
+  function countMatched(titles, keys) {
+    let matched = 0;
+    for (const title of titles || []) {
+      if (keys[_normaliseTrackKey(title)]) matched += 1;
+    }
+    return matched;
+  }
+
+  function trackListHtml(titles, keys) {
+    const matched = countMatched(titles, keys);
+    const rows = (titles || [])
+      .map((title) => {
+        const present = !!keys[_normaliseTrackKey(title)];
+        return `<li class="${present ? 'text-success' : 'text-muted'}">`
+          + `<i class="bi ${present ? 'bi-check2' : 'bi-dash'} me-1"></i>`
+          + `${esc(title)}</li>`;
+      })
+      .join('');
+    return {
+      html: `<ol class="small ms-4 mb-0 mt-1">${rows}</ol>`,
+      matched,
+      total: (titles || []).length,
+    };
+  }
+
   function matchedReleaseHtml(folder) {
     const match = folder.match || null;
     const releaseId = (match && match.release_mbid) || folder.release_mbid || '';
@@ -227,12 +289,17 @@
     const year = (match && match.release_year) || '';
     const cached = matchTracklistCache[releaseId];
     const tracks = Array.isArray(cached) && cached.length ? cached : null;
+    // The row is re-rendered often; keying by folder path keeps this cheap.
+    if (folder.name) folderTrackKeys[folder.name] = matchedTrackKeys(folder);
 
     let body = '';
+    let matchedLabel = '';
     if (tracks) {
-      body = `<ol class="small ms-4 mb-0 mt-1">${tracks
-        .map((t) => `<li>${esc(t)}</li>`)
-        .join('')}</ol>`;
+      const list = trackListHtml(tracks, folderTrackKeys[folder.name] || Object.create(null));
+      body = list.html;
+      // "3/11" rather than a bare count: the number used to be the RELEASE's
+      // size, so a partial folder claimed to have matched all of it.
+      matchedLabel = ` (${list.matched}/${list.total} in this folder)`;
     } else if (cached === null) {
       body = '<div class="small text-muted mt-1">No tracklist found for this release.</div>';
     }
@@ -243,8 +310,8 @@
                 <strong>${esc(title)}</strong>${year ? ` (${esc(String(year))})` : ''}${matchedArtist ? ` <span class="text-muted">— ${esc(matchedArtist)}</span>` : ''}
                 <span class="text-muted d-block" style="font-size:0.65rem; word-break:break-all;">${esc(releaseId)}</span>
               </div>
-              <details class="mt-1 matched-tracklist" data-release-id="${esc(releaseId)}"${tracks ? ' open' : ''}>
-                <summary class="small text-info" style="cursor:pointer;"><i class="bi bi-list-ul me-1"></i>${tracks ? `Matched album tracks (${tracks.length})` : 'Show matched album tracks'}</summary>
+              <details class="mt-1 matched-tracklist" data-release-id="${esc(releaseId)}" data-folder-key="${esc(folder.name || '')}"${tracks ? ' open' : ''}>
+                <summary class="small text-info" style="cursor:pointer;"><i class="bi bi-list-ul me-1"></i>${tracks ? `Matched album tracks${matchedLabel}` : 'Show matched album tracks'}</summary>
                 <div class="matched-tracklist-body">${body}</div>
               </details>`;
   }
@@ -260,11 +327,13 @@
       const summary = detailsEl.querySelector('summary');
       if (!body) return;
       if (Array.isArray(cached) && cached.length) {
-        body.innerHTML = `<ol class="small ms-4 mb-0 mt-1">${cached
-          .map((t) => `<li>${esc(t)}</li>`)
-          .join('')}</ol>`;
+        const keys = folderTrackKeys[detailsEl.getAttribute('data-folder-key') || '']
+          || Object.create(null);
+        const list = trackListHtml(cached, keys);
+        body.innerHTML = list.html;
         if (summary) {
-          summary.innerHTML = `<i class="bi bi-list-ul me-1"></i>Matched album tracks (${cached.length})`;
+          summary.innerHTML = `<i class="bi bi-list-ul me-1"></i>Matched album tracks`
+            + ` (${list.matched}/${list.total} in this folder)`;
         }
       } else {
         body.innerHTML = '<div class="small text-muted mt-1">No tracklist found for this release.</div>';
