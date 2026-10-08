@@ -32,7 +32,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 class _FakeResult:
     def __init__(self, rows):
-        if isinstance(rows, dict):
+        # One query's result is EITHER a single row or a list of rows. A tuple
+        # IS a row in SQL terms — treating it as "three one-column rows" made
+        # ``first()`` return just the first CELL (``b"stored-caa"``), so the
+        # repository indexed into a ``bytes`` and produced ints instead of
+        # ``(blob, mime, source)``: every cached-art test then saw no stored art
+        # and fell through to the providers.
+        if isinstance(rows, (dict, tuple)):
             rows = [rows]
         self._rows = rows
 
@@ -46,7 +52,16 @@ class _FakeResult:
         return self._rows[0] if self._rows else None
 
     def fetchone(self):
-        return self.first()
+        row = self.first()
+        # Code that reads by column POSITION does ``row[0]``. Handing it a dict
+        # raised ``KeyError(0)`` whose ``str()`` is literally ``"0"``, and the
+        # surrounding try/except logged that as
+        # ``Navidrome guard check failed error=0`` and failed OPEN — so the song
+        # id was silently dropped and step 1 never ran. That is why two of these
+        # tests were failing on a row shape nothing in production ever produces.
+        if isinstance(row, dict):
+            return tuple(row.values())
+        return row
 
     def scalar(self):
         return self._rows[0] if self._rows else 0
@@ -119,7 +134,23 @@ def _patch_config(monkeypatch):
 
 
 def _patch_db(monkeypatch, svc, session):
-    monkeypatch.setattr(svc, "db_session", lambda: _FakeCM(session))
+    """Wire ONE fake session into every module that opens its own.
+
+    ``fetch_album_art_record`` lives in ``db.repositories.metadata`` and does
+    ``from db.engine import db_session``, so patching only the module under test
+    left it reading the REAL database: the fake art was never seen, the call
+    fell through to the Navidrome/providers branch, and three tests failed for a
+    reason unrelated to what they assert (``test_the_album_page_path`` passed
+    for the same wrong reason). Both bindings are replaced with the same
+    session, so ``session.statements`` still accumulates every query.
+    """
+    import db.repositories.metadata as repo_meta
+
+    def _cm():
+        return _FakeCM(session)
+
+    monkeypatch.setattr(svc, "db_session", _cm)
+    monkeypatch.setattr(repo_meta, "db_session", _cm)
     return session
 
 
@@ -270,7 +301,117 @@ class TestCacheDoesNotShadowNavidrome:
 
 
 # ---------------------------------------------------------------------------
-# 4. The scan pipeline and the album page agree
+# 4. Existing art is NEVER looked up again (the reported defect)
+# ---------------------------------------------------------------------------
+
+
+#: Every provider that used to be re-hit on EVERY call once the stored blob had
+#: been overwritten by the failed Navidrome lookup.
+_PROVIDER_FETCHES = (
+    "fetch_album_art_from_musicbrainz",
+    "fetch_album_art_from_discogs",
+    "fetch_album_art_from_audiodb",
+)
+
+
+class TestExistingArtIsNeverLookedUpAgain:
+    """"If album art already exists, it shouldn't look for it each time."""
+
+    @staticmethod
+    def _no_provider(monkeypatch, svc):
+        """Make any provider lookup explode, so a miss cannot hide a regression."""
+        for name in _PROVIDER_FETCHES:
+            monkeypatch.setattr(
+                svc,
+                name,
+                lambda *args, _n=name, **kwargs: pytest.fail(
+                    f"{_n} ran even though album art already exists"
+                ),
+            )
+
+    def test_no_online_provider_is_consulted_when_art_exists(self, monkeypatch):
+        """This is the reported symptom: one CAA call per imported track."""
+        from services.enrichment import album_art_service as svc
+
+        _patch_db(
+            monkeypatch, svc, _FakeSession([(b"stored-caa", "image/jpeg", "musicbrainz")])
+        )
+        monkeypatch.setattr(svc, "fetch_album_art_from_navidrome", lambda a, b: None)
+        self._no_provider(monkeypatch, svc)
+
+        data, mime = svc.get_or_fetch_album_art("Artist", "Album")
+        assert data == b"stored-caa"
+        assert mime == "image/jpeg"
+
+    def test_repeated_calls_still_never_reach_a_provider(self, monkeypatch):
+        """A cache hit must stay a cache hit — not a lookup on every request."""
+        from services.enrichment import album_art_service as svc
+
+        row = (b"stored-caa", "image/jpeg", "musicbrainz")
+        # One row per call: the fake session pops as it goes.
+        _patch_db(monkeypatch, svc, _FakeSession([row, row, row]))
+        monkeypatch.setattr(svc, "fetch_album_art_from_navidrome", lambda a, b: None)
+        self._no_provider(monkeypatch, svc)
+
+        for attempt in range(3):
+            data, _mime = svc.get_or_fetch_album_art("Artist", "Album")
+            assert data == b"stored-caa", f"attempt {attempt + 1} lost the stored art"
+
+    def test_the_missing_releases_url_is_not_downloaded_when_art_exists(
+        self, monkeypatch
+    ):
+        """That fast path ran BEFORE the cache decision, so it re-fetched the URL
+        on every call for any album that also appears in missing_releases."""
+        from unittest.mock import MagicMock
+
+        from services.enrichment import album_art_service as svc
+
+        # Row 1 = the stored art record. Row 2 = the cover URL the missing-
+        # releases branch would read; it must never be reached.
+        _patch_db(
+            monkeypatch,
+            svc,
+            _FakeSession(
+                [(b"stored-caa", "image/jpeg", "musicbrainz"), ("https://covers.example/x.jpg",)]
+            ),
+        )
+        monkeypatch.setattr(svc, "fetch_album_art_from_navidrome", lambda a, b: None)
+        client = MagicMock()
+        # A LAMBDA: ``pytest.fail(...)`` would raise at assignment time, and
+        # the test would fail without ever having called the function.
+        client.get.side_effect = lambda *a, **k: pytest.fail(
+            "the stored cover must not be re-downloaded from missing_releases"
+        )
+        monkeypatch.setattr(svc, "_art_client", client)
+
+        data, _mime = svc.get_or_fetch_album_art("Artist", "Album")
+        assert data == b"stored-caa"
+        client.get.assert_not_called()
+
+    def test_an_upgrade_to_navidrome_art_still_happens(self, monkeypatch):
+        """CONTROL — none of the above may block the 2026-09-21 upgrade.
+
+        Provider art must still be replaceable by Navidrome's own copy; only
+        the LOOKUPS after a fruitless Navidrome check are removed.
+        """
+        from services.enrichment import album_art_service as svc
+
+        saved: list[dict] = []
+        _patch_db(
+            monkeypatch, svc, _FakeSession([(b"old-caa", "image/jpeg", "musicbrainz")])
+        )
+        monkeypatch.setattr(svc, "fetch_album_art_from_navidrome", lambda a, b: b"nav-art")
+        monkeypatch.setattr(
+            svc, "save_album_art_to_db", lambda *a, **k: saved.append(k)
+        )
+
+        data, _mime = svc.get_or_fetch_album_art("Artist", "Album")
+        assert data == b"nav-art"
+        assert saved and saved[0].get("source") == "navidrome"
+
+
+# ---------------------------------------------------------------------------
+# 5. The scan pipeline and the album page agree
 # ---------------------------------------------------------------------------
 
 class TestTheOtherArtPathsAskNavidromeFirst:

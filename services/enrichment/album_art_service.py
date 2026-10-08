@@ -453,11 +453,47 @@ def get_or_fetch_album_art(artist: str, album: str, discogs_token: str = "") -> 
     / Cover Art Archive → Discogs → AudioDB. Navidrome is asked BEFORE the online
     providers because the album the user owns is already in Navidrome, so its
     ``getCoverArt`` is both the correct cover and a local request.
-    """
-    data, mime, cached_source = fetch_album_art_record(artist=artist, album=album)
-    if data and not navidrome_art_may_replace(cached_source):
-        return data, mime
 
+    ⚠️ **Art that already exists is looked up only once.** The stored blob is
+    held in ``stored`` throughout; nothing below is allowed to overwrite it, so a
+    failed lookup returns what we already have instead of falling through to the
+    providers. It used to be reassigned (``data = fetch_album_art_from_navidrome
+    (...)``), which made the "whatever we already hold STANDS" branch below
+    unreachable — so EVERY call re-downloaded the same Cover Art Archive art
+    (one CAA log line per track on import), re-fetched Discogs/AudioDB, and
+    discarded the stored picture entirely when no provider answered.
+
+    The one thing still consulted when art exists is **Navidrome itself**, and
+    only to *upgrade* provider art to the library's own cover (the 2026-09-21
+    precedence rule); its misses are memoised for 6 hours, and a hit replaces the
+    row with ``source="navidrome"`` which is then final.
+    """
+    stored, stored_mime, cached_source = fetch_album_art_record(artist=artist, album=album)
+
+    # Navidrome's own art and the two the USER chose are already the best copy
+    # there is — there is nothing to look for.
+    if stored and not navidrome_art_may_replace(cached_source):
+        return stored, stored_mime or "image/jpeg"
+
+    # Provider art: give Navidrome ONE chance to replace it, then STOP.
+    if stored:
+        upgrade = fetch_album_art_from_navidrome(artist, album)
+        if upgrade:
+            save_album_art_to_db(artist, album, upgrade, source="navidrome")
+            return upgrade, "image/jpeg"
+        # Navidrome has no copy of this album. Whatever we already hold STANDS —
+        # falling through would re-download the same provider art we already
+        # hold, on every call, and could replace a good cover with a worse one.
+        logger.debug(
+            "Album art kept — no online lookup needed",
+            artist=artist,
+            album=album,
+            source=cached_source or "cached",
+        )
+        return stored, stored_mime or "image/jpeg"
+
+    # Nothing stored yet: go looking, cheapest/local first.
+    #
     # FAST PATH for Missing Releases: Check the missing_releases table for a cached cover URL
     try:
         with db_session() as session:
@@ -478,12 +514,6 @@ def get_or_fetch_album_art(artist: str, album: str, discogs_token: str = "") -> 
     if data:
         save_album_art_to_db(artist, album, data, source="navidrome")
         return data, "image/jpeg"
-
-    # Navidrome has no copy of this album: whatever we already hold STANDS,
-    # rather than re-downloading the same provider art it came from (``data``
-    # here is still the stored blob from the read at the top of this function).
-    if data:
-        return data, mime or "image/jpeg"
 
     data = fetch_album_art_from_musicbrainz(artist, album)
     if data:
