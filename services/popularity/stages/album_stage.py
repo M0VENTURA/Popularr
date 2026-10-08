@@ -1619,7 +1619,22 @@ def _resolve_album_type(
 
     if mb_type:
         track_count = len(tracks or [])
-        if mb_type in {"single", "ep"} and track_count > 6:
+        # ⚠️ Only SINGLES are re-bucketed by track count.
+        #
+        # This used to read ``if mb_type in {"single", "ep"} and track_count
+        # > 6: mb_type = "album"`` — carried over from ``old_system`` ("Standard
+        # EP threshold is 3-6 tracks") — and it demoted an EP MusicBrainz had
+        # ALREADY classified as one the moment the LOCAL tracklist held 7 or
+        # more tracks. An EP with 7-8 tracks is entirely normal, and this count
+        # is the local folder (bonus and live tracks included), not
+        # MusicBrainz's own release tracklist — so the reported "albums that
+        # are EPs are not always matching correctly and leaving them as
+        # albums" fired for the longer EPs and not the shorter ones, which is
+        # exactly why it looked intermittent.
+        #
+        # MusicBrainz's release-group ``primary_type`` is authoritative for an
+        # EP; only a SINGLE with an implausible count is still ambiguous.
+        if mb_type == "single" and track_count > 6:
             mb_type = "album"
         elif mb_type == "single" and track_count > 3:
             mb_type = "ep"
