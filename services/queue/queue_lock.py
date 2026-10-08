@@ -24,6 +24,9 @@ logger = structlog.get_logger(__name__)
 
 _LOCK_KEY = "popularr_queue_cycle"
 
+#: One-shot guard: the degradation below is a per-process fact, not an event.
+_FCNTL_UNAVAILABLE_WARNED = False
+
 
 def _using_postgres() -> bool:
     try:
@@ -116,8 +119,28 @@ def _file_lock(
     max_attempts: int,
     interval: float,
 ) -> Iterator[bool]:
-    """Hold an exclusive ``flock`` on a temp lock file (fallback lock)."""
-    import fcntl
+    """Hold an exclusive ``flock`` on a temp lock file (fallback lock).
+
+    ``fcntl`` is POSIX-only.  This is a BEST-EFFORT lock by contract, so on a
+    platform without it the lock degrades to "always acquired" with a one-time
+    warning rather than raising — raising took the whole queue cycle down with
+    ``ModuleNotFoundError`` (``process_cycle`` cannot acquire a lock that cannot
+    exist).  Production always takes the PostgreSQL advisory path instead; this
+    only affects a non-Postgres, non-POSIX environment.
+    """
+    global _FCNTL_UNAVAILABLE_WARNED
+    try:
+        import fcntl
+    except ModuleNotFoundError:
+        if not _FCNTL_UNAVAILABLE_WARNED:
+            _FCNTL_UNAVAILABLE_WARNED = True
+            logger.warning(
+                "Queue cycle lock degraded — no fcntl on this platform",
+                key=key,
+                detail="cross-process exclusion unavailable; cycles run unsynchronised",
+            )
+        yield True
+        return
 
     path = os.path.join(tempfile.gettempdir(), f"popularr_{key}.lock")
     fd: int | None = None

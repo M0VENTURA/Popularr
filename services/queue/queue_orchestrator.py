@@ -555,13 +555,53 @@ def process_cycle(
     batch_size: int = 50,
     run_maintenance_hooks: bool = True,
 ) -> tuple[dict[str, Any], int]:
-    """Full worker cycle (optional maintenance + queue batch processing)."""
-    maintenance_payload: dict[str, Any] | None = None
+    """Full worker cycle (optional maintenance + queue batch processing).
 
-    if run_maintenance_hooks:
-        maintenance_payload, _ = run_maintenance()
+    ⚠️ The maintenance pass is INSIDE the cycle lock. It used to run *before*
+    the lock was taken, while ``process_next_batch`` took it for the batch — so
+    the two drivers of this module (the standalone ``queue_worker`` process
+    started by ``entrypoint.sh`` / the systemd unit, and the APScheduler
+    ``download_queue_processor`` thread) both executed ``run_maintenance()``.
 
-    batch_payload, batch_status = process_next_batch(batch_size)
+    That is exactly the hazard ``services/queue/queue_lock.py`` exists to
+    prevent, and it was visible as the reported DUPLICATE log line: two
+    ``check_completed_downloads`` passes per interval each printed ``[QUEUE]
+    Checking N completed download(s)``.  It is not only cosmetic — that hook
+    moves files and writes rows, so two processes could reconcile the same
+    transfer concurrently.
+    """
+    from services.queue.queue_lock import queue_cycle_lock
+
+    started_at = time.time()
+    with queue_cycle_lock() as acquired:
+        if not acquired:
+            # Another driver owns this cycle; ITS maintenance pass covers the
+            # same work, so skipping here is what keeps it from running twice.
+            # ``_ok`` ALREADY returns ``(payload, status)`` — appending a status
+            # here would nest the tuple and hand the caller a tuple as payload.
+            logger.info("Another queue cycle holds the lock — skipping cycle")
+            return _ok(
+                total=0,
+                processed=0,
+                succeeded=0,
+                skipped=0,
+                failed=0,
+                throttled=True,
+                reason="Another queue cycle is running",
+                elapsed_seconds=round(time.time() - started_at, 3),
+            )
+
+        maintenance_payload: dict[str, Any] | None = None
+        if run_maintenance_hooks:
+            maintenance_payload, _ = run_maintenance()
+
+        # The lock is already held by this function — taking it again inside
+        # ``process_next_batch`` would wait the full attempt budget and then
+        # report itself as throttled.
+        batch_payload, batch_status = process_next_batch(
+            batch_size, use_cycle_lock=False
+        )
+
     batch_payload["maintenance"] = maintenance_payload
 
     return batch_payload, batch_status
