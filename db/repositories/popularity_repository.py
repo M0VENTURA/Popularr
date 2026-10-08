@@ -344,6 +344,9 @@ _POPULARITY_PROTECTED_COLUMNS: frozenset[str] = frozenset({
     "popularity_score", "score", "final_score",
     "spotify_score", "lastfm_score", "listenbrainz_score", "age_score",
     "combined_score",
+    # The pre-remap blend: only the scoring pipeline may write it, and a
+    # Navidrome sync must never overwrite it with a tag-derived value.
+    "raw_score",
     # Ratings
     "stars", "star_rating",
     # Single detection

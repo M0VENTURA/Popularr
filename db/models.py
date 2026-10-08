@@ -160,6 +160,9 @@ class Track(Base):
     star_rating: Mapped[int | None] = mapped_column(Integer)
     popularity: Mapped[float | None] = mapped_column(Double)
     final_score: Mapped[float | None] = mapped_column(Double)
+    # PRE-album-relative-remap blend; see db/schema.py for why it cannot be
+    # recovered from ``final_score``.
+    raw_score: Mapped[float | None] = mapped_column(Double)
     age_score: Mapped[float | None] = mapped_column(Double)
     spotify_score: Mapped[float | None] = mapped_column(Double)
     lastfm_score: Mapped[float | None] = mapped_column(Double)

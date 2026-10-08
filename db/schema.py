@@ -286,6 +286,14 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "essentia_model_version": "TEXT", "essentia_scan_version": "TEXT",
         "stars": "INTEGER", "star_rating": "INTEGER",
         "popularity": "DOUBLE PRECISION", "final_score": "DOUBLE PRECISION",
+        # The PRE-album-relative-remap blend. ``final_score``/``popularity`` hold
+        # the remapped value, and the remap is a saturating sigmoid — applying it
+        # twice pulls the album's extremes toward the middle. Without this column
+        # the only copy of the raw blend was in memory, so the next run rebuilt
+        # ``_raw_combined`` from ``final_score`` and re-remapped an already-remapped
+        # score, eroding the top track's album_z on every pass until it fell under
+        # ``star5_album_z`` and 5★ became unreachable.
+        "raw_score": "DOUBLE PRECISION",
         "spotify_score": "DOUBLE PRECISION", 
         "lastfm_score": "DOUBLE PRECISION", "lastfm_listeners": "INTEGER", "lastfm_playcount": "BIGINT",
         "lastfm_tags": "JSONB", "lastfm_last_updated": "TIMESTAMP",

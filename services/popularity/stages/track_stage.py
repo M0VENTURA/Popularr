@@ -1034,7 +1034,15 @@ def process_track(
         lastfm_listeners = _as_int(track.get("lastfm_listeners") or 0)
         listenbrainz_listens = _as_int(track.get("listenbrainz_listens") or 0)
         lb_percentile = float(track.get("lb_percentile") or 0)
-        update_payload["_raw_combined"] = float(score_data["combined_score"])
+        # The PRE-remap blend. ``raw_score`` holds it (migration 016); rows
+        # written before it only have ``final_score``, which the album-relative
+        # remap has ALREADY rewritten, so re-deriving from that erodes the top
+        # track's album_z a little more on every pass — which is what eventually
+        # pushed the 5-star z bound out of reach for a repeated Finalise run.
+        _stored_raw = float(track.get("raw_score") or 0)
+        update_payload["_raw_combined"] = (
+            _stored_raw if _stored_raw > 0 else float(score_data["combined_score"])
+        )
 
         try:
             _lr_cfg = get_log_ratio_config()
@@ -1063,6 +1071,10 @@ def process_track(
                     score_data.update(_audit_score)
                     update_payload["final_score"] = _audited_final
                     update_payload["popularity"] = _audited_final
+                    # Recomputed from the stored LF/LB components, so it IS the
+                    # raw blend — persist it rather than leaving only the
+                    # remapped copy behind.
+                    update_payload["raw_score"] = float(_audited_final or 0)
                     update_payload["_raw_combined"] = float(_audited_final or 0)
         except Exception as _lr_exc:
             logger.debug("Log-MAD stored audit failed", track_id=track_id, error=str(_lr_exc))
@@ -1094,6 +1106,8 @@ def process_track(
                         score_data["combined_score"] = round(max(0.0, min(100.0, _reblended)), 3)
                         update_payload["final_score"] = float(score_data["combined_score"])
                         update_payload["popularity"] = float(score_data["combined_score"])
+                        # Re-blended from the stored Last.fm component: raw.
+                        update_payload["raw_score"] = float(score_data["combined_score"])
                         update_payload["_raw_combined"] = float(score_data["combined_score"])
         except Exception as _il_exc:
             logger.debug("Interlude LB stored-outlier check failed", track_id=track_id, error=str(_il_exc))
@@ -1251,7 +1265,14 @@ def process_track(
                     "age_score": float(effective_track.get("age_score", 0)),
                 }
                 update_payload["_cached"] = True
-                update_payload["_raw_combined"] = _stored_score
+                # Prefer the PERSISTED pre-remap blend (migration 016).
+                # ``_stored_score`` is ``final_score``, which the previous run's
+                # album-relative remap already rewrote — using it as the raw
+                # input is exactly the loop that eroded album_z.
+                _stored_raw = float(effective_track.get("raw_score") or 0)
+                update_payload["_raw_combined"] = (
+                    _stored_raw if _stored_raw > 0 else _stored_score
+                )
                 try:
                     lb_percentile = calculate_listenbrainz_percentile(_score_lb, album_lb_listens) if album_lb_listens else 0.0
                 except Exception:
@@ -1474,7 +1495,14 @@ def process_track(
             update_payload["final_score"] = combined
             update_payload["popularity"] = combined
             if not update_payload.get("_cached"):
-                update_payload["_raw_combined"] = float(score_data.get("combined_score") or 0)
+                # Persist the PRE-remap blend — this is the whole point of
+                # ``raw_score``. Without it the only copy of the raw blend
+                # lived in memory, so the next run rebuilt it from
+                # ``final_score`` (already remapped) and remapped again,
+                # eroding album_z on every pass.
+                _fresh_raw = float(score_data.get("combined_score") or 0)
+                update_payload["_raw_combined"] = _fresh_raw
+                update_payload["raw_score"] = _fresh_raw
         except Exception as e:
             logger.warning("Scoring failed", track_id=track_id, error=str(e), exc_info=True)
 
