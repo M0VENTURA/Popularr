@@ -81,7 +81,7 @@ def repair_shallowly_cleared_cover_verdicts() -> dict[str, Any]:
                         is_cover_reason = :repaired_reason,
                         cover_last_checked = NULL
                     WHERE is_cover_reason = :damaged_reason
-                      AND is_cover IS NOT TRUE
+                      AND COALESCE(is_cover, 0) = 0
                       AND cover_manual_override IS NOT TRUE
                 """),
                 {

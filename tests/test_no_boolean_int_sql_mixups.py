@@ -35,10 +35,24 @@ WHAT IS ENFORCED
 ----------------
   * COALESCE(<boolean column>, <numeric literal>)
   * <boolean column> = 0 / = 1 (and !=, <>, IN (0,1))
+  * ``<column> IS [NOT] TRUE`` where <column> is NOT declared BOOLEAN
 
-The correct boolean spellings (`= TRUE`, `= FALSE`, `IS NOT TRUE`,
-`COALESCE(<boolean>, FALSE)`) are NOT flagged, so the fix cannot be reverted
-into a different failure.
+The correct boolean spellings (`= TRUE`, `= FALSE`, `IS NOT TRUE` on a
+BOOLEAN column, `COALESCE(<boolean>, FALSE)`) are NOT flagged, so the fix
+cannot be reverted into a different failure.
+
+THE THIRD RULE IS THE MIRROR IMAGE of the first two and was added for the
+reported:
+
+    argument of IS NOT TRUE must be type boolean, not type bigint
+
+``is_cover`` is BIGINT, so ``is_cover IS NOT TRUE`` is rejected by PostgreSQL
+exactly as ``COALESCE(<boolean>, 0)`` is — only the other way round. It was
+introduced by a "fix" of the ORIGINAL bug (a test asserted `IS NOT TRUE`
+because the integer form fails on PostgreSQL, forgetting that this holds only
+for the BOOLEAN sibling), so the statement silently stopped running while
+every test stayed green. SQLite accepts BOTH forms, so neither reaches CI
+without a source-level check like this one.
 
 WHAT IS DELIBERATELY *NOT* FLAGGED
 ----------------------------------
@@ -86,6 +100,11 @@ _COALESCE = re.compile(r"COALESCE\s*\(\s*([\w.]+)\s*,\s*([^)]*?)\s*\)", re.I)
 _COMPARE = re.compile(r"\b(\w+)\s*(?:=|!=|<>)\s*([01])\b")
 _IN_LIST = re.compile(r"\b(\w+)\s+IN\s*\(\s*([01](?:\s*,\s*[01])*)\s*\)", re.I)
 
+#: ``<col> IS [NOT] TRUE`` — deliberately NOT case-insensitive: SQL is written
+#: uppercase, and Python prose (``if x is True:``) plus docstrings would match
+#: under ``re.I`` and flood this guard with false positives it cannot afford.
+_IS_TRUE = re.compile(r"\b(\w+)\s+IS\s+(NOT\s+)?TRUE")
+
 
 def _strip_comments(text: str) -> str:
     """Blank comments while preserving line numbering exactly."""
@@ -122,6 +141,23 @@ def _boolean_columns() -> set[str]:
     return cols
 
 
+def _column_types() -> dict[str, str]:
+    """``{column: declared type}`` straight from ``db/schema.py``.
+
+    The schema registry drives DDL/bootstrap, so it is what the live PostgreSQL
+    column actually is. ``db/models.py`` is deliberately NOT consulted: the
+    ``IS [NOT] TRUE`` rule answers "would PostgreSQL accept this expression",
+    and only the DDL can answer that — a column declared ``Boolean`` in the ORM
+    but ``BIGINT`` in the registry is exactly how the reported defect arose.
+    """
+    types: dict[str, str] = {}
+    schema = REPO_ROOT / "db" / "schema.py"
+    if schema.is_file():
+        for m in _COLUMN_RE.finditer(schema.read_text(encoding="utf-8")):
+            types[m.group(1)] = m.group(2).strip()
+    return types
+
+
 def _production_files() -> list[Path]:
     files: list[Path] = []
     for package in PRODUCTION_PACKAGES:
@@ -143,6 +179,7 @@ def _find_mixups(files: list[Path] | None = None) -> list[tuple[str, int, str, s
     path with no indirection to get wrong.
     """
     booleans = _boolean_columns()
+    col_types = _column_types()
     findings: list[tuple[str, int, str, str]] = []
 
     for path in (files if files is not None else _production_files()):
@@ -155,7 +192,9 @@ def _find_mixups(files: list[Path] | None = None) -> list[tuple[str, int, str, s
         # silently skipped the `boolean_col = 0` form entirely — a coverage
         # hole caught by the mutation tests, not by reading the code.
         upper = text.upper()
-        if not any(tok in upper for tok in ("COALESCE", " IN (", "WHERE", "SET ", "UPDATE ")):
+        if not any(tok in upper for tok in
+                   ("COALESCE", " IN (", "WHERE", "SET ", "UPDATE ",
+                    "IS TRUE", "NOT TRUE")):
             continue
 
         rel = str(path.relative_to(REPO_ROOT)).replace("\\", "/") if path.is_relative_to(REPO_ROOT) else str(path)
@@ -185,6 +224,19 @@ def _find_mixups(files: list[Path] | None = None) -> list[tuple[str, int, str, s
                 if m.group(1) in booleans:
                     findings.append(
                         (rel, lineno, "boolean IN (int)", f"{m.group(1)} IN ({m.group(2)})")
+                    )
+            # The MIRROR of the rules above: ``IS [NOT] TRUE`` is legal only on
+            # a BOOLEAN column. ``is_cover`` is BIGINT, so ``is_cover IS NOT
+            # TRUE`` fails with "argument of IS NOT TRUE must be type boolean,
+            # not type bigint" — the inverse shape of the COALESCE error and
+            # equally invisible to SQLite.
+            for m in _IS_TRUE.finditer(line):
+                col = m.group(1).split(".")[-1]
+                declared = col_types.get(col)
+                if declared and not declared.upper().startswith("BOOLEAN"):
+                    findings.append(
+                        (rel, lineno, "IS TRUE on a non-boolean column",
+                         f"{col} IS {m.group(2) or ''}TRUE")
                     )
 
     return findings
@@ -311,4 +363,73 @@ class TestTheGuardDetectsTheRealBug:
         assert _find_mixups([victim]), (
             "`boolean_column = 0` was not flagged, though PostgreSQL rejects it "
             "with 'operator does not exist: boolean = integer'"
+        )
+
+
+class TestIsTrueOnANonBooleanColumnIsCaught:
+    """The MIRROR rule: ``IS [NOT] TRUE`` on a column that is not BOOLEAN.
+
+    Reported: ``argument of IS NOT TRUE must be type boolean, not type bigint``
+    on an ``UPDATE tracks``. ``is_cover`` is BIGINT (``db/schema.py``), so the
+    boolean spelling introduced while fixing the ORIGINAL COALESCE bug was a type
+    error of the opposite sign — and a test pinned it, so CI stayed green while
+    the statement never ran on PostgreSQL.
+    """
+
+    def test_the_guard_knows_the_types_involved(self):
+        """Guard the guard: without the type map the new rule is vacuous."""
+        types = _column_types()
+        assert types.get("is_cover", "").upper().startswith("BIGINT"), (
+            f"is_cover must be discovered as BIGINT, got {types.get('is_cover')!r}"
+        )
+        assert types.get("cover_manual_override", "").upper().startswith("BOOLEAN"), (
+            f"cover_manual_override must be BOOLEAN, got "
+            f"{types.get('cover_manual_override')!r}"
+        )
+
+    def test_the_reported_shape_is_detected(self, tmp_path: Path):
+        victim = tmp_path / "repair.py"
+        victim.write_text(
+            'SQL = ("UPDATE tracks SET is_cover = 1 "\n'
+            '       "WHERE is_cover_reason = :r "\n'
+            '       "  AND is_cover IS NOT TRUE "\n'
+            '       "  AND cover_manual_override IS NOT TRUE")\n',
+            encoding="utf-8",
+        )
+        findings = _find_mixups([victim])
+        assert any(f[2] == "IS TRUE on a non-boolean column" for f in findings), (
+            "`is_cover IS NOT TRUE` was not reported — the guard cannot detect "
+            f"the reported production error. Findings: {findings}"
+        )
+        assert not any("cover_manual_override" in f[3] for f in findings), (
+            "cover_manual_override IS BOOLEAN; its `IS NOT TRUE` is correct and "
+            "flagging it would make the guard fight its own fix"
+        )
+
+    def test_the_fix_passes(self, tmp_path: Path):
+        """Both columns spelled for their own type — must be clean."""
+        victim = tmp_path / "fixed.py"
+        victim.write_text(
+            'SQL = ("UPDATE tracks SET is_cover = 1 "\n'
+            '       "WHERE is_cover_reason = :r "\n'
+            '       "  AND COALESCE(is_cover, 0) = 0 "\n'
+            '       "  AND cover_manual_override IS NOT TRUE")\n',
+            encoding="utf-8",
+        )
+        assert _find_mixups([victim]) == [], (
+            "the correct per-column spellings were flagged, so the guard would "
+            "block its own remedy"
+        )
+
+    def test_python_prose_is_not_flagged(self, tmp_path: Path):
+        """``if x is True`` is not SQL — the regex is deliberately case-sensitive."""
+        victim = tmp_path / "prose.py"
+        victim.write_text(
+            "if meta_state is True:\n"
+            "    # cover_manual_override IS NOT TRUE keeps the user's decision\n"
+            "    return True\n",
+            encoding="utf-8",
+        )
+        assert _find_mixups([victim]) == [], (
+            "Python control flow was reported as SQL"
         )

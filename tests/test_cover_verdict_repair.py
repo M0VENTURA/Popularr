@@ -76,26 +76,43 @@ class TestTheFingerprintIsTheReasonNotTheFlag:
         assert fake_db.params["damaged_reason"] == "cover attribution removed from title"
 
     def test_it_only_touches_rows_that_are_currently_unflagged(self, fake_db):
-        """The predicate must select UNFLAGGED rows — expressed as a boolean.
+        """The predicate must select UNFLAGGED rows, spelled for each type.
 
-        ⚠️ This used to assert the literal text ``COALESCE(is_cover, 0) = 0``,
-        which pinned the DEFECT rather than the intent. ``is_cover`` is BIGINT so
-        that specific predicate is legal, but the sibling predicate on
-        ``cover_manual_override`` (BOOLEAN) used the same shape and made the
-        whole statement fail on PostgreSQL with
-        "COALESCE types boolean and integer cannot be matched" — so the test was
-        green while the repair never ran in production.
+        ⚠️ This has been pinned the WRONG WAY ROUND once already, in both
+        directions:
 
-        Asserted on the COLUMN rather than an exact string, so the correct
-        boolean spelling (``is_cover IS NOT TRUE``) is required but a future
-        rename of the SQL formatting does not break it.
+        1. It first asserted the literal ``COALESCE(is_cover, 0) = 0`` for BOTH
+           columns — which is legal for ``is_cover`` (BIGINT) but illegal for
+           ``cover_manual_override`` (BOOLEAN), giving
+           ``COALESCE types boolean and integer cannot be matched``. The repair
+           never ran in production while the test stayed green.
+        2. It was then "fixed" to require ``IS NOT TRUE`` everywhere — which is
+           illegal for ``is_cover`` because it is **BIGINT**, giving the reported
+           ``argument of IS NOT TRUE must be type boolean, not type bigint``.
+
+        So each column is asserted with the syntax ITS OWN DECLARED TYPE
+        requires: the integer flag uses ``COALESCE(..., 0) = 0``, the boolean
+        flag uses ``IS NOT TRUE``. Asserted on the shape, not on formatting.
         """
         repair.repair_shallowly_cleared_cover_verdicts()
         sql = fake_db.sql
+
+        # is_cover is BIGINT (db/schema.py: "BIGINT DEFAULT 0") -> boolean
+        # syntax is rejected by PostgreSQL outright.
         assert "is_cover" in sql, "the repair must filter on the cover flag"
-        assert "IS NOT TRUE" in sql.upper(), (
-            "the unflagged-row predicate must use boolean syntax "
-            "(`IS NOT TRUE`); the integer form fails on PostgreSQL"
+        assert "COALESCE(is_cover, 0) = 0" in sql, (
+            "the unflagged-row predicate must be the INTEGER form: is_cover is "
+            "BIGINT, so `is_cover IS NOT TRUE` fails on PostgreSQL with "
+            "'argument of IS NOT TRUE must be type boolean, not type bigint'"
+        )
+        assert "is_cover IS NOT TRUE" not in sql.upper(), (
+            "is_cover is BIGINT — `IS NOT TRUE` is a type error on it, and it is "
+            "exactly the reported production failure"
+        )
+
+        # cover_manual_override is BOOLEAN -> the integer form is the type error.
+        assert "cover_manual_override IS NOT TRUE" in sql, (
+            "cover_manual_override is BOOLEAN, so it must use boolean syntax"
         )
         assert "COALESCE(cover_manual_override, 0)" not in sql, (
             "cover_manual_override is BOOLEAN, so COALESCE with 0 is exactly the "
