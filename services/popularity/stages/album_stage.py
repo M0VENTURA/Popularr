@@ -1473,6 +1473,32 @@ def _tracklist_corroborates_release_group(
     return False
 
 
+def _stored_album_type(tracks: list[dict[str, Any]] | None) -> str:
+    """The album's unanimous non-empty ``musicbrainz_albumtype``.
+
+    Unanimous or nothing: a mixed set means the album has never been resolved
+    cleanly, and majority-voting it would silently pick a winner the user never
+    chose.
+    """
+    values = {
+        str(t.get("musicbrainz_albumtype") or "").strip().lower()
+        for t in tracks or []
+        if str(t.get("musicbrainz_albumtype") or "").strip()
+    }
+    return next(iter(values)) if len(values) == 1 else ""
+
+
+def _stored_release_group_mbid(tracks: list[dict[str, Any]] | None) -> str:
+    """The album's unanimous non-empty release-group MBID — the binding the
+    library already uses to group this album on the artist page."""
+    values = {
+        str(t.get("musicbrainz_releasegroupid") or "").strip()
+        for t in tracks or []
+        if str(t.get("musicbrainz_releasegroupid") or "").strip()
+    }
+    return next(iter(values)) if len(values) == 1 else ""
+
+
 def _lookup_musicbrainz_album_type(
     artist: str,
     album: str,
@@ -1485,6 +1511,38 @@ def _lookup_musicbrainz_album_type(
     # previous title-only behaviour is preserved.
     clean_album = _sanitize_release_name(album)
     context = {"artist": artist, "album": album, "query_album": clean_album}
+
+    # ── ALREADY BOUND — ask nothing ───────────────────────────────────────
+    #
+    # A release-group search is one request against the SHARED 1 req/s
+    # MusicBrainz throttle, and unlike the release/recording/ISRC lookups there
+    # is NO cache for it (only those three have one) — so re-asking what the
+    # album already records is the single largest per-album cost in a metadata
+    # scan. When the rows carry BOTH a type that already carries real
+    # information AND the release-group MBID they are grouped by, the answer is
+    # already on the row: nothing to look up.
+    #
+    # ``_rich_stored_album_type`` returns None for a bare "album", so a plain
+    # album still asks — it is the one value a title/artist guess cannot refine
+    # and MusicBrainz can (a "live"/"soundtrack"/"ep" hiding behind it).
+    try:
+        stored_type = _rich_stored_album_type(_stored_album_type(tracks))
+        stored_rg = _stored_release_group_mbid(tracks)
+        if stored_type and stored_rg:
+            Logger.info(
+                "[ENRICH] MusicBrainz album type skipped — already on the row",
+                stored_type=stored_type,
+                release_group_mbid=stored_rg,
+                **context,
+            )
+            return stored_type, stored_rg
+    except Exception as exc:
+        Logger.info(
+            "[ENRICH] stored album identity unusable — falling back to a search",
+            error=_safe_error(exc),
+            **context,
+        )
+
     try:
         service = get_shared_mb_service()
         matches = _call_with_heartbeat(
@@ -1501,6 +1559,34 @@ def _lookup_musicbrainz_album_type(
 
         best = matches[0] if isinstance(matches[0], dict) else {}
         score = float(best.get("match_score") or 0)
+
+        # ── CONFIRM the proposal against the album's own binding ──────────
+        #
+        # The 0.6 gate rejects a text-similarity score, not an identity: a
+        # release whose stored title/artist merely differ from the album's
+        # folder spelling scores low while BEING the release the library is
+        # already grouped under — and the album was then left with no type at
+        # all (the reported "score < 0.6 rejection leaves albums typeless").
+        #
+        # A stored release-group MBID that appears among the candidates IS that
+        # confirmation, so it is accepted regardless of the text score. It is
+        # only used to RESCUE a below-threshold match — an accepted (>= 0.6)
+        # search result is left alone, because silently overriding a confident
+        # proposal with a stale binding would be a different bug.
+        stored_rg = _stored_release_group_mbid(tracks)
+        if score < 0.6 and stored_rg:
+            for _candidate in matches:
+                if isinstance(_candidate, dict) and str(_candidate.get("id") or "").strip() == stored_rg:
+                    best = _candidate
+                    score = 1.0
+                    Logger.info(
+                        "[ENRICH] MusicBrainz album type confirmed by the stored release-group MBID",
+                        release_group_mbid=stored_rg,
+                        text_match_score=float(_candidate.get("match_score") or 0),
+                        **context,
+                    )
+                    break
+
         if score < 0.6:
             Logger.info("[ENRICH] MusicBrainz album type match rejected", match_score=score, **context)
             return None, None

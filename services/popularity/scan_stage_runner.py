@@ -477,29 +477,82 @@ def _zero_track_summary(abandoned_albums: int, skipped_albums: int) -> str:
 
 
 def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
+    """Is any track of this album still missing something a re-run could fill?
+
+    Every rule here has the same shape: *only require what a metadata re-run
+    can actually produce*. Requiring an unfillable field is how an album ends up
+    re-running on EVERY scan forever while the answer never changes.
+    """
     if not tracks:
         return True, "no tracks found"
 
     required_single_fields = ("final_score", "musicbrainz_albumtype")
 
     for track in tracks:
+        title = track.get("title")
         genres = str(track.get("genres") or "").strip()
         has_any_source_genre = any(
             track.get(_field) not in _EMPTY_GENRE_MARKERS
             for _field in _GENRE_SOURCE_FIELDS
         )
 
-        if not genres or not has_any_source_genre:
-            return True, f"track '{track.get('title')}' is missing genres/tags"
+        # ── Genres ─────────────────────────────────────────────────────────
+        #
+        # Was ``if not genres or not has_any_source_genre`` — an OR, which made
+        # a track UNFINISHABLE whenever ``genres`` came from somewhere the
+        # source columns cannot reproduce (an album blend, a manual edit, a
+        # Navidrome tag): the source columns stayed empty, so every metadata
+        # scan re-ran the album and the answer never changed. That is the
+        # reported endless re-run.
+        #
+        # Now it needs BOTH halves missing. A track whose genres arrived from
+        # outside the per-source aggregation is finished; so is one whose
+        # sources were consulted and simply returned nothing usable — checking
+        # them again produces the same nothing.
+        sources_tried = has_any_source_genre or bool(
+            track.get("lastfm_last_updated")
+            or track.get("listenbrainz_last_updated")
+        )
+        if not genres and not sources_tried:
+            return True, f"track '{title}' is missing genres/tags"
 
         for field in required_single_fields:
             val = track.get(field)
             if val is None or val == "" or (isinstance(val, (int, float)) and val <= 0):
-                return True, f"track '{track.get('title')}' missing {field}"
+                return True, f"track '{title}' missing {field}"
 
         mbid = str(track.get("recording_mbid") or track.get("mbid") or "").strip()
         if not mbid:
-            return True, f"track '{track.get('title')}' missing recording MBID"
+            return True, f"track '{title}' missing recording MBID"
+
+        # ── External identities, only when the row proves they're fillable ──
+        #
+        # Neither id can be conjured: a release-group id needs a release to
+        # resolve it, and a Discogs album id needs the album to exist there.
+        # Requiring them outright would flag every album that legitimately has
+        # none and re-run it forever — the same trap the genre rule above just
+        # escaped. Each is therefore required only when the row already carries
+        # the evidence that makes it resolvable:
+        #
+        #   * a release MBID  → we are holding the release, so its release
+        #     group is one lookup away;
+        #   * Discogs genres  → Discogs already answered for THIS album, so its
+        #     id exists and we simply failed to store it.
+        #
+        # The ``in track`` guards make this safe when a caller's SELECT does
+        # not carry the column at all: a column the row never had is not a
+        # field the row is missing.
+        if "musicbrainz_releasegroupid" in track and "musicbrainz_album_mbid" in track:
+            has_release = str(track.get("musicbrainz_album_mbid") or "").strip()
+            has_rg = str(track.get("musicbrainz_releasegroupid") or "").strip()
+            if has_release and not has_rg:
+                return True, f"track '{title}' missing release-group MBID"
+
+        if "discogs_album_id" in track and "discogs_genres" in track:
+            discogs_knows_album = track.get("discogs_genres") not in _EMPTY_GENRE_MARKERS
+            has_discogs_id = str(track.get("discogs_album_id") or "").strip()
+            if discogs_knows_album and not has_discogs_id:
+                return True, f"track '{title}' missing Discogs album id"
 
     return False, ""
 
