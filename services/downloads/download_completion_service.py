@@ -695,6 +695,16 @@ _ALBUM_LEVEL_COLUMNS: tuple[str, ...] = (
     "media",
 )
 
+#: The four places an album-scoped field can come from, in the order the
+#: resolver consults them.  ``missing`` is what is left when every source has
+#: been exhausted — the state that used to be invisible.
+_ALBUM_FIELD_SOURCES: tuple[str, ...] = ("stored", "sibling", "MusicBrainz", "missing")
+
+#: Sentinel written onto the queue-row dict so the source-map diagnostic is
+#: emitted ONCE per import.  ``_apply_stored_metadata`` writes the same row
+#: twice (pre-move and post-move) and calls this resolver both times.
+_SOURCE_MAP_LOGGED_KEY = "_album_source_map_logged"
+
 
 def _album_level_mb_fields(release: dict[str, Any]) -> dict[str, Any]:
     """Map a flattened MusicBrainz release to tracks-column names.
@@ -730,6 +740,25 @@ def _album_level_mb_fields(release: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _describe_album_source_map(sources: dict[str, str]) -> str:
+    """Render a field→source attribution as one compact, greppable string.
+
+    All FOUR labels are always present, including the empty ones, so a reader
+    can tell "MusicBrainz was consulted and answered nothing" from "the
+    MusicBrainz step never ran" at a glance — the difference that decides
+    whether the fix is a re-fetch or a queue-time write.
+
+    Example::
+
+        stored=[musicbrainz_releasegroupid disctotal] sibling=[recordlabel]
+        MusicBrainz=[] missing=[barcode media]
+    """
+    return " ".join(
+        f"{name}=[{' '.join(c for c in _ALBUM_LEVEL_COLUMNS if sources.get(c) == name) or '-'}]"
+        for name in _ALBUM_FIELD_SOURCES
+    )
+
+
 def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
     """Resolve album-level MusicBrainz metadata for a completing download.
 
@@ -743,14 +772,23 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
 
     A failed fetch is not an error: the stored values are still applied, and a
     release the user never matched simply resolves to no album fields.
+
+    Every field is also attributed to the source that supplied it, and ONE
+    line naming all of them is written per import (``[QUEUE] album metadata
+    sources …``) — see ``_describe_album_source_map``.  Without it a silent
+    split is only diagnosable by guessing which of the three paths failed.
     """
     resolved: dict[str, Any] = {}
+    # Which source answered for each field.  Starts at "missing" so a field no
+    # source ever fills is named explicitly rather than simply omitted.
+    sources: dict[str, str] = {c: "missing" for c in _ALBUM_LEVEL_COLUMNS}
 
     # ── 1. stored: queue-row columns ─────────────────────────────────────
     for column in _ALBUM_LEVEL_COLUMNS:
         value = item.get(column)
         if value is not None and str(value).strip() != "":
             resolved[column] = value
+            sources[column] = "stored"
 
     # ── 1b. stored: the queue row's metadata JSON ────────────────────────
     stored = item.get("metadata")
@@ -769,6 +807,8 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
                     and str(value).strip() != ""
                 ):
                     resolved[column] = value
+                    if column in sources:
+                        sources[column] = "stored"
 
     # ── 2. inherit from the album's OWN rows already in the library ─────────
     # The file is joining a release the library already holds, so the
@@ -818,6 +858,7 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
                     value = mapping.get(column)
                     if value is not None and str(value).strip() != "":
                         resolved[column] = value
+                        sources[column] = "sibling"
         except Exception as exc:
             logger.debug(
                 "Album MBID inheritance from library rows failed",
@@ -840,6 +881,8 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
                 for column, value in _album_level_mb_fields(release).items():
                     if column not in resolved and str(value).strip() != "":
                         resolved[column] = value
+                        if column in sources:
+                            sources[column] = "MusicBrainz"
         except Exception as exc:
             logger.debug(
                 "Album-level MB refresh failed — using stored values only",
@@ -862,6 +905,28 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
             release_mbid=release_mbid,
             album=item.get("album"),
         )
+
+    # ── 4. ONE diagnostic line per import ──────────────────────────────────
+    # Which source answered for every field, so the NEXT import reports the
+    # answer instead of the operator having to guess which of the three paths
+    # failed.  Written through ``log_unified`` — the same channel as the
+    # neighbouring ``[QUEUE] … imported to library`` line — and only once per
+    # row: this resolver runs twice per import (pre-move and post-move).
+    if not item.get(_SOURCE_MAP_LOGGED_KEY):
+        item[_SOURCE_MAP_LOGGED_KEY] = True
+        try:
+            from helpers.logging_config import log_unified
+
+            log_unified(
+                f"[QUEUE] album metadata sources {_describe_album_source_map(sources)}",
+                queue_id=item.get("id"),
+                album=item.get("album"),
+            )
+        except Exception as _diag_exc:  # a diagnostic must never break the import
+            logger.debug(
+                "Album metadata source map not written",
+                error=str(_diag_exc),
+            )
 
     return resolved
 

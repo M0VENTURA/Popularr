@@ -323,6 +323,11 @@ class DownloadQueue(Base):
     release_source: Mapped[str | None] = mapped_column(String)
     release_mbid: Mapped[str | None] = mapped_column(String)
     recording_mbid: Mapped[str | None] = mapped_column(String)
+    # Album-scoped MusicBrainz identity stored at QUEUE time.  It used to live
+    # only inside the ``metadata`` JSONB, so a queue path that skipped that blob
+    # left the row with no release group and the imported file split into its
+    # own album (see migration 017).
+    musicbrainz_releasegroupid: Mapped[str | None] = mapped_column(String)
     cover_art_url: Mapped[str | None] = mapped_column(String)
     duration: Mapped[float | None] = mapped_column(Double)
     found_filename: Mapped[str | None] = mapped_column(String)

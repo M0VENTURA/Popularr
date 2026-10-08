@@ -202,6 +202,7 @@ def queue_add(payload: Dict[str, Any]) -> Dict[str, Any]:
         release_id=payload.get("release_id") or None,
         release_mbid=payload.get("release_mbid") or None,
         recording_mbid=payload.get("recording_mbid") or None,
+        musicbrainz_releasegroupid=payload.get("musicbrainz_releasegroupid") or None,
         duration=payload.get("duration") or None,
         import_group=payload.get("import_group") or None,
         import_type=payload.get("import_type") or None,
@@ -229,6 +230,7 @@ def queue_add_batch(data: Dict[str, Any]) -> Dict[str, Any]:
             release_id=item.get("release_id"),
             release_mbid=item.get("release_mbid"),
             recording_mbid=item.get("recording_mbid"),
+            musicbrainz_releasegroupid=item.get("musicbrainz_releasegroupid"),
             disc_number=item.get("disc_number"),
             duration=item.get("duration"),
             import_group=item.get("import_group") or data.get("import_group"),
@@ -287,6 +289,10 @@ def add_release_tracks_to_queue_detailed(
     apply the same release metadata an album-page lookup would, without
     re-fetching MusicBrainz.  Optional: a caller that does not supply it leaves
     behaviour exactly as before.
+
+    ``musicbrainz_releasegroupid`` from that set is ALSO written to its own
+    column.  The artist page groups albums on it, so it must not be hostage to
+    a JSON blob a fallback path might never build.
 
     Returns a dict with ``queue_ids`` (list[int]), ``queued`` (bool), ``reason``
     (None when something was queued, otherwise a code documented in
@@ -480,14 +486,16 @@ def add_release_tracks_to_queue_detailed(
                         (
                             artist, album, title, search_query, source, status,
                             release_id, import_group, track_number, disc_number,
-                            album_artist, recording_mbid, duration, year, release_year,
+                            album_artist, recording_mbid, musicbrainz_releasegroupid,
+                            duration, year, release_year,
                             metadata, created_at, updated_at
                         )
                         VALUES
                         (
                             :artist, :album, :title, :search_query, :source, 'queued',
                             :release_id, :import_group, :track_number, :disc_number,
-                            :album_artist, :recording_mbid, :duration, :year, :release_year,
+                            :album_artist, :recording_mbid, :musicbrainz_releasegroupid,
+                            :duration, :year, :release_year,
                             :metadata, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                         )
                         RETURNING id
@@ -498,6 +506,7 @@ def add_release_tracks_to_queue_detailed(
                         "release_id": release_id, "import_group": import_group,
                         "track_number": track_number, "disc_number": disc_number,
                         "album_artist": album_artist or artist, "recording_mbid": recording_mbid,
+                        "musicbrainz_releasegroupid": _album_meta.get("musicbrainz_releasegroupid"),
                         "duration": duration, "year": str(year) if year else None,
                         "release_year": year, "metadata": json.dumps(_mb_meta) if _mb_meta else "{}",
                     },

@@ -30,6 +30,7 @@ UPDATE_ALLOWED_COLUMNS = frozenset({
     "artist", "title", "album", "album_artist", "source", "priority",
     "track_number", "disc_number", "year", "duration",
     "release_id", "release_source", "release_mbid", "recording_mbid",
+    "musicbrainz_releasegroupid",
     "release_year", "cover_art_url",
     "import_group", "import_type",
     "file_path", "matched_file_path", "music_file_path", "found_filename",
@@ -217,11 +218,12 @@ def insert_queue_item(
                 INSERT INTO download_queue
                     (artist, title, album, source, priority, track_number, disc_number,
                      album_artist, year, release_id, release_mbid, recording_mbid,
-                     duration, import_group, import_type, status, file_path, found_filename,
-                     created_at, updated_at)
+                     musicbrainz_releasegroupid, duration, import_group, import_type,
+                     status, file_path, found_filename, created_at, updated_at)
                 VALUES (:artist, :title, :album, :source, :priority, :track_number, :disc_number,
                         :album_artist, :year, :release_id, :release_mbid, :recording_mbid,
-                        :duration, :import_group, :import_type, :status, :file_path, :found_filename,
+                        :musicbrainz_releasegroupid, :duration, :import_group, :import_type,
+                        :status, :file_path, :found_filename,
                         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 RETURNING id
             """),
@@ -235,6 +237,10 @@ def insert_queue_item(
                 "release_id": kwargs.get("release_id"),
                 "release_mbid": kwargs.get("release_mbid"),
                 "recording_mbid": kwargs.get("recording_mbid"),
+                # A COLUMN, not a key inside ``metadata``: the release group is
+                # what the artist page groups albums on, and a queue path that
+                # skipped the JSON blob used to lose it silently.
+                "musicbrainz_releasegroupid": kwargs.get("musicbrainz_releasegroupid"),
                 "duration": kwargs.get("duration"),
                 "import_group": kwargs.get("import_group"),
                 "import_type": kwargs.get("import_type") or "song",

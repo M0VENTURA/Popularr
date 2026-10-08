@@ -75,7 +75,8 @@ def _queue_table(db_session):
         # lets us add what it is missing rather than fight over the schema.
         "artist", "title", "album", "source", "priority", "track_number",
         "disc_number", "album_artist", "year", "release_id", "release_mbid",
-        "recording_mbid", "duration", "import_group", "import_type", "status",
+        "recording_mbid", "musicbrainz_releasegroupid", "duration",
+        "import_group", "import_type", "status",
         "file_path", "found_filename", "created_at", "updated_at",
     ):
         if column not in present:

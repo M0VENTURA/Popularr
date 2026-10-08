@@ -109,7 +109,8 @@ def queue_env(monkeypatch):
                 source TEXT DEFAULT 'soulseek', status TEXT DEFAULT 'queued',
                 priority INTEGER DEFAULT 5, track_number TEXT, disc_number TEXT,
                 year TEXT, duration REAL, release_id TEXT, release_mbid TEXT,
-                recording_mbid TEXT, import_group TEXT, import_type TEXT,
+                recording_mbid TEXT, musicbrainz_releasegroupid TEXT,
+                import_group TEXT, import_type TEXT,
                 file_path TEXT, found_filename TEXT,
                 created_at TEXT, updated_at TEXT
             )

@@ -111,6 +111,10 @@ def ensure_schema(cursor):
         "album_artist": "TEXT",
         "release_mbid": "TEXT",
         "recording_mbid": "TEXT",
+        # Album-scoped: the artist page keys albums on this field, so a queue row
+        # that never stores it imports into a SEPARATE album from the release it
+        # was downloaded for.  Mirrors COLUMN_REGISTRY["download_queue"].
+        "musicbrainz_releasegroupid": "TEXT",
         "release_year": "INTEGER",
         "matched_file_path": "TEXT",
         "music_file_path": "TEXT",
