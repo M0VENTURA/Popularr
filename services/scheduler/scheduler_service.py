@@ -180,7 +180,7 @@ def get_scheduler() -> BackgroundScheduler:
         },
     )
 
-    _register_default_jobs(_SCHEDULER, scheduler_cfg)
+    _register_default_jobs(_SCHEDULER, scheduler_cfg, root_cfg=cfg)
     return _SCHEDULER
 
 
@@ -267,10 +267,31 @@ def _download_queue_processor_tick() -> None:
         log_queue("[QUEUE] cycle spawn failed", error=str(_exc))
 
 
-def _register_default_jobs(scheduler: BackgroundScheduler, cfg: dict[str, Any]) -> None:
-    """Register built-in periodic jobs unless they exist or are disabled."""
-    jobs = cfg.get("jobs", {})
-    watcher = cfg.get("watcher", {}) or {}
+def _register_default_jobs(
+    scheduler: BackgroundScheduler,
+    cfg: dict[str, Any],
+    *,
+    root_cfg: dict[str, Any] | None = None,
+) -> None:
+    """Register built-in periodic jobs unless they exist or are disabled.
+
+    ``cfg`` is the ``scheduler:`` sub-mapping (so ``jobs`` is
+    ``scheduler.jobs``, as documented).  ``root_cfg`` is the FULL config, used
+    only to fall back to the top-level ``watcher:`` section when ``scheduler:``
+    does not carry its own copy.
+
+    ⚠️ This function used to receive DIFFERENT dicts from its two callers:
+    ``get_scheduler()`` passed ``config["scheduler"]`` while
+    ``reschedule_jobs_from_config()`` passed the ROOT config.  Each caller
+    therefore saw half the settings — boot honoured ``scheduler.jobs``
+    intervals but ignored every ``watcher`` toggle, and a Config save honoured
+    the toggles but read ``config["jobs"]``, which does not exist, silently
+    resetting every custom interval to its default.  Both callers now pass the
+    same shape.
+    """
+    jobs = cfg.get("jobs", {}) or {}
+    root_cfg = root_cfg if isinstance(root_cfg, dict) else {}
+    watcher = cfg.get("watcher") or root_cfg.get("watcher") or {}
 
     def _enabled(job_id: str, watcher_key: str, default: bool = True) -> bool:
         try:
@@ -279,10 +300,19 @@ def _register_default_jobs(scheduler: BackgroundScheduler, cfg: dict[str, Any]) 
             return default
 
     def _interval(job_id: str, field: str, default: float) -> float:
+        """Read a job's interval, preserving an explicit 0.
+
+        Was ``float(... or default)``, which maps ``0`` back onto the default —
+        so "set it to 0 to disable" silently did nothing. 0 is now returned as
+        0 and the caller treats it as *disabled*, matching how 0 already means
+        "never" for the rescan windows and the missing-release tracklist limit.
+        """
         try:
-            return float(jobs.get(job_id, {}).get(field, default) or default)
-        except Exception:
-            return default
+            raw = jobs.get(job_id, {}).get(field, default)
+            value = float(raw)
+        except (TypeError, ValueError):
+            return float(default)
+        return value if value > 0 else 0.0
 
     def _func_ref(callable_obj: Any) -> str | None:
         if callable_obj is None:
@@ -359,32 +389,32 @@ def _register_default_jobs(scheduler: BackgroundScheduler, cfg: dict[str, Any]) 
             logger.warning("APScheduler failed to remove job", job_id=job_id, error=str(exc))
 
     # ── Library sync ──
-    if _enabled("library_sync", "auto_import_enabled", True):
-        interval_minutes = _interval("library_sync", "interval_minutes", 360)
+    library_interval = _interval("library_sync", "interval_minutes", 360)
+    if library_interval <= 0 or not _enabled("library_sync", "auto_import_enabled", True):
+        _remove_job("library_sync")
+    else:
         try:
             _put(
                 "library_sync", "Library sync with Navidrome",
-                IntervalTrigger(minutes=interval_minutes),
+                IntervalTrigger(minutes=library_interval),
                 func=_run_library_sync_job,
             )
         except Exception as exc:
             logger.warning("APScheduler failed to register library_sync", error=str(exc))
-    else:
-        _remove_job("library_sync")
 
     # ── Popularity scan ──
-    if _enabled("popularity_scan", "auto_popularity_scan", True):
-        interval_minutes = _interval("popularity_scan", "interval_minutes", 1440)  
+    popularity_interval = _interval("popularity_scan", "interval_minutes", 1440)
+    if popularity_interval <= 0 or not _enabled("popularity_scan", "auto_popularity_scan", True):
+        _remove_job("popularity_scan")
+    else:
         try:
             _put(
                 "popularity_scan", "Popularity recalculation",
-                IntervalTrigger(minutes=interval_minutes),
+                IntervalTrigger(minutes=popularity_interval),
                 func=_run_popularity_scan_job,
             )
         except Exception as exc:
             logger.warning("APScheduler failed to register popularity_scan", error=str(exc))
-    else:
-        _remove_job("popularity_scan")
 
     # ── Download queue processor ──
     if _enabled("download_queue_processor", "downloads_watcher_enabled", True):
@@ -480,8 +510,11 @@ def reschedule_jobs_from_config() -> dict[str, Any]:
         if not scheduler.running:
             scheduler.start()
             logger.info("APScheduler started (reschedule_jobs_from_config)")
-            
-        _register_default_jobs(scheduler, cfg)
+
+        # Same shape as ``get_scheduler()``: jobs live under ``scheduler.jobs``.
+        # Passing the ROOT config here read ``config["jobs"]`` — a key that
+        # never exists — so every save reset scheduler intervals to defaults.
+        _register_default_jobs(scheduler, cfg.get("scheduler") or {}, root_cfg=cfg)
         stats["jobs"] = len(list(scheduler.get_jobs() or []))
         logger.info("APScheduler config re-applied", registered_jobs=stats["jobs"])
         return stats

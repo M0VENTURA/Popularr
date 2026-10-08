@@ -40,6 +40,7 @@ from helpers.config_helpers import (
     clear_config_cache,
     get_config,
     needs_setup,
+    read_config_from_disk,
     save_config,
     save_partial_config,
 )
@@ -3588,7 +3589,20 @@ async def config_save_json() -> Any:
         data = (await request.get_json()) or {}
     except Exception:
         return jsonify({"success": False, "error": "Invalid JSON body"}), 400
-        
+
+    # Carry forward any top-level section this page does not collect.
+    # ``save_config`` REPLACES config.yaml wholesale, so a section the
+    # collector never emits — ``scheduler:`` held every scheduled-scan
+    # interval — would be DELETED by an ordinary save. Only keys the payload
+    # does not already carry are filled in, so an explicit value always wins,
+    # and a payload that already contains the section is untouched.
+    if isinstance(data, dict):
+        try:
+            for _section_key, _section_value in read_config_from_disk().items():
+                data.setdefault(_section_key, _section_value)
+        except Exception:
+            logger.debug("Config section carry-forward skipped")
+
     success = save_config(data)
     if success:
         try:

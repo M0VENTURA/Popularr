@@ -109,6 +109,7 @@
                                 <button id="popScanRunBtn" onclick="runDashboardPopularityScan()" class="btn btn-primary btn-sm px-3 ms-auto ms-sm-0"><i class="bi bi-play-fill"></i> Run</button>
                                 <button class="btn btn-outline-danger btn-sm flex-shrink-0" onclick="stopAllScans()" title="Stop all scans"><i class="bi bi-stop-fill"></i></button>
                             </div>
+                            {% include 'components/_scan_mode_key.html' %}
                             <div><span id="pop-status" class="text-muted small">Ready to scan.</span></div>
                         </div>
 

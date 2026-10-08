@@ -369,6 +369,23 @@ def get_watcher_settings() -> dict[str, Any]:
     }
 
 
+def read_config_from_disk() -> dict[str, Any]:
+    """Read the on-disk config, bypassing the in-memory cache.
+
+    Exists so a writer can carry across sections it does not itself produce.
+    ``save_config`` REPLACES ``config.yaml`` wholesale, and the Config page's
+    collector only emits the sections it renders — so any top-level section the
+    page does not know about would be **deleted** by an ordinary save. The live
+    example was ``scheduler:``, which held every scheduled-scan interval: they
+    were silently reset to their defaults each time Settings was saved.
+    """
+    try:
+        cfg, _ = _read_yaml(_CONFIG_PATH)
+        return cfg if isinstance(cfg, dict) else {}
+    except Exception:
+        return {}
+
+
 def save_config(config_data: dict) -> bool:
     """Persist a config dict back to the YAML file and clear the cache.
 

@@ -240,6 +240,12 @@
       return Number.isNaN(v) ? defaultValue : v;
     }
 
+    // Scheduled-job settings are collected below but live under a nested
+    // shape, so bind the existing section once instead of re-reading
+    // global.pageConfig at every level.
+    const _sched = (global.pageConfig && global.pageConfig.scheduler) || {};
+    const _schedJobs = _sched.jobs || {};
+
     const navidrome_users = [];
     document.querySelectorAll('.user-card').forEach((card) => {
       const user = {
@@ -429,6 +435,36 @@
         auto_popularity_scan: getChecked('watcher_auto_popularity', true),
         downloads_watcher_enabled: getChecked('watcher_downloads_enabled', true)
       },
+      // Scheduled background jobs (APScheduler).  This section MUST be in the
+      // payload: save_config() REPLACES config.yaml wholesale, so a payload
+      // without `scheduler:` deletes every interval and the timezone on the
+      // next save — which is exactly what used to happen, silently resetting
+      // the scheduled library sync / popularity scan to their defaults.
+      // Everything this page does not collect is carried across untouched.
+      scheduler: Object.assign(
+        {},
+        _sched,
+        {
+          jobs: Object.assign(
+            {},
+            _schedJobs,
+            {
+              library_sync: Object.assign(
+                {},
+                _schedJobs.library_sync || {},
+                // 0 is legal ("never run on a schedule"), so parseNumber and
+                // NOT `|| 360`.
+                { interval_minutes: parseNumber('scheduler_library_sync_interval_minutes', 360) }
+              ),
+              popularity_scan: Object.assign(
+                {},
+                _schedJobs.popularity_scan || {},
+                { interval_minutes: parseNumber('scheduler_popularity_scan_interval_minutes', 1440) }
+              )
+            }
+          )
+        }
+      ),
       features: Object.assign(
         {},
         (global.pageConfig && global.pageConfig.features) || {},

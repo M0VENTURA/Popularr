@@ -1545,6 +1545,47 @@
     </div>
   </div>
 
+  <!-- Scheduled Scans Section -->
+  <div class="card shadow-sm mb-3" id="scheduled-scans">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-clock-history"></i> Scheduled Scans</h5>
+      <small class="text-muted">Background jobs the scheduler runs on its own — separate from every scan button</small>
+    </div>
+    <div class="card-body">
+      {% set sch_jobs = ((config.get('scheduler', {}) or {}).get('jobs', {}) or {}) %}
+      <div class="row g-3">
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="scheduler_library_sync_interval_minutes">Library Sync Interval (minutes)</label>
+          <input type="number" step="1" min="0" max="10080" class="form-control form-control-sm" id="scheduler_library_sync_interval_minutes" value="{{ (sch_jobs.get('library_sync', {}) or {}).get('interval_minutes', 360) }}">
+          <small class="form-text text-muted">Re-imports new and changed Navidrome rows so the library stays in step. <strong>0 = never</strong> (equivalent to unticking <strong>Auto Import</strong> on the Watcher Service card). Default: <strong>360</strong> (6&nbsp;h)</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="scheduler_popularity_scan_interval_minutes">Popularity Scan Interval (minutes)</label>
+          <input type="number" step="1" min="0" max="10080" class="form-control form-control-sm" id="scheduler_popularity_scan_interval_minutes" value="{{ (sch_jobs.get('popularity_scan', {}) or {}).get('interval_minutes', 1440) }}">
+          <small class="form-text text-muted">Runs the <strong>Popularity</strong> mode only — never Finalise, Metadata, Singles or Essentia. <strong>0 = never</strong> (equivalent to unticking <strong>Auto Popularity Scan</strong>). Default: <strong>1440</strong> (24&nbsp;h)</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm">Not scheduled from here</label>
+          <div class="border rounded p-2 small text-muted" style="background: rgba(0,0,0,.15);">
+            <div class="mb-1"><strong>Download queue processor</strong> — every {{ config.get('watcher', {}).get('scan_interval', 30) }}&nbsp;s, set by <em>Scan Interval</em> on the Watcher Service card.</div>
+            <div class="mb-1"><strong>Missing-releases refresh</strong> — daily.</div>
+            <div class="mb-1"><strong>Upcoming releases</strong> — Wikipedia scrape daily 03:00, MusicBrainz refresh Sundays 04:00.</div>
+            <div class="mb-0">These read their own settings; nothing on this card changes them.</div>
+          </div>
+        </div>
+      </div>
+      <div class="alert alert-secondary mb-0 mt-3 py-2">
+        <small class="text-muted">
+          <strong>How it works:</strong> these two jobs are written to <code>config.yaml</code> under
+          <code>scheduler.jobs</code> and applied the moment you save — the scheduler is re-read on every save, so a new
+          interval takes effect without a restart. They run whether or not you have clicked a scan button, and they are
+          independent of the rescan windows below: a scheduled popularity scan still skips albums inside its own window,
+          so leave <strong>Forced</strong> off if you only want it to touch what is due.
+        </small>
+      </div>
+    </div>
+  </div>
+
   <!-- Scan Behaviour Section -->
   <div class="card shadow-sm mb-3" id="scan-skip-behaviour">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">
@@ -1646,12 +1687,76 @@
           <small class="form-text text-muted">Tracks at or above this age keep their existing Last.fm-backed popularity unless listener data is missing. Default: <strong>2</strong></small>
         </div>
       </div>
+      {% set rw = config.get('features', {}) %}
+      <div class="border rounded p-3 mt-3" id="rescan-windows-summary">
+        <div class="d-flex align-items-baseline justify-content-between flex-wrap gap-2 mb-2">
+          <h6 class="mb-0"><i class="bi bi-table"></i> Rescan windows at a glance</h6>
+          <small class="text-muted">read-only — reflects the inputs above</small>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle mb-0">
+            <thead>
+              <tr class="text-muted small">
+                <th style="width: 16%">Scan</th>
+                <th style="width: 16%">Runs again after</th>
+                <th style="width: 20%">Old albums (≥ {{ rw.get('old_album_age_months', 48) }} months)</th>
+                <th>What it does</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% set n_full = rw.get('album_skip_days', 7) %}
+              {% set o_full = rw.get('album_old_album_skip_days', 30) %}
+              <tr>
+                <td><strong>Full</strong></td>
+                <td>{% if n_full|int == 0 %}<span class="text-success">always</span>{% else %}{{ n_full }} days{% endif %}</td>
+                <td>{% if o_full|int == 0 %}<span class="text-success">always</span>{% else %}{{ o_full }} days{% endif %}</td>
+                <td class="text-muted">Everything — Navidrome import, metadata, popularity, singles, covers and file tags.</td>
+              </tr>
+              {% set n_pop = rw.get('popularity_skip_days', 7) %}
+              {% set o_pop = rw.get('popularity_old_album_skip_days', 30) %}
+              <tr>
+                <td><strong>Popularity</strong></td>
+                <td>{% if n_pop|int == 0 %}<span class="text-success">always</span>{% else %}{{ n_pop }} days{% endif %}</td>
+                <td>{% if o_pop|int == 0 %}<span class="text-success">always</span>{% else %}{{ o_pop }} days{% endif %}</td>
+                <td class="text-muted">Scores from Last.fm / ListenBrainz. A track that already has a score is still skipped inside the window.</td>
+              </tr>
+              {% set n_sgl = rw.get('singles_skip_days', 7) %}
+              {% set o_sgl = rw.get('singles_old_album_skip_days', 30) %}
+              <tr>
+                <td><strong>Singles</strong></td>
+                <td>{% if n_sgl|int == 0 %}<span class="text-success">always</span>{% else %}{{ n_sgl }} days{% endif %}</td>
+                <td>{% if o_sgl|int == 0 %}<span class="text-success">always</span>{% else %}{{ o_sgl }} days{% endif %}</td>
+                <td class="text-muted">Single / EP verdicts. A track whose verdict is still fresh is not re-assessed.</td>
+              </tr>
+              {% set n_meta = rw.get('metadata_skip_days', 0) %}
+              {% set o_meta = rw.get('metadata_old_album_skip_days', 30) %}
+              <tr class="border-bottom">
+                <td><strong>Metadata</strong></td>
+                <td>{% if n_meta|int == 0 %}<span class="text-success">always</span>{% else %}{{ n_meta }} days{% endif %}</td>
+                <td>{% if o_meta|int == 0 %}<span class="text-success">always</span>{% else %}{{ o_meta }} days{% endif %}</td>
+                <td class="text-muted">MusicBrainz / Discogs enrichment and file tags. Defaults to <strong>0</strong>, so metadata is always refreshed.</td>
+              </tr>
+              <tr>
+                <td><strong>Finalise</strong></td>
+                <td colspan="2" class="text-info">window ignored — always every album</td>
+                <td class="text-muted">Visits every album by design, but only fills in popularity / singles values that are <strong>missing</strong>. It never runs metadata, and it never runs Essentia.</td>
+              </tr>
+              <tr>
+                <td><strong>Essentia</strong></td>
+                <td colspan="2">its own scan</td>
+                <td class="text-muted">Audio mood analysis — started from the Essentia pane or the scan selector. It has no rescan window.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
       <div class="alert alert-secondary mb-0 mt-3 py-2">
         <small class="text-muted">
-          <strong>How it works:</strong> each scan option on the Scan page (Full, Popularity, Singles, Metadata) has its own
-          rescan window — an album is only re-processed by that scan once its window has passed. Set any window to <strong>0</strong>
-          and that scan always re-processes the whole library (slower, more API calls). A forced scan or an individual album
-          scan always re-scans regardless of these settings.
+          <strong>How it works:</strong> each scan option has its own rescan window — an album is only re-processed by
+          that scan once its window has passed. Set any window to <strong>0</strong> and that scan always re-processes
+          the whole library (slower, more API calls). <strong>Force</strong> and an individual album scan always
+          re-scan regardless of these settings. <strong>Finalise ignores every window</strong> — it always visits
+          every album, which is why it can take a while on a large library even when nothing is due.
         </small>
       </div>
     </div>

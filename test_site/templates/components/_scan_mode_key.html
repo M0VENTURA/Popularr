@@ -1,0 +1,88 @@
+{#
+  What each scan type actually does — one legend, every selector.
+
+  Usage:
+      {% include 'components/_scan_mode_key.html' %}
+
+  Rendered as a collapsed <details> so it costs one summary line on a toolbar
+  and expands into the full table.  Deliberately JS-free: a hover tooltip on an
+  <option> is not reliably shown by browsers, and a legend that only appears
+  after a selection is useless when the reader does not yet know which one to
+  pick.
+
+  It exists because the honest answer to "does Finalise run the other scans?"
+  is NO — finalise_only is dispatched alongside singles_only and every other
+  stage is switched off — and nothing on any page said so.
+
+  Callers: components/_scan_selector.html, pages/dashboard.html,
+  pages/artist_detail.html, components/_release_section.html.
+#}
+<details class="scan-mode-key w-100 mt-1">
+  <summary class="small text-muted" style="cursor: pointer;">
+    <i class="bi bi-question-circle"></i> What does each scan do?
+  </summary>
+  <div class="border rounded p-2 mt-1" style="background: rgba(0,0,0,.15);">
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0 small">
+        <thead>
+          <tr class="text-muted">
+            <th style="width: 15%;">Scan</th>
+            <th>What it does</th>
+            <th style="width: 22%;">Rescan window</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>All Modes</strong><br><span class="text-muted" style="font-size:.78em;">dashboard only</span></td>
+            <td>The whole pipeline for <em>every</em> artist: Navidrome import → metadata → popularity → singles → Essentia.</td>
+            <td>Full window</td>
+          </tr>
+          <tr>
+            <td><strong>Full</strong></td>
+            <td>Everything for one artist or album: Navidrome import, metadata, popularity, singles, cover detection and file tags.</td>
+            <td>Full window</td>
+          </tr>
+          <tr>
+            <td><strong>Navidrome</strong></td>
+            <td>Re-imports rows from Navidrome only — no external API calls, no scoring.</td>
+            <td>Full window</td>
+          </tr>
+          <tr>
+            <td><strong>Metadata</strong></td>
+            <td>MusicBrainz / Discogs enrichment, genres and file tags. Full enrichment runs here (it does not in Finalise).</td>
+            <td>Metadata window (defaults to <strong>0</strong> = always)</td>
+          </tr>
+          <tr>
+            <td><strong>Popularity</strong></td>
+            <td>Recomputes scores from Last.fm / ListenBrainz. A track that already has a score is kept unless you tick <strong>Force</strong>.</td>
+            <td>Popularity window</td>
+          </tr>
+          <tr>
+            <td><strong>Singles</strong></td>
+            <td>Single / EP verdicts. A verdict that is still fresh is reused rather than re-fetched.</td>
+            <td>Singles window</td>
+          </tr>
+          <tr class="table-active">
+            <td><strong>Finalise</strong></td>
+            <td>
+              <strong>Database only.</strong> Visits <strong>every</strong> album, recomputes star ratings and syncs to
+              Navidrome, but only fills in popularity and singles values that are <strong>missing</strong>.
+              It does <strong>not</strong> run metadata, and it does <strong>not</strong> run Essentia —
+              a stale scan is <em>not</em> caught up by Finalise.
+            </td>
+            <td><strong>none — always every album</strong></td>
+          </tr>
+          <tr>
+            <td><strong>Essentia</strong></td>
+            <td>Audio mood analysis of the files — its own scan, independent of the pipeline above.</td>
+            <td>none</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="text-muted mt-1" style="font-size: .82em;">
+      <strong>Force</strong> bypasses every window above, and an individual album scan always re-runs.
+      Windows are set on the Config page under <strong>Scan Behaviour</strong>.
+    </div>
+  </div>
+</details>
