@@ -1037,6 +1037,47 @@ def _picker_formats(release: dict[str, Any]) -> str:
     return ", ".join(dict.fromkeys(formats)) or "Digital/CD"
 
 
+def _picker_group_editions(processed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse releases that differ only by PRESSING into one choice.
+
+    The flyout exists to pick *content*, so two rows reading "12 tracks · UK ·
+    2004" and "12 tracks · US · 2005" are the same download and the choice
+    between them is noise — the reported "it pops up and asks for the specific
+    release" when every candidate is identical in the only dimension that
+    matters here.
+
+    The representative kept for a group is its FIRST member, which the caller
+    has already sorted Official-first-then-by-track-count, so the surviving row
+    is the best of the group rather than an arbitrary one. ``edition_count`` is
+    carried so the renderer can say how many were folded in.
+
+    A release whose track count is **unknown** (0 / missing ``media``) is never
+    merged: two releases we cannot count are not known to be the same, and
+    folding them would hide a real choice behind a false equivalence.
+    """
+    grouped: list[dict[str, Any]] = []
+    by_count: dict[int, dict[str, Any]] = {}
+
+    for release in processed:
+        count = int(release.get("track_count") or 0)
+        if count <= 0:
+            row = dict(release)
+            row["edition_count"] = 1
+            grouped.append(row)
+            continue
+
+        existing = by_count.get(count)
+        if existing is None:
+            row = dict(release)
+            row["edition_count"] = 1
+            by_count[count] = row
+            grouped.append(row)
+        else:
+            existing["edition_count"] += 1
+
+    return grouped
+
+
 def _picker_tracklist_html(client: MusicBrainzHttpClient, release_id: str) -> str:
     import html as _html
     try:
@@ -1149,10 +1190,11 @@ async def api_musicbrainz_release_picker() -> Any:
                   <button type="button" class="btn btn-sm btn-outline-info" onclick="toggleReleaseTracklistPreview('{{ rel.id }}')">
                     <i class="bi bi-list-ul"></i> Preview Tracks
                   </button>
-                  <button type="button" class="btn btn-sm btn-success d-flex align-items-center gap-1"
-                          onclick='queueSpecificRelease("{{ rel.id }}", {{ rel.title|tojson }}, {{ rel.artist|tojson }})'>
-                    <i class="bi bi-download"></i> Queue This Version
-                  </button>
+                      {% if rel.edition_count > 1 %}
+                      <span class="badge bg-secondary extra-small flex-shrink-0 me-auto ms-2" title="Editions with this same track count were folded into one choice">
+                        <i class="bi bi-collection"></i> {{ rel.edition_count }} editions
+                      </span>
+                      {% endif %}
                 </div>
 
                 <div id="preview-rel-{{ rel.id }}" class="mt-2 d-none extra-small text-muted border-top border-secondary pt-2"></div>
@@ -1161,7 +1203,7 @@ async def api_musicbrainz_release_picker() -> Any:
           </div>
         </div>
         """,
-        releases=processed,
+        releases=_picker_group_editions(processed),
         album=album,
         artist=artist,
     )

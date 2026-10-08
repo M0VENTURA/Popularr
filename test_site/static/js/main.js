@@ -541,6 +541,24 @@
         const rel = releases[0];
         return queueSpecificRelease(rel.id, rel.title || title || '', artist || '');
       }
+
+      // Every edition in this group carries the SAME number of tracks, so the
+      // flyout would offer rows differing only by PRESSING — country, date,
+      // format — which is not a difference a Soulseek download acts on.
+      // Queue the best one instead of asking. The endpoint sorts Official
+      // first and then by track count, so ``releases[0]`` is it.
+      //
+      // A count of 0 means the media did not load: that is UNIDENTIFIED, not
+      // "identical", and must still be chosen by hand — hence the explicit
+      // ``has(0)`` guard.
+      if (releases.length > 1) {
+        const counts = new Set(releases.map((rel) => Number(rel.track_count) || 0));
+        if (counts.size === 1 && !counts.has(0)) {
+          const best = releases[0];
+          const note = `All ${releases.length} versions have ${best.track_count} tracks — queued the best match`;
+          return queueSpecificRelease(best.id, best.title || title || '', artist || '', note);
+        }
+      }
     } catch (_error) {
       // Network failure → fall through to the flyout, which surfaces the error.
     }
@@ -548,7 +566,7 @@
     openSlideOver(url, 'Select Version: ' + (title || ''));
   }
 
-  async function queueSpecificRelease(releaseId, releaseTitle, artist) {
+  async function queueSpecificRelease(releaseId, releaseTitle, artist, note) {
     if (!releaseId) return;
 
     try {
@@ -574,6 +592,11 @@
       }
 
       global.toast.queued(releaseTitle);
+      // Only after the queue actually succeeded: announcing it up front would
+      // claim a queue that the API then refused.
+      if (note && global.toast && typeof global.toast.info === 'function') {
+        global.toast.info(note);
+      }
 
       const cb = releasePickerOnQueued;
       releasePickerOnQueued = null;
