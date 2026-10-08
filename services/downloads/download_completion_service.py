@@ -770,7 +770,61 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
                 ):
                     resolved[column] = value
 
-    # ── 2. refresh from MusicBrainz for anything still missing ───────────
+    # ── 2. inherit from the album's OWN rows already in the library ─────────
+    # The file is joining a release the library already holds, so the
+    # album-scoped MB identity it needs is already stored on its siblings.
+    #
+    # This runs BEFORE the MusicBrainz refresh on purpose: without it a queue
+    # row that stored no album metadata depended on a LIVE per-track MB call
+    # succeeding, and when it did not — the global throttle is 1 req/s, imports
+    # run per track, and the failure is logged only at DEBUG — the file was
+    # written with NO album MBIDs at all. The artist page keys albums on
+    # ``musicbrainz_releasegroupid`` (2026-10-06-albums-split-by-release-group),
+    # so those rows were filed as a SEPARATE ALBUM from the release they were
+    # downloaded for: the reported "they don't have the same mbid data … so are
+    # coming in as separate albums". LOCAL, so it spends nothing from the
+    # MusicBrainz budget.
+    _missing_album_cols = [c for c in _ALBUM_LEVEL_COLUMNS if not resolved.get(c)]
+    if _missing_album_cols:
+        try:
+            with db_session() as session:
+                # Prefer a sibling that CARRIES the release group — that is the
+                # field the grouping hangs on — then the oldest row.
+                sibling = session.execute(
+                    text(
+                        f"""
+                        SELECT {', '.join(_ALBUM_LEVEL_COLUMNS)}
+                        FROM tracks
+                        WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                          AND LOWER(COALESCE(album, '')) = LOWER(:album)
+                          AND COALESCE(file_path, '') NOT LIKE '__queued_for_download__%%'
+                        ORDER BY CASE
+                            WHEN COALESCE(musicbrainz_releasegroupid, '') <> '' THEN 0
+                            ELSE 1
+                        END, id
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "artist": item.get("album_artist") or item.get("artist"),
+                        "album": item.get("album"),
+                    },
+                ).fetchone()
+            if sibling is not None:
+                mapping = getattr(sibling, "_mapping", None) or dict(sibling)
+                for column in _ALBUM_LEVEL_COLUMNS:
+                    if column in resolved:
+                        continue
+                    value = mapping.get(column)
+                    if value is not None and str(value).strip() != "":
+                        resolved[column] = value
+        except Exception as exc:
+            logger.debug(
+                "Album MBID inheritance from library rows failed",
+                album=item.get("album"), error=str(exc),
+            )
+    
+    # ── 3. refresh from MusicBrainz for anything still missing ───────────
     release_mbid = str(
         item.get("release_mbid") or item.get("release_id") or ""
     ).strip()
@@ -792,6 +846,22 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
                 release_mbid=release_mbid,
                 error=str(exc),
             )
+
+    # ⚠️ NOWHERE to get the album's release-group id from. The artist page has
+    # keyed albums on ``musicbrainz_releasegroupid`` since
+    # 2026-10-06-albums-split-by-release-group, so a file written without it
+    # renders as its OWN album next to the release it was downloaded for. That
+    # is the reported "they don't have the same mbid data … so are coming in as
+    # separate albums", and it used to be reachable with NOTHING in the log —
+    # the stored/inherited/MusicBrainz paths all failed at DEBUG. One warning
+    # per affected track, because the operator cannot act on a silent split.
+    if release_mbid and not resolved.get("musicbrainz_releasegroupid"):
+        logger.warning(
+            "Imported track has no release-group MBID after stored, inherited "
+            "and MusicBrainz sources — it may render as a separate album",
+            release_mbid=release_mbid,
+            album=item.get("album"),
+        )
 
     return resolved
 
@@ -1017,6 +1087,13 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
     reported bug).  Failures are now surfaced at WARNING plus one unified
     queue line so the Logs page shows them.
     """
+    # Album-level MusicBrainz metadata — resolved ONCE, BEFORE the disc logic,
+    # because ``disctotal`` is what says whether a disc-1 track is on a
+    # multi-disc release (see the disc block below).  Applied to BOTH the file
+    # tags and the tracks row so an imported album carries the same release
+    # metadata an album-page lookup would have written.
+    _album_level = _resolve_album_level_metadata(item)
+
     meta: dict[str, Any] = {
         "title": item.get("title"),
         "artist": item.get("artist"),
@@ -1030,12 +1107,36 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
         _disc_num = int(str(_disc_raw).split("/")[0])
     except (TypeError, ValueError):
         _disc_num = 0
-        
-    meta["disc_number"] = str(_disc_raw) if _disc_num >= 2 else ""
+
+    try:
+        _disctotal = int(str(_album_level.get("disctotal") or "0").split("/")[0])
+    except (TypeError, ValueError):
+        _disctotal = 0
+
+    # ⚠️ The disc-1 strip is SINGLE-DISC ONLY.
+    #
+    # It used to be ``"" for every disc < 2``, so the FIRST disc of a
+    # MULTI-disc release had its TPOS cleared as well — Navidrome then reported
+    # ``discNumber`` 0 for those tracks, which is the reported "some multiple
+    # disk albums are adding the tracks as disk 0 rather than disk 1".  Disc 2+
+    # kept their number, so one album ended up as "disc 0" + "disc 2".
+    #
+    # The single-disc clear itself is deliberate (a stray "1" renders as its
+    # own "disc 0" group on a one-disc release) and is now decided by
+    # ``disctotal`` rather than by the number alone.  When the release is
+    # multi-disc but THIS track's disc is unknown, the frame is left alone —
+    # guessing is what produced the 0 in the first place.
+    if _disc_num >= 2:
+        _disc_value: str | None = str(_disc_raw)
+    elif _disc_num == 1:
+        _disc_value = "1" if _disctotal >= 2 else ""
+    else:
+        _disc_value = "" if _disctotal < 2 else None
+
     meta = {k: v for k, v in meta.items() if v not in (None, "")}
-    if _disc_num < 2:
-        meta["disc_number"] = ""
-        
+    if _disc_value is not None:
+        # "" survives the filter: it is the explicit CLEAR contract.
+        meta["disc_number"] = _disc_value
     recording_mbid = item.get("recording_mbid")
     if recording_mbid:
         meta["recording_mbid"] = recording_mbid
@@ -1054,7 +1155,8 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
     # missing, refreshed from MusicBrainz via the release MBID.  Applied to
     # BOTH the file tags and the tracks row so an imported album carries the
     # same release metadata an album-page lookup would have written.
-    _album_level = _resolve_album_level_metadata(item)
+    # Album-level fields — ``_album_level`` was resolved at the top (it also
+    # decided the disc behaviour above), so only the set is applied here.
     for _col, _val in _album_level.items():
         meta.setdefault(_col, _val)
 
