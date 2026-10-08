@@ -122,7 +122,7 @@ to be explicit rather than inherited from a review that assumed SQLite.
   controls, one of which pins that `propagate` was already `False`).
 * **Oracle** — reverting only `queue_orchestrator.py` → **4 failed / 2 passed**;
   exactly the 4 behavioural tests fail and both controls pass. Restored → 6.
-* **Sweep** — 45 queue/download/lock/worker/retry files, clean `origin/develop`
+* **Sweep** — 42 queue/download/lock/worker/retry files, clean `origin/develop`
   vs this change: **base `25 failed / 468 passed`** vs **new `21 failed / 472
   passed`**; `Compare-Object` on the sorted `^FAILED` lines = **empty for "only
   in CHANGED"**. The 4 that only fail at BASE are this change's own tests (the
