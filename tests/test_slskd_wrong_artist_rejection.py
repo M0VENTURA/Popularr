@@ -260,3 +260,120 @@ class TestHangulArtistScriptMismatch:
     def test_wrong_latin_track_rejected(self):
         candidate = _candidate("Stray Kids - Another Song.flac")
         assert _score_result(candidate, "Stray Kids", "토끼와 거북이") == 0.0
+
+
+class TestCompilationAlbumLeniency:
+    """A track queued from a Various Artists compilation also lives on the
+    artist's OWN release, so peers carry it from there with a DIFFERENT album
+    name.  The hard album gate must not reject it when artist + title agree —
+    reported as *"it doesn't match due to the album name being different even
+    though the track artist matches the artist and song title"*."""
+
+    def test_va_queue_row_matches_the_artists_own_release_file(self):
+        """Queue: "A Perfect Circle - Weak and Powerless" on
+        "MTV2 Headbangers Ball".  The candidate is from "Mer de Noms" —
+        different album, same artist, same title."""
+
+        candidate = _candidate(
+            "A Perfect Circle - Mer de Noms - 04 - Weak and Powerless.flac"
+        )
+        score = _score_result(
+            candidate,
+            "A Perfect Circle", "Weak and Powerless",
+            expected_album="MTV2 Headbangers Ball",
+            expected_album_artist="Various Artists",
+        )
+        assert score > 0.0, (
+            "a VA compilation album must not hard-reject the same song from "
+            "the artist's own release"
+        )
+        assert score >= 45.0, (
+            "the candidate must clear the accept floor — this is the file a "
+            "VA row should download"
+        )
+
+    def test_compilation_artist_variant_matches_too(self):
+        """'VA' is a placeholder in the same set as 'Various Artists'."""
+        candidate = _candidate("A Perfect Circle - Mer de Noms - Weak and Powerless.flac")
+        score = _score_result(
+            candidate,
+            "A Perfect Circle", "Weak and Powerless",
+            expected_album="MTV2 Headbangers Ball",
+            expected_album_artist="VA",
+        )
+        assert score >= 45.0
+
+    def test_album_artist_missing_still_relaxes_for_a_va_artist(self):
+        """Some VA rows only set the per-track artist; the ALBUM name alone is
+        not enough to know it is a compilation, so the artist fallback in the
+        placeholder set must participate."""
+        candidate = _candidate("Various Artists - Weak and Powerless.flac")
+        score = _score_result(
+            candidate,
+            "Various Artists", "Weak and Powerless",
+            expected_album="MTV2 Headbangers Ball",
+        )
+        assert score >= 45.0
+
+
+class TestCoreTitleOverridesTheAlbumGate:
+    """A version/edition marker drops the RAW title similarity below 0.85
+    even though the bracket-stripped CORE is the same song.  The same-song-
+    from-another-release carve-out the gate already allows for exact titles
+    must also apply to a core match."""
+
+    def test_annotated_title_from_another_release_is_accepted(self):
+        """The filename carries album + track number, so the parser DOES see
+        the mismatched album ("Mer de Noms" ≠ "MTV2 Headbangers Ball") and the
+        raw title score for "Weak and Powerless (Album Version)" is below the
+        0.85 override — only the bracket-stripped CORE match saves it."""
+        candidate = _candidate(
+            "A Perfect Circle - Mer de Noms - 04 - Weak and Powerless (Album Version).flac"
+        )
+        score = _score_result(
+            candidate,
+            "A Perfect Circle", "Weak and Powerless",
+            expected_album="MTV2 Headbangers Ball",
+        )
+        assert score > 0.0, (
+            "core titles match, so the different album is another release of "
+            "the SAME song — not evidence of a wrong file"
+        )
+
+    def test_genuinely_different_title_from_another_album_still_rejected(self):
+        """CONTROL — the album gate must keep its teeth when the title is a
+        different song entirely (the pinned wrong-album case)."""
+        candidate = _candidate(
+            "The Eternal - When The Circle Of Light Begins To Fade - 07 - Yesterday's Fire.flac"
+        )
+        assert _score_result(
+            candidate,
+            "The Eternal", "Lament for the Hollow",
+            expected_album="Obscured Horizons",
+        ) == 0.0
+
+
+class TestQueueItemIsCompilation:
+    def test_recognises_the_placeholders(self):
+        from services.downloads.download_pipeline_service import _queue_item_is_compilation
+
+        assert _queue_item_is_compilation(
+            expected_artist="A Perfect Circle",
+            expected_album_artist="Various Artists",
+        ) is True
+        assert _queue_item_is_compilation(
+            expected_artist="A Perfect Circle",
+            expected_album_artist="various",
+        ) is True
+        assert _queue_item_is_compilation(
+            expected_artist="Various Artists",
+            expected_album_artist=None,
+        ) is True
+        assert _queue_item_is_compilation(
+            expected_artist="A Perfect Circle",
+            expected_album_artist="A Perfect Circle",
+        ) is False
+        assert _queue_item_is_compilation(
+            expected_artist="A Perfect Circle",
+            expected_album_artist=None,
+        ) is False

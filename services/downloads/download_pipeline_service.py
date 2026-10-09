@@ -510,6 +510,39 @@ def _note_reject(rejects: dict[str, int] | None, reason: str) -> None:
         rejects[reason] = rejects.get(reason, 0) + 1
 
 
+def _queue_item_is_compilation(
+    *,
+    expected_artist: str,
+    expected_album_artist: str | None,
+) -> bool:
+    """True when a queue row asks for a track from a compilation release.
+
+    The queue item's PER-TRACK artist is the real performer; the ALBUM is a
+    "Various Artists" / soundtrack / compilation title, and the same song
+    exists on the artist's own release — so an album name that differs from
+    the queue's is expected on peers and must not hard-reject a candidate
+    whose artist + title agree.
+
+    Mirrors ``services.queue.queue_metadata_matcher``'s ``queue_is_compilation``:
+    the placeholders are the SAME ``_GENERIC_COMPILATION_ARTISTS`` set, so a
+    release the metadata matcher treats as a compilation is treated as one
+    here, and the two verifiers cannot disagree about it.
+    """
+    try:
+        from helpers.config_helpers import _GENERIC_COMPILATION_ARTISTS
+        from helpers.normalization_service import normalize_artist
+    except Exception:
+        return False
+
+    for value in (expected_album_artist, expected_artist):
+        name = normalize_artist(value or "")
+        if not name:
+            continue
+        if name in _GENERIC_COMPILATION_ARTISTS:
+            return True
+    return False
+
+
 def _score_result(
     result: dict[str, Any],
     expected_artist: str,
@@ -518,6 +551,8 @@ def _score_result(
     expected_duration: int | None = None,
     expected_year: Any = None,
     rejects: dict[str, int] | None = None,
+    *,
+    expected_album_artist: str | None = None,
 ) -> float:
     score = 0.0
     filename = str(result.get("filename", ""))
@@ -729,6 +764,24 @@ def _score_result(
     # signal.  Only an exact/near-exact title match is allowed to override
     # an album mismatch (the candidate may be a single pulled from a
     # different compilation, or the filename album may be a variant label).
+    #
+    # TWO RELAXATIONS, both still artist+title-gated:
+    #
+    # 1. COMPILATION LENIENCY.  A queue row on a "Various Artists"
+    #    compilation (album_artist is the placeholder) asks for a song that
+    #    ALSO lives on the artist's OWN release.  Peers almost always carry
+    #    it from that original release — a DIFFERENT album name — so an
+    #    album mismatch here is EXPECTED, not evidence of a wrong file
+    #    ("it doesn't match due to the album name being different even
+    #    though the track artist matches the artist and song title").
+    #    The hard reject is skipped; artist + title remain the verification.
+    #
+    # 2. CORE-TITLE OVERRIDE.  A version/edition marker drops the raw
+    #    ``title_score`` below 0.85 even though the BRACKET-STRIPPED core is
+    #    the same song ("Weak and Powerless (Album Version)" vs "Weak and
+    #    Powerless").  That is exactly the same-song-from-another-release
+    #    carve-out the gate already allows for exact titles, so a strong
+    #    core match must override the album mismatch the same way.
     if expected_album:
         parsed_album = str(parts.get("album") or "").strip()
         album_score = _similarity(str(parts.get("album") or ""), expected_album)
@@ -738,7 +791,16 @@ def _score_result(
                 and _normalise(expected_album) not in _normalise(filename)
                 and not _normalise(parsed_album) in _normalise(expected_album)
             )
-            if album_mismatch and title_score < 0.85:
+            compilation_context = _queue_item_is_compilation(
+                expected_artist=expected_artist,
+                expected_album_artist=expected_album_artist,
+            )
+            if (
+                album_mismatch
+                and title_score < 0.85
+                and not _title_core_match
+                and not compilation_context
+            ):
                 logger.debug(
                     "Rejected candidate — album mismatch",
                     filename=filename[:180],
@@ -810,6 +872,8 @@ def _select_best_result(
     expected_duration: int | None = None,
     expected_year: Any = None,
     min_score: float = 45.0,
+    *,
+    expected_album_artist: str | None = None,
 ) -> dict[str, Any] | None:
     scored: list[tuple[float, dict]] = []
     rejects: dict[str, int] = {}
@@ -817,7 +881,9 @@ def _select_best_result(
     for r in results:
         s = _score_result(
             r, expected_artist, expected_title, expected_album,
-            expected_duration, expected_year, rejects=rejects,
+            expected_duration, expected_year,
+            rejects=rejects,
+            expected_album_artist=expected_album_artist,
         )
         scored.append((s, r))
 
@@ -1069,6 +1135,10 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
     expected_artist = (item.get("artist") or "").strip()
     expected_title = (item.get("title") or "").strip()
     expected_album = (item.get("album") or "").strip() or None
+    # The album_artist is the compilation signal for the album gate: a VA
+    # row's song also lives on the artist's own release, so a peer file from
+    # THAT release has a different — and legitimate — album name.
+    expected_album_artist = (item.get("album_artist") or "").strip() or None
     expected_year = item.get("year") or item.get("release_year")
     expected_duration = None
     if item.get("duration"):
@@ -1115,6 +1185,7 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                     expected_artist=expected_artist,
                     expected_title=expected_title,
                     expected_album=expected_album,
+                    expected_album_artist=expected_album_artist,
                     expected_duration=expected_duration,
                     expected_year=expected_year,
                 )
