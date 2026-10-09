@@ -140,12 +140,37 @@ class TestTheRunnerProcessesEveryAlbumForFinalise:
     def test_the_progress_label_names_the_pass(self):
         assert '"Finalise Pass" if options.get("finalise_only")' in RUNNER_SOURCE
 
-    def test_a_stored_score_is_never_window_refreshed(self):
+    def test_a_stored_score_is_never_window_refreshed(self, monkeypatch):
         """"…only running the popularity … for files that are missing the
-        information": the staleness window must not re-score what exists."""
-        assert "if _mode_finalise:" in RUNNER_SOURCE
-        idx = RUNNER_SOURCE.index("if _mode_finalise:")
-        assert "_pop_due = False" in RUNNER_SOURCE[idx: idx + 700]
+        information": the staleness window must not re-score what exists.
+
+        The guard MOVED (the invariant did not): it used to be a
+        ``_pop_due = False`` written AFTER the two ``was_album_scanned``
+        lookups had already run and been discarded, which cost ~45s per album
+        on the reported Finalise pass. It now short-circuits at the FRONT of
+        ``_singles_popularity_due``, so this asserts the same thing by calling
+        the decision — a source-text check could not tell the two apart.
+        """
+        from services.popularity import scan_stage_runner as runner
+
+        assert hasattr(runner, "_singles_popularity_due"), (
+            "the finalise guard's home was removed"
+        )
+
+        def _boom(*args, **kwargs):
+            raise AssertionError(
+                "a finalise pass must not consult scan_history — the answer "
+                "would be discarded immediately"
+            )
+
+        monkeypatch.setattr(runner, "was_album_scanned", _boom)
+
+        assert runner._singles_popularity_due(
+            artist="Birds of Tokyo",
+            album="Birds of Tokyo",
+            album_is_old=True,
+            finalise=True,
+        ) is False
 
     def test_network_metadata_work_is_gated_off(self):
         """The recommend-stash and the missing-track recompute both reach

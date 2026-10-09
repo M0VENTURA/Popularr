@@ -11,7 +11,7 @@ Reduces API calls during repeated scans.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -117,3 +117,47 @@ def get_cache_duration_hours(track_year: int | None = None) -> int:
             return 24
     except (ValueError, TypeError):
         return 24
+
+
+def singles_detection_is_fresh(track: dict[str, Any], *, now: datetime | None = None) -> bool:
+    """True when this track's singles verdict may be reused instead of re-derived.
+
+    ``single_detection_last_updated`` is written ONLY by the singles block in
+    ``track_stage`` (and cleared by the track page's "clear single detection"),
+    so its presence means detection actually COMPLETED — whatever it concluded.
+    The TTL is :func:`get_cache_duration_hours`, the same window the rest of
+    this module uses.
+
+    ⚠️ THE BUG THIS REPLACES: the freshness check ALSO required positive
+    evidence — ``is_single`` or a matched source. That made "no" the one
+    verdict that could never be cached: every NON-single was re-assessed on
+    every pass, so Discogs and MusicBrainz ran again for each of them even
+    though the answer could not change inside the TTL. On an already-scanned
+    album that was tens of seconds of repeat network work *per track* (the
+    reported "4 minutes for one album that had all recent scan data"), and it
+    also disagreed with the album-level "unchanged" gate, which has always
+    asked only whether the timestamp exists.
+
+    An ERROR never stamps the timestamp, so a failed detection still retries.
+    """
+    raw = track.get("single_detection_last_updated")
+    if not raw:
+        return False
+
+    ts = raw
+    if isinstance(ts, str):
+        try:
+            ts = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    if not isinstance(ts, datetime):
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+
+    ref = now if now is not None else datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+
+    ttl_hours = get_cache_duration_hours(track.get("year") or track.get("release_year"))
+    return (ref - ts).total_seconds() < ttl_hours * 3600

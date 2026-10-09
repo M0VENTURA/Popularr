@@ -13,7 +13,7 @@ Architecture:
     up-to-date data.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 import structlog
 
@@ -170,25 +170,72 @@ def was_album_scanned(artist: str, album: str, scan_type: str, days: int = 7) ->
     Mirrors the legacy ``was_album_scanned`` helper used by ``album_skip_days``:
     an album whose most recent scan of the given type completed within the
     window is treated as already scanned and can be skipped.
+
+    ⚠️ TWO STATEMENTS, ON PURPOSE — this is the per-album hot spot.
+
+    The tolerant one wraps ``artist``/``album`` in ``LOWER(COALESCE(...))``,
+    and an EXPRESSION predicate cannot use ``idx_scan_history_scope
+    (scan_type, artist, album, status, started_at DESC)``: the index can only
+    serve the leading ``scan_type`` equality, so every row of that scan type
+    has to be read and filtered (and for a type that is a large slice of the
+    table the planner seq-scans the WHOLE table instead).  This runs three
+    times per album — the skip check plus two popularity-due checks — so on a
+    grown ``scan_history`` that was ~45s of dead time between an album's
+    header line and its first track.
+
+    The exact match runs FIRST because it constrains the whole index prefix
+    plus the range on ``started_at``, so Postgres answers it from the index
+    alone.  It almost always hits — the artist/album are the same values the
+    ``record_scan`` writer was handed by the same loop iteration — and the
+    tolerant statement stays as the fallback, so differing casing or an
+    edition-marker rewrite still resolves.
+
+    The cutoff is computed here rather than as ``NOW() - INTERVAL``: it matches
+    the ``utcnow()`` timestamps ``record_scan`` stamps, and it parses on every
+    dialect (the old form was PostgreSQL-only, so this helper could never be
+    exercised by the SQLite test suite).
     """
     if not artist or not album or days <= 0:
         return False
+
+    # Naive UTC — exactly what ``record_scan`` writes into ``started_at``.
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=int(days))
+    params = {
+        "scan_type": scan_type,
+        "artist": artist,
+        "album": album,
+        "cutoff": cutoff,
+    }
     try:
         with db_session() as session:
-            result = session.execute(
+            exact = session.execute(
+                text("""
+                    SELECT 1 FROM scan_history
+                    WHERE scan_type = :scan_type
+                      AND artist = :artist
+                      AND album = :album
+                      AND status = 'completed'
+                      AND started_at > :cutoff
+                    LIMIT 1
+                """),
+                params,
+            ).fetchone()
+            if exact is not None:
+                return True
+
+            tolerant = session.execute(
                 text("""
                     SELECT 1 FROM scan_history
                     WHERE scan_type = :scan_type
                       AND LOWER(COALESCE(artist, '')) = LOWER(:artist)
                       AND LOWER(COALESCE(album, '')) = LOWER(:album)
                       AND status = 'completed'
-                      AND started_at > (NOW() - (:days * INTERVAL '1 day'))
-                    ORDER BY started_at DESC
+                      AND started_at > :cutoff
                     LIMIT 1
                 """),
-                {"scan_type": scan_type, "artist": artist, "album": album, "days": int(days)},
-            )
-            return result.fetchone() is not None
+                params,
+            ).fetchone()
+            return tolerant is not None
     except Exception as exc:
         logger.exception(
             "was_album_scanned query failed",

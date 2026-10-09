@@ -886,6 +886,46 @@ def _resolve_scan_type(options: dict[str, Any]) -> str:
     return "combined"
 
 
+def _singles_popularity_due(
+    *,
+    artist: str,
+    album: str,
+    album_is_old: bool,
+    finalise: bool,
+) -> bool:
+    """Decide whether a singles/finalise pass should refresh scores too.
+
+    ``finalise=True`` answers **without touching ``scan_history`` at all**.
+    A finalise pass must never touch a score that exists, so the answer would
+    be discarded two lines later — but computing it cost two
+    ``was_album_scanned`` lookups, each of which used to read every row of its
+    ``scan_type``.  Reported as *"~4 minutes to progress one album that had all
+    recent scan data"*: two unanswerable questions sat between the album's
+    header line and its first track.
+
+    The window and the two-type check (``popularity``, then ``combined``) are
+    unchanged — only the order of the questions moved.
+    """
+    if finalise:
+        return False
+
+    try:
+        _pop_window = int(get_feature("popularity_skip_days", 7) or 0)
+        if album_is_old:
+            _pop_window = int(get_feature("popularity_old_album_skip_days", 30) or 0)
+    except Exception:
+        _pop_window = 7
+
+    if _pop_window <= 0:
+        # Config says "always rescan popularity" — nothing to look up.
+        return True
+
+    scored_recently = was_album_scanned(artist, album, "popularity", _pop_window) or was_album_scanned(
+        artist, album, "combined", _pop_window
+    )
+    return not scored_recently
+
+
 def _album_release_is_old(tracks: list[dict[str, Any]] | None, now=None) -> bool:
     try:
         age_months = int(get_feature("old_album_age_months", 48) or 48)
@@ -2479,29 +2519,26 @@ def run_scan(
                     logger.debug("LB tag batch failed", artist=artist, album=album, error=str(exc))
 
             # Singles pass: decide whether popularity is also due for a refresh.
-            _pop_due = False
-            if _mode_singles:
-                try:
-                    _pop_window = int(get_feature("popularity_skip_days", 7) or 0)
-                    if _album_is_old:
-                        _pop_window = int(get_feature("popularity_old_album_skip_days", 30) or 0)
-                except Exception:
-                    _pop_window = 7
-
-                if _pop_window <= 0:
-                    _pop_due = True
-                else:
-                    _pop_scored_recently = (was_album_scanned(artist, album, "popularity", _pop_window) or was_album_scanned(artist, album, "combined", _pop_window))
-                    _pop_due = not _pop_scored_recently
-
-            if _mode_finalise:
-                # "…only running the popularity … for files that are missing
-                # the information." A stored score is reused whenever
-                # ``_has_stored_popularity`` holds (track_stage), and
-                # ``refresh_popularity_if_due`` would widen that to a window
-                # refresh — finalise must never touch a score that exists.
-                # A track with NO stored score computes regardless of this flag.
-                _pop_due = False
+            #
+            # The finalise half of that decision now lives at the FRONT of
+            # ``_singles_popularity_due``: "…only running the popularity … for
+            # files that are missing the information." A stored score is reused
+            # whenever ``_has_stored_popularity`` holds (track_stage), and
+            # ``refresh_popularity_if_due`` would widen that to a window refresh
+            # — finalise must never touch a score that exists (a track with NO
+            # stored score computes regardless of this flag). Asking the two
+            # scan_history questions first and throwing the answer away was
+            # pure cost, so it is no longer asked.
+            _pop_due = (
+                _singles_popularity_due(
+                    artist=artist,
+                    album=album,
+                    album_is_old=_album_is_old,
+                    finalise=_mode_finalise,
+                )
+                if _mode_singles
+                else False
+            )
 
             # -------------------------------------------------------------
             # Album-authoritative release year.

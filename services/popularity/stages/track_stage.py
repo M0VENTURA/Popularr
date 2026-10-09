@@ -1518,35 +1518,18 @@ def process_track(
     # -------------------------------------------------------------------------
     # 2. SINGLES DETECTION
     # -------------------------------------------------------------------------
+    # A verdict is fresh for its TTL whatever it concluded. This used to ALSO
+    # demand positive evidence (``is_single`` or a matched source), so the
+    # commonest outcome — "not a single" — was never cacheable and every pass
+    # re-ran Discogs + MusicBrainz for those tracks. The decision lives in
+    # ``popularity_cache_policy.singles_detection_is_fresh`` next to the other
+    # freshness rules, where it can be tested directly.
     _sd_fresh = False
     if not bool(options.get("force")):
         try:
-            from datetime import datetime as _sd_dt, timezone as _sd_tz
-            _sd_raw = track.get("single_detection_last_updated")
-            if _sd_raw:
-                _sd_ts = _sd_raw
-                if isinstance(_sd_ts, str):
-                    _sd_ts = _sd_dt.fromisoformat(str(_sd_ts).replace("Z", "+00:00"))
-                if _sd_ts.tzinfo is None:
-                    _sd_ts = _sd_ts.replace(tzinfo=_sd_tz.utc)
-                _sd_ttl_hours = get_cache_duration_hours(
-                    track.get("year") or track.get("release_year")
-                )
-                _sd_age_ok = (_sd_dt.now(_sd_tz.utc) - _sd_ts).total_seconds() < _sd_ttl_hours * 3600
+            from services.popularity.popularity_cache_policy import singles_detection_is_fresh
 
-                _sd_has_evidence = bool(track.get("is_single"))
-                if not _sd_has_evidence:
-                    try:
-                        _sd_sources = track.get("single_sources") or ""
-                        sources = json.loads(_sd_sources) if isinstance(_sd_sources, str) else (_sd_sources or [])
-                        _sd_has_evidence = any(
-                            isinstance(s, dict) and bool(s.get("matched"))
-                            for s in (sources or [])
-                        )
-                    except Exception:
-                        _sd_has_evidence = True
-
-                _sd_fresh = _sd_age_ok and _sd_has_evidence
+            _sd_fresh = singles_detection_is_fresh(track)
         except Exception:
             _sd_fresh = False
 
