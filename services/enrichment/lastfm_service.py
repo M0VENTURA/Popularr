@@ -566,7 +566,12 @@ class LastFmService:
 
         detail = self._get_track_info_once(best_artist or artist, best_name)
         toptags = detail.get("toptags") or {}
-        playcount = int(detail.get("track_play", 0) or 0)
+        # ``track.getInfo`` is the authority for the playcount, but when it
+        # comes back empty the search result we already vetted still carries
+        # one — without the fallback the listener count survived and the
+        # playcount was written as 0, which is impossible (a listener with no
+        # plays).
+        playcount = int(detail.get("track_play", 0) or 0) or int(best.get("playcount") or 0)
         listeners = int(detail.get("listeners", 0) or 0) or best_listeners
 
         return {
@@ -651,6 +656,12 @@ class LastFmService:
                             "name": track.get("name", ""),
                             "artist": track_artist,
                             "listeners": int(track.get("listeners", 0) or 0),
+                            # The raw ``track.search`` response carries a per-match
+                            # playcount; dropping it made every search-resolved
+                            # track report listeners > 0 with playcount == 0 (the
+                            # aggregated search path sums it). The two numbers are
+                            # the same payload on Last.fm — lose one, lose both.
+                            "playcount": int(track.get("playcount", 0) or 0),
                             "url": track.get("url", ""),
                             "_score": score,
                         }

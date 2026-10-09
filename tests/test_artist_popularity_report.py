@@ -72,6 +72,7 @@ def _insert(
     album_artist: str | None = None,
     album: str = "Test Album",
     final_score: float | None = None,
+    raw_score: float | None = None,
     stars: int | None = None,
     lastfm_listeners: int | None = None,
     listenbrainz_listens: int | None = None,
@@ -83,11 +84,11 @@ def _insert(
             """
             INSERT INTO tracks (id, artist, album_artist, album, title,
                                 disc_number, track_number, file_path,
-                                final_score, stars,
+                                final_score, raw_score, stars,
                                 lastfm_listeners, listenbrainz_listens)
             VALUES (:id, :artist, :album_artist, :album, :title,
                     1, :track_number, :file_path,
-                    :final_score, :stars,
+                    :final_score, :raw_score, :stars,
                     :lastfm_listeners, :listenbrainz_listens)
             ON CONFLICT DO NOTHING
             """
@@ -101,6 +102,7 @@ def _insert(
             "track_number": int(track_id[-1]) if track_id[-1].isdigit() else 1,
             "file_path": f"/music/{track_id}.mp3",
             "final_score": final_score,
+            "raw_score": raw_score,
             "stars": stars,
             "lastfm_listeners": lastfm_listeners,
             "listenbrainz_listens": listenbrainz_listens,
@@ -177,6 +179,54 @@ class TestTheReportEndpoint:
 
         titles = [row[1] for row in rows[1:]]
         assert titles == ["Scored", "Unscored"]
+
+    async def test_the_pre_remap_blend_outranks_the_album_remapped_score(
+        self, client, db_session
+    ):
+        """THE REPORTED CASE.
+
+        ``final_score`` is ``apply_album_relative_popularity(raw)`` — it
+        re-normalises every album onto the same band, so the top cut of a live
+        album (4,700 Last.fm listeners) read 97.68 and ranked ABOVE the
+        artist's biggest hit (1.1M listeners, 88.7). ``raw_score`` is the
+        cross-album blend that number was remapped FROM, and the report
+        promises "most popular first" — so the raw blend must lead, with the
+        remapped value still shown in its column.
+        """
+        _insert(
+            db_session, track_id="t1", title="Live Cut",
+            final_score=97.68, raw_score=68.70,
+            lastfm_listeners=4_660, listenbrainz_listens=168_786,
+        )
+        _insert(
+            db_session, track_id="t2", title="Studio Hit",
+            final_score=88.72, raw_score=91.40,
+            lastfm_listeners=1_099_696, listenbrainz_listens=957_674,
+        )
+
+        rows = await _report_rows(client)
+
+        titles = [row[1] for row in rows[1:]]
+        assert titles == ["Studio Hit", "Live Cut"], (
+            "ranking by the album-relative final_score puts a 4.7k-listener "
+            "live rendition above a 1.1M-listener hit — the report must order "
+            "by the cross-album pre-remap blend"
+        )
+        assert [row[0] for row in rows[1:]] == ["1", "2"]
+
+    async def test_a_legacy_row_without_raw_score_falls_back(self, client, db_session):
+        """CONTROL — rows written before migration 016 keep the old chain."""
+        _insert(db_session, track_id="t1", title="Modern", final_score=50.0, raw_score=60.0)
+        _insert(db_session, track_id="t2", title="Legacy", final_score=70.0, raw_score=None)
+
+        rows = await _report_rows(client)
+
+        titles = [row[1] for row in rows[1:]]
+        # The modern row's pre-remap 60 is compared against the legacy row's
+        # FALLBACK (its final 70) numerically, so 70 sorts first here — what
+        # matters is that the legacy row is still present and still ordered by
+        # its own final_score, exactly as it was before raw_score existed.
+        assert titles == ["Legacy", "Modern"]
 
     async def test_only_this_artists_tracks_appear(self, client, db_session):
         _insert(db_session, track_id="t1", title="Mine", final_score=50.0)

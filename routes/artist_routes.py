@@ -591,10 +591,15 @@ _POPULARITY_REPORT_COLUMNS = (
     "popularity_frozen",
 )
 
-#: Most popular first. ``final_score`` is THE popularity number the page and the
-#: scan log both report (``popularity`` and ``stars`` only ever act as
-#: fallbacks when it is null — the page's own ordering uses the same chain);
-#: the title tiebreak keeps two equally-scored tracks in a stable order.
+#: Most popular first. ``raw_score`` is the PRE-REMAP blend (migration 016):
+#: the weighted Last.fm/ListenBrainz mixture BEFORE
+#: ``apply_album_relative_popularity`` normalised it to the album's own band.
+#: ``final_score`` is that normalised value, so it is only comparable WITHIN an
+#: album — it is what let the top cut of a live album (a few thousand
+#: listeners) outrank the artist's biggest hit (a million listeners) in this
+#: report. The report promises "most popular first", so the cross-album number
+#: leads; ``final_score`` (and the page's own fallback chain) only serve rows
+#: written before ``raw_score`` existed.
 _POPULARITY_REPORT_SQL = """
     SELECT title, artist, album, disc_number, track_number, year,
            final_score, popularity, stars,
@@ -604,7 +609,7 @@ _POPULARITY_REPORT_SQL = """
            is_live, popularity_frozen
     FROM tracks
     WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
-    ORDER BY COALESCE(final_score, popularity, stars, 0) DESC,
+    ORDER BY COALESCE(NULLIF(raw_score, 0), final_score, popularity, stars, 0) DESC,
              LOWER(COALESCE(title, ''))
 """
 
@@ -633,6 +638,14 @@ def _build_popularity_report(artist: str) -> str:
 @artist_bp.route("/api/artist/popularity-report")
 async def api_artist_popularity_report() -> Any:
     """Download every track for one artist as CSV, ordered most popular first.
+
+    Ordering uses the PRE-REMAP ``raw_score`` when present, not the
+    album-relative ``final_score``: the remap rescales EVERY album onto the
+    same band, so a live album's best cut can read 97 while the artist's
+    biggest hit reads 88 — and ranking those across albums calls the 4,700-
+    listener track "more popular", which is not what the report promises.
+    Rows written before migration 016 (no ``raw_score``) fall back to the
+    page's usual chain.
 
     Backs the test-site artist page's "Download Popularity Report" action: the
     full popularity row set — Last.fm listeners/playcount, ListenBrainz
