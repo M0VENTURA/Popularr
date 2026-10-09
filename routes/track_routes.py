@@ -519,6 +519,111 @@ async def api_track_update_metadata() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/track/bulk-update
+# ---------------------------------------------------------------------------
+
+@track_bp.route("/bulk-update", methods=["POST"])
+async def api_track_bulk_update() -> Any:
+    """Apply the Edit Album page's IDENTITY fields to SELECTED tracks.
+
+    Backs the album page's bulk "Edit Tracks" button (beside "Rename Selected").
+    Where "Rename Selected" moves FILES, this edits the rows — the point being
+    to realign a handful of tracks onto a *different* album (or to correct a
+    year/title/artist) without touching the rest of the tracklist.
+
+    Body::
+
+        {"track_ids": ["…"], "fields": {"album": "…", "year": "2007"},
+         "sync_to_file": true}
+
+    A field that is ABSENT or blank means "leave unchanged" — the modal only
+    posts what the user filled in, so a bulk edit is a partial update by
+    construction. Every id in ``track_ids`` is written; the DB update is one
+    statement and the file fan-out is the same ``sync_track_tags_to_file`` the
+    single-track endpoint uses, so the tags Navidrome reads stay in step with
+    the rows (the album-save fan-out rule).
+    """
+    data = (await request.get_json(silent=True)) or {}
+    track_ids = [str(t).strip() for t in (data.get("track_ids") or []) if str(t).strip()]
+    fields = data.get("fields") or {}
+
+    if not track_ids:
+        return jsonify({"success": False, "error": "track_ids required"}), 400
+    if not isinstance(fields, dict) or not fields:
+        return jsonify({"success": False, "error": "fields required"}), 400
+
+    allowed = {
+        "album", "album_artist", "year", "release_year",
+        "title", "artist", "writer", "track_number", "disc_number",
+    }
+    unknown = sorted(set(str(k) for k in fields) - allowed)
+    if unknown:
+        # Refused rather than silently dropped: a field the caller believes it
+        # set must never look applied.
+        return jsonify({
+            "success": False,
+            "error": f"Unsupported field(s): {', '.join(unknown)}",
+        }), 400
+
+    updates = {
+        str(k): v for k, v in fields.items()
+        if v is not None and str(v).strip() != ""
+    }
+    if not updates:
+        return jsonify({"success": False, "error": "No fields to update"}), 400
+
+    try:
+        with db_session() as session:
+            updates = _normalize_track_updates(updates, _get_track_column_types(session))
+            set_clause = ", ".join(f"{k} = :{k}" for k in updates)
+            placeholders = ", ".join(f":t{i}" for i in range(len(track_ids)))
+            params = {
+                **updates,
+                **{f"t{i}": track_id for i, track_id in enumerate(track_ids)},
+            }
+            session.execute(
+                text(
+                    f"UPDATE tracks SET {set_clause} "
+                    f"WHERE CAST(id AS TEXT) IN ({placeholders})"
+                ),
+                params,
+            )
+    except Exception as exc:
+        logger.error("Bulk track update failed", count=len(track_ids), error=str(exc))
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+    files_updated = 0
+    file_failures: list[str] = []
+    if data.get("sync_to_file", True):
+        for track_id in track_ids:
+            try:
+                if sync_track_tags_to_file(track_id):
+                    files_updated += 1
+                else:
+                    file_failures.append(track_id)
+            except Exception as sync_err:
+                file_failures.append(track_id)
+                logger.warning(
+                    "File tag sync failed for bulk update",
+                    track_id=track_id, error=str(sync_err),
+                )
+
+    navidrome_scan_triggered = False
+    if files_updated:
+        # One scan for the whole batch, not one per track.
+        navidrome_scan_triggered = _trigger_navidrome_scan()
+
+    return jsonify({
+        "success": True,
+        "updated": sorted(updates),
+        "tracks_requested": len(track_ids),
+        "files_updated": files_updated,
+        "file_failures": file_failures,
+        "navidrome_scan_triggered": navidrome_scan_triggered,
+    })
+
+
+# ---------------------------------------------------------------------------
 # GET /api/track/genre-recommendations
 # ---------------------------------------------------------------------------
 

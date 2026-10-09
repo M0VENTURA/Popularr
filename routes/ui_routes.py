@@ -1906,20 +1906,14 @@ async def album_detail(album_path: str) -> Any:
             tracks = scoped
             if _primary:
                 album_rg_filter = _primary
-    elif explicit_year and album_year_filter is not None:
-        # Reached ONLY when no row of this album carries a release group —
-        # the year is then the only identity left, so the old split applies.
-        year_tracks = [t for t in tracks if _track_year(t) == album_year_filter]
-        if year_tracks:
-            tracks = year_tracks
     else:
-        # No release-group data at all: keep the year split.
-        if album_year_filter is None and len(all_album_years) > 1:
-            album_year_filter = all_album_years[0]
-        if album_year_filter is not None and tracks:
-            year_tracks = [t for t in tracks if _track_year(t) == album_year_filter]
-            if year_tracks:
-                tracks = year_tracks
+        # No release-group data — but the SAME NAME across years is the same
+        # album to the person looking at it (a re-press tagged with the pressing
+        # year). Reported: "I also want it to show on similar albums with no
+        # release ID but the same name with a different year" → merged, exactly
+        # like the release-group case above. The year no longer scopes anything;
+        # it survives only as a LEGACY address, canonicalised below.
+        pass
 
     # ── One release, one URL ───────────────────────────────────────────────
     #
@@ -1931,14 +1925,15 @@ async def album_detail(album_path: str) -> Any:
     # in the track list). Collapse them onto the release group so a shared
     # link can never look like a second, differently-scoped album.
     #
-    # Not applied to POST (the save below issues its own redirect) and not
-    # applied when no release group exists — a genuinely year-scoped album
-    # keeps its year URLs.
-    if request.method != "POST" and explicit_year and album_rg_filter:
-        if album_rg_filter != album_year_seg:
+    # Not applied to POST (the save below issues its own redirect).  With no
+    # release group the address collapses to the bare album URL instead — the
+    # year identifies nothing, so there is nothing for it to select.
+    if request.method != "POST" and explicit_year:
+        _scope = album_rg_filter or ""
+        if _scope != album_year_seg:
             _canonical = url_for(
                 "ui.album_detail",
-                album_path=f"{artist_name}/{album_name}/{album_rg_filter}",
+                album_path=f"{artist_name}/{album_name}/{_scope}".rstrip("/"),
             )
             _qs = request.query_string.decode() if request.query_string else ""
             return redirect(f"{_canonical}?{_qs}" if _qs else _canonical)
@@ -2634,8 +2629,8 @@ async def album_detail(album_path: str) -> Any:
         _redirect_scope = ""
         if album_rg_filter:
             _redirect_scope = f"/{album_rg_filter}"
-        elif album_year_filter is not None:
-            _redirect_scope = f"/{album_year_filter}"
+        # No year branch: a year identifies nothing now, so a save lands on the
+        # canonical address (release group when known, else the bare album).
         # Fragment: the save is submitted from the EDIT ALBUM tab, but the
         # reload always came back on the default TRACKS tab — so the user saved
         # and was immediately dropped on the tracklist with a different Save

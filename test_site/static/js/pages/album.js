@@ -1120,6 +1120,108 @@
   global.renameSelectedTracks = renameSelectedTracks;
 
   /**
+   * Open the bulk "Edit Tracks" modal for the current selection.
+   *
+   * Sits beside "Rename Selected": rename moves FILES, this edits the ROWS —
+   * the same identity fields the Edit Album page offers, scoped to the ticks.
+   */
+  function openEditTracksModal() {
+    const ids = selectedTrackIds();
+    if (!ids.length) {
+      notifyError('Please select at least one track.');
+      return;
+    }
+    const counter = document.getElementById('editTracksSelectedCount');
+    if (counter) counter.textContent = String(ids.length);
+
+    const modalEl = document.getElementById('editTracksModal');
+    if (!modalEl) return;
+    if (global.bootstrap && global.bootstrap.Modal) {
+      global.bootstrap.Modal.getOrCreateInstance(modalEl).show();
+      return;
+    }
+    modalEl.classList.add('show');
+    modalEl.style.display = 'block';
+  }
+
+  /**
+   * Apply the modal's identity fields to the SELECTED tracks only.
+   *
+   * Only NON-BLANK fields are posted — a bulk edit is a partial update, so an
+   * untouched box leaves that column alone. The server refuses anything
+   * outside its allow-list, so a field this page does not know about can never
+   * be written silently.
+   */
+  async function applyEditTracks(btn) {
+    const ids = selectedTrackIds();
+    if (!ids.length) {
+      notifyError('Please select at least one track.');
+      return;
+    }
+
+    const fieldMap = {
+      album: 'btAlbum',
+      album_artist: 'btAlbumArtist',
+      year: 'btYear',
+      release_year: 'btReleaseYear',
+      track_number: 'btTrackNumber',
+      disc_number: 'btDiscNumber',
+      title: 'btTitle',
+      artist: 'btArtist',
+      writer: 'btWriter',
+    };
+    const fields = {};
+    Object.entries(fieldMap).forEach(([field, id]) => {
+      const el = document.getElementById(id);
+      const value = el ? String(el.value || '').trim() : '';
+      if (value) fields[field] = value;
+    });
+    if (!Object.keys(fields).length) {
+      notifyError('Fill in at least one field to apply.');
+      return;
+    }
+
+    const confirmed = global.ui && global.ui.confirm
+      ? await global.ui.confirm({
+        title: 'Edit selected tracks',
+        message: `Apply ${Object.keys(fields).length} field(s) to ${ids.length} selected track(s)?`,
+        detail: 'Database rows and file tags are both updated.',
+        tone: 'warning',
+        confirmLabel: 'Apply',
+      })
+      : window.confirm(`Apply these fields to ${ids.length} selected track(s)?`);
+    if (!confirmed) return;
+
+    const run = async () => {
+      const data = await global.api.postJson('/api/track/bulk-update', {
+        track_ids: ids,
+        fields,
+        sync_to_file: true,
+      });
+      if (!data || data.success !== true) {
+        notifyError((data && data.error) || 'Could not update the selected tracks.');
+        return;
+      }
+      if (Array.isArray(data.file_failures) && data.file_failures.length) {
+        notifyError(`${data.file_failures.length} track(s) updated in the database but ` +
+          'their file tags could not be written — see the logs.');
+      } else {
+        notifySuccess(`Updated ${ids.length} track(s).`);
+      }
+      setTimeout(() => global.location.reload(), 900);
+    };
+
+    if (global.busyPopup) {
+      return global.busyPopup.showAndRun('Updating selected tracks…', run)
+        .catch((error) => notifyError('Error: ' + error.message));
+    }
+    return run().catch((error) => notifyError('Error: ' + error.message));
+  }
+
+  global.openEditTracksModal = openEditTracksModal;
+  global.applyEditTracks = applyEditTracks;
+
+  /**
    * Open the "Change Album Art" dialog: search external sources, paste a URL,
    * or upload a file.
    *

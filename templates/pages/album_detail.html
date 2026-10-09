@@ -255,12 +255,85 @@
            column count (and every colspan the JS sub-rows rely on) stays put. #}
         <div id="bulkActionsToolbar" class="d-none align-items-center justify-content-between mb-2 gap-2 flex-wrap">
           <span class="text-muted small"><strong id="selectedCount">0</strong> track(s) selected</span>
+          <button class="btn btn-sm btn-outline-secondary" id="editTracksBtn" onclick="openEditTracksModal()" title="Apply album/artist/year/title edits to the SELECTED tracks only — the same identity fields the Edit Album page offers">
+            <i class="bi bi-pencil-square me-1"></i> Edit Tracks
+          </button>
           <button class="btn btn-sm btn-outline-primary" id="renameSelectedBtn" onclick="renameSelectedTracks(this)" title="Rename the selected files to the configured naming format (converts FLAC to MP3 when that is enabled in Config)">
             <i class="bi bi-files me-1"></i> Rename Selected
           </button>
           <button class="btn btn-sm btn-outline-danger" id="bulkDeleteSelectedBtn" onclick="confirmBulkDeleteTracks()" title="Delete the selected tracks — from the database, or from the database and disk">
             <i class="bi bi-trash me-1"></i> Delete Selected
           </button>
+        </div>
+        {# Bulk track edit — the Edit Album page's identity fields, scoped to the
+           selection. Blank fields are NOT posted, so the server writes only what
+           was filled in (and refuses anything outside its allow-list). Used to
+           realign a few tracks onto a different album without disturbing the
+           rest of the tracklist. #}
+        <div class="modal fade" id="editTracksModal" tabindex="-1" aria-hidden="true" aria-labelledby="editTracksModalTitle">
+          <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content bg-dark border-secondary">
+              <div class="modal-header border-secondary">
+                <h5 class="modal-title" id="editTracksModalTitle">
+                  <i class="bi bi-pencil-square me-2 text-warning"></i>Edit selected tracks
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+              </div>
+              <div class="modal-body">
+                <p class="text-muted small mb-3">
+                  Applies to <strong id="editTracksSelectedCount">0</strong> selected track(s).
+                  Leave a field blank to keep its current value — only what you type is
+                  written. Use <em>Album Title</em> / <em>Album Artist</em> /
+                  <em>Original Year</em> to realign tracks onto a different album.
+                  Both the database rows and the file tags are updated.
+                </p>
+                <div class="row g-3">
+                  <div class="col-md-6">
+                    <label class="form-label small" for="btAlbum">Album Title</label>
+                    <input type="text" class="form-control bg-dark text-light border-secondary" id="btAlbum" autocomplete="off">
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label small" for="btAlbumArtist">Album Artist</label>
+                    <input type="text" class="form-control bg-dark text-light border-secondary" id="btAlbumArtist" autocomplete="off">
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label small" for="btYear">Original Year</label>
+                    <input type="number" class="form-control bg-dark text-light border-secondary" id="btYear" placeholder="YYYY" min="0" max="2100">
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label small" for="btReleaseYear">Release Year</label>
+                    <input type="number" class="form-control bg-dark text-light border-secondary" id="btReleaseYear" placeholder="YYYY" min="0" max="2100">
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label small" for="btTrackNumber">Track Number</label>
+                    <input type="text" class="form-control bg-dark text-light border-secondary" id="btTrackNumber">
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label small" for="btDiscNumber">Disc Number</label>
+                    <input type="text" class="form-control bg-dark text-light border-secondary" id="btDiscNumber">
+                  </div>
+                  <div class="col-12">
+                    <label class="form-label small" for="btTitle">Track Title</label>
+                    <input type="text" class="form-control bg-dark text-light border-secondary" id="btTitle">
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label small" for="btArtist">Track Artist</label>
+                    <input type="text" class="form-control bg-dark text-light border-secondary" id="btArtist">
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label small" for="btWriter">Composer</label>
+                    <input type="text" class="form-control bg-dark text-light border-secondary" id="btWriter">
+                  </div>
+                </div>
+              </div>
+              <div class="modal-footer border-secondary">
+                <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-success btn-sm" id="editTracksApplyBtn" onclick="applyEditTracks(this)">
+                  <i class="bi bi-check2-circle me-1"></i> Apply to selected
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="table-responsive">
           {# NOT data-mobile-cards. This table's rows are only partly server-rendered:

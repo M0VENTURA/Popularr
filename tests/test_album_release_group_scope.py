@@ -62,13 +62,12 @@ class TestTheAlbumPageKnowsItsScope:
         assert "elif len(release_groups) == 1:" in src, (
             "one release group must produce one page"
         )
-        # The single-RG branch must come BEFORE the explicit-year branch, or a
-        # year URL (which the dashboard still builds) slices the release again.
-        single = src.index("elif len(release_groups) == 1:")
-        by_year = src.index("elif explicit_year and album_year_filter is not None:")
-        assert single < by_year, (
-            "an explicit year URL must not beat a single release group — that "
-            "is exactly the /2004 vs /1963 split that was reported"
+        # No year branch may exist to beat it. The year stopped identifying
+        # anything when same-name albums without a release ID were merged too
+        # (2026-10-09), so there is nothing left for a year URL to slice with.
+        assert "elif explicit_year and album_year_filter is not None:" not in src, (
+            "a year-scoping branch is back — an album with a release group must "
+            "never be sliced by the year in its address"
         )
 
     def test_several_release_groups_default_to_the_largest(self):
@@ -79,11 +78,18 @@ class TestTheAlbumPageKnowsItsScope:
             "deterministically rather than merging them"
         )
 
-    def test_no_release_group_data_falls_back_to_the_year_split(self):
+    def test_no_release_group_data_also_merges_every_year(self):
+        """Reported: "I also want it to show on similar albums with no release
+        ID but the same name with a different year."""
         src = UI_ROUTES.read_text(encoding="utf-8")
         branch = src[src.index("else:", src.index("elif len(release_groups) > 1:")):]
-        assert "len(all_album_years) > 1" in branch, (
-            "an album with no release-group data must keep the year split"
+        head = branch.split("\n\n")[0]
+        assert "year_tracks" not in head, (
+            "an album with no release-group data still splits by year — the "
+            "same name across years must land on ONE page"
+        )
+        assert "pass" in head, (
+            "the no-release-group branch must merge (the fall-through case)"
         )
 
 
@@ -238,28 +244,34 @@ class TestTheYearURLCannotSliceAReleaseGroup:
             "two year addresses must collapse to ONE canonical release URL"
         )
 
-    async def test_a_year_url_without_a_release_group_still_scopes(
+    async def test_a_year_url_without_a_release_group_collapses_to_the_bare_url(
         self, app, client, db_session
     ):
-        """CONTROL: the year split is the only identity an unbound album has."""
+        """CONTROL: the merge applies to unbound albums too — the year is
+        canonicalised away rather than used to scope."""
         album = "Unbound Editions"
         self._seed(db_session, "u-1", "Artist", album, "Old Cut", "1999")
         self._seed(db_session, "u-2", "Artist", album, "New Cut", "2015")
 
         resp = await client.get(f"/album/Artist/{album}/1999".replace(" ", "%20"))
-        assert resp.status_code == 200, (
-            "an album with NO release-group data must keep its year URLs"
+        assert resp.status_code in (301, 302), (
+            "a legacy year address must canonicalise, not serve a sliced page"
         )
-        body = await resp.get_data(as_text=True)
-        assert "Old Cut" in body
-        assert "New Cut" not in body
+        location = resp.headers["Location"]
+        assert "1999" not in location, "the year must not survive as a scope"
 
-    def test_the_release_group_branch_outranks_the_year_branch(self):
+        page = await client.get(location)
+        assert page.status_code == 200
+        body = await page.get_data(as_text=True)
+        assert "Old Cut" in body
+        assert "New Cut" in body, "same name, different year, no release ID → one page"
+
+    def test_the_year_never_scopes_anything(self):
         src = UI_ROUTES.read_text(encoding="utf-8")
-        several = src.index("elif len(release_groups) > 1:")
-        by_year = src.index("elif explicit_year and album_year_filter is not None:")
-        assert several < by_year, (
-            "several release groups must be resolved BEFORE the year branch — "
-            "with the old order a year URL sliced an album that carried a "
-            "release group, which is the reported /2007 vs /2011 split"
+        assert "elif explicit_year" not in src, (
+            "a year-scoping branch is back"
+        )
+        assert 'if request.method != "POST" and explicit_year:' in src, (
+            "a year segment must still be canonicalised away — dropping the "
+            "scope without redirecting would leave two addresses for one album"
         )

@@ -1,13 +1,24 @@
-"""Regression tests: same-name albums released in different years must not
-be merged on the album page.
+"""Same-name albums released in different years now share ONE album page.
 
-The album page (``/album/<artist>/<album>``) previously fetched ALL tracks by
-(artist, album) — two albums sharing a name from different years (a re-release
-or a genuine name collision) were merged into one page.  The fix:
+CONTRACT REVERSED on request (2026-10-09):
 
-1. When the URL has no year segment and the (artist, album) matches tracks
-   from MULTIPLE distinct years, the page defaults to the MOST RECENT year.
-2. A year selector links to ``/album/<artist>/<album>/<year>`` editions.
+    > I also want it to show on similar albums with no release ID but the same
+    > name with a different year.
+
+This file originally pinned the OPPOSITE (2026-08-28): same-name albums with
+different years were split, defaulting to the most recent, with a year selector
+linking to ``/album/<artist>/<album>/<year>``.  The year selector has since
+been dropped from the template, and the album page now merges — with or without
+a release group:
+
+* a release-group segment scopes to that release group;
+* release-group data on the rows (one or several) scopes to the release group;
+* NO release-group data → every year's tracks on ONE page;
+* a legacy ``/<year>`` address 302s to the canonical one (release group when
+  known, else the bare album URL) — the year identifies nothing.
+
+``tests/test_album_release_group_scope.py`` keeps the release-group half of the
+contract; this file owns the no-release-ID half.
 """
 
 from __future__ import annotations
@@ -36,9 +47,9 @@ def _seed_album(db_session, track_id, artist, album, title, year, release_year=N
 
 
 class TestAlbumYearDisambiguation:
-    async def test_route_defaults_to_most_recent_year(self, app, client, db_session):
-        """Opening /album/<artist>/<album> with no year must show only the
-        most recent edition's tracks when the name spans multiple years."""
+    async def test_route_merges_every_year(self, app, client, db_session):
+        """Opening /album/<artist>/<album> shows EVERY edition's tracks — same
+        name, different year, no release ID."""
         _seed_album(db_session, "t1", "Artist", "Same Name", "Track One", "1999")
         _seed_album(db_session, "t2", "Artist", "Same Name", "Track Two", "1999")
         _seed_album(db_session, "t3", "Artist", "Same Name", "Remaster Track", "2015")
@@ -46,25 +57,31 @@ class TestAlbumYearDisambiguation:
         resp = await client.get("/album/Artist/Same%20Name")
         assert resp.status_code == 200
         body = await resp.get_data(as_text=True)
-        # The 2015 edition's track appears…
-        assert "Remaster Track" in body
-        # …and the 1999-only tracks do NOT (they belong to the other edition).
-        assert "Track One" not in body
-        assert "Track Two" not in body
-        # The year selector surfaces both editions.
-        assert "2015" in body
-        assert "1999" in body
+        assert "Track One" in body
+        assert "Track Two" in body
+        assert "Remaster Track" in body, (
+            "the 2015 edition must appear alongside the 1999 one"
+        )
 
-    async def test_route_year_segment_shows_that_edition(self, app, client, db_session):
-        """Opening /album/<artist>/<album>/<year> shows exactly that year."""
+    async def test_route_year_segment_collapses_onto_the_merged_page(
+        self, app, client, db_session
+    ):
+        """A legacy /<year> address redirects instead of slicing."""
         _seed_album(db_session, "t1", "Artist", "Same Name", "Track One", "1999")
         _seed_album(db_session, "t3", "Artist", "Same Name", "Remaster Track", "2015")
 
         resp = await client.get("/album/Artist/Same%20Name/1999")
-        assert resp.status_code == 200
-        body = await resp.get_data(as_text=True)
+        assert resp.status_code in (301, 302), (
+            "the year address must canonicalise, not serve a sliced page"
+        )
+        location = resp.headers["Location"]
+        assert "1999" not in location, "the year must not survive as a scope"
+
+        page = await client.get(location)
+        assert page.status_code == 200
+        body = await page.get_data(as_text=True)
         assert "Track One" in body
-        assert "Remaster Track" not in body
+        assert "Remaster Track" in body, "both editions on the one page"
 
     async def test_single_year_album_unaffected(self, app, client, db_session):
         """An album with a single year is shown in full (no year selector)."""

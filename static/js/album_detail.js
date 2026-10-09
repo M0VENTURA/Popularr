@@ -2011,6 +2011,100 @@ window.renameSelectedTracks = function (btn) {
         .catch(err => alert('Rename failed: ' + err));
 };
 
+/**
+ * Open the bulk "Edit Tracks" modal for the current selection.
+ *
+ * Beside "Rename Selected": rename moves FILES, this edits the ROWS — the
+ * identity fields the Edit Album page offers, scoped to the ticks.
+ */
+window.openEditTracksModal = function () {
+    const ids = _getSelectedTrackIds();
+    if (!ids.length) {
+        alert('Please select at least one track.');
+        return;
+    }
+    const counter = document.getElementById('editTracksSelectedCount');
+    if (counter) counter.textContent = String(ids.length);
+
+    const modalEl = document.getElementById('editTracksModal');
+    if (!modalEl) return;
+    if (window.bootstrap && window.bootstrap.Modal) {
+        window.bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        return;
+    }
+    modalEl.classList.add('show');
+    modalEl.style.display = 'block';
+};
+
+/**
+ * Apply the modal's identity fields to the SELECTED tracks only.
+ *
+ * Only NON-BLANK fields are posted — a bulk edit is a partial update, so an
+ * untouched box leaves that column alone. The server refuses anything outside
+ * its allow-list, so nothing this page does not know about is ever written.
+ */
+window.applyEditTracks = function () {
+    const ids = _getSelectedTrackIds();
+    if (!ids.length) {
+        alert('Please select at least one track.');
+        return;
+    }
+
+    const fieldMap = {
+        album: 'btAlbum',
+        album_artist: 'btAlbumArtist',
+        year: 'btYear',
+        release_year: 'btReleaseYear',
+        track_number: 'btTrackNumber',
+        disc_number: 'btDiscNumber',
+        title: 'btTitle',
+        artist: 'btArtist',
+        writer: 'btWriter'
+    };
+    const fields = {};
+    Object.keys(fieldMap).forEach(function (field) {
+        const el = document.getElementById(fieldMap[field]);
+        const value = el ? String(el.value || '').trim() : '';
+        if (value) fields[field] = value;
+    });
+    if (!Object.keys(fields).length) {
+        alert('Fill in at least one field to apply.');
+        return;
+    }
+
+    const confirmed = window.confirm(
+        'Apply ' + Object.keys(fields).length + ' field(s) to ' + ids.length +
+        ' selected track(s)?\n\nDatabase rows and file tags are both updated.'
+    );
+    if (!confirmed) return;
+
+    const run = function () {
+        return fetch('/api/track/bulk-update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ track_ids: ids, fields: fields, sync_to_file: true })
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (!data || data.success !== true) {
+                    alert('Update failed: ' + ((data && data.error) || 'Unknown error'));
+                    return;
+                }
+                const failures = Array.isArray(data.file_failures) ? data.file_failures.length : 0;
+                const message = failures
+                    ? failures + ' track(s) updated in the database but their file tags could not be written — see the logs.'
+                    : 'Updated ' + ids.length + ' track(s).';
+                if (typeof window.showToast === 'function') window.showToast(message);
+                else alert(message);
+                setTimeout(function () { window.location.reload(); }, 900);
+            })
+            .catch(function (err) { alert('Error: ' + err.message); });
+    };
+
+    if (window.busyPopup) return window.busyPopup.showAndRun('Updating selected tracks…', run);
+    return run();
+};
+
 window.confirmBulkDeleteTracks = function () {
     const ids = _getSelectedTrackIds();
     if (ids.length === 0) { alert('Please select at least one track.'); return; }
