@@ -15,6 +15,9 @@ from db.engine import db_session
 from services.enrichment.musicbrainz_service import (
     get_shared_mb_client,
     fetch_musicbrainz_release_metadata,
+    # The ONE track-number rule, shared with both queue matchers: a position
+    # is a tie-breaker, never proof.
+    _track_number_pairing_allowed,
 )
 from api_clients.musicbrainz_http import escape_lucene_special_chars
 from helpers.normalization_service import (
@@ -205,7 +208,7 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
 
         library_rows = session.execute(
             text(
-                "SELECT id, title, track_number, disc_number, mbid, album FROM tracks "
+                "SELECT id, title, track_number, disc_number, mbid, album, duration FROM tracks "
                 "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)"
             ),
             {"artist": artist},
@@ -248,7 +251,7 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
     mb_total = len(mb_tracks)
 
     lib_norm = set()
-    lib_by_position: dict[tuple[int, str], str] = {}
+    lib_by_position: dict[tuple[int, str], tuple[str, Any]] = {}
     for r in library_rows:
         title = r.get("title") or ""
         if title:
@@ -256,7 +259,10 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
         disc = int(r.get("disc_number") or 1) if r.get("disc_number") not in (None, "", "0", 0) else 1
         tn = str(r.get("track_number") or "").strip()
         if tn:
-            lib_by_position[(disc, tn)] = title or ""
+            # The DURATION travels with the position so the pairing rule can
+            # tell "same recording, differently titled" from "a different song
+            # sitting at the same number".
+            lib_by_position[(disc, tn)] = (title or "", r.get("duration"))
 
     # ── Download-queue coverage ───────────────────────────────────────────
     # Two different questions, deliberately answered differently:
@@ -287,7 +293,26 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
         mb_disc = int(mt.get("disc_number") or 1)
         mb_num = str(mt.get("track_number") or "").strip()
 
-        position_occupied = bool(mb_num and (mb_disc, mb_num) in lib_by_position)
+        position_occupied = bool(mb_num) and (mb_disc, mb_num) in lib_by_position
+        if position_occupied:
+            # ⚠️ A POSITION IS A TIE-BREAKER, NEVER PROOF — the SAME rule both
+            # queue matchers already use. It used to count on its own, so any
+            # local rip whose own numbering differed from MusicBrainz's (a
+            # double-CD imported disc by disc, a long single-CD rip numbered
+            # across the whole disc) made an UNRELATED track at that number
+            # claim the MusicBrainz one as present — and a genuinely missing
+            # track was never offered. Reported as "not correctly pulling in
+            # the missing tracks".
+            #
+            # Now the name AND the length must both fail to contradict it
+            # before a position counts: a title that merely differs in
+            # wording still pairs, a different recording with a different
+            # length does not, and an unknown length stays permissive so an
+            # untagged file is not lost.
+            _lib_title, _lib_duration = lib_by_position[(mb_disc, mb_num)]
+            position_occupied = _track_number_pairing_allowed(
+                _lib_title, mb_title, _lib_duration, mt.get("duration"),
+            )
         if position_occupied or norm in lib_norm:
             # ⚠️ Position counts even when the TITLE differs: a wrong track
             # sitting at disc 1 / track 10 makes 10 look present. That is the

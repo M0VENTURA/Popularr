@@ -2474,10 +2474,34 @@ def get_musicbrainz_best_release(
         Expected_count = _get_local_track_count(Artist, Album)
         Expected_count = Expected_count if Expected_count > 0 else None
 
+        # ⚠️ MOST COMPLETE FIRST — and NEVER scored against the LOCAL count.
+        #
+        # It used to be ``Value -= abs(Expected_count - track_count) * 100.0``,
+        # a proximity term so dominant it outweighed every other signal
+        # combined (official +50, date +2.1, title +30 ≈ 82 < 100), so ONE
+        # track of difference flipped the whole choice. That is self-defeating
+        # for the missing-track list: the local count is what we ALREADY HAVE,
+        # so choosing the edition closest to it chooses the edition with
+        # nothing left to find. A double-CD whose disc 1 was imported first
+        # (12 rows) resolved to the 12-track single-CD pressing and the whole
+        # second disc never appeared as missing; a 16-track album whose rows
+        # were still 13 resolved to the 13-track pressing and the extra tracks
+        # were invisible — reported as "not correctly pulling in the missing
+        # tracks for … double cd and also longer single cd".
+        #
+        # An edition can only measure what is missing if it can still HOLD
+        # what we have plus what we do not, so the COUNT leads and the
+        # previous signals become tie-breaks between editions of equal
+        # completeness. When that leaves the chosen edition larger than the
+        # library the confidence comes out LOW — the honest answer, and it is
+        # what makes the album page offer the release picker instead of
+        # silently claiming a match.
         def score(item: dict[str, Any]) -> float:
             Value = 0.0
-            if Expected_count is not None:
-                Value -= abs(Expected_count - _as_int(item.get("track_count"), 0)) * 100.0
+            Count = _as_int(item.get("track_count"), 0)
+            # ×1000 so the count outranks the tie-breaks below (whose combined
+            # maximum is ~82); an UNKNOWN count ranks below any known one.
+            Value += float(Count) * 1000.0 if Count > 0 else -1000.0
             if str(item.get("status") or "").casefold() == "official":
                 Value += 50.0
             Date = str(item.get("date") or "")
