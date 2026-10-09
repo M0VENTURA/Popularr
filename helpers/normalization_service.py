@@ -446,7 +446,7 @@ _TRAILING_MARKER_TOKENS = frozenset({
     "edition", "deluxe", "version", "remaster", "remastered", "anniversary",
     "expanded", "extended", "limited", "special", "bonus", "collector",
     "collectors", "ultimate", "standard", "digital", "premium", "reissue",
-    "epic", "clean", "explicit", "tour", "press", "production", "mastered",
+    "repress", "epic", "clean", "explicit", "tour", "press", "production", "mastered",
     "itunes", "apple", "masters", "japanese", "uk", "us", "european",
     "super", "disc", "tracks", "track",
 })
@@ -576,7 +576,7 @@ def bracket_trailing_edition_marker(value: str) -> str:
 _EDITION_ANNOTATION_KEYWORDS = frozenset({
     "anniversary", "bonus", "clean", "collector", "deluxe", "digital",
     "edition", "epic", "explicit", "expanded", "extended", "limited",
-    "mastered for", "press", "production", "reissue", "remaster",
+    "mastered for", "press", "production", "reissue", "repress", "remaster",
     "remastered", "special", "standard", "tour", "ultimate", "version",
 })
 
@@ -586,7 +586,7 @@ _ALBUM_EDITION_STRIP_RE = re.compile(
     r"japanese\s+edition|uk\s+edition|us\s+edition|eu(?:ropean)?\s+edition|"
     r"special\s+edition|expanded\s+edition|extended\s+edition|"
     r"(?:\d+\s*(?:year\s*)?)?anniversary(?:\s+edition)?|"
-    r"reissue|limited\s+edition|collector(?:'s)?\s+edition|super\s+deluxe|"
+    r"reissue|repress(?:ed|ing)?|limited\s+edition|collector(?:'s)?\s+edition|super\s+deluxe|"
     r"standard\s+edition|digital\s+edition|remaster(?:ed)?(?:\s+edition)?|"
     r"mastered\s+for\s+(?:itunes|apple\s+digital\s+masters)|"
     r"(?:bmg\s+)?club\s+edition|"
@@ -611,7 +611,8 @@ _ALBUM_EDITION_STRIP_RE = re.compile(
     # "(Boogie Version)" must survive.
     r"(?![^)\]]*\b(?:live|remix|acoustic|unplugged|instrumental|demo|karaoke)\b)"
     r"[^)\]]*?\b(?:edition|deluxe|anniversary|expanded|extended|limited|"
-    r"special|bonus|collector(?:'s)?|ultimate|standard|digital|premium|reissue)\b"
+    r"special|bonus|collector(?:'s)?|ultimate|standard|digital|premium|reissue|"
+    r"repress(?:ed|ing)?)\b"
     r"[^)\]]*))"
     r"\s*[\)\]]\s*$",
     re.IGNORECASE,
