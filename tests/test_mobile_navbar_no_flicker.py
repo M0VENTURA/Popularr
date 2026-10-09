@@ -35,6 +35,7 @@ stabilises — a structural assertion cannot see a loop.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -46,6 +47,8 @@ LIVE_MAIN = "static/js/main.js"
 REBUILT_MAIN = "test_site/static/js/main.js"
 LIVE_CSS = REPO_ROOT / "static" / "css" / "popularr.css"
 REBUILT_CSS = REPO_ROOT / "test_site" / "static" / "css" / "popularr.css"
+LIVE_BASE = "templates/base.html"
+REBUILT_BASE = "test_site/templates/base.html"
 
 
 def _node_available() -> bool:
@@ -159,4 +162,54 @@ class TestBothTreesCarryTheGuard:
             assert ".navbar-collapse.show { max-height: calc(100dvh - var(--navbar-height" in css, (
                 f"{path.name}: the menu is no longer clamped by the collapsed "
                 "bar's height — see the note in main.js before changing it"
+            )
+
+
+# ===========================================================================
+# 3. The WIRING: each UI tree must render the DOM the fix keys on, and load
+#    the script that carries it (the report was for the rebuilt UI).
+# ===========================================================================
+class TestTheTemplatesProvideTheContract:
+    """The guard is keyed on `nav.navbar.fixed-top` and `#navbarNav`."""
+
+    @pytest.mark.parametrize("base_rel", [LIVE_BASE, REBUILT_BASE])
+    def test_the_navbar_and_its_collapse_are_rendered(self, base_rel):
+        html = (REPO_ROOT / base_rel).read_text(encoding="utf-8")
+        assert re.search(r'<nav class="[^"]*\bnavbar\b[^"]*\bfixed-top\b', html), (
+            f"{base_rel}: no `nav.navbar.fixed-top` — the script would find no "
+            "navbar and the token would never be set"
+        )
+        assert 'id="navbarNav"' in html, (
+            f"{base_rel}: no #navbarNav — the open-menu guard cannot tell the "
+            "menu is open and the loop returns"
+        )
+        assert 'data-bs-target="#navbarNav"' in html, (
+            f"{base_rel}: the toggler no longer targets the collapse"
+        )
+
+    @pytest.mark.parametrize("base_rel", [LIVE_BASE, REBUILT_BASE])
+    def test_the_collapse_is_nested_inside_the_navbar(self, base_rel):
+        """`nav.contains(collapse)` must be true — the subtraction is skipped
+        when the collapse is not a descendant of the measured element."""
+        html = (REPO_ROOT / base_rel).read_text(encoding="utf-8")
+        nav_start = re.search(r'<nav class="[^"]*\bfixed-top\b', html).start()
+        nav_end = html.index("</nav>", nav_start)
+        assert 'id="navbarNav"' in html[nav_start:nav_end], (
+            f"{base_rel}: #navbarNav is OUTSIDE the fixed-top nav, so the "
+            "collapse height would never be subtracted"
+        )
+
+    @pytest.mark.parametrize("base_rel", [LIVE_BASE, REBUILT_BASE])
+    def test_the_template_loads_the_script_that_carries_the_guard(self, base_rel):
+        """`versioned_static('js/main.js')` resolves against the static roots —
+        the rebuilt tree first, then live — so the same tag serves either tree's
+        copy. Both copies must therefore exist and both must carry the guard."""
+        html = (REPO_ROOT / base_rel).read_text(encoding="utf-8")
+        assert "versioned_static('js/main.js')" in html, (
+            f"{base_rel}: js/main.js is not loaded, so nothing syncs the token"
+        )
+        for main_rel in (LIVE_MAIN, REBUILT_MAIN):
+            src = (REPO_ROOT / main_rel).read_text(encoding="utf-8")
+            assert "navbarCollapseIsOpen" in src, (
+                f"{main_rel}: this static root would serve an UNFIXED main.js"
             )

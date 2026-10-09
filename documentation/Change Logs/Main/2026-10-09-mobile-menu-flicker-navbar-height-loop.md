@@ -75,7 +75,34 @@ pass pre-fix are the contract-preservation controls.
 **0 failures on both sides**.
 
 `node --check` clean on both `main.js` files and the probe.
+## Follow-up — the WIRING is now pinned per tree (the report was the rebuilt UI)
 
+The flicker was reported on the **rebuilt (`test_site`) UI**. That tree serves
+its own copies of everything, so the fix is only effective if **both** roots
+carry it and the template renders the DOM it keys on. A third test class pins
+that, per template:
+
+* `<nav class="… navbar … fixed-top …">` must exist — the script's selector is
+  `nav.navbar.fixed-top`, and with no match nothing ever sets the token;
+* `#navbarNav` must exist, and must be **nested inside that nav** — the guard
+  returns early when the collapse is not a descendant of the measured element
+  (`nav.contains(collapse)`), which would silently restore the loop;
+* the toggler must still target `#navbarNav`;
+* the template must load `versioned_static('js/main.js')`, and **both** static
+  roots must contain the guarded implementation — `versioned_static` resolves
+  the rebuilt tree first and falls back to live, so the same tag serves either
+  copy and an unfixed copy in *either* root would reintroduce the flicker.
+
+**Oracle for the wiring** — renaming `id="navbarNav"` in
+`test_site/templates/base.html` (rebuilt tree only) fails exactly the two
+rebuilt-template wiring tests and leaves the live ones passing: **2 failed, 22
+passed**; restored: **24 passed**. That proves the check is per-tree, not a
+whole-file string match.
+
+**Related suites** — `test_mobile_navbar_no_flicker.py` +
+`test_navbar_system_menu_and_search_shortcut.py` +
+`test_layout_css_js_template_integrity.py`: **304 passed, 1 skipped** (the skip
+is pre-existing).
 ## Files
 
 - `static/js/main.js`
