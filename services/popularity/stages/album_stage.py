@@ -1499,6 +1499,69 @@ def _stored_release_group_mbid(tracks: list[dict[str, Any]] | None) -> str:
     return next(iter(values)) if len(values) == 1 else ""
 
 
+def _release_group_from_stored_release(
+    tracks: list[dict[str, Any]] | None,
+    context: dict[str, Any],
+) -> tuple[None, str | None]:
+    """The release group of the RELEASE this album is already bound to.
+
+    ``musicbrainz_album_mbid`` is a concrete MusicBrainz release id — it comes
+    from the file's own tag, from Navidrome's ``musicBrainzId``, or from a
+    manual match — and ``fetch_musicbrainz_release_metadata`` answers its
+    release group from the HTTP-layer cache in one call. There is no text
+    matching, so there is no 0.6 score to fail.
+
+    The release-group SEARCH is still asked first: it also yields the TYPE.
+    This only runs when the search produced nothing, because an album already
+    linked to a release must never come back with no release group at all —
+    that is the reported "the release group ID doesn't seem to be populating
+    during the metadata scan".
+
+    Returns ``(None, release_group_mbid)`` — the TYPE is deliberately ``None``:
+    when only the binding is known the local detection still decides the type,
+    and the caller persists both through the same call.
+    """
+    release_mbid = next(
+        (
+            str(t.get("musicbrainz_album_mbid") or "").strip()
+            for t in tracks or []
+            if str(t.get("musicbrainz_album_mbid") or "").strip()
+        ),
+        "",
+    )
+    if not release_mbid:
+        return None, None
+    try:
+        from services.enrichment.musicbrainz_service import (
+            fetch_musicbrainz_release_metadata,
+        )
+
+        release = _call_with_heartbeat(
+            "album_type.musicbrainz.release_metadata",
+            fetch_musicbrainz_release_metadata,
+            release_mbid,
+            log_context=context,
+        ) or {}
+        release_group_mbid = str(release.get("release_group_mbid") or "").strip()
+    except Exception as exc:
+        Logger.info(
+            "[ENRICH] release group from the album's own release MBID failed",
+            release_mbid=release_mbid,
+            error=_safe_error(exc),
+            **context,
+        )
+        return None, None
+    if not release_group_mbid:
+        return None, None
+    Logger.info(
+        "[ENRICH] release group resolved from the album's own release MBID",
+        release_mbid=release_mbid,
+        release_group_mbid=release_group_mbid,
+        **context,
+    )
+    return None, release_group_mbid
+
+
 def _lookup_musicbrainz_album_type(
     artist: str,
     album: str,
@@ -1555,7 +1618,7 @@ def _lookup_musicbrainz_album_type(
         ) or []
         if not matches:
             Logger.info("[ENRICH] MusicBrainz album type had no matches", **context)
-            return None, None
+            return _release_group_from_stored_release(tracks, context)
 
         best = matches[0] if isinstance(matches[0], dict) else {}
         score = float(best.get("match_score") or 0)
@@ -1589,7 +1652,7 @@ def _lookup_musicbrainz_album_type(
 
         if score < 0.6:
             Logger.info("[ENRICH] MusicBrainz album type match rejected", match_score=score, **context)
-            return None, None
+            return _release_group_from_stored_release(tracks, context)
 
         # Various Artists compilations need a second, independent signal.
         # `album`/`tracks` are passed so a compilation is still recognised when
@@ -2213,10 +2276,30 @@ def ensure_album_type(album_row: dict[str, Any], options: dict[str, Any] | None 
         if track.get("id")
     }
     stored.discard("")
+    cached_type: str | None = None
     if len(stored) == 1 and not options.get("force"):
-        value = next(iter(stored))
-        Logger.info("[ENRICH] ensure album type cache hit", detected_type=value, **context)
-        return value
+        cached_type = next(iter(stored))
+        if _stored_release_group_mbid(tracks):
+            Logger.info("[ENRICH] ensure album type cache hit", detected_type=cached_type, **context)
+            return cached_type
+        # ⚠️ The TYPE is cached but the RELEASE GROUP is not — and both are
+        # written by the SAME ``_persist_album_type_to_tracks`` call below.
+        # The unconditional return that used to sit here meant an album whose
+        # type had already been set (by the popularity pass, by an earlier
+        # metadata run, or by the album page's Save) never reached the resolver
+        # at all, so ``musicbrainz_releasegroupid`` stayed empty for however
+        # many metadata scans ran — reported as "the release group ID doesn't
+        # seem to be populating during the metadata scan".
+        #
+        # Resolving costs one release-group search, the same one every untyped
+        # album already pays, and the ROW's own type still wins afterwards:
+        # ``_persist_album_type_to_tracks`` is fill-only for the type, so a
+        # cache hit cannot turn into a re-detection.
+        Logger.info(
+            "[ENRICH] ensure album type cache hit — release group missing, resolving",
+            detected_type=cached_type,
+            **context,
+        )
 
     detected: str | None = None
     try:
@@ -2227,6 +2310,10 @@ def ensure_album_type(album_row: dict[str, Any], options: dict[str, Any] | None 
             str(album_row.get("spotify_album_type") or "") or None,
             tracks,
         )
+        if cached_type:
+            # The row already carries a type; the resolve above existed for its
+            # RELEASE GROUP, not to re-decide the type.
+            detected = cached_type
 
         if not detected:
             Logger.warning("[ENRICH] ensure album type produced no type", **context)
