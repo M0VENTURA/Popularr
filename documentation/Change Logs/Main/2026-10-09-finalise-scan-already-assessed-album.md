@@ -112,13 +112,14 @@ sitting beside `should_freeze_track` / `should_use_cached_score` /
   of those is defensible on its own; together they are 40s per album per pass.
   Worth its own pass — the cheap first question is whether the MB release
   fetch is hitting the HTTP cache.
-- **`features.run_singles_on_skipped_albums` is a dead option.** It is on the
+- **`features.run_singles_on_skipped_albums` was a dead option** — it is on the
   Config page (both trees) and in `USER_GUIDE.md`, but **nothing in
-  `services/` reads it** — `grep run_singles_on_skipped_albums` across all
-  Python returns only the template and the guide. So "Run Singles Detection on
-  Skipped Albums" currently does nothing. Wiring it would make scans slower,
-  which is the opposite of this report, so it was left alone for a decision:
-  implement it, or drop it from the Config page.
+  `services/` read it**, so "Run Singles Detection on Skipped Albums" did
+  nothing. ⚠️ **RESOLVED the same day** — see
+  `2026-10-09-singles-gap-fill-on-skipped-albums.md`. Its intent ("if it had
+  scanned an album but somehow missed a track it wouldn't keep skipping that
+  track") is now implemented, so the option is no longer advertised in the
+  summary as unwired.
 - **`record_scan`'s completion UPDATE is the same index class of problem**
   (`artist IS NOT DISTINCT FROM …` with no `album` constraint, then
   `ORDER BY started_at DESC`) and runs once per album. It was left untouched

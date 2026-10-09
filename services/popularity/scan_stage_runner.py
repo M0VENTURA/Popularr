@@ -557,6 +557,58 @@ def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
     return False, ""
 
 
+def _tracks_without_singles_verdict(
+    tracks: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Tracks of this album that never completed a singles assessment.
+
+    ``single_detection_last_updated`` is stamped ONLY when detection ran to
+    completion — ``track_stage``'s singles block is its sole writer and a
+    raised exception leaves it untouched — so a row without one is a track the
+    pass genuinely MISSED. A negative verdict still HAS a timestamp, which is
+    what makes "assessed" safe to skip on.
+
+    One definition, two callers: the ``skip_unchanged_albums`` gate and the
+    opt-in singles gap fill. They must never disagree about "assessed" — two
+    definitions of it is how a gate ends up unable to satisfy itself.
+    """
+    return [
+        track
+        for track in (tracks or [])
+        if not (track or {}).get("single_detection_last_updated")
+    ]
+
+
+def _pass_runs_singles(options: dict[str, Any]) -> bool:
+    """True when this pass runs the singles block at all.
+
+    Mirrors ``track_stage``'s own gate on that section
+    (``if not metadata_only and not popularity_only and not _sd_fresh:``), so
+    "a pass that CAN fill a singles gap" has one definition. A metadata-only
+    or popularity-only pass runs no singles detection, so backfilling one is
+    not something it could do.
+    """
+    return not options.get("metadata_only") and not options.get("popularity_only")
+
+
+def _singles_gap_fill(
+    *,
+    tracks: list[dict[str, Any]] | None,
+    runs_singles: bool,
+    enabled: bool,
+) -> list[dict[str, Any]]:
+    """Tracks that keep an ALREADY-SCANNED album from being skipped.
+
+    Returns the tracks with no singles verdict when the opt-in gap fill
+    applies, otherwise an empty list. The caller un-skips the album when this
+    is non-empty, and only those tracks do any work: every other track answers
+    ``singles_detection_is_fresh`` and returns "(cached)" immediately.
+    """
+    if not runs_singles or not enabled:
+        return []
+    return _tracks_without_singles_verdict(tracks)
+
+
 def _sanitize_release_name(album_name: str) -> str:
     if not album_name:
         return ""
@@ -2037,6 +2089,11 @@ def run_scan(
         _mode_finalise = bool(options.get("finalise_only"))
         _album_is_old = _album_release_is_old(tracks)
 
+        # Can this pass fill a singles gap at all? Same predicate
+        # ``track_stage`` uses for its singles section. See
+        # ``_singles_gap_fill``.
+        _runs_singles = _pass_runs_singles(options)
+
         skip_album = False
         force_metadata_for_this_album = False
 
@@ -2085,12 +2142,18 @@ def run_scan(
                     skip_album = True
                     log_unified(f"Popularity Scan - Skipping album \"{str(album or '').strip()}\" (scanned within last {skip_days} days)")
                 elif get_feature("skip_unchanged_albums", True) and tracks and not _mode_meta:
+                    # "Assessed" is asked through the ONE helper, so this gate
+                    # and the gap fill below cannot disagree about it.
+                    _singles_unassessed = _tracks_without_singles_verdict(tracks)
                     if _mode_singles:
-                        all_done = all(t.get("single_detection_last_updated") for t in tracks)
+                        all_done = not _singles_unassessed
                     elif _mode_pop:
                         all_done = all(float(t.get("final_score") or 0) > 0 for t in tracks)
                     else:
-                        all_done = all(float(t.get("final_score") or 0) > 0 for t in tracks) and all(t.get("single_detection_last_updated") for t in tracks)
+                        all_done = (
+                            all(float(t.get("final_score") or 0) > 0 for t in tracks)
+                            and not _singles_unassessed
+                        )
                     if all_done:
                         skip_album = True
                         log_unified(f"Popularity Scan - Skipping album \"{str(album or '').strip()}\" (no changes detected)")
@@ -2103,6 +2166,41 @@ def run_scan(
                     skip_album = False
                     force_metadata_for_this_album = True
                     log_unified(f"Popularity Scan - Album recently scanned but incomplete — forcing rerun ({reason})")
+
+            # ── Opt-in singles gap fill (features.run_singles_on_skipped_albums)
+            #
+            # "The idea behind it was that if it had scanned an album but
+            # somehow missed a track it wouldn't keep skipping that track."
+            #
+            # The window above answers *"has this album been scanned?"* — which
+            # is NOT the same question as *"did every track get a verdict?"*.
+            # A track the earlier pass never reached (its worker abandoned on
+            # the per-album budget, a track added to the album afterwards, a
+            # detection that ERRORED and so stamped no timestamp) leaves the
+            # album looking finished, so ``was_album_scanned`` skips it again on
+            # every pass and the gap is never filled.
+            #
+            # Only the tracks WITHOUT a verdict do any work — the rest answer
+            # ``singles_detection_is_fresh`` and return "(cached)" at 0.0s — so
+            # the cost is one assessment per genuinely-missed track, ONCE: the
+            # verdict is then cached for its TTL and the window takes over again.
+            #
+            # Deliberately does NOT set ``force_metadata_for_this_album``: this
+            # fills the singles verdict, it does not re-run the metadata pass.
+            if skip_album:
+                _unassessed = _singles_gap_fill(
+                    tracks=tracks,
+                    runs_singles=_runs_singles,
+                    enabled=bool(get_feature("run_singles_on_skipped_albums", False)),
+                )
+                if _unassessed:
+                    skip_album = False
+                    log_unified(
+                        f"Popularity Scan - Album \"{str(album or '').strip()}\" has "
+                        f"{len(_unassessed)} of {len(tracks or [])} track(s) with no "
+                        "singles verdict — running it instead of skipping "
+                        "(Run Singles Detection on Skipped Albums)"
+                    )
 
         if skip_album:
             skipped_albums += 1

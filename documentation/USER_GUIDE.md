@@ -101,7 +101,7 @@ Scan Behaviour**:
 | Metadata Scan Window | `metadata_skip_days` | 0 | Metadata scans **always run** unless you raise this |
 | Minimum Tracks for Skip Check | `album_skip_min_tracks` | 1 | Albums below this track count are not treated as valid albums |
 | Skip Unchanged Albums | `skip_unchanged_albums` | True | Also skip when every track already has the data this scan would produce (scores / singles verdicts) |
-| Run Singles on Skipped Albums | `run_singles_on_skipped_albums` | False | Opt-in: still backfill single verdicts on skipped albums (uses Discogs/MusicBrainz lookups) |
+| Run Singles on Skipped Albums | `run_singles_on_skipped_albums` | False | Opt-in: an album the window would skip is still visited when a track has **no** singles verdict, so a track the scan missed is never skipped for ever (costs Discogs/MusicBrainz lookups, for those tracks only) |
 | Flag Cover Songs During Scans | `cover_detection_enabled` | True | Master toggle for the cover pass |
 | Mature Track Freeze (years) | `mature_track_min_age_years` | 2 | Tracks at/above this age keep their stored popularity (no re-fetch) |
 

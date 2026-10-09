@@ -1634,7 +1634,7 @@
             <option value="true" {% if config.get('features', {}).get('run_singles_on_skipped_albums', False) %}selected{% endif %}>True</option>
             <option value="false" {% if not config.get('features', {}).get('run_singles_on_skipped_albums', False) %}selected{% endif %}>False</option>
           </select>
-          <small class="form-text text-muted">Backfill single verdicts on skipped albums (both skip paths) so never-assessed tracks get one without a full rescan. Makes Discogs/MusicBrainz lookups for tracks without a stored verdict — off by default for quiet, fast skips.</small>
+          <small class="form-text text-muted">An already-scanned album is still visited when any track has <strong>no</strong> singles verdict, so a track the scan missed (an abandoned worker, a track added later, a detection that errored) is never skipped for ever. Only the tracks without a verdict do lookups — the rest are cached. Off by default: it costs Discogs/MusicBrainz calls.</small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
           <label class="form-label form-label-sm" for="feature_cover_detection_enabled">Flag Cover Songs During Scans</label>
