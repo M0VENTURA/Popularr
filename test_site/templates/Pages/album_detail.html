@@ -447,6 +447,12 @@
               <div class="col-12 col-md-6">
                 <label for="album_mbid" class="form-label small">MusicBrainz Release ID</label>
                 <input type="text" class="form-control bg-dark text-light border-secondary" id="album_mbid" name="album_mbid" value="{{ album_data.musicbrainz_album_mbid or '' }}">
+                {# Lists every edition of the release GROUP in the shared release
+                   picker (mode=select) so a different pressing can be bound
+                   without pasting an id. Nothing is written until Save. #}
+                <button type="button" class="btn btn-sm btn-outline-info mt-1" onclick="openAlbumReleaseSelector()">
+                  <i class="bi bi-collection me-1"></i>Choose from release group
+                </button>
               </div>
               <div class="col-12 col-md-6">
                 <label for="album_release_group_mbid" class="form-label small">MusicBrainz Release Group ID</label>

@@ -1119,6 +1119,12 @@ async def api_musicbrainz_release_picker() -> Any:
     rg_id = (request.args.get("rg_id") or "").strip()
     artist = (request.args.get("artist") or "").strip()
     album = (request.args.get("album") or "").strip()
+    # Two callers share this slideover and want DIFFERENT actions off the same
+    # list: the queue flow browses an edition to download, and the album page's
+    # Identifiers & Linking block browses an edition to LINK to.  Only the
+    # second one needs a button — the queue path auto-selects (one release, or
+    # every edition sharing a track count) and is driven by the caller.
+    select_mode = (request.args.get("mode") or "").strip().lower() == "select"
     if not rg_id:
         return "<div class='alert alert-danger m-3'>Missing Release Group ID</div>", 400
 
@@ -1162,7 +1168,12 @@ async def api_musicbrainz_release_picker() -> Any:
         <div class="p-3">
           <p class="extra-small text-muted mb-3">
             Found <strong>{{ releases|length }}</strong> release version{{ 's' if releases|length != 1 else '' }}
-            under <em>{{ album }}</em>. Select the exact version you want to queue:
+            under <em>{{ album }}</em>.
+            {% if select_mode %}
+              Select the version this album should be linked to:
+            {% else %}
+              Select the exact version you want to queue:
+            {% endif %}
           </p>
 
           <div class="d-flex flex-column gap-2">
@@ -1190,6 +1201,12 @@ async def api_musicbrainz_release_picker() -> Any:
                   <button type="button" class="btn btn-sm btn-outline-info" onclick="toggleReleaseTracklistPreview('{{ rel.id }}')">
                     <i class="bi bi-list-ul"></i> Preview Tracks
                   </button>
+                  {% if select_mode %}
+                  <button type="button" class="btn btn-sm btn-success ms-auto js-pick-release"
+                          data-release-id="{{ rel.id }}" data-release-title="{{ rel.title }}">
+                    <i class="bi bi-check2-circle"></i> Use this release
+                  </button>
+                  {% endif %}
                       {% if rel.edition_count > 1 %}
                       <span class="badge bg-secondary extra-small flex-shrink-0 me-auto ms-2" title="Editions with this same track count were folded into one choice">
                         <i class="bi bi-collection"></i> {{ rel.edition_count }} editions
@@ -1206,6 +1223,7 @@ async def api_musicbrainz_release_picker() -> Any:
         releases=_picker_group_editions(processed),
         album=album,
         artist=artist,
+        select_mode=select_mode,
     )
 
 

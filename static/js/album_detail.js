@@ -365,6 +365,63 @@ window.openAlbumLookupModal = function () {
 // Replaces the old `confirmReleaseSelection()`, which read
 // `#mbSelectedReleaseId` — an element that exists on no page in this app —
 // then fell back to `window._selectedMbReleaseId`, which nothing ever set.
+// ── Choose which EDITION of the release group this album is ───────────────
+//
+// The Identifiers & Linking block holds a concrete Release ID and a Release
+// Group ID, but nothing offered the releases BETWEEN them — the only way to
+// bind a different pressing was to paste an id by hand. This reuses the
+// release picker (the same slideover the queue already uses) in SELECT mode,
+// where each card gains a "Use this release" button, and it backs into
+// applyAlbumMbid(): the id lands in the form exactly like a Lookup-MBID pick
+// and is persisted by the form's own Save Metadata.
+window.openAlbumReleaseSelector = function () {
+    const value = function (id) {
+        const el = document.getElementById(id);
+        return el ? String(el.value || '').trim() : '';
+    };
+    // The release GROUP is what lists editions; a concrete release id works
+    // too, because the endpoint resolves it to its own group when the browse
+    // of a non-group id comes back empty.
+    const target = value('album_release_group_mbid') || value('album_mbid');
+    if (!target) {
+        alert('Link a MusicBrainz release first (Lookup MBID), then choose the edition.');
+        return;
+    }
+    const artist = window._pageData ? window._pageData.artistName : '';
+    const album = window._pageData ? window._pageData.albumName : '';
+    window.openSlideOver(
+        '/api/musicbrainz/release-picker?mode=select&rg_id=' + encodeURIComponent(target) +
+            '&artist=' + encodeURIComponent(artist) + '&album=' + encodeURIComponent(album),
+        'Select release: ' + album
+    );
+};
+
+// The slideover is SERVER-RENDERED HTML, so its buttons cannot be bound when
+// the page loads — delegate from the document instead.
+document.addEventListener('click', function (event) {
+    const btn = event.target && event.target.closest
+        ? event.target.closest('.js-pick-release')
+        : null;
+    if (!btn) return;
+    const releaseId = btn.getAttribute('data-release-id') || '';
+    if (!releaseId) return;
+
+    window.applyAlbumMbid(releaseId);
+
+    const slideOverEl = document.getElementById('detailSlideOver');
+    if (slideOverEl && window.bootstrap) {
+        const instance = window.bootstrap.Offcanvas.getInstance(slideOverEl);
+        if (instance) instance.hide();
+    }
+    const message = 'Release set to ' + (btn.getAttribute('data-release-title') || releaseId) +
+        ' — press Save Metadata to persist it.';
+    if (typeof window.showToast === 'function') {
+        window.showToast(message);
+    } else {
+        alert(message);
+    }
+});
+
 // It therefore always alerted "No release selected or MBID not found".
 // The value now arrives directly from the shared modal's selection callback
 // (see downloads.js's handleGlobalMbSelect / confirmReleaseSelection).

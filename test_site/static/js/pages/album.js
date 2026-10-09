@@ -1636,6 +1636,62 @@
     return true;
   }
 
+  // ── Choose which EDITION of the release group this album is ─────────────
+  //
+  // The Identifiers & Linking block holds a concrete Release ID and a Release
+  // Group ID, but nothing offered the releases BETWEEN them — the only way to
+  // bind a different pressing was to paste an id by hand. This reuses the
+  // release picker (the same slideover the queue already uses) in SELECT mode,
+  // where each card gains a "Use this release" button, and it backs into
+  // applyAlbumMbid(): the id lands in the form exactly like a Lookup-MBID pick
+  // and is persisted by the form's own Save Metadata. Nothing is written
+  // until the user saves, so a wrong choice is undone by reloading.
+  function openAlbumReleaseSelector() {
+    const value = (id) => {
+      const el = document.getElementById(id);
+      return el ? String(el.value || '').trim() : '';
+    };
+    // The release GROUP is what lists editions; a concrete release id works
+    // too, because the endpoint resolves it to its own group when the browse
+    // of a non-group id comes back empty.
+    const target = value('album_release_group_mbid') || value('album_mbid');
+    if (!target) {
+      notifyError('Link a MusicBrainz release first (Lookup MBID), then choose the edition.');
+      return;
+    }
+    const artist = global._pageData ? global._pageData.artistName : '';
+    const album = global._pageData ? global._pageData.albumName : '';
+    global.openSlideOver(
+      '/api/musicbrainz/release-picker?mode=select&rg_id=' + encodeURIComponent(target) +
+        '&artist=' + encodeURIComponent(artist) + '&album=' + encodeURIComponent(album),
+      'Select release: ' + album
+    );
+  }
+
+  // The slideover is SERVER-RENDERED HTML, so its buttons cannot be bound when
+  // the page loads — delegate from the document, the same pattern used
+  // everywhere else for rows a module does not build itself.
+  document.addEventListener('click', (event) => {
+    const btn = event.target && event.target.closest
+      ? event.target.closest('.js-pick-release')
+      : null;
+    if (!btn) return;
+    const releaseId = btn.getAttribute('data-release-id') || '';
+    if (!releaseId) return;
+
+    applyAlbumMbid(releaseId);
+
+    const slideOverEl = document.getElementById('detailSlideOver');
+    if (slideOverEl && global.bootstrap) {
+      const instance = global.bootstrap.Offcanvas.getInstance(slideOverEl);
+      if (instance) instance.hide();
+    }
+    notifySuccess(
+      'Release set to ' + (btn.getAttribute('data-release-title') || releaseId) +
+      ' — press Save Metadata to persist it.'
+    );
+  });
+
   /**
    * Apply a chosen release MBID to the Edit Album form.
    *
@@ -3092,6 +3148,7 @@
   global.applySelectedAlbumSourceTags = applySelectedAlbumSourceTags;
   global.openAlbumLookupModal = openAlbumLookupModal;
   global.applyAlbumMbid = applyAlbumMbid;
+  global.openAlbumReleaseSelector = openAlbumReleaseSelector;
   global.refreshAlbumTrackFindings = refreshAlbumTrackFindings;
   global.compareWithMusicBrainz = compareWithMusicBrainz;
   global.clearMBComparison = clearComparison;
