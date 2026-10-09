@@ -71,10 +71,48 @@
   // copy; two writers for one variable is how the 68px / 96px / 112px
   // disagreement started.
 
+  // ⚠️ THE EXPANDED MOBILE MENU MUST NOT COUNT TOWARDS THE TOKEN.
+  //
+  // `.navbar-collapse.show` is itself SIZED FROM the token
+  // (`max-height: calc(100dvh - var(--navbar-height) - 0.5rem)`), so measuring
+  // the navbar while the menu was open closed a loop:
+  //
+  //     menu grows → navbar taller → token grows → max-height shrinks
+  //     → menu clamps → navbar height changes → ResizeObserver fires → …
+  //
+  // It settled on TWO values and swept between them, forever, and every
+  // consumer of the token moved with each sweep (main's padding-top, the
+  // dashboard's min-height, the sticky footer) — reported as the bottom of the
+  // page flickering when the hamburger was pressed on mobile.
+  //
+  // The token means "how tall the COLLAPSED bar is", which is exactly what
+  // `main` has to clear; the open menu overlays the page instead of moving it.
+  const NAVBAR_MOBILE = global.matchMedia
+    ? global.matchMedia('(max-width: 991.98px)')
+    : null;
+
+  function navbarCollapseIsOpen() {
+    const collapse = document.getElementById('navbarNav');
+    if (!collapse) return false;
+    // At lg and up the toggler is hidden and the collapse sits INLINE in the
+    // row, so it is part of the bar's real height and must not be subtracted.
+    if (NAVBAR_MOBILE && !NAVBAR_MOBILE.matches) return false;
+    return collapse.classList.contains('show') ||
+      collapse.classList.contains('collapsing');
+  }
+
   function syncNavbarHeight() {
     const nav = document.querySelector('nav.navbar.fixed-top');
     if (!nav || !nav.offsetHeight) return;
-    document.documentElement.style.setProperty('--navbar-height', nav.offsetHeight + 'px');
+
+    let height = nav.offsetHeight;
+    if (navbarCollapseIsOpen()) {
+      const collapse = document.getElementById('navbarNav');
+      if (collapse && nav.contains(collapse)) height -= collapse.offsetHeight;
+    }
+    if (height <= 0) return;
+
+    document.documentElement.style.setProperty('--navbar-height', height + 'px');
   }
 
   function initNavbarHeight() {

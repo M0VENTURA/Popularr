@@ -686,6 +686,12 @@ form .form-check-input[name="force"] + .form-check-label {
 @media (max-width: 991.98px) {
     .navbar-nav { flex-direction: column !important; width: 100%; }
     .navbar-nav .nav-link { padding: 0.875rem 1.25rem !important; min-height: 48px; }
+    /* ⚠️ THE OPEN MENU IS CLAMPED BY THE COLLAPSED BAR'S HEIGHT — the token
+       must therefore NOT include the menu itself, or this rule and
+       syncNavbarHeight() (which measures the navbar) feed each other:
+       menu grows → token grows → max-height shrinks → menu clamps → navbar
+       height changes → ResizeObserver fires → …  The flicker that produced.
+       main.js subtracts the open collapse; keep it that way. */
     .navbar-collapse.show { max-height: calc(100dvh - var(--navbar-height) - 0.5rem); overflow-y: auto; -webkit-overflow-scrolling: touch; }
     [data-mobile-tab], [data-mobile-group], [data-album-group] { display: none !important; }
     [data-mobile-tab].mobile-tab-active, [data-mobile-group].mobile-tab-active, [data-album-group].album-mobile-active { display: block !important; }
