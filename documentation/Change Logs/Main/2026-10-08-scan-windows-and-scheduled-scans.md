@@ -30,13 +30,22 @@ other stages *off*:
 So a stale metadata/popularity/singles/Essentia scan is **not** caught up by
 Finalise. Nothing on any page said so.
 
+> ⚠️ **SUPERSEDED (2026-10-09)** — "Album skip gates: bypassed" and
+> "**Finalise** bypasses them too" below are no longer true. A NON-FORCED
+> Finalise now follows the config rules for the scan type it runs (it is
+> dispatched as `singles_only`, so the **Singles Scan Window** and the singles
+> half of **Skip Unchanged Albums** decide, against the `singles` history it
+> writes); Force still bypasses. See
+> `2026-10-09-finalise-follows-the-skip-windows.md`.
+
 **2. Yes — two settings, and both were half-broken.**
 
 *Rescan windows* (Config → **Scan Behaviour**): `album_skip_days` (7),
 `popularity_skip_days` (7), `singles_skip_days` (7), `metadata_skip_days` (0 =
 always), plus the `*_old_album_skip_days` (30) used for albums older than
 `old_album_age_months` (48). `0` = always; **Force** bypasses them;
-**Finalise** bypasses them too.
+**Finalise** bypassed them too (superseded 2026-10-09 — it now honours them,
+and Force still bypasses).
 
 *Scheduled jobs* — `scheduler.jobs.<id>.interval_minutes` in `config.yaml`
 (`library_sync` 360 min, `popularity_scan` 1440 min). **Not editable anywhere

@@ -22,6 +22,11 @@ codebase, and the new flag adds the finalise-specific gates:
 | singles only where missing | `track_stage`'s `_sd_fresh` gate (timestamp + evidence) already skips fresh detection for every mode |
 | DB information only | full enrichment stays deferred (`_full_pass` False), `enrich_album` takes the stored/heuristic type branch (`_detect_album_type`) instead of `_resolve_album_type` + `_persist_album_type_to_tracks`, annotation repair and cover detection are off (they key off the singles-pass flags), and the metadata-recommend stash + missing-track recompute gates gained `and not _mode_finalise` (both reach MusicBrainz) |
 
+> ⚠️ **SUPERSEDED (2026-10-09)** — the skip-gate row above is no longer true.
+> A **non-forced** Finalise now honours the configured windows like every other
+> pass (Force still bypasses); see
+> `2026-10-09-finalise-follows-the-skip-windows.md`.
+
 Star ratings (`_post_album_stars`) and `finalise_scan` itself still run —
 recomputed from the scores in the database, which is exactly "using the
 existing database information".

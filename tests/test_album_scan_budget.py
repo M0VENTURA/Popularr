@@ -825,18 +825,38 @@ class TestTheMissingTrackSnapshotIsNotStarvedByASkip:
     def test_the_endpoint_stays_database_only(self):
         """Pins WHY the scan is the sole writer, so nobody 'optimises' the
         snapshot back into the request path (one MusicBrainz call per owned
-        album per artist-page load)."""
+        album per artist-page load).
+
+        A page load takes the DB-only branch. The endpoint's ONE recompute is
+        behind ``refresh=1``, which only the album page's Lookup MBID sends for
+        the release it just resolved.
+
+        ⚠️ The window used to be a FIXED CHARACTER COUNT (``idx + 1400``), and
+        it went stale when ``266ed296`` gave the refresh branch its own log line
+        — the default branch fell outside it. It is now structural: the whole
+        function, up to the next route.
+        """
         routes = (
             REPO_ROOT / "routes" / "album_routes.py"
         ).read_text(encoding="utf-8")
-        idx = routes.index("def api_album_missing_tracks")
-        window = routes[idx: idx + 1400]
+        start = routes.index("def api_album_missing_tracks")
+        end = routes.index("\n@album_bp.route", start)
+        window = routes[start:end]
+
         assert "get_missing_tracks_from_db" in window, (
             "the endpoint must read the persisted snapshot"
         )
-        assert "get_missing_tracks(" not in window, (
-            "the endpoint must NOT recompute — that is what made a page load "
-            "fire a MusicBrainz release fetch per owned album"
+
+        head, refresh_kw, rest = window.partition("if refresh:")
+        assert refresh_kw, "the refresh branch is the endpoint's only recompute"
+        assert "get_missing_tracks(" not in head, (
+            "the endpoint must NOT recompute before the refresh gate — that is "
+            "what made a page load fire a MusicBrainz release fetch per owned "
+            "album"
+        )
+        default_branch = rest.split("else:", 1)[-1]
+        assert "get_missing_tracks(" not in default_branch, (
+            "the default (no-refresh) path must stay DB-only"
         )
 
     def test_the_snapshot_has_exactly_two_writers(self):
@@ -1008,10 +1028,11 @@ class TestTheZeroTrackSummaryTellsTheTruth:
         """Pins the FACT behind the corrected advice, so the wording cannot be
         'simplified' back into an untrue statement."""
         source = SCANNER.read_text(encoding="utf-8")
-        # The up-to-date skip is the only thing gated on `force` (the finalise
-        # pass now bypasses this same gate — it must never skip an album —
-        # but `force` remains one of its two conditions).
-        skip_idx = source.index("if not force and not album_filter and not _mode_finalise:")
+        # The up-to-date skip is the only thing gated on `force`. Finalise
+        # used to be exempted from it too (and was removed 2026-10-09: a
+        # non-forced finalise must follow the configured windows), but `force`
+        # remains one of its conditions.
+        skip_idx = source.index("if not force and not album_filter:")
         assert skip_idx, "the freshness skip must remain gated on force"
         # The budget is resolved unconditionally, outside any `force` guard.
         budget_idx = source.index("_album_budget = _resolve_album_budget()")

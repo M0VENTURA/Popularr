@@ -111,10 +111,31 @@ class TestTheRunnerProcessesEveryAlbumForFinalise:
         assert "finalise_only: bool = False" in RUNNER_SOURCE
         assert '"finalise_only": finalise_only,' in RUNNER_SOURCE
 
-    def test_the_skip_gates_are_bypassed(self):
-        """Freshness / skip-unchanged / completeness must not stop the album
-        before the file-tag sync — that sync IS the finalise pass."""
-        assert "if not force and not album_filter and not _mode_finalise:" in RUNNER_SOURCE
+    def test_the_skip_gates_follow_the_config(self):
+        """Reported: *"It should follow the config rules for skipping of known
+        scan types."*
+
+        A NON-FORCED finalise pass used to bypass every gate, so it re-visited
+        the whole library — 3 minutes for ONE album, 12 more queued.
+        """
+        assert "if not force and not album_filter and not _mode_finalise:" not in RUNNER_SOURCE, (
+            "the finalise exemption is back — a non-forced finalise pass "
+            "re-visits every album regardless of the configured windows"
+        )
+        assert "if not force and not album_filter:" in RUNNER_SOURCE, (
+            "the freshness skip must stay gated on force and album_filter"
+        )
+
+    def test_the_finalise_pass_reads_the_history_it_writes(self):
+        """The Singles window must be checked against the scan type this pass
+        actually RECORDS, or the window would read someone else's history."""
+        assert (
+            'if options.get("singles_only") or options.get("singles_with_missing_popularity"):\n'
+            '        return "singles"'
+        ) in RUNNER_SOURCE, (
+            "a finalise pass is dispatched as singles_only, so its history "
+            "type must be 'singles' — the window it is now gated on"
+        )
 
     def test_the_progress_label_names_the_pass(self):
         assert '"Finalise Pass" if options.get("finalise_only")' in RUNNER_SOURCE

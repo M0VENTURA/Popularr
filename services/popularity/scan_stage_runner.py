@@ -2000,12 +2000,26 @@ def run_scan(
         skip_album = False
         force_metadata_for_this_album = False
 
-        # A finalise pass processes EVERY album — the per-album file-tag sync
-        # below is the whole point, and the freshness / skip-unchanged gates
-        # would leave every already-scanned album (i.e. almost all of them)
-        # never finalised. What work each album does is decided per TRACK
-        # (stored score reuse + singles freshness), not by skipping it here.
-        if not force and not album_filter and not _mode_finalise:
+        # FINALISE USED TO BYPASS THESE GATES ENTIRELY, on the reasoning that
+        # the per-album file-tag sync below is the whole point of the pass and
+        # the freshness gates would leave every already-scanned album (i.e.
+        # almost all of them) never finalised.
+        #
+        # Reported: *"a non forced Finalise scan took 3 minutes to complete"*
+        # for ONE album, with 12 more queued — because a non-forced run re-visited
+        # every album in the library no matter what Config said. It now follows
+        # the CONFIG RULES for the scan type it runs: `_resolve_scan_type` maps
+        # a finalise pass to ``singles`` (it is dispatched as `singles_only`),
+        # so the **Singles Scan Window** — and the singles half of
+        # `Skip Unchanged Albums` — decide, each against the ``singles`` history
+        # this very pass records. `0` still means always run, Force still
+        # bypasses, and the completeness override below still forces an
+        # incomplete album through.
+        #
+        # DELIBERATE TRADE-OFF: an album skipped here does NOT get its file-tag
+        # sync on this pass. That is what "skip" means, and it is the rule the
+        # user configured.
+        if not force and not album_filter:
             try:
                 if _mode_meta:
                     skip_days = int(get_feature("metadata_skip_days", 0) or 0)
