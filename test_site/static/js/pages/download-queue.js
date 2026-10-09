@@ -615,11 +615,101 @@
   }
 
   /**
+   * Refresh the "Download Queue Processor" card (#queueProcessorStatusCard).
+   *
+   * Nothing used to write that card: `updateProcessorStatusCard` was never
+   * ported out of old_system, so the badge stayed on the markup's "Loading…",
+   * the body stayed on "Checking processor status…" and #restartProcessorBtn —
+   * which ships `disabled` — was never enabled. The endpoint was a stub too
+   * ("Queue processor status not implemented"), so even a wired card could not
+   * have said "Running". This always renders a TERMINAL state — running,
+   * restarting, stopped, or unreachable — so the card cannot sit on loading.
+   */
+  async function loadQueueProcessorStatus() {
+    let payload = null;
+    try {
+      payload = await global.api.getJson('/api/queue-processor/status');
+    } catch (error) {
+      console.error('Error loading queue processor status:', error);
+    }
+    updateProcessorStatusCard(payload);
+  }
+
+  /**
+   * Render the processor card from the /api/queue-processor/status payload.
+   *
+   * @param {Object|null} pData — null means the endpoint could not be reached,
+   *   which is shown as "Unknown" rather than left loading.
+   */
+  function updateProcessorStatusCard(pData) {
+    const badge = document.getElementById('processorStatusBadge');
+    const content = document.getElementById('processorStatusContent');
+    const restartBtn = document.getElementById('restartProcessorBtn');
+    if (!badge || !content) return;
+
+    const setBadge = (cls, label) => {
+      badge.className = `badge ${cls}`;
+      badge.innerHTML = `<i class="bi bi-circle-fill me-1" style="font-size:0.6em"></i> ${esc(label)}`;
+    };
+
+    if (!pData || pData.error) {
+      setBadge('bg-secondary', 'Unknown');
+      content.innerHTML = '<span class="text-warning"><i class="bi bi-exclamation-triangle"></i> ' +
+        'Processor status could not be loaded — check the server logs.</span>';
+      if (restartBtn) {
+        restartBtn.disabled = false;
+        restartBtn.classList.toggle('btn-danger', false);
+        restartBtn.classList.toggle('btn-primary', true);
+      }
+      return;
+    }
+
+    const status = String(pData.status || '').toLowerCase();
+    const running = !!(pData.processor_running || pData.running || status === 'running');
+    const restarting = status === 'restarting';
+
+    const stats = pData.queue_stats || {};
+    const statLine = [];
+    if (stats.queued != null) statLine.push(`${Number(stats.queued)} queued`);
+    if (stats.downloading != null) statLine.push(`${Number(stats.downloading)} active`);
+    if (stats.failed != null) statLine.push(`${Number(stats.failed)} failed`);
+    if (stats.ready != null) statLine.push(`${Number(stats.ready)} ready`);
+
+    const lines = [];
+    if (pData.message) lines.push(esc(pData.message));
+    if (statLine.length) lines.push(`<span class="text-muted">${statLine.join(' · ')}</span>`);
+    content.innerHTML = lines.join('<br>');
+
+    if (restarting) {
+      setBadge('bg-warning text-dark', 'Restarting');
+    } else if (running) {
+      setBadge('bg-success', 'Running');
+    } else {
+      setBadge('bg-danger', 'Stopped');
+    }
+
+    if (restartBtn) {
+      // Enabled in EVERY state, including Running: restarting a wedged
+      // processor is the point of the button. Only the colour changes — danger
+      // while it is down, primary while it is up.
+      restartBtn.disabled = false;
+      restartBtn.classList.toggle('btn-danger', !running);
+      restartBtn.classList.toggle('btn-primary', running);
+    }
+  }
+
+  /**
    * Fetch the queue once and drive every renderer from that one response.
    * The previous version issued four separate requests to this endpoint per
    * poll — see bug 4.
    */
   async function loadQueueStatus() {
+    // The processor card has its own endpoint and its own renderer. Refreshing
+    // it FIRST (before the early return below) is what keeps the badge, body
+    // and Restart button in step with the queue poll, whatever else this
+    // function has to bail out of.
+    await loadQueueProcessorStatus();
+
     let data;
     try {
       // The offset is now actually sent. getQueuePageUrl() existed for this
@@ -1923,6 +2013,7 @@
 
   // Legacy globals for inline handlers in the download templates.
   global.loadQueueStatus = loadQueueStatus;
+  global.loadQueueProcessorStatus = loadQueueProcessorStatus;
   global.changeQueuePage = changeQueuePage;
   global.addToQueue = addToQueue;
   global.searchMusicBrainzForQueue = searchMusicBrainzForQueue;

@@ -22,6 +22,7 @@ import structlog
 from sqlalchemy import text
 
 from helpers.config_helpers import get_queue_worker_config
+from services.queue.queue_heartbeat import record_queue_processor_cycle
 from services.queue.queue_orchestrator import process_cycle
 
 # Graceful degradation for sqlalchemy imports
@@ -152,6 +153,13 @@ def run(interval: int | None = None, batch_size: int | None = None) -> None:
                     batch_size=effective_batch,
                     run_maintenance_hooks=True,
                 )
+
+                # A finished cycle is this worker's ONLY cross-process proof of
+                # life: the WebUI never sees this PID, it reads the heartbeat
+                # file stamped here (services/queue/queue_heartbeat.py). Stamped
+                # after the call so a cycle that raised leaves no stamp and the
+                # status endpoint correctly reports the processor as stopped.
+                record_queue_processor_cycle("standalone-worker")
 
                 duration = round(time.monotonic() - start_time, 3)
 

@@ -102,33 +102,225 @@ def get_queue_events(
 # =============================================================================
 # PROCESSOR
 # =============================================================================
+#
+# The download queue has NO process this app owns outright. It is driven either
+# by the standalone ``services.queue.queue_worker`` (started by entrypoint.sh /
+# popularr-queue-worker.service) or by the APScheduler
+# ``download_queue_processor`` job inside the web process — never both at once,
+# and neither PID is visible to the other.
+#
+# So "is the processor running?" is answered with EVIDENCE, never assumed:
+#
+#   1. a heartbeat stamped by whichever driver last finished a cycle, younger
+#      than the staleness window (services/queue/queue_heartbeat.py), or
+#   2. an armed in-process scheduler job — the fresh-boot case, where the first
+#      tick has not happened yet.
+#
+# Everything else reports "stopped" and unlocks the Restart button. This used
+# to be a hardcoded ``running=False, message="Queue processor status not
+# implemented"`` stub, which is why the Download Queue Processor card sat on
+# "Checking processor status…" with a permanently greyed-out button: no code
+# ever wrote the badge, and the endpoint could never say "running" anyway.
 
-def queue_processor_status():
+
+def _queue_processor_stats() -> dict[str, int]:
+    """Queue counts for the card body, in the labels the UI already displays."""
+    from services.queue.queue_constraints import (
+        ACTIVE_QUEUE_STATUSES,
+        COMPLETED_QUEUE_STATUSES,
+        FAILED_STATUSES,
+    )
+
+    try:
+        counts = get_queue_status_counts() or {}
+    except Exception:
+        counts = {}
+
+    def _sum(statuses: Any) -> int:
+        return sum(int(counts.get(s, 0) or 0) for s in statuses)
+
+    return {
+        "queued": int(counts.get("queued", 0) or 0),
+        "active": _sum(ACTIVE_QUEUE_STATUSES),
+        "downloading": int(counts.get("downloading", 0) or 0),
+        "failed": _sum(FAILED_STATUSES),
+        "ready": _sum(COMPLETED_QUEUE_STATUSES),
+    }
+
+
+def queue_processor_status() -> tuple[dict[str, Any], int]:
+    """Report whether the download queue processor is actually running.
+
+    Returns ``running`` plus a ``status`` of ``running`` / ``restarting`` /
+    ``stopped``, the heartbeat and scheduler evidence behind that verdict
+    (``detail``), and ``queue_stats`` for the card body.
     """
-    Placeholder until queue processor state
-    is fully centralized.
-    """
+    from services.queue.queue_heartbeat import (
+        read_queue_processor_health,
+        stale_after_seconds,
+    )
+
+    stale_after = stale_after_seconds()
+    heartbeat = read_queue_processor_health()
+    age = heartbeat.get("age_seconds") if heartbeat else None
+    heartbeat_fresh = bool(heartbeat) and age is not None and age <= stale_after
+
+    try:
+        from services.scheduler.scheduler_service import (
+            queue_processor_schedule_snapshot,
+        )
+
+        schedule = queue_processor_schedule_snapshot()
+    except Exception as exc:
+        schedule = {
+            "available": False,
+            "running": False,
+            "job_registered": False,
+            "next_run_in_seconds": None,
+            "reason": f"schedule unavailable: {exc}",
+        }
+
+    armed = bool(schedule.get("running") and schedule.get("job_registered"))
+    running = heartbeat_fresh or armed
+
+    # A heartbeat stamped by the Restart button means "we asked it to start",
+    # not "a cycle finished" — say so instead of claiming a full Running state
+    # for a cycle that may still be in flight (or may never have started).
+    restarting = (
+        heartbeat_fresh
+        and str((heartbeat or {}).get("outcome") or "") == "requested"
+    )
+
+    detail: list[str] = []
+    if heartbeat_fresh:
+        detail.append(
+            f"last queue cycle {int(age)}s ago "
+            f"({heartbeat.get('driver')}, {heartbeat.get('outcome')})"
+        )
+    elif heartbeat and age is not None:
+        detail.append(
+            f"last queue cycle {int(age)}s ago — older than the {int(stale_after)}s window"
+        )
+    elif heartbeat:
+        detail.append("queue heartbeat exists but carries no usable timestamp")
+    else:
+        detail.append(f"no queue cycle has completed in the last {int(stale_after)}s")
+
+    if armed:
+        nxt = schedule.get("next_run_in_seconds")
+        detail.append(
+            "scheduler job armed"
+            + (f", next tick in {int(nxt)}s" if nxt is not None else "")
+        )
+    else:
+        detail.append(f"scheduler: {schedule.get('reason')}")
+
+    state = "restarting" if restarting else ("running" if running else "stopped")
+    if state == "restarting":
+        message = (
+            "Queue processor is restarting — a cycle was just requested; "
+            + "; ".join(detail)
+        )
+    elif state == "running":
+        message = "Queue processor is running — " + "; ".join(detail)
+    else:
+        message = (
+            "Queue processor is NOT running — "
+            + "; ".join(detail)
+            + ". Click Restart Processor to start a cycle."
+        )
 
     return _ok(
-        running=False,
-        migrated=False,
-        message="Queue processor status not implemented",
+        running=running,
+        processor_running=running,
+        status=state,
+        driver=(heartbeat or {}).get("driver"),
+        last_cycle_at=(heartbeat or {}).get("recorded_at"),
+        seconds_since_cycle=age,
+        stale_after_seconds=stale_after,
+        schedule=schedule,
+        queue_stats=_queue_processor_stats(),
+        detail=detail,
+        message=message,
     )
 
 
-def queue_processor_restart():
+def _kick_queue_cycle() -> dict[str, Any]:
+    """Run ONE queue cycle now, in a background thread.
+
+    The fallback when there is no in-process scheduler job to re-arm (split
+    deployment, scheduler stopped, job disabled). ``process_cycle`` takes the
+    cross-process cycle lock itself, so kicking while the standalone worker is
+    mid-cycle skips instead of colliding. Reported synchronously — the cycle
+    itself runs in the background, because a real cycle can take seconds.
     """
-    Queue processor restart placeholder.
+    def _run() -> None:
+        try:
+            from services.queue.queue_heartbeat import record_queue_processor_cycle
+            from services.queue.queue_orchestrator import process_cycle
+
+            process_cycle()
+            record_queue_processor_cycle("restart-kick")
+        except Exception as exc:
+            # stdlib logger (this module's `logger`), so %-style formatting —
+            # a kwarg like `error=` raises TypeError and would escape the
+            # thread, losing the queue.log line as well as the warning.
+            logger.warning("Queue restart cycle failed: %s", exc)
+            log_queue("[QUEUE] restart cycle failed", error=str(exc))
+
+    threading.Thread(target=_run, name="queue-restart-kick", daemon=True).start()
+    return {"kicked": True, "reason": "a queue cycle was started in the background"}
+
+
+def queue_processor_restart() -> tuple[dict[str, Any], int]:
+    """Kick the queue processor now and report exactly what was done.
+
+    Replaces a placeholder that deleted ``QUEUE_PROCESSOR_HEALTH_FILE`` when it
+    existed — a no-op, because nothing ever wrote that file. Restart now does
+    two real things: it re-arms the in-process scheduler job so the periodic
+    driver fires immediately, and, when there is no such job, it runs a cycle
+    itself. It then stamps the heartbeat so the card reads "restarting" right
+    away and flips to "running" once a cycle actually completes — the badge
+    changes because the queue moved, not because a flag was cleared.
     """
-    import subprocess, sys
+    from services.queue.queue_heartbeat import record_queue_processor_cycle
+    from services.scheduler.scheduler_service import kick_download_queue_processor
+
+    actions: list[str] = []
+
+    schedule = kick_download_queue_processor()
+    if schedule.get("attempted"):
+        actions.append(str(schedule.get("reason")))
+    else:
+        kick = _kick_queue_cycle()
+        actions.append(f"{kick['reason']} ({schedule.get('reason')})")
+
     try:
-        # Signal the queue processor to restart via its health-check file
-        proc_file = os.environ.get("QUEUE_PROCESSOR_HEALTH_FILE", "")
-        if proc_file and os.path.isfile(proc_file):
-            os.remove(proc_file)
-        return _ok(message="Queue processor restart signal sent")
-    except Exception as exc:
-        return _fail(str(exc))
+        from services.queue.queue_signal import signal_new_item
+
+        signal_new_item()
+        actions.append("woken any in-process queue worker")
+    except Exception:
+        pass
+
+    # Stamped last so the status snapshot below reports "restarting".
+    record_queue_processor_cycle("restart-requested", outcome="requested")
+
+    payload, status = queue_processor_status()
+    payload.update(
+        {
+            "success": True,
+            "restarting": True,
+            "message": "Queue processor restart requested — " + "; ".join(actions),
+            "restart": {"schedule": schedule, "actions": actions},
+        }
+    )
+    log_queue_event(
+        "processor_restart",
+        "Queue processor restart requested",
+        actions=actions,
+    )
+    return payload, status
 
 
 # =============================================================================

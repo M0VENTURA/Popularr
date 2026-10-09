@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import threading
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -245,11 +246,16 @@ def _download_queue_processor_tick() -> None:
     """Module-level function so APScheduler can serialize it by reference."""
     try:
         import threading as _th
+        from services.queue.queue_heartbeat import record_queue_processor_cycle
         from services.queue.queue_orchestrator import process_cycle
         
         def _run_cycle() -> None:
             try:
                 process_cycle()
+                # Stamped only AFTER a successful cycle — this tick and the
+                # standalone queue_worker are the two drivers whose liveness
+                # /api/queue-processor/status reports (queue_heartbeat.py).
+                record_queue_processor_cycle("scheduler")
             except Exception as _exc:
                 logger.warning("download_queue_processor cycle failed", error=str(_exc))
                 # services/scheduler is NOT in the logging routing table, so
@@ -265,6 +271,123 @@ def _download_queue_processor_tick() -> None:
     except Exception as _exc:
         logger.warning("download_queue_processor spawn failed", error=str(_exc))
         log_queue("[QUEUE] cycle spawn failed", error=str(_exc))
+
+
+# ---------------------------------------------------------------------------
+# Queue processor status / restart support
+# ---------------------------------------------------------------------------
+def queue_processor_schedule_snapshot() -> dict[str, Any]:
+    """Describe the in-process ``download_queue_processor`` job. Side-effect free.
+
+    Reads ``_SCHEDULER`` directly instead of calling ``get_scheduler()``:
+    building that singleton (and opening its SQLAlchemy jobstore) is a startup
+    side effect that a status endpoint polled every 10 seconds must never
+    trigger. ``_SCHEDULER`` is ``None`` when the scheduler was never created or
+    was stopped by ``stop_scheduler()``.
+
+    This is the SECOND piece of evidence behind ``/api/queue-processor/status``
+    — the heartbeat written by a finished cycle is the first. A freshly booted
+    app has no heartbeat yet but does have an armed job, and must not be
+    reported as stopped.
+
+    Returns a dict with:
+        ``available``             — the singleton exists in this process
+        ``running``               — the scheduler thread is actually started
+        ``job_registered``        — the queue job is scheduled
+        ``next_run_in_seconds``   — seconds until the next tick, or ``None``
+        ``reason``                — human explanation, always present
+    """
+    scheduler = _SCHEDULER
+    if scheduler is None:
+        return {
+            "available": False,
+            "running": False,
+            "job_registered": False,
+            "next_run_in_seconds": None,
+            "reason": "scheduler not initialised in this process",
+        }
+
+    try:
+        running = bool(scheduler.running)
+    except Exception:
+        running = False
+
+    job: Any = None
+    job_error: str | None = None
+    if running:
+        try:
+            job = scheduler.get_job("download_queue_processor")
+        except Exception as exc:
+            job_error = str(exc)
+
+    next_run_in: float | None = None
+    if job is not None:
+        try:
+            next_run = job.next_run_time
+            if next_run is not None:
+                next_run_in = max(
+                    0.0,
+                    (next_run - datetime.now(next_run.tzinfo)).total_seconds(),
+                )
+        except Exception:
+            next_run_in = None
+
+    if not running:
+        reason = "scheduler is not running in this process"
+    elif job_error:
+        reason = f"queue processor job lookup failed: {job_error}"
+    elif job is None:
+        reason = "queue processor job is not registered (disabled?)"
+    else:
+        reason = "queue processor job is scheduled"
+
+    return {
+        "available": True,
+        "running": running,
+        "job_registered": job is not None,
+        "next_run_in_seconds": next_run_in,
+        "reason": reason,
+    }
+
+
+def kick_download_queue_processor() -> dict[str, Any]:
+    """Ask the in-process queue job to fire immediately (the Restart button).
+
+    "Restart the processor" has no process to restart here: the processor is
+    either this scheduler job or the external ``queue_worker`` started by
+    ``entrypoint.sh``, neither of which the WebUI owns. The honest equivalent
+    is *make the next cycle happen now* — this re-arms the job, and the caller
+    runs a cycle itself when there is no job to re-arm.
+
+    Returns a dict describing what actually happened. ``attempted`` is False
+    when this process has nothing to re-arm, so the caller knows to fall back.
+    """
+    scheduler = _SCHEDULER
+    if scheduler is None:
+        return {"attempted": False, "reason": "scheduler not initialised in this process"}
+
+    try:
+        if not scheduler.running:
+            return {"attempted": False, "reason": "scheduler is not running in this process"}
+    except Exception:
+        return {"attempted": False, "reason": "scheduler state unavailable"}
+
+    try:
+        job = scheduler.get_job("download_queue_processor")
+    except Exception as exc:
+        return {"attempted": False, "reason": f"job lookup failed: {exc}"}
+    if job is None:
+        return {"attempted": False, "reason": "queue processor job is not registered"}
+
+    try:
+        # next_run_time is a first-class APScheduler field: setting it to "now"
+        # fires the job on the scheduler's next wakeup instead of waiting out
+        # the interval, and the IntervalTrigger resumes its normal cadence after.
+        job.modify(next_run_time=datetime.now(scheduler.timezone))
+    except Exception as exc:
+        return {"attempted": False, "reason": f"job reschedule failed: {exc}"}
+
+    return {"attempted": True, "reason": "queue processor job scheduled to run immediately"}
 
 
 def _register_default_jobs(

@@ -19,7 +19,13 @@
       global.cleanupCopiedSources        line 1704
       global.loadQueueEvents             line 1707
       global.clearQueueEventsLog         line 1708
-
+  The processor card (#processorStatusBadge / #processorStatusContent /
+  #restartProcessorBtn) is the one block NO inline handler touches: its three
+  ids are written exclusively by loadQueueProcessorStatus() →
+  updateProcessorStatusCard(), which loadQueueStatus() calls first on every
+  poll. That is what turns the badge from "Loading…" to Running/Restarting/
+  Stopped and unlocks the Restart button; the button ships `disabled` in this
+  markup deliberately, and only that function may enable it.
   The two filter groups (#queueStatusFilter, #queueSourceFilter) are radio
   inputs with no handlers — the module binds change listeners to the group ids.
 
