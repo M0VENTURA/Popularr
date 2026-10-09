@@ -279,19 +279,43 @@ def _album_genres(metadata: dict[str, Any]) -> str:
     return ", ".join(seen)
 
 
+def _first_present(rows: list[dict[str, Any]], keys: Any) -> str:
+    """First non-empty value for ``keys`` across ``rows``.
+
+    Row-major, then the field's own key order — the algorithm the album page's
+    ``first_value`` uses, so the review and the form cannot disagree about what
+    the album currently holds.
+
+    ⚠️ It used to read ``rows[0]`` ONLY. Album-level values are *meant* to be
+    duplicated onto every track row, but they routinely are not — a row
+    imported later, a partial re-tag, a field the scan filled on some rows and
+    not others — so Lookup MBID reported "(empty)" for a field the album page
+    was visibly showing, and then proposed a value the album already had.
+    Reported as *"some seem to be seen as empty even when there is information
+    in them"*.
+    """
+    for row in rows:
+        for key in keys:
+            value = _as_text(row.get(key))
+            if value:
+                return value
+    return ""
+
+
 def _album_level_proposals(
     local_tracks: list[dict[str, Any]],
     metadata: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Build the album-level "current -> proposed" list.
 
-    Album-level values are duplicated across the album's track rows, so the
-    first row is the representative "current" value.
+    "Current" is read with :func:`_first_present` — the first non-empty value
+    across the album's rows, not just the first row.
     """
     if not local_tracks:
         return []
 
-    head = local_tracks[0]
+    def _current(*keys: str) -> str:
+        return _first_present(local_tracks, keys)
 
     # ``album_title`` is the release-GROUP name (the album's main identity) and
     # the release-group key is authoritative; fall back to the release title
@@ -304,33 +328,27 @@ def _album_level_proposals(
 
     resolved["album_genres"] = _album_genres(metadata)
 
-    # "Current" values, read from the representative row.  A couple of the
-    # form fields do not map 1:1 onto a column name.
+    # "Current" values, read across EVERY row.  A couple of the form fields do
+    # not map 1:1 onto a column name, so each keeps its own key order.
     current: dict[str, str] = {
-        "album_title": _as_text(head.get("album")),
-        "album_artist": _as_text(head.get("album_artist") or head.get("artist")),
-        "album_release_title": _as_text(
-            head.get("release_title") or head.get("albumversion")
+        "album_title": _current("album"),
+        "album_artist": _current("album_artist", "artist"),
+        "album_release_title": _current("release_title", "albumversion"),
+        "album_originalyear": _current("year", "originalyear"),
+        "release_year": _current("release_year"),
+        "album_type": _current(
+            "spotify_album_type", "musicbrainz_albumtype", "releasetype"
         ),
-        "album_originalyear": _as_text(head.get("year") or head.get("originalyear")),
-        "release_year": _as_text(head.get("release_year")),
-        "album_type": _as_text(
-            head.get("spotify_album_type")
-            or head.get("musicbrainz_albumtype")
-            or head.get("releasetype")
-        ),
-        "album_mbid": _as_text(
-            head.get("musicbrainz_album_mbid") or head.get("musicbrainz_albumid")
-        ),
-        "album_release_group_mbid": _as_text(head.get("musicbrainz_releasegroupid")),
-        "artist_mbid": _as_text(head.get("musicbrainz_artistid")),
-        "album_recordlabel": _as_text(head.get("recordlabel")),
-        "album_catalognumber": _as_text(head.get("catalognumber")),
-        "album_barcode": _as_text(head.get("barcode")),
-        "album_releasedate": _as_text(head.get("releasedate")),
-        "album_media": _as_text(head.get("media")),
-        "album_releasecountry": _as_text(head.get("releasecountry")),
-        "album_genres": _as_text(head.get("genres")),
+        "album_mbid": _current("musicbrainz_album_mbid", "musicbrainz_albumid"),
+        "album_release_group_mbid": _current("musicbrainz_releasegroupid"),
+        "artist_mbid": _current("musicbrainz_artistid"),
+        "album_recordlabel": _current("recordlabel"),
+        "album_catalognumber": _current("catalognumber"),
+        "album_barcode": _current("barcode"),
+        "album_releasedate": _current("releasedate"),
+        "album_media": _current("media"),
+        "album_releasecountry": _current("releasecountry"),
+        "album_genres": _current("genres"),
     }
 
     proposals: list[dict[str, Any]] = []
