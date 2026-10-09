@@ -82,6 +82,7 @@ from helpers.normalization_service import (
     edition_annotations_compatible as Edition_annotations_compatible,
     extract_edition_annotation as Extract_edition_annotation,
     format_duration_mmss as Format_duration_mmss,
+    is_track_artist_placeholder,
     normalize_string as Normalize_string,
     normalize_title_for_lookup as Normalize_title_for_lookup,
     normalize_title_for_lucene_query as Normalize_title_for_lucene_query,
@@ -1906,13 +1907,43 @@ def _flatten_release(Release: dict[str, Any], release_id: str) -> dict[str, Any]
             genres = list(dict.fromkeys(genres))
 
             # Per-track artist: the recording's own credit when it has one,
-            # otherwise the release's joined credit (NOT the primary only —
-            # a featured credit belongs on the track).
-            Track_artist = (
+            # then the TRACK's own credit, and only then the release's.
+            #
+            # ⚠️ THE TRACK'S CREDIT IS NOT OPTIONAL.  On a Various-Artists
+            # release MusicBrainz puts the band on
+            # ``medium.tracks[].artist-credit`` and frequently leaves the
+            # RECORDING's credit unset — so reading only the recording handed
+            # ``Joined_artist_credit`` ("Various Artists") to every track of a
+            # compilation, and the missing-track table queued each of them as
+            # "Various Artists": a label, not a performer, which is exactly
+            # what Soulseek then searched for (reported: "some tracks are
+            # still being added to the download queue as Various Artists").
+            #
+            # The release's own credit stays the LAST resort — it is the right
+            # answer for a single-artist album, and a queue row still needs a
+            # non-empty artist to search with.
+            # A PLACEHOLDER carries no information, so it never wins: MusicBrainz
+            # may credit a recording to "Various Artists" while naming the band on
+            # the track, and taking the placeholder first would defeat the whole
+            # point of reading the track's credit.
+            _recording_credit = (
                 build_artist_credit_string(Recording.get("artist-credit") or [])
                 if Recording.get("artist-credit")
                 else ""
-            ) or Joined_artist_credit or Primary_artist
+            )
+            _track_credit = (
+                build_artist_credit_string(track.get("artist-credit") or [])
+                if track.get("artist-credit")
+                else ""
+            )
+            if is_track_artist_placeholder(_recording_credit):
+                _recording_credit = ""
+            if is_track_artist_placeholder(_track_credit):
+                _track_credit = ""
+            Track_artist = (
+                _recording_credit or _track_credit
+                or Joined_artist_credit or Primary_artist
+            )
 
             entry: dict[str, Any] = {
                 "disc_number": Disc_number,
