@@ -26,6 +26,7 @@ from helpers.normalization_service import (
     normalize_title_for_compare,
     normalize_title_for_lucene_query,
 )
+from helpers.track_ordering import album_track_sort_key
 
 logger = structlog.get_logger(__name__)
 
@@ -106,11 +107,15 @@ def get_library_tracks(artist: str, album: str) -> list[dict[str, Any]]:
             {"artist": artist},
         ).mappings().all()
 
-    return [
+    library = [
         dict(r)
         for r in rows
         if _album_key(str(r.get("album") or "")) == album_key
     ]
+    # ``track_number`` is TEXT — ``ORDER BY track_number`` reads 1, 10, 11, 12, 2.
+    # Decide the order here with the rule the album page shares.
+    library.sort(key=album_track_sort_key)
+    return library
 
 
 def _queued_coverage(
@@ -437,7 +442,10 @@ def find_duplicate_tracks(artist: str, album: str) -> dict[str, Any]:
             "track_ids": [str(t.get("id") or "") for t in tracks],
         })
 
-    duplicates.sort(key=lambda g: (g["disc_number"], g["track_number"], g["title"].casefold()))
+    # ``disc_number``/``track_number`` are TEXT (and stored as TEXT in this
+    # dict), so a tuple sort orders "10" before "2" — the shared key makes it
+    # numeric, with unnumbered groups after numbered ones.
+    duplicates.sort(key=album_track_sort_key)
     flat_ids = [tid for group in duplicates for tid in group["track_ids"]]
 
     if duplicates:
@@ -585,6 +593,10 @@ def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
         return {"missing_tracks": [], "missing_count": 0, "mb_total": 0, "library_count": 0}
 
     missing = [dict(r) for r in rows]
+    # ``track_number`` is TEXT here too: ``COALESCE(track_number, '999')``
+    # still compares "10" < "2", which is the reported missing-track order
+    # after importing from the album page.
+    missing.sort(key=album_track_sort_key)
     return {
         "missing_tracks": missing,
         "missing_count": len(missing),

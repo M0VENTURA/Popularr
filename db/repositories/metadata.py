@@ -11,6 +11,7 @@ import os
 from typing import Any
 from sqlalchemy import text
 from db.engine import db_session
+from helpers.track_ordering import album_track_sort_key
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,7 @@ def fetch_album_tracklist(conn: Any = None, artist: str = "", album: str = ""):
     """
     with db_session() as session:
         result = session.execute(text("""
-            SELECT id, title, track_number, duration, artist
+            SELECT id, title, track_number, duration, artist, disc_number
             FROM tracks
             WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
               AND LOWER(COALESCE(album, '')) = LOWER(:album)
@@ -160,7 +161,22 @@ def fetch_album_tracklist(conn: Any = None, artist: str = "", album: str = ""):
                      COALESCE(track_number, '999'),
                      title
         """), {"artist": artist, "album": album})
-        return result.fetchall() or []
+        rows = result.fetchall() or []
+
+    # ⚠️ The ORDER BY is only a PRE-SORT: ``track_number`` is TEXT, so it reads
+    # 1, 10, 11, 12, 2 — reported as the ARTIST PAGE's expandable tracklist
+    # being out of order. The order the user sees is decided here, with the
+    # same rule the album page uses (``helpers/track_ordering``), so the two
+    # surfaces can never disagree. ``disc_number`` is selected LAST so the
+    # positional reads in ``album_service.get_album_tracklist`` are unchanged.
+    return sorted(
+        rows,
+        key=lambda row: album_track_sort_key({
+            "disc_number": row[5],
+            "track_number": row[2],
+            "title": row[1],
+        }),
+    )
 
 
 def fetch_album_queue_track_stubs(conn: Any = None, artist: str = "", album: str = ""):
