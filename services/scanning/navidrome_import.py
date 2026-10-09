@@ -18,6 +18,7 @@ Architecture:
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -214,14 +215,79 @@ def fetch_album_tracks_safe(
         return [], ""
 
 
+def _merge_release_tags_from_file(
+    extracted: dict[str, Any],
+    track: dict[str, Any],
+) -> None:
+    """Fill fields Navidrome holds but never echoes from the FILE itself.
+
+    The Subsonic ``Child``/``AlbumID3`` structs are a fixed field set:
+    ``osChildFromMediaFile`` exposes title, ids, ISRC, replaygain, genres/moods,
+    participants, works and movements — and nothing else. Navidrome reads
+    barcode, catalog number, media, script, release country/status, language,
+    record label, release type and the track/disc totals into
+    ``model.MediaFile.Tags`` and keeps them there.
+
+    So importing an album whose files were tagged elsewhere (a Soulseek
+    download, a Picard-tagged rip) produced a row whose album page was blank
+    for exactly those fields — reported as *"the album didn't pick up the tags
+    on import from Navidrome"*. The file is local and already carries them.
+
+    Navidrome's own answer always WINS: a key that came off the wire is never
+    replaced, so this only ever fills a gap. Failures are silent — an
+    unreadable file degrades to "Navidrome had nothing to say", which is the
+    behaviour every other field already has.
+    """
+    raw_path = str(track.get("path") or extracted.get("file_path") or "").strip()
+    if not raw_path:
+        return
+
+    resolved = ""
+    try:
+        from services.metadata.tag_file_service import resolve_music_file_path
+
+        resolved = resolve_music_file_path(raw_path) or ""
+    except Exception as exc:
+        logger.debug(
+            "Release-tag readback: path could not be resolved",
+            path=raw_path, error=str(exc),
+        )
+    if not resolved:
+        # Navidrome hands back an ABSOLUTE path when ``ReportRealPath`` is on,
+        # and ``resolve_music_file_path`` returns None for anything missing.
+        try:
+            if os.path.isfile(raw_path):
+                resolved = raw_path
+        except (OSError, ValueError):
+            resolved = ""
+    if not resolved:
+        return
+
+    try:
+        from helpers.metadata_reader import read_release_tag_values
+
+        file_values = read_release_tag_values(resolved)
+    except Exception as exc:
+        logger.debug(
+            "Release-tag readback failed", path=resolved, error=str(exc),
+        )
+        return
+
+    for field, value in file_values.items():
+        if str(extracted.get(field) or "").strip():
+            continue  # the wire already answered
+        extracted[field] = value
+
+
 def extract_and_backfill_track_metadata(
     *,
     navi_client: Any,
     track: dict[str, Any],
 ) -> tuple[dict[str, Any], str]:
-    """Extract Navidrome metadata and writer JSON."""
+    """Extract Navidrome metadata, file release tags, and writer JSON."""
     get_song = getattr(navi_client, "get_song", None)
     extracted = extract_track_metadata(track, get_song=get_song)
+    _merge_release_tags_from_file(extracted, track)
     writer_json = extracted.get("writer", "[]") or "[]"
     return extracted, writer_json
 
@@ -503,6 +569,7 @@ def scan_artist_to_db(
                 payload = build_track_payload(
                     track=track,
                     extracted=extracted,
+                    album_track_count=len(tracks),
                     album_name=album_name,
                     album_artist_value=album_artist_value,
                     album_context=album_context,

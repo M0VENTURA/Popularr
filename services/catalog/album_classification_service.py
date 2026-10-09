@@ -80,6 +80,38 @@ def normalize_primary_release_type(album_type: str) -> str:
     return value.strip()
 
 
+def guess_album_type_from_track_count(track_count: int | None) -> str:
+    """Provisional ``Album`` / ``EP`` / ``Single`` from how many tracks there are.
+
+    Used ONLY when nothing else knows: a Navidrome import assigns no album
+    type of its own, and until the metadata scan runs the album page and the
+    artist page's sections show nothing at all.
+
+    ⚠️ This is deliberately a GUESS, written to ``releasetype`` rather than
+    ``musicbrainz_albumtype`` (see ``build_track_payload``). A local track
+    count is famously unreliable — an album with a flattened multi-disc
+    folder, bonus tracks or a partial rip reads long — which is exactly why
+    ``fa34e0b7`` stopped MusicBrainz's own ``ep``/``single`` being DEMOTED by
+    it. Demoting an authoritative answer and guessing at a blank one are
+    different questions: this only ever fills a blank, and the metadata scan
+    keeps the final word through ``musicbrainz_albumtype``.
+
+    Returns ``""`` when the count is unknown — an empty guess is never better
+    than no guess.
+    """
+    try:
+        count = int(track_count or 0)
+    except (TypeError, ValueError):
+        return ""
+    if count <= 0:
+        return ""
+    if count <= 2:
+        return "single"
+    if count <= 6:
+        return "ep"
+    return "album"
+
+
 def classify_album_type(album_row: dict[str, Any]) -> str:
     """Classify an album into the artist-page discography buckets.
 

@@ -388,3 +388,152 @@ def parse_artists_field(artists_raw: str) -> list[str]:
         pass
 
     return []
+
+
+# =============================================================================
+# RELEASE-TAG READBACK — what Navidrome keeps but never echoes
+# =============================================================================
+
+#: Internal fields whose value lives in a tag the app's own tag WRITER can
+#: produce.  Resolved through ``services.metadata.tag_names`` so the reader and
+#: the writer can never disagree about a spelling: ``clear_keys_for(field)`` is
+#: exactly the key set a write REMOVES, so reading through it picks up whatever
+#: was written — the canonical name, its separator/case variants and every
+#: declared synonym (``ORIGYEAR``/``ORIGINALYEAR``, ``TOTALTRACKS``/``TRACKTOTAL``).
+#:
+#: ⚠️ WHY THIS EXISTS. Navidrome reads these tags into ``model.MediaFile.Tags``
+#: and never sends them back: the Subsonic ``Child`` / ``AlbumID3`` structs are
+#: a fixed field set, and ``osChildFromMediaFile`` only exposes title, ids,
+#: ISRC, replaygain, genres/moods, participants, works and movements. So an
+#: import of a file that was downloaded (and tagged) elsewhere arrives with
+#: barcode, catalog number, media, script, release country/status, language,
+#: record label, release type, track/disc totals … all EMPTY — the reported
+#: "the album didn't pick up the tags on import from Navidrome". The file is
+#: local and already carries them; this reads them back.
+_RELEASE_TAG_FIELDS: tuple[str, ...] = (
+    # Album classification / release identity
+    "releasetype", "releasestatus", "releasecountry",
+    "musicbrainz_albumtype", "musicbrainz_albumstatus",
+    # Release detail — on disk, never on the wire
+    "media", "recordlabel", "catalognumber", "barcode", "asin", "script",
+    "discsubtitle", "albumversion", "copyright", "language",
+    "tracktotal", "disctotal", "compilation", "grouping", "explicitstatus",
+    # Dates
+    "originalyear", "originaldate", "releasedate",
+    # Credits / identifiers
+    "composer", "isrc",
+    "musicbrainz_releasegroupid", "musicbrainz_albumartistid",
+    "musicbrainz_artistid", "musicbrainz_releasetrackid", "musicbrainz_workid",
+    "musicbrainz_albumid", "musicbrainz_trackid",
+    # Enrichment the download import writes to the file
+    "musicbrainz_genres", "is_cover", "original_cover_artist",
+    # Sort / people lists
+    "albumartistsort", "artistsort", "artists",
+)
+
+#: Tags whose on-disk name is not derivable from the field name at all.
+#: ``LABEL`` is the Picard/MusicBrainz spelling of ``recordlabel`` (which is an
+#: ``UNMAPPED_TAG_FIELD`` and therefore has no canonical name of its own).
+_EXTRA_TAG_KEY_ALIASES: dict[str, str] = {
+    "label": "recordlabel",
+    "recordlabel": "recordlabel",
+    "organization": "recordlabel",
+    "publisher": "recordlabel",
+    "release_type": "releasetype",
+    "musicbrainz_albumtype": "releasetype",
+}
+
+
+def _release_tag_lookup() -> dict[str, str]:
+    """Normalised tag key → internal field name."""
+    from services.metadata.tag_names import clear_keys_for, normalise_tag_name
+
+    lookup: dict[str, str] = {}
+    for field in _RELEASE_TAG_FIELDS:
+        for key in clear_keys_for(field):
+            lookup.setdefault(key, field)
+    for key, field in _EXTRA_TAG_KEY_ALIASES.items():
+        lookup.setdefault(normalise_tag_name(key), field)
+    return lookup
+
+
+def read_release_tag_values(file_path: str) -> dict[str, str]:
+    """Read the release-level tags an MP3/FLAC file carries, by field name.
+
+    Returns ``{internal_field: value}`` for non-empty values only. Best-effort
+    and cheap: an unreadable or missing file yields ``{}`` so a caller can treat
+    "no file" exactly like "Navidrome had nothing to say".
+    """
+    from services.metadata.tag_names import normalise_tag_name
+
+    if not file_path:
+        return {}
+    try:
+        if not os.path.isfile(file_path):
+            return {}
+    except (OSError, ValueError):
+        return {}
+
+    lookup = _release_tag_lookup()
+    raw: dict[str, str] = {}
+
+    def _put(key: str, value: Any) -> None:
+        text = str(value or "").strip()
+        if text:
+            raw.setdefault(key, text)
+
+    try:
+        suffix = Path(file_path).suffix.lower()
+        if suffix == ".mp3":
+            from mutagen.id3 import ID3
+
+            tags = ID3(file_path)
+            # Every TXXX frame: the release detail tags are all custom frames
+            # and the desc spelling varies by tagger (BARCODE / bar code / …).
+            for frame in tags.getall("TXXX"):
+                desc = getattr(frame, "desc", "")
+                text = getattr(frame, "text", None)
+                if desc and text:
+                    _put(normalise_tag_name(desc), str(text[0]))
+            # Standard frames the custom-frame table does not cover.
+            for frame_id, field in (
+                ("TSRC", "isrc"), ("TCOM", "composer"), ("TIT3", "discsubtitle"),
+                ("TPUB", "recordlabel"), ("TLAN", "language"),
+                ("TSST", "discsubtitle"), ("TIT1", "grouping"),
+            ):
+                frames = tags.getall(frame_id)
+                for frame in frames:
+                    text = getattr(frame, "text", None)
+                    if text:
+                        _put(normalise_tag_name(field), str(text[0]))
+                        break
+            # TRCK / TPOS carry "1/3" — the totals are the second half.
+            for frame_id, total_field in (("TRCK", "tracktotal"), ("TPOS", "disctotal")):
+                frames = tags.getall(frame_id)
+                for frame in frames:
+                    text = getattr(frame, "text", None)
+                    if text and "/" in str(text[0]):
+                        _put(normalise_tag_name(total_field), str(text[0]).split("/", 1)[1])
+                    break
+        elif suffix == ".flac":
+            from mutagen.flac import FLAC
+
+            audio = FLAC(file_path)
+            for key, values in (audio.tags or {}).items():
+                if not values:
+                    continue
+                _put(normalise_tag_name(key), values[0])
+    except Exception:
+        # A tag read must never fail an import — the caller falls back to what
+        # Navidrome did supply.
+        return {}
+
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        field = lookup.get(key)
+        if not field:
+            continue
+        cleaned = value.strip()
+        if cleaned:
+            out.setdefault(field, cleaned)
+    return out

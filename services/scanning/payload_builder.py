@@ -215,6 +215,7 @@ def build_track_payload(
     is_new_track: bool = True,
     album_mbid: str | None = None,
     album_tags: dict[str, Any] | None = None,
+    album_track_count: int | None = None,
 ) -> dict[str, Any]:
     """Return a DB-ready payload for a Navidrome track.
 
@@ -239,6 +240,9 @@ def build_track_payload(
         album_tags: Album-level raw tags from ``extract_album_metadata``
             (record labels, release type, original dates) — AlbumID3 carries
             them, songs never do.
+        album_track_count: How many tracks Navidrome returned for this album.
+            Used ONLY to derive a provisional ``releasetype`` when neither the
+            file nor AlbumID3 carried one.
     """
     album_context = album_context or {}
     extracted = extracted or extract_track_metadata(track, get_song=get_song)
@@ -332,5 +336,33 @@ def build_track_payload(
             continue
         if not str(payload.get(_col) or "").strip():
             payload[_col] = _val
+
+    # ── Provisional album type ───────────────────────────────────────────
+    # A Navidrome import assigns NO album type of its own: the type every UI
+    # reads (``musicbrainz_albumtype``) is written by the album stage of the
+    # metadata/popularity scan, and the ``releasetype`` tag only exists when
+    # the file or AlbumID3 carried one. Until that scan runs, the album page
+    # and the artist page's sections show nothing at all — reported as
+    # "Navidrome imports also aren't assigning an album type".
+    #
+    # The guess goes into ``releasetype`` DELIBERATELY, never into
+    # ``musicbrainz_albumtype``: the latter is what the scan resolves and what
+    # ``_rich_stored_album_type`` treats as authoritative, so a guess written
+    # there could outrank MusicBrainz for ever. ``releasetype`` is the tag
+    # value, the read sites fall back to it, and the scan keeps owning the
+    # confirmed column. Fill-if-empty on the UPDATE side means an existing row
+    # gains it once but never loses a real value.
+    if not str(payload.get("releasetype") or "").strip():
+        try:
+            from services.catalog.album_classification_service import (
+                guess_album_type_from_track_count,
+            )
+
+            _guessed = guess_album_type_from_track_count(album_track_count)
+        except Exception as exc:  # never fail an import over a guess
+            logger.debug("Album type guess skipped", error=str(exc))
+            _guessed = ""
+        if _guessed:
+            payload["releasetype"] = _guessed
 
     return payload

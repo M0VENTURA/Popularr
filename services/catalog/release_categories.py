@@ -391,6 +391,13 @@ def category_for_album_row(album_row: dict) -> str:
         album_row.get("musicbrainz_albumtype")
         or album_row.get("spotify_album_type")
         or album_row.get("album_type")
+        # Last, and deliberately last: ``releasetype`` is the TAG value —
+        # what the file carries, what AlbumID3's ``releaseTypes`` carries, or
+        # the track-count guess a Navidrome import derives. ``musicbrainz_
+        # albumtype`` above it stays the scan's confirmed answer, so this is a
+        # fallback for an album no metadata scan has classified yet rather
+        # than a competing opinion.
+        or album_row.get("releasetype")
         or ""
     ).strip()
 

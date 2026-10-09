@@ -938,6 +938,31 @@ def associate_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
         return {"success": False, "error": str(exc)}
 
 
+def _release_cover_art(
+    release_mbid: str,
+    release_group_mbid: str = "",
+) -> tuple[bytes | None, str]:
+    """Front cover for the release from the Cover Art Archive.
+
+    Returns ``(image_bytes, mime)``; ``(None, "")`` when nothing is available.
+    Tried against the concrete release first (the artwork is filed there),
+    then the release group — the same order the album page's own lookup uses.
+    """
+    for mbid in (release_mbid, release_group_mbid):
+        if not str(mbid or "").strip():
+            continue
+        try:
+            from api_clients.coverartarchive import get_release_front_image_bytes
+
+            data = get_release_front_image_bytes(mbid)
+        except Exception as exc:
+            logger.debug("Cover Art Archive lookup failed", mbid=mbid, error=str(exc))
+            continue
+        if data:
+            return data, "image/jpeg"
+    return None, ""
+
+
 def _apply_release_metadata_to_files(
     *,
     files: list[dict[str, Any]],
@@ -986,10 +1011,63 @@ def _apply_release_metadata_to_files(
 
     from services.metadata.tag_file_service import update_file_metadata
 
+    # ── Album-level release fields ────────────────────────────────────────
+    # ``match_mb_tracks_to_files`` yields PER-TRACK identity only (title,
+    # artist, positions, recording MBID, ISRC …).  The release's own
+    # album-scoped identity — release type/status/country, album-artist MBID,
+    # release-group MBID, original date, label, catalog number, barcode,
+    # media — was fetched by ``fetch_musicbrainz_release_metadata`` and then
+    # discarded, so a manually matched folder imported with a handful of
+    # fields while the same album arriving through the download queue got the
+    # full set (reported side by side).  This is the SAME mapping the
+    # completion import uses, so the two paths cannot disagree about what
+    # "the release's album fields" are.
+    album_fields: dict[str, Any] = {}
+    try:
+        from services.downloads.download_completion_service import (
+            _album_level_mb_fields,
+        )
+
+        album_fields = _album_level_mb_fields(release_metadata)
+    except Exception as exc:
+        logger.debug("Album-level release fields unavailable", error=str(exc))
+
+    # ── Cover art ─────────────────────────────────────────────────────────
+    # ``move_track_to_library`` writes no tags and nothing else on this path
+    # fetched artwork — reported as "it also didn't attach the album art for
+    # the release".  Fetched ONCE (the Cover Art Archive is rate-limited like
+    # every other provider) and cached on the album too, so the album page
+    # shows it immediately instead of waiting for a Navidrome rescan.
+    cover_bytes, cover_mime = _release_cover_art(
+        release_mbid,
+        str(album_fields.get("musicbrainz_releasegroupid") or ""),
+    )
+    if cover_bytes:
+        try:
+            from services.enrichment.album_art_service import save_album_art_to_db
+
+            save_album_art_to_db(
+                album_artist,
+                album,
+                cover_bytes,
+                source="musicbrainz",
+                mime_type=cover_mime,
+            )
+        except Exception as exc:
+            logger.debug("Album art not cached for folder match", error=str(exc))
+
     applied: dict[str, dict[str, Any]] = {}
     for entry in matched:
         path = str(entry.get("file_path") or "")
         payload = {k: v for k, v in entry.items() if k not in {"file_path", "matched"}}
+        for _col, _val in album_fields.items():
+            if str(payload.get(_col) or "").strip():
+                continue
+            payload[_col] = _val
+        if cover_bytes and not payload.get("cover_art_data"):
+            payload["cover_art_data"] = cover_bytes
+            if cover_mime:
+                payload["cover_art_mime"] = cover_mime
         # The resolved release/album identity wins; the caller's values are only
         # a fallback for the fields MusicBrainz did not supply.  (``setdefault``
         # is not enough — the mapper always emits the keys, sometimes empty.)

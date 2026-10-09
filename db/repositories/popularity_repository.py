@@ -372,6 +372,18 @@ _POPULARITY_PROTECTED_COLUMNS: frozenset[str] = frozenset({
     "popularity_frozen",
 })
 
+#: A SECOND, softer grade of protection: a Navidrome sync may POPULATE these
+#: but may never overwrite them. ``_POPULARITY_PROTECTED_COLUMNS`` above was
+#: too blunt for the album type — "never touch" meant an EXISTING row could
+#: never gain one, because the INSERT half of the upsert only runs the first
+#: time a row is created. The import can now derive a provisional
+#: ``releasetype`` (the file's own tag, AlbumID3's ``releaseTypes``, or a
+#: track-count guess) into a row whose type is still blank, while a value the
+#: scan already resolved is left exactly as it is.
+_FILL_IF_EMPTY_PROTECTED_COLUMNS: frozenset[str] = frozenset({
+    "releasetype", "musicbrainz_albumtype",
+})
+
 
 def _execute_save(session, track_data: dict) -> bool:
     """Execute the actual save operation with schema validation.
@@ -419,6 +431,15 @@ def _execute_save(session, track_data: dict) -> bool:
     update_parts = []
     for k in keys:
         if k == "id":
+            continue
+        if is_navidrome_sync and k in _FILL_IF_EMPTY_PROTECTED_COLUMNS:
+            # ``tracks.k`` (not a bare ``k``): inside DO UPDATE the bare name
+            # would read the EXCLUDED side — spell the existing row out so the
+            # CASE looks at what is STORED.
+            update_parts.append(
+                f"{k}=CASE WHEN tracks.{k} IS NULL OR tracks.{k} = '' "
+                f"THEN EXCLUDED.{k} ELSE tracks.{k} END"
+            )
             continue
         if is_navidrome_sync and k in _POPULARITY_PROTECTED_COLUMNS:
             continue

@@ -482,7 +482,8 @@ async def dashboard() -> Any:
                         MAX(updated_at) AS added_at,
                         COUNT(*) AS track_count,
                         MAX(COALESCE(NULLIF(musicbrainz_albumtype, ''),
-                                     NULLIF(spotify_album_type, ''))) AS album_type,
+                                     NULLIF(spotify_album_type, ''),
+                                     NULLIF(releasetype, ''))) AS album_type,
                         MAX(COALESCE(
                             NULLIF(SUBSTRING(COALESCE(year, '') FROM '^[0-9]{4}'), ''),
                             NULLIF(CAST(release_year AS TEXT), '')
@@ -886,10 +887,17 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
                 "release_year": track.get("release_year"),
                 "spotify_album_type": track.get("musicbrainz_albumtype")
                     or track.get("spotify_album_type")
-                    or track.get("album_type"),
+                    or track.get("album_type")
+                    or track.get("releasetype"),
                 "album_type": track.get("musicbrainz_albumtype")
                     or track.get("album_type")
-                    or track.get("spotify_album_type"),
+                    or track.get("spotify_album_type")
+                    # LAST: ``releasetype`` is the tag value (file tag or
+                    # AlbumID3 ``releaseTypes``) or the track-count guess a
+                    # Navidrome import derives. The confirmed column above it
+                    # still wins, so this only shows a type for an album no
+                    # metadata scan has classified yet.
+                    or track.get("releasetype"),
                 "is_missing": False,
             }
 
@@ -2382,6 +2390,10 @@ async def album_detail(album_path: str) -> Any:
                 track.get("musicbrainz_albumtype")
                 or track.get("spotify_album_type")
                 or track.get("album_type")
+                # See ``category_for_album_row``: the tag/guessed type is a
+                # fallback for an unclassified album, never a competing
+                # opinion about a classified one.
+                or track.get("releasetype")
                 or ""
             ).lower()
             # ⚠️ `+acoustic` counts as live-state too. The OLD guard only
@@ -2741,7 +2753,7 @@ async def album_detail(album_path: str) -> Any:
         "total_discs": max(disc_values) if disc_values else 1,
         "singles_count": singles_count,
         "spotify_release_date": first_value("spotify_release_date", "release_date", "date"),
-        "spotify_album_type": first_value("musicbrainz_albumtype", "spotify_album_type", "album_type"),
+        "spotify_album_type": first_value("musicbrainz_albumtype", "spotify_album_type", "album_type", "releasetype"),
         "record_label": first_value("record_label", "label"),
         "catalog_number": first_value("catalog_number", "catalog"),
         "recordlabel": first_value("recordlabel"),
