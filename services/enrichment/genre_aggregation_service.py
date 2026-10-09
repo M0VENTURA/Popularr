@@ -670,6 +670,297 @@ def va_track_source_map(track: dict[str, Any]) -> dict[str, list[str]]:
     return source_map
 
 
+# ---------------------------------------------------------------------------
+# ARTIST-LEVEL GENRE FALLBACK
+#
+# Requested:
+#
+#   "When scanning a various artists collection, if the track has no genre data
+#    online, can it fall back to using the genres for the track artist? If on
+#    the local db it can be grabbed from that artist or looked up on
+#    Musicbrainz, discogs and last.fm"
+#
+# A VA track with nothing of its own was LEFT ALONE (its Navidrome value
+# survived) — correct, but on a compilation that value is often the disc
+# tagger's guess or empty. The PERFORMER is known, and the performer's genres
+# are exactly the missing evidence: the artist's own rows elsewhere in the
+# library, or the artist on MusicBrainz / Discogs / Last.fm.
+# ---------------------------------------------------------------------------
+
+#: PRIORITY order. The ranks are the SAME sources the track vote weighs, so the
+#: ordering can never contradict ``genres.weights`` in config — but this is a
+#: PRIORITY, not a threshold. See :func:`fallback_genres_for_artist` for why the
+#: ``genres.min_weight`` rule cannot be reused here.
+_ARTIST_GENRE_SOURCE_ORDER: tuple[str, ...] = (
+    # The user's OWN library first: those genres were already curated by an
+    # earlier scan (or by hand), which is better evidence than a fresh lookup.
+    "library",
+    "musicbrainz",
+    "discogs",
+    "lastfm",
+)
+
+#: ``{casefolded artist: [genre, ...]}`` for the life of the process.
+#:
+#: A VA album can carry twenty different performers and every track is visited
+#: once per scan, so without this the SAME artist would be looked up again for
+#: each of its tracks (and again on the next album). The lookups behind a miss
+#: are: one local query, up to two MusicBrainz requests at 1 req/s, one Discogs
+#: search and one Last.fm call.
+_ARTIST_GENRE_FALLBACK_CACHE: dict[str, list[str]] = {}
+
+
+def _artist_genres_from_library(artist: str, *, exclude_track_id: str = "") -> list[str]:
+    """The artist's genres that are ALREADY in this database.
+
+    Two places, cheapest first — neither costs a network call:
+
+    * the other tracks credited to this artist (their ``genres`` column is
+      what a previous scan resolved, so it is already aggregated);
+    * ``artists.lastfm_artist_tags``, the Last.fm artist tags a scan of that
+      artist's own music caches (``_fetch_artist_lastfm_tags``).
+    """
+    genres: list[str] = []
+
+    try:
+        with db_session() as session:
+            rows = session.execute(
+                text("""
+                    SELECT genres FROM tracks
+                    WHERE LOWER(TRIM(artist)) = LOWER(TRIM(:artist))
+                      AND genres IS NOT NULL AND TRIM(genres) <> ''
+                      AND CAST(id AS TEXT) <> :exclude_id
+                    LIMIT 25
+                """),
+                {"artist": artist, "exclude_id": str(exclude_track_id or "")},
+            ).fetchall()
+        for row in rows:
+            genres.extend(_parse_genre_input(row[0]))
+    except Exception as exc:
+        logger.debug("Artist genre library read failed", artist=artist, error=str(exc))
+
+    try:
+        with db_session() as session:
+            row = session.execute(
+                text(
+                    "SELECT lastfm_artist_tags FROM artists "
+                    "WHERE LOWER(TRIM(name)) = LOWER(TRIM(:artist))"
+                ),
+                {"artist": artist},
+            ).first()
+        if row and row[0]:
+            genres.extend(_parse_genre_input(row[0]))
+    except Exception as exc:
+        logger.debug("Artist tag cache read failed", artist=artist, error=str(exc))
+
+    return genres
+
+
+def _artist_genres_from_musicbrainz(artist: str) -> list[str]:
+    """MusicBrainz artist genres.
+
+    TWO requests, because MB exposes genres on the artist LOOKUP only — a
+    search result carries no ``genres`` however ``inc`` is spelled. The search
+    is exact-anchored so a same-named artist cannot answer for this one.
+    """
+    try:
+        from services.enrichment.musicbrainz_service import get_shared_mb_client
+
+        client = get_shared_mb_client()
+        escaped = _escape_lucene(artist)
+        results = client.search_artists(f'artist:"{escaped}"', limit=1) or []
+        mbid = str((results[0] or {}).get("id") or "") if results else ""
+        if not mbid:
+            return []
+        data = client.get_artist(mbid, inc="genres") or {}
+        return [
+            str(item.get("name"))
+            for item in (data.get("genres") or [])
+            if isinstance(item, dict) and item.get("name")
+        ]
+    except Exception as exc:
+        logger.debug("MusicBrainz artist genre lookup failed", artist=artist, error=str(exc))
+        return []
+
+
+def _artist_genres_from_discogs(artist: str) -> list[str]:
+    """Discogs artist genres (an artist-only query is artist-level)."""
+    try:
+        from helpers.config_helpers import get_config
+        from api_clients.discogs import get_discogs_genres
+
+        cfg = (get_config().get("api_integrations", {}) or {}).get("discogs", {}) or {}
+        token = str(cfg.get("token") or "")
+        if not token or not cfg.get("enabled", True):
+            return []
+        return list(get_discogs_genres("", artist, token=token, enabled=True) or [])
+    except Exception as exc:
+        logger.debug("Discogs artist genre lookup failed", artist=artist, error=str(exc))
+        return []
+
+
+def _artist_genres_from_lastfm(artist: str) -> list[str]:
+    """Last.fm artist top tags.
+
+    The tags are also written to ``artists.lastfm_artist_tags`` (fill-if-empty),
+    the same per-artist cache a scan of that artist's own music fills. That is
+    what makes the fallback CONVERGE: the next scan finds the artist in the
+    local tier and stops calling Last.fm for it.
+    """
+    try:
+        from helpers.config_helpers import get_config
+
+        cfg = (get_config().get("api_integrations", {}) or {}).get("lastfm", {}) or {}
+        api_key = str(cfg.get("api_key") or "")
+        if not cfg.get("enabled") or api_key in {
+            "", "your_lastfm_api_key", "YOUR_API_KEY", "<your_api_key>"
+        }:
+            return []
+        from api_clients.lastfm import LastFmClient
+
+        tags = LastFmClient(api_key).get_artist_top_tags(artist, limit=15) or []
+        names = [
+            str(tag.get("name") or "").strip()
+            for tag in tags
+            if isinstance(tag, dict) and str(tag.get("name") or "").strip()
+        ]
+        if names:
+            _cache_lastfm_artist_tags(artist, names)
+        return names
+    except Exception as exc:
+        logger.debug("Last.fm artist genre lookup failed", artist=artist, error=str(exc))
+        return []
+
+
+def _cache_lastfm_artist_tags(artist: str, names: list[str]) -> None:
+    """Store Last.fm artist tags on the artist row, only when it has none.
+
+    Best-effort and never overwriting: ``_fetch_artist_lastfm_tags`` treats a
+    populated column as a cache hit, so a second writer must not clobber it.
+    """
+    if not artist or not names:
+        return
+    try:
+        with db_session() as session:
+            session.execute(
+                text(
+                    "UPDATE artists SET lastfm_artist_tags = :tags "
+                    "WHERE LOWER(TRIM(name)) = LOWER(TRIM(:artist)) "
+                    "  AND (lastfm_artist_tags IS NULL OR TRIM(lastfm_artist_tags) = '')"
+                ),
+                {"tags": json.dumps(names, ensure_ascii=False), "artist": artist},
+            )
+    except Exception as exc:
+        logger.debug("Could not cache Last.fm artist tags", artist=artist, error=str(exc))
+
+
+def _escape_lucene(value: str) -> str:
+    """Reuse the shared Lucene escaper (a raw quote would break the query)."""
+    try:
+        from api_clients.musicbrainz_http import escape_lucene_special_chars
+
+        return escape_lucene_special_chars(value)
+    except Exception:
+        return value.replace('"', "")
+
+
+def _merge_artist_genre_sources(
+    sources: dict[str, list[str]], max_genres: int = 2
+) -> list[str]:
+    """Rank artist-level candidates: source PRIORITY first, then vote order.
+
+    Pure, so the ordering is testable without a database or a network.
+
+    ⚠️ ``genres.min_weight`` is deliberately NOT applied here. That rule exists
+    to stop a lone weak TRACK tag defining a track — but an artist's OWN top
+    tags are the artist's genre consensus, and the fallback only runs when the
+    track has nothing at all: thresholding it would mean a Last.fm-only artist
+    (weight 0.10) gets no fallback, and the request would fail for exactly the
+    compilations it was made for. The weight is used as the ORDER instead:
+    library → MusicBrainz → Discogs → Last.fm.
+
+    Junk and admin tags (years, "seen live", filter tags) are dropped before
+    ranking — the same filters the main vote uses.
+    """
+    ranked: list[str] = []
+    seen: set[str] = set()
+
+    for source in _ARTIST_GENRE_SOURCE_ORDER:
+        for raw in sources.get(source) or []:
+            name = str(raw or "").strip()
+            if not name or is_junk_genre(name) or is_admin_genre(name):
+                continue
+            key = normalize_genre_for_vote(name)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ranked.append(name)
+            if len(ranked) >= max_genres:
+                return ranked
+
+    return ranked
+
+
+def fallback_genres_for_artist(
+    artist: str,
+    *,
+    exclude_track_id: str = "",
+    max_genres: int = 2,
+) -> list[str]:
+    """Genres for the PERFORMER, for a VA track that has none of its own.
+
+    Local database FIRST — an artist already in this library has curated
+    genres, and reading them costs nothing. The online lookups (MusicBrainz,
+    Discogs, Last.fm) only run when the local answer is empty.
+
+    A placeholder performer ("Various Artists" on a track that inherited the
+    album credit) is NOT an artist to look up, so it returns nothing.
+
+    Memoised per artist for the life of the process: a compilation's tracks
+    share performers, and every track is visited once per scan.
+    """
+    artist = str(artist or "").strip()
+    if not artist:
+        return []
+
+    try:
+        from helpers.normalization_service import is_track_artist_placeholder
+
+        if is_track_artist_placeholder(artist):
+            return []
+    except Exception:
+        pass
+
+    key = artist.casefold()
+    cached = _ARTIST_GENRE_FALLBACK_CACHE.get(key)
+    if cached is not None:
+        return list(cached)
+
+    sources: dict[str, list[str]] = {}
+    library = _artist_genres_from_library(artist, exclude_track_id=exclude_track_id)
+    if library:
+        sources["library"] = library
+    else:
+        sources["musicbrainz"] = _artist_genres_from_musicbrainz(artist)
+        sources["discogs"] = _artist_genres_from_discogs(artist)
+        sources["lastfm"] = _artist_genres_from_lastfm(artist)
+
+    resolved = _merge_artist_genre_sources(sources, max_genres=max_genres)
+
+    # A LOOKUP THAT FOUND NOTHING IS NOT CACHED. An artist whose data is added
+    # to MusicBrainz (or to the library) later must be able to answer on the
+    # next scan; caching the miss would freeze it for the process's lifetime.
+    if resolved:
+        _ARTIST_GENRE_FALLBACK_CACHE[key] = list(resolved)
+        logger.info(
+            "Artist genre fallback resolved",
+            artist=artist,
+            genres=resolved,
+            from_local=bool(library),
+        )
+    return resolved
+
+
 def _genre_spelling_canon(value: Any) -> list[str]:
     """Genre names reduced to bare letters/digits, so ``Hip Hop`` == ``hip-hop``."""
     from services.metadata.metadata_proposal_service import _genre_names
@@ -716,9 +1007,10 @@ def sync_various_artists_track_genres(
 
     Two rules keep it safe:
 
-    * a track with no online source is left untouched (its Navidrome value is
-      better than a blank one), and so is a track whose value already matches —
-      no pointless write, no file-tag churn;
+    * a track with no online source FALLS BACK TO ITS PERFORMER'S genres
+      (:func:`fallback_genres_for_artist` — the local library first, then
+      MusicBrainz / Discogs / Last.fm). Only when that is empty too is the row
+      left untouched, keeping its Navidrome value rather than blanking it.
     * ``aggregate_genres`` applies ``genres.min_weight`` (0.25), so a lone
       Last.fm (0.10) / ListenBrainz (0.15) / Spotify (0.05) source cannot define
       a track by itself — the same rule every other genre path follows.
@@ -733,16 +1025,23 @@ def sync_various_artists_track_genres(
             continue
 
         source_map = va_track_source_map(track)
-        if not source_map:
-            continue
-
-        top_genres = aggregate_genres(
-            source_map,
-            max_genres=2,
-            context_title=str(track.get("title") or ""),
-            context_album=str(album or ""),
-            nav_genres=None,
-        )
+        if source_map:
+            top_genres = aggregate_genres(
+                source_map,
+                max_genres=2,
+                context_title=str(track.get("title") or ""),
+                context_album=str(album or ""),
+                nav_genres=None,
+            )
+            origin = "own sources"
+        else:
+            # The track has nothing of its own on a compilation. Its PERFORMER
+            # does, though — see ``fallback_genres_for_artist``.
+            top_genres = fallback_genres_for_artist(
+                str(track.get("artist") or ""),
+                exclude_track_id=str(track_id),
+            )
+            origin = "track artist"
         if not top_genres:
             continue
 
@@ -758,6 +1057,13 @@ def sync_various_artists_track_genres(
                 )
             track["genres"] = genres_str
             updated += 1
+            if origin == "track artist":
+                logger.debug(
+                    "Various-artist track genre set from its artist",
+                    track_id=track_id,
+                    artist=str(track.get("artist") or ""),
+                    genres=genres_str,
+                )
         except Exception as exc:
             logger.debug(
                 "Various-artist track genre sync failed",
