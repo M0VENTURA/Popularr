@@ -1822,7 +1822,7 @@ async def album_detail(album_path: str) -> Any:
                   AND LOWER(COALESCE(album, '')) = LOWER(:album)
                 ORDER BY
                     COALESCE(disc_number, '1'),
-                    NULLIF(regexp_replace(COALESCE(track_number::text, ''), '[^0-9].*$', ''), '')::int NULLS LAST,
+                    CAST(NULLIF(regexp_replace(COALESCE(CAST(track_number AS TEXT), ''), '[^0-9].*$', ''), '') AS INTEGER) NULLS LAST,
                     track_number,
                     title
             """),
@@ -1877,25 +1877,41 @@ async def album_detail(album_path: str) -> Any:
         # ONE release group → ONE page, even when the URL carries a year.
         # An old /<year> link used to slice this release into pieces (the
         # reported bug), and the dashboard still builds those links.
-        pass
-    elif explicit_year and album_year_filter is not None:
-        year_tracks = [t for t in tracks if _track_year(t) == album_year_filter]
-        if year_tracks:
-            tracks = year_tracks
+        #
+        # ⚠️ The scope is RECORDED, not merely tolerated: the save redirect
+        # and the canonicalisation below both need to know which release this
+        # page resolved to, or the album keeps offering a year address.
+        album_rg_filter = release_groups[0]
     elif len(release_groups) > 1:
+        # Several release groups share this name: ONE card's worth of rows —
+        # the one holding the most tracks — plus any row carrying no group.
+        #
+        # ⚠️⚠️ THIS BRANCH USED TO SIT *BELOW* ``explicit_year``. The order was
+        # single-RG → year → several RGs, so an album whose rows carried a
+        # release group but whose link carried a year was still sliced by that
+        # year — reported as "the same release, the same release-group ID,
+        # opens as /2007 and /2011 with different track lists". A year is not
+        # an identity once a release group exists; it never was.
         counts: dict[str, int] = {}
         for t in tracks:
             rg = _release_group_of(t)
             if rg:
                 counts[rg] = counts.get(rg, 0) + 1
-        _primary = max(counts, key=lambda r: counts[r])
+        _primary = max(counts, key=lambda r: counts[r]) if counts else ""
         scoped = [
             t for t in tracks
             if not _release_group_of(t) or _release_group_of(t) == _primary
         ]
         if scoped:
             tracks = scoped
-            album_rg_filter = _primary
+            if _primary:
+                album_rg_filter = _primary
+    elif explicit_year and album_year_filter is not None:
+        # Reached ONLY when no row of this album carries a release group —
+        # the year is then the only identity left, so the old split applies.
+        year_tracks = [t for t in tracks if _track_year(t) == album_year_filter]
+        if year_tracks:
+            tracks = year_tracks
     else:
         # No release-group data at all: keep the year split.
         if album_year_filter is None and len(all_album_years) > 1:
@@ -1904,6 +1920,28 @@ async def album_detail(album_path: str) -> Any:
             year_tracks = [t for t in tracks if _track_year(t) == album_year_filter]
             if year_tracks:
                 tracks = year_tracks
+
+    # ── One release, one URL ───────────────────────────────────────────────
+    #
+    # A trailing year is a LEGACY address — the dashboard and the unified
+    # search still build them. When the rows carry release-group data the page
+    # resolves the SAME release whichever year is asked for, so `/…/2007` and
+    # `/…/2011` were two addresses for one album: two "pages" that differed
+    # only in the address bar (and, when the release-group data was partial,
+    # in the track list). Collapse them onto the release group so a shared
+    # link can never look like a second, differently-scoped album.
+    #
+    # Not applied to POST (the save below issues its own redirect) and not
+    # applied when no release group exists — a genuinely year-scoped album
+    # keeps its year URLs.
+    if request.method != "POST" and explicit_year and album_rg_filter:
+        if album_rg_filter != album_year_seg:
+            _canonical = url_for(
+                "ui.album_detail",
+                album_path=f"{artist_name}/{album_name}/{album_rg_filter}",
+            )
+            _qs = request.query_string.decode() if request.query_string else ""
+            return redirect(f"{_canonical}?{_qs}" if _qs else _canonical)
 
     tracks = [_coerce_track_numerics(t) for t in tracks]
 

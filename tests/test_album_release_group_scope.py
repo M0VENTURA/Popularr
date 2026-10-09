@@ -37,6 +37,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UI_ROUTES = REPO_ROOT / "routes" / "ui_routes.py"
 LIVE_SECTION = REPO_ROOT / "templates" / "components" / "_album_category_section.html"
@@ -126,3 +128,138 @@ class TestTheLinksPreferTheReleaseGroup:
                 f"{path.name} still appends a year segment directly — the "
                 "release group must win when it exists"
             )
+
+
+@pytest.fixture(autouse=True)
+def _sqlite_regexp_replace():
+    """The album page's ``ORDER BY`` uses Postgres-only ``regexp_replace``.
+
+    Stamped on the LIVE connection as well as registered for future ones:
+    ``StaticPool`` may already have opened the shared connection before this
+    module imported, and an event listener alone would then never fire.
+    """
+    import re as _re
+
+    from conftest import register_sqlite_regexp_replace
+    from db.engine import get_engine
+
+    def _regexp_replace(value, pattern, repl, flags=""):
+        if value is None:
+            return None
+        try:
+            return _re.sub(
+                pattern, repl, str(value),
+                flags=_re.IGNORECASE if "i" in flags else 0,
+            )
+        except Exception:
+            return str(value)
+
+    engine = get_engine()
+    register_sqlite_regexp_replace(engine)
+    try:
+        with engine.connect() as conn:
+            pooled = conn.connection
+            dbapi = getattr(pooled, "dbapi_connection", None) or pooled.driver_connection
+            dbapi.create_function("regexp_replace", -1, _regexp_replace)
+    except Exception:
+        pass
+    yield
+
+
+class TestTheYearURLCannotSliceAReleaseGroup:
+    """The reported bug, end to end.
+
+    > Albums with the same release group ID but have the wrong years are being
+    > split by year. I want them all to appear on the one release.
+
+    Two URLs differing only in the year used to reach two different pages.
+    The release group now wins outright: a year address is LEGACY, so it
+    canonicalises onto the release group instead of scoping anything.
+    """
+
+    RG = "cb232173-17fa-309e-80a1-b0490c646a38"
+
+    @staticmethod
+    def _seed(db_session, track_id, artist, album, title, year, rg=""):
+        from sqlalchemy import text
+
+        db_session.execute(
+            text("""
+                INSERT INTO tracks (id, artist, album, title, file_path, year,
+                                    musicbrainz_releasegroupid)
+                VALUES (:id, :artist, :album, :title, :file_path, :year, :rg)
+                ON CONFLICT DO NOTHING
+            """),
+            {
+                "id": track_id,
+                "artist": artist,
+                "album": album,
+                "title": title,
+                "file_path": f"/music/{artist}/{album}/{title}.flac",
+                "year": year,
+                "rg": rg,
+            },
+        )
+        db_session.commit()
+
+    async def test_a_year_url_collapses_onto_the_release_group(
+        self, app, client, db_session
+    ):
+        album = "Nine Destinies and a Downfall"
+        self._seed(db_session, "rg-a", "Sirenia", album, "First Edition Track", "1999", self.RG)
+        self._seed(db_session, "rg-b", "Sirenia", album, "Second Edition Track", "2015", self.RG)
+
+        resp = await client.get(f"/album/Sirenia/{album}/1999".replace(" ", "%20"))
+        assert resp.status_code in (301, 302), (
+            "a year address on an album that HAS a release group must not be a "
+            f"second page — got {resp.status_code}"
+        )
+        location = resp.headers["Location"]
+        assert location.endswith(f"/{self.RG}"), location
+
+        page = await client.get(location)
+        assert page.status_code == 200
+        body = await page.get_data(as_text=True)
+        assert "First Edition Track" in body
+        assert "Second Edition Track" in body, (
+            "the release must appear as ONE page carrying every year"
+        )
+
+    async def test_both_year_addresses_reach_the_same_page(
+        self, app, client, db_session
+    ):
+        album = "Same Release Two Addresses"
+        self._seed(db_session, "y-a", "Artist", album, "Nineteen Ninety Nine", "1999", self.RG)
+        self._seed(db_session, "y-b", "Artist", album, "Twenty Fifteen", "2015", self.RG)
+
+        first = await client.get(f"/album/Artist/{album}/1999".replace(" ", "%20"))
+        second = await client.get(f"/album/Artist/{album}/2015".replace(" ", "%20"))
+        assert first.headers["Location"] == second.headers["Location"], (
+            "two year addresses must collapse to ONE canonical release URL"
+        )
+
+    async def test_a_year_url_without_a_release_group_still_scopes(
+        self, app, client, db_session
+    ):
+        """CONTROL: the year split is the only identity an unbound album has."""
+        album = "Unbound Editions"
+        self._seed(db_session, "u-1", "Artist", album, "Old Cut", "1999")
+        self._seed(db_session, "u-2", "Artist", album, "New Cut", "2015")
+
+        resp = await client.get(f"/album/Artist/{album}/1999".replace(" ", "%20"))
+        assert resp.status_code == 200, (
+            "an album with NO release-group data must keep its year URLs"
+        )
+        body = await resp.get_data(as_text=True)
+        assert "Old Cut" in body
+        assert "New Cut" not in body
+
+    def test_the_release_group_branch_outranks_the_year_branch(self):
+        src = UI_ROUTES.read_text(encoding="utf-8")
+        several = src.index("elif len(release_groups) > 1:")
+        by_year = src.index("elif explicit_year and album_year_filter is not None:")
+        assert several < by_year, (
+            "several release groups must be resolved BEFORE the year branch — "
+            "with the old order a year URL sliced an album that carried a "
+            "release group, which is the reported /2007 vs /2011 split"
+        )

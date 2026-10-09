@@ -396,6 +396,10 @@
   function renderDurationChecks(checks) {
     const tbody = document.getElementById('albumTracksTbody');
     if (!tbody) return;
+    // REPLACES rather than appends: this is now the only writer of these rows
+    // (the page-load loader and the Lookup-MBID proposal both funnel through
+    // here), so a second render must not double every notice.
+    document.querySelectorAll('.mb-duration-row').forEach((el) => el.remove());
     (checks || []).forEach((check) => {
       const row = trackRow(check.track_id);
       if (!row) return;
@@ -505,7 +509,10 @@
     clearBanner();
     clearAlbumBars();
     clearTrackRows();
-    document.querySelectorAll('.mb-duration-row').forEach((el) => el.remove());
+    // ⚠️ ".mb-duration-row" is deliberately NOT cleared here. clearAll is what
+    // Save Metadata and "Discard all" both run through, and neither can change
+    // a file's LENGTH — so the notice must outlive the proposal it was found
+    // with, and disappear only when a fresh comparison says the lengths agree.
   }
 
   // ── Entry points ────────────────────────────────────────────────────────
@@ -631,7 +638,9 @@
       if (fillField(change.field, change.proposed)) renderAlbumBar(change);
     });
     stageTrackChanges(data.track_changes || []);
-    renderDurationChecks(data.duration_checks || []);
+    // ⚠️ Duration rows are deliberately NOT rendered from the stash — a stash
+    // is consumed by Save/Discard, and a length mismatch is neither. They come
+    // from loadDurationChecks(), which runs on every page load.
     showBanner(data.counts || {}, data.release_title || '');
 
     const pendingInput = document.getElementById('pending_recommendations');
@@ -639,6 +648,45 @@
 
     renderPendingActions();
     markDirty();
+    return data;
+  }
+
+  /**
+   * Render the album's LENGTH mismatches — on every page load, always.
+   *
+   * "Length differs" used to be rendered ONLY from a proposal (Lookup MBID, or
+   * the recommendations a scan stashed), and both are consumed by Save
+   * Metadata: saving cleared the notice while the length itself was untouched,
+   * because a metadata save cannot change a file's duration. Reported as
+   * *"it shows until the metadata is saved — I want it to stay until the issue
+   * is resolved"*.
+   *
+   * So the rows have their own read path with no stash behind them: this runs
+   * whether or not anything is staged, and the rows change only when a FRESH
+   * comparison reports that the lengths now agree. There is deliberately no
+   * dismiss — the mismatch is either there or it is not.
+   */
+  async function loadDurationChecks() {
+    const url = '/api/album/duration-checks?artist=' +
+      encodeURIComponent(pageArtist()) + '&album=' + encodeURIComponent(pageAlbum());
+
+    let data;
+    try {
+      const resp = await fetch(url);
+      const text = await resp.text();
+      try {
+        data = JSON.parse(text);
+      } catch (_e) {
+        return null;
+      }
+    } catch (_e) {
+      return null;
+    }
+
+    // A FAILED check (MusicBrainz unreachable, nothing bound) must clear
+    // nothing: silence is not evidence that the lengths now agree.
+    if (!data || !data.success) return null;
+    renderDurationChecks(data.duration_checks || []);
     return data;
   }
 
@@ -679,6 +727,7 @@
   global.albumMetadataReview = {
     applyProposal,
     loadPendingRecommendations,
+    loadDurationChecks,
     discardPendingRecommendations,
     clearAll,
     stagedCount,
@@ -688,10 +737,15 @@
     ALBUM_FIELD_LABELS,
   };
 
-  // Load scan-stashed recommendations on page load. Deferred to idle so it can
-  // never delay the tracklist render.
+  // Load the length notices AND any scan-stashed recommendations on page load.
+  // Deferred to idle so neither can delay the tracklist render — and the two are
+  // independent on purpose: a length mismatch must surface even when nothing
+  // at all is staged for this album.
   document.addEventListener('DOMContentLoaded', () => {
-    const run = () => loadPendingRecommendations().catch(() => {});
+    const run = () => {
+      loadDurationChecks().catch(() => {});
+      loadPendingRecommendations().catch(() => {});
+    };
     if (global.requestIdleCallback) global.requestIdleCallback(run);
     else setTimeout(run, 300);
   });

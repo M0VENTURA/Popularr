@@ -498,6 +498,42 @@ async def api_album_discard_recommendations() -> Any:
     return jsonify(result), 200
 
 
+@album_bp.route("/duration-checks", methods=["GET"])
+def api_album_duration_checks() -> Any:
+    """Length mismatches for an album — reported on every page load.
+
+    Deliberately NOT part of the stash that Save Metadata and "Discard all"
+    clear: a file's duration cannot be written, so saving metadata never fixes
+    a length mismatch and the notice must not vanish with the proposal
+    (reported: *"it shows until the metadata is saved — I want it to stay until
+    the issue is resolved"*).
+
+    A sync handler on purpose — Quart runs it in the executor, so the
+    MusicBrainz comparison (rate-limited to 1 req/s) never blocks the event
+    loop of the page that asked for it.
+    """
+    artist = (request.args.get("artist") or "").strip()
+    album = (request.args.get("album") or "").strip()
+    release_mbid = (request.args.get("release_mbid") or "").strip()
+    if not artist or not album:
+        return jsonify({"success": False,
+                        "error": "artist and album are required",
+                        "duration_checks": [],
+                        "counts": {"duration_mismatches": 0}}), 400
+
+    from services.metadata.metadata_proposal_service import album_duration_checks
+
+    try:
+        result = album_duration_checks(artist, album, release_mbid)
+    except Exception as exc:
+        logger.error("Album duration check failed",
+                     artist=artist, album=album, error=str(exc))
+        return jsonify({"success": False, "error": str(exc),
+                        "duration_checks": [],
+                        "counts": {"duration_mismatches": 0}}), 500
+    return jsonify(result), 200
+
+
 @album_bp.route("/musicbrainz", methods=["POST"])
 async def api_album_musicbrainz_lookup() -> Any:
     """Lookup album on MusicBrainz."""

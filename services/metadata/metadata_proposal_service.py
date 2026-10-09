@@ -740,3 +740,101 @@ def propose_album_metadata(
             "duration_mismatches": len(duration_checks),
         },
     }
+
+
+def album_duration_checks(
+    artist: str,
+    album: str,
+    release_mbid: str = "",
+) -> dict[str, Any]:
+    """Length mismatches for an album — a FINDING, read fresh every time.
+
+    WHY THIS IS NOT PART OF ``propose_album_metadata``'s LIFECYCLE
+    -------------------------------------------------------------
+    The album page used to render "Length differs" only from a proposal: the
+    "Lookup MBID" preview, or the recommendations a scan stashed. Both are
+    consumed by Save Metadata, so saving erased the notice while the length
+    itself was untouched — a metadata save cannot change a file's duration.
+    Reported as *"it shows until the metadata is saved … I want it to stay
+    until the issue is resolved"*.
+
+    A length mismatch describes the AUDIO, not a staged edit, so it gets its
+    own read path with no stash behind it: computed on every album page load,
+    and it changes only when a fresh comparison says the lengths agree. There
+    is deliberately no dismiss action — the mismatch is either there or not.
+
+    ``release_mbid`` may be a concrete release id or a release-group id; when
+    the caller passes nothing the album's own stored binding is used (release
+    first, then release group). An album with no MusicBrainz binding has
+    nothing to compare against and answers with an empty list.
+
+    A FAILED comparison reports ``success: False`` rather than an empty list:
+    MusicBrainz being unreachable is not evidence that the lengths now agree,
+    and a caller must not clear notices it could not verify.
+    """
+    artist = _as_text(artist)
+    album = _as_text(album)
+    supplied = _as_text(release_mbid)
+
+    def _empty(error: str = "", *, ok: bool = True) -> dict[str, Any]:
+        return {
+            "success": ok,
+            "artist": artist,
+            "album": album,
+            "error": error,
+            "duration_checks": [],
+            "counts": {"duration_mismatches": 0},
+        }
+
+    if not artist or not album:
+        return _empty("artist and album are required", ok=False)
+
+    local_tracks = _load_local_tracks(artist, album)
+    if not local_tracks:
+        return _empty("No library tracks found for this album")
+
+    if not supplied:
+        for row in local_tracks:
+            supplied = (
+                _as_text(row.get("musicbrainz_album_mbid"))
+                or _as_text(row.get("musicbrainz_albumid"))
+                or _as_text(row.get("musicbrainz_releasegroupid"))
+            )
+            if supplied:
+                break
+    if not supplied:
+        # Nothing bound to MusicBrainz: there is no reference length for the
+        # file to disagree with, so there is nothing to report.
+        return _empty()
+
+    from services.enrichment.musicbrainz_service import compare_musicbrainz_release
+
+    try:
+        comparison_result = compare_musicbrainz_release(artist, album, supplied) or {}
+    except Exception as exc:
+        logger.warning(
+            "Album duration check failed",
+            artist=artist, album=album, error=str(exc),
+        )
+        return _empty(str(exc), ok=False)
+
+    if not comparison_result.get("success"):
+        return _empty(
+            _as_text(comparison_result.get("error"))
+            or "MusicBrainz comparison failed",
+            ok=False,
+        )
+
+    checks = _duration_checks(comparison_result.get("comparison") or [])
+    return {
+        "success": True,
+        "artist": artist,
+        "album": album,
+        "release_mbid": _as_text(
+            comparison_result.get("mb_release_mbid")
+            or comparison_result.get("release_mbid")
+        ) or supplied,
+        "error": "",
+        "duration_checks": checks,
+        "counts": {"duration_mismatches": len(checks)},
+    }
