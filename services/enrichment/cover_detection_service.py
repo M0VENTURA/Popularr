@@ -64,6 +64,7 @@ _ARTIST_TRACK_COLUMNS = (
     "original_cover_artist",    # 14
     "cover_manual_override",    # 15
     "cover_last_checked",       # 16
+    "musicbrainz_workid",       # 17
 )
 
 
@@ -125,6 +126,10 @@ def detect_covers_for_artist(
             "original_cover_artist": row_get(row, "original_cover_artist", 14, ""),
             "cover_manual_override": row_get(row, "cover_manual_override", 15, False),
             "cover_last_checked": row_get(row, "cover_last_checked", 16),
+            # Read into the detector's in-memory name: the detector normalises
+            # ``musicbrainz_workid`` -> ``work_mbid`` at the top of
+            # ``detect_covers_for_album``, so selecting the column is enough.
+            "musicbrainz_workid": row_get(row, "musicbrainz_workid", 17, ""),
         }
         album_key = track["album"] or "_no_album"
         albums.setdefault(album_key, []).append(track)
@@ -273,7 +278,7 @@ def detect_cover_song(
         logger.debug("Cover detected via title annotation", track=title)
         return True, "title_annotation"
 
-    if track_data and track_data.get("work_mbid"):
+    if track_data and (track_data.get("work_mbid") or track_data.get("musicbrainz_workid")):
         try:
             mock_track = {
                 "id": track_data.get("id") or "1",
@@ -283,7 +288,10 @@ def detect_cover_song(
                 "isrc": track_data.get("isrc"),
                 "writer": track_data.get("writer") or writer,
                 "composer": composer,
-                "work_mbid": track_data.get("work_mbid"),
+                # ``musicbrainz_workid`` is the real column; ``work_mbid`` the
+                # in-memory key. Accept both so the DB value (persisted by the
+                # metadata scan) reaches the detector without an online search.
+                "work_mbid": track_data.get("work_mbid") or track_data.get("musicbrainz_workid"),
             }
             detector = CoverDetector()
             

@@ -1118,6 +1118,30 @@ def _run_album_cover_detection(artist: str, album: str, tracks: list[dict[str, A
             _overlaid.append(_row)
         tracks = _overlaid
 
+    # Overlay the recording/work MBIDs the track stage RESOLVED this pass, so
+    # the deep cover pass does not re-search MusicBrainz for identity the
+    # metadata scan already fetched. ``resolved_track_mbids`` is keyed by track
+    # id -> {"recording_mbid": ..., "work_mbid": ...}.
+    _resolved_mbids = options.get("resolved_track_mbids") or {}
+    if _resolved_mbids:
+        _overlaid_mbids: list[dict[str, Any]] = []
+        for _row in tracks:
+            _tid = str(_row.get("id") or "")
+            _mb = _resolved_mbids.get(_tid)
+            if _mb and (_mb.get("recording_mbid") or _mb.get("work_mbid")):
+                _new = dict(_row)
+                if _mb.get("recording_mbid") and not str(_new.get("recording_mbid") or "").strip():
+                    _new["recording_mbid"] = _mb["recording_mbid"]
+                if _mb.get("work_mbid"):
+                    # Both spellings: ``work_mbid`` feeds the cover fallback
+                    # fast path; ``musicbrainz_workid`` is the stored column.
+                    _new["work_mbid"] = _mb["work_mbid"]
+                    _new["musicbrainz_workid"] = _mb["work_mbid"]
+                _overlaid_mbids.append(_new)
+            else:
+                _overlaid_mbids.append(_row)
+        tracks = _overlaid_mbids
+
     try:
         _cover_results = detect_covers_for_album(
             album=album,
@@ -2870,6 +2894,13 @@ def run_scan(
             # "(X Cover)" title is written back — the reported reversion of a
             # metadata scan's cover fix by the following popularity scan.
             _resolved_artists: dict[str, str] = {}
+            # Per-track recording/work MBIDs the track stage RESOLVED this
+            # pass (from MusicBrainz). ``tracks`` here are the load-time raw
+            # rows, so they do not yet carry what the stage just persisted.
+            # Publishing them lets the deep cover pass skip its own per-track
+            # MusicBrainz searches — the work id in particular feeds the
+            # work-based cover fallback without re-resolving the recording.
+            _resolved_mbids: dict[str, dict[str, str]] = {}
             for _res in _track_results_ordered:
                 if not isinstance(_res, dict):
                     continue
@@ -2877,8 +2908,17 @@ def run_scan(
                 _rartist = str(_res.get("artist") or "").strip()
                 if _rid and _rartist:
                     _resolved_artists[_rid] = _rartist
+                _rmbid = str(_res.get("recording_mbid") or "").strip()
+                _wmbid = str(_res.get("work_mbid") or "").strip()
+                if _rid and (_rmbid or _wmbid):
+                    _resolved_mbids[_rid] = {
+                        "recording_mbid": _rmbid,
+                        "work_mbid": _wmbid,
+                    }
             if _resolved_artists:
                 options["resolved_track_artists"] = _resolved_artists
+            if _resolved_mbids:
+                options["resolved_track_mbids"] = _resolved_mbids
 
             _run_album_cover_detection(artist=artist, album=album, tracks=tracks, options=options)
 

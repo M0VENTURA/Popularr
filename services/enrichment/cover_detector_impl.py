@@ -104,6 +104,12 @@ _MAX_COVER_CHAIN_DEPTH = 6
 # Maximum candidate recordings inspected during a work/title search.
 _MAX_CANDIDATE_INSPECTIONS = 12
 
+#: Per-detector-instance cap for the cached work -> recordings browse.
+_WORK_RECORDING_CACHE_MAX = 64
+
+#: Sentinel so a cached EMPTY browse (inconclusive) is not re-fetched.
+_MISS = object()
+
 _WRITER_RELATION_TYPES = frozenset({"composer", "writer", "lyricist"})
 
 
@@ -183,7 +189,32 @@ class CoverDetector:
         self.mb = get_shared_mb_client()
         self.db_conn = db_connection
         self._band_members_cache: dict[str, list[str]] = {}
+        self._work_recording_cache: "OrderedDict[str, list[dict[str, Any]]]" = OrderedDict()
         self._mem_lock = threading.Lock()
+
+    @staticmethod
+    def _track_has_logged_identity(track: dict[str, Any]) -> bool:
+        """True when the track row carries ANY MusicBrainz identity the scan logged.
+
+        The metadata scan writes ``recording_mbid``/``mbid``/``musicbrainz_trackid``
+        and (since the persist fix) ``musicbrainz_workid``; the Navidrome import
+        writes ``recording_mbid``/``musicbrainz_trackid`` from the file tags. A
+        track with NONE of these has NOT been resolved by MusicBrainz — no
+        recording, no work — so every cover-detection step that would need to
+        Search for it would just duplicate a lookup the metadata pass already
+        tried and failed. The deep pass skips such tracks instead of re-searching.
+        """
+        return bool(
+            str(
+                track.get("mbid")
+                or track.get("recording_mbid")
+                or track.get("musicbrainz_trackid")
+                or track.get("work_mbid")
+                or track.get("musicbrainz_workid")
+                or track.get("musicbrainz_album_mbid")
+                or ""
+            ).strip()
+        )
 
     # -- search helpers ---------------------------------------------------
 
@@ -242,6 +273,94 @@ class CoverDetector:
             "confidence": core.get("confidence", "medium"),
         }
 
+    # -- work-first ------------------------------------------------------
+
+    def _work_recordings(self, work_mbid: str, limit: int = 25) -> list[dict[str, Any]]:
+        """Browse a work's recordings, cached per detector instance.
+
+        The earliest recordings of the work are what decide the cover
+        question, so 25 candidates is plenty and keeps the payload small.
+        """
+        with self._mem_lock:
+            cached = self._work_recording_cache.get(work_mbid, _MISS)
+        if cached is not _MISS:
+            return cached
+        try:
+            recordings = self.mb.browse_work_recordings(
+                work_mbid, inc="artist-credits+releases", limit=limit
+            ) or []
+        except Exception as exc:
+            logger.debug("Work recording browse failed", work_mbid=work_mbid, error=str(exc))
+            return []
+        with self._mem_lock:
+            self._work_recording_cache[work_mbid] = recordings
+            while len(self._work_recording_cache) > _WORK_RECORDING_CACHE_MAX:
+                self._work_recording_cache.popitem(last=False)
+        return recordings
+
+    def _detect_via_work_id(
+        self,
+        work_mbid: str,
+        performer: str,
+        exclude_mbid: str = "",
+    ) -> dict[str, Any] | None:
+        """Answer the cover question from the work the metadata scan logged.
+
+        A cover and its original are BOTH performances of the SAME work, so the
+        work's own recording list is the complete candidate set — no title
+        search over the MusicBrainz index is needed. One ``browse`` call
+        replaces the deep pipeline's per-track fan-out (ISRC lookup + recording
+        fetches + up to ~9 requests per writer).
+
+        Return contract (the caller treats these differently):
+
+        * ``{"artist", "year", "confidence"}`` — the earliest recording of the
+          work credited to an artist OTHER than *performer*: a cover.
+        * ``{}`` — conclusive negative: the work HAS credited recordings and
+          every one belongs to the performer, so the performer originated the
+          song. The caller skips the track's deep fan-out.
+        * ``None`` — inconclusive (no usable work data); the caller falls
+          through to the full deep pipeline.
+        """
+        recordings = self._work_recordings(work_mbid)
+        if not recordings:
+            return None
+
+        earliest: dict[str, Any] | None = None
+        earliest_year = 9999
+        credited = 0
+        for rec in recordings:
+            if not isinstance(rec, dict) or not rec.get("id"):
+                continue
+            rec_id = str(rec.get("id") or "").strip()
+            if rec_id and rec_id == exclude_mbid:
+                continue
+            if _has_cover_annotation(str(rec.get("title") or "")):
+                continue
+            rec_artist = str(
+                artist_from_credit(rec.get("artist-credit", []) or []) or ""
+            ).strip()
+            if not rec_artist:
+                continue
+            credited += 1
+            if _same_artist(rec_artist, performer):
+                continue
+            year = year_from_recording(rec)
+            if year is None or year >= earliest_year:
+                continue
+            earliest_year = year
+            earliest = {
+                "artist": rec_artist,
+                "year": year,
+                "confidence": "medium",
+            }
+
+        if earliest:
+            return earliest
+        # The work HAS recordings bearing a credit and none of them differs
+        # from the performer — the performer originated the song.
+        return {} if credited else None
+
     # -- album entry point ------------------------------------------------
 
     def detect_covers_for_album(
@@ -262,6 +381,13 @@ class CoverDetector:
         for track in tracks:
             track.setdefault("album", album)
             track.setdefault("album_artist", artist)
+            if not str(track.get("work_mbid") or "").strip():
+                _stored_work = str(track.get("musicbrainz_workid") or "").strip()
+                if _stored_work:
+                    # The metadata scan persists the work MBID under the REAL
+                    # column name (``musicbrainz_workid``); this module reads
+                    # ``work_mbid``. Normalise so the work-first step can see it.
+                    track["work_mbid"] = _stored_work
 
         # Keep the source track for every id so updates always carry file_path.
         tracks_by_id: dict[str, dict[str, Any]] = {
@@ -351,6 +477,53 @@ class CoverDetector:
             seen_track_ids.add(result["track_id"])
             pending_updates.append(self._build_update(result, track))
 
+        # Step 1: work-first detection — the metadata scan ALREADY resolved
+        # each track's work (persisted as ``musicbrainz_workid`` / published
+        # in-memory as ``work_mbid``). A cover and its original are BOTH
+        # performances of the SAME work, so browsing the work's recordings —
+        # ONE MusicBrainz request — is the complete candidate set: no title
+        # search, no per-candidate recording fetches. Tracks the work answers
+        # conclusively are SKIPPED from the expensive ISRC / recording-
+        # relation / writer fan-out below (up to ~9 MB requests per writer),
+        # which previously re-derived over the network what the metadata scan
+        # had already logged.
+        for track in tracks:
+            tid = track.get("id")
+            if not tid or tid in seen_track_ids:
+                continue
+            work_mbid = str(track.get("work_mbid") or "").strip()
+            if not work_mbid:
+                continue
+            performer = str(track.get("artist") or "").strip() or artist
+            if not performer or is_track_artist_placeholder(performer):
+                continue
+            original = self._detect_via_work_id(
+                work_mbid=work_mbid,
+                performer=performer,
+                exclude_mbid=str(
+                    track.get("mbid") or track.get("recording_mbid") or ""
+                ).strip(),
+            )
+            if original is None:
+                # No usable work data — fall through to the deep pipeline.
+                continue
+            if not original:
+                logger.debug(
+                    "Work-first cover check: conclusive negative — every work "
+                    "recording is the performer's own",
+                    track=track.get("title"),
+                    work_mbid=work_mbid,
+                )
+                seen_track_ids.add(tid)
+                continue
+            logger.debug(
+                "Cover detected via the logged work",
+                track=track.get("title"),
+                work_mbid=work_mbid,
+                original_artist=original.get("artist"),
+            )
+            _record(self._result(tid, track.get("title", ""), original), track)
+
         # Step 2: ISRC-based matching
         for track in tracks:
             tid = track.get("id")
@@ -373,6 +546,12 @@ class CoverDetector:
         for track in tracks:
             tid = track.get("id")
             if not tid or tid in seen_track_ids:
+                continue
+            # Skip tracks without any logged MusicBrainz identity: resolving
+            # the recording here would search MusicBrainz for a track the
+            # metadata pass already failed to resolve — the exact duplicate
+            # network work this pass is meant to avoid.
+            if not self._track_has_logged_identity(track):
                 continue
             mbid = self._resolve_recording_mbid(track, artist, album)
             if not mbid:
@@ -492,7 +671,7 @@ class CoverDetector:
             if (track.get("original_cover_artist") or "").strip():
                 continue
 
-            work_mbid = str(track.get("work_mbid") or "").strip()
+            work_mbid = str(track.get("work_mbid") or track.get("musicbrainz_workid") or "").strip()
             if work_mbid:
                 logger.debug("Using pre-fetched work_mbid for cover fallback", track=track.get("title"), work_mbid=work_mbid)
                 original = self._earliest_work_recording(
@@ -503,6 +682,11 @@ class CoverDetector:
                     confidence="medium",
                 )
             else:
+                # Same skip rule as Step 3: without any logged identity the
+                # recording would need an online search the metadata pass has
+                # already tried — skip instead of re-searching.
+                if not self._track_has_logged_identity(track):
+                    continue
                 mbid = self._resolve_recording_mbid(track, artist, album)
                 if not mbid:
                     continue
@@ -811,21 +995,32 @@ class CoverDetector:
         self,
         recording_mbid: str,
         album_artist: str,
+        seed_recording: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Follow cover relations to the root of the chain.
 
         A cover relation can point at another cover. Following only one hop
         attributes the track to the intermediate version rather than the
         original, which is the primary cause of cover-of-a-cover results.
+
+        ``seed_recording`` skips the first ``get_recording``: the caller
+        (``_detect_via_recording_relation``) fetches the seed WITH the
+        recording-rels it needs, so re-fetching it here was one wasted
+        rate-limited MusicBrainz request per track.
         """
         visited: set[str] = {recording_mbid}
         current_id = recording_mbid
         best: dict[str, Any] | None = None
+        _first = True
 
         for _ in range(_MAX_COVER_CHAIN_DEPTH):
-            recording = self._get_recording(
-                current_id, "recording-rels+artist-credits+releases"
-            )
+            if _first and seed_recording:
+                recording = seed_recording
+            else:
+                recording = self._get_recording(
+                    current_id, "recording-rels+artist-credits+releases"
+                )
+            _first = False
             if not recording:
                 break
             core, next_id = self._cover_relation_target(
@@ -863,7 +1058,9 @@ class CoverDetector:
 
             # Modelled cover relations are the most reliable signal. Follow the
             # chain so a cover of a cover resolves to the true original.
-            chain_result = self._resolve_cover_chain(recording_mbid, album_artist)
+            chain_result = self._resolve_cover_chain(
+                recording_mbid, album_artist, seed_recording=seed
+            )
 
             cover_work_ids = extract_cover_work_ids(seed)
             if chain_result and not cover_work_ids:
@@ -1295,7 +1492,18 @@ class CoverDetector:
     ) -> str | None:
         del album_title  # retained for signature compatibility
 
-        existing = str(track.get("mbid") or "").strip()
+        # Accept every identity column the scan writes, so a track whose
+        # metadata pass already resolved the recording does NOT pay for a
+        # MusicBrainz search here. Previously only ``mbid`` was consulted,
+        # while the scan persists ``recording_mbid`` (+``mbid``), and the
+        # Navidrome import persists ``recording_mbid``/``musicbrainz_trackid``
+        # — so every deep-cover pass re-searched every track.
+        existing = str(
+            track.get("mbid")
+            or track.get("recording_mbid")
+            or track.get("musicbrainz_trackid")
+            or ""
+        ).strip()
         if existing:
             return existing
 

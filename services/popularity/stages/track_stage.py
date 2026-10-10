@@ -824,7 +824,15 @@ def _resolve_track_mb_metadata(
                 payload["musicbrainz_confidence"] = confidence
 
             if mb_data.get("work_mbid"):
+                # ``work_mbid`` is the in-memory key the shallow cover check
+                # reads; ``musicbrainz_workid`` is the REAL tracks column. Only
+                # the latter survives ``_execute_save`` (it filters by column
+                # names), so without this line the work id the metadata scan
+                # just paid for was silently DROPPED and the deep cover pass
+                # could never use it — it re-resolved the recording and
+                # re-searched the work on every scan instead.
                 payload["work_mbid"] = mb_data["work_mbid"]
+                payload["musicbrainz_workid"] = mb_data["work_mbid"]
 
             if recording_mbid and not _from_batch:
                 _raw_existing_writer = track.get("writer")
@@ -2163,6 +2171,19 @@ def process_track(
         "album_artist": _album_artist,
         "album": track.get("album") or effective_track.get("album", ""),
         "title": track.get("title") or effective_track.get("title") or "",
+        # The recording/work ids the metadata scan just resolved. Published so
+        # the deep cover pass can overlay them onto its (stale, load-time) rows
+        # and skip the per-track MusicBrainz searches — the same mechanism that
+        # already overlays the resolved artist.
+        "recording_mbid": update_payload.get("recording_mbid")
+        or track.get("recording_mbid")
+        or track.get("mbid")
+        or track.get("musicbrainz_trackid")
+        or "",
+        "work_mbid": update_payload.get("musicbrainz_workid")
+        or update_payload.get("work_mbid")
+        or track.get("musicbrainz_workid")
+        or "",
         "lastfm_listeners": int(lastfm_listeners or 0),
         "listenbrainz_listens": int(listenbrainz_listens or 0),
         "lb_percentile": float(lb_percentile or 0.0),
