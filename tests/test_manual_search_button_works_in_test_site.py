@@ -54,6 +54,7 @@ PARTIAL = REPO_ROOT / "test_site/templates/components/modals/_soulseek_manual_se
 LIVE_PARTIAL = REPO_ROOT / "templates/components/modals/_soulseek_manual_search.html"
 
 QUEUE_PAGE = REPO_ROOT / "test_site/templates/Pages/downloads/queue.html"
+REBUILT_MONITOR_PAGE = REPO_ROOT / "test_site/templates/Pages/downloads/monitor.html"
 LIVE_MONITOR_PAGE = REPO_ROOT / "templates/pages/downloads/monitor.html"
 
 SLSKD_JS = REPO_ROOT / "test_site/static/js/services/slskd.js"
@@ -266,34 +267,41 @@ class TestTheButtonFiresOnBothPageKinds:
 
 
 # ===========================================================================
-# 3. The premise: the monitor PAGE is shadowed, and loads only downloads.js
+# 3. The premise: the monitor page is now REBUILT, and loads slskd.js
 # ===========================================================================
 
 class TestTheShadowingPremiseHolds:
-    """If this ever changes, the delegate can be removed — so pin it."""
+    """Once the rebuilt monitor page was the stray artist snapshot, it was
+    SHADOWED to the live tree — which loads only downloads.js, not slskd.js,
+    so the manual-search button was dead there. That premise no longer holds:
+    the test_site monitor page has been REPAIRED in place (it now carries the
+    monitor ids and loads the rebuilt tree's controllers), so it is no longer
+    shadowed and loads services/slskd.js exactly like the queue page.
+    """
 
-    def test_the_monitor_page_is_shadowed_to_live(self):
+    def test_the_monitor_page_is_no_longer_shadowed(self):
         from helpers import test_site_mode
 
         shadowed = {s.replace("\\", "/") for s in test_site_mode._SHADOWED_TEMPLATES}
-        assert "pages/downloads/monitor.html" in shadowed, (
-            "the rebuilt monitor page is no longer shadowed, so the monitor page "
-            "now comes from test_site/ — re-check whether the modal still needs "
-            "its own binding fallback"
+        assert "pages/downloads/monitor.html" not in shadowed, (
+            "the rebuilt monitor page is still shadowed — it can never reach "
+            "the test_site controllers. Remove it from the shadow list now "
+            "that the page is real."
         )
 
-    def test_the_live_monitor_page_does_not_load_slskd_js(self):
-        body = LIVE_MONITOR_PAGE.read_text(encoding="utf-8", errors="replace")
-        assert "slskd.js" not in body, (
-            "the live monitor page now loads skld.js, which would bind the "
-            "button itself — the delegate is then redundant"
+    def test_the_rebuilt_monitor_page_loads_slskd_js(self):
+        body = REBUILT_MONITOR_PAGE.read_text(encoding="utf-8", errors="replace")
+        assert "services/slskd.js" in body, (
+            "the rebuilt monitor page must load services/slskd.js — it "
+            "provides runSoulseekManualSearch, which the manual-search modal's "
+            "delegate resolves at click time"
         )
 
-    def test_the_live_monitor_page_does_load_downloads_js(self):
-        body = LIVE_MONITOR_PAGE.read_text(encoding="utf-8", errors="replace")
-        assert "js/downloads.js" in body, (
-            "the monitor page must load the script that provides "
-            "runSoulseekManualSearch, or the button is dead there"
+    def test_the_rebuilt_monitor_page_loads_the_monitor_controller(self):
+        body = REBUILT_MONITOR_PAGE.read_text(encoding="utf-8", errors="replace")
+        assert "js/pages/monitor.js" in body, (
+            "the rebuilt monitor page must load js/pages/monitor.js — the "
+            "unmatched-folders and upcoming-releases sections are rendered by it"
         )
 
     def test_the_queue_page_still_loads_slskd_js(self):

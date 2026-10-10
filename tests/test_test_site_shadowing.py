@@ -146,10 +146,19 @@ class TestShadowIsPerLoaderNotGlobal:
 
 
 class TestShadowListContents:
-    def test_monitor_is_shadowed(self):
+    def test_the_shadow_list_is_empty(self):
+        """The one entry ever shadowed, ``pages/downloads/monitor.html``, was
+        REPAIRED in place (the test_site monitor page now carries the monitor
+        ids and loads the rebuilt tree's modern controllers), so the shadow
+        list is empty — exactly like ``components/_release_section.html``
+        before it. A rebuilt copy is preferred and correct.
+
+        ⚠️ This test deliberately FAILS if someone shadows a repo that has been
+        fixed, so a future contributor cannot silently re-add a workaround.
+        """
         from helpers.test_site_mode import _SHADOWED_TEMPLATES
 
-        assert "pages/downloads/monitor.html" in _SHADOWED_TEMPLATES
+        assert not _SHADOWED_TEMPLATES, _SHADOWED_TEMPLATES
 
     def test_entries_are_lowercase_and_root_relative(self):
         """Lookups are compared casefolded, so entries must be stored that way

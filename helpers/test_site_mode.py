@@ -90,9 +90,7 @@ CONFIG_KEY = "use_test_site"
 #: equivalent; tests/test_artist_page_contract.py asserts that they are.
 #:
 #: REMOVE an entry once the rebuilt file is replaced or deleted.
-_SHADOWED_TEMPLATES: Final[frozenset[str]] = frozenset({
-    "pages/downloads/monitor.html",
-})
+_SHADOWED_TEMPLATES: Final[frozenset[str]] = frozenset()
 
 
 class CaseInsensitiveFileSystemLoader(FileSystemLoader):

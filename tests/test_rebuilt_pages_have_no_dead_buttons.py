@@ -296,25 +296,34 @@ _OBSOLETE_BUTTONS: dict[tuple[str, str], str] = {
     ("artist_detail_v2.html", "saveEditedTrackFromArtistPage"): (
         "Same function, same cause as artist_detail.html above."
     ),
-    ("downloads/monitor.html", "saveEditedTrackFromArtistPage"): (
-        "Same function, same cause as artist_detail.html above."
+
+    # ── shared partials whose buttons need their controllers ────────────────
+    #
+    # downloads/monitor.html used to BE the stray artist page (its handlers
+    # saveEditedTrackFromArtistPage/toggleMissing/addEditArtistTrackGenre/
+    # fetchArtistCountry/editArtistCountry were registered here). It was
+    # repaired in place to a real monitor page loading pages/monitor.js, so
+    # those entries are DELETED — a rebuilt page now carries the monitor ids.
+    #
+    # The monitor page shares the SAME partials as downloads/queue.html
+    # (_track_edit / _playlists / _organize_group), so it needs the same
+    # register entries the queue page has.
+    ("downloads/monitor.html", "addEditTrackGenre"): (
+        "Same _track_edit.html sharing problem as downloads/queue.html."
     ),
-    ("downloads/monitor.html", "toggleMissing"): (
-        "Defined only in static/js/artist_detail.js (live). Six call sites on "
-        "this page."
+    ("downloads/monitor.html", "saveComprehensiveEditedTrack"): (
+        "Same _track_edit.html sharing problem as downloads/queue.html."
     ),
-    ("downloads/monitor.html", "addEditArtistTrackGenre"): (
-        "Defined only in static/js/artist_detail.js (live). pages/album.js has "
-        "`addEditTrackGenre`, and the two signatures disagree (the live one "
-        "reads the track id from the DOM), so this needs a decision rather "
-        "than an alias."
+    ("downloads/monitor.html", "saveEditedTrack"): (
+        "Same _track_edit.html sharing problem as downloads/queue.html."
     ),
-    ("downloads/monitor.html", "fetchArtistCountry"): (
-        "Defined in pages/artist-detail-extras.js, which this page does not "
-        "load. A missing-script fix."
+    ("downloads/monitor.html", "createPlaylist"): (
+        "_playlists.html is shared with downloads/search.html, which DOES load "
+        "features/csv-import.js / pages/playlist.js. Loading them here would "
+        "pull in those whole pages."
     ),
-    ("downloads/monitor.html", "editArtistCountry"): (
-        "Same cause as fetchArtistCountry above."
+    ("downloads/monitor.html", "importPlaylistFromCSV"): (
+        "Same _playlists.html sharing problem as downloads/queue.html."
     ),
     # ── shared partials whose buttons need their controllers ────────────────
     ("downloads/queue.html", "saveEditedTrack"): (
