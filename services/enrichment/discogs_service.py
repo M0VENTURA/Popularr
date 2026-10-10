@@ -319,6 +319,34 @@ def _release_artist_matches(result_artist: str, query_artist: str) -> bool:
     return denominator > 0 and (overlap / denominator) >= 0.80
 
 
+def _search_result_matches_artist(result: dict[str, Any], artist: str) -> bool:
+    """True when a Discogs global-search result is credited to ``artist``.
+
+    Discogs ``/database/search`` results carry the artist credit in ONE of two
+    places depending on the release: a dedicated ``artist`` field, OR embedded
+    in the ``title`` as ``"AFI - The Leaving Song Pt. II"``. The old filter read
+    only the ``artist`` field, so every title-embedded result was dropped and the
+    global-search fallback could never fire — a second, independent reason the
+    reported single was missed even after the artist-releases scan failed.
+
+    Returns False when neither the field nor the title's leading credit segment
+    matches, so a genuinely different artist's release is still excluded.
+    """
+    if _release_artist_matches(str(result.get("artist") or ""), artist):
+        return True
+
+    # No usable artist field — fall back to the leading credit segment of the
+    # title. Discogs separates "Artist - Title" with an ASCII hyphen or an
+    # en/em dash, so split on any of them and compare just the credit.
+    title = str(result.get("title") or "")
+    if not title:
+        return False
+    parts = re.split(r"\s+[-–—]\s+", title, maxsplit=1)
+    if len(parts) == 2 and parts[0].strip():
+        return _release_artist_matches(parts[0].strip(), artist)
+    return False
+
+
 # --- TYPES -------------------------------------------------------------------
 
 class DiscogsTrack(TypedDict):
@@ -545,16 +573,41 @@ class DiscogsService:
                 "artist_verified": artist_verified,
             }
 
+        # The title gate runs FIRST and is purely local. It used to run last,
+        # after a `format` requirement that the artist-releases endpoint cannot
+        # satisfy: that endpoint reports the PHYSICAL medium ("CD", "Vinyl") or
+        # nothing at all, while the SINGLE/EP type token lives in the release
+        # detail's `formats[].descriptions` — so a genuine single arrived
+        # format-less and was skipped before its (perfect) title match was ever
+        # computed. Gating on the title first means a matching release is never
+        # discarded for want of a field we can fetch, and the expensive format
+        # resolution below only runs for releases that already match.
         for rel in releases:
             if not isinstance(rel, dict):
                 continue
             if str(rel.get("role") or "Main").strip().lower() != "main":
                 continue
 
-            formats = release_format_key(rel.get("format"))
-            tokens = release_format_tokens(rel.get("format"))
-            if not tokens:
+            rel_title = str(rel.get("title") or "")
+            if not edition_annotations_compatible(title, rel_title):
                 continue
+            if not self._normalize_title(rel_title):
+                continue
+
+            sim = _discogs_title_similarity(title, rel_title)
+            if sim < MIN_DISCOGS_SIMILARITY:
+                continue
+
+            tokens = release_format_tokens(rel.get("format"))
+            if not (SINGLE_FORMAT_TOKENS & tokens or SUPPORTING_RELEASE_FORMAT_TOKENS & tokens):
+                # No single/EP type on the row (common on the artist-releases
+                # endpoint) — resolve it from the release detail now that the
+                # title has matched. The result is cached on the release dict,
+                # so this is paid once per artist, not once per track.
+                if not self._resolve_release_format(rel):
+                    continue
+                tokens = release_format_tokens(rel.get("format"))
+
             if ALBUM_FORMAT_TOKENS & tokens:
                 continue
 
@@ -570,16 +623,7 @@ class DiscogsService:
             except (TypeError, ValueError):
                 pass
 
-            rel_title = str(rel.get("title") or "")
-            if not edition_annotations_compatible(title, rel_title):
-                continue
-            if not self._normalize_title(rel_title):
-                continue
-
-            sim = _discogs_title_similarity(title, rel_title)
-            if sim < MIN_DISCOGS_SIMILARITY:
-                continue
-
+            formats = release_format_key(rel.get("format"))
             is_promo = "promo" in tokens
             status = _status(rel, formats, is_promo, is_single_format, is_ep_format, sim)
 
@@ -600,6 +644,57 @@ class DiscogsService:
                     logger.debug("New best EP candidate found", title=title, rel_title=rel_title, sim=round(sim, 3))
 
         return best_commercial or best_promo or best_ep
+
+    def _resolve_release_format(self, rel: dict[str, Any]) -> bool:
+        """Fetch ``format``/``track_count`` for one release and cache them on it.
+
+        The Discogs ``/artists/{id}/releases`` endpoint does NOT carry the
+        single/EP TYPE token — it reports the physical medium ("CD", "Vinyl")
+        or nothing — while ``resolve_master_formats`` only covers the first
+        ``_MAX_MASTER_FORMAT_RESOLUTIONS`` masters. A single past that cap
+        (or a non-master release row, which it skips entirely) therefore
+        arrives with no single/EP signal and was invisible to
+        ``_scan_releases``.
+
+        Called only after a release's title has already matched the track, so
+        the cost is bounded to real candidates rather than the whole
+        discography. The resolved values are written back onto ``rel`` — the
+        dicts live in ``_artist_releases_cache`` — so the lookup is paid once
+        per artist, not once per track. Returns True when a single/EP type
+        token was recovered.
+        """
+        release_id = rel.get("main_release") or rel.get("id")
+        if not release_id:
+            return False
+        try:
+            detail = self.http.get_release(release_id)
+        except Exception as exc:
+            logger.debug(
+                "Release format lookup failed",
+                release_id=release_id,
+                error=str(exc),
+            )
+            return False
+        if not detail:
+            return False
+
+        formats = [
+            " ".join(
+                part
+                for part in (
+                    str(f.get("name") or ""),
+                    " ".join(str(d) for d in (f.get("descriptions") or [])),
+                )
+                if part
+            )
+            for f in (detail.get("formats") or [])
+        ]
+        if not formats:
+            return False
+        rel["format"] = formats
+        if detail.get("tracklist") and not rel.get("track_count"):
+            rel["track_count"] = len(detail.get("tracklist") or []) or None
+        return bool(release_format_tokens(formats) & (SINGLE_FORMAT_TOKENS | SUPPORTING_RELEASE_FORMAT_TOKENS))
 
     # -- EP lead track ----------------------------------------------------
 
@@ -756,7 +851,7 @@ class DiscogsService:
                 r
                 for r in results
                 if isinstance(r, dict)
-                and _release_artist_matches(str(r.get("artist") or ""), artist)
+                and _search_result_matches_artist(r, artist)
             ]
             status = self._scan_releases(title, results, artist_verified=False)
             

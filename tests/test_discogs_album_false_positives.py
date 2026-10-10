@@ -60,12 +60,12 @@ class TestAlbumTracksNotFlaggedAsSingles:
             "Is It in Your Darkness", "Electric Again", "Vultures", "Golgata",
             "The Everlasting Flame", "Harvest Spine",
         ):
-            status = svc._scan_releases(title, "", _CATALOGUE, artist_verified=True)
+            status = svc._scan_releases(title, _CATALOGUE, artist_verified=True)
             assert status is None, f"{title!r} should not match a Discogs single"
 
     def test_genuine_title_track_single_still_confirms(self):
         svc = _svc()
-        status = svc._scan_releases("Övergivenheten", "", _CATALOGUE, artist_verified=True)
+        status = svc._scan_releases("Övergivenheten", _CATALOGUE, artist_verified=True)
         assert status is not None
         assert status["is_single"] is True
         assert "single" in status["format"]
@@ -77,7 +77,7 @@ class TestAlbumTracksNotFlaggedAsSingles:
         catalogue = [
             {"title": "A Predator's Portrait", "format": ["CD", "Album"], "track_count": 10, "role": "Main"},
         ]
-        status = svc._scan_releases("Predator", "", catalogue, artist_verified=True)
+        status = svc._scan_releases("Predator", catalogue, artist_verified=True)
         assert status is None
 
 
@@ -87,21 +87,21 @@ class TestStringFormatHandling:
     def test_string_format_single_is_detected(self):
         svc = _svc()
         catalogue = [{"title": "Valleys of Gloam", "format": "File, MP3, Single", "role": "Main"}]
-        status = svc._scan_releases("Valleys of Gloam", "", catalogue, artist_verified=True)
+        status = svc._scan_releases("Valleys of Gloam", catalogue, artist_verified=True)
         assert status is not None
         assert status["is_single"] is True
 
     def test_string_format_promo_is_detected_as_promo(self):
         svc = _svc()
         catalogue = [{"title": "Nerve", "format": "CD, Maxi, Promo", "role": "Main"}]
-        status = svc._scan_releases("Nerve", "", catalogue, artist_verified=True)
+        status = svc._scan_releases("Nerve", catalogue, artist_verified=True)
         assert status is not None
         assert status["is_promo"] is True
 
     def test_album_rejected_when_format_is_a_string(self):
         svc = _svc()
         catalogue = [{"title": "Övergivenheten", "format": "CD, Album", "role": "Main"}]
-        status = svc._scan_releases("Övergivenheten", "", catalogue, artist_verified=True)
+        status = svc._scan_releases("Övergivenheten", catalogue, artist_verified=True)
         assert status is None
 
 
