@@ -31,7 +31,10 @@ from db.repositories.tracks import upsert_track_payload, upsert_tracks_bulk
 from sqlalchemy import text
 from db.engine import db_session
 from helpers.logging_config import log_unified
-from helpers.normalization_service import strip_album_edition_marker
+from helpers.normalization_service import (
+    strip_album_edition_marker,
+    strip_appended_album_version,
+)
 from helpers.text_utils import _clean_artist_name_for_storage
 from services.scanning.cleanup import (
     cleanup_empty_artist_dirs,
@@ -111,6 +114,28 @@ def detect_live_album(album_name: str) -> dict[str, bool]:
     return {"is_live": is_live, "is_unplugged": album_type == "acoustic"}
 
 
+def clean_navidrome_album_name(album: dict[str, Any]) -> str:
+    """Return the album name as Popularr should STORE it, from a Navidrome AlbumID3.
+
+    Navidrome's Subsonic API never hands out a bare album title: ``Album.FullName()``
+    appends the ``albumversion`` tag, into which Navidrome folds Picard's
+    ``musicbrainz_albumcomment`` (the MusicBrainz release DISAMBIGUATION), so
+    "17: Greatest Hits" (disambiguation "1999 Album") arrives as
+    "17: Greatest Hits (1999 Album)". The edition-keyword stripper cannot catch that
+    free-text comment, and writing it into ``tracks.album`` glues a subtitle onto
+    every track of the album on every sync.
+
+    The version is removed FIRST (it is the OUTERMOST suffix; Navidrome appends it
+    last) by matching the value the album object carries in its own ``version`` field,
+    then the usual edition markers are stripped. The version itself is not lost:
+    ``extract_album_metadata`` stores it in the ``albumversion`` column.
+    """
+    raw_name = str(album.get("name") or "")
+    return strip_album_edition_marker(
+        strip_appended_album_version(raw_name, album.get("version"))
+    )
+
+
 def compute_artist_album_diff(
     artist_name: str,
     nav_albums: list[dict[str, Any]],
@@ -122,7 +147,7 @@ def compute_artist_album_diff(
     nav_names: set[str] = set()
     nav_counts: dict[str, int] = {}
     for album in nav_albums:
-        name = strip_album_edition_marker(album.get("name") or "")
+        name = clean_navidrome_album_name(album)
         if name:
             nav_names.add(name)
             nav_counts[name] = int(album.get("songCount", 0) or 0)
@@ -446,9 +471,29 @@ def scan_artist_to_db(
             if skip_artist:
                 return {"changed": False, "changed_albums": 0}
 
+            # A DB album that differs from a Navidrome album ONLY by an
+            # appended edition/version marker is the SAME album under a new
+            # name — a re-home, not a removal. Navidrome keeps the same song
+            # ids across a rename, so those ids are still alive under the new
+            # name and must never be deleted by the removed-album cleanup (they
+            # are keyed by the OLD name, which now looks "removed"). A rename
+            # that is not in `changed_album_names` is skipped by the album loop
+            # and so never reaches `navidrome_track_ids` — seed the live set
+            # here, from the DB ids of any album that reduces to a nav name
+            # under the version/edition strippers.
+            cleaned_nav_names = set(clean_navidrome_album_name(a) for a in albums)
+            for _db_raw, _db_ids in existing_album_tracks.items():
+                if not _db_ids:
+                    continue
+                _cleaned = strip_appended_album_version(
+                    strip_album_edition_marker(_db_raw), None
+                )
+                if _cleaned in cleaned_nav_names:
+                    navidrome_track_ids |= _db_ids
+
         _album_name_counts: dict[str, int] = {}
         for _album in albums:
-            _name = strip_album_edition_marker(str(_album.get("name") or "").strip())
+            _name = clean_navidrome_album_name(_album)
             if _name:
                 _album_name_counts[_name] = _album_name_counts.get(_name, 0) + 1
         duplicate_album_names = {
@@ -478,11 +523,17 @@ def scan_artist_to_db(
         navi_client = active_client or _get_fallback_client()
 
         _albums_matched_filter = 0
+        # Set False if a stop request breaks the loop: the live-id set below
+        # would then be INCOMPLETE (albums never fetched), and running the
+        # removed-album cleanup off it would delete tracks that are still in
+        # Navidrome. A partial import must never declare an album removed.
+        _album_loop_completed = True
         for album_index, album in enumerate(albums, 1):
-            album_name = strip_album_edition_marker(album.get("name") or "")
+            album_name = clean_navidrome_album_name(album)
 
             if progress_file and is_stop_requested(progress_file):
                 log_unified(f"Navidrome Import - Stop requested — import halted for '{artist_name}'")
+                _album_loop_completed = False
                 break
 
             if should_skip_album(
@@ -705,7 +756,7 @@ def scan_artist_to_db(
                 canonical_artist_name=canonical_artist_name,
             )
 
-        if diff_mode:
+        if diff_mode and _album_loop_completed:
             for removed_album in removed_album_names:
                 removed_cached_ids = existing_album_tracks.get(removed_album, set())
                 if removed_cached_ids:
@@ -714,6 +765,10 @@ def scan_artist_to_db(
                         album_name=removed_album,
                         cached_ids_for_album=removed_cached_ids,
                         navidrome_tracks=[],
+                        # A renamed album keeps its track ids under the NEW
+                        # name; they are alive, so they must not be deleted
+                        # just because the old NAME is gone.
+                        live_track_ids=navidrome_track_ids,
                     )
 
         # ⚠️ THIS IMPORT MAY HAVE JUST REWRITTEN ``tracks.id`` — the id IS the

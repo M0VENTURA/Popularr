@@ -263,3 +263,109 @@ def test_scan_artist_to_db_diff_mode_keeps_duplicate_album_tracks():
     assert result.get("changed") is True
     # Both duplicates' tracks survive — no sibling deletion.
     assert _db_track_ids() == {"k1", "k2", "k3", "k4"}
+
+
+def test_scan_artist_to_db_diff_mode_renamed_album_does_not_delete_tracks():
+    """A subtitle/version suffix stripped by the import must NOT delete tracks.
+
+    When Navidrome appends the album VERSION (the MusicBrainz disambiguation,
+    e.g. ``(1999 Album)``) to ``AlbumID3.name``, a DB row stored BEFORE this fix
+    holds the old suffixed name while the import now stores the cleaned name.
+    The old NAME therefore looks "removed" — but the tracks are simply re-homed
+    under the cleaned name, so they are still live. The removed-album cleanup
+    must not delete them (guarded by the live-id set the import collected).
+
+    The DB album is seeded with the SUBTITLE name and the SAME track ids the
+    import returns under the cleaned name, so it exercises the version-strip
+    re-home path rather than a plain name match.
+    """
+    artist = "Rename Artist"
+    with db_session() as session:
+        session.execute(
+            text(
+                "INSERT INTO tracks (id, artist, album, album_artist) "
+                "VALUES (:id, :artist, :album, :album_artist)"
+            ),
+            [
+                # Subtitle name pre-fix; same ids the import now returns clean.
+                {"id": "k1", "artist": artist, "album": "Keep Album (1999 Album)", "album_artist": artist},
+                {"id": "k2", "artist": artist, "album": "Keep Album (1999 Album)", "album_artist": artist},
+            ],
+        )
+
+    client = _FakeImportClient(
+        albums=[
+            # Same album, name now carries the appended version.
+            {"id": "al-keep", "name": "Keep Album", "version": "1999 Album", "songCount": 2},
+        ],
+        album_tracks={
+            "al-keep": [
+                _album_track("k1", "K One", artist),
+                _album_track("k2", "K Two", artist),
+            ],
+        },
+    )
+
+    result = scan_artist_to_db(artist, "ar-5", diff_mode=True, client=client)
+
+    assert isinstance(result, dict)
+    # The re-homed album's tracks SURVIVE — the id-level live-set guard stops
+    # the removed-album cleanup from deleting rows whose id is still alive.
+    assert _db_track_ids() == {"k1", "k2"}
+
+
+def test_scan_artist_to_db_stop_halt_does_not_run_removed_cleanup():
+    """A stop-halted import must not declare albums removed.
+
+    ``is_stop_requested`` breaks the album loop early, leaving the live-id set
+    incomplete. Running the removed-album cleanup off that partial set would
+    delete tracks that are still in Navidrome, so the cleanup is gated on the
+    loop having completed.
+    """
+    artist = "Stop Artist"
+    _seed_artist(artist)  # seeds "Keep Album" (k1,k2) + "Gone Album" (g1,g2)
+
+    client = _FakeImportClient(
+        albums=[
+            {"id": "al-keep", "name": "Keep Album", "songCount": 2},
+            # "Gone Album" is absent, so the diff would flag it removed — but
+            # the stop request halts the loop before the live set is complete.
+            {"id": "al-other", "name": "Other Album", "songCount": 1},
+        ],
+        album_tracks={
+            "al-keep": [
+                _album_track("k1", "K One", artist),
+                _album_track("k2", "K Two", artist),
+            ],
+            "al-other": [_album_track("o1", "O One", artist)],
+        },
+    )
+
+    import services.scanning.navidrome_import as ndi
+
+    # Halt after the FIRST album so the live-id set is provably incomplete.
+    calls = {"n": 0}
+    original_is_stop = ndi.is_stop_requested
+
+    def _stop_after_first(_path):
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    ndi.is_stop_requested = _stop_after_first
+    try:
+        scan_artist_to_db(
+            artist,
+            "ar-6",
+            diff_mode=True,
+            client=client,
+            # Required: the halt only fires when a progress_file is set, since
+            # ``is_stop_requested`` reads the stop flag keyed to that file.
+            progress_file="test-stop.progress",
+        )
+    finally:
+        ndi.is_stop_requested = original_is_stop
+
+    # Halted mid-loop, the live-id set is incomplete — but the removed-album
+    # cleanup is gated on the loop having finished (``_album_loop_completed``),
+    # so a partial import must not delete anything it did not get to fetch.
+    assert "g1" in _db_track_ids() and "g2" in _db_track_ids()

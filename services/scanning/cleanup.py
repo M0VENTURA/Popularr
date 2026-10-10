@@ -62,9 +62,22 @@ def cleanup_stale_album_tracks_if_needed(
     album_name: str,
     cached_ids_for_album: set[str],
     navidrome_tracks: list[dict[str, Any]],
+    live_track_ids: set[str] | None = None,
 ) -> None:
-    """Delete DB tracks that no longer exist in a Navidrome album."""
+    """Delete DB tracks that no longer exist in a Navidrome album.
+
+    ``live_track_ids`` (optional) is the set of track ids Navidrome still holds
+    ANYWHERE for this artist; normally every id the import fetched. A track id
+    in it is alive under SOME album, so it must never be deleted here even when
+    the album NAME no longer matches: an album renamed upstream (e.g. Navidrome
+    appending a disambiguation/version suffix that this import now strips) lands
+    in the diff's removed set under its OLD name while its tracks are re-homed
+    under the new one. Deleting on name alone would destroy rows the import has
+    just rewritten.
+    """
     nav_ids = {track.get("id") for track in navidrome_tracks if track.get("id")}
+    if live_track_ids:
+        nav_ids |= set(live_track_ids)
     stale_ids = cached_ids_for_album - nav_ids
     if not stale_ids:
         return

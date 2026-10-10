@@ -877,6 +877,53 @@ def strip_album_edition_marker(value: str) -> str:
     return f"{cleaned} ({trailing_year})" if trailing_year else cleaned
 
 
+def strip_appended_album_version(name: str, version: str | None) -> str:
+    """Return ``name`` with a Navidrome-appended album VERSION suffix removed.
+
+    This is the ``albumversion`` half of the edition-marker problem. Navidrome
+    maps Picard's ``musicbrainz_albumcomment`` tag (the MusicBrainz release
+    DISAMBIGUATION, e.g. "1999 Album") onto its internal ``albumversion`` tag
+    (``resources/mappings.yaml``), then ``Album.FullName()`` appends it via
+    ``appendSuffix`` whenever ``Subsonic.AppendAlbumVersion`` is on, so the
+    Subsonic API only ever hands out the merged form:
+
+        "17: Greatest Hits" + comment "1999 Album"
+            -> AlbumID3.name = "17: Greatest Hits (1999 Album)"
+
+    No edition-keyword list can catch that; the disambiguation is free text,
+    but the API ALSO carries the same value in the album's separate ``version``
+    field (``OpenSubsonicAlbumID3.Version``). So the suffix is removed by
+    MATCHING the value Navidrome appended, exactly as it built it
+    (``model/mediafile.go::appendSuffix``): a version that already carries its
+    own bracket is appended bare, otherwise it is wrapped in parentheses.
+
+    Idempotent, tolerant of case and of a version that is empty/mismatched
+    (a mismatch means the name was NOT built by appending, so it is returned
+    unchanged; this is never a blind "strip the last bracket" rule, which
+    would eat a real subtitle like "(Live at Wembley)").
+
+    NOTE: this removes the marker for building a lookup / storage key. The
+    version itself is NOT lost; ``extract_album_metadata`` stores it in the
+    ``albumversion`` column.
+    """
+    raw = str(name or "")
+    ver = str(version or "").strip()
+    if not ver or not raw.strip():
+        return raw
+
+    stripped = raw.rstrip()
+    # Mirror appendSuffix: an already-bracketed version is appended bare,
+    # anything else is wrapped in parentheses.
+    if len(ver) >= 2 and ver[0] in "([" and ver[-1] in ")]":
+        suffix = f" {ver}"
+    else:
+        suffix = f" ({ver})"
+
+    if stripped.casefold().endswith(suffix.casefold()) and len(stripped) > len(suffix):
+        return stripped[: -len(suffix)].rstrip()
+    return raw
+
+
 def is_redundant_rename(old_name: str, new_name: str) -> bool:
     """True when ``new_name`` adds nothing beyond duplicated annotations."""
     return (
