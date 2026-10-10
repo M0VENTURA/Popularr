@@ -92,6 +92,17 @@ _FILTER_TAGS: frozenset[str] = frozenset({
     "symphonic", "soundtrack", "christmas", "holiday"
 })
 
+#: Subset of ``_FILTER_TAGS`` that describe ONE TRACK's performance
+#: (a cover, a live take, an acoustic arrangement…). They may be appended
+#: to the track whose own title/sources justify them, but must NEVER be
+#: spread to every track of an album by an album-level blend — that is the
+#: reported "track genres saved to album / Cover on non-cover songs".
+#: The Christmas family stays album-valid: a Christmas album IS an album
+#: property and the playlist builder depends on the tag surviving.
+_TRACK_AFFILIATION_FILTER_TAGS: frozenset[str] = frozenset(
+    _FILTER_TAGS - frozenset({"christmas", "holiday"})
+)
+
 _ADMIN_GENRE_WORDS: frozenset[str] = frozenset({
     "covers", "tribute", "tributes", "tribute band",
     "live album", "live recordings", "rework", "reworked", 
@@ -506,15 +517,26 @@ def _append_extra_genres(genres: list[str], title: str, album: str, intercepted_
     context_lower = f"{title or ''} {album or ''}".lower()
     
     # Base heuristic checks
-    if bool(re.search(r"[\(\[]\s*(live\vert{}acoustic\vert{}unplugged)[^)\]]*[\)\]]\s*$", title_lower)) or \
+    # ⚠️ The parenthetical alternation was corrupted in de12b3cf to
+    # ``(live\vert{}acoustic\vert{}unplugged)`` — a Python regex where ``\v``
+    # is a vertical-tab escape — so it NEVER matched and live/acoustic tracks
+    # stopped being tagged. Restored to the original alternation.
+    if bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", title_lower)) or \
        any(re.search(p, context_lower) for p in [r"\bconcert\b", r"\bat\s+\w+\s+(arena|stadium|hall|club|theatre|theater)"]):
         if intercepted_filters is not None:
             intercepted_filters.add("Live")
-            
-    if re.search(r"\b(cover|tribute)\b", context_lower):
+
+    # "Cover" is a per-TRACK affiliation, never an album property. The old
+    # ``\b(cover|tribute)\b`` over title+album tagged ordinary songs whose
+    # title merely contains the word ("Cover Me Now") and every track of an
+    # album named "Covers: A Tribute …". Only the same strict forms the cover
+    # detector uses justify it: a trailing "(X Cover)" suffix, "cover of",
+    # or "originally by" — matched on the TITLE only.
+    if (re.search(r"[\(\[]\s*[^)\]]+\s+cover\s*[\)\]]\s*$", title_lower)
+            or re.search(r"\bcover\s+of\b|\boriginally\s+by\b", title_lower)):
         if intercepted_filters is not None:
             intercepted_filters.add("Cover")
-            
+
     if "remaster" in title_lower or "remaster" in context_lower:
         if intercepted_filters is not None:
             intercepted_filters.add("Remaster")
@@ -631,6 +653,22 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
                 source_map.setdefault(src_key, []).extend(parsed_vals)
 
     recommended = aggregate_genres(source_map, max_genres=2)
+
+    # ── Album blend must NOT carry per-track affiliation tags ──────────────
+    #
+    # ``aggregate_genres`` appends every ``_FILTER_TAGS`` token it finds in ANY
+    # track's sources — so one genuine cover's "cover", or one track's
+    # Last.fm "acoustic", was spread to EVERY track of the album by the
+    # album-wide ``UPDATE tracks SET genres`` in ``sync_album_file_tags``.
+    # That is the reported "saving track genres to album / attaching Cover to
+    # non-cover songs". Only the Christmas family survives an album blend:
+    # a Christmas album is an album property and the genre-playlist builder
+    # relies on the tag being present outside its 3-genre window.
+    recommended = [
+        g for g in recommended
+        if g.strip().lower() not in _TRACK_AFFILIATION_FILTER_TAGS
+    ]
+
     return {"success": True, "artist": artist, "album": album, "genres": recommended}
 
 

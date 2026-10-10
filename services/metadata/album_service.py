@@ -1064,6 +1064,17 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
             if val:
                 vals = val if isinstance(val, list) else [str(val)]
                 source_map[src_key].extend(v.strip() for v in vals if v and v.strip())
-    from services.enrichment.genre_aggregation_service import aggregate_genres
+    from services.enrichment.genre_aggregation_service import (
+        _TRACK_AFFILIATION_FILTER_TAGS,
+        aggregate_genres,
+    )
     recommended = aggregate_genres(dict(source_map))
+    # Same rule as the album blend in
+    # ``genre_aggregation_service.get_track_recommendations``: a per-track
+    # affiliation tag (Cover/Live/Acoustic/…) on ONE track must not be shown
+    # as the album's recommended genre.
+    recommended = [
+        g for g in recommended
+        if g.strip().lower() not in _TRACK_AFFILIATION_FILTER_TAGS
+    ]
     return {"success": True, "artist": artist, "album": album, "genres": recommended}

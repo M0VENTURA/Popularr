@@ -265,7 +265,18 @@ def _album_top_genres(
         return []
 
     try:
-        return aggregate_genres(album_source_map, max_genres=max_genres)
+        from services.enrichment.genre_aggregation_service import (
+            _TRACK_AFFILIATION_FILTER_TAGS,
+        )
+        top = aggregate_genres(album_source_map, max_genres=max_genres)
+        # An album-level inheritance list must not carry per-track affiliation
+        # tags (Cover/Live/Acoustic/…): one track's "cover" source would make
+        # every sparse sibling inherit it. Same rule as the album blend in
+        # ``genre_aggregation_service.get_track_recommendations``.
+        return [
+            g for g in top
+            if g.strip().lower() not in _TRACK_AFFILIATION_FILTER_TAGS
+        ]
     except Exception:
         return []
 
