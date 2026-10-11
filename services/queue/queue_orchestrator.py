@@ -398,7 +398,12 @@ def process_next_batch(
 
             with queue_cycle_lock() as acquired:
                 if not acquired:
-                    logger.info("Another queue cycle holds the lock — skipping batch")
+                    # DEBUG: with the standalone worker AND the scheduler
+                    # thread both driving cycles, this fires for every other
+                    # driver on every tick — at INFO it was thousands of
+                    # identical lines a day in queue.log. It is expected
+                    # contention, not an event anyone acts on.
+                    logger.debug("Another queue cycle holds the lock — skipping batch")
                     return _ok(
                         total=0,
                         processed=0,
@@ -579,7 +584,9 @@ def process_cycle(
             # same work, so skipping here is what keeps it from running twice.
             # ``_ok`` ALREADY returns ``(payload, status)`` — appending a status
             # here would nest the tuple and hand the caller a tuple as payload.
-            logger.info("Another queue cycle holds the lock — skipping cycle")
+            # DEBUG: expected dual-driver contention (see the batch skip above)
+            # — at INFO this alone was ~4 identical lines per minute.
+            logger.debug("Another queue cycle holds the lock — skipping cycle")
             return _ok(
                 total=0,
                 processed=0,

@@ -874,6 +874,7 @@ def _select_best_result(
     min_score: float = 45.0,
     *,
     expected_album_artist: str | None = None,
+    miss_sink: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     scored: list[tuple[float, dict]] = []
     rejects: dict[str, int] = {}
@@ -914,6 +915,28 @@ def _select_best_result(
     below_floor = sum(1 for s, _ in scored if 0 < s < min_score)
     if below_floor:
         rejects["below_floor"] = below_floor
+    miss = {
+        "min_score": min_score,
+        "top_score": round(float(top_score), 1),
+        "candidates": len(scored),
+        "rejected": dict(rejects),
+        "top_candidate": str(top.get("filename") or "")[:200],
+    }
+    if miss_sink is not None:
+        # A search run tries MANY fallback queries (up to ~20). One WARNING
+        # PER QUERY buried every real signal in queue.log — a single doomed
+        # item emitted ~20 identical lines every ~15s while holding the queue
+        # cycle lock. The caller collects the misses and warns ONCE with the
+        # closest attempt (see ``_warn_closest_search_miss``).
+        miss_sink.append(miss)
+        logger.debug(
+            "Query yielded no qualifying candidate",
+            artist=expected_artist,
+            title=expected_title,
+            top_score=miss["top_score"],
+            candidates=miss["candidates"],
+        )
+        return None
     logger.warning(
         "No result met min_score — no qualifying download candidate",
         artist=expected_artist,
@@ -926,6 +949,95 @@ def _select_best_result(
         top_candidate=str(top.get("filename") or "")[:200],
     )
     return None
+
+
+def _warn_closest_search_miss(
+    misses: list[dict[str, Any]],
+    *,
+    artist: str,
+    title: str,
+    album: str | None,
+    queries_tried: int,
+) -> None:
+    """ONE "no result met min_score" warning per search run, not per query.
+
+    A run fans out over fallback queries and bitrate tiers; warning on every
+    fruitless query made queue.log mostly the same line repeated for minutes
+    per doomed item. The closest miss (most candidates, then highest top
+    score) is the one worth explaining; a run where EVERY query returned
+    zero candidates needs no line at all — the ``no_results`` search event
+    already says it.
+    """
+    if not misses:
+        return
+    best_miss = max(
+        misses,
+        key=lambda m: (int(m.get("candidates") or 0), float(m.get("top_score") or 0.0)),
+    )
+    if not int(best_miss.get("candidates") or 0):
+        return
+    logger.warning(
+        "No result met min_score — no qualifying download candidate",
+        artist=artist,
+        title=title,
+        album=album,
+        min_score=best_miss.get("min_score"),
+        top_score=best_miss.get("top_score"),
+        candidates=best_miss.get("candidates"),
+        rejected=best_miss.get("rejected"),
+        top_candidate=best_miss.get("top_candidate"),
+        queries_tried=queries_tried,
+    )
+
+
+def _attempt_candidate_downloads(
+    slskd: Any,
+    candidates: list[dict[str, Any]],
+    queue_id: int,
+    expected_artist: str,
+    expected_title: str,
+) -> tuple[bool, dict[str, Any] | None, str]:
+    """Try each candidate in order; a slot-less peer is SKIPPED, not fatal.
+
+    The BEST candidate having zero free upload slots used to fail the whole
+    item on the spot — while up to two other qualifying candidates sat
+    untried (proven in the wild: a 2-candidate item FAILED on the first
+    peer's slots, and a later retry succeeded from the second peer). The
+    loop below already knew how to skip slot-less peers; the early return
+    simply never let it run for the best candidate.
+
+    Returns ``(success, chosen, fail_reason)``. ``fail_reason`` is
+    ``"item_removed"`` when the queue item vanished mid-attempt, and always
+    names the LAST failure mode seen rather than a stale earlier one.
+    """
+    success = False
+    chosen = None
+    fail_reason = "download_failed"
+    for candidate in candidates:
+        if not _queue_item_exists(queue_id):
+            logger.info("Queue item was removed while searching", queue_id=queue_id)
+            return False, None, "item_removed"
+        if not candidate.get("has_free_upload_slot", True):
+            _block_peer(candidate.get("username"), candidate.get("filename"))
+            fail_reason = "peer_no_free_slots"
+            continue
+
+        success = slskd.download_file(
+            candidate["username"],
+            candidate["filename"],
+            size=int(candidate.get("size") or (candidate.get("size_mb", 0) * 1024 * 1024)),
+        )
+        if success:
+            chosen = candidate
+            break
+
+        _block_peer(candidate.get("username"), candidate.get("filename"))
+        fail_reason = "download_failed"
+        log_unified(
+            f"[QUEUE] {expected_artist} - {expected_title} → peer {candidate.get('username')} "
+            f"failed ({fail_reason}), trying next candidate…"
+        )
+    return success, chosen, fail_reason
 
 
 # =============================================================================
@@ -1167,6 +1279,7 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
         searched_queries: list[str] = []
         used_low_quality_fallback = False
         results: list[dict[str, Any]] = []
+        _misses: list[dict[str, Any]] = []
 
         bitrate_tiers: list[tuple[int, bool]] = [(floor_bitrate, True)]
         if allow_low_quality_fallback and fallback_bitrate < floor_bitrate:
@@ -1188,6 +1301,7 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                     expected_album_artist=expected_album_artist,
                     expected_duration=expected_duration,
                     expected_year=expected_year,
+                    miss_sink=_misses,
                 )
                 if best:
                     used_low_quality_fallback = tier_index > 0
@@ -1214,6 +1328,13 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
 
         if not best:
             logger.info("No qualifying result for queue item", queue_id=queue_id, artist=expected_artist, title=expected_title)
+            _warn_closest_search_miss(
+                _misses,
+                artist=expected_artist,
+                title=expected_title,
+                album=expected_album,
+                queries_tried=len(searched_queries),
+            )
             _log_search_event(
                 search_type="automatic",
                 query=query,
@@ -1235,23 +1356,15 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
             return {"success": False, "status": "item_removed"}
 
         if not best.get("has_free_upload_slot", True):
-            logger.warning("Best match peer has 0 free slots — skipping download", username=best.get("username"))
-            _block_peer(best.get("username"), best.get("filename"))
-            _log_search_event(
-                search_type="automatic",
-                query=query,
+            # NOT fatal: the candidate loop below skips slot-less peers and
+            # tries the next qualifying one (a 2-candidate item used to FAIL
+            # here on the best peer's slots — see _attempt_candidate_downloads).
+            logger.info(
+                "Best match peer has no free slots — trying next candidate",
                 queue_id=queue_id,
-                item=item,
-                result_count=len(results),
-                duration_seconds=elapsed,
-                notes="peer_no_free_slots",
-                selected_result=best,
-                results=results,
+                username=best.get("username"),
+                candidates=len(results),
             )
-            log_unified(f"[QUEUE] {expected_artist} - {expected_title} → failed: peer has no free upload slots")
-            _log_queue_event("failed", f"{expected_artist} - {expected_title} → failed: peer has no free upload slots", queue_id)
-            mark_failed(queue_id, "peer_no_free_slots")
-            return {"success": False, "status": "peer_no_free_slots"}
 
         update_queue_item(queue_id, status="downloading")
 
@@ -1262,33 +1375,12 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
             if r.get("username") != best.get("username") or r.get("filename") != best.get("filename"):
                 candidates.append(r)
 
-        success = False
-        chosen = None
-        fail_reason = "download_failed"
-        
-        for candidate in candidates:
-            if not _queue_item_exists(queue_id):
-                logger.info("Queue item was removed while searching", queue_id=queue_id)
-                return {"success": False, "status": "item_removed"}
-            if not candidate.get("has_free_upload_slot", True):
-                _block_peer(candidate.get("username"), candidate.get("filename"))
-                fail_reason = "peer_no_free_slots"
-                continue
-                
-            success = slskd.download_file(
-                candidate["username"],
-                candidate["filename"],
-                size=int(candidate.get("size") or (candidate.get("size_mb", 0) * 1024 * 1024)),
-            )
-            if success:
-                chosen = candidate
-                break
-                
-            _block_peer(candidate.get("username"), candidate.get("filename"))
-            log_unified(
-                f"[QUEUE] {expected_artist} - {expected_title} → peer {candidate.get('username')} "
-                f"failed ({fail_reason}), trying next candidate…"
-            )
+        success, chosen, fail_reason = _attempt_candidate_downloads(
+            slskd, candidates, queue_id, expected_artist, expected_title
+        )
+
+        if not success and fail_reason == "item_removed":
+            return {"success": False, "status": "item_removed"}
 
         if not success:
             _log_search_event(
@@ -1298,7 +1390,7 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                 item=item,
                 result_count=len(results),
                 duration_seconds=elapsed,
-                notes="download_failed",
+                notes=fail_reason,
                 selected_result=chosen or best,
                 results=results,
             )
