@@ -115,6 +115,32 @@ async def apply_track_mb_field(track_id: str) -> Any:
                 payload, status = _fail("Track not found", 404)
                 return jsonify(payload), status
 
+            # When the TITLE is applied from the Compare/Apply UI the user
+            # expects the FILE tag to follow (the Config page's "All File
+            # Metadata" setting). The DB-only write left the audio file holding
+            # the old title while the album page showed the new one.
+            if field == "title":
+                try:
+                    _path_row = session.execute(
+                        text("SELECT file_path FROM tracks WHERE CAST(id AS TEXT) = :id"),
+                        {"id": track_id},
+                    ).fetchone()
+                    if _path_row and str(_path_row[0] or "").strip():
+                        from services.metadata.tag_file_service import (
+                            resolve_music_file_path,
+                            write_tags_to_file,
+                        )
+                        _resolved = resolve_music_file_path(str(_path_row[0]))
+                        if _resolved:
+                            write_tags_to_file(_resolved, {"title": str(value)})
+                except Exception as _w_exc:
+                    # The DB write already succeeded; a file-tag failure must
+                    # not turn a 200 into a 500.
+                    logger.warning(
+                        "Applied MB field but file-tag write failed",
+                        track_id=track_id, field=field, error=str(_w_exc),
+                    )
+
         payload, status = _ok(track_id=track_id, field=field, value=value)
         return jsonify(payload), status
     except Exception as exc:

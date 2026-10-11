@@ -818,6 +818,46 @@ def _same_album_release(a: str, b: str) -> bool:
     )
 
 
+def _field_ignored_for_track(track: dict[str, Any], field: str) -> bool:
+    """True when the user permanently ignores ``field`` for this track.
+
+    Reads ``mb_ignored_fields`` — the JSON array the Compare UI's Ignore
+    button writes via ``ignore-mb-field``. A field ignored there must stay
+    ignored by the scan too, otherwise the scan would clobber a decision the
+    user explicitly made on the album page.
+    """
+    raw = track.get("mb_ignored_fields")
+    if not raw:
+        return False
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(parsed, list):
+        return False
+    return field in {str(item) for item in parsed}
+
+
+def _metadata_update_allowed() -> bool:
+    """True when the scan may ACT on MusicBrainz metadata.
+
+    ``metadata_update.apply_during_scan`` (default true) decides whether the
+    scan applies metadata it resolves or instead records it as a
+    pending_mb_updates recommendation (recommend-only mode). The title
+    promotion must not fire in recommend-only mode — the user asked to review
+    changes there.
+    """
+    try:
+        from helpers.config_helpers import get_metadata_update_config
+
+        return bool((get_metadata_update_config() or {}).get("apply_during_scan", True))
+    except Exception:
+        # Fail open: an unreadable config must not silently stop the scan from
+        # applying metadata it has always applied.
+        return True
+
+
+
 def _resolve_track_mb_metadata(
     *,
     track_id: str,
@@ -951,6 +991,42 @@ def _resolve_track_mb_metadata(
 
             if mb_data.get("title"):
                 payload["musicbrainz_title"] = mb_data["title"]
+                # ── PROMOTE the release tracklist title to the track title ──
+                #
+                # ``musicbrainz_title`` alone is a REVIEW column: the scan
+                # learns the release's own name for this position (e.g. "My
+                # First and Last (Chinese version)" on an album whose local
+                # file says the plain "My First and Last") but never writes it,
+                # so the DB and the file tags keep the wrong local spelling
+                # forever. The album-release identity supplied by the batch
+                # (``_from_batch``) is the HIGHEST-confidence source the scan
+                # has — it is the album's OWN release, matched by position and
+                # duration, not a title search — so promoting its title is the
+                # same trust the code already places in its recording MBID.
+                #
+                # Gate: only the batch identity; the local title must differ
+                # meaningfully; the track must not be frozen; the user must not
+                # have permanently ignored the title field (``mb_ignored_fields``
+                # — the Compare UI's Ignore button) and the enriched title must
+                # not be a placeholder.
+                _release_title = _as_str(mb_data["title"]).strip()
+                _local_title = _as_str(track.get("title") or "").strip()
+                if (
+                    _from_batch
+                    and not frozen_track
+                    and _release_title
+                    and _local_title
+                    and _release_title.casefold() != _local_title.casefold()
+                    and not _field_ignored_for_track(track, "title")
+                    and _metadata_update_allowed()
+                ):
+                    payload["title"] = _release_title
+                    logger.info(
+                        "[MB] release tracklist title promoted to title",
+                        track_id=track_id,
+                        old_title=_local_title,
+                        new_title=_release_title,
+                    )
 
             _artist_mbid = mb_data.get("artist_mbid")
             if _artist_mbid and not _as_str(track.get("musicbrainz_artistid") or track.get("musicbrainz_artist_id")):
@@ -2303,6 +2379,11 @@ def process_track(
         "album_artist": _album_artist,
         "album": track.get("album") or effective_track.get("album", ""),
         "title": track.get("title") or effective_track.get("title") or "",
+        # True when the release tracklist title was promoted onto this track's
+        # ``title`` this pass. The runner collects the ids so the file-tag
+        # sync can REWRITE the TITLE tag (not just fill-if-missing) for
+        # exactly these tracks.
+        "title_corrected": bool((update_payload or {}).get("title")),
         # The recording/work ids the metadata scan just resolved. Published so
         # the deep cover pass can overlay them onto its (stale, load-time) rows
         # and skip the per-track MusicBrainz searches — the same mechanism that

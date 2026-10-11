@@ -2923,6 +2923,11 @@ def run_scan(
             # MusicBrainz searches — the work id in particular feeds the
             # work-based cover fallback without re-resolving the recording.
             _resolved_mbids: dict[str, dict[str, str]] = {}
+            # Track ids whose ``title`` the track stage PROMOTED this pass
+            # (the release tracklist title applied to the DB column). Handed to
+            # ``sync_album_file_tags`` so the file TITLE tag is REWRITTEN for
+            # exactly these tracks — not merely filled if missing.
+            _corrected_title_ids: set[str] = set()
             for _res in _track_results_ordered:
                 if not isinstance(_res, dict):
                     continue
@@ -2930,6 +2935,8 @@ def run_scan(
                 _rartist = str(_res.get("artist") or "").strip()
                 if _rid and _rartist:
                     _resolved_artists[_rid] = _rartist
+                if _rid and bool(_res.get("title_corrected")):
+                    _corrected_title_ids.add(_rid)
                 _rmbid = str(_res.get("recording_mbid") or "").strip()
                 _wmbid = str(_res.get("work_mbid") or "").strip()
                 if _rid and (_rmbid or _wmbid):
@@ -3010,7 +3017,11 @@ def run_scan(
             if not options.get("popularity_only") and not options.get("singles_detection_only"):
                 try:
                     log_unified(f"[TAG_SYNC] Syncing cleaned metadata to audio files for '{album}'...")
-                    _tag_sync = sync_album_file_tags(artist=artist, album=album)
+                    _tag_sync = sync_album_file_tags(
+                        artist=artist,
+                        album=album,
+                        corrected_title_ids=_corrected_title_ids or None,
+                    )
                     if _tag_sync and (_tag_sync.get("files_updated") or _tag_sync.get("corrections_recorded")):
                         _album_report["metadata_corrections"] = int(_tag_sync.get("corrections_recorded") or 0)
                         # The per-album file-tag result is DETAIL; the section

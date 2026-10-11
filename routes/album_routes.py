@@ -397,9 +397,15 @@ async def api_album_upload_art() -> Any:
     """Set custom album art from an uploaded file."""
     try:
         form = await request.form
+        # Quart's ``request.files`` is an ASYNC attribute like ``request.form``
+        # — accessing it without ``await`` returns the coroutine itself, so
+        # ``.get("image")`` raises "'coroutine' object has no attribute 'get'"
+        # and every upload fails with "Upload failed: …". The playlists import
+        # route (``await request.files``) is the pattern.
+        files = await request.files
         artist = form.get("artist", "").strip()
         album = form.get("album", "").strip()
-        image_file = request.files.get("image")
+        image_file = files.get("image")
 
         if not artist or not album:
             return jsonify({"error": "Artist and album name required"}), 400

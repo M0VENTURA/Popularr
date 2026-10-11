@@ -506,8 +506,18 @@ def is_various_artists_album(
     return category == "va"
 
 
-def sync_album_file_tags(artist: str, album: str) -> dict[str, Any]:
-    """Fill missing file tags + record corrections for one album's tracks."""
+def sync_album_file_tags(
+    artist: str,
+    album: str,
+    corrected_title_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    """Fill missing file tags + record corrections for one album's tracks.
+
+    ``corrected_title_ids`` — the set of track ids whose ``title`` the scan
+    JUST corrected (a MusicBrainz release-tracklist title promoted to the DB
+    column). For exactly those tracks the TITLE tag is rewritten even when
+    the file already holds a value; everything else stays strictly
+    fill-if-missing, so a deliberately-chosen local title is never clobbered.    """
     try:
         from helpers.config_helpers import get_tagging_config
         tagging = get_tagging_config()
@@ -583,22 +593,36 @@ def sync_album_file_tags(artist: str, album: str) -> dict[str, Any]:
         and album_year
         and _norm(album_edition_year) != _norm(album_year)
     )
+    # The scan reports corrected track ids under their DB ``id``; the freshly
+    # loaded rows carry the same ids, but normalise anyway (ids are cast to
+    # strings somewhere in the pipeline).
+    _corrected_ids = {str(_i) for _i in (corrected_title_ids or set())}
     for track in tracks:
         file_path = str(track.get("file_path") or "").strip()
         if not file_path or not os.path.exists(file_path):
             continue
-            
+
         file_values = _read_file_values(file_path)
         db_candidates = _db_tag_candidates(
             track, album_year, perfect, include_lyrics, artist_genres,
             edition_year=album_edition_year,
         )
 
+        # A track whose title the scan just corrected must have the TITLE tag
+        # rewritten even if the file already holds a value (a deliberately
+        # chosen local spelling is never clobbered — only the ids in this set
+        # are touched, and they are exactly the ones the scan promoted).
+        _title_was_corrected = str(track.get("id") or "") in _corrected_ids
+
         fill: dict[str, str] = {}
         for k, v in db_candidates.items():
             file_val = str(file_values.get(k) or "").strip()
             if k == "genres":
                 # Always force overwrite genres if the tag has structurally changed
+                if _norm(file_val) != _norm(v):
+                    fill[k] = v
+            elif k == "title" and _title_was_corrected:
+                # The scan corrected this title; the file must follow.
                 if _norm(file_val) != _norm(v):
                     fill[k] = v
             elif k == "year" and _date_needs_correction and _norm(file_val) == _norm(album_year):
