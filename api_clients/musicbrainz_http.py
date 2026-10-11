@@ -193,6 +193,31 @@ class MusicBrainzHttpClient:
                     headers=_req_headers,
                     timeout=timeout,
                 )
+
+                # 304 MUST be handled BEFORE raise_for_status(): httpx (0.28+)
+                # raises HTTPStatusError for a 3xx "Redirect response '304
+                # Not Modified'" even with follow_redirects=True, so the
+                # conditional-GET layer below was UNREACHABLE — every
+                # revalidation logged "request failed permanently" and
+                # returned {} (discarding the cached payload it existed to
+                # reuse).
+                if response.status_code == 304:
+                    if isinstance(_cached_entry, (list, tuple)):
+                        logger.debug(
+                            "MusicBrainz conditional GET hit (304)",
+                            endpoint=endpoint,
+                        )
+                        _fresh_payload = _cached_entry[1]
+                        return _fresh_payload if isinstance(_fresh_payload, dict) else {}
+                    # A 304 with no cached body is unusable and cannot be
+                    # recovered by retrying; return before raise_for_status()
+                    # so the log stays honest (a 304 is not a failure).
+                    logger.debug(
+                        "MusicBrainz 304 with no cached body; treating as miss",
+                        endpoint=endpoint,
+                    )
+                    return {}
+
                 response.raise_for_status()
                 if str(response.url.path) != str(httpx.URL(url).path):
                     # Merged entities 301 to their new location; the redirect
@@ -203,13 +228,6 @@ class MusicBrainzHttpClient:
                         endpoint=endpoint,
                         resolved_path=str(response.url.path),
                     )
-                if response.status_code == 304 and isinstance(_cached_entry, (list, tuple)):
-                    logger.debug(
-                        "MusicBrainz conditional GET hit (304)",
-                        endpoint=endpoint,
-                    )
-                    _fresh_payload = _cached_entry[1]
-                    return _fresh_payload if isinstance(_fresh_payload, dict) else {}
                 payload = response.json()
                 _etag = str(response.headers.get("etag") or "").strip()
                 if _etag and isinstance(payload, dict):
