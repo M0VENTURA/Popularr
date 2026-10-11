@@ -47,7 +47,7 @@ def mb_fetcher_env(monkeypatch):
                 status TEXT,
                 last_seen_at TEXT,
                 updated_at TEXT,
-                UNIQUE (artist_name, album_name)
+                UNIQUE (artist_name, album_name, primary_type)
             )
         """))
         conn.execute(text("""

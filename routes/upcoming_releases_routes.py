@@ -543,12 +543,15 @@ async def api_add_upcoming_release() -> Any:
 
     release_date = str(data.get("release_date") or data.get("date") or "").strip()[:10]
     mbid = str(data.get("release_group_mbid") or data.get("mbid") or "").strip()
-    primary_type = str(data.get("primary_type") or "").strip()
+    primary_type = str(data.get("primary_type") or "").strip().lower()
     release_year = int(release_date[:4]) if len(release_date) >= 4 and release_date[:4].isdigit() else None
     now = datetime.now().isoformat()
 
     try:
         with db_session() as session:
+            # Same-typed row first, then the untyped (Wikipedia/legacy) row
+            # for absorption — never a differently-typed row, so a
+            # same-titled single and album stay distinct.
             dup = session.execute(
                 text("""
                     SELECT id FROM upcoming_releases
@@ -556,9 +559,15 @@ async def api_add_upcoming_release() -> Any:
                           = LOWER(REGEXP_REPLACE(:artist, '[^a-zA-Z0-9]', '', 'g'))
                       AND LOWER(REGEXP_REPLACE(album_name, '[^a-zA-Z0-9]', '', 'g'))
                           = LOWER(REGEXP_REPLACE(:album, '[^a-zA-Z0-9]', '', 'g'))
+                      AND (LOWER(COALESCE(TRIM(primary_type), '')) = :ptype
+                           OR COALESCE(NULLIF(TRIM(primary_type), ''), '') = '')
+                    ORDER BY CASE
+                        WHEN LOWER(COALESCE(TRIM(primary_type), '')) = :ptype THEN 0
+                        ELSE 1
+                    END
                     LIMIT 1
                 """),
-                {"artist": artist, "album": album},
+                {"artist": artist, "album": album, "ptype": primary_type},
             ).fetchone()
 
             if dup:
@@ -597,7 +606,7 @@ async def api_add_upcoming_release() -> Any:
                         1.0, :checked, 'discovered',
                         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
-                    ON CONFLICT (artist_name, album_name) DO UPDATE SET
+                    ON CONFLICT (artist_name, album_name, primary_type) DO UPDATE SET
                         last_seen_at = CURRENT_TIMESTAMP,
                         release_date = CASE
                             WHEN upcoming_releases.release_date IS NULL
@@ -614,7 +623,7 @@ async def api_add_upcoming_release() -> Any:
                 """),
                 {
                     "artist": artist, "album": album, "date": release_date or None,
-                    "year": release_year, "ptype": primary_type or None,
+                    "year": release_year, "ptype": primary_type,
                     "mbid": mbid or None, "checked": now,
                 },
             )

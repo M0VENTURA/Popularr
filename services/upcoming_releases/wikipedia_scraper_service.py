@@ -820,10 +820,10 @@ class WikipediaReleaseScraper:
                         text("""
                             INSERT INTO upcoming_releases
                                 (artist_name, album_name, source, source_key, release_date,
-                                 release_year, status, last_seen_at, updated_at)
+                                 release_year, primary_type, status, last_seen_at, updated_at)
                             VALUES (:artist, :album, :source, :source_key, :date,
-                                    :year, 'discovered', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                            ON CONFLICT (artist_name, album_name) DO UPDATE SET
+                                    :year, '', 'discovered', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            ON CONFLICT (artist_name, album_name, primary_type) DO UPDATE SET
                                 last_seen_at = CURRENT_TIMESTAMP,
                                 source = CASE
                                     WHEN upcoming_releases.source = 'MusicBrainz Daily Collection'

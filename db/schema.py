@@ -207,7 +207,7 @@ TABLES_TO_ENSURE: dict[str, str] = {
             album_in_collection BOOLEAN DEFAULT FALSE,
             release_group_mbid TEXT,
             match_source TEXT,
-            primary_type TEXT,
+            primary_type TEXT NOT NULL DEFAULT '',
             mbid_match_status TEXT DEFAULT 'unmatched',
             mbid_source TEXT,
             mbid_confidence TEXT,
@@ -218,7 +218,7 @@ TABLES_TO_ENSURE: dict[str, str] = {
             last_seen_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            CONSTRAINT uq_upcoming_artist_album UNIQUE (artist_name, album_name)
+            CONSTRAINT uq_upcoming_artist_album_type UNIQUE (artist_name, album_name, primary_type)
         )
     """,
     "scan_states": """

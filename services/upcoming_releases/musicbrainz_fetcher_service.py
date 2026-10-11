@@ -831,6 +831,18 @@ def _fetch_global_upcoming_release_groups(
 # Database SQL
 # =============================================================================
 
+# ---------------------------------------------------------------------------
+# Dedup identity: (normalised artist, normalised album, primary type).
+#
+# A same-titled SINGLE and ALBUM (the "album named after its lead single"
+# pattern) are two distinct MusicBrainz release groups and must live in two
+# rows — keying on artist+album alone collapsed them into one and the
+# earliest-date rule discarded the album's future date, hiding the upcoming
+# album.  Untyped rows (Wikipedia, legacy data) are still absorbable: a
+# typed MusicBrainz write first matches its own typed row, then falls back
+# to the untyped row for the same artist+album.
+# ---------------------------------------------------------------------------
+
 _FIND_EXISTING_RELEASE_SQL = text(
     """
     SELECT id
@@ -865,7 +877,137 @@ _FIND_EXISTING_RELEASE_SQL = text(
                   'g'
               )
           )
+      AND LOWER(
+              COALESCE(
+                  TRIM(primary_type),
+                  ''
+              )
+          ) = :ptype
     LIMIT 1
+    """
+)
+
+_FIND_LEGACY_RELEASE_SQL = text(
+    """
+    SELECT id
+    FROM upcoming_releases
+    WHERE LOWER(
+              REGEXP_REPLACE(
+                  artist_name,
+                  '[^a-zA-Z0-9]',
+                  '',
+                  'g'
+              )
+          ) = LOWER(
+              REGEXP_REPLACE(
+                  :artist,
+                  '[^a-zA-Z0-9]',
+                  '',
+                  'g'
+              )
+          )
+      AND LOWER(
+              REGEXP_REPLACE(
+                  album_name,
+                  '[^a-zA-Z0-9]',
+                  '',
+                  'g'
+              )
+          ) = LOWER(
+              REGEXP_REPLACE(
+                  :album,
+                  '[^a-zA-Z0-9]',
+                  '',
+                  'g'
+              )
+          )
+      AND COALESCE(
+              NULLIF(
+                  TRIM(primary_type),
+                  ''
+              ),
+              ''
+          ) = ''
+    LIMIT 1
+    """
+)
+
+_UPDATE_TYPED_RELEASE_SQL = text(
+    """
+    UPDATE upcoming_releases
+    SET
+        last_seen_at = CURRENT_TIMESTAMP,
+        source = :source,
+        primary_type = LOWER(
+            COALESCE(
+                NULLIF(:primary_type, ''),
+                upcoming_releases.primary_type
+            )
+        ),
+
+        release_date = COALESCE(
+            :release_date,
+            upcoming_releases.release_date
+        ),
+
+        release_year = COALESCE(
+            :release_year,
+            upcoming_releases.release_year
+        ),
+
+        artist_in_collection = (
+            COALESCE(
+                upcoming_releases.artist_in_collection,
+                FALSE
+            )
+            OR :artist_in_collection
+        ),
+
+        release_group_mbid = COALESCE(
+            :release_group_mbid,
+            upcoming_releases.release_group_mbid
+        ),
+
+        mbid_match_status = CASE
+            WHEN COALESCE(
+                upcoming_releases.mbid_manual_override,
+                FALSE
+            )
+                THEN upcoming_releases.mbid_match_status
+            ELSE 'matched'
+        END,
+
+        mbid_confidence = CASE
+            WHEN COALESCE(
+                upcoming_releases.mbid_manual_override,
+                FALSE
+            )
+                THEN upcoming_releases.mbid_confidence
+            ELSE 'high'
+        END,
+
+        mbid_source = CASE
+            WHEN COALESCE(
+                upcoming_releases.mbid_manual_override,
+                FALSE
+            )
+                THEN upcoming_releases.mbid_source
+            ELSE :mbid_source
+        END,
+
+        mbid_match_score = CASE
+            WHEN COALESCE(
+                upcoming_releases.mbid_manual_override,
+                FALSE
+            )
+                THEN upcoming_releases.mbid_match_score
+            ELSE 1.0
+        END,
+
+        mbid_last_checked_at = :checked_at,
+        updated_at = CURRENT_TIMESTAMP
+
+    WHERE id = :id
     """
 )
 
@@ -980,7 +1122,10 @@ _INSERT_RELEASE_SQL = text(
         :release_date,
         :release_year,
         :source,
-        NULLIF(:primary_type, ''),
+        COALESCE(
+            NULLIF(:primary_type, ''),
+            ''
+        ),
         :artist_in_collection,
         :release_group_mbid,
         'matched',
@@ -993,7 +1138,7 @@ _INSERT_RELEASE_SQL = text(
         CURRENT_TIMESTAMP
     )
 
-    ON CONFLICT (artist_name, album_name)
+    ON CONFLICT (artist_name, album_name, primary_type)
     DO UPDATE SET
         last_seen_at = CURRENT_TIMESTAMP,
         source = EXCLUDED.source,
@@ -1169,15 +1314,45 @@ def _persist_releases(
                 if not values:
                     continue
 
+                ptype = str(
+                    values.get("primary_type") or ""
+                ).strip().lower()
+
+                lookup_params = {
+                    "artist": values["artist"],
+                    "album": values["album"],
+                    "ptype": ptype,
+                }
+
                 existing = session.execute(
                     _FIND_EXISTING_RELEASE_SQL,
-                    {
-                        "artist": values["artist"],
-                        "album": values["album"],
-                    },
+                    lookup_params,
                 ).fetchone()
 
                 if existing:
+                    # Same-typed row: MusicBrainz is the authority for its
+                    # own typed release group, so refresh the date (the
+                    # earliest-date merge belongs only to the legacy
+                    # untyped absorb below).
+                    session.execute(
+                        _UPDATE_TYPED_RELEASE_SQL,
+                        {
+                            **values,
+                            "id": existing[0],
+                        },
+                    )
+
+                    updated += 1
+                    continue
+
+                existing = session.execute(
+                    _FIND_LEGACY_RELEASE_SQL,
+                    lookup_params,
+                ).fetchone()
+
+                if existing:
+                    # Untyped legacy/Wikipedia row: absorb it (earliest-date
+                    # merge semantics preserved).
                     session.execute(
                         _UPDATE_RELEASE_SQL,
                         {

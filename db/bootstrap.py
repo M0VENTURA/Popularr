@@ -177,12 +177,14 @@ def ensure_upcoming_releases_schema() -> bool:
                 WHERE a.id > b.id
                   AND a.artist_name = b.artist_name
                   AND a.album_name = b.album_name
+                  AND COALESCE(a.primary_type, '') = COALESCE(b.primary_type, '')
                   AND a.source = b.source
             """))
             try: session.execute(text("ALTER TABLE upcoming_releases DROP CONSTRAINT IF EXISTS uq_upcoming_artist_album_source"))
             except Exception: pass
-            
-            session.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_upcoming_artist_album ON upcoming_releases (artist_name, album_name)"))
+
+            session.execute(text("DROP INDEX IF EXISTS uq_upcoming_artist_album"))
+            session.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_upcoming_artist_album_type ON upcoming_releases (artist_name, album_name, primary_type)"))
             session.execute(text("UPDATE upcoming_releases SET last_seen_at = COALESCE(last_seen_at, updated_at, created_at, CURRENT_TIMESTAMP)"))
         return True
     except Exception as e:
