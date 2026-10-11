@@ -542,6 +542,26 @@ def _album_z_band_star(
         if float(s or 0) > 0
     ]
     if len(valid) < 3:
+        # A SINGLE/EP RELEASE (1-2 track album) has no album distribution; the
+        # album z is 0.0 by construction. Rate the base band against the
+        # artist's catalogue when it is large enough to be one — the same
+        # fallback ``_assign_stars`` now uses for its z-scores. ``max_stars``
+        # still applies (a live album's tighter ceiling, for example).
+        if artist_scores:
+            valid_artist = [
+                float(s) for s in artist_scores if float(s or 0) > 0
+            ]
+            if len(valid_artist) >= 5:
+                artist_z, artist_spread = _compute_artist_z(score, valid_artist)
+                th = _live_star_thresholds()
+                epsilon = _star_epsilon_z(artist_spread, th["epsilon"])
+                if artist_z >= th["star4_artist_z"] - epsilon:
+                    return min(4, int(max_stars))
+                if artist_z >= th["star3_album_z"] - epsilon:
+                    return min(3, int(max_stars))
+                if artist_z >= th["star2_album_z"] - epsilon:
+                    return min(2, int(max_stars))
+                return 1
         return min(3, int(max_stars))
 
     album_z, spread = _compute_album_z(score, valid)
@@ -1116,10 +1136,23 @@ def _assign_stars(
     )
     _album_pool = _cohort_pool if _use_lb_cohort else album_scores
 
-    if is_compilation:
+    # A SINGLE/EP RELEASE (an album holding only 1-2 tracks) has no meaningful
+    # album distribution: ``_compute_album_z`` needs min_count=3, so its album
+    # z is 0.0 by construction and the base band below hard-caps such albums at
+    # 3★ forever, however popular the single is (reported: "songs on single
+    # releases seem to be scoring low"). Rate them against the ARTIST's
+    # catalogue instead — the same reasoning the compilation branch documents
+    # next door ("there is no separate album pool that means anything"). The
+    # era caps still gate the 5★ (catalogue-top cutoff / top-N / slots), so a
+    # merely-mid single cannot inflate past its true catalogue position.
+    _small_album_pool = (
+        len([s for s in _album_pool if float(s or 0) > 0])
+        < _LB_COHORT_MIN_TRACKS
+    )
+    if is_compilation or _small_album_pool:
         # Both z-scores are computed against the SAME credited-artist
         # catalogue distribution -- there is no separate "album" pool that
-        # means anything for a compilation track.
+        # means anything for a compilation track (or a 1-2 track single).
         album_z, album_spread = _compute_artist_z(score, artist_scores)
         artist_z, artist_spread = album_z, album_spread
     else:
