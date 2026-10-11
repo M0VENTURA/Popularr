@@ -7,7 +7,9 @@ tracks against known single releases WITHOUT per-track API searches.
 - MusicBrainz: two release-group searches (singles+EPs, then albums).
 - Discogs: one artist-releases call (first 100 releases, role=Main), with
   format-based classification (Single / EP / Album).
-- Persisted with a 7-day freshness TTL; re-prefetch skips fresh artists.
+- Persisted with a configurable freshness TTL (``prefetch_cache_days``,
+  default 7); re-prefetch skips fresh artists PER SOURCE, so an empty
+  Discogs result no longer forces a MusicBrainz re-fetch.
 """
 
 from __future__ import annotations
@@ -27,7 +29,32 @@ from services.metadata import artist_scan_service
 
 logger = structlog.get_logger(__name__)
 
+#: Fallback when ``features.prefetch_cache_days`` is unset. Kept as a module
+#: constant so existing imports/tests keep working.
 CACHE_FRESH_HOURS = 24 * 7
+
+#: Reserved title used to remember "Discogs returned 0 releases for this
+#: artist" so the prefetch gate can skip next time. Readers filter by
+#: ``release_type IN ('single','ep')`` or match real track titles, so an
+#: empty-typed sentinel row never leaks into single detection.
+_DISCOGS_CHECKED_SENTINEL = "__discogs_checked__"
+
+
+def _prefetch_cache_hours() -> float:
+    """Effective prefetch freshness window in hours, from Config.
+
+    ``features.prefetch_cache_days`` (default 7) is the single knob shared by
+    the popularity and release caches, so it can be aligned with the Scan
+    Behaviour windows. ``0`` means "always re-prefetch" (never fresh),
+    matching the skip-window convention.
+    """
+    try:
+        from helpers.config_helpers import get_feature
+
+        days = get_feature("prefetch_cache_days", 7)
+        return max(0.0, float(days or 0)) * 24.0
+    except Exception:
+        return float(CACHE_FRESH_HOURS)
 
 
 # ---------------------------------------------------------------------------
@@ -152,27 +179,53 @@ def _cache_has_source(artist: str, source: str) -> bool:
         return False
 
 
-def _artist_cache_fresh(artist: str) -> bool:
-    """True when the artist was cached within the TTL."""
+def _artist_source_fresh(artist: str, source: str) -> bool:
+    """True when the artist's ``source`` rows were refreshed within the TTL.
+
+    Checked PER SOURCE so an artist whose Discogs fetch returned 0 rows does
+    not force a MusicBrainz re-fetch on every scan (the old combined gate
+    required a Discogs row to exist whenever a Discogs id was known, so a
+    single empty Discogs result made the whole cache permanently "stale").
+    """
     try:
         with db_session() as session:
             result = session.execute(
-                text("SELECT MAX(updated_at) AS latest FROM artist_release_cache WHERE LOWER(artist) = LOWER(:artist)"),
-                {"artist": artist},
+                text(
+                    "SELECT MAX(updated_at) AS latest FROM artist_release_cache "
+                    "WHERE LOWER(artist) = LOWER(:artist) AND source = :source"
+                ),
+                {"artist": artist, "source": source},
             )
             row = result.fetchone()
         if not row or not row[0]:
             return False
         latest = row[0]
+        hours = _prefetch_cache_hours()
+        if hours <= 0:
+            return False
+        if isinstance(latest, str):
+            # SQLite (and some drivers) return CURRENT_TIMESTAMP as text.
+            try:
+                latest = datetime.fromisoformat(latest.strip())
+            except ValueError:
+                return False
         if isinstance(latest, datetime):
             if latest.tzinfo is None:
                 latest = latest.replace(tzinfo=timezone.utc)
             else:
                 latest = latest.astimezone(timezone.utc)
-            return (datetime.now(timezone.utc) - latest).total_seconds() < CACHE_FRESH_HOURS * 3600
+            return (datetime.now(timezone.utc) - latest).total_seconds() < hours * 3600
         return False
     except Exception:
         return False
+
+
+def _artist_cache_fresh(artist: str) -> bool:
+    """True when the artist's MusicBrainz release rows were cached within the TTL.
+
+    Retained for callers that only care about the primary (MusicBrainz) source.
+    """
+    return _artist_source_fresh(artist, "musicbrainz")
 
 
 def get_cached_artist_release_rows(artist: str, source: str = "discogs") -> list[dict[str, Any]] | None:
@@ -184,7 +237,7 @@ def get_cached_artist_release_rows(artist: str, source: str = "discogs") -> list
     reuses the runner's prefetched artist page instead of re-fetching all
     Discogs pages per process.
     """
-    if not _artist_cache_fresh(artist):
+    if not _artist_source_fresh(artist, source):
         return None
     try:
         with db_session() as session:
@@ -193,8 +246,9 @@ def get_cached_artist_release_rows(artist: str, source: str = "discogs") -> list
                     SELECT artist, title, release_type, source, release_id, year, is_promo, category
                     FROM artist_release_cache
                     WHERE LOWER(artist) = LOWER(:artist) AND source = :source
+                      AND title <> :sentinel
                 """),
-                {"artist": artist, "source": source},
+                {"artist": artist, "source": source, "sentinel": _DISCOGS_CHECKED_SENTINEL},
             )
             return [dict(r) for r in result.mappings().all()]
     except Exception as exc:
@@ -444,29 +498,71 @@ def _fetch_discogs_releases(artist: str, discogs_artist_id: str) -> list[dict[st
 def prefetch_artist_releases(artist: str, discogs_artist_id: str = "") -> dict[str, Any]:
     """Pull an artist's releases into ``artist_release_cache``.
 
-    Skips artists refreshed within the TTL. Returns per-source counts.
+    Skips each SOURCE refreshed within the TTL. Returns per-source counts.
+
+    The gate is PER SOURCE: MusicBrainz freshness is independent of Discogs.
+    The old combined gate (``fresh AND (has discogs rows OR no discogs id)``)
+    meant that whenever a Discogs id was known but the Discogs fetch returned
+    0 rows, the cache was permanently "stale" and MusicBrainz was re-fetched
+    on every scan — the reported "prefetch runs again every restart".
     """
     if not artist:
         return {"musicbrainz": 0, "discogs": 0}
-    if _artist_cache_fresh(artist) and (_cache_has_source(artist, "discogs") or not discogs_artist_id):
-        return {"musicbrainz": 0, "discogs": 0, "skipped": "fresh"}
 
-    mb_rows = _fetch_musicbrainz_releases(artist)
-    _upsert_releases(artist, mb_rows)
+    out: dict[str, Any] = {"musicbrainz": 0, "discogs": 0}
 
-    discogs_rows: list[dict[str, Any]] = []
-    if discogs_artist_id:
+    if not _artist_source_fresh(artist, "musicbrainz"):
+        mb_rows = _fetch_musicbrainz_releases(artist)
+        _upsert_releases(artist, mb_rows)
+        out["musicbrainz"] = len(mb_rows)
+
+    if discogs_artist_id and not _artist_source_fresh(artist, "discogs"):
         discogs_rows = _fetch_discogs_releases(artist, discogs_artist_id)
         _upsert_releases(artist, discogs_rows)
+        out["discogs"] = len(discogs_rows)
+        # Remember the check even when Discogs returned nothing, so the next
+        # scan can skip. The sentinel is filtered out of every reader (it has
+        # no single/EP type and a reserved title that matches no track).
+        if not discogs_rows:
+            _mark_discogs_checked(artist)
 
-    if mb_rows or discogs_rows:
+    if out["musicbrainz"] or out["discogs"]:
         logger.info(
             "[RELEASE_CACHE] Artist releases cached",
             artist=artist,
-            mb_count=len(mb_rows),
-            discogs_count=len(discogs_rows),
+            mb_count=out["musicbrainz"],
+            discogs_count=out["discogs"],
         )
-    return {"musicbrainz": len(mb_rows), "discogs": len(discogs_rows)}
+    return out
+
+
+def _mark_discogs_checked(artist: str) -> None:
+    """Record that the Discogs prefetch ran for ``artist`` (even with 0 rows).
+
+    Writes one reserved row so ``_artist_source_fresh(artist, "discogs")``
+    becomes True and the prefetch skips next time. Every reader excludes it:
+    the single/EP title queries filter on ``release_type``, the missing-releases
+    diff filters on ``source = 'musicbrainz'``, and single detection matches by
+    real track title.
+    """
+    try:
+        with db_session() as session:
+            session.execute(
+                text("""
+                    INSERT INTO artist_release_cache
+                        (artist, title, release_type, category, source, release_id, year, is_promo, updated_at)
+                    VALUES (:artist, :title, '', '', 'discogs', NULL, NULL, FALSE, CURRENT_TIMESTAMP)
+                    ON CONFLICT (artist, title, source) DO UPDATE SET
+                        updated_at = CURRENT_TIMESTAMP
+                """),
+                {"artist": artist, "title": _DISCOGS_CHECKED_SENTINEL},
+            )
+    except Exception as exc:
+        logger.debug(
+            "[RELEASE_CACHE] Discogs-checked marker write failed",
+            artist=artist,
+            error=str(exc),
+        )
 
 
 def get_artist_single_titles(artist: str, source: str | None = None) -> set[str]:

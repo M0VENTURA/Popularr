@@ -29,7 +29,25 @@ from services.popularity.popularity_sources import (
 
 logger = structlog.get_logger(__name__)
 
+#: Fallback when ``features.prefetch_cache_days`` is unset.
 CACHE_FRESH_HOURS = 24 * 7
+
+
+def _prefetch_cache_hours() -> float:
+    """Effective prefetch freshness window in hours, from Config.
+
+    ``features.prefetch_cache_days`` (default 7) is shared with the release
+    cache so both prefetches can be aligned with the Scan Behaviour windows.
+    ``0`` means "always re-fetch" (never fresh), matching the skip-window
+    convention.
+    """
+    try:
+        from helpers.config_helpers import get_feature
+
+        days = get_feature("prefetch_cache_days", 7)
+        return max(0.0, float(days or 0)) * 24.0
+    except Exception:
+        return float(CACHE_FRESH_HOURS)
 
 #: Last.fm ``artist.getTopTracks`` is a SINGLE call per artist, and every
 #: title it returns is answered from that one call for the rest of the scan
@@ -72,7 +90,10 @@ def _is_fresh(row: dict[str, Any]) -> bool:
         else:
             return False
         age = (datetime.now(timezone.utc) - updated).total_seconds()
-        return age < CACHE_FRESH_HOURS * 3600
+        hours = _prefetch_cache_hours()
+        if hours <= 0:
+            return False
+        return age < hours * 3600
     except Exception:
         return False
 

@@ -374,7 +374,12 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "composer": "TEXT", "album_artist": "TEXT", "year": "TEXT"
     },
     "artist_release_cache": {
-        "is_promo": "BOOLEAN DEFAULT FALSE", "category": "TEXT"
+        "is_promo": "BOOLEAN DEFAULT FALSE", "category": "TEXT",
+        # Present in the CREATE TABLE since the table shipped, but a database
+        # bootstrapped by an even older build lacks it and the incremental
+        # sync only adds registry-listed columns. Without it the release-cache
+        # freshness check (``MAX(updated_at)``) fails and every scan re-fetches.
+        "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
     },
     "missing_releases": {"tracklist": "TEXT"},
     "track_popularity_cache": {"lastfm_tags": "JSONB"},
