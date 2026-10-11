@@ -2548,6 +2548,12 @@ def run_scan(
                                     "listenbrainz_listens": int(_cur.get("listenbrainz_listens") or 0),
                                     "listenbrainz_users": int(_cur.get("listenbrainz_users") or 0),
                                     "source": "album_tracklist",
+                                    # Persist the IDENTITY too (audit G3): the
+                                    # runner's guard above skips the whole LB
+                                    # tracklist lookup when the seeded entry
+                                    # carries source + mbid, so the mapping
+                                    # resolved NOW serves every later pass.
+                                    "recording_mbid": str(_cur.get("recording_mbid") or "").strip() or None,
                                 })
 
                         if _cache_rows:

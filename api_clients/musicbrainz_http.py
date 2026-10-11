@@ -102,6 +102,19 @@ class _LruCache:
 _RECORDING_DETAIL_CACHE = _LruCache(max_size=4000)
 _ISRC_LOOKUP_CACHE = _LruCache(max_size=2000)
 _RELEASE_DETAIL_CACHE = _LruCache(max_size=2000)
+#: Conditional-GET layer (audit G7): endpoint+params -> [etag, payload].
+#: MusicBrainz honours If-None-Match, so an identical request revalidates
+#: with a ~300-byte exchange instead of re-downloading the body. The key
+#: includes EVERY query param (sorted), so two different queries can never
+#: collide onto one payload.
+_ETAG_CACHE = _LruCache(max_size=2000)
+
+
+def _etag_cache_key(endpoint: str, params: dict[str, Any] | None) -> str:
+    query = params or {}
+    return "etag::" + endpoint + "::" + "&".join(
+        f"{k}={query[k]}" for k in sorted(query)
+    )
 
 
 def _strict_throttle() -> None:
@@ -139,6 +152,7 @@ class MusicBrainzHttpClient:
         _RECORDING_DETAIL_CACHE.clear()
         _ISRC_LOOKUP_CACHE.clear()
         _RELEASE_DETAIL_CACHE.clear()
+        _ETAG_CACHE.clear()
 
     def is_available(self) -> bool:
         return time.monotonic() >= _CIRCUIT_OPEN_UNTIL
@@ -157,6 +171,18 @@ class MusicBrainzHttpClient:
         url = f"{self.base_url}{endpoint.lstrip('/')}"
         query_params = params or {}
 
+        # Conditional-GET (audit G7): revalidate an identical cross-process
+        # request with If-None-Match instead of re-downloading the body.
+        _etag_key = _etag_cache_key(endpoint, query_params)
+        _cached_entry = _ETAG_CACHE.get(_etag_key)
+        _req_headers = self.headers
+        if (
+            isinstance(_cached_entry, (list, tuple))
+            and len(_cached_entry) == 2
+            and str(_cached_entry[0] or "").strip()
+        ):
+            _req_headers = {**self.headers, "If-None-Match": str(_cached_entry[0])}
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -164,7 +190,7 @@ class MusicBrainzHttpClient:
                 response = self.session.get(
                     url,
                     params=query_params,
-                    headers=self.headers,
+                    headers=_req_headers,
                     timeout=timeout,
                 )
                 response.raise_for_status()
@@ -177,7 +203,17 @@ class MusicBrainzHttpClient:
                         endpoint=endpoint,
                         resolved_path=str(response.url.path),
                     )
+                if response.status_code == 304 and isinstance(_cached_entry, (list, tuple)):
+                    logger.debug(
+                        "MusicBrainz conditional GET hit (304)",
+                        endpoint=endpoint,
+                    )
+                    _fresh_payload = _cached_entry[1]
+                    return _fresh_payload if isinstance(_fresh_payload, dict) else {}
                 payload = response.json()
+                _etag = str(response.headers.get("etag") or "").strip()
+                if _etag and isinstance(payload, dict):
+                    _ETAG_CACHE.set(_etag_key, [_etag, payload])
                 return payload if isinstance(payload, dict) else {}
                 
             except httpx.HTTPStatusError as exc:

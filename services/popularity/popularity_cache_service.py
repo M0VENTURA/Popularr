@@ -97,6 +97,12 @@ def _row_to_entry(row: dict[str, Any]) -> dict[str, Any]:
     _tags = row.get("lastfm_tags")
     if _tags:
         entry["lastfm_tags"] = _tags
+    _mbid = str(row.get("recording_mbid") or "").strip()
+    if _mbid:
+        # The album-tracklist identity (audit G3): lets the runner skip the
+        # per-album ListenBrainz tracklist lookup when the mapping is already
+        # on the row.
+        entry["recording_mbid"] = _mbid
     return entry
 
 

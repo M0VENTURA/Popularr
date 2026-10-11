@@ -70,6 +70,7 @@ TABLES_TO_ENSURE: dict[str, str] = {
             listenbrainz_listens INTEGER DEFAULT 0, listenbrainz_users INTEGER DEFAULT 0, 
             lastfm_tags JSONB,
             source TEXT DEFAULT 'bulk', updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            recording_mbid TEXT,
             CONSTRAINT uq_track_popularity_artist_title UNIQUE (artist, title)
         )
     """,

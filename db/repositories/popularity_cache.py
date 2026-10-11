@@ -56,7 +56,8 @@ def get_cached_popularity_for_titles(
             result = session.execute(
                 text("""
                     SELECT artist, title, lastfm_listeners, lastfm_playcount,
-                           listenbrainz_listens, listenbrainz_users, lastfm_tags, source, updated_at
+                           listenbrainz_listens, listenbrainz_users, lastfm_tags, source, updated_at,
+                           recording_mbid
                     FROM track_popularity_cache
                     WHERE LOWER(artist) = LOWER(:artist)
                     ORDER BY lastfm_listeners DESC
@@ -82,7 +83,11 @@ def upsert_track_popularity_bulk(rows: list[dict[str, Any]]) -> int:
 
     Each row: ``artist``, ``title``, optional ``lastfm_listeners``,
     ``lastfm_playcount``, ``listenbrainz_listens``, ``listenbrainz_users``,
-    ``source``.  Returns the number of rows written.
+    ``source``, ``recording_mbid``.  Returns the number of rows written.
+
+    ``recording_mbid`` is NEVER clobbered back to NULL by a row that does not
+    carry one: the album-tracklist identity is the ONLY writer that knows it,
+    and the artist-prefetch writer (listeners only) runs far more often.
     """
     if not rows:
         return 0
@@ -93,10 +98,10 @@ def upsert_track_popularity_bulk(rows: list[dict[str, Any]]) -> int:
                     text("""
                         INSERT INTO track_popularity_cache
                             (artist, title, lastfm_listeners, lastfm_playcount,
-                             listenbrainz_listens, listenbrainz_users, lastfm_tags, source, updated_at)
+                             listenbrainz_listens, listenbrainz_users, lastfm_tags, source, updated_at, recording_mbid)
                         VALUES
                             (:artist, :title, :lastfm_listeners, :lastfm_playcount,
-                             :listenbrainz_listens, :listenbrainz_users, :lastfm_tags, :source, CURRENT_TIMESTAMP)
+                             :listenbrainz_listens, :listenbrainz_users, :lastfm_tags, :source, CURRENT_TIMESTAMP, :recording_mbid)
                         ON CONFLICT (artist, title) DO UPDATE SET
                             lastfm_listeners = EXCLUDED.lastfm_listeners,
                             lastfm_playcount = EXCLUDED.lastfm_playcount,
@@ -104,6 +109,7 @@ def upsert_track_popularity_bulk(rows: list[dict[str, Any]]) -> int:
                             listenbrainz_users = EXCLUDED.listenbrainz_users,
                             lastfm_tags = COALESCE(EXCLUDED.lastfm_tags, track_popularity_cache.lastfm_tags),
                             source = EXCLUDED.source,
+                            recording_mbid = COALESCE(EXCLUDED.recording_mbid, track_popularity_cache.recording_mbid),
                             updated_at = CURRENT_TIMESTAMP
                     """),
                     {
@@ -115,6 +121,7 @@ def upsert_track_popularity_bulk(rows: list[dict[str, Any]]) -> int:
                         "listenbrainz_users": int(row.get("listenbrainz_users") or 0),
                         "lastfm_tags": row.get("lastfm_tags") or None,
                         "source": row.get("source") or "bulk",
+                        "recording_mbid": str(row.get("recording_mbid") or "").strip() or None,
                     },
                 )
             return len(rows)
