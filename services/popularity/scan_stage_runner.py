@@ -2413,6 +2413,22 @@ def run_scan(
                         except Exception as exc:
                             logger.warning("Popularity cache prefetch failed", artist=artist, error=str(exc))
 
+                        try:
+                            # Artist-level similar-artists refresh: the
+                            # per-album path is DB-READ-ONLY from here on
+                            # (the old per-album fetch re-fired the network
+                            # for every album whenever the cached list was
+                            # EMPTY — an artist with no similar artists paid
+                            # Last.fm + MB-id + ListenBrainz per album,
+                            # forever). Checked empties are remembered for
+                            # 90 days; failures retry once per ARTIST pass.
+                            from services.popularity.stages.album_stage import (
+                                refresh_similar_artists,
+                            )
+                            refresh_similar_artists(artist, options)
+                        except Exception as exc:
+                            logger.warning("Similar-artists prefetch failed", artist=artist, error=str(exc))
+
                     try:
                         _discogs_id = ""
                         for _t in artist_all_tracks.get(artist) or track_dicts:

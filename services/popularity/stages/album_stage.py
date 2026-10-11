@@ -918,7 +918,83 @@ def _json_list(raw: Any) -> list[Any]:
         return []
 
 
-def _fetch_similar_artists(artist: str, options: dict[str, Any]) -> dict[str, list[Any]]:
+#: Similar artists change slowly: one artist-level refresh per this many
+#: days (checked answers — including empty — are remembered for the window).
+_SIMILAR_ARTIST_CACHE_DAYS = 90
+
+
+def _read_similar_artists(artist: str) -> dict[str, Any]:
+    """DB-only read of the artist-level similar-artist cache.
+
+    Returns ``{"lastfm": <list|None>, "listenbrainz": <list|None>,
+    "last_updated": <datetime|None>}`` where **None means "never
+    successfully checked"** (the column is NULL) and a list — including the
+    empty list — is a remembered ANSWER. The distinction is the whole point:
+    the old cache could not tell "checked, genuinely nothing" from "never
+    checked", so an artist with no similar artists re-fired the network for
+    EVERY album of EVERY scan.
+    """
+    out: dict[str, Any] = {"lastfm": None, "listenbrainz": None, "last_updated": None}
+    try:
+        with db_session() as session:
+            cached = session.execute(
+                text("""
+                    SELECT similar_artists_lastfm,
+                           similar_artists_listenbrainz,
+                           similar_artists_last_updated
+                    FROM artists WHERE name = :artist
+                """),
+                {"artist": artist},
+            ).mappings().first()
+        if cached:
+            lf_raw = row_get(cached, "similar_artists_lastfm")
+            lb_raw = row_get(cached, "similar_artists_listenbrainz")
+            out["lastfm"] = _json_list(lf_raw) if lf_raw is not None else None
+            out["listenbrainz"] = _json_list(lb_raw) if lb_raw is not None else None
+            ts_raw = row_get(cached, "similar_artists_last_updated")
+            if ts_raw:
+                try:
+                    ts = (
+                        ts_raw
+                        if isinstance(ts_raw, datetime)
+                        else datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                    )
+                    out["last_updated"] = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                except (TypeError, ValueError):
+                    Logger.warning(
+                        "[ENRICH] invalid similar-artist cache timestamp",
+                        timestamp=str(ts_raw),
+                        artist=artist,
+                    )
+    except Exception as exc:
+        Logger.warning(
+            "[ENRICH] similar-artist cache read failed",
+            error=_safe_error(exc),
+            artist=artist,
+        )
+    return out
+
+
+def refresh_similar_artists(artist: str, options: dict[str, Any]) -> dict[str, list[Any]]:
+    """Fetch similar artists ONCE PER ARTIST PASS (network), DB-first.
+
+    The per-album path calls ``_read_similar_artists`` only — this function
+    runs from the scan runner's per-artist prefetch thread, so a scan of N
+    albums pays at most the stale sources once per artist, and a
+    single-album scan fills the artist-level cache on its way past (the
+    user-visible pages read the artists table directly either way).
+
+    Per-source semantics (the fix for the per-album retry loop):
+
+    * a checked result — INCLUDING an empty one — is persisted as a JSON
+      list and honoured for ``_SIMILAR_ARTIST_CACHE_DAYS`` (an artist with
+      no similar artists is an answer, not a cache miss);
+    * a failure or an unavailable dependency (e.g. no artist MBID for
+      ListenBrainz) leaves the column NULL and retries on the next ARTIST
+      pass, never the next album;
+    * a disabled integration is not a check at all and costs nothing to
+      re-consider.
+    """
     result: dict[str, list[Any]] = {"lastfm": [], "listenbrainz": []}
     context = {"artist": artist}
 
@@ -927,58 +1003,36 @@ def _fetch_similar_artists(artist: str, options: dict[str, Any]) -> dict[str, li
         return result
 
     try:
-        with _log_section("similar_artists.cache_read", **context):
-            with db_session() as session:
-                cached = session.execute(
-                    text("""
-                        SELECT similar_artists_lastfm,
-                               similar_artists_listenbrainz,
-                               similar_artists_last_updated
-                        FROM artists WHERE name = :artist
-                    """),
-                    {"artist": artist},
-                ).mappings().first()
-
-        cache_fresh = False
-        cache_age_days: int | None = None
-        if cached:
-            result["lastfm"] = _json_list(row_get(cached, "similar_artists_lastfm"))
-            result["listenbrainz"] = _json_list(row_get(cached, "similar_artists_listenbrainz"))
-            timestamp_raw = row_get(cached, "similar_artists_last_updated")
-            if timestamp_raw:
-                try:
-                    timestamp = (
-                        timestamp_raw
-                        if isinstance(timestamp_raw, datetime)
-                        else datetime.fromisoformat(str(timestamp_raw).replace("Z", "+00:00"))
-                    )
-                    if timestamp.tzinfo is None:
-                        timestamp = timestamp.replace(tzinfo=timezone.utc)
-                    cache_age_days = max(0, (datetime.now(timezone.utc) - timestamp).days)
-                    cache_fresh = cache_age_days < 90
-                except (TypeError, ValueError):
-                    Logger.warning(
-                        "[ENRICH] invalid similar-artist cache timestamp",
-                        timestamp=str(timestamp_raw),
-                        **context,
-                    )
-
-        lastfm_fresh = cache_fresh and bool(result["lastfm"])
-        listenbrainz_fresh = cache_fresh and bool(result["listenbrainz"])
+        cached = _read_similar_artists(artist)
+        cache_fresh = bool(
+            cached.get("last_updated")
+            and (datetime.now(timezone.utc) - cached["last_updated"]).days < _SIMILAR_ARTIST_CACHE_DAYS
+        )
+        lastfm_fresh = cache_fresh and cached["lastfm"] is not None
+        listenbrainz_fresh = cache_fresh and cached["listenbrainz"] is not None
         Logger.info(
             "[ENRICH] similar-artist cache status",
-            cache_age_days=cache_age_days,
+            cache_age_days=(
+                (datetime.now(timezone.utc) - cached["last_updated"]).days
+                if cached.get("last_updated")
+                else None
+            ),
             lastfm_fresh=lastfm_fresh,
             listenbrainz_fresh=listenbrainz_fresh,
-            lastfm_count=len(result["lastfm"]),
-            listenbrainz_count=len(result["listenbrainz"]),
+            lastfm_count=len(cached["lastfm"] or []),
+            listenbrainz_count=len(cached["listenbrainz"] or []),
             **context,
         )
         if lastfm_fresh and listenbrainz_fresh:
-            return result
+            return {"lastfm": cached["lastfm"] or [], "listenbrainz": cached["listenbrainz"] or []}
 
         from helpers.config_helpers import get_config
         config = get_config()
+
+        lastfm_checked = lastfm_fresh
+        listenbrainz_checked = listenbrainz_fresh
+        lastfm_list = list(cached["lastfm"] or [])
+        lb_list = list(cached["listenbrainz"] or [])
 
         if lastfm_fresh:
             Logger.info("[ENRICH] Last.fm similar artists skipped", reason="fresh cache", **context)
@@ -994,11 +1048,12 @@ def _fetch_similar_artists(artist: str, options: dict[str, Any]) -> dict[str, li
                         limit=10,
                         log_context=context,
                     ) or []
-                    result["lastfm"] = [
+                    lastfm_list = [
                         str(item.get("name"))
                         for item in similar
                         if isinstance(item, dict) and item.get("name")
                     ]
+                    lastfm_checked = True
                 except Exception as exc:
                     Logger.warning("[ENRICH] Last.fm similar artists failed", error=_safe_error(exc), **context)
             else:
@@ -1043,41 +1098,56 @@ def _fetch_similar_artists(artist: str, options: dict[str, Any]) -> dict[str, li
                         limit=10,
                         log_context={**context, "artist_mbid": artist_mbid},
                     ) or []
-                    result["listenbrainz"] = [
+                    lb_list = [
                         str(item.get("name"))
                         for item in lb_similar
                         if isinstance(item, dict) and item.get("name")
                     ]
+                    listenbrainz_checked = True
                 else:
                     Logger.info("[ENRICH] ListenBrainz similar artists skipped", reason="artist MBID unavailable", **context)
             except Exception as exc:
                 Logger.warning("[ENRICH] ListenBrainz similar artists failed", error=_safe_error(exc), **context)
 
-        try:
-            with _log_section("similar_artists.cache_write", **context):
-                with db_session() as session:
-                    session.execute(
-                        text("""
-                            INSERT INTO artists (
-                                id, name, similar_artists_lastfm,
-                                similar_artists_listenbrainz,
-                                similar_artists_last_updated
-                            )
-                            VALUES (:artist, :artist, :lf, :lb, :updated)
-                            ON CONFLICT (name) DO UPDATE SET
-                                similar_artists_lastfm = excluded.similar_artists_lastfm,
-                                similar_artists_listenbrainz = excluded.similar_artists_listenbrainz,
-                                similar_artists_last_updated = excluded.similar_artists_last_updated
-                        """),
-                        {
-                            "artist": artist,
-                            "lf": json.dumps(result["lastfm"], ensure_ascii=False) if result["lastfm"] else None,
-                            "lb": json.dumps(result["listenbrainz"], ensure_ascii=False) if result["listenbrainz"] else None,
-                            "updated": datetime.now(timezone.utc).isoformat(),
-                        },
-                    )
-        except Exception as exc:
-            Logger.warning("[ENRICH] similar-artist cache persistence failed", error=_safe_error(exc), **context)
+        result = {"lastfm": lastfm_list, "listenbrainz": lb_list}
+        if lastfm_checked or listenbrainz_checked:
+            # Stamp the attempt and persist each source: a CHECKED result —
+            # including an empty one — is written as a JSON list (an answer
+            # remembered for the cache window); an UNCHECKED source keeps its
+            # previous column value (still NULL when it never succeeded).
+            try:
+                with _log_section("similar_artists.cache_write", **context):
+                    with db_session() as session:
+                        session.execute(
+                            text("""
+                                INSERT INTO artists (
+                                    id, name, similar_artists_lastfm,
+                                    similar_artists_listenbrainz,
+                                    similar_artists_last_updated
+                                )
+                                VALUES (:artist, :artist, :lf, :lb, :updated)
+                                ON CONFLICT (name) DO UPDATE SET
+                                    similar_artists_lastfm = :lf,
+                                    similar_artists_listenbrainz = :lb,
+                                    similar_artists_last_updated = :updated
+                            """),
+                            {
+                                "artist": artist,
+                                "lf": (
+                                    json.dumps(lastfm_list, ensure_ascii=False)
+                                    if lastfm_checked
+                                    else (json.dumps(cached["lastfm"], ensure_ascii=False) if cached["lastfm"] is not None else None)
+                                ),
+                                "lb": (
+                                    json.dumps(lb_list, ensure_ascii=False)
+                                    if listenbrainz_checked
+                                    else (json.dumps(cached["listenbrainz"], ensure_ascii=False) if cached["listenbrainz"] is not None else None)
+                                ),
+                                "updated": datetime.now(timezone.utc).isoformat(),
+                            },
+                        )
+            except Exception as exc:
+                Logger.warning("[ENRICH] similar-artist cache persistence failed", error=_safe_error(exc), **context)
     except Exception as exc:
         Logger.exception("[ENRICH] similar artists pipeline failed", error=_safe_error(exc), **context)
 
@@ -2914,7 +2984,17 @@ def _run_full_enrichment(
         _fetch_musicbrainz_artist_id(artist)
 
     with _log_section("full.similar_artists", **context):
-        similar = _fetch_similar_artists(artist, options)
+        # READ-ONLY from the album path (audit follow-up): the network
+        # refresh runs ONCE PER ARTIST in the scan runner's prefetch thread
+        # (refresh_similar_artists). Per-album this used to re-fire
+        # Last.fm + MB-id + ListenBrainz for every album whenever the cached
+        # list was EMPTY — an artist with no similar artists paid the
+        # network per album, forever.
+        _similar_cached = _read_similar_artists(artist)
+        similar = {
+            "lastfm": _similar_cached["lastfm"] or [],
+            "listenbrainz": _similar_cached["listenbrainz"] or [],
+        }
 
     with _log_section("full.discogs_artist_id", **context):
         _fetch_discogs_artist_id(artist, options)
