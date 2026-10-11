@@ -61,6 +61,9 @@ _mb_single_rg_cache: dict[str, list[dict[str, Any]]] = {}
 _MB_SINGLE_RG_CACHE_MAX = 4000
 _album_track_count_cache: dict[tuple[str, str], int] = {}
 _album_title_track_cache: dict[tuple[str, str], bool] = {}
+# Per (artist, album) memo for the release-year SELECT, which otherwise runs
+# once per TRACK in the release-date check (audit G4).
+_album_year_memo: dict[tuple[str, str], int | None] = {}
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
@@ -207,8 +210,18 @@ def _parse_release_year(value: Any) -> int | None:
 
 
 def _album_release_year(artist: str, album: str | None) -> int | None:
+    """MIN(release_year) of the album's tracks — memoised per album per process.
+
+    Called per TRACK by the release-date check; without the memo an album of
+    12 tracks ran the identical SELECT 12 times per detection pass (audit G4).
+    """
     if not album:
         return None
+    memo_key = (str(artist or "").casefold().strip(), str(album).casefold().strip())
+    with _CACHE_LOCK:
+        if memo_key in _album_year_memo:
+            return _album_year_memo[memo_key]
+    year: int | None = None
     try:
         from sqlalchemy import text as _text
         from db.engine import db_session
@@ -221,10 +234,15 @@ def _album_release_year(artist: str, album: str | None) -> int | None:
                 ),
                 {"artist": artist, "album": album},
             ).first()
-            year = row._mapping.get("y") if row else None
-        return int(year) if year else None
+            raw_year = row._mapping.get("y") if row else None
+        year = int(raw_year) if raw_year else None
     except Exception:
-        return None
+        year = None
+    # The NEGATIVE answer is memoised too: an album without a stored year
+    # would otherwise re-query for every track, every pass.
+    with _CACHE_LOCK:
+        _album_year_memo[memo_key] = year
+    return year
 
 
 SINGLE_RELEASE_LEAD_YEARS = 1
@@ -266,7 +284,6 @@ def _source_confidence_levels() -> dict[str, str]:
         "discogs": "high",
         "musicbrainz": "medium",
         "discogs_video": "medium",
-        "musicbrainz_compilation": "medium",
         "lastfm": "medium",
         "radio_edit": "medium",
     }
@@ -274,7 +291,6 @@ def _source_confidence_levels() -> dict[str, str]:
         "discogs": "source_discogs_confidence",
         "musicbrainz": "source_musicbrainz_confidence",
         "discogs_video": "source_discogs_video_confidence",
-        "musicbrainz_compilation": "source_musicbrainz_compilation_confidence",
         "lastfm": "source_lastfm_confidence",
         "radio_edit": "source_radio_edit_confidence",
     }
@@ -829,7 +845,6 @@ def detect_single_for_track(
     discogs_video_confirmed = False
     lastfm_confirmed = False
     radio_edit_found = False
-    mb_compilation_confirmed = False
     single_release_date_match = False
 
     reasons: list[str] = []
@@ -975,20 +990,11 @@ def detect_single_for_track(
         except Exception as exc:
             logger.debug("ISRC single lookup failed", isrc=isrc, error=str(exc))
 
-    if musicbrainz_confirmed and mb_client and hasattr(mb_client, "appears_on_various_artists"):
-        try:
-            if mb_client.appears_on_various_artists(lookup_title, artist):
-                mb_compilation_confirmed = True
-                reasons.append("mb_compilation")
-        except Exception:
-            pass
-
     for _src_flag, _src_name in (
         (isrc_single_confirmed, "isrc"),
         (lb_top10, "listenbrainz_top10"),
         (z_standout, "popularity_z_standout"),
         (radio_edit_found, "radio_edit"),
-        (mb_compilation_confirmed, "musicbrainz_compilation"),
         (lastfm_confirmed, "lastfm"),
         (discogs_video_confirmed, "discogs_video"),
         (single_release_date_match, "release_date_match"),
@@ -1039,9 +1045,6 @@ def detect_single_for_track(
         medium_sources += 1
         metadata_medium_sources += 1
     if lastfm_confirmed and _levels.get("lastfm", "medium") != "low":
-        medium_sources += 1
-        metadata_medium_sources += 1
-    if mb_compilation_confirmed and _levels.get("musicbrainz_compilation", "medium") != "low":
         medium_sources += 1
         metadata_medium_sources += 1
     if radio_edit_found and _levels.get("radio_edit", "medium") != "low":

@@ -80,6 +80,17 @@ def _as_datetime(value):
     return dt
 
 
+# =============================================================================
+# CACHE FRESHNESS POLICY
+# =============================================================================
+
+#: A completed "not a single" verdict is the STABLE half of the distribution
+#: (see ``singles_detection_is_fresh``): it outlives the base TTL ladder by
+#: this factor. Config-level tuning knob by constant, like the other cache
+#: TTLs in this module.
+_SINGLE_NEGATIVE_TTL_MULTIPLIER = 3
+
+
 def should_use_cached_score(track):
     """Return True when a cached score is fresh enough to reuse.
 
@@ -139,6 +150,13 @@ def singles_detection_is_fresh(track: dict[str, Any], *, now: datetime | None = 
     asked only whether the timestamp exists.
 
     An ERROR never stamps the timestamp, so a failed detection still retries.
+
+    Definitive negatives live longer (audit G5): a stamped row with
+    ``is_single`` falsy is a COMPLETED "not a single" verdict, and a track's
+    release history does not change — re-running the full arm battery (up to
+    ~4 MusicBrainz calls + Last.fm + Discogs per track) at the positive
+    cadence for old deep cuts was the dominant singles-pass cost of a full
+    scan. Positive verdicts keep the base ladder.
     """
     raw = track.get("single_detection_last_updated")
     if not raw:
@@ -160,4 +178,6 @@ def singles_detection_is_fresh(track: dict[str, Any], *, now: datetime | None = 
         ref = ref.replace(tzinfo=timezone.utc)
 
     ttl_hours = get_cache_duration_hours(track.get("year") or track.get("release_year"))
+    if not track.get("is_single"):
+        ttl_hours *= _SINGLE_NEGATIVE_TTL_MULTIPLIER
     return (ref - ts).total_seconds() < ttl_hours * 3600

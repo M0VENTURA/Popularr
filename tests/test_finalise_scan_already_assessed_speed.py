@@ -291,8 +291,12 @@ class TestNegativeSinglesVerdictsAreCacheable:
         )
 
         now = datetime.now(timezone.utc)
-        # 2010 release -> get_cache_duration_hours returns 168h (7 days).
-        track = self._track(single_detection_last_updated=now - timedelta(days=8))
+        # 2010 release -> get_cache_duration_hours returns 168h (7 days), and
+        # a definitive NEGATIVE verdict is multiplied by
+        # _SINGLE_NEGATIVE_TTL_MULTIPLIER (3x = 21 days) — so "expired" for a
+        # not-a-single row means past the MULTIPLIED window. The class's
+        # contract (expiry works at all) is unchanged.
+        track = self._track(single_detection_last_updated=now - timedelta(days=25))
 
         assert singles_detection_is_fresh(track, now=now) is False
 

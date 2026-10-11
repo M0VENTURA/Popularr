@@ -155,6 +155,13 @@ _MB_BATCH_CHUNK = 20
 _MB_BATCH_SIMILARITY_FLOOR = 0.6
 _MBID_CACHE_SIMILARITY_FLOOR = 0.6
 _MBID_CACHE_TTL_SECONDS = 30 * 24 * 3600
+# A "no recording matches" answer is data too: the search that produced it
+# cost a full second of the global 1 req/s MusicBrainz throttle, and the read
+# path used to refuse empty entries — so every scan process re-searched every
+# unresolvable track (duplicate-title tracks the album batch skips, releases
+# MusicBrainz simply lacks). Negatives are served for a shorter window so a
+# genuinely new recording still gets found within the week.
+_MBID_NEGATIVE_TTL_SECONDS = 7 * 24 * 3600
 _MBID_CACHE_MAX_SIZE = 5000
 _RELEASE_GROUP_MATCH_FLOOR = 0.6
 
@@ -750,6 +757,18 @@ class MusicBrainzService:
                         **context,
                     )
                     return mbid, round(score, 3)
+                if (
+                    not mbid
+                    and cached_at is not None
+                    and now - cached_at < _MBID_NEGATIVE_TTL_SECONDS
+                ):
+                    # The recorded MISS (see the _record_mbid call below).
+                    self._mbid_cache.move_to_end(cache_key)
+                    Logger.debug(
+                        "[MB] recording suggestion negative cache hit",
+                        **context,
+                    )
+                    return "", 0.0
 
         query_title = Normalize_title_for_lucene_query(Strip_search_keywords(title))
         query = (
@@ -800,7 +819,14 @@ class MusicBrainzService:
 
             if best_mbid and best_score >= _MBID_CACHE_SIMILARITY_FLOOR:
                 self._record_mbid(cache_key, best_mbid, round(best_score, 3))
-                self._maybe_flush_cache()
+            else:
+                # Record the MISS with the same machinery (the read path
+                # serves it for _MBID_NEGATIVE_TTL_SECONDS). Without this the
+                # empty answer was re-searched once per scan process per
+                # track — the largest repeatable per-track MB cost in a full
+                # scan (audit G1).
+                self._record_mbid(cache_key, "", 0.0)
+            self._maybe_flush_cache()
 
             Logger.info(
                 "[MB] recording suggestion completed",

@@ -29,7 +29,16 @@ from services.popularity.popularity_sources import (
 
 logger = structlog.get_logger(__name__)
 
-CACHE_FRESH_HOURS = 24 * 7  # 1 week
+CACHE_FRESH_HOURS = 24 * 7
+
+#: Last.fm ``artist.getTopTracks`` is a SINGLE call per artist, and every
+#: title it returns is answered from that one call for the rest of the scan
+#: (audit G2). Tracks OUTSIDE the map fall to the deep-cut path —
+#: search-aggregation + track.getInfo + variant lookups, 3-6 Last.fm calls
+#: EACH per TTL. Widened from 200: the extra titles cost nothing per artist
+#: and cover the deep cuts of most discographies. Last.fm may cap lower; a
+#: shorter answer is simply a smaller map, never an error.
+_LF_TOP_TRACKS_LIMIT = 500  # 1 week
 
 # =============================================================================
 # THREAD-SAFE MEMORY CACHES
@@ -140,7 +149,7 @@ def _lf_top_tracks_map(lastfm_client: Any, artist: str) -> dict[str, dict[str, i
             if cache_key in _lf_top_tracks_cache:
                 return _lf_top_tracks_cache[cache_key]
                 
-        top_tracks = lastfm_client.get_artist_top_tracks(primary, limit=200) or []
+        top_tracks = lastfm_client.get_artist_top_tracks(primary, limit=_LF_TOP_TRACKS_LIMIT) or []
     except Exception as exc:
         logger.debug("artist.getTopTracks failed", artist=artist, error=str(exc))
         return {}
