@@ -534,8 +534,14 @@ def _detect_discogs(title: str, artist: str, album: str | None,
                 
         calc = calculate_discogs_confidence(title, similarity, artist_verified)
         matched = bool(matched_raw and calc["matched"])
-        metadata: dict[str, Any] = {"is_promo": is_promo}
-        metadata.update(calc.get("metadata") or {})
+        # ``calc`` was called WITHOUT ``is_promo`` (a verified exact promo
+        # match stays at the full 0.85 here; ``determine_final_status`` caps
+        # it at "medium" downstream via the flag), but calc's metadata ALWAYS
+        # carries ``is_promo=False`` — updating with it first clobbered the
+        # service's real flag, so a full-path promo-only match could never be
+        # downgraded and counted as a commercial single instead.
+        metadata: dict[str, Any] = dict(calc.get("metadata") or {})
+        metadata["is_promo"] = bool(is_promo)
         
         if year:
             metadata["release_year"] = year

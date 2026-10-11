@@ -12,7 +12,10 @@ with a Discogs source (only the title track is a genuine Discogs single):
    STRING formats (the artist-releases endpoint returns "CD, Single, Enh",
    not a list) — so singles on the artist page were invisible.
 3. A fuzzy/unverified Discogs match still marked the track as a single. Discogs
-   now only confirms a single on HIGH-confidence (near-exact verified) matches.
+   now confirms a single only on a near-exact VERIFIED match (high band), or
+   on an unverified global-search match in the MEDIUM band (deliberate
+   2026-09-05 design — capped below full confidence so it can never be
+   definitive or short-circuit the remaining detection arms).
 """
 
 from __future__ import annotations
@@ -120,7 +123,11 @@ class TestSplitSingleSimilarity:
 
 
 class TestHighConfidenceOnly:
-    """Discogs confirms a single only on HIGH-confidence matches."""
+    """Discogs confirms a single on a near-exact VERIFIED match (high band),
+    or on an unverified global-search match in the MEDIUM band — the
+    deliberate 2026-09-05 design (``DISCOGS_UNVERIFIED_WEIGHT`` caps
+    unverified matches below the full-confidence band so they can never be
+    definitive, but they still count as evidence)."""
 
     def test_exact_verified_match_confirms(self):
         result = calculate_discogs_confidence("Övergivenheten", 1.0, True)
@@ -130,11 +137,24 @@ class TestHighConfidenceOnly:
     def test_fuzzy_match_does_not_confirm(self):
         # "Dreams of Nowhere" vs the unrelated "Nerve" promo scored 0.75 —
         # well above the old 0.40 gate, so it confirmed. 0.85 × 0.75 = 0.64 is
-        # below the high-confidence threshold → never confirms a single.
+        # below the verified minimum → never confirms a single.
         result = calculate_discogs_confidence("Dreams of Nowhere", 0.75, True)
         assert result["matched"] is False
         assert result["confidence"] < 0.85
 
-    def test_unverified_match_never_confirms(self):
+    def test_unverified_match_confirms_only_in_the_medium_band(self):
+        # An unverified (global-search) EXACT match counts as MEDIUM evidence:
+        # 0.60 × 1.0 = 0.60 ≥ DISCOGS_MIN_UNVERIFIED_CONFIDENCE (0.50) →
+        # matched, but strictly below DISCOGS_FULL_CONFIDENCE (0.85) so it
+        # can never be treated as definitive or trigger the early exit. (The
+        # old "never confirms" assertion here predates the 2026-09-05
+        # medium-band design; reinstating it would also kill the revived
+        # global-search fallback, which only ever runs unverified.)
         result = calculate_discogs_confidence("Some Track", 1.0, False)
+        assert result["matched"] is True
+        assert result["confidence"] < 0.85
+
+    def test_unverified_fuzzy_match_does_not_confirm(self):
+        # 0.60 × 0.75 = 0.45 < the unverified minimum → no evidence at all.
+        result = calculate_discogs_confidence("Some Track", 0.75, False)
         assert result["matched"] is False
