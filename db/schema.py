@@ -382,7 +382,17 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
     },
     "missing_releases": {"tracklist": "TEXT"},
-    "track_popularity_cache": {"lastfm_tags": "JSONB"},
+    "track_popularity_cache": {
+        "lastfm_tags": "JSONB",
+        # Migration 018 adds this column, but the entrypoint swallows a failed
+        # "upgrade head" (``|| true``), so a database whose migration chain
+        # broke before 018 never gained it — and the popularity-cache upsert
+        # references it unconditionally (INSERT + ON CONFLICT), so the WHOLE
+        # artist batch fails with UndefinedColumn and no popularity data is
+        # persisted at all. Listing it here makes the bootstrap's column sync
+        # repair the table independently of the migration state.
+        "recording_mbid": "TEXT",
+    },
     "scan_history": {
         "scan_type": "TEXT", "artist": "TEXT", "album": "TEXT", "status": "TEXT", "message": "TEXT",
         "started_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "completed_at": "TIMESTAMP", 
