@@ -31,13 +31,42 @@ rule is kept.
 
 from __future__ import annotations
 
+import io
+import re
 import sys
+import tokenize
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
+
+
+def _strip_python(source: str) -> str:
+    """Remove comments and docstrings so a probe cannot match its own prose.
+
+    The fix's comment quoting the removed condition ("track_count > 6")
+    would otherwise satisfy a naive substring check.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except tokenize.TokenError:
+        return source
+    kept = [
+        tok.string
+        for tok in tokens
+        if tok.type not in (
+            tokenize.COMMENT,
+            tokenize.STRING,
+            tokenize.NL,
+            tokenize.NEWLINE,
+            tokenize.INDENT,
+            tokenize.DEDENT,
+            tokenize.ENCODING,
+        )
+    ]
+    return " ".join(kept)
 
 
 def _resolve(monkeypatch, mb_type, track_count, *, spotify_type=None, title="Untitled"):
@@ -89,25 +118,55 @@ class TestMusicBrainzEpsSurviveTheTrackCountRule:
             "says 'album'"
         )
 
-    def test_the_adjustment_log_is_only_emitted_when_a_single_moves(self):
-        """The diagnostic must survive — it is how this rule is noticed."""
-        source = (
-            REPO_ROOT / "services" / "popularity" / "stages" / "album_stage.py"
-        ).read_text(encoding="utf-8")
-        assert "[ENRICH] MusicBrainz album type adjusted by track count" in source
+    def test_no_track_count_rebucketing_remains(self):
+        """The count rule must stay gone for BOTH single and ep.
+
+        The diagnostic log it emitted ("adjusted by track count") is the
+        tell that the rule is back; a source probe keeps it from being
+        reintroduced unnoticed. Comments are STRIPPED first — the fix's own
+        comment quotes the removed condition, and a naive substring match
+        would be satisfied by that quotation.
+        """
+        source = _strip_python(
+            (REPO_ROOT / "services" / "popularity" / "stages" / "album_stage.py")
+            .read_text(encoding="utf-8")
+        )
+        assert "adjusted by track count" not in source, (
+            "the local-track-count re-bucketing of a MusicBrainz single/ep "
+            "has been reintroduced"
+        )
+        assert "track_count > 3" not in source
+        assert "track_count > 6" not in source
 
 
-class TestTheSingleHeuristicIsPreserved:
-    """CONTROL — only the EP half of the rule is removed."""
+class TestTheSingleHeuristicIsGoneToo:
+    """The single half of the count rule was removed on 2026-10-12.
 
-    @pytest.mark.parametrize(
-        "track_count,expected",
-        [(2, "single"), (3, "single"), (4, "ep"), (6, "ep"), (7, "album"), (10, "album")],
-    )
-    def test_a_single_is_still_rebucketed_by_count(self, monkeypatch, track_count, expected):
+    The 2026-10-09 fix kept ``elif mb_type == "single" and track_count > 3:
+    mb_type = "ep"`` on the assumption that "a single with an implausible
+    count is genuinely ambiguous". A live report disproved it: a release
+    MusicBrainz correctly matched to a SINGLE (with its release-group and
+    release id) stayed an EP because the local folder held 4-6 tracks —
+    exactly the "LOCAL folder, not the release tracklist" error the EP fix
+    removed. MusicBrainz's primary_type is authoritative for single AND ep.
+    """
+
+    @pytest.mark.parametrize("track_count", [1, 2, 3, 4, 6, 7, 10, 20])
+    def test_a_single_stays_a_single_at_every_track_count(self, monkeypatch, track_count):
         _mb, resolved_mb, _rg, _raw = _resolve(monkeypatch, "single", track_count)
-        assert resolved_mb == expected, (
-            f"a {track_count}-track single must resolve to {expected!r}"
+        assert resolved_mb == "single", (
+            f"a {track_count}-track release MusicBrainz calls a SINGLE resolved "
+            f"to {resolved_mb!r} — the count is the LOCAL folder, not the "
+            "release tracklist"
+        )
+
+    @pytest.mark.parametrize("track_count", [4, 6])
+    def test_the_reported_ep_case_is_fixed(self, monkeypatch, track_count):
+        """REPORTED 2026-10-12: a matched Single 'stayed as EP'."""
+        detected, resolved_mb, _rg, _raw = _resolve(monkeypatch, "single", track_count)
+        assert resolved_mb == "single"
+        assert detected == "single", (
+            "a release MusicBrainz matched to a Single must not present as an EP"
         )
 
     def test_a_plain_album_is_untouched(self, monkeypatch):

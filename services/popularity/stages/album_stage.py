@@ -1837,35 +1837,34 @@ def _resolve_album_type(
     original_mb_type = mb_type
 
     if mb_type:
-        track_count = len(tracks or [])
-        # ⚠️ Only SINGLES are re-bucketed by track count.
+        # ── MusicBrainz's release-group primary_type is AUTHORITATIVE ──────
         #
-        # This used to read ``if mb_type in {"single", "ep"} and track_count
-        # > 6: mb_type = "album"`` — carried over from ``old_system`` ("Standard
-        # EP threshold is 3-6 tracks") — and it demoted an EP MusicBrainz had
-        # ALREADY classified as one the moment the LOCAL tracklist held 7 or
-        # more tracks. An EP with 7-8 tracks is entirely normal, and this count
-        # is the local folder (bonus and live tracks included), not
-        # MusicBrainz's own release tracklist — so the reported "albums that
-        # are EPs are not always matching correctly and leaving them as
-        # albums" fired for the longer EPs and not the shorter ones, which is
-        # exactly why it looked intermittent.
+        # The type must NEVER be re-bucketed by the LOCAL track count. This
+        # used to read (before 2026-10-09 and after, respectively):
         #
-        # MusicBrainz's release-group ``primary_type`` is authoritative for an
-        # EP; only a SINGLE with an implausible count is still ambiguous.
-        if mb_type == "single" and track_count > 6:
-            mb_type = "album"
-        elif mb_type == "single" and track_count > 3:
-            mb_type = "ep"
-        if original_mb_type != mb_type:
-            Logger.info(
-                "[ENRICH] MusicBrainz album type adjusted by track count",
-                original_type=original_mb_type,
-                adjusted_type=mb_type,
-                track_count=track_count,
-                **context,
-            )
-
+        #     if mb_type in {"single", "ep"} and track_count > 6: mb_type = "album"
+        #     elif mb_type == "single" and track_count > 3:       mb_type = "ep"
+        #
+        # carried over from ``old_system`` ("Standard EP threshold is 3-6
+        # tracks"). Both halves are wrong for the same two reasons:
+        #
+        #   * ``track_count`` is the LOCAL folder — bonus tracks, live bonus
+        #     cuts, a flattened multi-disc set — NOT MusicBrainz's release
+        #     tracklist; and
+        #   * a 4-8 track folder is exactly what a single, an EP and a short
+        #     album can all look like locally, so the count cannot separate
+        #     them and merely substitutes a guess for the answer.
+        #
+        # Reported 2026-10-09: "albums that are EPs are not always matching
+        # correctly and leaving them as albums" — the EP half was removed then
+        # for exactly this reason. Reported 2026-10-12: a release MusicBrainz
+        # correctly matched to a SINGLE (with its release-group and release id)
+        # "stayed as EP" because the local folder held 4-6 tracks. This removes
+        # the single half. The only count-independent safety net that remains
+        # is the corroboration guard below, which downgrades a rich type
+        # (album+live etc.) the local title/track titles do not back up — it
+        # has never applied to a bare single/ep, which is why MB's answer for
+        # those two now stands.
         if not _mb_type_is_corroborated(mb_type, album, tracks or [], context):
             mb_type = "album" if mb_type.startswith("album") else mb_type
 
