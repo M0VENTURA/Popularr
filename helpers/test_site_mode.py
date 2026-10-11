@@ -72,12 +72,12 @@ CONFIG_KEY = "use_test_site"
 #: environment it is maintained in, so a known-bad file can be *shadowed*
 #: instead of deleted.
 #:
-#: ``pages/downloads/monitor.html`` — the rebuilt copy is a stray artist-page
-#: snapshot (title "{{ artist_name }}", thousands of lines, none of the monitor
-#: ids). Serving it raised ``BuildError: Could not build url for endpoint
-#: 'dashboard'`` on GET /downloads/monitor, because its links use BARE endpoint
-#: names while every blueprint in this app is namespaced (``ui.dashboard``).
-#: The live ``templates/pages/downloads/monitor.html`` is the correct page.
+#: ``pages/downloads/monitor.html`` — the rebuilt copy used to be a stray
+#: artist-page snapshot (title "{{ artist_name }}", thousands of lines, none of
+#: the monitor ids), which raised ``BuildError`` when served. It has since been
+#: REPAIRED in place (this page now carries the monitor ids and loads the
+#: rebuilt tree's modern controllers), so it is deliberately NOT shadowed any
+#: more — exactly like ``components/_release_section.html`` below.
 #:
 #: NOTE on ``components/_release_section.html``: the rebuilt copy used to be a
 #: stray FULL ARTIST PAGE (byte-identical to templates/pages/artist_detail.html)

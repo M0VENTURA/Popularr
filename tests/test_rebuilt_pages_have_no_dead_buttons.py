@@ -325,6 +325,7 @@ _OBSOLETE_BUTTONS: dict[tuple[str, str], str] = {
     ("downloads/monitor.html", "importPlaylistFromCSV"): (
         "Same _playlists.html sharing problem as downloads/queue.html."
     ),
+
     # ── shared partials whose buttons need their controllers ────────────────
     ("downloads/queue.html", "saveEditedTrack"): (
         "_track_edit.html is shared with album_detail.html, where these live "
