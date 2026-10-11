@@ -236,7 +236,16 @@ def upsert_artist_release_rows(artist: str, releases: list[dict[str, Any]]) -> N
         elif SINGLE_FORMAT_TOKENS.intersection(fmt_tokens):
             rtype = "single"
         else:
-            rtype = "album"
+            # No single/EP TYPE token on the row (the artist-releases
+            # endpoint omits it, and ``resolve_master_formats`` only covers
+            # the first ``_MAX_MASTER_FORMAT_RESOLUTIONS`` masters). This
+            # used to GUESS "album" — a guess the upsert then re-applied on
+            # every write, clobbering any scan-time on-demand correction
+            # back to "album". Store "unknown" (""), which
+            # ``_upsert_releases`` preserves over known values' absence and
+            # ``_scan_releases`` resolves on demand; the confirmed answer is
+            # written back by ``persist_resolved_discogs_single``.
+            rtype = ""
         year = rel.get("year")
         if not isinstance(year, int) or year <= 0:
             year = None
@@ -255,15 +264,34 @@ def upsert_artist_release_rows(artist: str, releases: list[dict[str, Any]]) -> N
 
 
 def _upsert_releases(artist: str, rows: list[dict[str, Any]]) -> None:
+    """Insert/refresh cache rows; an UNKNOWN classification never overwrites a known one.
+
+    A format-less Discogs row is stored with ``release_type = ''`` (see
+    ``_fetch_discogs_releases``). The ``ON CONFLICT`` clause below therefore
+    preserves the existing ``release_type``/``is_promo`` pair whenever the
+    incoming classification is unknown — without that, every 7-day re-prefetch
+    would clobber a ``single`` confirmed by ``persist_resolved_discogs_single``
+    back to unknown, and the next scan's fast path would miss it again. A
+    FACT (album/single from real format tokens) always wins over an old value.
+    """
     if not rows:
         return
     try:
         with db_session() as session:
             for row in rows:
+                # ``rtype`` (upsert_artist_release_rows) or ``release_type``
+                # (the _fetch_* prefetches) — both always present from current
+                # callers. The old ``or …, "album")`` fallback silently
+                # swallowed the legitimate UNKNOWN value "" (empty is falsy!)
+                # and wrote the guessed "album" straight back, defeating the
+                # unknown classification one layer down.
+                _type = row.get("rtype")
+                if _type is None:
+                    _type = row.get("release_type")
                 params = {
                     "artist": artist,
                     "title": row.get("title"),
-                    "rtype": row.get("rtype") or row.get("release_type", "album"),
+                    "rtype": str(_type or "").strip(),
                     "category": row.get("category", "Album"),
                     "source": row.get("source", "musicbrainz"),
                     "release_id": row.get("release_id"),
@@ -276,11 +304,17 @@ def _upsert_releases(artist: str, rows: list[dict[str, Any]]) -> None:
                             (artist, title, release_type, category, source, release_id, year, is_promo, updated_at)
                         VALUES (:artist, :title, :rtype, :category, :source, :release_id, :year, :is_promo, CURRENT_TIMESTAMP)
                         ON CONFLICT (artist, title, source) DO UPDATE SET
-                            release_type = EXCLUDED.release_type,
+                            release_type = CASE
+                                WHEN EXCLUDED.release_type = '' THEN artist_release_cache.release_type
+                                ELSE EXCLUDED.release_type
+                            END,
                             category = EXCLUDED.category,
                             release_id = EXCLUDED.release_id,
                             year = EXCLUDED.year,
-                            is_promo = EXCLUDED.is_promo,
+                            is_promo = CASE
+                                WHEN EXCLUDED.release_type = '' THEN artist_release_cache.is_promo
+                                ELSE EXCLUDED.is_promo
+                            END,
                             updated_at = CURRENT_TIMESTAMP
                     """),
                     params,
@@ -371,7 +405,15 @@ def _fetch_discogs_releases(artist: str, discogs_artist_id: str) -> list[dict[st
             elif SINGLE_FORMAT_TOKENS.intersection(fmt_tokens):
                 rtype = "single"
             else:
-                rtype = "album"
+                # No single/EP TYPE token on the row (the artist-releases
+                # endpoint omits it, and ``resolve_master_formats`` only covers
+                # the first ``_MAX_MASTER_FORMAT_RESOLUTIONS`` masters). This
+                # used to GUESS "album" — a guess the upsert then re-applied on
+                # every prefetch, clobbering any scan-time on-demand
+                # correction back to "album". Store "unknown" ("") instead;
+                # ``_scan_releases`` resolves these rows on demand and
+                # ``persist_resolved_discogs_single`` writes the answer back.
+                rtype = ""
             year = None
             raw_year = rel.get("year")
             if isinstance(raw_year, int) and raw_year > 0:
@@ -470,6 +512,59 @@ def get_artist_promo_titles(artist: str, source: str = "discogs") -> set[str]:
             return {str(r[0]).strip().lower() for r in result.fetchall() or [] if r[0]}
     except Exception:
         return set()
+
+
+def persist_resolved_discogs_single(
+    artist: str, release_id: str, is_promo: bool
+) -> bool:
+    """Record that a cached Discogs release was confirmed as a single.
+
+    The artist-releases endpoint does not carry the single/EP TYPE token, so
+    ``_fetch_discogs_releases`` stores such rows with an UNKNOWN classification
+    (``release_type = ''``). When ``DiscogsService._scan_releases`` resolves a
+    title-matching row's format on demand and confirms it as a single, this
+    writes that answer back — otherwise it died with the process and every
+    scan re-paid the Discogs release-detail call while the next scan's fast
+    path (``get_artist_single_titles``) never saw the title.
+
+    UPDATE-only by design: a global-search match whose release the artist's
+    prefetch never cached must not invent cache rows — the prefetch owns the
+    row set, this only corrects a classification. Returns True when a row was
+    actually changed.
+    """
+    artist = str(artist or "").strip()
+    release_id = str(release_id or "").strip()
+    if not artist or not release_id:
+        return False
+    try:
+        with db_session() as session:
+            result = session.execute(
+                text("""
+                    UPDATE artist_release_cache
+                    SET release_type = 'single',
+                        is_promo = :is_promo,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE LOWER(artist) = LOWER(:artist)
+                      AND source = 'discogs'
+                      AND release_id = :release_id
+                      AND (COALESCE(release_type, '') <> 'single'
+                           OR COALESCE(is_promo, FALSE) <> :is_promo)
+                """),
+                {
+                    "artist": artist,
+                    "release_id": release_id,
+                    "is_promo": bool(is_promo),
+                },
+            )
+            return bool(result.rowcount)
+    except Exception as exc:
+        logger.debug(
+            "[RELEASE_CACHE] Single classification write-back failed",
+            artist=artist,
+            release_id=release_id,
+            error=str(exc),
+        )
+        return False
 
 
 # ---------------------------------------------------------------------------

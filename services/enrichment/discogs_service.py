@@ -817,6 +817,10 @@ class DiscogsService:
             return cached
 
         artist_releases = self._get_artist_releases(artist) or []
+        # Which artist's cache the match came from — the inverted retry below
+        # scans the INVERTED artist's release list, whose cache rows must be
+        # the ones corrected by the write-back at the end.
+        _cache_artist = artist
         status = self._scan_releases(title, artist_releases, artist_verified=True)
 
         if status is None:
@@ -902,6 +906,7 @@ class DiscogsService:
                     inv_status["inverted_match_used"] = True
                     status = inv_status
                     _inv_used = True
+                    _cache_artist = inverted
                     logger.info(
                         "Inverted artist match retry succeeded",
                         standard_sim=_std_sim,
@@ -933,6 +938,42 @@ class DiscogsService:
 
         if _inv_used:
             status["inverted_match_used"] = True
+
+        # Persist a confirmed single back to the artist release cache. A
+        # release past the 15-master cap (or a non-master row) carries NO
+        # format on the artist-releases endpoint, so its cache row holds an
+        # UNKNOWN classification and the single just confirmed here came from
+        # the on-demand detail lookup in ``_scan_releases``. Without this
+        # write-back the answer died with the process and every scan re-paid
+        # the Discogs detail call; the next scan's fast path
+        # (``get_artist_single_titles``) reads the row instead.
+        # UPDATE-only by contract (``persist_resolved_discogs_single``): a
+        # global-search match for an uncached release invents no rows.
+        # EP-lead promotions are deliberately NOT persisted — an EP is capped
+        # at medium confidence and must not enter the fast path as an exact
+        # 0.85 cached hit.
+        if (
+            status.get("is_single")
+            and not status.get("is_ep_lead")
+            and status.get("release_id")
+        ):
+            try:
+                from services.popularity.release_cache_service import (
+                    persist_resolved_discogs_single,
+                )
+
+                persist_resolved_discogs_single(
+                    artist=_cache_artist,
+                    release_id=str(status["release_id"]),
+                    is_promo=bool(status.get("is_promo")),
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Discogs single write-back failed",
+                    artist=_cache_artist,
+                    release_id=status.get("release_id"),
+                    error=str(exc),
+                )
 
         with self._lock:
             self._single_cache[cache_key] = status
