@@ -852,12 +852,29 @@ class MusicBrainzService:
             Logger.info("[MB] recording metadata skipped", reason="incomplete input", **context)
             return {}
         try:
-            mbid, confidence = self.get_suggested_mbid(
-                title,
-                artist,
-                is_live_release=is_live_release,
-                edition_annotation=edition_annotation,
-            )
+            # A caller that already KNOWS the track's recording MBID (the
+            # common case: the album's own release supplied it, or a previous
+            # scan stored it) must not pay for a recording.search. Re-searching
+            # a known MBID is pure waste against the shared 1 req/s budget AND
+            # can churn the id: the search re-ranks candidates, so a tie-break
+            # may pick a DIFFERENT recording than the one already stored. The
+            # metadata fetch below is what actually enriches the track (genres,
+            # ISRC, work-rels, credits) — that is the only call still needed.
+            _known_mbid = str(kwargs.get("mbid") or "").strip()
+            if _known_mbid:
+                mbid, confidence = _known_mbid, 1.0
+                Logger.debug(
+                    "[MB] recording metadata using known mbid",
+                    mbid=mbid,
+                    **context,
+                )
+            else:
+                mbid, confidence = self.get_suggested_mbid(
+                    title,
+                    artist,
+                    is_live_release=is_live_release,
+                    edition_annotation=edition_annotation,
+                )
             if not mbid:
                 return {}
             recording = _call_with_heartbeat(
@@ -867,6 +884,30 @@ class MusicBrainzService:
                 inc="artist-credits+releases+release-groups+work-rels+genres",
                 Log_context={**context, "mbid": mbid},
             )
+            if not recording and _known_mbid:
+                # The stored MBID no longer resolves (deleted/invalid
+                # recording). Recover by searching once rather than leaving the
+                # track un-enriched for ever — but only then.
+                Logger.info(
+                    "[MB] known mbid did not resolve, falling back to search",
+                    mbid=_known_mbid,
+                    **context,
+                )
+                mbid, confidence = self.get_suggested_mbid(
+                    title,
+                    artist,
+                    is_live_release=is_live_release,
+                    edition_annotation=edition_annotation,
+                )
+                if not mbid:
+                    return {}
+                recording = _call_with_heartbeat(
+                    "recording.get",
+                    self.http.get_recording,
+                    mbid,
+                    inc="artist-credits+releases+release-groups+work-rels+genres",
+                    Log_context={**context, "mbid": mbid},
+                )
             if not recording:
                 Logger.info("[MB] recording metadata empty", mbid=mbid, **context)
                 return {}
@@ -1722,6 +1763,7 @@ def lookup_recording_metadata(
     album: str | None = None,
     is_live_release: bool = False,
     edition_annotation: str | None = None,
+    mbid: str | None = None,
 ) -> dict[str, Any]:
     return _get_service().lookup_recording_metadata(
         title,
@@ -1729,6 +1771,7 @@ def lookup_recording_metadata(
         album=album,
         is_live_release=is_live_release,
         edition_annotation=edition_annotation,
+        mbid=mbid,
     )
 
 def merge_metadata(base: dict[str, Any], mb: dict[str, Any], overrides: dict[str, Any] | None = None) -> dict[str, Any]:
