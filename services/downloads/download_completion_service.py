@@ -140,7 +140,7 @@ def _remember_failed_peer(transfer: dict[str, Any]) -> None:
 def _monitored_downloads_dir() -> str:
     try:
         from services.downloads.download_scan_service import resolve_downloads_dir
-        return resolve_downloads_dir(prefer_music_subfolder=False)
+        return resolve_downloads_dir()
     except Exception:
         return "?"
 
@@ -1930,7 +1930,7 @@ def check_completed_downloads() -> dict[str, Any]:
 
         slskd_client = get_slskd_client()
         slskd = SlskdService(http_client=slskd_client) if slskd_client is not None else None
-        downloads_dir = resolve_downloads_dir(prefer_music_subfolder=False)
+        downloads_dir = resolve_downloads_dir()
 
         log_unified(f"[QUEUE] Checking {downloading_count} completed download(s) — downloads dir: {downloads_dir}")
 

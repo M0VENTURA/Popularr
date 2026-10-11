@@ -230,7 +230,7 @@ def _build_original_archive_path(source_path: str, downloads_root: str, original
 def _resolve_downloads_root() -> str:
     try:
         from services.infrastructure.filesystem_service import resolve_downloads_dir
-        return resolve_downloads_dir(prefer_music_subfolder=False)
+        return resolve_downloads_dir()
     except Exception:
         return os.environ.get("DOWNLOADS_DIR", "/downloads")
 

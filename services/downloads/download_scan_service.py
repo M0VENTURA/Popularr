@@ -53,7 +53,7 @@ _last_discovered_count: int | None = None
 
 def discover_audio_files() -> list[DiscoveredFile]:
     """Filesystem-only scan for audio files across the configured downloads root."""
-    downloads_dir = resolve_downloads_dir(prefer_music_subfolder=False)
+    downloads_dir = resolve_downloads_dir()
     if not os.path.isdir(downloads_dir):
         logger.warning("Downloads directory not found", downloads_dir=downloads_dir)
         return []
@@ -323,7 +323,7 @@ def discover_files() -> dict[str, Any]:
     if _duplicate_cleanup_config("prune_empty_folders", True):
         try:
             from services.infrastructure.fs_manager import FileSystemManager
-            downloads_root = resolve_downloads_dir(prefer_music_subfolder=False)
+            downloads_root = resolve_downloads_dir()
             music_root = os.environ.get("MUSIC_FOLDER", "/music")
             if downloads_root:
                 FileSystemManager(downloads_root, music_root).cleanup_empty_dirs(Path(downloads_root))

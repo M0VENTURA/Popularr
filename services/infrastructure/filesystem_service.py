@@ -113,19 +113,6 @@ def apply_release_year_mtime(file_path: str, year: Any, queue_id: int | None = N
 # INTERNAL HELPERS
 # ==============================================================================
 
-def _prefer_music_subfolder(path: str) -> str:
-    if not path:
-        return path
-
-    normalized = os.path.normpath(path)
-    if os.path.basename(normalized).lower() == "downloads":
-        music_subdir = os.path.join(normalized, "Music")
-        if os.path.isdir(music_subdir):
-            return music_subdir
-
-    return normalized
-
-
 def create_monitoring_folder(artist: str, album: str, year: Any) -> Path:
     base_dir = Path(resolve_downloads_dir())
 
@@ -175,7 +162,7 @@ def resolve_original_archive_dir() -> str:
         subfolder = str(conversion_cfg.get("original_subfolder", "Original") or "Original").strip()
     except Exception:
         subfolder = "Original"
-    root = resolve_downloads_dir(prefer_music_subfolder=False)
+    root = resolve_downloads_dir()
     return os.path.normpath(os.path.join(root, subfolder or "Original"))
 
 
@@ -199,33 +186,40 @@ def resolve_music_dir(config: dict[str, Any] | None = None) -> str:
     )
 
 
-def resolve_downloads_dir(prefer_music_subfolder: bool = True) -> str:
-    """Single source of truth for download folder resolution."""
-    def _resolve(value: str) -> str:
-        normalized = os.path.normpath(value.strip())
-        if not prefer_music_subfolder:
-            return normalized
-        return _prefer_music_subfolder(normalized)
+def resolve_downloads_dir() -> str:
+    """Single source of truth for download folder resolution.
 
+    ⚠️ This used to silently prefer a ``Music`` SUBFOLDER of the downloads
+    root whenever one existed (``_prefer_music_subfolder``). A stray empty
+    ``Music`` directory — e.g. a torrent literally named "Music" whose files
+    were then deleted by the mismatch cleanup — redirected every caller that
+    used the default into an empty folder, which is exactly how the
+    Matched-Folders list went from 27 items to 0 while the downloads root
+    held159 files. The completion/import pipeline had already opted out
+    (``prefer_music_subfolder=False``) since August, so the heuristic split
+    the app in two: completions found files under the root while the folder
+    features stared into the empty subfolder. Retired outright — the
+    configured downloads folder IS the downloads folder.
+    """
     env_dir = os.environ.get("DOWNLOADS_DIR")
     if env_dir:
-        return _resolve(env_dir)
+        return os.path.normpath(env_dir.strip())
 
     try:
         config = get_config() or {}
         downloads_cfg = config.get("downloads") or {}
-        
+
         monitor_folder = downloads_cfg.get("monitor_folder")
         if monitor_folder:
-            return _resolve(monitor_folder)
+            return os.path.normpath(str(monitor_folder).strip())
 
         folder = downloads_cfg.get("folder")
         if folder:
-            return _resolve(folder)
+            return os.path.normpath(str(folder).strip())
     except Exception:
         pass
 
-    return "/downloads/Music"
+    return "/downloads"
 
 
 def _get_files_in_folder(folder_path: str, max_depth: int = 3, max_files: int = 500) -> list[dict[str, Any]]:

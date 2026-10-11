@@ -3849,7 +3849,7 @@ async def downloads_monitor() -> Any:
     return await render_template(
         "pages/downloads/monitor.html",
         slskd_config=cfg.get("slskd", {}),
-        downloads_dir=resolve_downloads_dir(prefer_music_subfolder=False),
+        downloads_dir=resolve_downloads_dir(),
     )
 
 

@@ -167,14 +167,21 @@ class TestMetadataMatcherCompilationTolerance:
 
 
 class TestMonitoredDownloadsDirResolution:
-    """The completion walk must scan the downloads root, not the Music subfolder."""
+    """The completion walk must scan the downloads root — the ONLY downloads dir.
+
+    ``resolve_downloads_dir`` no longer takes (or honors) a
+    ``prefer_music_subfolder`` kwarg: the Music-subfolder preference was
+    retired after a stray empty ``downloads/Music`` directory hijacked every
+    default-resolving caller. Passing the old kwarg now raises TypeError, so
+    this pins that the call site passes NOTHING.
+    """
 
     def test_resolves_downloads_root(self, monkeypatch):
         from services.downloads import download_completion_service as dcs
 
         seen = {}
 
-        def fake_resolve(**kwargs):
+        def fake_resolve(*args, **kwargs):
             seen.update(kwargs)
             return "/downloads"
 
@@ -183,4 +190,4 @@ class TestMonitoredDownloadsDirResolution:
             fake_resolve,
         )
         assert dcs._monitored_downloads_dir() == "/downloads"
-        assert seen.get("prefer_music_subfolder") is False
+        assert seen == {}
