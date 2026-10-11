@@ -135,22 +135,31 @@ class TestTheRawBlendIsPersisted:
 class TestTheStoredReadPrefersRawScore:
     def test_the_singles_pass_reads_it_first(self):
         src = _TrackStageSource.text()
-        idx = src.index("update_payload[\"_raw_combined\"] = (")
-        window = src[max(0, idx - 500): idx + 300]
-        assert 'float(track.get("raw_score") or 0)' in window, (
-            "the stored-score branch must take the PRE-remap blend, not the "
-            "remapped final_score it used to re-derive"
+        idx = src.index('_stored_raw = float(track.get("raw_score") or 0)')
+        window = src[idx: idx + 900]
+        assert "if _stored_raw > 0:" in window, (
+            "the stored branch must take the PRE-remap blend when present"
         )
-        assert "if _stored_raw > 0 else float(score_data[" in window, (
-            "rows written before migration 016 must still fall back"
+        # Since 2026-10-11 the pre-016 fallback is a RECONSTRUCTION of the
+        # true blend from stored listeners — never the remapped final_score
+        # (feeding it back was the erosion loop behind \"previously-scanned
+        # albums reset to 3★\"). See test_pre016_rows_repair_not_erode.py.
+        assert "_reconstruct_raw_blend(" in window, (
+            "pre-016 rows must rebuild their raw blend from stored data"
+        )
+        assert 'else float(score_data["combined_score"])' not in src, (
+            "final_score is a REMAPPED value — it may never be the raw input"
         )
 
     def test_the_cached_branch_reads_it_first(self):
         src = _TrackStageSource.text()
         idx = src.index('update_payload["_cached"] = True')
-        window = src[idx: idx + 500]
+        window = src[idx: idx + 1200]
         assert 'float(effective_track.get("raw_score") or 0)' in window, (
             "the cached branch is the one a Finalise pass takes for every track"
+        )
+        assert "_reconstruct_raw_blend(" in window, (
+            "the cached branch must repair pre-016 rows, not re-remap them"
         )
 
 

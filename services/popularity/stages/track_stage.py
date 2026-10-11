@@ -729,6 +729,84 @@ def _score_track_popularity(
     return score_data, lb_percentile
 
 
+def _reconstruct_raw_blend(
+    *,
+    track: dict[str, Any],
+    title: str,
+    artist: str,
+    album_context: dict[str, Any],
+    album_tracks: list[dict[str, Any]] | None,
+    album_lb_listens: list[int] | None,
+    prefetched_popularity: dict[str, dict[str, Any]] | None,
+    artist_max_lf_listeners: int,
+    artist_lf_context: dict[str, Any] | None,
+    is_live_track: bool,
+    track_duration: float | None,
+) -> float:
+    """Rebuild a pre-016 row's PRE-remap blend from its own stored data.
+
+    Rows written before migration 016 have ``raw_score IS NULL``; their only
+    stored score is ``final_score``, which the album-relative remap already
+    REWROTE. The cached paths used to feed that remapped value back into the
+    remap as if it were the raw blend — the erosion loop: the top track's z
+    decays monotonically each pass and crosses below the 5★ bound
+    (album_z ≥ 1.0), after which 5★ is unreachable and the album flattens
+    into the mid bands. That is exactly the reported symptom:
+    previously-scanned albums reset to 3★ on an ordinary non-forced scan
+    while CLEAN albums — which take the fresh path and persist a genuine raw
+    — rate correctly.
+
+    ``_score_track_popularity`` is a PURE function of stored data (stored
+    listeners, album context, cached verdict flags) — no network — so the
+    true blend is rebuilt EXACTLY as a fresh scan would compute it and
+    persisted (``raw_score``), repairing the damage in one pass and making
+    every future pass stable. Returns 0.0 when the row lacks even stored
+    listeners to reconstruct from — the caller then leaves the raw UNKNOWN
+    (0), which the remap SKIPS (``raw <= 0``) rather than corrupting.
+    """
+    try:
+        lastfm_listeners = _as_int(track.get("lastfm_listeners") or 0)
+        listenbrainz_listens = _as_int(track.get("listenbrainz_listens") or 0)
+        if lastfm_listeners <= 0 and listenbrainz_listens <= 0:
+            return 0.0
+        _title = _as_str(title or track.get("title"))
+        _artist = _as_str(artist or track.get("artist"))
+        _rec_mbid = _as_str(
+            track.get("recording_mbid")
+            or track.get("mbid")
+            or track.get("musicbrainz_trackid")
+            or ""
+        )
+        score_data, _lb_pct = _score_track_popularity(
+            track_id=_as_str(track.get("id") or ""),
+            artist=_artist,
+            title=_title,
+            lastfm_listeners=lastfm_listeners,
+            listenbrainz_listens=listenbrainz_listens,
+            artist_max_lf_listeners=artist_max_lf_listeners,
+            album_lb_listens=album_lb_listens,
+            album_context=album_context,
+            album_tracks=album_tracks,
+            prefetched_popularity=prefetched_popularity,
+            release_date=_as_str(track.get("year") or track.get("release_year")) or None,
+            is_single=bool(track.get("is_single")),
+            has_mb_meta=bool(_rec_mbid),
+            is_featured_track=("feat" in _artist.lower()) or ("feat" in _title.lower()),
+            is_live_track=is_live_track,
+            is_instrumental_track=is_instrumental_track(_title),
+            artist_lf_context=artist_lf_context,
+            track_duration=track_duration,
+        )
+        return float((score_data or {}).get("combined_score") or 0.0)
+    except Exception as exc:
+        logger.debug(
+            "Raw blend reconstruction failed",
+            track_id=track.get("id"),
+            error=str(exc),
+        )
+        return 0.0
+
+
 def _same_album_release(a: str, b: str) -> bool:
     if not a or not b:
         return False
@@ -1055,13 +1133,34 @@ def process_track(
         lb_percentile = float(track.get("lb_percentile") or 0)
         # The PRE-remap blend. ``raw_score`` holds it (migration 016); rows
         # written before it only have ``final_score``, which the album-relative
-        # remap has ALREADY rewritten, so re-deriving from that erodes the top
-        # track's album_z a little more on every pass — which is what eventually
-        # pushed the 5-star z bound out of reach for a repeated Finalise run.
+        # remap has ALREADY rewritten — feeding that back into the remap IS
+        # the erosion loop (each pass decays the top track's z until the 5★
+        # bound is unreachable). Rebuild the TRUE blend from the stored
+        # listeners (pure function, no network) and persist it; when even
+        # that is impossible the raw stays UNKNOWN (0) and the remap SKIPS
+        # the row.
         _stored_raw = float(track.get("raw_score") or 0)
-        update_payload["_raw_combined"] = (
-            _stored_raw if _stored_raw > 0 else float(score_data["combined_score"])
-        )
+        if _stored_raw > 0:
+            update_payload["_raw_combined"] = _stored_raw
+        else:
+            _recon_raw = _reconstruct_raw_blend(
+                track=track,
+                title=track_title,
+                artist=track_artist,
+                album_context=album_context,
+                album_tracks=album_tracks,
+                album_lb_listens=album_lb_listens,
+                prefetched_popularity=prefetched_popularity,
+                artist_max_lf_listeners=artist_max_lf_listeners,
+                artist_lf_context=artist_lf_context,
+                is_live_track=_resolved_is_live,
+                track_duration=_safe_duration(track.get("duration")),
+            )
+            if _recon_raw > 0:
+                update_payload["raw_score"] = _recon_raw
+                update_payload["_raw_combined"] = _recon_raw
+            else:
+                update_payload["_raw_combined"] = 0.0
 
         try:
             _lr_cfg = get_log_ratio_config()
@@ -1287,11 +1386,33 @@ def process_track(
                 # Prefer the PERSISTED pre-remap blend (migration 016).
                 # ``_stored_score`` is ``final_score``, which the previous run's
                 # album-relative remap already rewrote — using it as the raw
-                # input is exactly the loop that eroded album_z.
+                # input is exactly the loop that eroded album_z into the 3★
+                # band on repeated non-forced album scans of PREVIOUSLY-SCANNED
+                # albums (clean albums take the fresh path and never hit this).
+                # Rebuild the true blend from the stored listeners instead and
+                # persist it; unknown (0) → the remap skips the row.
                 _stored_raw = float(effective_track.get("raw_score") or 0)
-                update_payload["_raw_combined"] = (
-                    _stored_raw if _stored_raw > 0 else _stored_score
-                )
+                if _stored_raw > 0:
+                    update_payload["_raw_combined"] = _stored_raw
+                else:
+                    _recon_raw = _reconstruct_raw_blend(
+                        track=effective_track,
+                        title=title,
+                        artist=artist,
+                        album_context=album_context,
+                        album_tracks=album_tracks,
+                        album_lb_listens=album_lb_listens,
+                        prefetched_popularity=prefetched_popularity,
+                        artist_max_lf_listeners=artist_max_lf_listeners,
+                        artist_lf_context=artist_lf_context,
+                        is_live_track=_resolved_is_live,
+                        track_duration=_safe_duration(effective_track.get("duration")),
+                    )
+                    if _recon_raw > 0:
+                        update_payload["raw_score"] = _recon_raw
+                        update_payload["_raw_combined"] = _recon_raw
+                    else:
+                        update_payload["_raw_combined"] = 0.0
                 try:
                     lb_percentile = calculate_listenbrainz_percentile(_score_lb, album_lb_listens) if album_lb_listens else 0.0
                 except Exception:
