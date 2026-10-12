@@ -2448,6 +2448,22 @@ def run_scan(
                         except Exception as exc:
                             logger.warning("Similar-artists prefetch failed", artist=artist, error=str(exc))
 
+                        try:
+                            # Artist-level biography/country/image/line-up
+                            # refresh: the per-album path is DB-READ-ONLY from
+                            # here on (_read_artist_metadata).  The old
+                            # per-album fetch re-ran the DB read + "already
+                            # cached" checks for EVERY album of the artist —
+                            # the cached values are artist-level, so one check
+                            # per artist pass is enough.  Cached values are
+                            # used verbatim; failures retry once per artist.
+                            from services.popularity.stages.album_stage import (
+                                _fetch_artist_metadata,
+                            )
+                            _fetch_artist_metadata(artist)
+                        except Exception as exc:
+                            logger.warning("Artist-metadata prefetch failed", artist=artist, error=str(exc))
+
                     try:
                         _discogs_id = ""
                         for _t in artist_all_tracks.get(artist) or track_dicts:

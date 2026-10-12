@@ -904,6 +904,49 @@ def _fetch_artist_metadata(artist: str) -> dict[str, Any]:
     return result
 
 
+def _read_artist_metadata(artist: str) -> dict[str, Any]:
+    """DB-only read of the artist-level metadata cache.
+
+    The network refresh (biography / country / image / line-up) lives in
+    :func:`_fetch_artist_metadata` and runs ONCE PER ARTIST PASS in the scan
+    runner's prefetch thread — the same pattern as ``refresh_similar_artists``.
+    The per-album path must never touch the network or repeat the "already
+    cached" skip checks: an artist with N albums used to re-run the DB read
+    (and, until the cache write landed, the lookups themselves) for EVERY
+    album even though country/bio/image are artist-level values.  A local
+    indexed SELECT is all an album needs.
+    """
+    result: dict[str, Any] = {
+        "country": None, "bio": None, "image_url": None,
+        "members": None, "members_last_updated": None,
+    }
+    try:
+        with _log_section("artist_metadata.database_read", **{"artist": artist}):
+            with db_session() as session:
+                existing = session.execute(
+                    text(
+                        "SELECT country, bio, image_url, members, members_last_updated "
+                        "FROM artists WHERE name = :artist"
+                    ),
+                    {"artist": artist},
+                ).mappings().first()
+        if existing:
+            result.update(
+                country=existing.get("country") or None,
+                bio=existing.get("bio") or None,
+                image_url=existing.get("image_url") or None,
+                members=existing.get("members") or None,
+                members_last_updated=existing.get("members_last_updated") or None,
+            )
+    except Exception as exc:
+        Logger.warning(
+            "[ENRICH] artist metadata cache read failed",
+            artist=artist,
+            error=_safe_error(exc),
+        )
+    return result
+
+
 def _json_list(raw: Any) -> list[Any]:
     if raw in (None, "", "null"):
         return []
@@ -2938,7 +2981,14 @@ def _run_full_enrichment(
     Logger.info("[ENRICH] album-art result", source=art_source, found=bool(art_source), **context)
 
     with _log_section("full.artist_metadata", **context):
-        metadata = _fetch_artist_metadata(artist)
+        # READ-ONLY from the album path: the network refresh + "already
+        # cached" checks run ONCE PER ARTIST in the scan runner's prefetch
+        # thread (_fetch_artist_metadata).  An artist with N albums used to
+        # repeat the DB read and the skip-checks per album — country/bio/
+        # image are artist-level values, so there is nothing album-scoped to
+        # re-check.  The release-country backfill below reads the value the
+        # prefetch persisted.
+        metadata = _read_artist_metadata(artist)
 
     with _log_section("full.lastfm_tags", **context):
         _fetch_artist_lastfm_tags(artist)
