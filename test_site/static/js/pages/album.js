@@ -1002,6 +1002,9 @@
 
   global.downloadMissingTracks = downloadMissingTracks;
 
+  global.toggleAlbumLookupSkip = toggleAlbumLookupSkip;
+  global.uploadAlbumCsvTracklist = uploadAlbumCsvTracklist;
+
   /**
    * Rename this album's files to match the configured naming format.
    *
@@ -2975,6 +2978,57 @@
    */
   function appendMissingRow(row, tbody) {
     placeMissingRow(row, tbody, rowOrderKey(row));
+  }
+
+  /** Set the CSV upload card's visibility off the "Do not search album
+   *  release" checkbox (custom albums). */
+  function toggleAlbumLookupSkip() {
+    const cb = document.getElementById('album_lookup_skip');
+    const card = document.getElementById('albumLookupSkipCsvCard');
+    if (!cb || !card) return;
+    card.classList.toggle('d-none', !cb.checked);
+    card.classList.toggle('d-block', cb.checked);
+  }
+
+  /** Upload a CSV tracklist as this custom album's missing-track source. */
+  async function uploadAlbumCsvTracklist(btn) {
+    const fileInput = document.getElementById('albumCsvFile');
+    const status = document.getElementById('albumCsvStatus');
+    const file = fileInput && fileInput.files && fileInput.files[0];
+    if (!file) {
+      if (status) status.innerHTML = '<span class="text-warning">Choose a .csv tracklist file first.</span>';
+      return;
+    }
+    let text;
+    try {
+      text = await file.text();
+    } catch (_e) {
+      if (status) status.innerHTML = '<span class="text-danger">Could not read the file.</span>';
+      return;
+    }
+    const artist = pageArtist();
+    const album = pageAlbum();
+    if (btn) btn.disabled = true;
+    if (status) status.innerHTML = '<span class="text-muted">Importing tracklist…</span>';
+    try {
+      const data = await global.api.postJson('/api/album/tracklist-csv', { artist, album, csv: text });
+      if (status) {
+        if (data && data.success) {
+          const n = Number(data.missing_count || 0);
+          const read = Number(data.rows_read || 0);
+          status.innerHTML = `<span class="text-success">Tracklist imported — <strong>${n}</strong> track(s) missing from the library (of ${read} read). They are shown below and can be queued for download.</span>`;
+          if (typeof loadAlbumMissingTracks === 'function') {
+            loadAlbumMissingTracks();
+          }
+        } else {
+          status.innerHTML = `<span class="text-danger">Import failed: ${esc(data && data.error ? data.error : 'unknown error')}</span>`;
+        }
+      }
+    } catch (err) {
+      if (status) status.innerHTML = `<span class="text-danger">Import failed: ${esc(err && err.message ? err.message : err)}</span>`;
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   }
 
   async function loadAlbumMissingTracks() {

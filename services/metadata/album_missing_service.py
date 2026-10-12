@@ -533,6 +533,253 @@ def persist_missing_from_comparison(
     return len(missing)
 
 
+def import_csv_tracklist(artist: str, album: str, csv_text: str) -> dict[str, Any]:
+    """Use a user-uploaded CSV tracklist as the album's missing-track source.
+
+    For a custom album that is not on MusicBrainz/Discogs, the CSV stands in
+    for the release: every CSV track the library does not yet have is
+    computed and persisted to ``missing_album_tracks`` (the same table the
+    MusicBrainz release comparison writes), so the album page's existing
+    missing list + "Download Missing Tracks" flow just works.
+
+    Also marks the album ``album_lookup_skip = '1'`` — the user is telling
+    the scan "this album has no release to look up", so the scan's MB/Discogs
+    album lookups and its own missing-track refresh are skipped for it (the
+    refresh would otherwise DELETE these CSV rows as "not in the MB release").
+
+    CSV format (liberal on purpose):
+
+      * a header row is skipped when any cell looks like a field name
+        (``title``/``name``/``track``/``track number``/``#``/``artist``/
+        ``disc``/``duration``); headers map by name;
+      * otherwise POSITIONAL: ``title`` alone, or ``track_number,title``, or
+        ``disc,track_number,title`` — trailing columns (``artist``,
+        ``duration``) are accepted when present;
+      * an Exportify-style ``#5 - Song`` cell is normalised (the ``#`` form
+        is treated as the track number).
+
+    Returns ``{"success", "imported", "missing_count", "missing_tracks",
+    "library_count", "rows_read", "errors"}``.
+    """
+    rows, errors = _parse_csv_tracklist(csv_text)
+
+    # Reserve the skip flag BEFORE the persist: even a 0-row CSV must stop the
+    # scan's MB refresh from wiping the album's existing missing list.
+    try:
+        from services.metadata.album_lookup_skip_service import set_album_lookup_skip
+        set_album_lookup_skip(artist, album, True)
+    except Exception as exc:
+        logger.debug("Album lookup-skip flag write failed during CSV import", error=str(exc))
+
+    with db_session() as session:
+        album_key = _album_key(album)
+
+        def _rows_in_album(rs):
+            return [dict(r) for r in rs if _album_key(str(r.get("album") or "")) == album_key]
+
+        library_rows = session.execute(
+            text(
+                "SELECT id, title, track_number, disc_number, mbid, album, duration FROM tracks "
+                "WHERE LOWER(TRIM(COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist)))) = LOWER(:artist)"
+            ),
+            {"artist": artist},
+        ).mappings().all()
+        library_rows = _rows_in_album(library_rows)
+        library_count = len(library_rows)
+
+    queued_titles, queued_positions = _queued_coverage(artist, album)
+
+    lib_norm = {_title_match_key(str(r.get("title") or "")) for r in library_rows if r.get("title")}
+    lib_by_position: dict[tuple[int, str], str] = {}
+    for r in library_rows:
+        disc = int(r.get("disc_number") or 1) if r.get("disc_number") not in (None, "", "0", 0) else 1
+        tn = str(r.get("track_number") or "").strip()
+        if tn:
+            lib_by_position[(disc, tn)] = str(r.get("title") or "")
+
+    missing: list[dict[str, Any]] = []
+    for row in rows:
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        norm = _title_match_key(title)
+        tn = str(row.get("track_number") or "").strip()
+        disc = int(row.get("disc_number") or 1)
+        if norm in lib_norm:
+            continue
+        position_key = (disc, tn) if tn else None
+        if position_key and position_key in lib_by_position:
+            continue
+        if norm in queued_titles:
+            continue
+        if tn:
+            qd = disc if disc else 1
+            if (qd, tn) in queued_positions:
+                continue
+        missing.append({
+            "title": title,
+            "track_number": tn or None,
+            "disc_number": disc,
+            "track_artist": str(row.get("artist") or artist),
+            "year": str(row.get("year") or "") or None,
+            "duration": row.get("duration"),
+            "release_id": None,
+            "recording_mbid": None,
+        })
+
+    _persist_missing_tracks(artist, album, missing)
+    logger.info(
+        "Persisted missing tracks from uploaded CSV",
+        artist=artist, album=album, rows_read=len(rows), missing=len(missing),
+    )
+    return {
+        "success": True,
+        "imported": len(missing),
+        "missing_count": len(missing),
+        "missing_tracks": missing,
+        "library_count": library_count,
+        "rows_read": len(rows),
+        "errors": errors,
+    }
+
+
+_CSV_HEADER_CELLS = {
+    "title", "name", "track", "track title", "song", "song title",
+    "track number", "track #", "#", "num", "number", "no",
+    "artist", "track artist", "disc", "disc number", "disk",
+    "duration", "length", "time", "year", "album",
+}
+
+
+def _parse_csv_tracklist(csv_text: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Parse a liberal CSV tracklist into ``{title, track_number, disc_number,
+    artist, year, duration}`` rows. Returns ``(rows, errors)``."""
+    import csv as _csv
+    import io as _io
+
+    rows: list[dict[str, Any]] = []
+    errors: list[str] = []
+    text = str(csv_text or "")
+    if not text.strip():
+        return rows, errors
+
+    try:
+        reader = list(_csv.reader(_io.StringIO(text)))
+    except Exception as exc:
+        return rows, [f"could not parse CSV: {exc}"]
+
+    # Skip a leading header row when any cell names a field.
+    header_idx: int | None = None
+    if reader:
+        sample = [str(c or "").strip().lower() for c in (reader[0] or [])]
+        if sample and any(c in _CSV_HEADER_CELLS for c in sample):
+            header_idx = 0
+
+    col_map: dict[int, str] = {}
+    if header_idx is not None:
+        for i, cell in enumerate(reader[header_idx]):
+            name = str(cell or "").strip().lower()
+            if name in ("title", "name", "track title", "song", "song title"):
+                col_map[i] = "title"
+            elif name in ("artist", "track artist"):
+                col_map[i] = "artist"
+            elif name in ("track number", "track #", "num", "number", "no", "#"):
+                col_map[i] = "track_number"
+            elif name in ("disc", "disc number", "disk"):
+                col_map[i] = "disc_number"
+            elif name in ("duration", "length", "time"):
+                col_map[i] = "duration"
+            elif name == "year":
+                col_map[i] = "year"
+
+    for row_num, raw in enumerate(reader):
+        if row_num == header_idx:
+            continue
+        cells = [str(c or "").strip() for c in (raw or [])]
+        if not any(cells):
+            continue
+
+        if header_idx is not None:
+            entry: dict[str, Any] = {}
+            for i, cell in enumerate(cells):
+                field = col_map.get(i)
+                if not field:
+                    continue
+                if field == "title":
+                    entry["title"] = cell.lstrip("#").strip()
+                elif field == "track_number":
+                    entry["track_number"] = cell.lstrip("#").strip()
+                else:
+                    entry[field] = cell
+            if entry.get("title"):
+                rows.append(_coerce_csv_row(entry))
+            continue
+
+        # Positional: title | number,title | disc,number,title | + artist/duration,
+        # plus Exportify-style "#N - Title" cells.
+        first = cells[0].lstrip("#").strip()
+        if not first:
+            continue
+        # "#5 - Song Five" → (5, "Song Five").
+        _hash_split = re.match(r"^(\d+)\s*-\s*(.+)$", first)
+        if first.isdigit() and len(cells) >= 2:
+            if len(cells) >= 3 and cells[1].isdigit():
+                # disc,number,title [, artist]
+                entry = {"disc_number": cells[0], "track_number": cells[1], "title": cells[2]}
+                if len(cells) >= 4 and cells[3]:
+                    entry["artist"] = cells[3]
+            else:
+                # number,title [, artist] [, duration]
+                entry = {"track_number": first, "title": cells[1]}
+                if len(cells) >= 3 and cells[2]:
+                    if cells[2].isdigit():
+                        entry["duration"] = cells[2]
+                    else:
+                        entry["artist"] = cells[2]
+                if len(cells) >= 4 and cells[3] and cells[3].isdigit():
+                    entry["duration"] = cells[3]
+            rows.append(_coerce_csv_row(entry))
+        elif _hash_split:
+            entry = {"track_number": _hash_split.group(1), "title": _hash_split.group(2)}
+            rows.append(_coerce_csv_row(entry))
+        else:
+            entry = {"title": first}
+            if len(cells) >= 2 and cells[1]:
+                # title,artist | title,duration
+                if cells[1].isdigit():
+                    entry["duration"] = cells[1]
+                else:
+                    entry["artist"] = cells[1]
+            if len(cells) >= 3 and cells[2] and cells[2].isdigit():
+                entry["duration"] = cells[2]
+            rows.append(_coerce_csv_row(entry))
+
+    return rows, errors
+
+
+def _coerce_csv_row(entry: dict[str, Any]) -> dict[str, Any]:
+    """Normalise one parsed CSV row (numbers stripped to plain forms)."""
+    tn = str(entry.get("track_number") or "").lstrip("#").strip()
+    disc = str(entry.get("disc_number") or "").strip()
+    if not disc:
+        # A "1-08" style track number splits disc+track.
+        m = re.match(r"^(\d+)[-.](\d+)$", tn)
+        if m:
+            disc, tn = m.group(1), m.group(2)
+    entry["track_number"] = tn or None
+    entry["disc_number"] = int(disc) if disc.isdigit() else 1
+    duration = str(entry.get("duration") or "").strip()
+    if duration and not duration.isdigit():
+        # "3:45" → seconds; "3:04:15" (h:m:s) supported.
+        parts = [p for p in duration.split(":") if p.strip().isdigit()]
+        if 1 <= len(parts) <= 3:
+            secs = 0
+            for p in parts:
+                secs = secs * 60 + int(p)
+            entry["duration"] = secs
+    return entry
+
+
 def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
     """The persisted missing-track list for one album — DATABASE ONLY.
 

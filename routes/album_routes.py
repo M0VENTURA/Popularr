@@ -797,6 +797,35 @@ def api_album_missing_tracks() -> Any:
         return jsonify({"error": str(exc)}), 500
 
 
+@album_bp.route("/tracklist-csv", methods=["POST"])
+async def api_album_tracklist_csv() -> Any:
+    """Use an uploaded CSV tracklist as this album's missing-track source.
+
+    For a custom album that is not on MusicBrainz/Discogs: parses a liberal
+    CSV tracklist (header or positional: ``title``, ``number,title``,
+    ``disc,number,title``), computes which tracks the library is missing,
+    persists them to ``missing_album_tracks`` (the same table the MB release
+    comparison writes, so the existing missing list + Download Missing Tracks
+    flow just works) and marks the album ``album_lookup_skip`` so the scan
+    stops searching MusicBrainz/Discogs for it.
+    """
+    body = await request.get_json() or {}
+    artist = str(body.get("artist") or "").strip()
+    album = str(body.get("album") or "").strip()
+    csv_text = str(body.get("csv") or "").strip()
+    if not artist or not album:
+        return jsonify({"error": "artist and album are required"}), 400
+    if not csv_text:
+        return jsonify({"error": "csv is empty"}), 400
+    try:
+        from services.metadata.album_missing_service import import_csv_tracklist
+        result = import_csv_tracklist(artist, album, csv_text)
+        return jsonify(result)
+    except Exception as exc:
+        logger.error("CSV tracklist import failed", artist=artist, album=album, error=str(exc))
+        return jsonify({"error": str(exc)}), 500
+
+
 @album_bp.route("/duplicate-tracks", methods=["GET"])
 def api_album_duplicate_tracks() -> Any:
     """Tracks on this album that were downloaded more than once.

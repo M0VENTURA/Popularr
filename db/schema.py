@@ -263,6 +263,12 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "explicitstatus": "TEXT", "originalyear": "TEXT", "originaldate": "TEXT",
         "tracktotal": "TEXT", "disctotal": "TEXT", "script": "TEXT",
         "discsubtitle": "TEXT", "albumversion": "TEXT",
+        # Custom albums that are not on MusicBrainz/Discogs: '1' = skip the
+        # album-release lookups (album type from MB, Discogs release id,
+        # CAA/Discogs/AudioDB art, missing-track refresh against an MB
+        # release). Written ALBUM-WIDE by the album save and the CSV
+        # tracklist upload. '' = normal (lookups on).
+        "album_lookup_skip": "TEXT",
         # SPECIFIC release/edition name, e.g. "Experience: Expanded
         # (Remixes and B-Sides)".  The release-GROUP name (the album's main
         # identity) stays in ``album``; this is the tagline shown beneath it.

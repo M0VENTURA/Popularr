@@ -810,7 +810,10 @@ class TestTheMissingTrackSnapshotIsNotStarvedByASkip:
         """
         source = SCANNER.read_text(encoding="utf-8")
         idx = source.index("_missing = get_missing_tracks(artist=artist, album=album)")
-        window = source[idx - 500: idx]
+        # 1400, not 500: the block gained the per-album ``album_lookup_skip``
+        # guard (a custom "do not search album release" album's list is
+        # CSV-sourced) between the mode gate and the call.
+        window = source[idx - 1400: idx]
 
         assert 'not options.get("popularity_only")' in window, (
             "the snapshot gate must still exclude popularity-only scans"
@@ -899,22 +902,29 @@ class TestTheMissingTrackSnapshotIsNotStarvedByASkip:
         # and a THIRD writer passed different arguments (`... (artist, album,
         # [])`), which evaded the guard entirely. Counting the call itself
         # cannot be evaded that way.
+        # Exactly THREE called writers. The third is the album page's CSV
+        # tracklist upload (``import_csv_tracklist``) — the deliberate way a
+        # custom "do not search album release" album supplies its missing
+        # list. Counting the call itself cannot be evaded by different
+        # argument spelling.
         call_sites = (
             svc.count("_persist_missing_tracks(")
             - svc.count("def _persist_missing_tracks(")
         )
-        assert call_sites == 2, (
-            f"expected exactly 2 snapshot writers, found {call_sites}: the "
-            "scan's get_missing_tracks and the album page's "
-            "persist_missing_from_comparison — a third writer changes when the "
+        assert call_sites == 3, (
+            f"expected exactly 3 snapshot writers, found {call_sites}: the "
+            "scan's get_missing_tracks, the album page's "
+            "persist_missing_from_comparison, and the CSV tracklist upload "
+            "import_csv_tracklist — any further writer changes when the "
             "snapshot goes stale and must be a deliberate decision"
         )
         for expected_caller in (
             "def get_missing_tracks(",
             "def persist_missing_from_comparison(",
+            "def import_csv_tracklist(",
         ):
             assert expected_caller in svc, (
-                f"{expected_caller} is one of the two intended writers"
+                f"{expected_caller} is one of the intended writers"
             )
 
         # The comparison writer must reuse the comparison it was handed rather

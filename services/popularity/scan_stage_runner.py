@@ -3188,20 +3188,32 @@ def run_scan(
             # SEARCH it falls back to when an album has no stored MBID was paid
             # one-per-album every time the artist page was opened.
             if not options.get("popularity_only") and not options.get("singles_detection_only") and not _mode_finalise:
+                # A "do not search album release" album is SKIPPED: its
+                # missing list comes from the user's CSV tracklist (or is
+                # simply absent), not from a MusicBrainz release — the MB
+                # refresh would either find nothing or resolve the WRONG
+                # release and DELETE the CSV-persisted rows ("not in the MB
+                # release").
                 try:
-                    _missing = get_missing_tracks(artist=artist, album=album)
-                    if _missing and _missing.get("missing_count"):
+                    from services.metadata.album_lookup_skip_service import album_lookup_skip as _album_skip_lookup
+                    _skip_missing_refresh = _album_skip_lookup(artist, album)
+                except Exception:
+                    _skip_missing_refresh = False
+                if not _skip_missing_refresh:
+                    try:
+                        _missing = get_missing_tracks(artist=artist, album=album)
+                        if _missing and _missing.get("missing_count"):
+                            logger.debug(
+                                "[MISSING_TRACKS] album missing tracks refreshed",
+                                artist=artist,
+                                album=album,
+                                missing_count=_missing.get("missing_count"),
+                            )
+                    except Exception as exc:
                         logger.debug(
-                            "[MISSING_TRACKS] album missing tracks refreshed",
-                            artist=artist,
-                            album=album,
-                            missing_count=_missing.get("missing_count"),
+                            "Missing-track refresh failed",
+                            artist=artist, album=album, error=str(exc),
                         )
-                except Exception as exc:
-                    logger.debug(
-                        "Missing-track refresh failed",
-                        artist=artist, album=album, error=str(exc),
-                    )
             # ------------------------------
 
             # Deferred album rename detection.

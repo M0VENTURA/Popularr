@@ -2451,6 +2451,23 @@ async def album_detail(album_path: str) -> Any:
                     except Exception as revert_err:
                         logger.debug("Live-state revert failed", track_id=track_id, error=str(revert_err))
 
+        # ── Do-not-search-album-release flag ─────────────────────────────
+        # A custom album (not on MusicBrainz/Discogs) can be marked so the
+        # album-release lookups are skipped. Written ALBUM-WIDE AFTER the
+        # rename below so every track agrees on the final artist/album.
+        try:
+            from services.metadata.album_lookup_skip_service import set_album_lookup_skip
+            _skip_lookup = str(form.get("album_lookup_skip") or "").strip().lower() in (
+                "1", "true", "on", "yes"
+            )
+            set_album_lookup_skip(
+                new_artist or artist_name,
+                new_title or album_name,
+                _skip_lookup,
+            )
+        except Exception as _skip_lookup_err:
+            logger.debug("Album lookup-skip flag write failed", error=str(_skip_lookup_err))
+
         # ── Phase 3: every track's file tags, concurrently ────────────────
         # The database half of the save is already durable at this point, so
         # the files are the only thing left holding the response open.
@@ -2822,6 +2839,9 @@ async def album_detail(album_path: str) -> Any:
         "musicbrainz_album_mbid": first_value("musicbrainz_album_mbid", "musicbrainz_releaseid", "musicbrainz_albumid"),
         "musicbrainz_releasegroupid": first_value("musicbrainz_releasegroupid", "musicbrainz_release_group_id"),
         "discogs_album_id": first_value("discogs_album_id", "discogs_release_id"),
+        # Custom albums not on MusicBrainz/Discogs: '1' = skip the album
+        # release lookups. Read album-wide (same value on every track).
+        "album_lookup_skip": first_value("album_lookup_skip"),
     }
 
     year_values = [

@@ -665,6 +665,22 @@ def _fetch_album_art_with_fallback(
         Logger.info("[ENRICH] album art kept", source=_cached_source or "cached", **context)
         return "cached"
 
+    # A "do not search album release" album is CUSTOM — CAA/AudioDB/Discogs
+    # art are RELEASE lookups, so stop after Navidrome + the stored cover
+    # (both of which already had first refusal above).
+    try:
+        from services.metadata.album_lookup_skip_service import album_lookup_skip
+        _skip_album_lookup = album_lookup_skip(artist, album)
+    except Exception:
+        _skip_album_lookup = False
+    if _skip_album_lookup:
+        Logger.info(
+            "[ENRICH] album-art online providers skipped",
+            reason="do-not-search-album-release",
+            **context,
+        )
+        return "cached" if _cached_source else None
+
     try:
         data = _call_with_heartbeat(
             "album_art.musicbrainz_caa",
@@ -1869,6 +1885,22 @@ def _resolve_album_type(
     context = {"artist": artist, "album": album}
     detected = _detect_album_type(artist, album, album_artist, spotify_type)
     Logger.info("[ENRICH] local album type detected", detected_type=detected, **context)
+
+    # A "do not search album release" album is a CUSTOM album (not on
+    # MusicBrainz/Discogs) — never query MB for its type. The local heuristic
+    # above is the answer.
+    try:
+        from services.metadata.album_lookup_skip_service import album_lookup_skip
+        _skip_album_lookup = album_lookup_skip(artist, album)
+    except Exception:
+        _skip_album_lookup = False
+    if _skip_album_lookup:
+        Logger.info(
+            "[ENRICH] MusicBrainz album type lookup skipped",
+            reason="do-not-search-album-release",
+            **context,
+        )
+        return detected, None, None, None
 
     # ``tracks`` is passed so the VA-compilation tracklist gate can compare the
     # local tracklist against the candidate release-group.  Without it a VA
@@ -3084,6 +3116,16 @@ def _resolve_discogs_album_id(artist: str, album: str) -> str | None:
     is accepted — a wrong release id is worse than a blank one, and this
     writes straight to every track of the album.
     """
+    # A "do not search album release" album is custom — it is not on Discogs,
+    # so a lookup would be a wasted rate-limited search every scan.
+    try:
+        from services.metadata.album_lookup_skip_service import album_lookup_skip
+        if album_lookup_skip(artist, album):
+            Logger.info("[ENRICH] Discogs album ID lookup skipped", reason="do-not-search-album-release", artist=artist, album=album)
+            return None
+    except Exception:
+        pass
+
     from helpers.normalization_service import normalize_title_for_lookup
     from services.enrichment.discogs_service import (
         _sanitize_release_name,

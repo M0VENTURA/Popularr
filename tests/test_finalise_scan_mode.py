@@ -174,17 +174,29 @@ class TestTheRunnerProcessesEveryAlbumForFinalise:
 
     def test_network_metadata_work_is_gated_off(self):
         """The recommend-stash and the missing-track recompute both reach
-        MusicBrainz; a finalise pass is DB-only."""
+        MusicBrainz; a finalise pass is DB-only.
+
+        The missing-track recompute gained an ADDITIONAL gate inside the
+        mode-gated block (the per-album ``album_lookup_skip`` flag — a custom
+        "do not search album release" album's list is CSV-sourced, so the MB
+        refresh must skip it); the finalise exclusion is unchanged and still
+        sits in the same ``if`` condition."""
         assert (
             'if _stash_only and not options.get("popularity_only") '
             'and not options.get("singles_detection_only") and not _mode_finalise:'
         ) in RUNNER_SOURCE
-        assert (
+        idx = RUNNER_SOURCE.index('if not options.get("popularity_only") ')
+        gate_idx = RUNNER_SOURCE.index(
             'if not options.get("popularity_only") '
-            'and not options.get("singles_detection_only") and not _mode_finalise:\n'
-            "                try:\n"
-            "                    _missing = get_missing_tracks(artist=artist, album=album)"
-        ) in RUNNER_SOURCE
+            'and not options.get("singles_detection_only") and not _mode_finalise:',
+            idx,
+        )
+        window = RUNNER_SOURCE[gate_idx: gate_idx + 1400]
+        assert "get_missing_tracks(artist=artist, album=album)" in window, (
+            "the snapshot recompute must still exist (a finalise pass is DB-only"
+            " and non-finalise passes keep refreshing the snapshot)"
+        )
+        assert "not _mode_finalise" in window
 
     def test_the_file_tag_sync_is_NOT_gated_away(self):
         """CONTROL — the whole point of the pass is this sync; its gate must

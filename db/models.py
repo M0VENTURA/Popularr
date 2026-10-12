@@ -226,6 +226,9 @@ class Track(Base):
     originalyear: Mapped[str | None] = mapped_column(String)
     recordlabel: Mapped[str | None] = mapped_column(String)
     release_title: Mapped[str | None] = mapped_column(String)
+    # Custom albums not on MusicBrainz/Discogs: '1' = skip the album-release
+    # lookups (see album_lookup_skip_service).
+    album_lookup_skip: Mapped[str | None] = mapped_column(String)
     releasedate: Mapped[str | None] = mapped_column(String)
     releasestatus: Mapped[str | None] = mapped_column(String)
     releasetype: Mapped[str | None] = mapped_column(String)
