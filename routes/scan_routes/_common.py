@@ -158,6 +158,46 @@ def guard_and_launch_popularity_scan(
         set_runtime,
     )
 
+    # ``scan_type`` is OUR bookkeeping (runtime-registry type label + failure
+    # record). It must NOT be force-forwarded to the runner: the targeted
+    # popularity runners accept it (it is their mode selector), but the
+    # artist/album "full" pipelines (``run_artist_pipeline`` /
+    # ``run_album_pipeline``) do NOT — forwarding it blindly made
+    # ``run_album_pipeline`` die with "unexpected keyword argument 'scan_type'"
+    # inside the daemon thread (reported 2026-10-12: "Targeted worker failed:
+    # run_album_pipeline() got an unexpected keyword argument 'scan_type'").
+    # Resolve it once here and drop it from what the runner receives; anything
+    # ELSE the runner does not accept is a genuine caller bug and is dropped
+    # loudly (a mismatched signature must not kill the worker silently).
+    _scan_type = str(kwargs.get("scan_type") or "popularity")
+    _runner_kwargs = dict(kwargs)
+    try:
+        _sig = inspect.signature(runner)
+        if not any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in _sig.parameters.values()
+        ):
+            _accepted = {
+                name
+                for name, p in _sig.parameters.items()
+                if p.kind
+                in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
+            }
+            _dropped = sorted(set(_runner_kwargs) - _accepted)
+            _runner_kwargs = {
+                k: v for k, v in _runner_kwargs.items() if k in _accepted
+            }
+            if _dropped:
+                logger.warning(
+                    "Dropping kwargs the scan runner does not accept",
+                    runner=getattr(runner, "__name__", repr(runner)),
+                    dropped=_dropped,
+                )
+    except (TypeError, ValueError):
+        pass
+
     with scan_lock:
         # In-process guard first (cheap).  Then the cross-process guard.
         if is_runtime_running("popularity"):
@@ -202,7 +242,7 @@ def guard_and_launch_popularity_scan(
 
         def _worker() -> None:
             try:
-                runner(*args, **kwargs)
+                runner(*args, **_runner_kwargs)
             except Exception as exc:
                 # A daemon-thread exception would otherwise be swallowed by
                 # ``run_async`` (no handler) — the route returns "started",
@@ -220,7 +260,7 @@ def guard_and_launch_popularity_scan(
                 try:
                     from services.scanning.scan_history_service import record_scan
                     record_scan(
-                        str(kwargs.get("scan_type") or "popularity"),
+                        _scan_type,
                         "failed",
                         message=f"targeted scan failed: {exc}",
                         artist=str(args[0] if args else kwargs.get("artist") or ""),
@@ -232,7 +272,7 @@ def guard_and_launch_popularity_scan(
                 clear_runtime("popularity")
 
         thread = run_async(_worker)
-        set_runtime("popularity", {"thread": thread, "type": kwargs.get("scan_type") or "popularity"})
+        set_runtime("popularity", {"thread": thread, "type": _scan_type})
     return True
 
 

@@ -268,6 +268,80 @@ class TestGuardAndLaunchBehaviour:
         )
 
 
+# ---------------------------------------------------------------------------
+# 3. Regression (2026-10-12): the runner must not receive kwargs it cannot
+#    accept. The "full" branches pass ``scan_type`` for the runtime registry;
+#    ``run_album_pipeline`` does NOT take it, and blindly forwarding it killed
+#    the worker with "run_album_pipeline() got an unexpected keyword argument
+#    'scan_type'".
+# ---------------------------------------------------------------------------
+
+class TestGuardFiltersKwargsForTheRunner:
+
+    def test_pipeline_runner_does_not_receive_scan_type(self, monkeypatch):
+        # THE regression: run_album_pipeline(artist, album, *, force=False)
+        # accepts no scan_type — the helper must drop it while still starting.
+        TestGuardAndLaunchBehaviour._patch(monkeypatch, scan_active=False)
+        ran: dict[str, Any] = {}
+
+        def _pipeline(artist_name, album_name, *, force=False):
+            ran["artist"] = artist_name
+            ran["album"] = album_name
+            ran["force"] = force
+
+        from routes.scan_routes._common import guard_and_launch_popularity_scan
+
+        started = guard_and_launch_popularity_scan(
+            _pipeline, "Artist", "Album", force=True, scan_type="full"
+        )
+        assert started is True
+        _wait_for(lambda: "artist" in ran)
+        assert ran["artist"] == "Artist"
+        assert ran["album"] == "Album"
+        assert ran["force"] is True
+        assert "scan_type" not in ran, (
+            "the full branches must not forward scan_type to a pipeline that "
+            "does not accept it (run_album_pipeline TypeError)"
+        )
+
+    def test_targeted_runner_still_receives_scan_type(self, monkeypatch):
+        # run_popularity_album_scan / run_popularity_artist_scan DO accept
+        # scan_type (their mode selector) — forwarding must be preserved.
+        TestGuardAndLaunchBehaviour._patch(monkeypatch, scan_active=False)
+        ran: dict[str, Any] = {}
+
+        def _targeted(artist, *, force=False, scan_type="popularity"):
+            ran["artist"] = artist
+            ran["force"] = force
+            ran["scan_type"] = scan_type
+
+        from routes.scan_routes._common import guard_and_launch_popularity_scan
+
+        started = guard_and_launch_popularity_scan(
+            _targeted, "Artist", force=True, scan_type="finalise"
+        )
+        assert started is True
+        _wait_for(lambda: "artist" in ran)
+        assert ran["scan_type"] == "finalise"
+        assert ran["force"] is True
+
+    def test_the_registry_records_the_full_scan_type(self, monkeypatch):
+        # Even though scan_type is dropped from the runner's kwargs, it must
+        # still land in the runtime registry as the type label.
+        calls = TestGuardAndLaunchBehaviour._patch(monkeypatch, scan_active=False)
+
+        from routes.scan_routes._common import guard_and_launch_popularity_scan
+
+        started = guard_and_launch_popularity_scan(
+            lambda *a, **k: None, "Artist", scan_type="full"
+        )
+        assert started is True
+        _wait_for(lambda: len(calls["set_runtime"]) > 0)
+        # The mock records positional args: set_runtime("popularity", {…}).
+        _registered = calls["set_runtime"][0][0][1]
+        assert _registered.get("type") == "full"
+
+
 def _wait_for(condition, timeout: float = 5.0) -> None:
     """Poll a condition with a hard ceiling (tests spawn real threads)."""
     deadline = time.monotonic() + timeout
