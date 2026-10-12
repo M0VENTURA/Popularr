@@ -71,6 +71,7 @@ TABLES_TO_ENSURE: dict[str, str] = {
             lastfm_tags JSONB,
             source TEXT DEFAULT 'bulk', updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             recording_mbid TEXT,
+            release_track_title TEXT,
             CONSTRAINT uq_track_popularity_artist_title UNIQUE (artist, title)
         )
     """,
@@ -392,6 +393,14 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         # persisted at all. Listing it here makes the bootstrap's column sync
         # repair the table independently of the migration state.
         "recording_mbid": "TEXT",
+        # Migration 020 adds this column: the RELEASE track title at the
+        # position a row's identity was resolved from. The runner only
+        # TRUSTS a cached album-tracklist identity when this title still
+        # corroborates the LOCAL track title — a row cached from a different
+        # EDITION of the album (a 46-track single disc vs an 80-track local
+        # folder) carries no corroboration and is re-resolved once instead of
+        # being re-applied forever.
+        "release_track_title": "TEXT",
     },
     "scan_history": {
         "scan_type": "TEXT", "artist": "TEXT", "album": "TEXT", "status": "TEXT", "message": "TEXT",

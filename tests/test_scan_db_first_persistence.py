@@ -56,6 +56,7 @@ def pop_cache_db(tmp_path, monkeypatch):
                 source TEXT DEFAULT 'bulk',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 recording_mbid TEXT,
+                release_track_title TEXT,
                 CONSTRAINT uq_track_popularity_artist_title UNIQUE (artist, title)
             )
         """))

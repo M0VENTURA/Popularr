@@ -70,6 +70,7 @@ from services.popularity.popularity_math import (
     reanchor_scores_to_album_relative,
 )
 from services.popularity.popularity_sources import (
+    _position_title_corroborates,
     album_recording_batch_key,
     get_lastfm_artist_max_listeners,
     get_listenbrainz_album_tracklist_with_release,
@@ -705,6 +706,27 @@ def _collapse_album_mb_batch(mb_batch: dict[str, dict[str, Any]], track_contexts
     for _meta in (mb_batch or {}).values():
         if _meta and str(_meta.get("album") or "").strip():
             _meta["album"] = canonical
+
+
+def _cached_identity_corroborates(
+    local_title: str,
+    entry: dict[str, Any] | None,
+) -> bool:
+    """Whether a cached ``album_tracklist`` identity can be trusted WITHOUT
+    re-running the per-album ListenBrainz tracklist pass.
+
+    The cached row is trusted only when it carries the RELEASE title the
+    identity was resolved from (``release_track_title``, added in migration
+    020) AND that title still corroborates the LOCAL title. Rows written
+    before the column existed, and rows cached from a DIFFERENT edition of the
+    album (the positional poison), have no corroboration → the caller re-runs
+    the (cheap) pass, which either re-persists a valid identity or drops the
+    stale one in the per-row merge below.
+    """
+    rel_title = str((entry or {}).get("release_track_title") or "").strip()
+    if not rel_title:
+        return False
+    return bool(_position_title_corroborates(local_title, rel_title))
 
 
 def _build_album_recording_batch(
@@ -2528,6 +2550,20 @@ def run_scan(
                             if _entry.get("source") != "album_tracklist" or not _entry.get("recording_mbid"):
                                 _needs_album_lb = True
                                 break
+                            # ⭐ A cached album-tracklist identity is trusted ONLY
+                            # when its stored RELEASE title still corroborates
+                            # the local title. Rows cached from a DIFFERENT
+                            # edition of the album (an 80-track local folder
+                            # against a 46-track stored release — the
+                            # "Alternative 90s" positional poison) carry no
+                            # corroboration, and rows written before the
+                            # ``release_track_title`` column existed have none
+                            # either: re-run the (cheap) pass once, which
+                            # either re-persists a valid identity or drops the
+                            # stale one.
+                            if not _cached_identity_corroborates(_t["title"], _entry):
+                                _needs_album_lb = True
+                                break
 
                     if _needs_album_lb:
                         _clean_album = _sanitize_release_name(album)
@@ -2559,6 +2595,24 @@ def run_scan(
                             if _entry and _entry.get("recording_mbid"):
                                 _cur["recording_mbid"] = _entry.get("recording_mbid")
                                 _cur["release_track_title"] = _entry.get("release_track_title") or ""
+                            elif _cur.get("source") == "album_tracklist":
+                                # ⭐ The fresh pass has NO identity for this row
+                                # (its release no longer corroborates this
+                                # position — a different edition, or a
+                                # positional alias the source gate now refuses
+                                # to create). The PREVIOUS scan may still have
+                                # cached one: drop the stale identity here so
+                                # the batch and the per-track search resolve
+                                # from the track itself, and clear the source
+                                # marker so the next scan re-runs the pass
+                                # instead of trusting the stale row.
+                                _cur.pop("recording_mbid", None)
+                                _cur.pop("release_track_title", None)
+                                _cur["source"] = ""
+                                log_unified(
+                                    f"[scan_runner] Album-tracklist identity dropped — release no longer "
+                                    f"corroborates title='{_t.get('title')}' ({artist} - {album})"
+                                )
 
                             if _entry and _entry.get("listenbrainz_listens"):
                                 # ⚠️ MAX, not assignment. For a compilation the
@@ -2589,23 +2643,31 @@ def run_scan(
                                     f"(release={_rel_listens}, kept={_lb_won})"
                                 )
                             if _album_release_mbid:
-                                _cur["_album_tracklist"] = True
-                                _cur["source"] = "album_tracklist"
-                                _cache_rows.append({
-                                    "artist": artist,
-                                    "title": str(_t["title"]),
-                                    "lastfm_listeners": int(_cur.get("lastfm_listeners") or 0),
-                                    "lastfm_playcount": int(_cur.get("lastfm_playcount") or 0),
-                                    "listenbrainz_listens": int(_cur.get("listenbrainz_listens") or 0),
-                                    "listenbrainz_users": int(_cur.get("listenbrainz_users") or 0),
-                                    "source": "album_tracklist",
-                                    # Persist the IDENTITY too (audit G3): the
-                                    # runner's guard above skips the whole LB
-                                    # tracklist lookup when the seeded entry
-                                    # carries source + mbid, so the mapping
-                                    # resolved NOW serves every later pass.
-                                    "recording_mbid": str(_cur.get("recording_mbid") or "").strip() or None,
-                                })
+                                if _entry and _entry.get("recording_mbid"):
+                                    _cur["_album_tracklist"] = True
+                                    _cur["source"] = "album_tracklist"
+                                    _cache_rows.append({
+                                        "artist": artist,
+                                        "title": str(_t["title"]),
+                                        "lastfm_listeners": int(_cur.get("lastfm_listeners") or 0),
+                                        "lastfm_playcount": int(_cur.get("lastfm_playcount") or 0),
+                                        "listenbrainz_listens": int(_cur.get("listenbrainz_listens") or 0),
+                                        "listenbrainz_users": int(_cur.get("listenbrainz_users") or 0),
+                                        "source": "album_tracklist",
+                                        # Persist the IDENTITY too (audit G3): the
+                                        # runner's guard above skips the whole LB
+                                        # tracklist lookup when the seeded entry
+                                        # carries source + mbid, so the mapping
+                                        # resolved NOW serves every later pass.
+                                        "recording_mbid": str(_cur.get("recording_mbid") or "").strip() or None,
+                                        # Persist WHICH release title the identity
+                                        # was resolved from (migration 020): the
+                                        # guard corroborates it against the LOCAL
+                                        # title before trusting the row — a row
+                                        # cached from a different EDITION is
+                                        # re-resolved, not re-applied.
+                                        "release_track_title": str(_cur.get("release_track_title") or "").strip() or None,
+                                    })
 
                         if _cache_rows:
                             try:

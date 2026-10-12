@@ -27,7 +27,12 @@ from api_clients.listenbrainz import (
     get_listenbrainz_score as lb_get_listenbrainz_score,
     get_release_metadata_batch as lb_get_release_metadata_batch,
 )
-from helpers.normalization_service import strip_cover_attribution, strip_diacritics
+from helpers.normalization_service import (
+    strip_cover_attribution,
+    strip_diacritics,
+    strip_featured_artist,
+    titles_match_for_review,
+)
 from services.popularity.popularity_matching import (
     ARTIST_JOIN_RE,
     choose_best_provider_counts,
@@ -413,6 +418,74 @@ def _index_release_tracklist(
                     pos_entry["mbids"].append(rec_mbid)
 
 
+def _position_title_corroborates(local_title: str, release_title: str) -> bool:
+    """Whether the release's title at a position plausibly names the SAME song
+    as the local title.
+
+    The position alias exists for a local title that lost its version marker —
+    dArtagnan's "Farewell (feat. Patty Gurdy)" against the release's
+    "Farewell [Unplugged Version]": the release's title at that position is
+    then the same song with a marker, and the marker-tolerant comparison below
+    (feat. credits stripped, then version/cover annotations ignored) still
+    equates the two ("farewell" == "farewell").
+
+    When the cores are DIFFERENT songs the numbering is a COINCIDENCE, not an
+    identity. A different EDITION of an album (a 46-track single disc against
+    an 80-track local folder) numbers its tracks differently, so local#N is a
+    DIFFERENT song than release#N. Reported: an 80-track "Alternative 90s"
+    folder carried a stored release MBID for the 46-track edition and the
+    position pass aliased local#10 "Where Is My Mind?" to release#10 "Happy"
+    (Ned's Atomic Dustbin), #8 "Song 2" to "What You Do to Me" (Teenage
+    Fanclub) and #18 "Buddy Holly" to "She Know's She's Wrong" (Jellyfish) —
+    three wrong recordings, whose ListenBrainz counts were then scored as the
+    local songs'.
+
+    Deliberately conservative: a cover marker on either side is a DIFFERENT
+    recording (not the same song with a marker), and a title that normalises
+    away to nothing cannot corroborate anything — both fall back to the
+    per-track search rather than silently receiving a stranger's identity.
+    """
+    if not local_title or not release_title:
+        return False
+    _local = strip_featured_artist(str(local_title)) or str(local_title)
+    _release = strip_featured_artist(str(release_title)) or str(release_title)
+    return titles_match_for_review(_local, _release)
+
+
+def _position_alias_allowed(
+    local_title: str,
+    release_title: str | None,
+    *,
+    local_track_count: int,
+    release_track_count: int,
+) -> bool:
+    """Whether a position alias may claim an identity for ``local_title``.
+
+    Two independent paths admit an alias:
+
+    1. **Title corroboration** — the release's title at that position is the
+       SAME song with a marker/feat difference (``_position_title_corroborates``).
+       This is the version-marker case the alias exists for.
+
+    2. **Exact same-album count** — the release holds EXACTLY as many tracks
+       as the local album. That is the translated-title case: the local
+       spelling and the release spelling are genuinely incomparable (Stray
+       Kids' release lists "삐처리" where the library stores the English
+       "BLEEP"), so title cannot corroborate — but a release with the same
+       track count IS the same album, and disc+position+length is the
+       designed answer (the motivating regression test).
+
+    When BOTH fail, the numbering is a coincidence of a DIFFERENT edition:
+    an 80-track "Alternative 90s" folder carrying a stored release MBID for
+    the 46-track single disc aliased local#10 "Where Is My Mind?" to
+    release#10 "Happy" — position+duration alone cannot tell that apart, so
+    no alias is emitted and the track falls back to the per-track search.
+    """
+    if _position_title_corroborates(local_title, release_title):
+        return True
+    return int(local_track_count) == int(release_track_count)
+
+
 def get_listenbrainz_album_tracklist_with_release(
     artist: str,
     album: str,
@@ -510,6 +583,13 @@ def get_listenbrainz_album_tracklist_with_release(
             }
 
     used_pos_keys: set[tuple[int, int]] = set()
+    # # of LOCAL rows with a title vs # of positions on the release tracklist.
+    # A DIFFERENT edition of an album (an 80-track local folder against a
+    # 46-track stored release) never matches; the SAME album does. Equal
+    # counts are the only evidence a position alias can rely on when the
+    # title itself is incomparable (a translated/alternate-script title).
+    _local_track_count = sum(1 for _t in tracks if str(_t.get("title") or "").strip())
+    _release_track_count = len(position_index)
     # How many LOCAL rows share each normalised title. A title-keyed identity is
     # only authoritative when it can name ONE row — two local rows titled
     # identically (dArtagnan's "Helden X Hymnen" at positions 1 and 15, the
@@ -572,6 +652,21 @@ def get_listenbrainz_album_tracklist_with_release(
 
         pos_entry = position_index.get(pos_key)
         if not pos_entry or not pos_entry["mbids"]:
+            continue
+
+        if not _position_alias_allowed(
+            local_title,
+            pos_entry.get("title"),
+            local_track_count=_local_track_count,
+            release_track_count=_release_track_count,
+        ):
+            logger.debug(
+                "Position match rejected — release title is a different song",
+                local_title=local_title,
+                release_track_title=pos_entry.get("title"),
+                disc=local_disc,
+                track=local_pos,
+            )
             continue
 
         mb_len_ms = pos_entry.get("length_ms")
@@ -688,6 +783,21 @@ def get_listenbrainz_album_tracklist_with_release(
 
         row_pos_entry = position_index.get((row_disc, row_pos))
         if not row_pos_entry or not row_pos_entry["mbids"]:
+            continue
+
+        if not _position_alias_allowed(
+            local_title,
+            row_pos_entry.get("title"),
+            local_track_count=_local_track_count,
+            release_track_count=_release_track_count,
+        ):
+            logger.debug(
+                "Per-row position alias rejected — release title is a different song",
+                local_title=local_title,
+                release_track_title=row_pos_entry.get("title"),
+                disc=row_disc,
+                track=row_pos,
+            )
             continue
 
         row_len_ms = row_pos_entry.get("length_ms")

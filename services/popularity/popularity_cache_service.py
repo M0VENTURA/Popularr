@@ -124,6 +124,13 @@ def _row_to_entry(row: dict[str, Any]) -> dict[str, Any]:
         # per-album ListenBrainz tracklist lookup when the mapping is already
         # on the row.
         entry["recording_mbid"] = _mbid
+    _rel_title = str(row.get("release_track_title") or "").strip()
+    if _rel_title:
+        # The RELEASE's title at the position the identity was resolved from:
+        # the runner corroborates it against the LOCAL title before trusting
+        # the cached identity (a row cached from a DIFFERENT edition of the
+        # album must be re-resolved, not re-applied).
+        entry["release_track_title"] = _rel_title
     return entry
 
 

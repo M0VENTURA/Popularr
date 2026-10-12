@@ -15,6 +15,23 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _reset_shared_mb_client(monkeypatch):
+    """Each test fakes ``MusicBrainzHttpClient`` via monkeypatch, but
+    ``get_shared_mb_client()`` caches the constructed client in a process-wide
+    singleton (``_SHARED_MB_CLIENT``). Without a reset, the FIRST test's fake
+    leaks into every later test in the process and its release tracklist
+    replaces the later fixture's — the position gate made that order-dependent
+    failure visible (the leaked CEREMONY/삐처리 tracklist answered a HERO
+    fixture with the wrong release)."""
+    import services.enrichment.musicbrainz_service as _mbs
+
+    monkeypatch.setattr(_mbs, "_SHARED_MB_CLIENT", None)
+    monkeypatch.setattr(_mbs, "_shared_mb_service", None)
+    monkeypatch.setattr(_mbs, "_service", None)
+    yield
+
+
 class _FakeMBClient:
     """Stands in for MusicBrainzHttpClient.get_release tracklist."""
 
@@ -52,8 +69,8 @@ def _run_tracklist(monkeypatch, media, local_tracks, release_mbid="rel-karma"):
     # the fake MusicBrainz tracklist below is the source of truth.
     monkeypatch.setattr(ps, "lb_get_release_metadata_batch", lambda *a, **k: {})
     monkeypatch.setattr(
-        "api_clients.musicbrainz_http.MusicBrainzHttpClient",
-        lambda **kwargs: _FakeMBClient(media),
+        "services.enrichment.musicbrainz_service.get_shared_mb_client",
+        lambda *a, **k: _FakeMBClient(media),
     )
     monkeypatch.setattr(
         ps,
