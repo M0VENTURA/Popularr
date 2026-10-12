@@ -15,6 +15,9 @@ from typing import Any, Callable
 import structlog
 from quart import flash, jsonify, redirect, request, url_for
 
+from helpers.logging_config import log_unified
+from services.scanning.runtime_state import scan_lock
+
 logger = structlog.get_logger(__name__)
 
 
@@ -115,6 +118,122 @@ def assert_callable_accepts_kwargs(target: Callable, kwargs: dict[str, Any]) -> 
             f"argument {unexpected[0]!r}. The background thread would have died "
             f"before running any code. Accepted: {sorted(accepted)}"
         )
+
+
+def guard_and_launch_popularity_scan(
+    runner: Callable,
+    *args: Any,
+    **kwargs: Any,
+) -> bool:
+    """Start a popularity-family scan under the duplicate-run guard.
+
+    Returns True when the scan was started, False when one is already running
+    (mirrors the dashboard's ``/api/popularity/run`` duplicate protection).
+
+    THE SINGLE GATE
+    ---------------
+    Every popularity-scan trigger shares ONE guard so no path can start a
+    second scan while one is already running — the dashboard API, the
+    scheduler, the targeted artist/album routes and now the album-page "full"
+    scan (which used to launch ``run_album_pipeline`` with NO guard at all:
+    a second trigger overlapped the first, both marked the SAME shared
+    ``popularity_scan`` progress row running, the runner's skip-guards saw the
+    other generation's rows as fresh and self-froze, and the reported
+    "Popularity Scan - no tracks processed: 1 album(s) exceeded their
+    per-album time budget" was the result of two generations of the SAME
+    album grinding on the shared 1 req/s MusicBrainz budget).
+
+    Guard order:
+      * in-process runtime registry first (cheap);
+      * cross-process shared scan-state rows second (a scan running in
+        ANOTHER hypercorn worker is invisible to the per-process registry),
+      * with the stale-row SELF-HEAL — if the DB says a scan is running but no
+        LIVE worker in THIS process owns it, the row is a phantom (a worker
+        crashed before its ``finally``, or a previous process died mid-scan).
+        Clear it so targeted scans are never permanently blocked.
+    """
+    from services.scanning.runtime_state import (
+        clear_runtime,
+        is_runtime_running,
+        set_runtime,
+    )
+
+    with scan_lock:
+        # In-process guard first (cheap).  Then the cross-process guard.
+        if is_runtime_running("popularity"):
+            return False
+
+        # Cross-process: if the DB says a scan is running but no LIVE worker in
+        # THIS process owns it, the row is stale (a worker crashed before its
+        # finally, or a previous process was killed mid-scan) — self-heal it so
+        # targeted scans are never permanently blocked by a phantom "already
+        # running" (mirrors the dashboard API path).
+        from services.scanning.pipelines.popularity_pipeline import is_popularity_scan_active
+        from services.scanning.runtime_state import get_runtime
+        from services.scanning.scan_state import (
+            clear_progress_file,
+            get_scan_progress_path,
+            read_progress_file,
+        )
+
+        if is_popularity_scan_active():
+            _live_owner = False
+            for _scan_type in ("popularity_scan", "full_scan"):
+                _state = read_progress_file(get_scan_progress_path(_scan_type))
+                if _state.get("is_running"):
+                    _rt = get_runtime(_scan_type.replace("_scan", ""))
+                    if _rt is not None:
+                        _owner_thread = _rt.get("thread") if isinstance(_rt, dict) else _rt
+                        if is_process_alive(_owner_thread):
+                            _live_owner = True
+                            break
+            if _live_owner:
+                return False
+            # No live owner — the DB row is stale.  Reset it so THIS scan
+            # starts cleanly instead of being permanently blocked.
+            try:
+                for _scan_type in ("popularity_scan", "full_scan"):
+                    _state = read_progress_file(get_scan_progress_path(_scan_type))
+                    if _state.get("is_running"):
+                        clear_progress_file(get_scan_progress_path(_scan_type))
+                log_unified("Cleared stale scan-state rows (phantom 'already running') before starting scan")
+            except Exception:
+                pass
+
+        def _worker() -> None:
+            try:
+                runner(*args, **kwargs)
+            except Exception as exc:
+                # A daemon-thread exception would otherwise be swallowed by
+                # ``run_async`` (no handler) — the route returns "started",
+                # the worker dies silently, and the Unified Scan log shows
+                # nothing at all for the requested artist.  Surface it so the
+                # failure is diagnosable (mirrors the dashboard API worker).
+                import traceback
+
+                log_unified(f"[POPULARITY] Targeted worker failed: {exc}")
+                logger.error(
+                    "[POPULARITY] Targeted worker failed",
+                    error=str(exc),
+                    traceback=traceback.format_exc(),
+                )
+                try:
+                    from services.scanning.scan_history_service import record_scan
+                    record_scan(
+                        str(kwargs.get("scan_type") or "popularity"),
+                        "failed",
+                        message=f"targeted scan failed: {exc}",
+                        artist=str(args[0] if args else kwargs.get("artist") or ""),
+                        album="",
+                    )
+                except Exception:
+                    pass
+            finally:
+                clear_runtime("popularity")
+
+        thread = run_async(_worker)
+        set_runtime("popularity", {"thread": thread, "type": kwargs.get("scan_type") or "popularity"})
+    return True
 
 
 def run_async(target: Callable, *args, daemon: bool = True, **kwargs) -> threading.Thread:
