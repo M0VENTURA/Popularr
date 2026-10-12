@@ -1556,13 +1556,14 @@
           <label class="form-label form-label-sm" for="pop_album_timeout_seconds">Per-Album Scan Timeout (seconds)</label>
           <input type="number" step="60" min="0" max="21600" class="form-control form-control-sm" id="pop_album_timeout_seconds" placeholder="900" value="{{ config.get('popularity', {}).get('album_timeout_seconds', 900) }}">
           <small class="form-text text-muted">
-            Safety net for a <strong>hung album</strong> during a scan. When a single album exceeds
-            this it is <strong>skipped</strong>, and the scan continues with that artist's
-            <strong>remaining albums</strong> — only the stuck album is lost.
-            This is the budget that catches a stuck call, because a hang always looks like
-            <em>one album</em> not finishing. Lower it to bound a bad album more tightly.
-            Set to <strong>0</strong> to disable it (never skip an album).
-            Default: <strong>900</strong> (15 min)
+            Safety net for a <strong>hung album</strong> during a scan. This is the
+            <strong>base (minimum)</strong> budget: a small album uses it exactly, and a
+            <strong>large album scales up</strong> (about 20&nbsp;s per track) so a big
+            compilation that must look up every track online is never cut off mid-progress.
+            When an album still exceeds its budget it is <strong>skipped</strong>, and the scan
+            continues with that artist's <strong>remaining albums</strong> — only the stuck
+            album is lost. Set to <strong>0</strong> to disable it (never skip an album).
+            Default: <strong>900</strong> (15 min base)
           </small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">

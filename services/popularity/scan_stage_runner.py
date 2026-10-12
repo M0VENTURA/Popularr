@@ -265,6 +265,35 @@ def _resolve_album_budget() -> float | None:
     return None if resolved <= 0 else float(resolved)
 
 
+#: Extra per-track allowance added to the per-album budget for LARGE albums.
+#: An album with no release/recording MBIDs does a FULL per-track online
+#: lookup (MusicBrainz 1 req/s + Last.fm + Discogs + per-track cover
+#: detection), so an 80-track compilation legitimately needs ~20 minutes of
+#: wall-clock. The flat 900 s budget cut such an album at 15 min *mid-
+#: progress* — still working, still logging [TRACK] lines — and the runner
+#: then discarded every finished track's star rating ("0 tracks processed",
+#: "Album ... skipped (exceeded 900.0s budget)"): the reported "no-MBID
+#: albums fail at the end before the finalise stage". The budget must bound
+#: a genuinely HUNG call, not confuse "slow album" with "stuck one".
+_ALBUM_BUDGET_PER_TRACK_SECONDS = 20.0
+
+
+def _scale_album_budget(base: float | None, track_count: int) -> float | None:
+    """Per-album budget for a phase processing *track_count* tracks.
+
+    ``base`` is the configured ``album_timeout_seconds`` (``None`` when the
+    budget is disabled — the disabled state passes through untouched, so ``0``
+    keeps meaning "never skip"). The configured value is the FLOOR: albums
+    whose ``track_count * 20s`` exceeds it get the scaled allowance, small
+    albums keep the base exactly. A fast album never reaches the ceiling, so
+    scaling up is free for the common case — it only helps the large/slow
+    albums the flat cap was silently killing.
+    """
+    if base is None or track_count <= 0:
+        return base
+    return float(max(base, _ALBUM_BUDGET_PER_TRACK_SECONDS * int(track_count)))
+
+
 #: Album-phase workers that hit the per-album budget and are STILL RUNNING.
 #: One module-level list on purpose: the three ``_bounded_album_phase`` call
 #: sites live in different scopes, and the cap only means something if it is a
@@ -2878,7 +2907,16 @@ def run_scan(
                 album=album,
                 section="album_track_phase",
                 log_context={"artist": artist, "album": album},
-                seconds=_album_budget,
+                # SCALE the per-album budget by the track count. A large album
+                # (a compilation with no release MBIDs, say) legitimately needs
+                # a full per-track online lookup per track; a flat 900 s cap
+                # cuts it mid-progress and the runner then discards every
+                # finished track's star rating (the reported "no-MBID albums
+                # fail at the end before finalise"). ``_album_budget`` stays the
+                # configured FLOOR, so this only ever gives slow albums room —
+                # the enrich/post-singles phases keep the base (they have their
+                # own per-artist prefetch budget).
+                seconds=_scale_album_budget(_album_budget, len(_track_jobs)),
             )
 
             # ⚠️ The track phase is where most of an album's wall-clock goes,
