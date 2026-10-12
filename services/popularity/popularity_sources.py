@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import threading
+from collections import Counter
 from typing import Any
 
 import structlog
@@ -509,6 +510,17 @@ def get_listenbrainz_album_tracklist_with_release(
             }
 
     used_pos_keys: set[tuple[int, int]] = set()
+    # How many LOCAL rows share each normalised title. A title-keyed identity is
+    # only authoritative when it can name ONE row — two local rows titled
+    # identically (dArtagnan's "Helden X Hymnen" at positions 1 and 15, the
+    # unplugged rendition having lost its marker) still need their position
+    # aliases, because title alone cannot separate them.
+    _local_title_counts: Counter = Counter()
+    for _t in tracks:
+        _k = normalize_for_aggregation(_t.get("title") or "")
+        if _k:
+            _local_title_counts[_k] += 1
+
     for t in tracks:
         local_title = t.get("title")
         if not local_title:
@@ -632,6 +644,34 @@ def get_listenbrainz_album_tracklist_with_release(
             continue
         local_key = normalize_for_aggregation(local_title)
         if not local_key:
+            continue
+
+        # ⚠️ A title-keyed identity is authoritative ONLY when it can name a
+        # single row. Skip the position alias when the local title is unique
+        # (one local row) AND the release resolves that title uniquely.
+        #
+        # This loop was written for the SAME-TITLED LOCAL pair case
+        # (dArtagnan's two "Helden X Hymnen" rows at positions 1 and 15 — the
+        # unplugged rendition lost its marker — where title alone cannot
+        # separate them), but it emitted a position alias for EVERY row. On
+        # a sparse library that is wrong by construction: when the local
+        # folder is MISSING tracks (queued/downloading, so the files are
+        # numbered 1..M while those recordings sit at release positions
+        # k..k+M-1), the LOCAL position no longer equals the RELEASE position.
+        # Reported: "The Power of Love" sat at local#5 (Love Shack, release#5,
+        # was still queued), so this loop aliased it to Love Shack's recording
+        # and the batch proposed changing the title to "Love Shack".
+        #
+        # Two local rows sharing one title still fall through
+        # (``_local_title_counts[local_key] > 1``), and titles absent from the
+        # release (the version-marker case) get no title-keyed identity at
+        # all, so their position aliases are still emitted.
+        _existing_title = out.get(local_key) or {}
+        if (
+            _existing_title.get("recording_mbid")
+            and _existing_title.get("title_is_unique")
+            and _local_title_counts.get(local_key, 0) <= 1
+        ):
             continue
 
         try:
