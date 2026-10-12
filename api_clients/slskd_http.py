@@ -415,14 +415,74 @@ class SlskdHttpClient:
             logger.debug("Failed to get application state", error=str(exc))
             return {}
 
+    def get_server_state(self) -> dict[str, Any]:
+        """Return the slskd server sub-state across slskd versions.
+
+        Where the connection state lives differs by version, and the
+        ``state`` field is a C# enum-flags STRING (``"Connected, LoggedIn"``)
+        not always a boolean — see ``is_connected``:
+
+          * newer:  ``GET /application/state`` -> ``{..., "server": {...}}``
+          * older:  ``GET /server``            -> the server object itself
+          * older:  ``GET /application``       -> ``{..., "server": {...}}``
+
+        ``application/state`` is probed first because it is the current
+        shape; the ``/server``/``/application`` fallbacks mirror the ORIGINAL
+        client (``old_system/api_clients/slskd.py::get_server_state``),
+        which is what historical (and this) deployment answered.
+        """
+        state = self.get_state()
+        if isinstance(state, dict):
+            server = state.get("server")
+            if isinstance(server, dict) and server:
+                return server
+            # Some versions carry the server fields at the top level.
+            if state.get("state") or state.get("isConnected") is not None:
+                return state
+        for endpoint in ("server", "application"):
+            try:
+                data = self.get_json(endpoint, default={})
+            except Exception as exc:
+                logger.debug("Failed to get slskd server state", endpoint=endpoint, error=str(exc))
+                continue
+            if not isinstance(data, dict):
+                continue
+            if endpoint == "application":
+                data = data.get("server")
+            if isinstance(data, dict) and data:
+                return data
+        return {}
+
     def is_connected(self) -> bool:
-        """Return True when the Soulseek client is connected and logged in."""
-        try:
-            state = self.get_state()
-            server = state.get("server", {}) if isinstance(state, dict) else {}
-            return bool(server.get("isConnected") or server.get("isLoggedIn"))
-        except Exception:
+        """Return True when the Soulseek client is connected and logged in.
+
+        The server state reports connection BOTH ways across slskd versions:
+
+          * explicit booleans — ``isConnected`` (modern) / ``isLoggedIn``;
+          * a C# enum-flags STRING in ``state`` — ``"Connected, LoggedIn"`` /
+            ``"Connected"`` / ``"Disconnected"`` (the shape the ORIGINAL
+            client parsed; the hardening pass read ONLY the booleans, so a
+            healthy server reporting the flag string read as *disconnected*
+            and every search was skipped — the regression restored here).
+
+        Preference order mirrors the original client: an explicit
+        ``isConnected`` boolean is authoritative when present, then
+        ``isLoggedIn``, then the flag string. ``False`` / ``{}`` (endpoint
+        unreachable or no state) means NOT connected — that is what stops the
+        queue recording ``no_results`` + a 24h backoff while slskd is down.
+        """
+        server = self.get_server_state()
+        if not isinstance(server, dict) or not server:
             return False
+        if "isConnected" in server:
+            return bool(server["isConnected"])
+        if "isLoggedIn" in server:
+            return bool(server["isLoggedIn"])
+        raw = str(server.get("state") or server.get("status") or "").strip().lower()
+        if not raw:
+            return False
+        flags = {f.strip() for f in raw.split(",") if f.strip()}
+        return bool(flags.intersection({"connected", "loggedin"}))
 
 
 # =============================================================================
