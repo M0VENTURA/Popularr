@@ -200,6 +200,113 @@ def discard_album_recommendations(artist: str, album: str) -> dict[str, Any]:
     return {"success": True, "cleared": cleared}
 
 
+def stash_track_title_recommendation(
+    *,
+    track_id: str,
+    artist: str,
+    album: str,
+    current_title: str,
+    proposed_title: str,
+    release_mbid: str = "",
+    release_title: str = "",
+) -> bool:
+    """Stash ONE track's unconfirmed MusicBrainz title proposal.
+
+    The scan auto-applies a release-tracklist title ONLY when the match was
+    position + length verified. When it was NOT (a title-keyed fallback, or a
+    position match whose length was never verified), the title is offered for
+    review instead: this writes a ``title`` change onto the track's
+    ``pending_mb_updates`` envelope, which the dashboard's "metadata requiring
+    approval" panel lists.
+
+    MERGES into an existing envelope (a track may already carry
+    recommendations from a prior recommend-only scan) and respects
+    ``mb_ignored_fields``. Never clears the album — unlike
+    ``stash_album_recommendations``, which owns the whole-album lifecycle.
+    Returns True when a change was actually written.
+    """
+    track_id = _as_text(track_id)
+    current_title = _as_text(current_title)
+    proposed_title = _as_text(proposed_title)
+    if not track_id or not proposed_title:
+        return False
+
+    try:
+        with db_session() as session:
+            row = session.execute(
+                text("""
+                    SELECT pending_mb_updates, mb_ignored_fields
+                    FROM tracks
+                    WHERE CAST(id AS TEXT) = :track_id
+                """),
+                {"track_id": track_id},
+            ).fetchone()
+            if not row:
+                return False
+            mapping = dict(row._mapping)
+            ignored = mapping.get("mb_ignored_fields")
+            if ignored:
+                try:
+                    parsed = json.loads(ignored) if isinstance(ignored, str) else ignored
+                    if isinstance(parsed, list) and "title" in {str(i) for i in parsed}:
+                        return False
+                except (TypeError, ValueError):
+                    pass
+
+            envelope: dict[str, Any] = {}
+            raw = mapping.get("pending_mb_updates")
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        envelope = parsed
+                except (TypeError, ValueError):
+                    envelope = {}
+
+            if envelope.get("version") not in (None, _ENVELOPE_VERSION):
+                # Unknown envelope: never touch it — writing over a shape we do
+                # not understand could destroy a user's saved decisions.
+                return False
+
+            changes = [
+                c for c in (envelope.get("changes") or [])
+                if isinstance(c, dict) and str(c.get("field") or "") != "title"
+            ]
+            changes.append({
+                "field": "title",
+                "label": "Title",
+                "current": current_title,
+                "proposed": proposed_title,
+            })
+
+            envelope.update({
+                "version": _ENVELOPE_VERSION,
+                "release_mbid": _as_text(release_mbid) or _as_text(envelope.get("release_mbid")),
+                "release_title": _as_text(release_title) or _as_text(envelope.get("release_title")),
+                "stashed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "changes": changes,
+            })
+
+            session.execute(
+                text("""
+                    UPDATE tracks
+                    SET pending_mb_updates = :payload,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE CAST(id AS TEXT) = :track_id
+                """),
+                {"payload": json.dumps(envelope), "track_id": track_id},
+            )
+            session.commit()
+            return True
+    except Exception as exc:
+        logger.warning(
+            "Could not stash track title recommendation",
+            track_id=track_id,
+            artist=artist, album=album, error=str(exc),
+        )
+        return False
+
+
 def fetch_album_recommendations(artist: str, album: str) -> dict[str, Any]:
     """Read the album's stashed recommendations for rendering.
 

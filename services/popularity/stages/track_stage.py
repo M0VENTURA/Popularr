@@ -885,6 +885,11 @@ def _resolve_track_mb_metadata(
     _force_meta = bool(force_meta) or _needs_enrichment
 
     mb_data = None
+    # An unconfirmed batch title match (see the deferred-to-approval branch
+    # below). Carried out so ``process_track`` can stash it onto
+    # ``tracks.pending_mb_updates`` — the dashboard's "metadata requiring
+    # approval" panel.
+    _title_recommendation: dict[str, Any] | None = None
     if title and artist:
         _batch_mb = options.get("mb_batch_metadata") or {}
         for _batch_key in _album_recording_batch_keys(
@@ -1004,13 +1009,19 @@ def _resolve_track_mb_metadata(
                 # duration, not a title search — so promoting its title is the
                 # same trust the code already places in its recording MBID.
                 #
-                # Gate: only the batch identity; the local title must differ
-                # meaningfully; the track must not be frozen; the user must not
-                # have permanently ignored the title field (``mb_ignored_fields``
-                # — the Compare UI's Ignore button) and the enriched title must
-                # not be a placeholder.
+                # Gate: push the title ONLY when the match is CONFIRMED — the
+                # identity came from the position-qualified alias (the local
+                # track NUMBER matched a release position) AND the length guard
+                # VERIFIED both durations within 5s. A title-keyed fallback, or
+                # a position match whose length was never verified (either side
+                # missing), is "potentially wrong": the release title is then
+                # left as a RECOMMENDATION (stashed to the dashboard's
+                # "metadata requiring approval" panel) rather than auto-applied.
                 _release_title = _as_str(mb_data["title"]).strip()
                 _local_title = _as_str(track.get("title") or "").strip()
+                _title_match_confirmed = bool(
+                    (mb_data or {}).get("_title_match_confirmed")
+                )
                 if (
                     _from_batch
                     and not frozen_track
@@ -1019,6 +1030,7 @@ def _resolve_track_mb_metadata(
                     and _release_title.casefold() != _local_title.casefold()
                     and not _field_ignored_for_track(track, "title")
                     and _metadata_update_allowed()
+                    and _title_match_confirmed
                 ):
                     payload["title"] = _release_title
                     logger.info(
@@ -1026,6 +1038,38 @@ def _resolve_track_mb_metadata(
                         track_id=track_id,
                         old_title=_local_title,
                         new_title=_release_title,
+                    )
+                elif (
+                    _from_batch
+                    and not frozen_track
+                    and _release_title
+                    and _local_title
+                    and _release_title.casefold() != _local_title.casefold()
+                    and not _field_ignored_for_track(track, "title")
+                    and _metadata_update_allowed()
+                    and not _title_match_confirmed
+                ):
+                    # Unconfirmed match: NEVER rewrite the title. Offer it for
+                    # review so the dashboard's "metadata requiring approval"
+                    # panel can save/discard it.
+                    _title_recommendation = {
+                        "current": _local_title,
+                        "proposed": _release_title,
+                        "release_mbid": _as_str(
+                            mb_data.get("release_group_mbid")
+                            or mb_data.get("release_mbid")
+                            or ""
+                        ),
+                        "release_title": _as_str(
+                            mb_data.get("release_title") or ""
+                        ),
+                    }
+                    logger.info(
+                        "[MB] release tracklist title deferred to approval",
+                        track_id=track_id,
+                        old_title=_local_title,
+                        proposed_title=_release_title,
+                        reason="match not confirmed (track#/length)",
                     )
 
             _artist_mbid = mb_data.get("artist_mbid")
@@ -1117,6 +1161,7 @@ def _resolve_track_mb_metadata(
         ),
         "has_genres": _has_genres,
         "force_meta": _force_meta,
+        "title_recommendation": _title_recommendation,
     }
 
 
@@ -1334,6 +1379,35 @@ def process_track(
             _genre_lookup_artist = _mb_meta.get("artist")
             _genre_lookup_title = _mb_meta.get("title")
             update_payload.update(_mb_meta.get("payload") or {})
+
+            # An UNCONFIRMED release-tracklist title (a batch identity that was
+            # NOT position+length verified) must never be auto-applied — it is
+            # stashed for review instead, surfacing on the dashboard's
+            # "metadata requiring approval" panel. The stash is a per-track
+            # merge (never clears an album); skipped when metadata updating is
+            # recommend-only, where the album-level stash already handles it.
+            _title_rec = _mb_meta.get("title_recommendation")
+            if _title_rec:
+                try:
+                    from services.metadata.pending_update_service import (
+                        stash_track_title_recommendation,
+                    )
+
+                    stash_track_title_recommendation(
+                        track_id=track_id,
+                        artist=_as_str(_mb_meta.get("artist") or track_artist),
+                        album=_as_str(track.get("album") or album_context.get("album")),
+                        current_title=_as_str(_title_rec.get("current")),
+                        proposed_title=_as_str(_title_rec.get("proposed")),
+                        release_mbid=_as_str(_title_rec.get("release_mbid")),
+                        release_title=_as_str(_title_rec.get("release_title")),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Track title recommendation stash failed",
+                        track_id=track_id,
+                        error=str(exc),
+                    )
             
         if album_context.get("audiodb_genres"):
             update_payload["audiodb_genres"] = album_context["audiodb_genres"]

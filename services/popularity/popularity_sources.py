@@ -591,6 +591,11 @@ def get_listenbrainz_album_tracklist_with_release(
             "listenbrainz_users": users,
             "recording_mbid": pos_entry["mbids"][0],
             "release_track_title": str(pos_entry.get("title") or ""),
+            # True ONLY when BOTH lengths were known and within the 5s guard.
+            # The guard SKIPS when either side is missing, so a position
+            # match with unknown lengths is weaker — the caller must not treat
+            # its release title as confirmed.
+            "length_verified": bool(mb_len_ms and local_dur > 0),
         }
         used_pos_keys.add(pos_key)
         logger.info(
@@ -662,6 +667,11 @@ def get_listenbrainz_album_tracklist_with_release(
             "release_track_title": str(row_pos_entry.get("title") or ""),
             "local_disc_number": row_disc,
             "local_track_number": row_pos,
+            # True ONLY when BOTH lengths were known and within the 5s guard
+            # (the guard is SKIPPED when either side is missing). A position
+            # match whose length was never verified cannot confirm the release
+            # title for auto-application.
+            "length_verified": bool(row_len_ms and row_dur > 0),
         }
 
     if out:

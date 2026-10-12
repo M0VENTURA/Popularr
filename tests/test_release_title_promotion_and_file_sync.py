@@ -78,6 +78,8 @@ class TestReleaseTitleIsPromoted:
                     _batch_key("nct dream", "My First and Last", 1, 3): {
                         "recording_mbid": _mbid(3),
                         "title": "My First and Last (Chinese version)",
+                        # position (track 3, disc 1) + verified length = confirmed
+                        "_title_match_confirmed": True,
                     }
                 }
             },
@@ -131,6 +133,7 @@ class TestReleaseTitleIsPromoted:
                     _batch_key("nct dream", "My First and Last", 1, 3): {
                         "recording_mbid": _mbid(3),
                         "title": "My First and Last (Chinese version)",
+                        "_title_match_confirmed": True,
                     }
                 }
             },
@@ -167,6 +170,7 @@ class TestReleaseTitleIsPromoted:
                     _batch_key("artist", "Same Title", 1, 1): {
                         "recording_mbid": _mbid(1),
                         "title": "Same Title",
+                        "_title_match_confirmed": True,
                     }
                 }
             },
@@ -340,7 +344,7 @@ def test_runner_passes_corrected_title_ids_to_tag_sync() -> None:
 
     # And the collection loop reads the title_corrected flag off each result.
     assert any(
-        isinstance(n, ast.Attribute) and n.attr == "title_corrected" is False
+        isinstance(n, ast.Attribute) and n.attr == "title_corrected"
         for n in ast.walk(tree)
     ) or any(
         isinstance(n, ast.Constant) and n.value == "title_corrected"

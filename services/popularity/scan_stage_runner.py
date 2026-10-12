@@ -766,9 +766,15 @@ def _build_album_recording_batch(
         _track_number = _t.get("track_number")
 
         # The position-qualified alias first: it names THIS row's recording.
+        # ``_by_position`` is CRITICAL for the title-promotion gate — a
+        # position alias only exists when the track NUMBER matched a release
+        # position AND (when both lengths are known) the +/-5s duration guard
+        # passed. A title-keyed fallback below has NEITHER guarantee, so its
+        # release title must never be auto-applied.
         entry = (prefetched_popularity or {}).get(
             track_identity_key(_title_key, _disc, _track_number)
         ) or {}
+        _by_position = bool(entry.get("recording_mbid"))
 
         if not entry.get("recording_mbid"):
             if _title_counts.get(_title_key, 0) > 1:
@@ -797,6 +803,13 @@ def _build_album_recording_batch(
             "disc": _disc,
             "track_number": _track_number,
             "title_is_unique": _title_counts.get(_title_key, 0) == 1,
+            # The title is auto-applied ONLY when the identity was resolved by
+            # position (track number) AND the length guard actually verified
+            # both durations. Position-without-verified-length and the
+            # title-keyed fallback are BOTH "potentially wrong" — their
+            # release titles go to the recommendation stash instead.
+            "by_position": _by_position,
+            "length_verified": bool(entry.get("length_verified")),
         })
         if recording_mbid not in seen_mbids:
             seen_mbids.append(recording_mbid)
@@ -823,6 +836,12 @@ def _build_album_recording_batch(
             # version marker when the local file lost it, and it is what makes
             # the provider "alternate performance" test recognise the track.
             entry["title"] = identity["release_track_title"]
+
+        # Title auto-application requires BOTH a track-number match AND a
+        # verified length match. Everything short of that is a recommendation.
+        entry["_title_match_confirmed"] = bool(
+            identity["by_position"] and identity["length_verified"]
+        )
 
         batch[album_recording_batch_key(
             identity["artist"], identity["title"],
