@@ -1072,9 +1072,32 @@ def _resolve_track_mb_metadata(
                         reason="match not confirmed (track#/length)",
                     )
 
+            # ── Batch-artist trust decision (shared by the artist + MBID
+            # writes below). ──────────────────────────────────────────────
+            # A batch entry that came from the release-tracklist position
+            # alias and whose release title does NOT match the local title is
+            # an UNCONFIRMED identity (the same condition the title block
+            # refuses to auto-apply above).  Its artist therefore belongs to
+            # the wrong slot of a misaligned release and must not be written
+            # over the track's real performer.  A non-batch (search-resolved)
+            # identity is always trustworthy: the search was run with the
+            # local title+artist, so its artist IS the match.
+            _batch_artist_untrustworthy = bool(
+                _from_batch
+                and not _title_match_confirmed
+                and bool(_release_title)
+                and bool(_local_title)
+                and _release_title.casefold() != _local_title.casefold()
+            )
+
             _artist_mbid = mb_data.get("artist_mbid")
-            if _artist_mbid and not _as_str(track.get("musicbrainz_artistid") or track.get("musicbrainz_artist_id")):
-                payload["musicbrainz_artistid"] = _artist_mbid
+            # The MBID belongs to the batch/recording's artist, so it is only
+            # trustworthy when the identity is: NOT a batch position alias, or
+            # a CONFIRMED one.  An unconfirmed alias pointing at the wrong slot
+            # would stamp a wrong artist MBID onto a real performer.
+            if _artist_mbid and not _batch_artist_untrustworthy:
+                if not _as_str(track.get("musicbrainz_artistid") or track.get("musicbrainz_artist_id")):
+                    payload["musicbrainz_artistid"] = _artist_mbid
 
             _mb_isrc = _as_str(mb_data.get("isrc") or "").strip()
             if _mb_isrc and not _as_str(track.get("isrc") or "").strip():
@@ -1093,7 +1116,28 @@ def _resolve_track_mb_metadata(
                     normalize_artist,
                 )
 
-                if is_track_artist_placeholder(_existing_artist) and normalize_artist(
+                # ── Batch-artist trust gate ───────────────────────────────
+                # The TITLE only gets corrected/offered when the identity is
+                # CONFIRMED (track# + verified length) — see the title block
+                # above.  The ARTIST must obey the SAME rule: a batch position
+                # alias whose title doesn't match the local one is pointing at
+                # the WRONG slot of a misaligned release (a VA compilation
+                # without an album MBID is exactly this case), and trusting its
+                # artist would overwrite the track's real performer — e.g.
+                # "Where Is My Mind?" (Pixies) aliased to slot artist "Ned's
+                # Atomic Dustbin" — then feed that wrong name into the
+                # recording search, which returns nothing and saves no MBID. A
+                # batch-sourced search match (``_from_batch`` False) is already
+                # resolved with the local title+artist, so it is trustworthy.
+                if _batch_artist_untrustworthy:
+                    logger.info(
+                        "[MB] batch artist ignored — identity not confirmed",
+                        track_id=track_id,
+                        old=_existing_artist,
+                        release_artist=_mb_artist,
+                        release_title=_release_title,
+                    )
+                elif is_track_artist_placeholder(_existing_artist) and normalize_artist(
                     _mb_artist
                 ) != normalize_artist(_existing_artist):
                     payload["artist"] = _mb_artist
