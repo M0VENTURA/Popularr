@@ -46,6 +46,25 @@ def _has_unique_key(bind: sa.Connection, name: str) -> bool:
     return name in names
 
 
+def _has_table_constraint(bind: sa.Connection, name: str) -> bool:
+    """Whether ``name`` exists AS A TABLE-CONSTRAINT (not merely an index).
+
+    The old key has existed BOTH ways: a real table constraint, and (via the
+    schema bootstrap) a bare unique INDEX under the same name. Only the
+    constraint form may be targeted by ``DROP CONSTRAINT`` — attempting it
+    when only the index exists RAISES on PostgreSQL, and because PostgreSQL
+    migrations run in a transaction, that raised statement ABORTS the whole
+    transaction: every later statement then fails with
+    ``InFailedSqlTransaction`` even though each is individually safe (the
+    entrypoint observed exactly this on ``DROP INDEX IF EXISTS``). The
+    ``except Exception: pass`` never helps — the abort happened server-side.
+    """
+    inspector = sa.inspect(bind)
+    if not inspector.has_table(TABLE):
+        return False
+    return name in {c["name"] for c in inspector.get_unique_constraints(TABLE)}
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
@@ -57,12 +76,18 @@ def upgrade() -> None:
     # Normalise NULL types to '' so the column can be NOT NULL.
     op.execute(sa.text(f"UPDATE {TABLE} SET primary_type = '' WHERE primary_type IS NULL"))
 
-    # Drop the old two-column key — as a constraint and/or as the bare
-    # unique index the bootstrap used to create.
-    try:
+    # Drop the old two-column key — it has existed as a table constraint AND
+    # (via the schema bootstrap) as a bare unique index under this name.
+    # ⚠️ Inspect for the CONSTRAINT first, and only when the DIALECT supports
+    # ``ALTER … DROP CONSTRAINT`` (SQLite cannot — the old code swallowed the
+    # NotImplementedError). On PostgreSQL an unconditional
+    # ``DROP CONSTRAINT`` for an absent constraint ABORTS the whole migration
+    # transaction, so the next statement fails with
+    # ``InFailedSqlTransaction`` even inside a Python ``try/except`` (the
+    # reported production boot failure). The bare ``DROP INDEX IF EXISTS``
+    # below is safe either way and handles the index form.
+    if _has_table_constraint(bind, OLD_KEY) and bind.dialect.name != "sqlite":
         op.drop_constraint(OLD_KEY, TABLE, type_="unique")
-    except Exception:
-        pass
     op.execute(sa.text(f"DROP INDEX IF EXISTS {OLD_KEY}"))
 
     if bind.dialect.name == "postgresql":

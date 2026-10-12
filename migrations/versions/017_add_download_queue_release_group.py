@@ -57,8 +57,8 @@ def _existing_columns() -> set[str]:
 
     Inspector-guarded and dialect-portable — ``ADD COLUMN IF NOT EXISTS`` is
     PostgreSQL-only and the migration chain also runs against the SQLite test
-    engine (the same pattern ``014_add_tracks_release_detail`` and
-    ``016_add_tracks_raw_score`` use).
+    engine (the same pattern ``014_add_tracks_release_detail``,
+    ``016_add_tracks_raw_score`` and ``018/020`` use).
     """
     bind = op.get_bind()
     inspector = sa.inspect(bind)
@@ -66,10 +66,20 @@ def _existing_columns() -> set[str]:
 
 
 def upgrade() -> None:
+    # The table itself is created by the SCHEMA BOOTSTRAP (db/schema.py), not
+    # by this chain — on a fresh database the bootstrap adds it WITH the
+    # column, so a missing table means there is nothing to add. Guarding the
+    # WHOLE migration (not just the inspector) keeps a chain-run against an
+    # un-bootstrapped database or a partial harness from touching a table
+    # that doesn't exist (``ADD COLUMN`` would raise ``no such table``).
+    if not sa.inspect(op.get_bind()).has_table(_TABLE):
+        return
     if _COLUMN not in _existing_columns():
         op.add_column(_TABLE, sa.Column(_COLUMN, sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
+    if not sa.inspect(op.get_bind()).has_table(_TABLE):
+        return
     if _COLUMN in _existing_columns():
         op.drop_column(_TABLE, _COLUMN)

@@ -69,6 +69,17 @@ def _stamp(engine: sa.Engine, revision: str) -> None:
             f"INSERT INTO alembic_version (version_num) VALUES ('{revision}')"
         )
 
+def _chain_head() -> str:
+    """The current head revision id, read from the real migration chain.
+
+    Tests used to hard-code ``"011_add_tracks_album_artist"``; the chain has
+    moved (it is at 020 now), so a magic string rots silently. Reading the
+    head from ``ScriptDirectory`` means the assertion always matches whatever
+    the chain actually is.
+    """
+    from alembic.script import ScriptDirectory
+
+    return ScriptDirectory(os.path.join(_PROJECT_ROOT, "migrations")).get_current_head()
 
 def _precreate_bootstrap_tables(engine: sa.Engine) -> None:
     """Create the bootstrap-built schema state using db.schema DDL.
@@ -139,12 +150,12 @@ class TestMigrationChainIdempotency:
         inspector = sa.inspect(sqlite_engine)
         assert "missing_album_tracks" in set(inspector.get_table_names())
 
-        # Version recorded at head.
+        # Version recorded at the REAL chain head (was hard-coded to 011).
         with sqlite_engine.connect() as conn:
             version = conn.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
             ).scalar()
-        assert version == "011_add_tracks_album_artist"
+        assert version == _chain_head()
 
     def test_partially_bootstrapped_db_upgrade_converges(self, sqlite_engine: sa.Engine) -> None:
         """Partial bootstrap state (some tables, older stamp) also converges."""
@@ -156,6 +167,11 @@ class TestMigrationChainIdempotency:
             schema_module.TABLES_TO_ENSURE["artists"],
             schema_module.TABLES_TO_ENSURE["scan_history"],
             schema_module.TABLES_TO_ENSURE["bookmarks"],
+            # Revision 017 (``017_add_download_queue_release_group``)
+            # inspector-guards ``download_queue`` columns; without the table
+            # the harness raises ``NoSuchTableError`` — production always has
+            # it (the bootstrap creates it), so the harness must too.
+            schema_module.TABLES_TO_ENSURE["download_queue"],
         ]
         def translate(ddl: str) -> str:
             return (
@@ -232,7 +248,7 @@ class TestBareTracksUpgradeConverges:
             version = conn.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
             ).scalar()
-        assert version == "011_add_tracks_album_artist"
+        assert version == _chain_head()
 
     def test_bare_tracks_stamped_at_010_upgrade_to_head(self, sqlite_engine: sa.Engine) -> None:
         """Even when alembic_version is at 010 (so only 011 remains), the
@@ -252,7 +268,7 @@ class TestBareTracksUpgradeConverges:
             version = conn.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
             ).scalar()
-        assert version == "011_add_tracks_album_artist"
+        assert version == _chain_head()
 
 
 class TestMigration011AddsTracksAlbumArtist:
@@ -294,7 +310,7 @@ class TestMigration011AddsTracksAlbumArtist:
             version = conn.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
             ).scalar()
-        assert version == "011_add_tracks_album_artist"
+        assert version == _chain_head()
 
     def test_fresh_db_011_is_noop(self, sqlite_engine: sa.Engine) -> None:
         """A fresh chain already declares album_artist in 001 — no-op."""
@@ -305,7 +321,103 @@ class TestMigration011AddsTracksAlbumArtist:
             version = conn.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
             ).scalar()
-        assert version == "011_add_tracks_album_artist"
+        assert version == _chain_head()
+
+
+class TestMigration019OldKeyForms:
+    """Migration 019 drops the old upcoming-releases unique key.
+
+    The old key has existed BOTH as a table constraint and (via the schema
+    bootstrap) as a bare unique index under the same name
+    (``uq_upcoming_artist_album``). On PostgreSQL an unconditional
+    ``DROP CONSTRAINT`` for the absent constraint form ABORTS the migration
+    transaction (transactional DDL), so the very next statement fails with
+    ``InFailedSqlTransaction`` even inside a Python ``try/except`` — the
+    reported production boot failure. The constraint drop must be gated on an
+    inspector check for the CONSTRAINT (not the index).
+    """
+
+    def _drop_019_source(self) -> str:
+        """The migration source with comments stripped (the docstrings quote
+        ``op.drop_constraint``, so matching must ignore prose)."""
+        import re as _re
+
+        path = os.path.join(_PROJECT_ROOT, "migrations", "versions",
+                            "019_upcoming_releases_type_in_key.py")
+        src = open(path, encoding="utf-8").read()
+        src = _re.sub(r'""".*?"""', "", src, flags=_re.S)
+        src = _re.sub(r"'''.*?'''", "", src, flags=_re.S)
+        return "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+
+    def test_the_constraint_drop_is_gated_on_a_constraint_inspector_check(self):
+        src = self._drop_019_source()
+        # The guard helper must exist and look at TABLE CONSTRAINTS (not
+        # indexes) — that is what distinguishes the two forms.
+        assert "def _has_table_constraint" in src, (
+            "019 must inspect TABLE CONSTRAINTS before dropping one"
+        )
+        assert "get_unique_constraints" in src, (
+            "_has_table_constraint must read get_unique_constraints"
+        )
+        # Exactly ONE DROP CONSTRAINT, and it must sit INSIDE the guarded
+        # branch (guard defined BEFORE the drop). The old code dropped it
+        # unconditionally inside ``try/except`` — with no ``_has_table_constraint``
+        # symbol at all, so ``src.index`` below would raise and the test fail.
+        assert src.count("op.drop_constraint(") == 1
+        guard_at = src.index("_has_table_constraint(bind, OLD_KEY)")
+        drop_at = src.index("op.drop_constraint(OLD_KEY, TABLE, type_=\"unique\")")
+        assert guard_at < drop_at, (
+            "op.drop_constraint must be unreachable without the constraint "
+            "inspector guard — a bare drop aborts the PostgreSQL migration "
+            "transaction when only the same-named index exists"
+        )
+        # The index form is still handled safely afterwards.
+        assert "DROP INDEX IF EXISTS" in src
+
+    def test_the_index_form_of_the_old_key_upgrades_cleanly(self, sqlite_engine):
+        # The production shape that failed on PostgreSQL: the old key exists
+        # only as a bare unique INDEX (the pre-019 bootstrap form), NOT as a
+        # table constraint. 019 must drop the index and create the new key
+        # WITHOUT ever attempting DROP CONSTRAINT.
+        with sqlite_engine.begin() as conn:
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE upcoming_releases (
+                    id INTEGER PRIMARY KEY,
+                    artist_name TEXT NOT NULL,
+                    album_name TEXT NOT NULL,
+                    primary_type TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'wikipedia',
+                    release_date TEXT,
+                    release_year INTEGER
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX uq_upcoming_artist_album "
+                "ON upcoming_releases (artist_name, album_name)"
+            )
+
+        _stamp(sqlite_engine, "018_track_popularity_cache_recording_mbid")
+        cfg = _make_alembic_config(str(sqlite_engine.url))
+        command.upgrade(cfg, "head")  # must not raise
+
+        inspector = sa.inspect(sqlite_engine)
+        unique_names = {i["name"] for i in inspector.get_indexes("upcoming_releases") if i.get("unique")}
+        assert "uq_upcoming_artist_album" not in unique_names, (
+            "the old-key INDEX must be dropped (only the constraint form "
+            "would have been dropped before — the index survived, and the "
+            "attempted DROP CONSTRAINT then poisoned the PG transaction)"
+        )
+        assert "uq_upcoming_artist_album_type" in unique_names, (
+            "the new 3-column key must be created"
+        )
+
+        with sqlite_engine.connect() as conn:
+            version = conn.exec_driver_sql(
+                "SELECT version_num FROM alembic_version"
+            ).scalar()
+        assert version == _chain_head()
 
 
 class TestIdempotentHelpers:
