@@ -32,8 +32,6 @@ from pathlib import Path
 
 import pytest
 
-import helpers.config_helpers as ch
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCANNER = REPO_ROOT / "services" / "popularity" / "scan_stage_runner.py"
 PIPELINE = (
@@ -86,60 +84,25 @@ class _FakeThread:
 # The config getter
 # ---------------------------------------------------------------------------
 
-class TestGetAlbumTimeoutSeconds:
-    @staticmethod
-    def _cfg(value):
-        return {"popularity": {"album_timeout_seconds": value}}
-
-    def test_default_is_900(self, monkeypatch):
-        monkeypatch.setattr(ch, "get_config", lambda: {})
-        assert ch.get_album_timeout_seconds() == 900
-
-    def test_a_configured_value_is_honoured(self, monkeypatch):
-        monkeypatch.setattr(ch, "get_config", lambda: self._cfg(300))
-        assert ch.get_album_timeout_seconds() == 300
-
-    def test_zero_disables_the_budget(self, monkeypatch):
-        """0 must mean OFF, not "fall back to the default" — the whole point
-        is that a user can stop any album being skipped."""
-        monkeypatch.setattr(ch, "get_config", lambda: self._cfg(0))
-        assert ch.get_album_timeout_seconds() == 0
-
-    def test_a_negative_value_also_disables(self, monkeypatch):
-        monkeypatch.setattr(ch, "get_config", lambda: self._cfg(-1))
-        assert ch.get_album_timeout_seconds() == 0
-
-    def test_too_small_is_clamped_up(self, monkeypatch):
-        monkeypatch.setattr(ch, "get_config", lambda: self._cfg(5))
-        assert ch.get_album_timeout_seconds() == 60
-
-    def test_absurd_is_clamped_down(self, monkeypatch):
-        monkeypatch.setattr(ch, "get_config", lambda: self._cfg(999999))
-        assert ch.get_album_timeout_seconds() == 21600
-
-    def test_a_bad_value_falls_back_to_the_default(self, monkeypatch):
-        monkeypatch.setattr(ch, "get_config", lambda: self._cfg("nonsense"))
-        assert ch.get_album_timeout_seconds() == 900
-
-    def test_a_missing_section_falls_back_to_the_default(self, monkeypatch):
-        monkeypatch.setattr(ch, "get_config", lambda: {"popularity": {}})
-        assert ch.get_album_timeout_seconds() == 900
-
-
 class TestResolveAlbumBudget:
-    """The runner turns the configured seconds into a bound or None."""
+    """The runner turns the single per-track knob into a bound or None.
+
+    The per-album budget is DERIVED from ``popularity.track_timeout_seconds``:
+    each track of the album gets that much wall-clock (see
+    ``_scale_album_budget``).  There are no separate album/artist knobs.
+    """
 
     def test_zero_config_becomes_None_meaning_unbounded(self, monkeypatch):
         import services.popularity.scan_stage_runner as runner
 
-        monkeypatch.setattr(runner, "get_album_timeout_seconds", lambda: 0)
+        monkeypatch.setattr(runner, "get_track_timeout_seconds", lambda: 0)
         assert runner._resolve_album_budget() is None
 
     def test_a_configured_value_becomes_a_float(self, monkeypatch):
         import services.popularity.scan_stage_runner as runner
 
-        monkeypatch.setattr(runner, "get_album_timeout_seconds", lambda: 900)
-        assert runner._resolve_album_budget() == 900.0
+        monkeypatch.setattr(runner, "get_track_timeout_seconds", lambda: 30)
+        assert runner._resolve_album_budget() == 30.0
 
     def test_a_broken_getter_falls_back_to_a_sane_default(self, monkeypatch):
         import services.popularity.scan_stage_runner as runner
@@ -147,8 +110,8 @@ class TestResolveAlbumBudget:
         def _boom():
             raise RuntimeError("config unavailable")
 
-        monkeypatch.setattr(runner, "get_album_timeout_seconds", _boom)
-        assert runner._resolve_album_budget() == 900.0
+        monkeypatch.setattr(runner, "get_track_timeout_seconds", _boom)
+        assert runner._resolve_album_budget() == 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -317,75 +280,75 @@ class TestOnlyTheAlbumIsSkippedNotTheArtist:
 # The artist budget must not fire on SIZE alone
 # ---------------------------------------------------------------------------
 
-class TestTheArtistBudgetScalesWithAlbumCount:
+class TestTheArtistBudgetScalesWithTrackCount:
     """A flat per-artist budget is a size limit in disguise.
 
     "Various Artists" holds every compilation in the library; a flat 1800s
-    abandoned it mid-way.  The fix treats the configured value as FIXED
-    OVERHEAD and adds a per-album allowance on top.
+    abandoned it mid-way.  The budget is now fixed overhead PLUS the per-track
+    allowance times the artist's TOTAL TRACK count, so the artist is sized by
+    its real work.
     """
 
-    def test_the_pipeline_scales_the_artist_budget_by_album_count(self) -> None:
+    def test_the_pipeline_scales_the_artist_budget_by_track_count(self) -> None:
         source = PIPELINE.read_text(encoding="utf-8")
-        assert "get_album_counts_by_artist" in source, (
-            "the artist budget must consult the artist's album count"
+        assert "get_track_counts_by_artist" in source, (
+            "the artist budget must consult the artist's total track count"
         )
-        assert "_album_allowance * _artist_album_count" in source, (
-            "the per-album allowance must be multiplied by the album count"
+        assert "_track_budget * _artist_track_count" in source, (
+            "the per-track allowance must be multiplied by the track count"
         )
 
     def test_a_large_artist_gets_a_proportionally_larger_budget(self) -> None:
         """Model the arithmetic the pipeline performs."""
-        configured = 1800
-        per_album = 900
+        overhead = 1800
+        per_track = 30
 
-        def effective(albums: int) -> float:
-            return float(configured + per_album * albums)
+        def effective(tracks: int) -> float:
+            return float(overhead + per_track * tracks)
 
-        # A small artist behaves exactly as before, plus its own allowance.
-        assert effective(5) == 1800 + 900 * 5
-        # A large compilation artist gets room for every album, so the flat
+        # A small artist behaves essentially as before, plus its own allowance.
+        assert effective(20) == 1800 + 30 * 20
+        # A large compilation artist (thousands of tracks across every
+        # compilation in the library) gets room for every track, so the flat
         # budget can no longer abandon it for being large.
-        assert effective(500) > 500 * per_album
-        assert effective(500) > effective(10)
+        assert effective(8000) > 8000 * per_track
+        assert effective(100) > effective(10)
 
-    def test_zero_artist_budget_still_disables_entirely(self) -> None:
+    def test_zero_track_budget_still_disables_entirely(self) -> None:
         """Scaling must not resurrect a budget the user turned off."""
         source = PIPELINE.read_text(encoding="utf-8")
-        assert "if _resolved_budget <= 0:" in source, (
+        assert "if _track_budget <= 0:" in source, (
             "0 must still mean DISABLED, checked BEFORE any scaling"
         )
-        # The disable branch must be evaluated before the album allowance.
-        disable_idx = source.index("if _resolved_budget <= 0:")
-        scale_idx = source.index("_album_allowance * _artist_album_count")
+        # The disable branch must be evaluated before the track allowance.
+        disable_idx = source.index("if _track_budget <= 0:")
+        scale_idx = source.index("_track_budget * _artist_track_count")
         assert disable_idx < scale_idx
 
-    def test_a_failed_count_lookup_falls_back_to_the_unscaled_budget(self) -> None:
-        """Losing the count must degrade to the old behaviour, not to a wrong
-        one — and must never crash the scan."""
+    def test_a_failed_count_lookup_falls_back_to_fixed_overhead(self) -> None:
+        """Losing the count must degrade to the fixed overhead, not to a wrong
+        budget — and must never crash the scan."""
         source = PIPELINE.read_text(encoding="utf-8")
-        assert "Album-count lookup failed" in source
-        # The lookup is wrapped, and a missing artist counts as 0 albums.
+        assert "Track-count lookup failed" in source
+        # The lookup is wrapped, and a missing artist counts as 0 tracks.
         assert "_all_counts.get(artist)" in source
         assert "or 0" in source
 
 
-class TestTheAlbumCountQueryIsOneRoundTrip:
+class TestTheTrackCountQueryIsOneRoundTrip:
     """A per-artist loop would be hundreds of queries on a full scan."""
 
-    def test_library_exposes_a_bulk_album_count(self) -> None:
+    def test_library_exposes_a_bulk_track_count(self) -> None:
         from db.repositories import library as lib
 
-        assert hasattr(lib, "get_album_counts_by_artist")
+        assert hasattr(lib, "get_track_counts_by_artist")
 
     def test_the_query_groups_the_same_way_get_all_artists_does(self) -> None:
-        (REPO_ROOT / "db" / "repositories" / "library.py").read_text(
-            encoding="utf-8"
-        )
-        from db.repositories import library as lib
         import inspect
 
-        src = inspect.getsource(lib.get_album_counts_by_artist)
+        from db.repositories import library as lib
+
+        src = inspect.getsource(lib.get_track_counts_by_artist)
         assert "GROUP BY 1" in src, "must aggregate in one query"
         assert "COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist))" in src, (
             "must group EXACTLY as get_all_artists does, or the keys will not "
@@ -405,7 +368,7 @@ class TestTheAlbumCountQueryIsOneRoundTrip:
                 return False
 
         monkeypatch.setattr(lib, "db_session", lambda: _Boom())
-        assert lib.get_album_counts_by_artist() == {}, (
+        assert lib.get_track_counts_by_artist() == {}, (
             "a sizing hint must never raise into the scan"
         )
 
@@ -414,7 +377,7 @@ class TestTheAlbumCountQueryIsOneRoundTrip:
 # The config contract: the Config page is the source of truth
 # ---------------------------------------------------------------------------
 
-class TestTheAlbumBudgetIsOnTheConfigPage:
+class TestTheTrackTimeoutIsOnTheConfigPage:
     TREES = (
         ("live", REPO_ROOT / "templates" / "pages" / "config.html",
          REPO_ROOT / "static" / "js" / "config.js"),
@@ -425,42 +388,63 @@ class TestTheAlbumBudgetIsOnTheConfigPage:
     @pytest.mark.parametrize("label,html,js", TREES)
     def test_the_input_exists(self, label, html, js) -> None:
         body = html.read_text(encoding="utf-8")
-        assert 'id="pop_album_timeout_seconds"' in body, (
-            f"{label}: the album timeout must be settable from the Config page"
+        assert 'id="pop_track_timeout_seconds"' in body, (
+            f"{label}: the per-track timeout must be settable from the Config page"
         )
-        assert "popularity', {}).get('album_timeout_seconds'" in body, (
-            f"{label}: the input must read the album_timeout_seconds key"
+        assert "popularity', {}).get('track_timeout_seconds'" in body, (
+            f"{label}: the input must read the track_timeout_seconds key"
+        )
+
+    @pytest.mark.parametrize("label,html,js", TREES)
+    def test_the_old_dials_are_gone(self, label, html, js) -> None:
+        """The album/artist timeouts are derived from the one knob now — the
+        dials must not exist, or operators will tune a value nothing reads."""
+        body = html.read_text(encoding="utf-8")
+        assert 'id="pop_album_timeout_seconds"' not in body, (
+            f"{label}: the obsolete per-album dial must be removed"
+        )
+        assert 'id="pop_artist_timeout_seconds"' not in body, (
+            f"{label}: the obsolete per-artist dial must be removed"
+        )
+        script = js.read_text(encoding="utf-8")
+        assert "album_timeout_seconds" not in script, (
+            f"{label}: config.js must not collect the removed album key"
+        )
+        assert "artist_timeout_seconds" not in script, (
+            f"{label}: config.js must not collect the removed artist key"
         )
 
     @pytest.mark.parametrize("label,html,js", TREES)
     def test_the_js_collects_it_without_clobbering_zero(self, label, html, js) -> None:
         script = js.read_text(encoding="utf-8")
-        assert "album_timeout_seconds" in script, (
+        assert "track_timeout_seconds" in script, (
             f"{label}: config.js must collect the value, or it never persists"
         )
         # 0 means DISABLED, so a `|| default` guard would silently undo it.
-        idx = script.index("album_timeout_seconds")
+        idx = script.index("track_timeout_seconds")
         window = script[idx: idx + 400]
         assert "Math.max(0, raw)" in window, (
             f"{label}: the value must be clamped without turning 0 into a default"
         )
-        assert "pop_album_timeout_seconds" in window, (
+        assert "pop_track_timeout_seconds" in window, (
             f"{label}: the payload must read the input id"
         )
 
 
 class TestTheBehaviourIsDescribedHonestly:
-    def test_the_artist_help_text_mentions_scaling(self) -> None:
-        """The old text said only "raise it if your artists need longer",
-        which was wrong advice for a large artist."""
+    def test_the_track_help_text_explains_the_derived_budgets(self) -> None:
+        """The old text had three dials and said only "raise it if your
+        artists need longer", which was wrong advice for a large artist."""
         html = (REPO_ROOT / "templates" / "pages" / "config.html").read_text(
             encoding="utf-8"
         )
-        assert "scaled" in html and "Various Artists" in html, (
-            "the per-artist help must explain that the budget scales by album "
-            "count, or the operator will keep raising a value that was not "
-            "the problem"
+        assert "track count" in html and "Various Artists" in html, (
+            "the per-track help must explain that the album budget is the "
+            "per-track allowance × track count and the artist budget scales "
+            "by the artist's track count — or an operator cannot tell what "
+            "the one knob controls"
         )
+        assert "pop_track_timeout_seconds" in html
 
 
 # ---------------------------------------------------------------------------
@@ -712,7 +696,7 @@ class TestTheArtistCallSiteToleratesADisabledBudget:
 
     ``_run_one_artist`` returns ``None``, and ``_bounded_call_report`` returns
     the RAW result when ``seconds is None``.  So with
-    ``artist_timeout_seconds = 0`` — the Config page's own "disable the timeout"
+    ``track_timeout_seconds = 0`` — the Config page's own "disable the timeout"
     setting — ``_artist_report`` was ``None`` and the whole artist loop died on
     the FIRST artist with ``AttributeError: 'NoneType' object has no attribute
     'get'``.
@@ -734,7 +718,7 @@ class TestTheArtistCallSiteToleratesADisabledBudget:
         window = source[idx: idx + 1600]
         assert "isinstance(_artist_report, dict)" in window, (
             "the artist call site must normalise a non-dict report, or "
-            "artist_timeout_seconds=0 crashes the full scan on artist #1"
+            "track_timeout_seconds=0 crashes the full scan on artist #1"
         )
         # Anchor the fallback INSIDE the same window so an unrelated occurrence
         # elsewhere in the file cannot satisfy this.
@@ -1008,16 +992,16 @@ class TestTheZeroTrackSummaryTellsTheTruth:
     def test_the_summary_names_the_real_config_label(self):
         """The advice must name the control the user can actually find.
 
-        The Config page calls it **"Per-Album Scan Timeout (seconds)"** — the
-        label rendered for ``popularity.album_timeout_seconds``. That label is
-        asserted against BOTH template trees so the message cannot drift into
-        naming a control that does not exist (the user would search for a
-        phrase the page never shows).
+        The Config page calls it **"Per-Track Scan Timeout (seconds)"** — the
+        label rendered for ``popularity.track_timeout_seconds`` (the single
+        scan-timeout knob). That label is asserted against BOTH template trees
+        so the message cannot drift into naming a control that does not exist
+        (the user would search for a phrase the page never shows).
         """
         import services.popularity.scan_stage_runner as runner
 
         msg = runner._zero_track_summary(3, 3)
-        assert "Per-Album Scan Timeout" in msg, (
+        assert "Per-Track Scan Timeout" in msg, (
             "the advice must use the Config page's own label"
         )
 
@@ -1026,12 +1010,12 @@ class TestTheZeroTrackSummaryTellsTheTruth:
             "test_site/templates/Pages/config.html",
         ):
             html = (REPO_ROOT / rel).read_text(encoding="utf-8")
-            assert "Per-Album Scan Timeout (seconds)" in html, (
+            assert "Per-Track Scan Timeout (seconds)" in html, (
                 f"{rel}: the label the summary refers to must exist on the "
                 "Config page"
             )
-            assert 'id="pop_album_timeout_seconds"' in html, (
-                f"{rel}: and it must be bound to album_timeout_seconds"
+            assert 'id="pop_track_timeout_seconds"' in html, (
+                f"{rel}: and it must be bound to track_timeout_seconds"
             )
 
     def test_forced_mode_really_cannot_bypass_the_budget(self):

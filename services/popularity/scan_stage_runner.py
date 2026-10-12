@@ -30,7 +30,6 @@ from db.repositories.tracks import DeferredPersistSink, upsert_tracks_bulk
 
 # Config & Helpers
 from helpers.config_helpers import (
-    get_album_timeout_seconds,
     get_config,
     get_feature,
     get_prefetch_budget_seconds,
@@ -253,45 +252,36 @@ def _bounded_call_report(
 
 
 def _resolve_album_budget() -> float | None:
-    """Read the per-album wall-clock budget, or None when disabled.
+    """Read the per-track wall-clock allowance, or None when disabled.
 
-    ``None`` means "no budget": ``_bounded_call_report(seconds=None)`` runs the
-    call directly with no join at all, which is what ``0`` must mean.
+    The per-album budget is DERIVED from the single knob
+    ``popularity.track_timeout_seconds`` (see ``_scale_album_budget``): each
+    track of the album gets that much wall-clock.  ``None`` means "no budget":
+    ``_bounded_call_report(seconds=None)`` runs the call directly with no join
+    at all, which is what ``0`` must mean.
     """
     try:
-        resolved = int(get_album_timeout_seconds())
+        resolved = int(get_track_timeout_seconds())
     except Exception:
-        return 900.0
+        return 30.0
     return None if resolved <= 0 else float(resolved)
-
-
-#: Extra per-track allowance added to the per-album budget for LARGE albums.
-#: An album with no release/recording MBIDs does a FULL per-track online
-#: lookup (MusicBrainz 1 req/s + Last.fm + Discogs + per-track cover
-#: detection), so an 80-track compilation legitimately needs ~20 minutes of
-#: wall-clock. The flat 900 s budget cut such an album at 15 min *mid-
-#: progress* — still working, still logging [TRACK] lines — and the runner
-#: then discarded every finished track's star rating ("0 tracks processed",
-#: "Album ... skipped (exceeded 900.0s budget)"): the reported "no-MBID
-#: albums fail at the end before the finalise stage". The budget must bound
-#: a genuinely HUNG call, not confuse "slow album" with "stuck one".
-_ALBUM_BUDGET_PER_TRACK_SECONDS = 20.0
 
 
 def _scale_album_budget(base: float | None, track_count: int) -> float | None:
     """Per-album budget for a phase processing *track_count* tracks.
 
-    ``base`` is the configured ``album_timeout_seconds`` (``None`` when the
-    budget is disabled — the disabled state passes through untouched, so ``0``
-    keeps meaning "never skip"). The configured value is the FLOOR: albums
-    whose ``track_count * 20s`` exceeds it get the scaled allowance, small
-    albums keep the base exactly. A fast album never reaches the ceiling, so
-    scaling up is free for the common case — it only helps the large/slow
-    albums the flat cap was silently killing.
+    ``base`` is the per-track allowance (``track_timeout_seconds``; ``None``
+    when the budget is disabled, which passes through untouched so ``0`` keeps
+    meaning "never skip").  The album budget is exactly ``base * track_count``:
+    each track gets the per-track allowance, so a big compilation that must
+    look up every track online is sized by its real work — while a genuinely
+    hung album is still bounded by the same product.  Small albums get
+    proportionally small budgets: the per-track unit IS the knob the operator
+    controls, so no separate flat floor exists.
     """
     if base is None or track_count <= 0:
         return base
-    return float(max(base, _ALBUM_BUDGET_PER_TRACK_SECONDS * int(track_count)))
+    return float(base * int(track_count))
 
 
 #: Album-phase workers that hit the per-album budget and are STILL RUNNING.
@@ -495,10 +485,11 @@ def _zero_track_summary(abandoned_albums: int, skipped_albums: int) -> str:
     if abandoned_albums:
         return (
             f"Popularity Scan - no tracks processed: {abandoned_albums} album(s) "
-            "exceeded their per-album time budget ("
-            f"{skipped_albums} album(s) skipped in total). Raise the 'Per-Album Scan "
-            "Timeout' in Config, or set it to 0 to disable the budget, then rescan — "
-            "Forced mode does NOT bypass the budget."
+            "exceeded their time budget ("
+            f"{skipped_albums} album(s) skipped in total). Raise the 'Per-Track Scan "
+            "Timeout' in Config — the per-track allowance, of which an album's budget "
+            "is that × its track count — or set it to 0 to disable the budget, then "
+            "rescan. Forced mode does NOT bypass the budget."
         )
     return (
         "Popularity Scan - All albums were skipped (recently scanned or up to "

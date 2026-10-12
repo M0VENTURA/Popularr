@@ -221,6 +221,43 @@ def get_album_counts_by_artist() -> dict[str, int]:
     }
 
 
+def get_track_counts_by_artist() -> dict[str, int]:
+    """Total TRACK count per artist, in ONE query.
+
+    Counterpart of :func:`get_album_counts_by_artist` for the consolidated
+    scan-timeout model: the full-scan loop sizes each artist's wall-clock
+    budget from its total TRACK count (``track_timeout_seconds * tracks``
+    plus fixed overhead), and a per-artist loop would be hundreds of
+    round-trips.
+
+    Grouping matches :func:`get_all_artists` exactly
+    (``COALESCE(NULLIF(TRIM(album_artist),''), TRIM(artist))``), so the keys
+    line up with the names the scan iterates.
+
+    Returns ``{}`` on failure rather than raising: a scan must not die because
+    a sizing hint could not be read.  Callers must treat a missing artist as
+    "count unknown" and fall back to the fixed-overhead budget.
+    """
+    try:
+        with db_session() as session:
+            rows = session.execute(text("""
+                SELECT COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist)) AS artist_name,
+                       COUNT(*) AS track_count
+                FROM tracks
+                WHERE COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist)) IS NOT NULL
+                  AND COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist)) != ''
+                GROUP BY 1
+            """)).fetchall()
+    except Exception as exc:
+        logger.warning("Track counts per artist read failed", error=str(exc))
+        return {}
+    return {
+        str(row[0]): int(row[1] or 0)
+        for row in rows or []
+        if row and row[0]
+    }
+
+
 
 
 def upsert_musicbrainz_release(

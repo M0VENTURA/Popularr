@@ -1,5 +1,12 @@
 # The per-album scan budget scales with the album's track count (2026-10-12)
 
+> **SUPERSEDED 2026-10-13** by
+> `2026-10-13-consolidated-scan-timeouts.md`: the flat 900 s floor and the
+> hardcoded 20 s/track constant are gone — `track_timeout_seconds` is now the
+> single knob and the album budget is `track_timeout × track count`. The
+> 80-track-album regression this change fixed stays fixed; the per-track unit
+> is simply operator-configurable now.
+
 ## Report
 
 "Scanned albums with no mb/match seem to fail at the end before hitting the

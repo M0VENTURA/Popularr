@@ -2247,26 +2247,46 @@ def get_scan_pipeline_config() -> dict[str, Any]:
 
 
 def get_track_timeout_seconds() -> int:
-    """Return the per-album per-track collection deadline (seconds).
+    """THE single scan-timeout knob: the per-track wall-clock allowance (s).
 
-    The popularity scan runs each album's per-track pipeline on a bounded
-    thread pool; ``as_completed(timeout=...)`` waits at most this long for
-    the slowest worker before the album finalises with the tracks that DID
-    complete.  The default is kept LOW so a hung provider (rate-limit
-    stall, dead connection) costs seconds, not minutes — the old system's
-    key advantage.  Users with slow-but-legitimate per-track work (heavy
-    MusicBrainz/Discogs lookups on large albums) can raise it in config.
+    Consolidated (2026-10-13): the old per-album and per-artist dials are
+    gone — every scan budget is now DERIVED from this one value:
+
+    * Per-album budget = ``track_timeout_seconds * track_count`` — each track
+      of the album gets this much wall-clock, so a big compilation that must
+      look up every track online is never cut off mid-progress, while a
+      genuinely hung album is still bounded by the same product.  The fast
+      one-shot album phases (enrichment, post-singles) get the flat allowance.
+      See ``scan_stage_runner._resolve_album_budget`` / ``_scale_album_budget``.
+    * Per-artist budget = fixed overhead (1800 s: Navidrome import + the
+      Essentia pass, which have no per-track granularity) plus
+      ``track_timeout_seconds`` times the artist's TOTAL track count — so
+      "Various Artists", one artist holding every compilation in the library,
+      is sized by its real work and never abandoned for being large.
+      See the artist-budget block in ``popularity_pipeline``.
+
+    ``0`` disables the safety net ENTIRELY: no album is ever skipped and no
+    artist is ever abandoned.
 
     Config section: ``popularity.track_timeout_seconds`` in config.yaml.
 
-    Default: 120 (2 min).  Clamped 120-1800.
+    Default: 30 (s).  Clamped 10-600.
     """
     cfg = get_config()
     try:
-        timeout = int((cfg.get("popularity") or {}).get("track_timeout_seconds", 120) or 120)
+        raw = (cfg.get("popularity") or {}).get("track_timeout_seconds", 30)
+    except Exception:
+        raw = 30
+    if raw is None:
+        return 30
+    try:
+        value = int(raw)
     except (TypeError, ValueError):
-        timeout = 120
-    return max(120, min(timeout, 1800))
+        return 30
+    if value <= 0:
+        # Explicit opt-out: no scan timeouts at all.
+        return 0
+    return max(10, min(value, 600))
 
 
 def get_prefetch_budget_seconds() -> int:
@@ -2291,107 +2311,6 @@ def get_prefetch_budget_seconds() -> int:
     except (TypeError, ValueError):
         budget = 180
     return max(120, min(budget, 1800))
-
-
-def get_album_timeout_seconds() -> int:
-    """Per-album wall-clock budget during a scan (seconds).
-
-    Config section: ``popularity.album_timeout_seconds`` in config.yaml.
-
-    WHY THIS IS A SEPARATE BUDGET FROM ``artist_timeout_seconds``
-    -----------------------------------------------------------
-    An artist row is not a unit of work.  ``get_all_artists`` groups by
-    ``COALESCE(NULLIF(TRIM(album_artist),''), TRIM(artist))``, so
-    **"Various Artists" is ONE artist containing every compilation in the
-    library** — hundreds of albums.  A flat per-artist budget is therefore a
-    SIZE limit wearing a timeout's clothes: the artist is abandoned for doing
-    legitimate work, losing every album it had not reached yet.  The reported
-    case was exactly this::
-
-        Various Artists  abandoned  exceeded 1800.0s budget
-
-    Because one slow album is what a stuck syscall actually looks like, the
-    album is the correct unit to bound.  When an album exceeds this budget it
-    is skipped and the scan CONTINUES with the artist's remaining albums,
-    instead of discarding the whole artist.
-
-    Set to ``0`` to disable the per-album budget entirely.
-
-    Default: 900 (15 min) — an album of ~15 tracks doing full metadata +
-    popularity + singles work finishes well inside this; only a genuinely
-    stuck album reaches it.  Clamped 60-21600 (1 min - 6 h).
-    """
-    cfg = get_config()
-    try:
-        raw = (cfg.get("popularity") or {}).get("album_timeout_seconds", 900)
-    except Exception:
-        raw = 900
-    if raw is None:
-        return 900
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return 900
-    if value <= 0:
-        # Explicit opt-out: no per-album budget, so no album is ever skipped.
-        return 0
-    return max(60, min(value, 21600))
-
-
-def get_artist_timeout_seconds() -> int:
-    """Per-artist wall-clock budget during a full-library scan (seconds).
-
-    Config section: ``popularity.artist_timeout_seconds`` in config.yaml.
-
-    The dashboard's "All" scan bounds EACH artist with this budget.  It is a
-    safety net for a genuinely HUNG call (a stuck API/DNS/DB request the
-    per-track timeouts cannot catch), not a performance target: when it
-    expires the artist is abandoned and the scan moves on, so the artist is
-    never actually scanned.
-
-    ⚠️ Abandoning a merely-SLOW artist is what caused the reported cascade —
-    the abandoned worker kept running, contending for the DB pool and the
-    shared HTTP rate limiter, which made the NEXT artist likelier to time out
-    too.  Raising this is therefore the correct lever for a library whose
-    artists legitimately need longer than the default.
-
-    ⚠️ This is a FIXED OVERHEAD budget, NOT a per-album one.  The caller adds
-    ``get_album_timeout_seconds() * album_count`` so that a large artist
-    ("Various Artists" can hold hundreds of compilations) is not abandoned for
-    the crime of being large; the per-album budget is what catches an actually
-    stuck album.  See ``get_album_timeout_seconds``.
-
-    Previously this was read as ``features.full_scan_artist_timeout_seconds``
-    with a hardcoded 1800 default and was NOT exposed anywhere in the UI — so
-    the value could only be changed by hand-editing config.yaml, and an
-    operator hitting the cascade had no supported way to fix it.
-
-    Default: 1800 (30 min).  Clamped 60-21600 (1 min - 6 h); ``0`` disables
-    the budget entirely (never abandon an artist).
-    """
-    cfg = get_config()
-    raw: Any = None
-    try:
-        popularity = cfg.get("popularity") or {}
-        if isinstance(popularity, dict) and "artist_timeout_seconds" in popularity:
-            raw = popularity.get("artist_timeout_seconds")
-        else:
-            # Back-compat: the original location, still honoured so an
-            # existing config.yaml keeps working after this move.
-            raw = get_feature("full_scan_artist_timeout_seconds", None)
-    except Exception:
-        raw = None
-
-    if raw is None:
-        return 1800
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return 1800
-    if value <= 0:
-        # Explicit opt-out: no budget, so no artist is ever abandoned.
-        return 0
-    return max(60, min(value, 21600))
 
 
 # =============================================================================

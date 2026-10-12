@@ -56,6 +56,17 @@ from services.scanning.abandoned_workers import (
     resolve_max_live_abandoned as _resolve_max_live_abandoned,
 )
 
+#: Fixed-overhead portion of a full-scan artist budget (seconds).
+#:
+#: Covers the work that has no per-track granularity — the Navidrome library
+#: import and the Essentia pass, plus a generous margin for pipeline start-up.
+#: The per-artist budget is ``this + track_timeout_seconds * <artist track
+#: count>`` (see the artist-budget block in ``_run_full_scan_as_artist_pipeline``),
+#: so a legitimate large artist ("Various Artists" holds every compilation) is
+#: sized by its real work and never abandoned for being large, while an
+#: actually HUNG artist is still bounded.
+_ARTIST_FIXED_OVERHEAD_SECONDS = 1800.0
+
 
 def is_popularity_scan_active() -> bool:
     """Return True when a popularity-family scan is already running.
@@ -486,13 +497,14 @@ def _run_full_scan_as_artist_pipeline(
             # with a live-but-stuck worker thread — the runtime self-heal
             # correctly refuses to clear a live owner, so the scan never
             # recovered.  Abandon the artist after the budget and move on.
-            # Configurable via popularity.artist_timeout_seconds (Config page).
-            # 0 DISABLES the budget: no artist is ever abandoned, which is the
-            # right setting for a library whose artists legitimately need
-            # longer than the default — abandoning a merely-SLOW artist is
-            # what created the cascade.
+            # Configurable via popularity.track_timeout_seconds (Config page) —
+            # THE single scan-timeout knob. Setting it to 0 DISABLES the
+            # budget: no artist is ever abandoned, which is the right setting
+            # for a library whose artists legitimately need longer than the
+            # default — abandoning a merely-SLOW artist is what created the
+            # cascade.
             #
-            # ⚠️⚠️ THE BUDGET IS SCALED BY ALBUM COUNT, ON PURPOSE.
+            # ⚠️⚠️ THE BUDGET IS SCALED BY TRACK COUNT, ON PURPOSE.
             # An artist row is not a unit of work.  ``get_all_artists`` groups
             # by ``COALESCE(NULLIF(TRIM(album_artist),''), TRIM(artist))``, so
             # **"Various Artists" is ONE artist holding every compilation in
@@ -502,44 +514,42 @@ def _run_full_scan_as_artist_pipeline(
             #     Various Artists  abandoned  exceeded 1800.0s budget
             #
             # ...which discarded every album it had not reached yet.  So the
-            # configured value is treated as FIXED OVERHEAD (the Navidrome
-            # import and the Essentia pass, which have no album granularity)
-            # and each album gets its own allowance on top.  An actually stuck
-            # ALBUM is caught by the separate per-album budget in the runner,
-            # which skips that one album and keeps the rest.
-            _artist_budget: float | None = 1800.0
+            # artist budget = fixed overhead (the Navidrome import and the
+            # Essentia pass, which have no per-track granularity) + the
+            # per-track allowance times the artist's TOTAL track count.  An
+            # actually stuck ALBUM is caught by the per-album budget in the
+            # runner (``track_timeout * track count``), which skips that one
+            # album and keeps the rest.
+            _artist_budget: float | None = _ARTIST_FIXED_OVERHEAD_SECONDS
             try:
-                from helpers.config_helpers import (
-                    get_album_timeout_seconds,
-                    get_artist_timeout_seconds,
-                )
+                from helpers.config_helpers import get_track_timeout_seconds
 
-                _resolved_budget = int(get_artist_timeout_seconds())
-                if _resolved_budget <= 0:
+                _track_budget = int(get_track_timeout_seconds())
+                if _track_budget <= 0:
                     _artist_budget = None
                 else:
-                    _album_allowance = max(0, int(get_album_timeout_seconds()))
-                    _artist_album_count = 0
+                    _artist_track_count = 0
                     try:
-                        from db.repositories.library import get_album_counts_by_artist
+                        from db.repositories.library import get_track_counts_by_artist
 
-                        _all_counts = get_album_counts_by_artist() or {}
-                        _artist_album_count = int(
+                        _all_counts = get_track_counts_by_artist() or {}
+                        _artist_track_count = int(
                             _all_counts.get(artist)
                             or _all_counts.get(str(artist).strip())
                             or 0
                         )
                     except Exception as _count_exc:
                         logger.debug(
-                            "[FULL_SCAN] Album-count lookup failed; using the "
-                            "un-scaled artist budget",
+                            "[FULL_SCAN] Track-count lookup failed; using the "
+                            "fixed-overhead artist budget",
                             artist=artist, error=str(_count_exc),
                         )
                     _artist_budget = float(
-                        _resolved_budget + _album_allowance * _artist_album_count
+                        _ARTIST_FIXED_OVERHEAD_SECONDS
+                        + _track_budget * _artist_track_count
                     )
             except Exception:
-                _artist_budget = 1800.0
+                _artist_budget = _ARTIST_FIXED_OVERHEAD_SECONDS
 
             def _run_one_artist() -> None:
                 run_artist_scan_pipeline(artist, force=force, progress_callback=_cb)
@@ -552,7 +562,7 @@ def _run_full_scan_as_artist_pipeline(
             )
 
             # ⚠️ `_bounded_call_report` has TWO return conventions:
-            #   * `seconds is None` (budget DISABLED via artist_timeout_seconds=0)
+            #   * `seconds is None` (budget DISABLED via track_timeout_seconds=0)
             #     returns the function's RAW result — here `None`, because
             #     `_run_one_artist` returns nothing.
             #   * a configured budget returns the wrapper dict.

@@ -376,63 +376,12 @@ class TestMaxLiveAbandonedConfig:
         assert pp._resolve_max_live_abandoned() == 0
 
 
-class TestArtistTimeoutConfig:
-    """The per-artist budget is now settable, including 'disabled'."""
-
-    @staticmethod
-    def _with_config(monkeypatch, cfg):
-        import helpers.config_helpers as ch
-
-        monkeypatch.setattr(ch, "get_config", lambda: cfg)
-        return ch
-
-    def test_default_is_1800(self, monkeypatch):
-        ch = self._with_config(monkeypatch, {})
-        assert ch.get_artist_timeout_seconds() == 1800
-
-    def test_a_configured_value_is_honoured(self, monkeypatch):
-        ch = self._with_config(monkeypatch, {"popularity": {"artist_timeout_seconds": 900}})
-        assert ch.get_artist_timeout_seconds() == 900
-
-    def test_zero_disables_the_budget(self, monkeypatch):
-        """0 must mean 'never abandon an artist', not 'abandon immediately'."""
-        ch = self._with_config(monkeypatch, {"popularity": {"artist_timeout_seconds": 0}})
-        assert ch.get_artist_timeout_seconds() == 0
-
-        ch = self._with_config(monkeypatch, {"popularity": {"artist_timeout_seconds": -1}})
-        assert ch.get_artist_timeout_seconds() == 0
-
-    def test_a_positive_value_is_clamped_to_a_sane_band(self, monkeypatch):
-        ch = self._with_config(monkeypatch, {"popularity": {"artist_timeout_seconds": 10}})
-        assert ch.get_artist_timeout_seconds() == 60, "too small must clamp up"
-
-        ch = self._with_config(monkeypatch, {"popularity": {"artist_timeout_seconds": 999999}})
-        assert ch.get_artist_timeout_seconds() == 21600, "absurd must clamp down"
-
-    def test_the_legacy_location_still_works(self, monkeypatch):
-        """An existing config.yaml written before the move must keep working."""
-        ch = self._with_config(
-            monkeypatch, {"features": {"full_scan_artist_timeout_seconds": 1200}}
-        )
-        assert ch.get_artist_timeout_seconds() == 1200
-
-    def test_the_new_location_wins_over_the_legacy_one(self, monkeypatch):
-        ch = self._with_config(
-            monkeypatch,
-            {
-                "popularity": {"artist_timeout_seconds": 400},
-                "features": {"full_scan_artist_timeout_seconds": 1200},
-            },
-        )
-        assert ch.get_artist_timeout_seconds() == 400
-
-    def test_a_bad_value_falls_back_to_the_default(self, monkeypatch):
-        ch = self._with_config(monkeypatch, {"popularity": {"artist_timeout_seconds": "junk"}})
-        assert ch.get_artist_timeout_seconds() == 1800
-
-
 class TestThePipelineUsesTheConfigurableBudget:
-    """The full-scan loop must READ the configured budget, and 0 must disable it.
+    """The full-scan loop must READ the per-track knob, and 0 must disable it.
+
+    The artist budget is DERIVED from ``popularity.track_timeout_seconds``
+    (fixed overhead + per-track allowance × the artist's total track count),
+    so the pipeline reads THAT value — there is no artist dial anymore.
 
     ``_run_full_scan_as_artist_pipeline`` imports its collaborators INSIDE the
     function (``from db.repositories.library import get_all_artists`` etc.), so
@@ -455,8 +404,10 @@ class TestThePipelineUsesTheConfigurableBudget:
             _fake_bounded,
         )
         monkeypatch.setattr(
-            "helpers.config_helpers.get_artist_timeout_seconds", lambda: budget
+            "helpers.config_helpers.get_track_timeout_seconds", lambda: budget
         )
+        # The empty in-memory DB answers the track-count sizing query with {}
+        # (0 tracks), so the artist budget = fixed overhead + budget * 0.
         # Function-local imports: patch the source modules.
         monkeypatch.setattr(library_repo, "get_all_artists", lambda: ["Artist A"])
         monkeypatch.setattr(scan_pipeline, "run_artist_scan_pipeline", lambda *a, **k: None)
@@ -494,11 +445,17 @@ class TestThePipelineUsesTheConfigurableBudget:
         pp._run_full_scan_as_artist_pipeline(force=False)
 
         assert captured.get("seconds") is None, (
-            "artist_timeout_seconds=0 must DISABLE the budget (pass seconds=None), "
+            "track_timeout_seconds=0 must DISABLE the budget (pass seconds=None), "
             f"but the pipeline applied {captured.get('seconds')!r}"
         )
 
-    def test_a_configured_budget_is_passed_through(self, monkeypatch):
+    def test_a_configured_budget_reaches_the_artist_bound(self, monkeypatch):
+        """The artist budget is fixed overhead + per-track × track count.
+
+        The test DB has no tracks, so the count is 0 and the bound is the
+        1800s fixed overhead.  A per-track allowance of 900 would make the
+        bound 1800 + 900*0 = 1800.0 — never the configured value on its own.
+        """
         import services.scanning.pipelines.popularity_pipeline as pp
 
         captured: dict[str, object] = {}
@@ -506,8 +463,9 @@ class TestThePipelineUsesTheConfigurableBudget:
 
         pp._run_full_scan_as_artist_pipeline(force=False)
 
-        assert captured.get("seconds") == 900.0, (
-            "the configured artist budget must reach _bounded_call_report"
+        assert captured.get("seconds") == 1800.0, (
+            "the artist budget must reach _bounded_call_report as "
+            "fixed-overhead + per-track allowance × track count"
         )
 
 
@@ -533,8 +491,10 @@ class TestAbandoningAnArtistCancelsItsWorker:
             lambda func, *a, **k: dict(budget_result),
         )
         monkeypatch.setattr(
-            "helpers.config_helpers.get_artist_timeout_seconds", lambda: 900
+            "helpers.config_helpers.get_track_timeout_seconds", lambda: 900
         )
+        # The empty test DB answers the track-count sizing query with {} (0
+        # tracks), so the artist budget = fixed overhead + 900 * 0 = 1800.0.
         monkeypatch.setattr(library_repo, "get_all_artists", lambda: ["Warrel Dane"])
         monkeypatch.setattr(scan_pipeline, "run_artist_scan_pipeline", lambda *a, **k: None)
         monkeypatch.setattr(scan_state, "clear_stop_request", lambda *a, **k: None)

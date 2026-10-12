@@ -1908,7 +1908,7 @@ def _resolve_max_per_artist(cfg: dict[str, Any]) -> int | None:
     """Per-artist track cap for a generated playlist.
 
     ``0`` (or a missing/invalid value) means UNLIMITED, which is the documented
-    meaning everywhere else in this config (see ``album_timeout_seconds``): a
+    meaning everywhere else in this config (see ``track_timeout_seconds``): a
     cap that silently becomes a default would make "0 = no limit" impossible to
     express. Default **25** applies the anti-monopoly cap out of the box.
     """

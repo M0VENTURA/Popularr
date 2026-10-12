@@ -17,7 +17,11 @@ popularity:
     lastfm: 0.55        # Default: 0.55 (55%)
     listenbrainz: 0.35  # Default: 0.35 (35%)
     age: 0.10           # Default: 0.10 (10%)
-  track_timeout_seconds: 600  # Per-album per-track collection deadline (default: 600, clamped 120-1800)
+  track_timeout_seconds: 30  # THE single scan-timeout knob: per-track allowance
+                             # (default: 30, clamped 10-600; 0 = disable the whole
+                             # safety net). Album budget = this * track count;
+                             # artist budget = 1800s fixed overhead + this * the
+                             # artist's total track count.
   scan_threads: 4             # Concurrent per-track workers during a popularity scan (default: 4, 1-8)
   prefetch_budget_seconds: 360  # Per-artist prefetch / post-singles enrichment budget (default: 360, clamped 120-1800)
 ```

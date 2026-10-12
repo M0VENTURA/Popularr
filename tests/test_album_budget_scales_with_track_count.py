@@ -18,11 +18,11 @@ detection), so it needs ~20 minutes of wall-clock. It was cut at 15 min
 the runner then discarded every finished track's star rating — "0 tracks
 processed", no stars for the album.
 
-Fix: the configured ``album_timeout_seconds`` is the FLOOR of the track-phase
-budget; albums whose ``track_count * 20s`` exceeds it get the scaled
-allowance. This keeps the budget a *hung-call* safety net instead of an
-accidental size limit. ``0`` (disabled) and the enrich/post-singles phases
-are unchanged.
+Consolidated (2026-10-13): the flat 900 s floor and the hardcoded 20 s
+per-track constant are GONE. ``popularity.track_timeout_seconds`` is now THE
+single knob: the album budget is exactly ``track_timeout * track_count``,
+so the operator controls the per-track unit directly. ``0`` (disabled) and
+the fast enrich/post-singles phases (flat ``track_timeout``) are unchanged.
 """
 
 from __future__ import annotations
@@ -47,51 +47,48 @@ def _source() -> str:
 
 class TestTheBudgetScalesWithTrackCount:
 
-    def test_small_album_keeps_the_base_budget(self):
+    def test_a_single_track_gets_the_base_allowance(self):
         import services.popularity.scan_stage_runner as runner
 
-        # 20 tracks * 20s = 400s < 900s floor → the configured value stands.
-        assert runner._scale_album_budget(900.0, 20) == 900.0
+        assert runner._scale_album_budget(30.0, 1) == 30.0
+
+    def test_small_album_gets_the_per_track_product(self):
+        import services.popularity.scan_stage_runner as runner
+
+        # 20 tracks × 30s = 600s — no floor, the per-track unit IS the knob.
+        assert runner._scale_album_budget(30.0, 20) == 600.0
 
     def test_empty_album_keeps_the_base_budget(self):
         import services.popularity.scan_stage_runner as runner
 
-        assert runner._scale_album_budget(900.0, 0) == 900.0
+        assert runner._scale_album_budget(30.0, 0) == 30.0
 
     def test_large_album_scales_up(self):
         import services.popularity.scan_stage_runner as runner
 
-        # THE reported album: 80 tracks → 1600s > 900s.
-        assert runner._scale_album_budget(900.0, 80) == 1600.0
+        # THE reported album: 80 tracks × 30s = 2400s — comfortably above the
+        # old flat 900s that cut it mid-progress.
+        assert runner._scale_album_budget(30.0, 80) == 2400.0
 
-    def test_the_configured_value_is_the_floor(self):
+    def test_the_allowance_is_configurable(self):
         import services.popularity.scan_stage_runner as runner
 
-        # A low configured budget still yields the scaled allowance for a
-        # large album (the floor never drops below the album's need).
-        assert runner._scale_album_budget(300.0, 80) == 1600.0
-        # ...but a small album keeps the low configured value.
-        assert runner._scale_album_budget(300.0, 5) == 300.0
+        # Raising the one knob raises every album's budget proportionally.
+        assert runner._scale_album_budget(60.0, 80) == 4800.0
+        assert runner._scale_album_budget(10.0, 80) == 800.0
 
     def test_disabled_budget_passes_through(self):
         import services.popularity.scan_stage_runner as runner
 
         assert runner._scale_album_budget(None, 80) is None, (
-            "album_timeout_seconds=0 must keep meaning 'never skip'"
+            "track_timeout_seconds=0 must keep meaning 'never skip'"
         )
 
     def test_scaling_is_monotonic_in_track_count(self):
         import services.popularity.scan_stage_runner as runner
 
-        values = [runner._scale_album_budget(900.0, n) for n in (1, 10, 45, 46, 80, 200)]
+        values = [runner._scale_album_budget(30.0, n) for n in (1, 10, 45, 46, 80, 200)]
         assert values == sorted(values), "a bigger album must never get less budget"
-
-    def test_boundary_track_count(self):
-        import services.popularity.scan_stage_runner as runner
-
-        # 45 * 20 = 900 == floor → base; 46 * 20 = 920 → scaled.
-        assert runner._scale_album_budget(900.0, 45) == 900.0
-        assert runner._scale_album_budget(900.0, 46) == 920.0
 
 
 # ---------------------------------------------------------------------------
@@ -137,12 +134,16 @@ class TestTheTrackPhaseUsesTheScaledBudget:
         for call in calls:
             assert "seconds=" in call, f"a bounded album phase call lacks seconds=:\n{call[:200]}"
 
-    def test_the_per_track_constant_is_documented(self):
+    def test_the_hardcoded_per_track_constant_is_gone(self):
         source = _source()
-        assert "_ALBUM_BUDGET_PER_TRACK_SECONDS = 20.0" in source
-        # The scaling factor must be referenced by the helper (not an orphan
-        # constant that the math accidentally ignores).
-        assert "_ALBUM_BUDGET_PER_TRACK_SECONDS" in source.split("def _scale_album_budget")[1]
+        assert "_ALBUM_BUDGET_PER_TRACK_SECONDS" not in source, (
+            "the hardcoded 20s per-track constant must be gone — the "
+            "per-track allowance IS the configurable track_timeout_seconds"
+        )
+        assert "base * int(track_count)" in source, (
+            "the album budget must be the per-track allowance times the "
+            "track count"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -164,5 +165,7 @@ class TestTheReportedAlbumWouldNoLongerBeCut:
         import services.popularity.scan_stage_runner as runner
 
         # Even a large album has a finite ceiling — the budget still bounds a
-        # HANG, it just no longer doubles as a size limit.
-        assert runner._scale_album_budget(900.0, 80) == 1600.0
+        # HANG (at the configured per-track allowance).
+        scaled = runner._scale_album_budget(30.0, 80)
+        assert scaled == 2400.0, "the budget must remain a finite safety net"
+        assert runner._scale_album_budget(30.0, 100000) == 3000000.0
