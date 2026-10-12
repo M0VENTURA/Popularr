@@ -12,6 +12,7 @@ Raw HTTP is handled by api_clients.slskd_http.
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -129,6 +130,22 @@ def _is_connection_error(exc: BaseException) -> bool:
     if "No route to host" in msg or "Connection refused" in msg or "Name or service not known" in msg:
         return True
     return False
+
+
+def _is_not_found_error(exc: BaseException) -> bool:
+    """True when ``exc`` is an HTTP 404 (the resource stopped existing).
+
+    httpx raises ``HTTPStatusError`` carrying the response, so the 404 status
+    is checked both on the exception and on ``exc.response``.  Used by
+    ``get_search_results``: a search that has been DROPPED (404) mid-poll must
+    be treated as COMPLETE, not left polled until the hard timeout.
+    """
+    status = getattr(exc, "status_code", None)
+    if status == 404:
+        return True
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    return status == 404
 
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -508,7 +525,9 @@ class SlskdService:
     @staticmethod
     def _retry_after_or_backoff(resp: Any, attempt: int) -> float:
         """Seconds to wait after a 429 — Retry-After seconds-or-HTTP-date, else
-        a short backoff.  Status-code based, never body-text based."""
+        a backoff that grows with the attempt.  Status-code based, never
+        body-text based.  The ceiling is deliberately HIGH (10s): a hard
+        Soulseek server rate-limit window is rarely cleared by a 2s wait."""
         import email.utils
 
         wait_seconds = 0.8
@@ -526,7 +545,7 @@ class SlskdService:
                     return wait_seconds
                 except Exception:
                     pass
-        return min(2.0, 0.4 * attempt)
+        return min(10.0, 1.0 * attempt)
 
     def _search_exists(self, search_id: str, timeout: float | None = None) -> bool:
         """Whether a search with OUR id exists on the server (idempotency).
@@ -552,6 +571,12 @@ class SlskdService:
             state_data = self.http.get_json(f"searches/{quote(search_id, safe='')}", timeout=timeout, default={})
             state = state_data.get("state", "InProgress")
         except Exception as exc:
+            # The search may have been dropped/expired mid-poll (404) — keep
+            # polling it is pointless and burns the whole wait ceiling.
+            # Treat a 404 as COMPLETE so the caller drains what it has.
+            if _is_not_found_error(exc):
+                logger.info("slskd search not found during poll — treated as complete", search_id=search_id)
+                return [], "Deleted", True
             logger.warning(
                 "slskd get state failed for search",
                 search_id=search_id,
@@ -578,6 +603,10 @@ class SlskdService:
                     ))
             return responses, state, not self.is_search_active_state(state)
         except Exception as exc:
+            # Same 404 treatment on the responses half: the search is gone.
+            if _is_not_found_error(exc):
+                logger.info("slskd search responses not found — treated as complete", search_id=search_id)
+                return [], "Deleted", True
             logger.warning("slskd get responses failed for search", search_id=search_id, error=str(exc))
             return [], state, not self.is_search_active_state(state)
 
@@ -769,27 +798,45 @@ class SlskdService:
 
     @staticmethod
     def _rank_qualified(items: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
-        """Rank qualified results: relevance to the QUERY first, then quality,
-        then peer availability (slot before queue length before upload speed)."""
+        """Rank qualified results: relevance to the QUERY first, then peer
+        availability, then quality.
+
+        Relevance weighs BASENAME matches (the real file name) above folder-
+        path matches — a query for "Track" must not be satisfied by a folder
+        named Track with a different song inside it.  Peer availability ranks
+        ABOVE bitrate: a 320k MP3 from an open-slot peer downloads instantly, a
+        perfect FLAC behind a 4000-deep queue sits in ``Queued, Remotely``.
+        """
         query_tokens = SlskdService._rank_query_tokens(query)
         token_set = frozenset(query_tokens)
 
         def _rank(item: dict) -> tuple:
             filename = str(item.get("filename") or "")
             base = _extension_from_filename(filename)
-            basename = filename[filename.rfind("/") + 1:] or filename
+            # Tokenise the ACTUAL file name separately from its directory: a
+            # query for "Track" must not be satisfied by a folder called Track
+            # that holds a different song.  ``os.path.basename``/``dirname``
+            # cope with the peer's "/" separators (and Windows "\\") alike.
+            basename = os.path.basename(filename) or filename
+            folder_path = os.path.dirname(filename)
             basename_tokens = frozenset(SlskdService._rank_query_tokens(basename))
-            folder_tokens = token_set - basename_tokens
-            baseline_hits = sum(1 for t in basename_tokens if t in token_set)
-            folder_hits = sum(1 for t in folder_tokens if t in token_set)
+            folder_tokens = frozenset(SlskdService._rank_query_tokens(folder_path))
+            basename_hits = len(basename_tokens & token_set)
+            folder_hits = len(folder_tokens & token_set)
+            # Weighted relevance: a basename match is worth 3x a folder match,
+            # so the file NAMED "Song" outranks a folder named "Song" holding a
+            # different track — while a genuine folder match still earns credit
+            # (the previous form credited every non-basename token, so folder
+            # matches added nothing to the ranking).
+            relevance = basename_hits * 3 + folder_hits
             return (
-                -baseline_hits,           # basename matches weigh more
-                -folder_hits,             # folder matches weigh less
+                -relevance,
+                # peer availability first: OPEN-slot peers sort before
+                # slot-less ones (ascending), and an unknown slot is NOT
+                # treated as full — a missing value is not evidence busy.
+                0 if item.get("has_free_upload_slot") is not False else 1,
                 -int(item.get("bitrate") or 0),
                 -int(item.get("sample_rate") or 0),
-                # peer availability: unknown slot is NOT treated as full —
-                # a missing value is not evidence the peer is busy.
-                0 if item.get("has_free_upload_slot") is False else 1,
                 int(item.get("queue_length") or 0),
                 -(item.get("upload_speed") if isinstance(item.get("upload_speed"), (int, float)) else 0),
                 str(item.get("extension") or base),
@@ -898,7 +945,7 @@ class SlskdService:
             for item in self.filter_results_by_quality(
                 responses, min_bitrate=min_bitrate, query=query, max_results=None, reject_reasons=reject_reasons
             ):
-                key = (item["username"], item["filename"])
+                key = (item["username"], item["filename"].casefold())
                 if key not in seen:
                     seen.add(key)
                     accumulated.append(item)
@@ -920,7 +967,7 @@ class SlskdService:
                 for item in self.filter_results_by_quality(
                     responses, min_bitrate=min_bitrate, query=query, max_results=None, reject_reasons=reject_reasons
                 ):
-                    key = (item["username"], item["filename"])
+                    key = (item["username"], item["filename"].casefold())
                     if key not in seen:
                         seen.add(key)
                         accumulated.append(item)
@@ -990,9 +1037,17 @@ class SlskdService:
             for item in entries:
                 if not isinstance(item, dict):
                     continue
-                size = int(item.get("size", 0) or 0)
-                bytes_transferred = int(item.get("bytesTransferred", 0) or 0)
-                progress = min(100, round((bytes_transferred / size) * 100, 2)) if size else int(item.get("percentComplete", 0) or 0)
+                # slskd can return None / non-numeric values for the size and
+                # byte counts in the first moments of a transfer (before it has
+                # negotiated with the peer).  ``_to_int`` degrades those to 0
+                # and the percentComplete fallback keeps the bar sane.
+                size = _to_int(item.get("size"))
+                bytes_transferred = _to_int(item.get("bytesTransferred"))
+                if size:
+                    progress = min(100, round((bytes_transferred / size) * 100, 2))
+                else:
+                    progress = _to_int(item.get("percentComplete"))
+                progress = max(0, min(100, progress or 0))
                 # slskd can list the same transfer BOTH nested (in a directory)
                 # and at the top level — dedupe on its identity, not its shape.
                 transfer_item = {
@@ -1003,7 +1058,7 @@ class SlskdService:
                     "bytesTransferred": bytes_transferred,
                     "progress": progress,
                     "state": self.state_text(item.get("state") or item.get("transferState") or item.get("status")),
-                    "averageSpeed": int(item.get("averageSpeed", 0) or 0),
+                    "averageSpeed": _to_int(item.get("averageSpeed")),
                     "queuePosition": self.extract_queue_position(item),
                     # NOT the generic ``path`` key — that is the remote path,
                     # not where the file landed locally.

@@ -346,3 +346,170 @@ class TestTokeniserAndRanking:
         ranked = SlskdService._rank_qualified(items, "Band - Song")
         assert ranked[0]["filename"] == "Random Folder/Band - Song.flac"
         assert ranked[1]["filename"] == "Band - Song/01 - Some Other Song.flac"
+
+    def test_a_folder_match_still_beats_no_match_at_all(self):
+        # Query words appear ONLY in the first file's FOLDER path; the second
+        # file matches nowhere.  The genuine folder match must still rank
+        # first — the previous implementation credited every non-basename
+        # token as a "folder hit", so both scored identically and bitrate
+        # decided the order.
+        folder_match = _qualify_file("Arctic Monkeys - AM/01 Whatever.flac")
+        folder_match["bitrate"] = 192
+        no_match = _qualify_file("Other/03 Unrelated.flac")
+        no_match["bitrate"] = 320
+        ranked = SlskdService._rank_qualified([no_match, folder_match], "Arctic Monkeys")
+        assert ranked[0]["filename"] == "Arctic Monkeys - AM/01 Whatever.flac"
+
+    def test_a_basename_match_beats_a_folder_only_match(self):
+        basename_match = _qualify_file("Some Folder/Arctic Monkeys - Do I Wanna Know.flac")
+        folder_only = _qualify_file("Arctic Monkeys/01 Do I Wanna Know.flac")
+        ranked = SlskdService._rank_qualified([folder_only, basename_match], "Arctic Monkeys")
+        assert ranked[0]["filename"] == "Some Folder/Arctic Monkeys - Do I Wanna Know.flac"
+
+
+# ---------------------------------------------------------------------------
+# Refinements: 404-complete, slot-above-bitrate, casefold dedup, 429 ceiling,
+# null-safe transfer progress
+# ---------------------------------------------------------------------------
+
+class _NotFound(Exception):
+    """Minimal stand-in for httpx.HTTPStatusError on a 404."""
+    status_code = 404
+
+
+class _NotFoundClient(_NoHttp):
+    """get_json raises a 404 for the state half, or the responses half."""
+
+    def __init__(self, fail_on="state"):
+        self.enabled = True
+        self.fail_on = fail_on
+
+    def get_json(self, endpoint, *args, **kwargs):
+        if self.fail_on == "state":
+            raise _NotFound("404 Not Found")
+        if "responses" in endpoint:  # responses half
+            raise _NotFound("404 Not Found")
+        return {"state": "InProgress"}
+
+
+class TestGetSearchResults404IsComplete:
+
+    def test_a_404_state_lookup_treats_the_search_as_complete(self):
+        svc = SlskdService(http_client=_NotFoundClient(fail_on="state"))
+        responses, state, is_complete = svc.get_search_results("s1")
+        assert responses == []
+        assert is_complete is True
+        assert "Deleted" == state
+
+    def test_a_404_on_responses_treats_the_search_as_complete(self):
+        svc = SlskdService(http_client=_NotFoundClient(fail_on="responses"))
+        responses, state, is_complete = svc.get_search_results("s1")
+        assert responses == []
+        assert is_complete is True
+
+    def test_a_404_via_the_response_object_is_also_complete(self):
+        # Real httpx raises HTTPStatusError carrying the original response, so
+        # the status may be reachable only through ``exc.response``.
+        class _Resp:
+            status_code = 404
+
+        class _Err(Exception):
+            response = _Resp()
+
+        class _Client(_NoHttp):
+            enabled = True
+
+            def get_json(self, endpoint, *args, **kwargs):
+                raise _Err("404 Not Found")
+
+        svc = SlskdService(http_client=_Client())
+        responses, state, is_complete = svc.get_search_results("s1")
+        assert responses == []
+        assert is_complete is True
+
+
+class TestRankSlotAboveBitrate:
+
+    def test_an_open_slot_low_bitrate_outranks_a_full_slot_high_bitrate(self):
+        full_hq = _qualify_file("Band - Song.flac")
+        full_hq["has_free_upload_slot"] = False   # full peer, great file
+        open_lq = _qualify_file("Band - Song.mp3")
+        open_lq["bitrate"] = 128
+        open_lq["has_free_upload_slot"] = True    # open peer, ok file
+        ranked = SlskdService._rank_qualified([full_hq, open_lq], "Band - Song")
+        assert ranked[0]["filename"] == "Band - Song.mp3", (
+            "an open-slot peer must rank ABOVE bitrate — a full-slot perfect "
+            "file can sit queued behind 4000 other downloads"
+        )
+
+    def test_unknown_slot_is_not_treated_as_full(self):
+        unknown = _qualify_file("a.flac")
+        unknown["has_free_upload_slot"] = None     # unknown, must not rank last
+        full = _qualify_file("b.flac")
+        full["has_free_upload_slot"] = False
+        ranked = SlskdService._rank_qualified([full, unknown], "a b")
+        assert ranked[0]["filename"] == "a.flac"
+        assert ranked[1]["filename"] == "b.flac"
+
+
+class TestSearchCasefoldDedup:
+    """Windows peers make path casing unpredictable — identical files differing
+    only in case must not be counted/queued twice."""
+
+    def test_same_file_different_case_is_seen_once(self):
+        http = _FeedHttp()
+        http.entries = [
+            ([_response("Band - Song.FLAC"), _response("band - song.flac")], "Completed", True),
+        ]
+        holder = _SearchableSvc(http)
+        out = holder.svc.search_and_filter("band - song", wait_seconds=10, poll_interval=0.01)
+        assert len(out) == 1, "case-only differences are the same Soulseek file"
+
+
+class TestRetryAfter429Ceiling:
+
+    def test_429_backoff_can_reach_ten_seconds(self):
+        from services.downloads.slskd_service import SlskdService as _S
+
+        resp = _HdrResp()
+        assert _S._retry_after_or_backoff(resp, 100) == 10.0
+        assert _S._retry_after_or_backoff(resp, 5) == 5.0
+
+    def test_retry_after_header_still_wins(self):
+        from services.downloads.slskd_service import SlskdService as _S
+
+        resp = _HdrResp(retry_after="2")
+        assert _S._retry_after_or_backoff(resp, 5) == 2.0
+
+
+class _HdrResp:
+    def __init__(self, retry_after=""):
+        self.headers = {"Retry-After": retry_after} if retry_after else {}
+
+
+class TestTransferNullSize:
+
+    def test_null_and_garbage_sizes_do_not_crash(self):
+        svc = SlskdService(http_client=_NoHttp())
+        flat = svc.parse_transfers_response([{
+            "username": "peer",
+            "directories": [{"directory": "x", "files": [
+                {"id": "t1", "filename": "a.flac", "size": None,
+                 "bytesTransferred": "lots", "state": "InProgress"},
+                {"id": "t2", "filename": "b.flac", "size": 0,
+                 "percentComplete": None, "state": "InProgress"},
+            ]}],
+        }])
+        assert flat[0]["size"] == 0
+        assert flat[0]["progress"] == 0
+        assert flat[1]["progress"] == 0
+
+    def test_percent_complete_fallback_is_used_when_size_is_zero(self):
+        svc = SlskdService(http_client=_NoHttp())
+        flat = svc.parse_transfers_response([{
+            "username": "peer",
+            "directories": [{"directory": "x", "files": [
+                {"id": "t1", "filename": "a.flac", "size": 0, "percentComplete": "57", "state": "InProgress"},
+            ]}],
+        }])
+        assert flat[0]["progress"] == 57
