@@ -473,6 +473,22 @@ class TestFrontendsStillSendTheBatchShape:
         source = self._read("test_site/static/js/services/slskd.js")
         assert "{ files: files }" in source
 
+    def test_rebuilt_slskd_service_posts_flat_shape_for_queue_download(self):
+        """The queue-download endpoint reads FLAT username/filename/size +
+        queue_id — the nested `files` batch shape of /api/slskd/download is
+        NOT understood there. When the rebuilt modal forwards a queueId the
+        payload must be flat (mirroring static/js/downloads.js
+        downloadSoulseekManualResult); otherwise the manual-search download
+        from a queue row fails with "queue_id, username, and filename
+        required" (the reported 400)."""
+        source = self._read("test_site/static/js/services/slskd.js")
+        assert "QUEUE_DOWNLOAD_ENDPOINT" in source
+        assert "filename: file.filename" in source, (
+            "the queue-linked branch must send the FLAT shape (username/"
+            "filename/size + queue_id), never the nested files list"
+        )
+        assert "queue_id: opts.queueId" in source
+
     def test_both_point_at_the_download_endpoint(self):
         for path in (
             "static/js/downloads_page.js",

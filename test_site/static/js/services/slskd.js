@@ -523,10 +523,35 @@
       if (!accepted) return false;
     }
 
-    const endpoint = opts.queueId ? QUEUE_DOWNLOAD_ENDPOINT : DOWNLOAD_ENDPOINT;
-    const payload = opts.queueId
-      ? { files: files, queue_id: opts.queueId }
-      : { files: files };
+    let endpoint = opts.queueId ? QUEUE_DOWNLOAD_ENDPOINT : DOWNLOAD_ENDPOINT;
+    let payload;
+    if (opts.queueId) {
+      // /api/slskd/queue-download links ONE file to the queue row and reads
+      // FLAT username/filename/size (+ queue_id) — it does NOT understand the
+      // nested `files` batch shape that /api/slskd/download accepts. Posting
+      // `{ files, queue_id }` here produced "queue_id, username, and filename
+      // required" on every manual-search download from a queue row. Mirror
+      // static/js/downloads.js downloadSoulseekManualResult, which already
+      // builds this exact flat body for the same endpoint.
+      if (files.length > 1) {
+        // A queue row is a single file; the flat endpoint can only carry one.
+        // Fall back to the batch endpoint so no file is silently dropped (the
+        // queue row simply isn't linked — never hit in practice, but honest).
+        console.warn('[slskd] queue-linked download with >1 file — using the batch endpoint');
+        endpoint = DOWNLOAD_ENDPOINT;
+        payload = { files: files };
+      } else {
+        const file = files[0] || {};
+        payload = {
+          username: file.username,
+          filename: file.filename,
+          size: file.size || 0,
+          queue_id: opts.queueId,
+        };
+      }
+    } else {
+      payload = { files: files };
+    }
 
     try {
       const data = await global.api.postJson(endpoint, payload);
