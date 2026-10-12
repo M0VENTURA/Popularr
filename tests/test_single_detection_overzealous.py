@@ -32,13 +32,15 @@ import pytest
 def _final(**kw):
     from services.enrichment.single_detection_service import determine_final_status
 
+    # The old boolean flags (``radio_edit`` / ``has_metadata``) no longer
+    # exist — the source-count API (``high_sources`` / ``medium_sources`` /
+    # ``metadata_medium_sources``) replaced them. The counts below are the
+    # definitive evidence; the old flags were redundant alongside them.
     defaults = dict(
         discogs=False,
         musicbrainz=False,
         album_z=0.0,
         artist_z=0.0,
-        radio_edit=False,
-        has_metadata=False,
         is_title_track=False,
         is_compilation=False,
         zscore_high=1.0,
@@ -77,7 +79,6 @@ class TestPlus44AlbumScenario:
             artist_z=1.24,
             high_sources=1,
             medium_sources=0,
-            has_metadata=True,
         ) == "high"
 
     def test_cliffdiving_lone_mb_match_low_z_medium(self):
@@ -86,14 +87,15 @@ class TestPlus44AlbumScenario:
         # single. A lone medium source can never be 'high', but it must be
         # marked as a single ('medium') rather than dropped to 'none' —
         # low z-scores only refine high vs medium, they never demote a
-        # confirmed single.
+        # confirmed single. MB is a METADATA medium source
+        # (``metadata_medium_sources``), which confirms at the low z band.
         assert _final(
             musicbrainz=True,
             album_z=0.33,
             artist_z=0.33,
             high_sources=0,
             medium_sources=1,
-            has_metadata=True,
+            metadata_medium_sources=1,
         ) == "medium"
 
     def test_title_track_low_z_medium_not_high(self):
@@ -105,7 +107,7 @@ class TestPlus44AlbumScenario:
             artist_z=-1.87,
             high_sources=0,
             medium_sources=1,
-            has_metadata=True,
+            metadata_medium_sources=1,
             is_title_track=True,
         ) == "medium"
 
@@ -121,8 +123,6 @@ class TestMediumBandNeedsTwoSources:
             artist_z=0.8,
             high_sources=0,
             medium_sources=1,
-            radio_edit=True,
-            has_metadata=True,
         ) == "none"
 
     def test_two_weak_sources_medium_band_is_medium(self):
@@ -131,8 +131,6 @@ class TestMediumBandNeedsTwoSources:
             artist_z=0.8,
             high_sources=0,
             medium_sources=2,
-            radio_edit=True,
-            has_metadata=False,
         ) == "medium"
 
     def test_one_high_source_medium_band_is_high(self):
@@ -142,7 +140,6 @@ class TestMediumBandNeedsTwoSources:
             artist_z=0.8,
             high_sources=1,
             medium_sources=0,
-            has_metadata=True,
         ) == "high"
 
     def test_metadata_poor_medium_band_not_single(self):
@@ -155,7 +152,6 @@ class TestMediumBandNeedsTwoSources:
             artist_z=0.7,
             high_sources=0,
             medium_sources=0,
-            has_metadata=False,
         ) == "none"
 
 

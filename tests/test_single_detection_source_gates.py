@@ -50,9 +50,26 @@ class _FakeMBClient:
         return False
 
 
+class _FakeMBService:
+    """Stands in for ``musicbrainz_service.get_shared_mb_service``.
+
+    ``_detect_musicbrainz`` falls back to the SERVICE-level ``is_single``
+    when the raw client found nothing (advanced mode). The raw fake client
+    cannot cover that; without the stub the service would construct a real
+    shared client and hit the network.
+    """
+
+    def is_single(self, *args, **kwargs):
+        return False
+
+
 def _detect(title="Song", artist="Artist", isrc="US1234567890", mb_client=None, **kw):
     from services.enrichment.single_detection_service import detect_single_for_track
 
+    # ``use_advanced_detection`` arrives via ``**kw`` from the individual
+    # tests — it must NOT be hard-coded here or a test that passes it
+    # explicitly (e.g. ``_detect(..., use_advanced_detection=True)``) raises
+    # ``TypeError: got multiple values for keyword argument``.
     return detect_single_for_track(
         title=title,
         artist=artist,
@@ -61,7 +78,6 @@ def _detect(title="Song", artist="Artist", isrc="US1234567890", mb_client=None, 
         isrc=isrc,
         mb_client=mb_client,
         persist_result=False,
-        use_advanced_detection=False,
         is_va_compilation=False,
         **kw,
     )
@@ -105,9 +121,16 @@ class TestDiscogsVideoConfigurable:
 
         monkeypatch.setattr(sds, "_detect_discogs_video", _fake_video)
         monkeypatch.setattr(sds, "_always_check_discogs_video", lambda: False)
+        # Advanced mode's ``_detect_musicbrainz`` falls back to the SERVICE
+        # ``is_single`` (get_shared_mb_service) — stub it so no real MusicBrainz
+        # network call happens in this test.
+        monkeypatch.setattr(
+            "services.enrichment.musicbrainz_service.get_shared_mb_service",
+            lambda *a, **k: _FakeMBService(),
+        )
 
         client = _FakeMBClient(isrc_singles=False)
-        _detect(mb_client=client, use_advanced_detection=True)
+        _detect(mb_client=client, use_advanced_detection=True, artist_mbid="artist-1")
 
         # Default: Discogs-video NOT checked after MB confirmed.
         assert not calls.get("called")
@@ -123,9 +146,13 @@ class TestDiscogsVideoConfigurable:
 
         monkeypatch.setattr(sds, "_detect_discogs_video", _fake_video)
         monkeypatch.setattr(sds, "_always_check_discogs_video", lambda: True)
+        monkeypatch.setattr(
+            "services.enrichment.musicbrainz_service.get_shared_mb_service",
+            lambda *a, **k: _FakeMBService(),
+        )
 
         client = _FakeMBClient(isrc_singles=False)
-        result = _detect(mb_client=client, use_advanced_detection=True)
+        result = _detect(mb_client=client, use_advanced_detection=True, artist_mbid="artist-1")
 
         # With the config flag on, Discogs-video runs and corroborates.
         assert calls.get("called")

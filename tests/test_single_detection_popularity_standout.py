@@ -26,13 +26,14 @@ import pytest
 def _final(**kw):
     from services.enrichment.single_detection_service import determine_final_status
 
+    # The old boolean flags (``radio_edit`` / ``has_metadata``) no longer
+    # exist — the source-count API (``high_sources`` / ``medium_sources`` /
+    # ``metadata_medium_sources``) replaced them.
     defaults = dict(
         discogs=False,
         musicbrainz=False,
         album_z=0.0,
         artist_z=0.0,
-        radio_edit=False,
-        has_metadata=False,
         is_title_track=False,
         is_compilation=False,
         zscore_high=1.0,
@@ -79,7 +80,6 @@ class TestPopularityStandoutConfirmsSingle:
             high_sources=1,
             medium_sources=0,
             z_standout=True,
-            has_metadata=True,
         ) == "high"
 
     def test_high_z_no_sources_no_standout_still_none(self):
@@ -99,8 +99,6 @@ class TestPopularityStandoutConfirmsSingle:
             artist_z=1.4,
             high_sources=0,
             medium_sources=1,
-            radio_edit=True,
-            has_metadata=False,
         ) == "none"
 
     def test_medium_band_one_weak_source_still_none(self):
@@ -110,8 +108,6 @@ class TestPopularityStandoutConfirmsSingle:
             artist_z=0.8,
             high_sources=0,
             medium_sources=1,
-            radio_edit=True,
-            has_metadata=True,
         ) == "none"
 
 
@@ -267,15 +263,20 @@ class TestAlbumLocalCompositeZ:
     def test_mid_pack_album_track_not_promoted_by_inflated_artist_z(self, monkeypatch):
         # "Circle the Drain": mid-pack listeners on the album, but its artist_z
         # is inflated to ~3.1 by the standout album.  The composite album-local
-        # z is negative → no z_standout → a lone Last.fm medium source cannot
-        # promote it to 'high' (was single=high before the fix).
+        # z is in the medium band -> no z_standout.  The NEW engine semantics:
+        # a Last.fm confirmation is a METADATA medium source -> the track is a
+        # MEDIUM-confidence single (never 'high'). Before the singles split the
+        # engine treated the lone Last.fm source as insufficient and flagged it
+        # low; the re-asserted expectation is the new deliberate behaviour
+        # (Last.fm single confirmation IS authoritative, and the inflated
+        # artist_z must NOT promote it to high/5★).
         result = self._detect(monkeypatch, lastfm_listeners=39262, listenbrainz_listens=55095)
         decision = result["decision"]
         assert decision["artist_z"] > 2.5, decision
         assert decision["z_composite"] < 1.0, decision
         assert decision["z_standout"] is False, result["reasons"]
-        assert result["is_single"] is False, result["reasons"]
-        assert result["confidence"] == "low"
+        assert result["is_single"] is True, result["reasons"]
+        assert result["confidence"] == "medium", result["reasons"]
 
     def test_album_standout_still_promoted(self, monkeypatch):
         # "Slit Wrist Theory": the genuine intra-album standout (119k vs ~40k

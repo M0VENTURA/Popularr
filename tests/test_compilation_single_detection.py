@@ -88,7 +88,9 @@ class TestDetermineFinalStatusCompilationIgnoresPopularity:
         assert self._final(discogs=True, high_sources=1) == "high"
 
     def test_two_medium_sources_is_medium(self):
-        assert self._final(lastfm=True, radio_edit=True, medium_sources=2) == "medium"
+        # On a compilation, two medium sources (Last.fm + radio-edit, both
+        # folded into the ``medium_sources`` count) still confirm a single.
+        assert self._final(medium_sources=2) == "medium"
 
     def test_z_standout_alone_is_none(self):
         # A high z-score + z_standout with NO sources is not a single on a
@@ -98,7 +100,7 @@ class TestDetermineFinalStatusCompilationIgnoresPopularity:
     def test_z_standout_with_single_weak_source_is_none(self):
         # On a regular album z_standout + 1 medium source would upgrade to
         # 'high'; on a compilation popularity is ignored so it stays 'none'.
-        assert self._final(lastfm=True, medium_sources=1, z_standout=True) == "none"
+        assert self._final(medium_sources=1, z_standout=True) == "none"
 
     def test_high_z_no_sources_is_none(self):
         assert self._final() == "none"

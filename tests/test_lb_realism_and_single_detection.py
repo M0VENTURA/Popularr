@@ -31,7 +31,6 @@ class TestDetermineFinalStatusIsCompilation:
             artist_z=0.7,
             high_sources=0,
             medium_sources=0,
-            has_metadata=False,
             is_compilation=False,
         )
         assert result == "none"
@@ -44,7 +43,6 @@ class TestDetermineFinalStatusIsCompilation:
             artist_z=0.7,
             high_sources=0,
             medium_sources=0,
-            has_metadata=False,
             is_compilation=True,
         )
         assert result == "none"

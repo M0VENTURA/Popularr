@@ -51,10 +51,14 @@ class TestLive4StarRequiresSingleDefault:
             _track(conf="high", single=True), _ALBUM, _ARTIST,
         ) == 4
 
-    def test_user_marked_live_track_reaches_four(self):
+    def test_user_marked_live_track_reaches_five(self):
+        # A USER-marked single (``single_confidence == "user"``) is an
+        # explicit instruction and is NEVER demoted — ``_assign_stars``
+        # returns 5 for it straight away (the live-4★ gate is
+        # ALGORITHMIC only; a manual override bypasses it).
         assert _assign(
             _track(conf="user", single=True), _ALBUM, _ARTIST,
-        ) == 4
+        ) == 5
 
     def test_non_live_track_unaffected(self):
         # A plain studio track still reaches the 4★ band on album-z alone.
