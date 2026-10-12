@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -72,6 +73,18 @@ _SLSKD_REMOTELY_QUEUED_TIMEOUT_MINUTES = 60
 #: that "succeeded" but was not found → requeue → search picks a DIFFERENT
 #: file → repeat).
 _SLSKD_SUCCEEDED_NOT_FOUND_TIMEOUT_MINUTES = 15
+
+#: Consecutive succeeded-but-not-found cycles before the item is failed for
+#: retry.  Cycle-counted (not wall-clock) so a refreshed ``updated_at`` can
+#: never reset the grace period forever (see _reconcile_transfer_state).
+_SLSKD_SUCCEEDED_NOT_FOUND_MAX_CYCLES = 3
+
+#: Consecutive cycles where the completed transfer's file landed but could
+#: not be claimed/imported (already claimed by another row, or moved off disk)
+#: before the item is failed for retry.  See the landed-path claim in
+#: ``check_completed_downloads`` — the previously-silent skip that re-logged
+#: "appeared within the grace window" every cycle forever.
+_LANDED_NOT_IMPORTED_MAX_CYCLES = 3
 
 
 def _refresh_downloading_item(queue_id: int) -> dict[str, Any] | None:
@@ -207,6 +220,7 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
 
     _base_key = _norm_key(base)
     _base_punct = _punctuation_stripped_key(base)
+    _base_pfx = _track_prefix_stripped_key(base)
     search_roots: set[str] = set()
     if monitored and os.path.isdir(monitored) and monitored != "?":
         search_roots.add(monitored)
@@ -247,6 +261,7 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
                         if (
                             _norm_key(_fname) == _base_key
                             or (_base_punct and _punctuation_stripped_key(_fname) == _base_punct)
+                            or (_base_pfx and _track_prefix_stripped_key(_fname) == _base_pfx)
                         ):
                             candidates.append(os.path.join(_root, _fname))
                             break
@@ -307,6 +322,76 @@ def _punctuation_stripped_key(name: str) -> str:
         return "".join(c for c in stripped.lower() if c.isalnum())
     except Exception:
         return "".join(c for c in str(name or "").lower() if c.isalnum())
+
+
+_TRACK_NUM_PREFIX_RE = re.compile(r"^\d{1,4}(?:[\s._-]*\d{1,4})*[\s._-]*")
+
+
+def _basename_without_track_prefix(name: str) -> str:
+    """Basename with a leading DISC/TRACK number prefix removed, if present.
+
+    Peers number files many ways: ``0108 - Spring of Rage.flac`` (disc 01 +
+    track 08), ``08 - Spring of Rage.flac``, ``1-08. Spring of Rage.flac``,
+    ``3-02 - Breathing New Life.flac``. slskd saves the REMOTE filename
+    verbatim, so the on-disk name can differ from the queue's
+    ``found_filename`` ONLY by that leading number ("0108" vs "08" vs "1-08").
+    The punct-stripped key keeps the digits, so ``0108springofrage`` never
+    equals ``08springofrage`` — the reported loop where a succeeded transfer
+    stays "no local file found" forever even though the file IS under the
+    downloads dir.
+
+    Stripping a leading ``1-4``-digit + separators before keying makes all
+    these collapse to the same key. The baseline keys are still tried FIRST;
+    the prefixed-stripped key is an ADDITIONAL fallback candidate, and the
+    caller verifies the file against the queue item (metadata / filename
+    matcher) before importing, so a false-positive prefix collapse cannot
+    import the wrong track.
+    """
+    try:
+        base = str(name or "").strip()
+    except Exception:
+        return str(name or "")
+    base = _TRACK_NUM_PREFIX_RE.sub("", base)
+    return base
+
+
+def _track_prefix_stripped_key(name: str) -> str:
+    """Punct-stripped key of the track-number-stripped basename.
+
+    Secondary key ONLY — the exact/punct keys remain primary. See
+    ``_basename_without_track_prefix`` for why the digits must be dropped.
+    """
+    try:
+        import unicodedata as _ud
+        stripped = _basename_without_track_prefix(name)
+        nfc = _ud.normalize("NFC", stripped)
+        stripped = "".join(c for c in _ud.normalize("NFKD", nfc) if not _ud.combining(c))
+        return "".join(c for c in stripped.lower() if c.isalnum())
+    except Exception:
+        return _punctuation_stripped_key(name)
+
+
+#: Consecutive-cycle counters for the two "succeeded but the item never
+#: proceeds" loops — keyed by queue id, so the item is FAILED (requeued) after
+#: N observations regardless of how often the row's ``updated_at`` is touched.
+#: (``update_queue_item`` always stamps ``updated_at = CURRENT_TIMESTAMP``, so
+#: the original wall-clock stale gate could be reset every cycle and an item
+#: polled forever — the reported 45-minute-plus "will keep polling" loops.)
+_SUCCEEDED_NOT_FOUND_CYCLES: dict[int, int] = {}
+_LANDED_NOT_IMPORTED_CYCLES: dict[int, int] = {}
+
+
+def _bump_cycle_counter(counter: dict[int, int], queue_id: int) -> int:
+    """Increment a per-item consecutive-cycle counter and return its value."""
+    counter[int(queue_id)] = counter.get(int(queue_id), 0) + 1
+    return counter[int(queue_id)]
+
+
+def _clear_cycle_counter(counter: dict[int, int], queue_id: int) -> None:
+    try:
+        counter.pop(int(queue_id), None)
+    except Exception:
+        pass
 
 
 def _is_stale_queue_item(
@@ -1810,6 +1895,10 @@ def _reconcile_transfer_state(
         local = str(transfer.get("localFilePath") or "")
         landed = _wait_for_transfer_file(found_fn, local)
         if landed:
+            # The wait is OVER — reset the consecutive not-found counter so
+            # the next observation starts fresh (a found file is the end of
+            # this grace story).
+            _clear_cycle_counter(_SUCCEEDED_NOT_FOUND_CYCLES, queue_id)
             # Return the LANDED PATH (not just False) so the caller can
             # immediately claim + import it — previously it returned False,
             # the item stayed 'downloading', and the next cycle's
@@ -1834,8 +1923,24 @@ def _reconcile_transfer_state(
         # Keep the item 'downloading' so a later cycle claims the file the
         # moment it lands; only after the grace period is it failed for a
         # (much slower) retry.
-        if _is_stale_queue_item(item, stale_minutes=_SLSKD_SUCCEEDED_NOT_FOUND_TIMEOUT_MINUTES, now=now):
-            logger.warning("Succeeded transfer never produced a local file — failing for retry", queue_id=queue_id)
+        #
+        # The grace period is CONSECUTIVE CYCLE COUNT, not wall-clock age:
+        # ``update_queue_item`` stamps ``updated_at = CURRENT_TIMESTAMP`` on
+        # every update, so a wall-clock stale gate (%15 min) can be reset
+        # indefinitely by anything that touches the row — the reported
+        # 45-minute-plus "will keep polling" loops.  After 3 consecutive
+        # succeeded-but-not-found observations the item is failed for retry
+        # no matter what updated_at says.
+        _succeeded_not_found_cycles = _bump_cycle_counter(
+            _SUCCEEDED_NOT_FOUND_CYCLES, queue_id
+        )
+        _grace_exhausted = (
+            _succeeded_not_found_cycles >= _SLSKD_SUCCEEDED_NOT_FOUND_MAX_CYCLES
+            or _is_stale_queue_item(item, stale_minutes=_SLSKD_SUCCEEDED_NOT_FOUND_TIMEOUT_MINUTES, now=now)
+        )
+        if _grace_exhausted:
+            logger.warning("Succeeded transfer never produced a local file — failing for retry", queue_id=queue_id, cycles=_succeeded_not_found_cycles)
+            _clear_cycle_counter(_SUCCEEDED_NOT_FOUND_CYCLES, queue_id)
             _remember_failed_peer(transfer)
             try:
                 transfer_id = str(transfer.get("id") or "")
@@ -1961,6 +2066,7 @@ def check_completed_downloads() -> dict[str, Any]:
                                     c for c in _ud.normalize("NFKD", _base_key) if not _ud.combining(c)
                                 ).lower()
                                 _base_punct = _punctuation_stripped_key(_cand_base)
+                                _base_pfx = _track_prefix_stripped_key(_cand_base)
                                 # Search the downloads root PLUS the torrents
                                 # dir / sibling ``torrents`` roots — slskd's
                                 # complete-directory can differ from the app's
@@ -1995,6 +2101,7 @@ def check_completed_downloads() -> dict[str, Any]:
                                                 _fn_key == _base_key
                                                 or _fn_stripped == _base_stripped
                                                 or (_base_punct and _punctuation_stripped_key(_fname) == _base_punct)
+                                                or (_base_pfx and _track_prefix_stripped_key(_fname) == _base_pfx)
                                             ):
                                                 resolved_local = os.path.join(_root, _fname)
                                                 break
@@ -2375,6 +2482,39 @@ def check_completed_downloads() -> dict[str, Any]:
                                     _block_peer_for_queue_item(queue_id, found_fn)
                                     mark_failed(queue_id, "Downloaded file artist did not match queue item; deleted and rescheduled")
                                     stats["failed"] += 1
+                                    continue
+                            else:
+                                # The landed path could not be claimed: either
+                                # it no longer exists on disk (a worker/watcher
+                                # already moved it) or another queue row claimed
+                                # the SAME file earlier this cycle. Previously
+                                # this was a silent fall-through — the item
+                                # re-logged "appeared within the grace window"
+                                # every cycle forever, never imported, never
+                                # failed (the reported 45-minute-plus stuck
+                                # items). Count consecutive cycles and FAIL for
+                                # retry once the file settles elsewhere.
+                                _landed_cycles = _bump_cycle_counter(
+                                    _LANDED_NOT_IMPORTED_CYCLES, queue_id
+                                )
+                                if not os.path.isfile(_landed_path):
+                                    logger.warning(
+                                        "Landed file no longer on disk — skipping claim",
+                                        queue_id=queue_id, path=_landed_path,
+                                        cycles=_landed_cycles,
+                                    )
+                                else:
+                                    logger.warning(
+                                        "Landed file already claimed by another queue row this cycle",
+                                        queue_id=queue_id, path=_landed_path,
+                                        cycles=_landed_cycles,
+                                    )
+                                if _landed_cycles >= _LANDED_NOT_IMPORTED_MAX_CYCLES:
+                                    _clear_cycle_counter(_LANDED_NOT_IMPORTED_CYCLES, queue_id)
+                                    mark_failed(queue_id, "Slskd file landed but could not be claimed/imported (claimed by another row or already moved)")
+                                    stats["failed"] += 1
+                                    log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → failed: landed file could not be claimed (requeued)")
+                                    _log_queue_event("failed", "Landed file could not be claimed — scheduling retry", queue_id)
                                     continue
                     # Only treat as stale/no-file when we STILL have nothing —
                     # the landed-path claim above sets abs_path and must fall
