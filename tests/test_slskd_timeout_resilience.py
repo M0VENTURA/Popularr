@@ -9,6 +9,7 @@ ReadTimeout used to fail the entire queue item with ``no_results`` /
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -49,12 +50,19 @@ class _FakeHttp:
         self.enabled = enabled
         self.calls = 0
         self.failures_before_success = 0
+        self.posted_ids: list[str] = []
 
     def post_json(self, *args, **kwargs):
         self.calls += 1
         if self.calls <= self.failures_before_success:
             raise TimeoutError("timed out (ReadTimeout)")
-        resp = _FakeResp(200, {"id": "search-123"})
+        # The new contract POSTs a client-generated id; the server honours it
+        # and the response echoes it.  (A download POST body is a LIST, not a
+        # dict — tolerate both shapes.)
+        body = args[1] if len(args) > 1 else (kwargs.get("json") or {})
+        posted_id = (body or {}).get("id") if isinstance(body, dict) else "search-123"
+        self.posted_ids.append(str(posted_id))
+        resp = _FakeResp(200, {"id": posted_id})
         return resp
 
 
@@ -78,7 +86,7 @@ class TestStartSearchRetry:
         http.failures_before_success = 2
         svc = SlskdService(http)
         search_id = svc.start_search("Spice Girls - Holler", max_attempts=5)
-        assert search_id == "search-123"
+        assert search_id == http.posted_ids[-1], "the id is the client-generated one"
         assert http.calls == 3
 
     def test_gives_up_after_max_attempts(self):
@@ -103,12 +111,19 @@ class TestDownloadFileRetry:
         http = _FakeHttp()
         http.failures_before_success = 1
         svc = SlskdService(http)
-        assert svc.download_file("hudsonk1992", "/Spice Girls/track.flac") is True
+        assert svc.download_file("hudsonk1992", "/Spice Girls/track.flac", size=5_000_000) is True
         assert http.calls == 2
 
     def test_returns_false_when_disabled(self):
         svc = SlskdService(_FakeHttp(enabled=False))
+        assert svc.download_file("peer", "file.mp3", size=1) is False
+
+    def test_refuses_a_zero_size_request(self):
+        """slskd needs the real size to ask the peer; a 0-sized POST is dead."""
+        http = _FakeHttp()
+        svc = SlskdService(http)
         assert svc.download_file("peer", "file.mp3") is False
+        assert http.calls == 0
 
 
 # ---------------------------------------------------------------------------
@@ -136,83 +151,141 @@ class TestGetSearchResultsResilience:
 # ---------------------------------------------------------------------------
 
 class _RecoveringHttp(_FakeHttp):
-    """POST always fails; list_searches exposes an active search with the query."""
+    """POST always times out; the search may still exist under OUR id."""
 
-    def __init__(self, active_searches=None, enabled=True):
+    def __init__(self, search_state=None, enabled=True):
         super().__init__(enabled=enabled)
-        self._active = active_searches or []
+        self._search_state = search_state
 
     def post_json(self, *args, **kwargs):
         self.calls += 1
+        body = args[1] if len(args) > 1 else (kwargs.get("json") or {})
+        self.posted_ids.append(str((body or {}).get("id") or ""))
         raise TimeoutError("timed out (ReadTimeout)")
 
-    def get_json(self, endpoint, **kwargs):
-        if endpoint == "searches":
-            return self._active
-        return {}
+    def get_search_state(self, search_id, timeout=10):
+        return dict(self._search_state) if self._search_state else {}
 
     def put(self, *args, **kwargs):
-        resp = _FakeResp(204)
-        return resp
+        return _FakeResp(204)
 
     def delete(self, *args, **kwargs):
-        resp = _FakeResp(204)
-        return resp
+        return _FakeResp(204)
 
 
-def _active_search(search_id="search-abc", query="Spice Girls - Holler", state="InProgress"):
-    from datetime import datetime, timedelta, timezone
-    started = datetime.now(timezone.utc) - timedelta(seconds=10)
+def _owns(search_id: str):
+    SlskdService.mark_search_owned(search_id)
+
+
+def _active_search(search_id="search-abc", query="Spice Girls - Holler", state="InProgress", started=None):
+    if started is None:
+        from datetime import timedelta
+
+        started = datetime.now(timezone.utc) - timedelta(seconds=10)
     return {"id": search_id, "state": state, "searchText": query, "startedAt": started.isoformat()}
 
 
 class TestStartSearchRecovery:
-    def test_recovers_search_started_despite_post_failure(self):
-        http = _RecoveringHttp(active_searches=[_active_search()])
+    """Recovery is by OUR client-generated id, never by query text.
+
+    The old ``find_active_search_by_query`` matched another worker's search on
+    its query string, adopted it, and then deleted it in the cleanup — the
+    other worker lost its results.  A POST that times out after the server
+    accepted the request is recovered by checking whether OUR id exists.
+    """
+
+    def test_a_post_timeout_that_actually_started_the_search_forces_the_id(self):
+        http = _RecoveringHttp(search_state={"id": "whatever", "state": "InProgress"})
         svc = SlskdService(http)
         search_id = svc.start_search("Spice Girls - Holler", max_attempts=2)
-        assert search_id == "search-abc"
+        # The returned id is the one WE posted (and now know exists), not a
+        # query-text match.
+        assert search_id is not None
+        assert search_id in http.posted_ids
 
-    def test_returns_none_when_no_matching_active_search(self):
-        http = _RecoveringHttp(active_searches=[_active_search(search_id="other", query="Something Else")])
+    def test_returns_none_when_our_search_does_not_exist(self):
+        http = _RecoveringHttp(search_state=None)
         svc = SlskdService(http)
         assert svc.start_search("Spice Girls - Holler", max_attempts=2) is None
 
-    def test_find_active_search_by_query_matches_query_and_state(self):
-        http = _RecoveringHttp(active_searches=[
-            _active_search(search_id="old", query="Spice Girls - Holler", state="Completed"),
-            _active_search(search_id="new", query="Spice Girls - Holler"),
-        ])
-        svc = SlskdService(http)
-        found = svc.find_active_search_by_query("Spice Girls - Holler")
-        assert found is not None
-        assert found["id"] == "new"
+    def test_recovery_never_uses_query_text(self):
+        import inspect
+
+        from services.downloads import slskd_service as mod
+
+        assert not hasattr(mod.SlskdService, "find_active_search_by_query"), (
+            "query-text recovery was removed: it could adopt another worker's search"
+        )
 
 
 class TestClearStaleSearches:
-    def test_cancels_terminal_and_stuck_searches_but_not_fresh(self):
+    """Cleanup only touches OUR searches (plus truly orphaned ones)."""
+
+    def _http_with(self, searches):
         cancelled = []
 
         class _CleaningHttp(_RecoveringHttp):
+            def get_json(self, endpoint, *args, **kwargs):
+                if str(endpoint).split("?")[0] == "searches":
+                    return [dict(s) for s in self._searches]
+                return {}
+
             def delete(self, endpoint, *args, **kwargs):
                 seg = endpoint.split("/")[-1]
-                cancelled.append(seg.split("?")[0])
+                cancelled.append("delete:" + seg.split("?")[0])
                 return _FakeResp(204)
 
             def put(self, endpoint, *args, **kwargs):
+                seg = endpoint.split("/")[-1]
+                cancelled.append("stop:" + seg.split("?")[0])
                 return _FakeResp(204)
 
-        http = _CleaningHttp(active_searches=[
+        http = _CleaningHttp(search_state={})
+        http._searches = searches
+        http.cancelled = cancelled
+        return http
+
+    def test_owned_terminal_and_stuck_are_cleaned_but_fresh_is_not(self):
+        from datetime import timedelta
+
+        _owns("terminal")
+        _owns("stuck")
+        _owns("fresh")
+        stuck_started = datetime.now(timezone.utc) - timedelta(minutes=10)   # > 180s
+        fresh_started = datetime.now(timezone.utc) - timedelta(seconds=10)   # < 180s
+        http = self._http_with([
             _active_search(search_id="terminal", state="Completed"),
-            _active_search(search_id="stuck", state="InProgress", query="Old Query"),
-            _active_search(search_id="fresh", state="InProgress"),
+            _active_search(search_id="stuck", state="InProgress", started=fresh_started) | {"startedAt": stuck_started.isoformat()},
+            _active_search(search_id="fresh", state="InProgress", started=fresh_started),
         ])
         svc = SlskdService(http)
         svc.clear_stale_searches(budget_seconds=8)
-        # terminal (completed) search is cleaned via DELETE
-        assert "terminal" in cancelled
-        # the fresh InProgress search must NOT be cancelled
-        assert "fresh" not in cancelled
+        assert "delete:terminal" in http.cancelled
+        assert "stop:stuck" in http.cancelled or "delete:stuck" in http.cancelled
+        assert not any("fresh" in c for c in http.cancelled), "a fresh owned search must not be cancelled"
+
+    def test_a_foreign_terminal_search_is_left_alone(self):
+        """Searches the user started in the slskd web UI are not ours — a
+        terminal one may still be on screen, so it is not deleted."""
+        _owns("ours")
+        http = self._http_with([
+            _active_search(search_id="ours", state="Completed"),
+            _active_search(search_id="manual", state="Completed"),
+        ])
+        SlskdService(http).clear_stale_searches(budget_seconds=8)
+        assert any("ours" in c for c in http.cancelled)
+        assert not any("manual" in c for c in http.cancelled)
+
+    def test_a_truly_orphaned_active_search_is_cancelled(self):
+        """A NOT-ours active search older than the generous orphan threshold."""
+        from datetime import timedelta
+
+        old_started = datetime.now(timezone.utc) - timedelta(minutes=45)
+        http = self._http_with([
+            _active_search(search_id="ghost", state="InProgress", started=old_started),
+        ])
+        SlskdService(http).clear_stale_searches(budget_seconds=8)
+        assert any("ghost" in c for c in http.cancelled)
 
 
 # ---------------------------------------------------------------------------

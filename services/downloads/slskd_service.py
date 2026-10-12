@@ -15,10 +15,10 @@ from __future__ import annotations
 import re
 import threading
 import time
-import traceback
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import quote
 
 import structlog
@@ -48,7 +48,12 @@ def _configured_cleanup_interval() -> int:
         return _DEFAULT_SEARCH_CLEANUP_INTERVAL
 
 STUCK_SEARCH_TIMEOUT_MS = 3 * 60 * 1000
-EMPTY_TERMINAL_STATES = frozenset({"Completed, Cancelled", "Completed, Errored", "Cancelled", "Errored"})
+
+#: A search we did NOT start is "truly orphaned" only after this long —
+#: terminal-state foreign searches (e.g. a manual search in the slskd web UI)
+#: are left alone entirely; an active foreign search is only cancelled once it
+#: has outlived this generous window.
+ORPHANED_SEARCH_TIMEOUT_MS = 30 * 60 * 1000
 
 # Search lifecycle states (distinct from download-transfer states).
 # slskd reports a search as "InProgress" while peers are still responding
@@ -57,6 +62,25 @@ EMPTY_TERMINAL_STATES = frozenset({"Completed, Cancelled", "Completed, Errored",
 # version that returns a different in-progress search state string is not
 # misread as "complete".
 SEARCH_ACTIVE_STATES = frozenset({"InProgress", "Queued", "Requested", "None", "Initializing", "In Progress"})
+
+# Terminal search states — also parsed as a flag set: state strings are
+# "Completed, TimedOut" / "Completed, ResponseLimitReached" / … and a state
+# in SEARCH_TERMINAL_FLAGS ends the search regardless of its qualifier.
+SEARCH_TERMINAL_STATES = frozenset({
+    "Completed", "Completed, Cancelled", "Completed, Errored",
+    "Completed, TimedOut", "Completed, ResponseLimitReached",
+    "Completed, FileLimitReached", "Completed, Succeeded", "Completed, Rejected",
+    "Cancelled", "Cancelled, TimedOut", "Errored", "TimedOut",
+    "Succeeded", "Rejected", "Failed", "Error",
+})
+
+#: Substrings that make a search state a terminal one ("Completed, TimedOut"
+#: has two flag tokens: "Completed" and "TimedOut").
+SEARCH_TERMINAL_FLAGS = frozenset(("completed", "succeeded", "timedout", "errored", "cancelled", "rejected", "failed", "error"))
+
+# Lossless container extensions.  ``ape``/``wv`` are lossless; ``m4a`` is
+# deliberately NOT here (an m4a is usually AAC).
+LOSSLESS_EXTENSIONS = frozenset(("flac", "wav", "aiff", "alac", "ape", "wv"))
 
 # Transient httpx exception names that warrant a retry rather than an
 # immediate queue-item failure.
@@ -107,6 +131,61 @@ def _is_connection_error(exc: BaseException) -> bool:
     return False
 
 
+def _to_int(value: Any, default: int = 0) -> int:
+    """Safe int conversion for slskd payload fields.
+
+    slskd peers can return non-numeric strings (or omit the field entirely);
+    one bad value must drop that file, not the whole response.
+    """
+    if value is None or isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _extension_from_filename(filename: str) -> str:
+    """Container extension from the file name (used when the payload omits it)."""
+    name = (filename or "").strip()
+    if "." not in name:
+        return ""
+    return name.rsplit(".", 1)[-1].lower()
+
+
+def _raw_file_count(responses: list) -> int:
+    """Total files across responses WITHOUT quality filtering.
+
+    Drives the empty-search early abort: a search streaming many files that
+    ALL fail the quality gate is not empty, so it must not be cancelled as one.
+    Tolerates both ``SearchResponse`` objects and plain dicts (test fakes).
+    """
+    total = 0
+    for resp in responses or []:
+        files = resp.files if isinstance(resp, SearchResponse) else (resp.get("files") if isinstance(resp, dict) else None)
+        total += len(files or [])
+    return total
+
+
+def _search_elapsed_ms(search: dict) -> int:
+    """Milliseconds since a search started (0 when unknown)."""
+    started_at = search.get("startedAt") or search.get("StartedAt") or search.get("started_at")
+    if not started_at:
+        return 0
+    try:
+        if isinstance(started_at, str):
+            started_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        else:
+            started_dt = started_at
+        if started_dt.tzinfo is None:
+            started_dt = started_dt.replace(tzinfo=timezone.utc)
+        return int((datetime.now(timezone.utc) - started_dt).total_seconds() * 1000)
+    except Exception:
+        return 0
+
+
 @dataclass
 class SearchFile:
     filename: str
@@ -119,12 +198,15 @@ class SearchFile:
     is_locked: bool = False
 
     def __post_init__(self):
-        self.size = int(self.size or 0)
-        self.bitrate = int(self.bitrate or 0)
-        self.sample_rate = int(self.sample_rate or 0)
-        self.length = int(self.length or 0)
+        self.size = _to_int(self.size)
+        self.bitrate = _to_int(self.bitrate)
+        self.sample_rate = _to_int(self.sample_rate)
+        self.length = _to_int(self.length)
         if self.bit_depth is not None:
-            self.bit_depth = int(self.bit_depth) if self.bit_depth else None
+            self.bit_depth = _to_int(self.bit_depth) or None
+        # A missing payload extension is derived from the filename so the
+        # lossless classification never silently degrades to "unknown".
+        self.extension = (self.extension or "").lower() or _extension_from_filename(self.filename)
 
     @property
     def size_mb(self) -> float:
@@ -138,15 +220,41 @@ class SearchFile:
 
     @property
     def is_lossless(self) -> bool:
-        return (self.extension or "").lower() in ("flac", "wav", "aiff", "alac")
+        return self.extension in LOSSLESS_EXTENSIONS
 
-    def matches_quality(self, min_bitrate: int = 192, min_sample_rate: int = 44100) -> bool:
-        """Check if this file meets minimum quality thresholds."""
-        if self.is_locked:
+    def matches_quality(
+        self,
+        min_bitrate: int = 192,
+        min_sample_rate: int = 44100,
+        reject_reasons: dict[str, int] | None = None,
+    ) -> bool:
+        """Check if this file meets minimum quality thresholds.
+
+        Missing attributes are UNKNOWN, not failing: Soulseek peers routinely
+        omit ``sampleRate`` (and sometimes ``bitRate``) — a 320k MP3 with no
+        sample rate used to be rejected outright, which silently hid the only
+        real copy of a rare track.  Every rejection is counted by reason in
+        ``reject_reasons`` (when supplied) so `no_qualifying_result` stops
+        being a mystery.
+        """
+        def _reject(reason: str) -> bool:
+            if reject_reasons is not None:
+                reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
             return False
+
+        if self.is_locked:
+            return _reject("locked")
         if self.is_lossless:
-            return self.sample_rate >= min_sample_rate
-        return self.bitrate >= min_bitrate and self.sample_rate >= min_sample_rate
+            if self.sample_rate == 0:
+                return True  # unknown sample rate on a lossless container: keep
+            return self.sample_rate >= min_sample_rate or _reject("sample_rate_below_min")
+        if self.bitrate == 0:
+            return True  # unknown bitrate: keep — the scorer's duration gate still protects
+        if self.bitrate < min_bitrate:
+            return _reject("bitrate_below_min")
+        if self.sample_rate == 0:
+            return True  # unknown sample rate on a lossy container: keep
+        return self.sample_rate >= min_sample_rate or _reject("sample_rate_below_min")
 
 
 @dataclass
@@ -160,20 +268,26 @@ class SearchResponse:
     def __post_init__(self):
         if not self.files:
             self.files = []
-        elif isinstance(self.files[0], dict):
-            self.files = [
-                SearchFile(
-                    filename=f.get("filename", ""),
-                    size=f.get("size", 0),
-                    bitrate=f.get("bitRate", 0),
-                    sample_rate=f.get("sampleRate", 0),
-                    length=f.get("length", 0),
-                    bit_depth=f.get("bitDepth"),
-                    extension=f.get("extension"),
-                    is_locked=bool(f.get("isLocked", f.get("is_locked", False))),
-                )
-                for f in self.files
-            ]
+        else:
+            # Convert PER ITEM: a single non-dict or mixed list must not drop
+            # the whole response.  Invalid items are skipped, valid ones kept.
+            converted: list[SearchFile] = []
+            for f in self.files:
+                if isinstance(f, SearchFile):
+                    converted.append(f)
+                elif isinstance(f, dict):
+                    converted.append(SearchFile(
+                        filename=f.get("filename", ""),
+                        size=f.get("size", 0),
+                        bitrate=f.get("bitRate", 0),
+                        sample_rate=f.get("sampleRate", 0),
+                        length=f.get("length", 0),
+                        bit_depth=f.get("bitDepth"),
+                        extension=f.get("extension"),
+                        is_locked=bool(f.get("isLocked", f.get("is_locked", False))),
+                    ))
+                # else: skip — a malformed entry is one missing file, not all.
+            self.files = converted
 
 
 class SlskdService:
@@ -205,6 +319,55 @@ class SlskdService:
         self._cleanup_interval_override = (
             None if search_cleanup_interval is None else int(search_cleanup_interval)
         )
+
+    # ── Search OWNERSHIP (process-wide) ───────────────────────────────────
+    # ``clear_stale_searches`` used to cancel EVERY terminal search and any
+    # active search older than 180s — including searches the user started in
+    # the slskd web UI and searches another worker was still reading.  The ids
+    # this app created are tracked class-level (both entry points build a
+    # fresh instance per operation, so instance state would forget ownership
+    # immediately) and the cleaner only touches OUR ids plus truly orphaned
+    # searches older than a generous threshold.
+    _OWNED_SEARCH_LOCK = threading.Lock()
+    _OWNED_SEARCH_IDS: set[str] = set()
+
+    @classmethod
+    def mark_search_owned(cls, search_id: str) -> None:
+        with cls._OWNED_SEARCH_LOCK:
+            cls._OWNED_SEARCH_IDS.add(str(search_id))
+
+    @classmethod
+    def unmark_search_owned(cls, search_id: str) -> None:
+        with cls._OWNED_SEARCH_LOCK:
+            cls._OWNED_SEARCH_IDS.discard(str(search_id))
+
+    @classmethod
+    def reset_owned_searches(cls) -> None:
+        """Clear the ownership registry (used by tests and manual maintenance)."""
+        with cls._OWNED_SEARCH_LOCK:
+            cls._OWNED_SEARCH_IDS.clear()
+
+    @classmethod
+    def _owned_search_ids_snapshot(cls) -> set[str]:
+        with cls._OWNED_SEARCH_LOCK:
+            return set(cls._OWNED_SEARCH_IDS)
+
+    def is_connected(self) -> bool:
+        """True when slskd's Soulseek client is connected and logged in.
+
+        Used as the gate before a search: a disconnected client cannot search,
+        so starting one would fail and the queue would record a misleading
+        ``no_results`` + a 24h backoff.  Fails OPEN only when the HTTP client
+        cannot tell us at all (missing method) — a state endpoint error is
+        already "not connected" at the HTTP layer.
+        """
+        try:
+            checker = getattr(self.http, "is_connected", None)
+            if checker is None:
+                return True
+            return bool(checker())
+        except Exception:
+            return True
 
     # ── Stale-search cleanup CADENCE (process-wide) ───────────────────────
     # ``clear_stale_searches`` costs a ``GET /searches`` round-trip (and a
@@ -255,90 +418,70 @@ class SlskdService:
         return bool(state == cls.STATE_SUCCEEDED or "succeed" in state_lower or state_lower in {"completed", "complete", "succeeded"})
 
     @staticmethod
-    def extract_queue_position(entry: dict | None) -> Optional[int]:
+    def extract_queue_position(entry: dict | None) -> int | None:
         if not isinstance(entry, dict):
             return None
-        raw = entry.get("queuePosition") or entry.get("queue_position") or entry.get("position") or entry.get("queueIndex") or entry.get("queueLength")
-        try:
-            return int(raw) if raw is not None else None
-        except Exception:
-            return None
+        # ``is not None`` (NOT an or-chain): a queue position of 0 is a real
+        # answer, and ``queueLength`` is the peer's TOTAL queue length, never
+        # this file's position — it is not a valid fallback.
+        for key in ("queuePosition", "queue_position", "position", "queueIndex"):
+            raw = entry.get(key)
+            if raw is not None:
+                try:
+                    return int(raw)
+                except Exception:
+                    return None
+        return None
 
-    def find_active_search_by_query(self, query: str, within_seconds: int = 60) -> Optional[dict]:
-        """Return the most-recent active search whose query matches *query*."""
-        _ACTIVE_STATES = {"None", "Queued", "Requested", "InProgress", "Initializing", "In Progress"}
-        try:
-            searches = self.list_searches(timeout=8)
-        except Exception:
-            return None
-            
-        now = datetime.now(timezone.utc)
-        target = str(query or "").strip().lower()
-        matches = []
-        
-        for s in searches or []:
-            state = str(s.get("state") or s.get("State") or "")
-            if state not in _ACTIVE_STATES:
-                continue
-            search_text = str(s.get("searchText") or s.get("query") or "").strip()
-            if target and search_text.lower() != target:
-                continue
-            started_at = s.get("startedAt") or s.get("StartedAt") or s.get("started_at")
-            if not started_at:
-                matches.append(s)
-                continue
-            try:
-                if isinstance(started_at, str):
-                    started_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-                else:
-                    started_dt = started_at
-                if started_dt.tzinfo is None:
-                    started_dt = started_dt.replace(tzinfo=timezone.utc)
-                if (now - started_dt).total_seconds() <= within_seconds:
-                    matches.append(s)
-            except Exception:
-                matches.append(s)
-                
-        if not matches:
-            return None
-            
-        matches.sort(key=lambda s: s.get("startedAt") or s.get("StartedAt") or "", reverse=True)
-        return matches[0]
+    def start_search(
+        self,
+        query: str,
+        timeout: float | None = None,
+        max_attempts: int = 5,
+    ) -> str | None:
+        """Start a Soulseek search with an idempotency-safe, client-owned id.
 
-    def start_search(self, query: str, timeout: Optional[int] = None, max_attempts: int = 5, recover: bool = True) -> Optional[str]:
+        The search id is generated CLIENT-SIDE and POSTed as ``id`` (slskd
+        honours a client-supplied id and only generates its own when absent) —
+        so a retry cannot create a SECOND search, and recovery never needs to
+        match another worker's search by query text (which let one worker
+        adopt and then delete a colleague's search).  After a transient
+        failure the server may already have accepted the request: we check
+        whether OUR id exists before retrying, and return it if it does.
+        """
         if not self.http.enabled:
             return None
-            
-        data = {"searchText": query, "filterResponses": False}
+
+        search_id = str(uuid.uuid4())
+        data: dict[str, Any] = {"id": search_id, "searchText": query, "filterResponses": False}
         for attempt in range(1, max_attempts + 1):
             try:
                 resp = self.http.post_json("searches", data, timeout=timeout)
                 if resp.status_code in [200, 201]:
-                    payload = resp.json() or {}
-                    return payload.get("id") or payload.get("searchId")
-                    
+                    self.mark_search_owned(search_id)
+                    return search_id
+
                 body_preview = (resp.text or "")[:200]
-                retryable_429 = resp.status_code == 429 and (
-                    "only one concurrent operation" in body_preview.lower()
-                    or "wait until the previous request completes" in body_preview.lower()
-                )
+                retryable_429 = resp.status_code == 429
                 if retryable_429 and attempt < max_attempts:
-                    wait_seconds = 0.8
-                    retry_after = (resp.headers.get("Retry-After") or "").strip()
-                    if retry_after:
-                        try:
-                            wait_seconds = max(0.2, float(retry_after))
-                        except Exception:
-                            pass
-                    else:
-                        wait_seconds = min(2.0, 0.4 * attempt)
+                    wait_seconds = self._retry_after_or_backoff(resp, attempt)
                     time.sleep(wait_seconds)
                     continue
-                    
+
                 logger.warning("slskd search start failed", status_code=resp.status_code, preview=body_preview)
                 break
             except Exception as exc:
                 if _is_transient_error(exc) and attempt < max_attempts:
+                    # The server may already have accepted the request before
+                    # the timeout — check OUR id before blindly retrying.
+                    if self._search_exists(search_id, timeout=timeout):
+                        self.mark_search_owned(search_id)
+                        logger.info(
+                            "slskd search accepted despite transient error",
+                            search_id=search_id,
+                            error=str(exc),
+                        )
+                        return search_id
                     wait_seconds = min(2.0, 0.4 * attempt)
                     logger.warning(
                         "slskd search start transient error",
@@ -350,41 +493,63 @@ class SlskdService:
                     )
                     time.sleep(wait_seconds)
                     continue
-                    
+
                 logger.error(
                     "slskd search failed",
                     query=query,
                     error=str(exc),
                     error_type=type(exc).__name__,
                     base_url=getattr(self.http, "base_url", "?"),
-                    exc_info=True,
+                    exc_info=not _is_connection_error(exc),
                 )
                 break
-
-        if recover:
-            try:
-                recovered = self.find_active_search_by_query(query, within_seconds=60)
-                if recovered:
-                    recovered_id = (
-                        recovered.get("id")
-                        or recovered.get("searchId")
-                        or recovered.get("Id")
-                        or ""
-                    )
-                    if recovered_id:
-                        logger.info("slskd recovered active search after start failed", search_id=recovered_id, query=query)
-                        return str(recovered_id)
-            except Exception as exc:
-                logger.debug("slskd search recovery lookup failed", query=query, error=str(exc))
         return None
 
-    def get_search_results(self, search_id: str, timeout: Optional[int] = None) -> tuple[list[SearchResponse], str, bool]:
+    @staticmethod
+    def _retry_after_or_backoff(resp: Any, attempt: int) -> float:
+        """Seconds to wait after a 429 — Retry-After seconds-or-HTTP-date, else
+        a short backoff.  Status-code based, never body-text based."""
+        import email.utils
+
+        wait_seconds = 0.8
+        retry_after = (getattr(resp, "headers", None) or {}).get("Retry-After") or ""
+        retry_after = str(retry_after or "").strip()
+        if retry_after:
+            try:
+                wait_seconds = max(0.2, float(retry_after))
+                return wait_seconds
+            except ValueError:
+                # HTTP-date form — e.g. "Fri, 31 Dec 1999 23:59:59 GMT".
+                try:
+                    parsed = email.utils.parsedate_to_datetime(retry_after)
+                    wait_seconds = max(0.2, (parsed.timestamp() - time.time()))
+                    return wait_seconds
+                except Exception:
+                    pass
+        return min(2.0, 0.4 * attempt)
+
+    def _search_exists(self, search_id: str, timeout: float | None = None) -> bool:
+        """Whether a search with OUR id exists on the server (idempotency).
+
+        Prefers the HTTP client's ``get_search_state``; falls back to a raw
+        ``GET /searches/{id}`` for older/injected clients.  Any failure reads
+        as "unknown", and an unknown must NOT cancel a retry we need.
+        """
+        try:
+            getter = getattr(self.http, "get_search_state", None)
+            if getter is not None:
+                return bool(getter(search_id, timeout=min(int(timeout or 10), 10)))
+            return bool(self.http.get_json(f"searches/{quote(search_id, safe='')}", timeout=timeout, default={}))
+        except Exception:
+            return False
+
+    def get_search_results(self, search_id: str, timeout: float | None = None) -> tuple[list[SearchResponse], str, bool]:
         if not self.http.enabled:
             return [], "Error", True
-            
+
         state = "InProgress"
         try:
-            state_data = self.http.get_json(f"searches/{search_id}", timeout=timeout, default={})
+            state_data = self.http.get_json(f"searches/{quote(search_id, safe='')}", timeout=timeout, default={})
             state = state_data.get("state", "InProgress")
         except Exception as exc:
             logger.warning(
@@ -394,10 +559,11 @@ class SlskdService:
                 error_type=type(exc).__name__,
             )
             return [], state, False
-            
-        if state in EMPTY_TERMINAL_STATES:
-            return [], state, True
-            
+
+        # Responses are fetched for EVERY state, including cancelled/errored:
+        # a search that was cut short still returned whatever it had by then —
+        # discarding it would lose genuine partial results.  Completeness is
+        # decided by state, not by whether we bother to fetch.
         try:
             raw = self.http.get_json(f"searches/{quote(search_id, safe='')}/responses", timeout=timeout, default=[])
             responses = []
@@ -410,25 +576,86 @@ class SlskdService:
                         upload_speed=raw_resp.get("uploadSpeed"),
                         queue_length=raw_resp.get("queueLength"),
                     ))
-            return responses, state, state not in SEARCH_ACTIVE_STATES
+            return responses, state, not self.is_search_active_state(state)
         except Exception as exc:
             logger.warning("slskd get responses failed for search", search_id=search_id, error=str(exc))
-            return [], state, state not in SEARCH_ACTIVE_STATES
+            return [], state, not self.is_search_active_state(state)
 
-    def download_file(self, username: str, filename: str, size: int = 0, timeout: Optional[int] = None) -> bool:
+    @classmethod
+    def is_search_active_state(cls, state: str) -> bool:
+        """Active = literally an in-progress state.
+
+        A state that is NOT in ``SEARCH_ACTIVE_STATES`` is treated as
+        complete — including flag-style terminal strings and any future
+        terminal variant — so an unknown state can never make the poller wait
+        forever.
+        """
+        return state in SEARCH_ACTIVE_STATES
+
+    @classmethod
+    def is_terminal_search_state(cls, state: str) -> bool:
+        """Terminal = a known terminal exact state OR a flag-style variant
+        (``"Completed, ResponseLimitReached"`` carries the ``completed`` flag)."""
+        if state in SEARCH_TERMINAL_STATES:
+            return True
+        tokens = re.sub(r"[^A-Za-z]", " ", state.lower()).split()
+        return any(token in SEARCH_TERMINAL_FLAGS for token in tokens)
+
+    def _peer_enqueue(self, username: str, files: list[dict[str, Any]], timeout: float | None = None) -> bool:
+        """POST one peer's files exactly ONCE; True = the peer was asked.
+
+        Single implementation behind both ``download_file`` and
+        ``download_files``.  Prefers the HTTP client's ``enqueue_downloads``
+        (with ``raise_on_error`` so a silent rejection cannot read as
+        acceptance); falls back to the raw POST for clients that predate the
+        flag.  None of the (username, filename) values are normalised — a
+        remote path with a trailing space is a DIFFERENT path to Soulseek.
+        """
+        enqueue = getattr(self.http, "enqueue_downloads", None)
+        if enqueue is not None:
+            try:
+                enqueue(username, files, timeout=timeout or 15, raise_on_error=True)
+                return True
+            except TypeError:
+                # Signature predates the raise_on_error/timeout kwargs.
+                enqueue(username, files)
+                return True
+            except Exception as exc:
+                # A transient network error must PROPAGATE so the caller's
+                # retry loop (`download_file`) can retry — swallowing it here
+                # would turn a timeout into a definitive failure.
+                if _is_transient_error(exc):
+                    raise
+                return False
+        try:
+            safe_user = quote(username or "", safe="")
+            resp = self.http.post_json(f"transfers/downloads/{safe_user}", files, timeout=timeout)
+            return getattr(resp, "status_code", None) in (200, 201, 204)
+        except Exception as exc:
+            if _is_transient_error(exc):
+                raise
+            return False
+
+    def download_file(self, username: str, filename: str, size: int = 0, timeout: float | None = None) -> bool:
         if not self.http.enabled:
             return False
         if not size:
+            # slskd requires the REAL size to ask the remote peer for the file;
+            # sending a 0-sized request would be rejected by the peer, so a
+            # caller that has no size must not fire the request at all.
             logger.warning(
-                "slskd download_file called without a file size — slskd requires the real size to request the file from the peer",
+                "slskd download_file called without a file size — request refused",
                 username=username,
                 filename=str(filename or "")[:80],
             )
+            return False
         for attempt in range(1, 3):
             try:
-                safe_user = quote(username or "", safe="")
-                resp = self.http.post_json(f"transfers/downloads/{safe_user}", [{"filename": filename, "size": int(size or 0)}], timeout=timeout)
-                return resp.status_code in [200, 201, 204]
+                return self._peer_enqueue(
+                    username,
+                    [{"filename": filename, "size": int(size or 0)}],
+                    timeout=timeout,
+                )
             except Exception as exc:
                 if _is_transient_error(exc) and attempt < 2:
                     wait_seconds = 1.0
@@ -441,11 +668,17 @@ class SlskdService:
                     )
                     time.sleep(wait_seconds)
                     continue
-                logger.error("slskd download exception", username=username, filename=filename[:50], error=str(exc), exc_info=True)
+                logger.error(
+                    "slskd download exception",
+                    username=username,
+                    filename=filename[:50],
+                    error=str(exc),
+                    exc_info=not _is_connection_error(exc),
+                )
                 return False
         return False
 
-    def download_files(self, files: list[dict[str, Any]], timeout: Optional[int] = None) -> list[dict[str, Any]]:
+    def download_files(self, files: list[dict[str, Any]], timeout: float | None = None) -> list[dict[str, Any]]:
         """Queue several files for download, batching by peer username.
 
         ``files`` is the shape the search page already produces::
@@ -474,38 +707,31 @@ class SlskdService:
         for entry in files or []:
             if not isinstance(entry, dict):
                 continue
-            entry_user = str(entry.get("username") or "").strip()
-            entry_filename = str(entry.get("filename") or "").strip()
-            if not entry_user or not entry_filename:
+            # Passed through UNCHANGED: a trailing space is a real part of the
+            # remote path and Soulseek matches remote paths exactly.  Only
+            # empty/None values are skipped.
+            entry_user = entry.get("username")
+            entry_filename = entry.get("filename")
+            if entry_user is None or not str(entry_user).strip():
                 continue
-            by_user.setdefault(entry_user, []).append({
-                "filename": entry_filename,
+            if entry_filename is None or not str(entry_filename).strip():
+                continue
+            by_user.setdefault(str(entry_user), []).append({
+                "filename": str(entry_filename),
                 "size": int(entry.get("size") or 0),
             })
 
         results: list[dict[str, Any]] = []
         for entry_user, payload_files in by_user.items():
-            transfer_ids: list[str] = []
-            peer_success = True
+            peer_success = False
             peer_error: str | None = None
             try:
-                # ``raise_on_error=True`` is load-bearing: without it a failed
-                # POST is indistinguishable from an older slskd that accepted
-                # the request without a body, and the caller would report a
-                # silent no-op as success.
-                transfer_ids = self.http.enqueue_downloads(
-                    entry_user, payload_files, timeout=timeout or 15, raise_on_error=True
-                ) or []
-            except TypeError:
-                # Older client without the ``raise_on_error``/``timeout`` kwargs.
-                try:
-                    transfer_ids = self.http.enqueue_downloads(entry_user, payload_files) or []
-                except Exception as exc:
-                    peer_success, peer_error = False, str(exc)
+                peer_success = self._peer_enqueue(entry_user, payload_files, timeout=timeout)
             except Exception as exc:
-                peer_success, peer_error = False, str(exc)
+                peer_error = str(exc)
 
             if not peer_success:
+                peer_error = peer_error or "slskd rejected the request"
                 logger.error(
                     "slskd batch download failed",
                     username=entry_user,
@@ -519,22 +745,82 @@ class SlskdService:
                 # number of transfers that will complete.  Only the remote peer
                 # being asked for the file is proven here.
                 "requested": len(payload_files) if peer_success else 0,
-                "transfer_ids": transfer_ids,
+                "transfer_ids": [],
                 "success": peer_success,
                 "error": peer_error,
             })
 
         return results
 
-    def filter_results_by_quality(self, responses: list[SearchResponse], min_bitrate: int = 192, min_sample_rate: int = 44100, max_results: int = 50, query: str = "") -> list[dict]:
-        qualified = []
+    @staticmethod
+    def _rank_query_tokens(query: str) -> list[str]:
+        """Query tokens for relevance ranking.
+
+        Non-ASCII characters are preserved (`Ça ira`, `Mötley`, `Björk`) via
+        NFKD + combining-mark strip, and apostrophes are removed so `don't`
+        keys as ``dont`` rather than being split into ``don`` + ``t``.
+        """
+        import unicodedata
+
+        cleaned = unicodedata.normalize("NFKD", query or "")
+        cleaned = "".join(ch for ch in cleaned if not unicodedata.combining(ch))
+        cleaned = cleaned.replace("'", "")
+        return [t for t in re.findall(r"[a-zA-Z0-9]+", cleaned.lower()) if len(t) >= 2]
+
+    @staticmethod
+    def _rank_qualified(items: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+        """Rank qualified results: relevance to the QUERY first, then quality,
+        then peer availability (slot before queue length before upload speed)."""
+        query_tokens = SlskdService._rank_query_tokens(query)
+        token_set = frozenset(query_tokens)
+
+        def _rank(item: dict) -> tuple:
+            filename = str(item.get("filename") or "")
+            base = _extension_from_filename(filename)
+            basename = filename[filename.rfind("/") + 1:] or filename
+            basename_tokens = frozenset(SlskdService._rank_query_tokens(basename))
+            folder_tokens = token_set - basename_tokens
+            baseline_hits = sum(1 for t in basename_tokens if t in token_set)
+            folder_hits = sum(1 for t in folder_tokens if t in token_set)
+            return (
+                -baseline_hits,           # basename matches weigh more
+                -folder_hits,             # folder matches weigh less
+                -int(item.get("bitrate") or 0),
+                -int(item.get("sample_rate") or 0),
+                # peer availability: unknown slot is NOT treated as full —
+                # a missing value is not evidence the peer is busy.
+                0 if item.get("has_free_upload_slot") is False else 1,
+                int(item.get("queue_length") or 0),
+                -(item.get("upload_speed") if isinstance(item.get("upload_speed"), (int, float)) else 0),
+                str(item.get("extension") or base),
+            )
+
+        return sorted(items, key=_rank)
+
+    def filter_results_by_quality(
+        self,
+        responses: list[SearchResponse],
+        min_bitrate: int = 192,
+        min_sample_rate: int = 44100,
+        max_results: int | None = 50,
+        query: str = "",
+        reject_reasons: dict[str, int] | None = None,
+    ) -> list[dict]:
+        """Qualify a poll snapshot; ``max_results=None`` keeps EVERYTHING.
+
+        Direct callers keep the old default cap; ``search_and_filter`` polls
+        with ``max_results=None`` and applies the cap ONCE over the whole
+        accumulated set, so a correct match that never made the top-50 of a
+        single snapshot is still seen.
+        """
+        qualified: list[dict[str, Any]] = []
         for response in responses:
             for file in response.files:
-                if file.matches_quality(min_bitrate, min_sample_rate):
+                if file.matches_quality(min_bitrate, min_sample_rate, reject_reasons=reject_reasons):
                     qualified.append({
                         "username": response.username,
                         "filename": file.filename,
-                        "size": file.size,               # <--- Restored raw byte size
+                        "size": file.size,               # raw byte size
                         "size_mb": round(file.size_mb, 2),
                         "bitrate": file.bitrate,
                         "sample_rate": file.sample_rate,
@@ -543,38 +829,14 @@ class SlskdService:
                         "is_lossless": file.is_lossless,
                         "duration": file.duration_formatted,
                         "length_seconds": file.length,
-                        "has_free_upload_slot": getattr(response, "has_free_upload_slot", True),
+                        "has_free_upload_slot": getattr(response, "has_free_upload_slot", None),
                         "upload_speed": getattr(response, "upload_speed", None),
                         "queue_length": getattr(response, "queue_length", None),
                     })
-        # Rank by how much the file matches the QUERY we just ran, and only
-        # then by quality.
-        #
-        # This used to sort purely by bitrate and keep the first ``max_results``.
-        # Every poll re-filters the WHOLE result set, so that cap decided what
-        # the queue ever got to see: for a broad fallback query (a bare title,
-        # the artist's first word) the top 50 by bitrate are rarely the file
-        # being searched for, the scorer was handed an arbitrary 50, and the
-        # answer was ``no_qualifying_result (50 candidates)`` — day after day,
-        # for the same track. Relevance first, quality second, cap unchanged.
-        query_tokens = [
-            t for t in re.findall(r"[a-z0-9]+", (query or "").lower())
-            if len(t) >= 2
-        ]
-        if query_tokens:
-            def _rank(item: dict) -> tuple[int, int, int]:
-                file_tokens = set(
-                    re.findall(r"[a-z0-9]+", str(item.get("filename") or "").lower())
-                )
-                return (
-                    -sum(1 for token in query_tokens if token in file_tokens),
-                    -int(item.get("bitrate") or 0),
-                    -int(item.get("sample_rate") or 0),
-                )
-            qualified.sort(key=_rank)
-        else:
-            qualified.sort(key=lambda item: (-item["bitrate"], -item["sample_rate"]))
-        return qualified[:max_results]
+        ranked = SlskdService._rank_qualified(qualified, query)
+        if max_results is not None:
+            ranked = ranked[:int(max_results)]
+        return ranked
 
     def search_and_filter(
         self,
@@ -582,10 +844,17 @@ class SlskdService:
         min_bitrate: int | None = None,
         wait_seconds: int | None = None,
         poll_interval: float = 1.0,
-        timeout: Optional[int] = None,
+        timeout: float | None = None,
         empty_abort_seconds: float | None = None,
         cancel_when_done: bool = True,
-    ) -> list[dict]:
+    ) -> list[dict] | None:
+        """Search, poll to completion and return the ranked qualified files.
+
+        Returns ``None`` when the Soulseek client is DISCONNECTED — a distinct
+        outcome the caller must NOT record as ``no_results``/backoff (the
+        queue would otherwise punish a connectivity problem with the search-miss
+        ladder).  Returns ``[]`` for a genuinely empty search.
+        """
         if min_bitrate is None:
             from helpers.config_helpers import get_search_quality_config
             min_bitrate = get_search_quality_config()["min_bitrate"]
@@ -596,24 +865,39 @@ class SlskdService:
             from helpers.config_helpers import get_queue_search_tuning
             empty_abort_seconds = float(get_queue_search_tuning()["search_empty_abort_seconds"] or 0)
 
+        # Server-state gate: a disconnected client cannot search.  This is
+        # what stops the queue recording `no_results` + a 24h backoff while
+        # slskd is simply not logged in.
+        if not self.is_connected():
+            logger.warning("Soulseek server not connected — search not attempted", query=query)
+            return None
+
         try:
             self.maybe_clear_stale_searches(budget_seconds=6)
         except Exception:
             pass
 
+        if min_bitrate < 0:
+            min_bitrate = 0
         search_id = self.start_search(query, timeout=timeout)
         if not search_id:
             return []
 
-        search_wall_started = time.time()
-        deadline = time.time() + max(0, int(wait_seconds or 0))
+        search_wall_started = time.monotonic()
+        deadline = time.monotonic() + max(0, int(wait_seconds or 0))
         poll_attempt = 0
         seen: set[tuple[str, str]] = set()
         accumulated: list[dict] = []
+        reject_reasons: dict[str, int] = {}
+        raw_files_seen = 0
 
         def _drain() -> None:
+            nonlocal raw_files_seen
             responses, _state, _complete = self.get_search_results(search_id, timeout=timeout)
-            for item in self.filter_results_by_quality(responses, min_bitrate=min_bitrate, query=query):
+            raw_files_seen += _raw_file_count(responses)
+            for item in self.filter_results_by_quality(
+                responses, min_bitrate=min_bitrate, query=query, max_results=None, reject_reasons=reject_reasons
+            ):
                 key = (item["username"], item["filename"])
                 if key not in seen:
                     seen.add(key)
@@ -621,60 +905,78 @@ class SlskdService:
 
         try:
             while True:
-                delay = 1.0 if poll_attempt < 5 else (2.0 if poll_attempt < 10 else 5.0)
+                base_delay = float(poll_interval or 1.0)
+                delay = base_delay if poll_attempt < 2 else (2.0 if poll_attempt < 10 else 5.0)
                 poll_attempt += 1
-                if time.time() + delay > deadline:
+                # Never sleep past the deadline: a wait_seconds shorter than
+                # the first delay must still get at least one poll.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     break
+                delay = min(delay, max(0.01, remaining))
                 time.sleep(delay)
                 responses, _state, is_complete = self.get_search_results(search_id, timeout=timeout)
-                for item in self.filter_results_by_quality(responses, min_bitrate=min_bitrate, query=query):
+                raw_files_seen += _raw_file_count(responses)
+                for item in self.filter_results_by_quality(
+                    responses, min_bitrate=min_bitrate, query=query, max_results=None, reject_reasons=reject_reasons
+                ):
                     key = (item["username"], item["filename"])
                     if key not in seen:
                         seen.add(key)
                         accumulated.append(item)
                 if is_complete:
                     break
-                # Zero-result early abort.  slskd keeps empty searches
-                # ``InProgress`` until they time out, so waiting out the full
-                # ceiling on EVERY query is what made an un-locatable track
-                # burn ~9 minutes (150s primary + 20 x 20s fallbacks) to
-                # conclude ``no_results``.  A search that has streamed nothing
-                # for ``empty_abort_seconds`` is a dead query — cancel it and
-                # let the caller move on to the next variant.
+                # Zero-result early abort — based on RAW files, not qualified
+                # ones: a search streaming many files that ALL fail the quality
+                # gate is NOT empty, so it must not be cancelled as one.
                 if (
                     empty_abort_seconds
                     and empty_abort_seconds > 0
-                    and not accumulated
-                    and (time.time() - search_wall_started) >= empty_abort_seconds
+                    and raw_files_seen == 0
+                    and (time.monotonic() - search_wall_started) >= empty_abort_seconds
                 ):
                     logger.info(
                         "Empty search cancelled early",
                         search_id=search_id,
                         query=query,
-                        elapsed_s=round(time.time() - search_wall_started, 1),
+                        elapsed_s=round(time.monotonic() - search_wall_started, 1),
                     )
                     self.cancel_search(search_id, timeout=2)
                     break
 
-            if not accumulated:
-                _drain()
+            # ALWAYS one final drain: anything that arrived after the last poll
+            # (or was missed by a deadline exit) must not be thrown away.
+            _drain()
         finally:
-            # Eager cleanup: cancel the search we just finished polling so it
-            # does not linger in slskd until the 180s stale-search cleaner
-            # (`clear_stale_searches`) has to cancel it.  The queue never
-            # re-polls a finished search, so each item leaving a live search
-            # behind is exactly the "cleanup working too hard" symptom.
             if cancel_when_done:
                 try:
                     self.cancel_search(search_id, timeout=2)
                 except Exception:
                     pass
-        return accumulated
+            else:
+                try:
+                    self.unmark_search_owned(search_id)
+                except Exception:
+                    pass
+
+        if reject_reasons:
+            logger.debug(
+                "Search filtered files by reason",
+                query=query,
+                raw_files=raw_files_seen,
+                qualified=len(accumulated),
+                reasons=reject_reasons,
+            )
+
+        # Cap ONCE, over the whole accumulated set — never per snapshot.
+        ranked = SlskdService._rank_qualified(accumulated, query)
+        return ranked[:50]
 
     def parse_transfers_response(self, raw: list | dict) -> list[dict]:
         if isinstance(raw, dict):
             raw = raw.get("downloads") or raw.get("transfers") or raw.get("items") or []
         flat = []
+        seen: set[tuple[str, str, str]] = set()
         for user_entry in raw or []:
             if not isinstance(user_entry, dict):
                 continue
@@ -691,7 +993,9 @@ class SlskdService:
                 size = int(item.get("size", 0) or 0)
                 bytes_transferred = int(item.get("bytesTransferred", 0) or 0)
                 progress = min(100, round((bytes_transferred / size) * 100, 2)) if size else int(item.get("percentComplete", 0) or 0)
-                flat.append({
+                # slskd can list the same transfer BOTH nested (in a directory)
+                # and at the top level — dedupe on its identity, not its shape.
+                transfer_item = {
                     "id": item.get("id") or item.get("remoteToken") or item.get("token") or "",
                     "username": username,
                     "filename": item.get("filename") or item.get("fileName") or item.get("name") or item.get("path") or "",
@@ -701,12 +1005,19 @@ class SlskdService:
                     "state": self.state_text(item.get("state") or item.get("transferState") or item.get("status")),
                     "averageSpeed": int(item.get("averageSpeed", 0) or 0),
                     "queuePosition": self.extract_queue_position(item),
-                    "localFilePath": item.get("localFilePath") or item.get("localPath") or item.get("downloadedFilePath") or item.get("path") or "",
+                    # NOT the generic ``path`` key — that is the remote path,
+                    # not where the file landed locally.
+                    "localFilePath": item.get("localFilePath") or item.get("localPath") or item.get("downloadedFilePath") or "",
                     "startedAt": item.get("startedAt") or item.get("started"),
-                })
+                }
+                key = (username, str(transfer_item["id"]), str(transfer_item["filename"]).casefold())
+                if key in seen:
+                    continue
+                seen.add(key)
+                flat.append(transfer_item)
         return flat
 
-    def get_active_downloads(self, timeout: Optional[int] = None) -> list[dict]:
+    def get_active_downloads(self, timeout: float | None = None) -> list[dict]:
         try:
             raw = self.http.get_json("transfers/downloads", timeout=timeout, default=[])
             return self.parse_transfers_response(raw)
@@ -724,10 +1035,10 @@ class SlskdService:
             )
             return []
 
-    def get_completed_transfers(self, timeout: Optional[int] = None) -> list[dict]:
+    def get_completed_transfers(self, timeout: float | None = None) -> list[dict]:
         return [item for item in self.get_active_downloads(timeout=timeout) if self.is_success_state(item.get("state"))]
 
-    def list_searches(self, timeout: Optional[int] = None) -> list[dict]:
+    def list_searches(self, timeout: float | None = None) -> list[dict]:
         try:
             payload = self.http.get_json("searches", timeout=timeout, default=[])
             return payload if isinstance(payload, list) else []
@@ -783,14 +1094,17 @@ class SlskdService:
         return True
 
     def clear_stale_searches(self, budget_seconds: float = 8) -> None:
-        """Cancel terminal-state (or long-running stuck) searches in slskd."""
-        _TERMINAL_STATES = {
-            "Completed, TimedOut", "Completed, ResponseLimitReached",
-            "Completed, FileLimitReached", "Completed, Cancelled",
-            "Completed, Errored", "Completed", "Succeeded",
-            "Cancelled", "Errored", "TimedOut",
-        }
+        """Cancel OUR stale searches (plus truly orphaned ones).
+
+        Ownership rule (see the class notes on ``_OWNED_SEARCH_IDS``): a
+        search only touches slskd when it is OURS — terminal OR stuck past
+        ``STUCK_SEARCH_TIMEOUT_MS`` — or when it is NOT ours but has been
+        running longer than ``ORPHANED_SEARCH_TIMEOUT_MS`` (a genuinely
+        abandoned search).  Terminal-state searches the user started in the
+        slskd web UI are left alone: their results may still be on screen.
+        """
         deadline = time.monotonic() + max(0.1, float(budget_seconds))
+        owned = type(self)._owned_search_ids_snapshot()
         try:
             existing = self.list_searches(timeout=4)
             for s in existing or []:
@@ -801,53 +1115,76 @@ class SlskdService:
                 state = str(s.get("state") or s.get("State") or "")
                 if not sid:
                     continue
+                is_owned = sid in owned
+                elapsed_ms = _search_elapsed_ms(s)
 
-                should_cancel = state in _TERMINAL_STATES
-                if not should_cancel and state in self.ACTIVE_STATES:
-                    started_at = s.get("startedAt") or s.get("StartedAt") or s.get("started_at")
-                    elapsed_ms = 0
-                    if started_at:
-                        try:
-                            if isinstance(started_at, str):
-                                started_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-                            else:
-                                started_dt = started_at
-                            if started_dt.tzinfo is None:
-                                started_dt = started_dt.replace(tzinfo=timezone.utc)
-                            elapsed_ms = int((datetime.now(timezone.utc) - started_dt).total_seconds() * 1000)
-                        except Exception:
-                            elapsed_ms = 0
-                    if elapsed_ms > STUCK_SEARCH_TIMEOUT_MS:
-                        should_cancel = True
-                        logger.info("Cancelling stuck active search", search_id=sid, state=state, elapsed_ms=elapsed_ms)
+                if is_owned and self.is_terminal_search_state(state):
+                    should_cancel = True
+                elif is_owned and elapsed_ms > STUCK_SEARCH_TIMEOUT_MS:
+                    should_cancel = True
+                    logger.info("Cancelling stuck owned search", search_id=sid, state=state, elapsed_ms=elapsed_ms)
+                elif not is_owned and elapsed_ms > ORPHANED_SEARCH_TIMEOUT_MS:
+                    should_cancel = True
+                    logger.info("Cancelling orphaned search", search_id=sid, state=state, elapsed_ms=elapsed_ms)
+                else:
+                    should_cancel = False
 
-                if should_cancel:
-                    time_left = deadline - time.monotonic()
-                    if time_left <= 0:
-                        logger.warning("Stale search cleanup budget exhausted")
-                        break
-                    if state in self.ACTIVE_STATES:
-                        try:
-                            self.http.put(f"searches/{sid}", timeout=max(0.5, min(2, time_left)))
-                        except Exception:
-                            pass
-                    time_left = deadline - time.monotonic()
-                    if time_left <= 0:
-                        logger.warning("Stale search cleanup budget exhausted")
-                        break
-                    self.cancel_search(sid, timeout=max(0.5, min(2, time_left)))
-                    if state in _TERMINAL_STATES:
-                        logger.info("Cleared stale search", search_id=sid, state=state)
+                if not should_cancel:
+                    continue
+
+                if state in SEARCH_ACTIVE_STATES or state in SEARCH_TERMINAL_STATES:
+                    stop_ok = self._stop_search(sid, timeout=max(0.5, min(2, deadline - time.monotonic())))
+                    if not stop_ok:
+                        logger.warning("Stale search stop returned unexpected status", search_id=sid, state=state)
+
+                if time.monotonic() >= deadline:
+                    logger.warning("Stale search cleanup budget exhausted")
+                    break
+                if self.cancel_search(sid, timeout=max(0.5, min(2, deadline - time.monotonic()))):
+                    if is_owned and self.is_terminal_search_state(state):
+                        logger.info("Cleared owned stale search", search_id=sid, state=state)
         except Exception as cleanup_err:
             logger.warning("Could not clear stale searches", error=str(cleanup_err))
 
-    def cancel_search(self, search_id: str, timeout: Optional[int] = None) -> bool:
+    def _stop_search(self, search_id: str, timeout: float | None = None) -> bool:
+        """Stop an ACTIVE search — prefers the HTTP client's documented
+        ``stop_search`` (PUT), with a raw-PUT fallback for older clients."""
         try:
-            resp = self.http.delete(f"searches/{quote(search_id or '', safe='')}", timeout=timeout)
-            if resp.status_code in [200, 204]:
-                return True
-            body = (resp.text or "")[:400]
-            return resp.status_code in [409, 500] and "concurrency" in body.lower()
+            stop = getattr(self.http, "stop_search", None)
+            if stop is not None:
+                return bool(stop(search_id))
+            resp = self.http.put(f"searches/{quote(search_id, safe='')}", timeout=timeout)
+            return getattr(resp, "status_code", None) in (200, 204, 304)
+        except Exception as exc:
+            logger.warning("stop search failed", search_id=search_id, error=str(exc), error_type=type(exc).__name__)
+            return False
+
+    def _delete_search(self, search_id: str, timeout: float | None = None) -> bool:
+        """Delete a search — prefers ``delete_search``; 404 counts as success
+        (the search is already gone)."""
+        try:
+            deleter = getattr(self.http, "delete_search", None)
+            if deleter is not None:
+                return bool(deleter(search_id))
+            resp = self.http.delete(f"searches/{quote(search_id, safe='')}", timeout=timeout)
+            return getattr(resp, "status_code", None) in (200, 204)
+        except Exception as exc:
+            logger.warning("delete search failed", search_id=search_id, error=str(exc), error_type=type(exc).__name__)
+            return False
+
+    def cancel_search(self, search_id: str, timeout: float | None = None) -> bool:
+        """Stop an active search and remove it (best effort on each half).
+
+        The active half uses the explicit stop (PUT) so the search does not
+        keep streaming responses into slskd; removal treats a 404 as success
+        (already deleted).  A 409/500 "concurrency" reply on delete is NOT
+        treated as success — it is logged; the search's cleanup is retried at
+        the next clean cycle, not silently swallowed.
+        """
+        self.unmark_search_owned(search_id)
+        try:
+            self._stop_search(search_id, timeout=timeout)
+            return self._delete_search(search_id, timeout=timeout)
         except Exception as exc:
             logger.warning(
                 "slskd cancel search failed",
@@ -857,7 +1194,7 @@ class SlskdService:
             )
             return False
 
-    def cancel_download(self, username: str, transfer_id: str, remove: bool = True, timeout: Optional[int] = None) -> bool:
+    def cancel_download(self, username: str, transfer_id: str, remove: bool = True, timeout: float | None = None) -> bool:
         try:
             # URL-encode both path segments — Soulseek usernames can legally
             # contain spaces, #, &, %, ? and unicode, which would otherwise
@@ -876,7 +1213,7 @@ class SlskdService:
             )
             return False
 
-    def clear_completed_downloads(self, timeout: Optional[int] = None) -> bool:
+    def clear_completed_downloads(self, timeout: float | None = None) -> bool:
         try:
             resp = self.http.delete("transfers/downloads/all/completed", timeout=timeout)
             return resp.status_code in [200, 204]

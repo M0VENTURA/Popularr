@@ -116,6 +116,19 @@ async def slskd_search() -> Any:
         client = SlskdHttpClient(web_url, api_key)
         slskd_service = SlskdService(http_client=client)
 
+        # Server-state gate: a disconnected Soulseek client cannot search.
+        # Report it distinctly so the UI never suggests "search slot busy"
+        # and the search never records a misleading result.
+        try:
+            connected = await asyncio.to_thread(slskd_service.is_connected)
+        except Exception:
+            connected = True
+        if not connected:
+            return jsonify({
+                "error": "slskd is not connected to the Soulseek network",
+                "slskd_disconnected": True,
+            }), 503
+
         try:
             await asyncio.to_thread(slskd_service.maybe_clear_stale_searches, budget_seconds=6)
         except Exception:

@@ -162,10 +162,15 @@ class SlskdHttpClient:
             return False
 
     def delete_search(self, search_id: str) -> bool:
-        """Delete a search and its results."""
+        """Delete a search and its results.
+
+        A 404 counts as success — the search is already gone, which is the
+        state the caller wanted.  (slskd serialises API operations, so a
+        concurrent delete from another worker can legitimately win the race.)
+        """
         try:
             resp = self.delete(f"searches/{search_id}")
-            return resp.status_code in (200, 204)
+            return resp.status_code in (200, 204, 404)
         except Exception as exc:
             logger.debug("Failed to delete search", search_id=search_id, error=str(exc))
             return False

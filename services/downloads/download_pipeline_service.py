@@ -386,6 +386,26 @@ def _schedule_search_retry(queue_id: int, item: dict, reason: str) -> None:
     _log_queue_event(status, f"{artist} - {title} → {note}", queue_id)
 
 
+def search_disconnected(item: dict, queue_id: int, artist: str, title: str) -> None:
+    """slskd's Soulseek client is not connected — the search never ran.
+
+    Records NO failure and schedules NO retry: the item simply returns to the
+    queue so the next cycle retries once the connection is back.  (Recording
+    ``no_results`` here would punish a connectivity problem with the
+    escalating search-miss backoff, eventually the weekly miss slot.)
+    """
+    try:
+        update_queue_item(
+            queue_id,
+            status="queued",
+            failure_reason="slskd disconnected — search not attempted",
+        )
+    except Exception:
+        pass
+    log_unified(f"[QUEUE] {artist} - {title} → slskd disconnected, search skipped")
+    _log_queue_event("queued", f"{artist} - {title} → slskd disconnected, search skipped", queue_id)
+
+
 def _sanitize_slskd_query(query: str) -> str:
     if not query:
         return query
@@ -1402,6 +1422,15 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                     empty_abort_seconds=_empty_abort,
                     cancel_when_done=True,
                 )
+                if results is None:
+                    # The Soulseek client is DISCONNECTED — the search never
+                    # ran.  This must NOT be recorded as no_results / no
+                    # qualifying result: that would punish a connectivity
+                    # problem with the escalating search-miss backoff (and
+                    # eventually the weekly slot).  Leave the item queued for
+                    # the next cycle instead.
+                    search_disconnected(item, queue_id, expected_artist, expected_title)
+                    return {"success": False, "status": "slskd_disconnected", "skipped": True}
                 results = _filter_blocked_peers(results)
                 all_results.extend(results)
                 consecutive_empty = consecutive_empty + 1 if not results else 0

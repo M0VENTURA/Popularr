@@ -33,11 +33,14 @@ def _reset_cadence():
     The cadence counter is a CLASS attribute (deliberately — both search entry
     points build a fresh ``SlskdService`` per operation, so instance state
     would reset every call and the cleanup would run every search).  That means
-    it leaks between tests, so it must be reset explicitly.
+    it leaks between tests, so it must be reset explicitly.  Same for the
+    ownership registry.
     """
     SlskdService.reset_cleanup_cadence()
+    SlskdService.reset_owned_searches()
     yield
     SlskdService.reset_cleanup_cadence()
+    SlskdService.reset_owned_searches()
 
 
 class _FakeResp:
@@ -83,6 +86,9 @@ class _RecordingHttp:
 
 
 def _terminal(search_id: str) -> dict:
+    """A terminal search WE started — registered owned so the cleaner may
+    remove it (un-owned terminal searches are left for the manual UI)."""
+    SlskdService.mark_search_owned(search_id)
     return {"id": search_id, "state": "Completed, TimedOut"}
 
 
