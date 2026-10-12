@@ -609,6 +609,41 @@ def _tracks_without_singles_verdict(
     ]
 
 
+def _album_scored_but_never_rated(tracks: list[dict[str, Any]] | None) -> bool:
+    """True when an album's tracks are SCORED but NONE of them have stars.
+
+    This is the signature of a run interrupted between the per-album score
+    persistence and the DEFERRED artist-level star flush (``_flush_artist_
+    star_ratings`` runs at the artist boundary, not per album): every track
+    was scored and written, but the pass stopped before any star was posted.
+    The next NON-FORCED scan's skip gate would then SKIP the album as "no
+    changes detected" (all tracks already carry ``final_score``) while its
+    stars stay NULL forever — the reported "when an artist was rescanned with
+    a non forced scan later on, it runs the finalize pass on it and no tracks
+    are getting 5 star in the scan".
+
+    The heal: count such an album as incomplete so the completeness override
+    forces it through — where, with stored scores reused (no re-scoring, no
+    network beyond the normal cached enrich), ``_post_album_stars`` finally
+    assigns them. Safe by construction:
+
+      * an album with NO scored track stays untouched (it is not "waiting for
+        a flush", it was never rated for a reason);
+      * an album where ANY track already has a star is left alone (a
+        different, partial-rating story);
+      * tracks excluded from stats (``exclude_from_stats``) are ignored on
+        BOTH sides, so an all-excluded album is never forced through forever.
+    """
+    if not tracks:
+        return False
+    eligible = [t for t in tracks if not bool(t.get("exclude_from_stats"))]
+    if not eligible:
+        return False
+    scored = any(float(t.get("final_score") or 0) > 0 for t in eligible)
+    rated = any(int(t.get("stars") or 0) > 0 for t in tracks)
+    return bool(scored) and not rated
+
+
 def _pass_runs_singles(options: dict[str, Any]) -> bool:
     """True when this pass runs the singles block at all.
 
@@ -2295,6 +2330,25 @@ def run_scan(
                         "singles verdict — running it instead of skipping "
                         "(Run Singles Detection on Skipped Albums)"
                     )
+
+        # ── Starless self-heal ─────────────────────────────────────────────
+        # An album whose tracks are scored but NONE have stars is the
+        # signature of a run interrupted BEFORE the deferred artist-level star
+        # flush (``_flush_artist_star_ratings`` runs at the ARTIST boundary,
+        # not per album). The next non-forced scan must NOT skip it as "no
+        # changes detected" — that leaves its stars NULL forever. Forcing it
+        # through here reuses the stored scores (no re-scoring, no metadata
+        # re-run — deliberately does NOT set ``force_metadata_for_this_album``)
+        # so ``_post_album_stars`` finally assigns them.
+        #
+        # Metadata-only passes never rate, so they must keep skipping these
+        # albums (else the completeness override would re-run them forever).
+        if skip_album and not options.get("metadata_only") and _album_scored_but_never_rated(tracks):
+            skip_album = False
+            log_unified(
+                f"Popularity Scan - Album \"{str(album or '').strip()}\" scored but never rated "
+                "(no stars) — running it to assign them"
+            )
 
         if skip_album:
             skipped_albums += 1
