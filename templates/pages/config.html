@@ -712,7 +712,7 @@
         <div class="col-12 col-md-6 col-lg-4">
           <label class="form-label form-label-sm" for="queue_search_backoff_hours">Search Miss Backoff (hours)</label>
           <input type="text" class="form-control form-control-sm" id="queue_search_backoff_hours" placeholder="4, 12, 24" value="{{ config.get('queue', {}).get('search_backoff_hours', [4, 12, 24])|join(', ') }}">
-          <small class="form-text text-muted">Escalating wait between searches when a track finds <strong>no results</strong>. The first miss waits the first value, the second miss the next, and so on; once the miss count passes the list length, the <strong>longest tier is reused</strong> — the item keeps returning to the queue automatically and is never parked as <strong>Failed</strong>. Default: <strong>4, 12, 24</strong></small>
+          <small class="form-text text-muted">Escalating wait between searches when a track finds <strong>no results</strong>. The first miss waits the first value, the second miss the next, and so on; once the miss count passes the list length, the item moves to the <strong>Search Miss Retry Day</strong> slot below instead of repeating every 24h. Default: <strong>4, 12, 24</strong></small>
         </div>
         <div class="col-12 col-md-6 col-lg-4">
           <label class="form-label form-label-sm" for="queue_failure_retry_delay_minutes">Failure Retry Delay (minutes)</label>
@@ -729,14 +729,67 @@
           </select>
           <small class="form-text text-muted">Albums with a <strong>future release date</strong> are searched once per week on this day (06:00 UTC) until the release drops. Default: <strong>Friday</strong></small>
         </div>
+        <div class="col-12 col-md-6 col-lg-4">
+          <label class="form-label form-label-sm" for="queue_miss_retry_weekday">Search Miss Retry Day</label>
+          {% set q_miss_day = config.get('queue', {}).get('miss_retry_weekday', 3) %}
+          <select class="form-select form-select-sm" id="queue_miss_retry_weekday">
+            {% for day_idx, day_name in [(0, 'Monday'), (1, 'Tuesday'), (2, 'Wednesday'), (3, 'Thursday'), (4, 'Friday'), (5, 'Saturday'), (6, 'Sunday')] %}
+            <option value="{{ day_idx }}" {% if q_miss_day == day_idx %}selected{% endif %}>{{ day_name }}</option>
+            {% endfor %}
+          </select>
+          <small class="form-text text-muted">After the backoff tiers are exhausted, a persistently-unfindable track is re-searched <strong>once per week</strong> on this day — default <strong>Thursday</strong>, the evening before Friday's release day when fresh uploads appear. The item still returns to the queue automatically.</small>
+        </div>
+        <div class="col-12 col-md-6 col-lg-4">
+          <label class="form-label form-label-sm" for="queue_miss_retry_time">Search Miss Retry Time (UTC)</label>
+          <input type="text" class="form-control form-control-sm" id="queue_miss_retry_time" placeholder="18:00" value="{{ config.get('queue', {}).get('miss_retry_time', '18:00') }}">
+          <small class="form-text text-muted">Clock (00:00–23:59, UTC) for the weekly miss retry. Default: <strong>18:00</strong>. If today is the retry day and the time has already passed, the retry moves to next week.</small>
+        </div>
       </div>
       <div class="alert alert-secondary mb-0 mt-3 py-2">
         <small class="text-muted">
           <strong>How it works:</strong> nothing is ever retried immediately — every failure or search miss schedules
           the next attempt at a future time. <strong>Search misses</strong> (no results / wrong duration) use the escalating
-          backoff tiers above; <strong>transfer failures</strong> use the Failure Retry Delay; <strong>pre-release albums</strong> wait
-          for the weekly rescan day. You can always bypass the wait with the ⏳ force-start button on the queue page.
+          backoff tiers above, then the weekly retry day; <strong>transfer failures</strong> use the Failure Retry Delay;
+          <strong>pre-release albums</strong> wait for the weekly rescan day. You can always bypass the wait with the ⏳
+          force-start button on the queue page.
         </small>
+      </div>
+    </div>
+  </div>
+
+  <!-- Queue Search Tuning Section -->
+  <div class="card shadow-sm mb-3" id="queue-search-tuning">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-search"></i> Queue Search Tuning</h5>
+      <small class="text-muted">How long each Soulseek search waits, and when unpromising searches are cut short</small>
+    </div>
+    <div class="card-body">
+      <div class="row g-3">
+        <div class="col-12 col-md-6 col-lg-4">
+          <label class="form-label form-label-sm" for="queue_search_max_wait_seconds">Primary Search Wait (seconds)</label>
+          <input type="number" min="1" max="600" class="form-control form-control-sm" id="queue_search_max_wait_seconds" placeholder="150" value="{{ config.get('queue', {}).get('search_max_wait_seconds', 150) }}">
+          <small class="form-text text-muted">Ceiling for the <strong>first</strong> query of a track (full artist – title). Polling stops as soon as slskd reports the search complete. Default: <strong>150</strong></small>
+        </div>
+        <div class="col-12 col-md-6 col-lg-4">
+          <label class="form-label form-label-sm" for="queue_fallback_search_max_wait_seconds">Fallback Search Wait (seconds)</label>
+          <input type="number" min="1" max="300" class="form-control form-control-sm" id="queue_fallback_search_max_wait_seconds" placeholder="20" value="{{ config.get('queue', {}).get('fallback_search_max_wait_seconds', 20) }}">
+          <small class="form-text text-muted">Ceiling for every <strong>alternative</strong> query (dropped words, bare title…). Kept short — up to 20 fallbacks per track, and each full wait adds up. Default: <strong>20</strong></small>
+        </div>
+        <div class="col-12 col-md-6 col-lg-4">
+          <label class="form-label form-label-sm" for="queue_search_empty_abort_seconds">Stop Empty Search After (seconds)</label>
+          <input type="number" min="0" max="600" class="form-control form-control-sm" id="queue_search_empty_abort_seconds" placeholder="90" value="{{ config.get('queue', {}).get('search_empty_abort_seconds', 90) }}">
+          <small class="form-text text-muted">A search that has streamed <strong>zero results</strong> for this long is cancelled and the next query is tried, instead of waiting out the ceiling (slskd keeps empty searches running until they time out). <strong>0 disables</strong>. Default: <strong>90</strong></small>
+        </div>
+        <div class="col-12 col-md-6 col-lg-4">
+          <label class="form-label form-label-sm" for="queue_search_empty_shrink_after">Shrink Waits After N Empty Queries</label>
+          <input type="number" min="0" max="20" class="form-control form-control-sm" id="queue_search_empty_shrink_after" placeholder="4" value="{{ config.get('queue', {}).get('search_empty_shrink_after', 4) }}">
+          <small class="form-text text-muted">After this many <strong>consecutive empty</strong> queries, the remaining fallbacks wait only the Shrunken Wait — every more-specific variant already found nothing. <strong>0 disables</strong>. Default: <strong>4</strong></small>
+        </div>
+        <div class="col-12 col-md-6 col-lg-4">
+          <label class="form-label form-label-sm" for="queue_search_shrunken_wait_seconds">Shrunken Wait (seconds)</label>
+          <input type="number" min="1" max="120" class="form-control form-control-sm" id="queue_search_shrunken_wait_seconds" placeholder="8" value="{{ config.get('queue', {}).get('search_shrunken_wait_seconds', 8) }}">
+          <small class="form-text text-muted">The reduced wait used once the shrink threshold is hit. Combined with the empty-search abort this is what takes a hopeless track from ~9 minutes of searching down to ~2-3. Default: <strong>8</strong></small>
+        </div>
       </div>
     </div>
   </div>

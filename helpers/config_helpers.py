@@ -537,6 +537,45 @@ _SLSKD_SEARCH_MAX_WAIT_SECONDS = 150
 _SLSKD_FALLBACK_SEARCH_MAX_WAIT_SECONDS = 20
 
 
+def get_queue_search_tuning() -> dict[str, Any]:
+    """Get queue search duration tuning (Config section ``queue``).
+
+    Keys (all under ``queue`` in config.yaml):
+
+    - ``search_max_wait_seconds`` (150): ceiling for the PRIMARY query.
+    - ``fallback_search_max_wait_seconds`` (20): ceiling for fallback queries.
+    - ``search_empty_abort_seconds`` (90): a search that has streamed ZERO
+      results for this long is CANCELLED early instead of being waited out —
+      slskd keeps empty searches ``InProgress`` until they time out, and the
+      full ceiling on every query is what made a hopeless track burn ~9
+      minutes (150s + 20 x 20s).  ``0`` disables the early abort.
+    - ``search_empty_shrink_after`` (4): after this many CONSECUTIVE empty
+      queries, the remaining queries wait only
+      ``search_shrunken_wait_seconds`` — every more-specific variant already
+      failed to surface anything, so the tail of the fallback list should not
+      burn the full ceiling each.
+    - ``search_shrunken_wait_seconds`` (8): the reduced wait once the shrink
+      threshold has been reached.
+    """
+    cfg = get_config()
+    queue = cfg.get("queue", {}) if isinstance(cfg, dict) else {}
+    return {
+        "search_max_wait_seconds": int(
+            queue.get("search_max_wait_seconds", _SLSKD_SEARCH_MAX_WAIT_SECONDS)
+            or _SLSKD_SEARCH_MAX_WAIT_SECONDS
+        ),
+        "fallback_search_max_wait_seconds": int(
+            queue.get("fallback_search_max_wait_seconds", _SLSKD_FALLBACK_SEARCH_MAX_WAIT_SECONDS)
+            or _SLSKD_FALLBACK_SEARCH_MAX_WAIT_SECONDS
+        ),
+        "search_empty_abort_seconds": float(
+            queue.get("search_empty_abort_seconds", 90) or 0
+        ),
+        "search_empty_shrink_after": int(queue.get("search_empty_shrink_after", 4) or 0),
+        "search_shrunken_wait_seconds": int(queue.get("search_shrunken_wait_seconds", 8) or 0),
+    }
+
+
 # Cached SlskdClient instance — config does not change at runtime so we build
 # the object once and reuse it for the lifetime of the process.
 _slskd_client_cache = None

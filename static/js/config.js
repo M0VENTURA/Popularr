@@ -249,7 +249,14 @@ function buildConfigObject() {
           .split(',').map(s => parseInt(s.trim(), 10))
           .filter(n => !isNaN(n) && n > 0),
         failure_retry_delay_minutes: parseInt(getValue('queue_failure_retry_delay_minutes', '30')) || 30,
-        pre_release_retry_weekday: parseInt(getValue('queue_pre_release_retry_weekday', '4')) || 4
+        pre_release_retry_weekday: parseInt(getValue('queue_pre_release_retry_weekday', '4')) || 4,
+        miss_retry_weekday: parseInt(getValue('queue_miss_retry_weekday', '3')) || 3,
+        miss_retry_time: getValue('queue_miss_retry_time', '18:00'),
+        search_max_wait_seconds: parseNumber('queue_search_max_wait_seconds', 150),
+        fallback_search_max_wait_seconds: parseNumber('queue_fallback_search_max_wait_seconds', 20),
+        search_empty_abort_seconds: parseNumber('queue_search_empty_abort_seconds', 90),
+        search_empty_shrink_after: parseNumber('queue_search_empty_shrink_after', 4),
+        search_shrunken_wait_seconds: parseNumber('queue_search_shrunken_wait_seconds', 8)
       }
     ),
     lastfm: Object.assign(

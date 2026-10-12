@@ -253,12 +253,61 @@ def _fmt_local(dt: datetime) -> str:
         return dt.strftime("%Y-%m-%d %H:%M")
 
 
+def _next_weekday_slot(now_utc: datetime, weekday: int, clock: str) -> datetime:
+    """Next occurrence of *weekday* at *clock* (``"HH:MM"``, UTC).
+
+    Strictly in the future: if today IS the target day and the clock time has
+    already passed, the slot moves to next week so a retry never lands in the
+    past.  Both the pre-release rescan day (06:00) and the persistent-miss
+    slot (Thursday evening by default) are calendar-aligned weekly retries —
+    ONE arithmetic keeps them consistent.
+    """
+    try:
+        hour, minute = (int(part) for part in clock.split(":", 1))
+        hour = max(0, min(23, hour))
+        minute = max(0, min(59, minute))
+    except Exception:
+        hour, minute = 6, 0
+    days = (weekday - now_utc.weekday()) % 7
+    if days == 0 and (now_utc.hour, now_utc.minute) >= (hour, minute):
+        days = 7
+    return (now_utc + timedelta(days=days)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
 def _next_pre_release_six_am(now_utc: datetime) -> datetime:
     weekday = _pre_release_retry_weekday()
-    days = (weekday - now_utc.weekday()) % 7
-    if days == 0 and now_utc.hour >= 6:
-        days = 7
-    return (now_utc + timedelta(days=days)).replace(hour=6, minute=0, second=0, microsecond=0)
+    return _next_weekday_slot(now_utc, weekday, "06:00")
+
+
+def _miss_retry_weekday() -> int:
+    """Weekday (0=Mon..6=Sun) for persistent-miss retries.
+
+    Default 3 (Thursday): Friday is the weekly release day, so the retry
+    lands the evening before — fresh uploads of a previously-unfindable track
+    appear on Soulseek when a release drops.
+    """
+    try:
+        from helpers.config_helpers import get_config
+        value = int((get_config() or {}).get("queue", {}).get("miss_retry_weekday", 3) or 3)
+        return max(0, min(6, value))
+    except Exception:
+        return 3
+
+
+def _miss_retry_time() -> str:
+    """Clock (``"HH:MM"``, UTC) for persistent-miss retries (default ``18:00``)."""
+    try:
+        from helpers.config_helpers import get_config
+        raw = str((get_config() or {}).get("queue", {}).get("miss_retry_time", "18:00") or "18:00").strip()
+        if re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", raw):
+            return raw
+        return "18:00"
+    except Exception:
+        return "18:00"
+
+
+def _next_miss_retry_slot(now_utc: datetime) -> datetime:
+    return _next_weekday_slot(now_utc, _miss_retry_weekday(), _miss_retry_time())
 
 
 def _resolve_item_release_date(item: dict) -> str | None:
@@ -312,10 +361,25 @@ def _schedule_search_retry(queue_id: int, item: dict, reason: str) -> None:
         _day_name = _weekday_names[_pre_release_retry_weekday()]
         note = f"{reason} — pre-release, scanning {_day_name} {_fmt_local(next_run)} local"
     else:
-        hours = _backoff_hours_for(retry_count)
-        next_run = now_utc + timedelta(hours=hours)
-        status = "backed_off"
-        note = f"{reason} — backing off {hours}h until {_fmt_local(next_run)} local (attempt {retry_count + 1})"
+        tiers = _search_backoff_hours()
+        if retry_count >= len(tiers):
+            # Persistent miss: the escalating tiers (4h/12h/24h) are spent and
+            # this track still never surfaced.  Instead of repeating every 24h
+            # forever (the "day after day" pattern from the search log), the
+            # retry lands on ONE calendar slot per week — the evening before
+            # the release day, when fresh uploads of the track appear on
+            # Soulseek.  The item still returns to the queue automatically:
+            # it is never parked or abandoned.
+            next_run = _next_miss_retry_slot(now_utc)
+            status = "backed_off"
+            _weekday_names = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+            _day_name = _weekday_names[_miss_retry_weekday()]
+            note = f"{reason} — persistent miss, retrying {_day_name} {_fmt_local(next_run)} local"
+        else:
+            hours = _backoff_hours_for(retry_count)
+            next_run = now_utc + timedelta(hours=hours)
+            status = "backed_off"
+            note = f"{reason} — backing off {hours}h until {_fmt_local(next_run)} local (attempt {retry_count + 1})"
 
     schedule_queue_retry(queue_id, status, next_run.isoformat(), note)
     log_unified(f"[QUEUE] {artist} - {title} → {note}")
@@ -359,6 +423,32 @@ def build_search_query(item: dict) -> str:
             query = title
 
     return _sanitize_slskd_query(query)
+
+
+def _search_query_wait(
+    *,
+    idx: int,
+    consecutive_empty: int,
+    long_first_wait: bool,
+    primary_wait: int,
+    fallback_wait: int,
+    shrink_after: int,
+    shrunken_wait: int,
+) -> int:
+    """Per-query wait ceiling for the automatic queue search.
+
+    The primary query (idx 0 of the first bitrate tier) waits ``primary_wait``;
+    every fallback waits ``fallback_wait``.  Once ``consecutive_empty`` queries
+    in a row have returned NOTHING, the remaining queries wait only
+    ``shrunken_wait``: every more-specific variant already failed to surface
+    anything, so the LESS-specific tail of the fallback list should not burn
+    the full ceiling each — that is what made a hopeless track take ~9 minutes
+    (150s + 20 x 20s) to conclude ``no_results``.
+    """
+    wait = primary_wait if (idx == 0 and long_first_wait) else fallback_wait
+    if shrink_after > 0 and consecutive_empty >= shrink_after and shrunken_wait > 0:
+        wait = min(wait, shrunken_wait)
+    return max(1, int(wait))
 
 
 def _build_fallback_search_queries(item: dict, primary_query: str) -> list[str]:
@@ -1265,7 +1355,7 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
         _log_queue_event("searching", f"{expected_artist} - {expected_title} → searching Soulseek", queue_id)
 
         from helpers.config_helpers import (
-            _SLSKD_FALLBACK_SEARCH_MAX_WAIT_SECONDS,
+            get_queue_search_tuning,
             get_search_quality_config,
         )
 
@@ -1273,6 +1363,13 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
         floor_bitrate = int(_quality_cfg.get("min_bitrate") or 192)
         fallback_bitrate = int(_quality_cfg.get("fallback_min_bitrate") or 128)
         allow_low_quality_fallback = bool(_quality_cfg.get("allow_low_quality_fallback", False))
+
+        _search_tuning = get_queue_search_tuning()
+        _primary_wait = int(_search_tuning.get("search_max_wait_seconds") or 0)
+        _fallback_wait = int(_search_tuning.get("fallback_search_max_wait_seconds") or 0)
+        _empty_abort = float(_search_tuning.get("search_empty_abort_seconds") or 0)
+        _shrink_after = int(_search_tuning.get("search_empty_shrink_after") or 0)
+        _shrunken_wait = int(_search_tuning.get("search_shrunken_wait_seconds") or 0)
 
         best = None
         all_results: list[dict[str, Any]] = []
@@ -1285,13 +1382,29 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
         if allow_low_quality_fallback and fallback_bitrate < floor_bitrate:
             bitrate_tiers.append((fallback_bitrate, False))
 
+        consecutive_empty = 0
         for tier_index, (tier_bitrate, long_first_wait) in enumerate(bitrate_tiers):
             for idx, q in enumerate([query] + fallback_queries):
                 searched_queries.append(q)
-                wait_seconds = None if (idx == 0 and long_first_wait) else _SLSKD_FALLBACK_SEARCH_MAX_WAIT_SECONDS
-                results = slskd.search_and_filter(q, min_bitrate=tier_bitrate, wait_seconds=wait_seconds)
+                wait_seconds = _search_query_wait(
+                    idx=idx,
+                    consecutive_empty=consecutive_empty,
+                    long_first_wait=long_first_wait,
+                    primary_wait=_primary_wait,
+                    fallback_wait=_fallback_wait,
+                    shrink_after=_shrink_after,
+                    shrunken_wait=_shrunken_wait,
+                )
+                results = slskd.search_and_filter(
+                    q,
+                    min_bitrate=tier_bitrate,
+                    wait_seconds=wait_seconds,
+                    empty_abort_seconds=_empty_abort,
+                    cancel_when_done=True,
+                )
                 results = _filter_blocked_peers(results)
                 all_results.extend(results)
+                consecutive_empty = consecutive_empty + 1 if not results else 0
 
                 best = _select_best_result(
                     results,

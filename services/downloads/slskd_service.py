@@ -576,50 +576,99 @@ class SlskdService:
             qualified.sort(key=lambda item: (-item["bitrate"], -item["sample_rate"]))
         return qualified[:max_results]
 
-    def search_and_filter(self, query: str, min_bitrate: int | None = None, wait_seconds: int | None = None, poll_interval: float = 1.0, timeout: Optional[int] = None) -> list[dict]:
+    def search_and_filter(
+        self,
+        query: str,
+        min_bitrate: int | None = None,
+        wait_seconds: int | None = None,
+        poll_interval: float = 1.0,
+        timeout: Optional[int] = None,
+        empty_abort_seconds: float | None = None,
+        cancel_when_done: bool = True,
+    ) -> list[dict]:
         if min_bitrate is None:
             from helpers.config_helpers import get_search_quality_config
             min_bitrate = get_search_quality_config()["min_bitrate"]
         if wait_seconds is None:
             from helpers.config_helpers import _SLSKD_SEARCH_MAX_WAIT_SECONDS
             wait_seconds = _SLSKD_SEARCH_MAX_WAIT_SECONDS
-            
+        if empty_abort_seconds is None:
+            from helpers.config_helpers import get_queue_search_tuning
+            empty_abort_seconds = float(get_queue_search_tuning()["search_empty_abort_seconds"] or 0)
+
         try:
             self.maybe_clear_stale_searches(budget_seconds=6)
         except Exception:
             pass
-            
+
         search_id = self.start_search(query, timeout=timeout)
         if not search_id:
             return []
 
+        search_wall_started = time.time()
         deadline = time.time() + max(0, int(wait_seconds or 0))
         poll_attempt = 0
         seen: set[tuple[str, str]] = set()
         accumulated: list[dict] = []
-        
-        while True:
-            delay = 1.0 if poll_attempt < 5 else (2.0 if poll_attempt < 10 else 5.0)
-            poll_attempt += 1
-            if time.time() + delay > deadline:
-                break
-            time.sleep(delay)
-            responses, _state, is_complete = self.get_search_results(search_id, timeout=timeout)
-            for item in self.filter_results_by_quality(responses, min_bitrate=min_bitrate, query=query):
-                key = (item["username"], item["filename"])
-                if key not in seen:
-                    seen.add(key)
-                    accumulated.append(item)
-            if is_complete:
-                break
-                
-        if not accumulated:
+
+        def _drain() -> None:
             responses, _state, _complete = self.get_search_results(search_id, timeout=timeout)
             for item in self.filter_results_by_quality(responses, min_bitrate=min_bitrate, query=query):
                 key = (item["username"], item["filename"])
                 if key not in seen:
                     seen.add(key)
                     accumulated.append(item)
+
+        try:
+            while True:
+                delay = 1.0 if poll_attempt < 5 else (2.0 if poll_attempt < 10 else 5.0)
+                poll_attempt += 1
+                if time.time() + delay > deadline:
+                    break
+                time.sleep(delay)
+                responses, _state, is_complete = self.get_search_results(search_id, timeout=timeout)
+                for item in self.filter_results_by_quality(responses, min_bitrate=min_bitrate, query=query):
+                    key = (item["username"], item["filename"])
+                    if key not in seen:
+                        seen.add(key)
+                        accumulated.append(item)
+                if is_complete:
+                    break
+                # Zero-result early abort.  slskd keeps empty searches
+                # ``InProgress`` until they time out, so waiting out the full
+                # ceiling on EVERY query is what made an un-locatable track
+                # burn ~9 minutes (150s primary + 20 x 20s fallbacks) to
+                # conclude ``no_results``.  A search that has streamed nothing
+                # for ``empty_abort_seconds`` is a dead query — cancel it and
+                # let the caller move on to the next variant.
+                if (
+                    empty_abort_seconds
+                    and empty_abort_seconds > 0
+                    and not accumulated
+                    and (time.time() - search_wall_started) >= empty_abort_seconds
+                ):
+                    logger.info(
+                        "Empty search cancelled early",
+                        search_id=search_id,
+                        query=query,
+                        elapsed_s=round(time.time() - search_wall_started, 1),
+                    )
+                    self.cancel_search(search_id, timeout=2)
+                    break
+
+            if not accumulated:
+                _drain()
+        finally:
+            # Eager cleanup: cancel the search we just finished polling so it
+            # does not linger in slskd until the 180s stale-search cleaner
+            # (`clear_stale_searches`) has to cancel it.  The queue never
+            # re-polls a finished search, so each item leaving a live search
+            # behind is exactly the "cleanup working too hard" symptom.
+            if cancel_when_done:
+                try:
+                    self.cancel_search(search_id, timeout=2)
+                except Exception:
+                    pass
         return accumulated
 
     def parse_transfers_response(self, raw: list | dict) -> list[dict]:
