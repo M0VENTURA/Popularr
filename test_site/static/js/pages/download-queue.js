@@ -853,7 +853,11 @@
       const events = (data && data.events) || [];
       const lines = events.slice().reverse().map((event) => {
         const ts = event.created_at || event.timestamp || null;
-        const time = ts ? new Date(ts).toLocaleTimeString([], { hour12: false }) : '--:--:--';
+        const parsed = ts ? new Date(ts) : null;
+        // An unparseable stamp must not print "Invalid Date".
+        const time = parsed && !isNaN(parsed.getTime())
+          ? parsed.toLocaleTimeString([], { hour12: false })
+          : '--:--:--';
         return `[${time}] ${(event.event_type || 'info').toUpperCase()} ${event.message || ''}`;
       });
       logEl.textContent = lines.length ? lines.join('\n') : 'No queue events yet.';
@@ -874,7 +878,9 @@
 
       events.slice().reverse().forEach((event) => {
         const ts = event.timestamp ? new Date(event.timestamp) : null;
-        const time = ts ? ts.toLocaleTimeString([], { hour12: false }) : '--:--:--';
+        const time = ts && !isNaN(ts.getTime())
+          ? ts.toLocaleTimeString([], { hour12: false })
+          : '--:--:--';
         const type = (event.search_type || 'unknown').toUpperCase();
         chunks.push(
           `[${type}] [${time}] Query: "${event.query || ''}"  |  ` +
@@ -912,12 +918,16 @@
       emptyDiv.style.display = 'none';
       table.style.display = 'table';
       tbody.innerHTML = events.map((event) => {
-        const ts = new Date(event.created_at);
+        // ⚠️ `new Date(null)` is the EPOCH, not an error — a line whose
+        // timestamp the backend could not parse rendered as 01/01/1970, which
+        // reads as a real (and very wrong) date. Fall back to a dash instead.
+        const ts = event.created_at ? new Date(event.created_at) : null;
+        const tsText = ts && !isNaN(ts.getTime()) ? ts.toLocaleString() : '—';
         const badgeClass = event.event_type === 'file_found' ? 'bg-info'
           : event.event_type === 'status_change' ? 'bg-primary'
           : event.event_type === 'error' ? 'bg-danger' : 'bg-success';
         return `<tr>
-          <td class="small text-muted">${esc(ts.toLocaleString())}</td>
+          <td class="small text-muted">${esc(tsText)}</td>
           <td><span class="badge ${badgeClass}">${esc((event.event_type || '').replace(/_/g, ' ').toUpperCase())}</span></td>
           <td>${esc(event.message || '')}</td>
         </tr>`;

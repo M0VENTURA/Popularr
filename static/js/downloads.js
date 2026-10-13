@@ -2326,9 +2326,13 @@ async function loadQueueEvents() {
     table.style.display = 'table';
 
     tbody.innerHTML = events.map(e => {
-      const ts = new Date(e.created_at);
+      // ⚠️ `new Date(null)` is the EPOCH, not an error — a line whose timestamp
+      // the backend could not parse rendered as 01/01/1970, which reads as a
+      // real (and very wrong) date. Fall back to a dash instead.
+      const ts = e.created_at ? new Date(e.created_at) : null;
+      const tsText = ts && !isNaN(ts.getTime()) ? ts.toLocaleString() : '—';
       const badgeClass = e.event_type === 'file_found' ? 'bg-info' : e.event_type === 'status_change' ? 'bg-primary' : e.event_type === 'error' ? 'bg-danger' : 'bg-success';
-      return `<tr><td class="small text-muted">${escapeHtml(ts.toLocaleString())}</td><td><span class="badge ${badgeClass}">${escapeHtml((e.event_type || '').replace(/_/g, ' ').toUpperCase())}</span></td><td>${escapeHtml(e.message || '')}</td></tr>`;
+      return `<tr><td class="small text-muted">${escapeHtml(tsText)}</td><td><span class="badge ${badgeClass}">${escapeHtml((e.event_type || '').replace(/_/g, ' ').toUpperCase())}</span></td><td>${escapeHtml(e.message || '')}</td></tr>`;
     }).join('');
   } catch (error) { console.error('Error loading queue events:', error); }
 }

@@ -40,6 +40,29 @@ logger = logging.getLogger(__name__)
 _queue_events_lock = threading.Lock()
 _queue_events: list[dict[str, Any]] = []
 
+#: Leading timestamp of a line in ``queue.log`` — BOTH separators.
+#:
+#: ⚠️ A single log file carries TWO timestamp formats, because two different
+#: logging paths write into it:
+#:
+#:   * structlog loggers (``services.downloads.*``, ``services.queue.*`` …) go
+#:     through ``structlog.processors.TimeStamper(fmt="iso")`` →
+#:     ``2026-10-13T10:53:31.169453``
+#:   * ``log_queue`` / ``log_unified`` write through the ``popularr.*`` stdlib
+#:     loggers, whose formatter uses ``%Y-%m-%d %H:%M:%S`` →
+#:     ``2026-10-13 10:53:49``
+#:
+#: The space-only pattern this replaced matched the second form only, so every
+#: ``services.*`` line parsed to ``created_at=None`` and the viewer rendered
+#: ``new Date(null)`` — **01/01/1970**. The other two parsers of these same logs
+#: (``log_service._filter_lines_last_hour`` and ``templates/pages/logs.html``)
+#: already used ``[ T]``; this was the one that had drifted.
+#:
+#: ONE module-level constant on purpose: the pattern was previously duplicated in
+#: two functions here, and a copy that accepts a different subset of the formats
+#: is exactly how one viewer shows dates and another shows 1970.
+_LOG_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
+
 
 # =============================================================================
 # EVENT STORE
@@ -378,7 +401,7 @@ def _tail_queue_log(limit: int = 100) -> list[dict[str, Any]]:
     # a small tail window, leaving the viewer "stale" even though fresh
     # queue activity exists further up the file.
     _TAIL_BYTES = 256 * 1024
-    _TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+    _TS_RE = _LOG_TS_RE
     try:
         from helpers.logging_config import resolve_log_dir
         import glob as _glob
@@ -554,7 +577,7 @@ def _tail_search_log(limit: int = 100) -> list[dict[str, Any]]:
     database backoff) so the monitor's Soulseek Search Log is never blank.
     """
     _TAIL_BYTES = 256 * 1024
-    _TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+    _TS_RE = _LOG_TS_RE
     try:
         from helpers.logging_config import resolve_log_dir
         import glob as _glob
