@@ -408,9 +408,11 @@ class TestRecentHistoryTabs:
 class TestMobileBottomNav:
     """A phone-first tab bar for the destinations people reach for constantly.
 
-    It is a flex FOOTER ITEM of <body> (like #globalPlayerBar / #scanStatusBar),
-    NOT `position: fixed`, so `main` shrinks to make room and the bar cannot
-    cover content.
+    It is `position: fixed; bottom: 0` and sits BEFORE <main> in the DOM, so it
+    paints from the first chunk of the document — a slow page (the ~1000-row
+    artists list) used to paint a flex-footer bar LAST, which read as "the
+    toolbar disappears while the page loads". `body` reserves the bar's height
+    below lg so `main` still scrolls above it.
     """
 
     def test_the_nav_is_in_base_so_every_page_has_it(self) -> None:
@@ -418,17 +420,28 @@ class TestMobileBottomNav:
         assert 'class="bottom-nav"' in base
         assert 'aria-label="Primary"' in base
 
-    def test_it_is_a_flex_footer_item_not_fixed(self) -> None:
+    def test_it_is_fixed_but_the_body_reserves_its_height(self) -> None:
+        """The bar is `position: fixed; bottom: 0` so it paints from the first
+        chunk of the document (a slow page used to paint it LAST — "the
+        toolbar disappears while the page loads") — and `body` reserves its
+        height below lg so content scrolls ABOVE it, never behind it.
+        """
         css = _read(POPULARR_CSS)
         idx = css.index(".bottom-nav {")
         window = css[idx: idx + 900]
-        assert "position: fixed" not in window, (
-            "a fixed bar would detach from the flex column, break the "
-            "--footer-stack-height maths and cover page content"
+        assert "position: fixed" in window, (
+            "fixed + bottom:0 is what keeps the shell visible while a slow "
+            "page streams in"
         )
-        assert "flex-shrink: 0" in window, (
-            "as a flex footer item it must not shrink, or it collapses"
+        assert "bottom: 0" in window
+        # The compensation must live in the SAME below-lg media query that
+        # shows the bar, or the bar covers the bottom of main's scroll area.
+        media_idx = css.index("@media (max-width: 991.98px)", idx)
+        body_win = css[media_idx: media_idx + 320]
+        assert "padding-bottom: calc(var(--bottom-nav-height)" in body_win, (
+            "body must reserve the fixed bar's height so main scrolls above it"
         )
+        assert "env(safe-area-inset-bottom" in body_win
 
     def test_the_five_destinations(self) -> None:
         base = _read(BASE_HTML)
@@ -602,6 +615,142 @@ class TestBottomNavActiveState:
             assert nav.count("bottom-nav-item active") <= 1, (
                 f"{path}: more than one tab highlighted"
             )
+
+
+# ---------------------------------------------------------------------------
+# 9. The bottom nav paints from the FIRST chunk (app shell stays visible)
+# ---------------------------------------------------------------------------
+#
+# Reported: "When going to the Artists button on the bottom row, the toolbar
+# disappears while the page loads." The artists page server-renders ~1000 rows,
+# so when the bar was the LAST element of <body> the browser painted it LAST —
+# on a slow page it popped in seconds after everything else. The top navbar is
+# first in the DOM, which is why ONLY the bottom row vanished.
+# ---------------------------------------------------------------------------
+
+class TestTheBottomNavIsPaintedFirst:
+    """The bar must sit BEFORE <main> in the DOM and be position:fixed so it
+    paints from the first chunk, while body reserves its height (below lg) so
+    content scrolls above it."""
+
+    def test_the_nav_comes_before_main_in_the_document(self) -> None:
+        base = _read(BASE_HTML)
+        # ⚠️ Match the REAL opening tag, not the bare `<main` — the explanatory
+        # comment above the bar itself says "before <main>", so a bare
+        # substring search hits the COMMENT and reports the wrong order.
+        assert base.find('class="bottom-nav"') < base.find('<main class="container-fluid">'), (
+            "the bar must be parsed before <main>: paint order follows parse "
+            "order, and a slow page used to paint the bar LAST (the reported "
+            "'toolbar disappears while the page loads')"
+        )
+
+    def test_the_nav_is_fixed_to_the_viewport_bottom(self) -> None:
+        css = _read(POPULARR_CSS)
+        idx = css.index(".bottom-nav {")
+        window = css[idx: idx + 600]
+        assert "position: fixed;" in window and "bottom: 0;" in window, (
+            "fixed to the viewport bottom keeps the shell visible no matter "
+            "how far main scrolls"
+        )
+
+    def test_body_reserves_the_bar_height_below_lg(self) -> None:
+        css = _read(POPULARR_CSS)
+        idx = css.index("@media (max-width: 991.98px)", css.index(".bottom-nav {"))
+        window = css[idx: idx + 400]
+        assert "padding-bottom" in window and "--bottom-nav-height" in window, (
+            "body must reserve the fixed bar's height so main's scroll area "
+            "and the status bar end ABOVE it"
+        )
+        assert "env(safe-area-inset-bottom" in window
+
+
+# ---------------------------------------------------------------------------
+# 10. The main-site navbar search is the toolbar's hero
+# ---------------------------------------------------------------------------
+#
+# Asked for a more prominent search "even if the toolbar is made bigger" — on
+# the MAIN toolbar (the top navbar), not the mobile bottom bar. The field was
+# `input-group-sm` (a secondary control); it is now `input-group-lg` with a
+# pill wrapper and a focus glow.
+# ---------------------------------------------------------------------------
+
+class TestTheMainSiteSearchIsProminent:
+
+    def test_the_field_is_larger_than_a_small_input(self) -> None:
+        base = _read(BASE_HTML)
+        idx = base.index('id="navSearchForm"')
+        window = base[idx: idx + 600]
+        assert "input-group-lg" in window, (
+            "the search must be the hero of the toolbar; input-group-sm said "
+            "'secondary control' and the box read as just another icon"
+        )
+
+    def test_the_prominent_pill_wrapper_exists(self) -> None:
+        css = _read(POPULARR_CSS)
+        assert ".nav-search-input-group" in css, (
+            "the promoted search needs the pill wrapper that gives it the "
+            "hero treatment"
+        )
+        idx = css.index(".nav-search-input-group {")
+        window = css[idx: idx + 500]
+        assert "border-radius: var(--radius-pill" in window
+        assert "focus-within" in window, (
+            "a focused hero field should glow so it reads as the primary "
+            "control"
+        )
+
+    def test_the_mobile_navbar_grows_to_fit_it(self) -> None:
+        css = _read(POPULARR_CSS)
+        idx = css.index("@media (max-width: 991.98px)")
+        window = css[idx: idx + 160]
+        assert "--navbar-height: 132px" in window, (
+            "the toolbar is allowed to grow taller for the search; the "
+            "fallback must clear the larger field at first paint"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 11. The artists page defers its heavy corrections until the page is loaded
+# ---------------------------------------------------------------------------
+#
+# "The artists page also takes a while to generate, can the 'needs repair'
+# function wait until the page is loaded to start?" — the corrections fetch
+# (GET /api/artists/corrections, a heavy aggregate) fired at DOMContentLoaded,
+# competing with first paint AND with the page's ~1000 lazy avatar images.
+# ---------------------------------------------------------------------------
+
+class TestArtistsCorrectionsWaitForLoad:
+    ARTISTS_JS = TS / "static" / "js" / "pages" / "artists.js"
+
+    def test_the_fetch_no_longer_fires_at_domcontentloaded(self) -> None:
+        js = self.ARTISTS_JS.read_text(encoding="utf-8")
+        assert "addEventListener('load'" in js, (
+            "the corrections fetch must wait until the page is FULLY loaded, "
+            "not run at DOMContentLoaded"
+        )
+        # The old form directly called loadCorrections() in initCorrections.
+        assert "initCorrections()\n  }" not in js.replace("loadCorrections();", "")
+        idx = js.index("function initCorrections()")
+        block = js[idx: js.index("// Escape closes the overlay", idx)]
+        assert "loadCorrections()" not in block.split("addEventListener('load'")[0], (
+            "loadCorrections must be inside the load/idle path, not called "
+            "synchronously from initCorrections"
+        )
+
+    def test_it_idles_before_running(self) -> None:
+        js = self.ARTISTS_JS.read_text(encoding="utf-8")
+        assert "requestIdleCallback" in js, (
+            "if available, the fetch should run in an idle slot so the badges "
+            "pop in instead of blocking the visible render"
+        )
+
+    def test_the_avatar_images_are_lazy(self) -> None:
+        page = _read(TS / "templates" / "Pages" / "artist_list.html")
+        assert 'loading="lazy"' in page, (
+            "~1000 avatar requests blocked window load; lazy loading lets the "
+            "page paint (and lets the deferred corrections know when load "
+            "really is done) without waiting on every image"
+        )
 
 
 

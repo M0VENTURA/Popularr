@@ -60,13 +60,19 @@
 
       <!-- Persistent Global Search Bar -->
       <div class="nav-search-wrapper" id="navSearchForm" title="Search library or MusicBrainz (Ctrl+K)">
-        <div class="input-group input-group-sm">
+        <div class="input-group input-group-lg nav-search-input-group">
           <span class="input-group-text bg-dark border-secondary text-muted"><i class="bi bi-search"></i></span>
           {#
             type="search" + enterkeyhint="search" give the mobile keyboard a
             Search key instead of a plain Return; autocapitalize/autocorrect/
             spellcheck off stop artist names being "corrected" as they are
             typed. `inputmode="search"` keeps the search-optimised layout.
+
+            `input-group-lg` + `.nav-search-input-group` make this the visual
+            HERO of the toolbar on the main site — the user asked for a search
+            that is prominent even if the bar grows taller. The pre-existing
+            `input-group-sm` said "secondary control" and the search box read
+            as just another icon.
           #}
           <input type="search" id="navSearchInput" class="form-control bg-dark text-light border-secondary shadow-none"
                  placeholder="Search library or MusicBrainz…" autocomplete="off" aria-label="Search library or MusicBrainz"
@@ -84,7 +90,7 @@
                 id="navSearchKbdHint" title="Press Ctrl+K (⌘K on Mac) to search" aria-hidden="true">
             <kbd class="search-kbd" id="navSearchKbd">Ctrl</kbd><kbd class="search-kbd">K</kbd>
           </span>
-          <button class="btn btn-outline-secondary btn-sm" type="button" title="Search" aria-label="Search" onclick="openUnifiedSearch()">
+          <button class="btn btn-outline-secondary" type="button" title="Search" aria-label="Search" onclick="openUnifiedSearch()">
             <i class="bi bi-search"></i>
           </button>
         </div>
@@ -184,6 +190,67 @@
         </ul>
       </div>
     </div>
+  </nav>
+
+  {#
+    MOBILE BOTTOM NAVIGATION
+
+    ⚠️ DOM-FIRST ON PURPOSE: this bar is painted from the VERY FIRST chunk of
+    the document, positioned BEFORE <main>. The artists page is the proof:
+    it server-renders ~1000 rows, and when this bar lived at the END of the
+    body the browser painted it LAST — so on a slow page it popped in seconds
+    after everything else, reading as "the toolbar disappeared while the page
+    loads". The top navbar is first in the DOM, which is why ONLY the bottom
+    row vanished. Painting order follows parse order: put the shell's fixed
+    elements first, and the shell is visible from first paint.
+
+    It is `position: fixed; bottom: 0` (below lg), so it stays at the bottom
+    of the viewport no matter how far `main` scrolls — the bar is the app
+    shell and does not scroll away. The OLD design was a flex footer item so
+    `main` would shrink to make room; the compensation now lives in `body`'s
+    `padding-bottom: var(--bottom-nav-height)` (mobile media query in
+    popularr.css) so the flex column stops ABOVE the bar and content can never
+    hide behind it. `--footer-stack-height` (sticky-save-bar, dashboard
+    min-height) still includes the nav height, so that maths is unchanged.
+
+    Only the destinations people reach for constantly are exposed; everything
+    else stays in the hamburger menu. The active state is decided SERVER-SIDE
+    from request.path (no JS), so the bar is correct on first paint instead of
+    flashing the wrong tab while a script catches up.
+
+    Search is kept as one of the five destinations: the promoted search field
+    belongs to the TOP NAVBAR (the "main site" toolbar), not the mobile bar —
+    that bar is pure navigation.
+  #}
+  {% set _nav_path = request.path %}
+  {# `/` 302s to `/dashboard`, so the real dashboard path is the latter — the
+     Home item must light up on BOTH, or it reads as inactive on the page it
+     represents. #}
+  {% set _nav_home = _nav_path == '/' or _nav_path == '/dashboard' %}
+  <nav class="bottom-nav" aria-label="Primary">
+    <a class="bottom-nav-item{% if _nav_home %} active{% endif %}"
+       href="{{ url_for('ui.dashboard') }}"
+       {% if _nav_home %}aria-current="page"{% endif %}>
+      <i class="bi bi-speedometer2" aria-hidden="true"></i><span>Home</span>
+    </a>
+    <a class="bottom-nav-item{% if _nav_path.startswith('/artists') or _nav_path.startswith('/artist/') %} active{% endif %}"
+       href="{{ url_for('ui.artists') }}"
+       {% if _nav_path.startswith('/artists') or _nav_path.startswith('/artist/') %}aria-current="page"{% endif %}>
+      <i class="bi bi-people" aria-hidden="true"></i><span>Artists</span>
+    </a>
+    <a class="bottom-nav-item{% if _nav_path.startswith('/downloads') %} active{% endif %}"
+       href="/downloads/monitor"
+       {% if _nav_path.startswith('/downloads') %}aria-current="page"{% endif %}>
+      <i class="bi bi-download" aria-hidden="true"></i><span>Downloads</span>
+    </a>
+    <a class="bottom-nav-item{% if _nav_path.startswith('/playlists') or _nav_path.startswith('/playlist/') %} active{% endif %}"
+       href="/playlists"
+       {% if _nav_path.startswith('/playlists') or _nav_path.startswith('/playlist/') %}aria-current="page"{% endif %}>
+      <i class="bi bi-collection-play" aria-hidden="true"></i><span>Playlists</span>
+    </a>
+    <button type="button" class="bottom-nav-item" onclick="openUnifiedSearch()" aria-label="Search">
+      <i class="bi bi-search" aria-hidden="true"></i><span>Search</span>
+    </button>
   </nav>
 
   {#
@@ -317,55 +384,6 @@
     <span id="scanStatusLine" class="text-truncate">Idle</span>
     <span class="scan-status-open"><i class="bi bi-terminal"></i> Log</span>
   </div>
-
-  {#
-    MOBILE BOTTOM NAVIGATION
-
-    A flex FOOTER ITEM of <body> — like #globalPlayerBar and #scanStatusBar —
-    and NOT `position: fixed`, so `main` (the flex:1 scroll container) shrinks
-    to make room and the bar can never cover page content. popularr.css hides it
-    at lg and up and collapses --bottom-nav-height to 0 there, so the footer
-    stack is unchanged on desktop.
-
-    Only the destinations people reach for constantly are exposed; everything
-    else stays in the hamburger menu. The active state is decided SERVER-SIDE
-    from request.path (no JS), so the bar is correct on first paint instead of
-    flashing the wrong tab while a script catches up.
-
-    "Search" is a button, not a link: it opens the unified search flyout
-    (global.openUnifiedSearch, published by ui/search-flyout.js) exactly as the
-    navbar's search button does.
-  #}
-  {% set _nav_path = request.path %}
-  {# `/` 302s to `/dashboard`, so the real dashboard path is the latter — the
-     Home item must light up on BOTH, or it reads as inactive on the page it
-     represents. #}
-  {% set _nav_home = _nav_path == '/' or _nav_path == '/dashboard' %}
-  <nav class="bottom-nav" aria-label="Primary">
-    <a class="bottom-nav-item{% if _nav_home %} active{% endif %}"
-       href="{{ url_for('ui.dashboard') }}"
-       {% if _nav_home %}aria-current="page"{% endif %}>
-      <i class="bi bi-speedometer2" aria-hidden="true"></i><span>Home</span>
-    </a>
-    <a class="bottom-nav-item{% if _nav_path.startswith('/artists') or _nav_path.startswith('/artist/') %} active{% endif %}"
-       href="{{ url_for('ui.artists') }}"
-       {% if _nav_path.startswith('/artists') or _nav_path.startswith('/artist/') %}aria-current="page"{% endif %}>
-      <i class="bi bi-people" aria-hidden="true"></i><span>Artists</span>
-    </a>
-    <a class="bottom-nav-item{% if _nav_path.startswith('/downloads') %} active{% endif %}"
-       href="/downloads/monitor"
-       {% if _nav_path.startswith('/downloads') %}aria-current="page"{% endif %}>
-      <i class="bi bi-download" aria-hidden="true"></i><span>Downloads</span>
-    </a>
-    <a class="bottom-nav-item{% if _nav_path.startswith('/playlists') or _nav_path.startswith('/playlist/') %} active{% endif %}"
-       href="/playlists"
-       {% if _nav_path.startswith('/playlists') or _nav_path.startswith('/playlist/') %}aria-current="page"{% endif %}>
-      <i class="bi bi-collection-play" aria-hidden="true"></i><span>Playlists</span>
-    </a>
-    <button type="button" class="bottom-nav-item" onclick="openUnifiedSearch()" aria-label="Search">
-      <i class="bi bi-search" aria-hidden="true"></i><span>Search</span>
-    </button>
-  </nav>
 
   <div class="modal fade modal-fullscreen" id="unifiedLogModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-fullscreen">

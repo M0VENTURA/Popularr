@@ -256,7 +256,26 @@
     if (toggle) {
       toggle.addEventListener('change', () => applyCorrectionsFilter(toggle.checked));
     }
-    if (document.querySelector('[data-artist-key]')) loadCorrections();
+    // ⚠️ DON'T FETCH AT DOMContentLoaded. The artists page server-renders up to
+    // ~1000 rows plus an avatar request per artist; the corrections aggregate
+    // (GET /api/artists/corrections) is a heavy count query that used to fire
+    // immediately, competing with first paint AND with the page's own images
+    // for the connection. Wait until the page is FULLY loaded (all its images
+    // are lazy so `load` fires once they've streamed), and after the toggle is
+    // wired so the filter never acts on partial data.
+    if (document.querySelector('[data-artist-key]')) {
+      global.addEventListener('load', () => {
+        // requestIdleCallback: run in a quiet slot after the page settles, so
+        // the badges pop in instead of blocking the visible render. Falls back
+        // to a macrotask where idle callbacks don't exist.
+        const run = () => loadCorrections();
+        if (typeof global.requestIdleCallback === 'function') {
+          global.requestIdleCallback(run, { timeout: 2000 });
+        } else {
+          setTimeout(run, 0);
+        }
+      });
+    }
   }
 
   // Escape closes the overlay.

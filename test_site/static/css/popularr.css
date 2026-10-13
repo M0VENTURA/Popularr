@@ -114,12 +114,15 @@
 
 /* The navbar wraps its search row below the lg breakpoint, making it
    taller. Without these, main content is pushed too far down on desktop
-   and not far enough on mobile. */
+   and not far enough on mobile. The search field is `input-group-lg` (the
+   main-site hero search), so the bar is taller than it was as `input-group-
+   sm` — these fallbacks must clear the measured value at first paint (main.js
+   re-measures and overwrites the token immediately anyway). */
 @media (max-width: 991.98px) {
-    :root { --navbar-height: 112px; --bottom-nav-height: 3.5rem; }
+    :root { --navbar-height: 132px; --bottom-nav-height: 3.5rem; }
 }
 @media (max-width: 575.98px) {
-    :root { --navbar-height: 104px; }
+    :root { --navbar-height: 124px; }
 }
 
 /* ── App Shell & Base Rules ──────────────────────────────────────────────── */
@@ -204,6 +207,34 @@ main.container-fluid {
     border: 1px solid var(--border-color);
     border-bottom-width: 2px;
     border-radius: var(--radius-sm, 0.25rem);
+}
+
+/* Promoted navbar search — the visual HERO of the toolbar on the main site.
+   `input-group-lg` in base.html grows the field; this cements it: the group
+   gets a pill shape, a subtle glow when focused, and the icon/button match
+   the larger field instead of looking like secondary controls. The toolbar
+   is allowed to grow taller to fit it (--navbar-height is measured, so every
+   consumer follows automatically). */
+.nav-search-input-group {
+    border-radius: var(--radius-pill, 999px);
+    transition: box-shadow 0.15s ease;
+
+    &:focus-within {
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--spotify-green) 25%, transparent);
+    }
+
+    .input-group-text,
+    .btn {
+        border-radius: 0;
+    }
+    .btn:last-child {
+        border-top-right-radius: var(--radius-pill, 999px);
+        border-bottom-right-radius: var(--radius-pill, 999px);
+    }
+    .input-group-text:first-child {
+        border-top-left-radius: var(--radius-pill, 999px);
+        border-bottom-left-radius: var(--radius-pill, 999px);
+    }
 }
 
 /* The global modal wrappers in base.html are direct children of <body>,
@@ -769,12 +800,19 @@ form .form-check-input[name="force"] + .form-check-label {
 }
 
 /* ── Mobile bottom navigation ──────────────────────────────────────────────
-   A flex FOOTER ITEM of <body> — exactly like #globalPlayerBar and
-   #scanStatusBar — and deliberately NOT `position: fixed`. That is what keeps
-   the --footer-stack-height maths correct: `main` is the flex:1 scroll
-   container and simply shrinks to make room, so the bar can never cover page
-   content (the failure mode the inline `position: fixed` on the player bar
-   used to cause).
+   `position: fixed; bottom: 0`, so the bar is glued to the viewport bottom
+   no matter how far `main` scrolls — and, as a fixed element, it paints from
+   the FIRST chunk of the document. That is the point: keep the app shell
+   visible while a slow page (e.g. the artists page's ~1000 server-rendered
+   rows) streams in. The OLD flex-footer design painted LAST on a slow page
+   because it sat at the end of the body — the reported "the toolbar
+   disappears while the page loads".
+
+   `main` is the flex:1 scroll container: body's mobile padding-bottom (below)
+   reserves the bar's height so content scrolls ABOVE it and can never hide
+   behind it. `--footer-stack-height` (which sticky-save-bar and the dashboard
+   min-height consume) STILL includes --bottom-nav-height, so its maths is
+   unchanged.
 
    Hidden at lg and up, where the navbar already carries these destinations;
    `--bottom-nav-height` collapses to 0 there so the footer stack is unchanged
@@ -784,7 +822,10 @@ form .form-check-input[name="force"] + .form-check-label {
    ------------------------------------------------------------------------- */
 .bottom-nav {
     display: none;
-    flex-shrink: 0;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
     align-items: stretch;
     height: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom, 0px));
     padding-bottom: env(safe-area-inset-bottom, 0px);
@@ -797,6 +838,11 @@ form .form-check-input[name="force"] + .form-check-label {
 
 @media (max-width: 991.98px) {
     .bottom-nav { display: flex; }
+    /* The fixed bar overlays the viewport bottom; reserve its height on the
+       flex column so `main`'s scroll area and the status bar end ABOVE it. */
+    body {
+        padding-bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom, 0px));
+    }
 }
 
 .bottom-nav-item {

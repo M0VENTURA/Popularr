@@ -160,6 +160,7 @@
                         <div class="artist-row-avatar rounded-circle border border-secondary overflow-hidden d-flex align-items-center justify-content-center flex-shrink-0" style="width: 48px; height: 48px;">
                             <img src="{{ url_for('artist.api_artist_image', name=artist.display_name) }}"
                                  alt="{{ artist.display_name }}"
+                                 loading="lazy" decoding="async"
                                  style="width: 100%; height: 100%; object-fit: cover;"
                                  onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
                             <i class="bi bi-person-fill fs-4 text-muted" style="display: none;"></i>
