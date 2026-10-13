@@ -143,6 +143,12 @@ main.container-fluid {
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
+    /* Reserve the scrollbar track whether or not it is currently needed, so
+       content does not shift sideways when a page grows past one screen.
+       `--scrollbar-width` (written by syncNavbarHeight in main.js) then tells
+       the FIXED navbar how far to pull its right edge in — otherwise the bar
+       sits over the top of the scrollbar and it cannot be grabbed there. */
+    scrollbar-gutter: stable;
     padding: calc(var(--navbar-height) + 0.75rem) 0.75rem 1rem 0.75rem;
 }
 
@@ -156,6 +162,16 @@ main.container-fluid {
 .nav-brand-row      { flex: 1 1 100%; order: 1; }
 .nav-search-wrapper { flex: 1 1 100%; order: 3; margin-top: 0.5rem; }
 .nav-links-wrapper  { order: 4; width: 100%; }
+
+/* ── The fixed navbar must not cover the scrollbar ──────────────────────────
+   The bar is `position: fixed; left: 0; right: 0`, so it spans the full
+   viewport and overlays the top of main's scrollbar — the scrollbar could not
+   be dragged from the first ~navbar-height pixels. `--scrollbar-width` is
+   measured by syncNavbarHeight() (main.js); on mobile, where the scrollbar is
+   an overlay that occupies no layout width, it is 0 and this is a no-op. */
+.navbar.fixed-top {
+    right: var(--scrollbar-width, 0px);
+}
 
 @media (min-width: 992px) {
     .nav-brand-row      { flex: 0 0 auto !important; width: auto; }

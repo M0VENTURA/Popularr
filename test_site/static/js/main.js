@@ -115,8 +115,29 @@
     document.documentElement.style.setProperty('--navbar-height', height + 'px');
   }
 
+  // ── Scrollbar width ─────────────────────────────────────────────────────
+  //
+  // The navbar is `position: fixed; left: 0; right: 0`, so it spans the whole
+  // viewport and lies OVER the top of main's scrollbar — which made the
+  // scrollbar impossible to grab for the first ~navbar-height pixels. CSS pulls
+  // the bar's right edge in by this token so the scrollbar stays reachable.
+  //
+  // Measured from `main` rather than the document: page scrolling lives on
+  // `main` (body is overflow:hidden), so the document's own client width tells
+  // us nothing. `scrollbar-gutter: stable` on main means the value does NOT
+  // change as content grows or shrinks, so measuring on resize/load is enough.
+  // On mobile the scrollbar is an overlay occupying no layout width, so this
+  // resolves to 0 and the inset is a no-op.
+  function syncScrollbarWidth() {
+    const main = document.querySelector('main.container-fluid');
+    if (!main) return;
+    const width = Math.max(0, main.offsetWidth - main.clientWidth);
+    document.documentElement.style.setProperty('--scrollbar-width', width + 'px');
+  }
+
   function initNavbarHeight() {
     syncNavbarHeight();
+    syncScrollbarWidth();
 
     // A resize listener alone misses height changes that are not window
     // resizes — the mobile menu expanding, or web fonts landing after first
@@ -134,6 +155,11 @@
       navCollapse.addEventListener('shown.bs.collapse', syncNavbarHeight);
       navCollapse.addEventListener('hidden.bs.collapse', syncNavbarHeight);
     }
+
+    // The scrollbar can appear/disappear with the window width (overlay vs
+    // classic), and a zoom change can resize it too.
+    global.addEventListener('resize', syncScrollbarWidth);
+    global.addEventListener('load', syncScrollbarWidth);
 
     global.addEventListener('load', syncNavbarHeight);
   }
@@ -811,6 +837,7 @@
 
   global.popularr = {
     syncNavbarHeight,
+    syncScrollbarWidth,
     initMobileTabs,
     openSlideOver,
     openReleasePicker,

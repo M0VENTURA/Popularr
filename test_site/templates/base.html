@@ -3,7 +3,22 @@
 <head>
   <meta charset="utf-8">
   <title>{% block title %}Popularr Dashboard{% endblock %}</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {#
+    `viewport-fit=cover` is load-bearing, not decoration: without it iOS
+    reports env(safe-area-inset-*) as 0, so the bottom sheet's
+    `padding-bottom: env(safe-area-inset-bottom)` in popularr.css was a no-op
+    and content sat under the home indicator on notched devices.
+  #}
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#121212">
+  {# "Add to Home Screen" installs Popularr as a standalone, chrome-less app. #}
+  <link rel="manifest" href="{{ versioned_static('manifest.webmanifest') }}">
+  <link rel="icon" href="{{ versioned_static('img/icon.svg') }}" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="{{ versioned_static('img/icon.svg') }}">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Popularr">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
 
   {% set dist = url_for('static', filename='dist') %}
   {% if config.get('features', {}).get('use_local_assets', False) %}
@@ -47,9 +62,17 @@
       <div class="nav-search-wrapper" id="navSearchForm" title="Search library or MusicBrainz (Ctrl+K)">
         <div class="input-group input-group-sm">
           <span class="input-group-text bg-dark border-secondary text-muted"><i class="bi bi-search"></i></span>
-          <input type="text" id="navSearchInput" class="form-control bg-dark text-light border-secondary shadow-none"
+          {#
+            type="search" + enterkeyhint="search" give the mobile keyboard a
+            Search key instead of a plain Return; autocapitalize/autocorrect/
+            spellcheck off stop artist names being "corrected" as they are
+            typed. `inputmode="search"` keeps the search-optimised layout.
+          #}
+          <input type="search" id="navSearchInput" class="form-control bg-dark text-light border-secondary shadow-none"
                  placeholder="Search library or MusicBrainz…" autocomplete="off" aria-label="Search library or MusicBrainz"
                  aria-keyshortcuts="Control+K Meta+K"
+                 inputmode="search" enterkeyhint="search"
+                 autocapitalize="off" autocorrect="off" spellcheck="false"
                  onfocus="openUnifiedSearch();this.select();"
                  oninput="syncNavSearchQuery()">
           {# The shortcut hint is a SIBLING of the input inside the input-group,
@@ -95,9 +118,16 @@
             <ul class="dropdown-menu dropdown-menu-dark">
               <li><a class="dropdown-item" href="/discover"><i class="bi bi-compass me-2"></i> Discover</a></li>
               <li><a class="dropdown-item" href="/downloads/discover/upcoming"><i class="bi bi-calendar-event me-2"></i> Upcoming Releases</a></li>
+              {#
+                Missing moved here from the top level. It is a catalogue-gap
+                report, i.e. the same "what am I not listening to yet?" job as
+                Discover/Upcoming, so it belongs in this menu rather than
+                competing with Artists/Downloads for the bar.
+              #}
+              <li><hr class="dropdown-divider"></li>
+              <li><a class="dropdown-item" href="/missing"><i class="bi bi-exclamation-circle text-warning me-2"></i> Missing Releases</a></li>
             </ul>
           </li>
-          <li class="nav-item"><a class="nav-link" href="/missing"><i class="bi bi-exclamation-circle text-warning"></i> <span class="d-lg-none d-xl-inline">Missing</span></a></li>
 
           {% if custom_bookmark_links and custom_bookmark_links|length > 0 %}
           <li class="nav-item dropdown">

@@ -480,7 +480,9 @@
             <span class="small text-muted">${esc(String(scan.processed_items ?? 0))}/${esc(String(scan.total_items ?? '?'))}</span>
           </div>
           ${currentItem}
-          <div class="progress" style="height:8px;">
+          <div class="progress" style="height:8px;" role="progressbar"
+               aria-valuenow="${Math.round(pct)}" aria-valuemin="0" aria-valuemax="100"
+               aria-label="${esc(scanDisplayName(scan.scan_type))} progress">
             <div class="progress-bar progress-bar-striped progress-bar-animated bg-success"
                  style="width:${pct}%;"></div>
           </div>
@@ -745,8 +747,18 @@
   }
 
   async function loadUpcomingReleasesTable() {
-    const container = document.getElementById('upcomingTableWrap');
-    if (!container) return;
+    const desktop = document.getElementById('upcomingTableWrap');
+    const mobile = document.getElementById('upcoming-releases-cards');
+    if (!desktop && !mobile) return;
+
+    // Loading state. Without it the card is blank until the fetch resolves,
+    // which reads as "no releases" rather than "still loading".
+    if (desktop) {
+      desktop.innerHTML =
+        '<div class="text-center py-4 text-muted small">' +
+        '<span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>' +
+        'Loading releases…</div>';
+    }
 
     try {
       // Delegated to UpcomingReleasesService so the dashboard table and the
@@ -757,12 +769,23 @@
         limit: 50,
         page: 1,
       });
-      global.UpcomingReleasesService.renderTable('upcomingTableWrap', data.releases || [], {
-        emptyMessage: 'No upcoming releases found.',
-      });
+      const opts = { emptyMessage: 'No upcoming releases found.' };
+      // The service renders an ACCORDION (responsive by nature), so the same
+      // markup goes to whichever container the current breakpoint shows.
+      // Rendering only into #upcomingTableWrap — which is `d-none d-lg-block`
+      // — left #upcoming-releases-cards (`d-lg-none`) permanently empty, so on
+      // a phone the card showed its header and footer around a blank body.
+      if (desktop) {
+        global.UpcomingReleasesService.renderTable('upcomingTableWrap', data.releases || [], opts);
+      }
+      if (mobile) {
+        global.UpcomingReleasesService.renderTable('upcoming-releases-cards', data.releases || [], opts);
+      }
     } catch (error) {
-      container.innerHTML =
+      const msg =
         `<div class="text-center py-4 text-danger small">Error loading releases: ${esc(error.message)}</div>`;
+      if (desktop) desktop.innerHTML = msg;
+      if (mobile) mobile.innerHTML = msg;
     }
   }
 

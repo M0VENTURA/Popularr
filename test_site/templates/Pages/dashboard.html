@@ -56,7 +56,7 @@
             <div class="card shadow-sm" id="scannerControlsCard">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
                     <h6 class="mb-0 fw-semibold"><i class="bi bi-lightning-charge-fill text-success me-1"></i> Scanner Engine</h6>
-                    <span id="scannerStatusBadge" class="badge bg-secondary" style="font-size:0.65rem;"><i class="bi bi-circle-fill me-1 small"></i> Idle</span>
+                    <span id="scannerStatusBadge" class="badge bg-secondary" style="font-size:0.65rem;" role="status" aria-live="polite"><i class="bi bi-circle-fill me-1 small" aria-hidden="true"></i> Idle</span>
                 </div>
                 <div class="card-body py-3">
                     {#
@@ -106,11 +106,11 @@
                                     <input class="form-check-input" type="checkbox" id="popScanRestart" name="restart" value="1">
                                     <label class="form-check-label small" for="popScanRestart">Restart</label>
                                 </div>
-                                <button id="popScanRunBtn" onclick="runDashboardPopularityScan()" class="btn btn-primary btn-sm px-3 ms-auto ms-sm-0"><i class="bi bi-play-fill"></i> Run</button>
-                                <button class="btn btn-outline-danger btn-sm flex-shrink-0" onclick="stopAllScans()" title="Stop all scans"><i class="bi bi-stop-fill"></i></button>
+                                <button id="popScanRunBtn" onclick="runDashboardPopularityScan()" class="btn btn-primary btn-sm px-3 ms-auto ms-sm-0"><i class="bi bi-play-fill" aria-hidden="true"></i> Run</button>
+                                <button class="btn btn-outline-danger btn-sm flex-shrink-0" onclick="stopAllScans()" title="Stop all scans" aria-label="Stop all scans"><i class="bi bi-stop-fill" aria-hidden="true"></i></button>
                             </div>
                             {% include 'components/_scan_mode_key.html' %}
-                            <div><span id="pop-status" class="text-muted small">Ready to scan.</span></div>
+                            <div><span id="pop-status" class="text-muted small" role="status" aria-live="polite">Ready to scan.</span></div>
                         </div>
 
                         <!-- Navidrome Pane -->
@@ -123,18 +123,18 @@
                                 </div>
                                 <button onclick="startNavidromeImport()" class="btn btn-secondary btn-sm px-3"><i class="bi bi-cloud-download"></i> Import</button>
                                 <button onclick="startNavidromeServerScan()" class="btn btn-outline-secondary btn-sm px-3" title="Trigger a Navidrome server rescan"><i class="bi bi-arrow-repeat"></i> Sync Changes</button>
-                                <button class="btn btn-outline-danger btn-sm flex-shrink-0 ms-auto ms-sm-0" onclick="stopAllScans()" title="Stop all scans"><i class="bi bi-stop-fill"></i></button>
+                                <button class="btn btn-outline-danger btn-sm flex-shrink-0 ms-auto ms-sm-0" onclick="stopAllScans()" title="Stop all scans" aria-label="Stop all scans"><i class="bi bi-stop-fill" aria-hidden="true"></i></button>
                             </div>
-                            <div><span id="nav-status" class="text-muted small">Ready to sync.</span></div>
+                            <div><span id="nav-status" class="text-muted small" role="status" aria-live="polite">Ready to sync.</span></div>
                         </div>
 
                         <!-- Essentia Pane -->
                         <div class="tab-pane fade" id="scannerPaneEssentia" role="tabpanel">
                             <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
                                 <button onclick="startEssentiaScan()" class="btn btn-info btn-sm px-3"><i class="bi bi-play-fill"></i> Run Mood Scan</button>
-                                <button class="btn btn-outline-danger btn-sm flex-shrink-0 ms-auto ms-sm-0" onclick="stopAllScans()" title="Stop all scans"><i class="bi bi-stop-fill"></i></button>
+                                <button class="btn btn-outline-danger btn-sm flex-shrink-0 ms-auto ms-sm-0" onclick="stopAllScans()" title="Stop all scans" aria-label="Stop all scans"><i class="bi bi-stop-fill" aria-hidden="true"></i></button>
                             </div>
-                            <div><span id="ess-status" class="text-muted small">Ready to analyze audio.</span></div>
+                            <div><span id="ess-status" class="text-muted small" role="status" aria-live="polite">Ready to analyze audio.</span></div>
                         </div>
                     </div>
 
@@ -222,7 +222,7 @@
                     <h6 class="mb-0">
                         <i class="bi bi-clipboard-check text-info me-1"></i> Needs Metadata Approval
                     </h6>
-                    <span class="badge bg-info text-dark" id="pending-approval-count">0</span>
+                    <span class="badge bg-info text-dark" id="pending-approval-count" role="status" aria-live="polite">0</span>
                 </div>
                 <div class="card-body p-0 overflow-y-auto" style="max-height: 420px; scrollbar-width: thin;">
                     <div class="list-group list-group-flush" id="pending-approval-body">

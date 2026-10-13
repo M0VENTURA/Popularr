@@ -31,7 +31,8 @@ data-action attributes, consistent with components/_musicbrainz_search_component
     <!-- Hidden input mirroring the navbar search -->
     <div class="input-group mb-2 d-none" aria-hidden="true">
       <span class="input-group-text" id="unifiedSearchIcon"><i class="bi bi-search"></i></span>
-      <input type="text" id="unifiedSearchInput" class="form-control" placeholder="Search library or MusicBrainz…" autocomplete="off" tabindex="-1">
+      <input type="search" id="unifiedSearchInput" class="form-control" placeholder="Search library or MusicBrainz…" autocomplete="off" tabindex="-1"
+             inputmode="search" enterkeyhint="search" autocapitalize="off" autocorrect="off" spellcheck="false">
     </div>
 
     <!-- Advanced filters — collapsible -->
