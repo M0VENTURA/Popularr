@@ -318,6 +318,55 @@
     <span class="scan-status-open"><i class="bi bi-terminal"></i> Log</span>
   </div>
 
+  {#
+    MOBILE BOTTOM NAVIGATION
+
+    A flex FOOTER ITEM of <body> — like #globalPlayerBar and #scanStatusBar —
+    and NOT `position: fixed`, so `main` (the flex:1 scroll container) shrinks
+    to make room and the bar can never cover page content. popularr.css hides it
+    at lg and up and collapses --bottom-nav-height to 0 there, so the footer
+    stack is unchanged on desktop.
+
+    Only the destinations people reach for constantly are exposed; everything
+    else stays in the hamburger menu. The active state is decided SERVER-SIDE
+    from request.path (no JS), so the bar is correct on first paint instead of
+    flashing the wrong tab while a script catches up.
+
+    "Search" is a button, not a link: it opens the unified search flyout
+    (global.openUnifiedSearch, published by ui/search-flyout.js) exactly as the
+    navbar's search button does.
+  #}
+  {% set _nav_path = request.path %}
+  {# `/` 302s to `/dashboard`, so the real dashboard path is the latter — the
+     Home item must light up on BOTH, or it reads as inactive on the page it
+     represents. #}
+  {% set _nav_home = _nav_path == '/' or _nav_path == '/dashboard' %}
+  <nav class="bottom-nav" aria-label="Primary">
+    <a class="bottom-nav-item{% if _nav_home %} active{% endif %}"
+       href="{{ url_for('ui.dashboard') }}"
+       {% if _nav_home %}aria-current="page"{% endif %}>
+      <i class="bi bi-speedometer2" aria-hidden="true"></i><span>Home</span>
+    </a>
+    <a class="bottom-nav-item{% if _nav_path.startswith('/artists') or _nav_path.startswith('/artist/') %} active{% endif %}"
+       href="{{ url_for('ui.artists') }}"
+       {% if _nav_path.startswith('/artists') or _nav_path.startswith('/artist/') %}aria-current="page"{% endif %}>
+      <i class="bi bi-people" aria-hidden="true"></i><span>Artists</span>
+    </a>
+    <a class="bottom-nav-item{% if _nav_path.startswith('/downloads') %} active{% endif %}"
+       href="/downloads/monitor"
+       {% if _nav_path.startswith('/downloads') %}aria-current="page"{% endif %}>
+      <i class="bi bi-download" aria-hidden="true"></i><span>Downloads</span>
+    </a>
+    <a class="bottom-nav-item{% if _nav_path.startswith('/playlists') or _nav_path.startswith('/playlist/') %} active{% endif %}"
+       href="/playlists"
+       {% if _nav_path.startswith('/playlists') or _nav_path.startswith('/playlist/') %}aria-current="page"{% endif %}>
+      <i class="bi bi-collection-play" aria-hidden="true"></i><span>Playlists</span>
+    </a>
+    <button type="button" class="bottom-nav-item" onclick="openUnifiedSearch()" aria-label="Search">
+      <i class="bi bi-search" aria-hidden="true"></i><span>Search</span>
+    </button>
+  </nav>
+
   <div class="modal fade modal-fullscreen" id="unifiedLogModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-fullscreen">
       <div class="modal-content bg-dark">
