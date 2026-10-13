@@ -176,7 +176,7 @@ class TestSearchAndFilterEmptyAbort:
             ([], "InProgress", False),   # first poll: still nothing
         ])
         # wait_seconds is large; the abort must fire FIRST at ~1s.
-        svc.filter_results_by_quality = lambda responses, min_bitrate=192, query="", max_results=None, reject_reasons=None: responses
+        svc.filter_results_by_quality = lambda responses, min_bitrate=192, query="", max_results=None, reject_reasons=None, allowed_formats=None: responses
 
         results = svc.search_and_filter(
             "artist - title", wait_seconds=600, empty_abort_seconds=1
@@ -192,7 +192,7 @@ class TestSearchAndFilterEmptyAbort:
             ([{"username": "peer", "filename": "A - B.flac"}], "InProgress", False),
             ([], "Completed, TimedOut", True),
         ])
-        svc.filter_results_by_quality = lambda responses, min_bitrate=192, query="", max_results=None, reject_reasons=None: responses
+        svc.filter_results_by_quality = lambda responses, min_bitrate=192, query="", max_results=None, reject_reasons=None, allowed_formats=None: responses
 
         results = svc.search_and_filter(
             "artist - title", wait_seconds=600, empty_abort_seconds=1
@@ -207,7 +207,7 @@ class TestSearchAndFilterEmptyAbort:
         svc, calls = _make_service()
         feed = _ResultsFeed([])  # always ([], "InProgress", False)
         svc.get_search_results = feed
-        svc.filter_results_by_quality = lambda responses, min_bitrate=192, query="", max_results=None, reject_reasons=None: responses
+        svc.filter_results_by_quality = lambda responses, min_bitrate=192, query="", max_results=None, reject_reasons=None, allowed_formats=None: responses
 
         results = svc.search_and_filter(
             "artist - title", wait_seconds=1, empty_abort_seconds=0
@@ -221,7 +221,7 @@ class TestSearchAndFilterEmptyAbort:
         svc.get_search_results = _ResultsFeed([
             ([{"username": "peer", "filename": "A - B.flac"}], "Completed, TimedOut", True),
         ])
-        svc.filter_results_by_quality = lambda responses, min_bitrate=192, query="", max_results=None, reject_reasons=None: responses
+        svc.filter_results_by_quality = lambda responses, min_bitrate=192, query="", max_results=None, reject_reasons=None, allowed_formats=None: responses
 
         svc.search_and_filter("artist - title", wait_seconds=10, cancel_when_done=False)
         assert calls == []

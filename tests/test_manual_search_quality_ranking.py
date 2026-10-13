@@ -71,9 +71,10 @@ class TestQualityMinimumComesFromConfig:
         assert "_file_meets_quality(" in src
         helper = src[src.index("def _file_meets_quality("):]
         helper = helper[: helper.index("# ====")]
-        assert "file.matches_quality(min_bitrate, min_sample_rate)" in helper, (
+        assert "file.matches_quality(min_bitrate, min_sample_rate, allowed_formats=allowed_formats)" in helper, (
             "the manual path must apply the SAME quality rule as the automated "
-            "one (which treats a missing attribute as UNKNOWN, not a failure)"
+            "one (which treats a missing attribute as UNKNOWN, not a failure) "
+            "AND the same container allow-list"
         )
 
 
@@ -196,7 +197,7 @@ class TestOneOddFileCannotEmptyTheList:
                 self.length = length
                 self.calls = []
 
-            def matches_quality(self, bitrate, sample_rate):
+            def matches_quality(self, bitrate, sample_rate, **kwargs):
                 self.calls.append((bitrate, sample_rate))
                 return self._ok
 

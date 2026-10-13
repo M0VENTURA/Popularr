@@ -629,6 +629,20 @@
           <div class="form-text">Lowest acceptable bitrate for the fallback pass (e.g. 128 for old MP3s).</div>
         </div>
         <div class="col-12">
+          <label class="form-label">Allowed Download Formats</label>
+          {% set _af = config.get('downloads', {}).get('quality', {}).get('allowed_formats', ['flac', 'mp3']) %}
+          {% set _af_norm = (_af or []) | map('lower') | list %}
+          <div class="d-flex flex-wrap gap-3">
+            {% for _fmt, _label in [('flac','FLAC'),('mp3','MP3'),('m4a','M4A / AAC'),('ogg','OGG'),('opus','OPUS'),('wav','WAV'),('aac','AAC')] %}
+            <div class="form-check">
+              <input class="form-check-input download-format-check" type="checkbox" value="{{ _fmt }}" id="downloads_format_{{ _fmt }}" {% if _fmt in _af_norm %}checked{% endif %}>
+              <label class="form-check-label" for="downloads_format_{{ _fmt }}">{{ _label }}</label>
+            </div>
+            {% endfor %}
+          </div>
+          <div class="form-text">Only these container types are accepted as download matches. Anything else (AIFF, ALAC, DSF, APE …) is rejected from the queue rather than imported without metadata — the tag writer supports only MP3, FLAC and M4A. Leave every box unchecked to accept any type.</div>
+        </div>
+        <div class="col-12">
           <div class="form-check form-switch mb-2">
             <input class="form-check-input" type="checkbox" id="search_fuzzy_enabled" {% if config.get('search', {}).get('fuzzy', {}).get('enabled', True) %}checked{% endif %}>
             <label class="form-check-label" for="search_fuzzy_enabled"><strong>Typo-Tolerant Library Search</strong></label>

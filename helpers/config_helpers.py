@@ -2349,7 +2349,7 @@ def get_search_quality_config() -> dict[str, Any]:
     Returns:
         Dict with keys ``min_bitrate``, ``min_sample_rate``,
         ``min_length_seconds``, ``allow_low_quality_fallback``,
-        ``fallback_min_bitrate``.
+        ``fallback_min_bitrate``, ``allowed_formats``.
 
     Default Values:
         - min_bitrate: 192
@@ -2357,15 +2357,36 @@ def get_search_quality_config() -> dict[str, Any]:
         - min_length_seconds: 30
         - allow_low_quality_fallback: False
         - fallback_min_bitrate: 128
+        - allowed_formats: {"flac", "mp3"}
+
+    ``allowed_formats`` is the set of container extensions a DOWNLOAD may be
+    accepted in (bare, lowercase, no dot). Only FLAC and MP3 are enabled by
+    default: every other container — AIFF, WAV, ALAC, DSF, APE, WV — either
+    cannot be written with tags by ``tag_file_service`` (its writer supports
+    only mp3/flac/m4a/mp4, so an AIFF landed with NO metadata applied) or is
+    otherwise not wanted in the library. A file whose type is not allowed is
+    REJECTED at search time (never offered as a match) and, if one slips
+    through, rejected from the queue at completion instead of being imported
+    tagless. An empty list disables the check (accept any type).
     """
     cfg = get_config()
     quality = cfg.get("downloads", {}).get("quality", {})
+    _raw_formats = quality.get("allowed_formats", ["flac", "mp3"])
+    # Normalise to bare lowercase extensions so ".FLAC", "FLAC" and "flac"
+    # all mean the same type (the config page and a hand-edited config.yaml
+    # can spell it either way).
+    allowed_formats = {
+        str(ext).strip().lower().lstrip(".")
+        for ext in (_raw_formats or [])
+        if str(ext).strip()
+    }
     return {
         "min_bitrate": int(quality.get("min_bitrate", 192)),
         "min_sample_rate": int(quality.get("min_sample_rate", 44100)),
         "min_length_seconds": int(quality.get("min_length_seconds", 30)),
         "allow_low_quality_fallback": bool(quality.get("allow_low_quality_fallback", False)),
         "fallback_min_bitrate": int(quality.get("fallback_min_bitrate", 128)),
+        "allowed_formats": allowed_formats,
     }
 
 

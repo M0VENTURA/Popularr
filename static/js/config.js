@@ -342,7 +342,13 @@ function buildConfigObject() {
           min_sample_rate: parseInt(getValue('downloads_search_min_sample_rate', '44100')) || 44100,
           min_length_seconds: parseInt(getValue('downloads_search_min_length', '30')) || 30,
           allow_low_quality_fallback: getChecked('downloads_search_quality_fallback'),
-          fallback_min_bitrate: parseInt(getValue('downloads_search_fallback_bitrate', '128')) || 128
+          fallback_min_bitrate: parseInt(getValue('downloads_search_fallback_bitrate', '128')) || 128,
+          // Container types a download may be accepted in. Only these are
+          // offered as matches; anything else is rejected from the queue.
+          // An empty array disables the check (accept any type).
+          allowed_formats: Array.from(
+            document.querySelectorAll('.download-format-check:checked')
+          ).map((el) => el.value)
         }
       ),
       conversion: {

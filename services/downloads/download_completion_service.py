@@ -510,6 +510,23 @@ def _file_matches_queue_item(
     from services.downloads.match_engine import filename_matches_queue_item
     from services.queue.queue_metadata_matcher import _metadata_matches_queue_item
 
+    # ── Format gate ────────────────────────────────────────────────────────
+    # A container we do not accept (default: only flac/mp3) must NOT match,
+    # even when its tags line up perfectly. An AIFF/WAV/ALAC lands, then
+    # ``tag_file_service`` cannot write the metadata (its writer supports only
+    # mp3/flac/m4a) — so the file is copied over TAGLESS. Rejecting it here
+    # (both call sites inherit this) deletes it and reschedules the item
+    # instead of importing a file with no metadata.
+    try:
+        from helpers.config_helpers import get_search_quality_config
+        _allowed = set(get_search_quality_config().get("allowed_formats") or set())
+    except Exception:
+        _allowed = set()
+    if _allowed:
+        _ext = os.path.splitext(str(file_path or ""))[1].lower().lstrip(".")
+        if _ext not in _allowed:
+            return False, "unsupported_format"
+
     meta_state = None
     try:
         meta_state = _metadata_matches_queue_item(file_path, queue_item)
@@ -692,6 +709,20 @@ def _delete_mismatched_download(file_path: str, queue_id: int, reason: str) -> N
             logger.warning("Deleted mismatched download", queue_id=queue_id, path=file_path, reason=reason)
     except Exception as exc:
         logger.warning("Could not delete mismatched file", queue_id=queue_id, path=file_path, error=str(exc))
+
+
+def _queue_reject_failure_reason(match_source: str) -> str:
+    """Failure message for a landed file that failed the completion match.
+
+    A FORMAT rejection is a different problem from a wrong-artist/title
+    mismatch: the file may be the right song in a container we do not accept
+    (config ``downloads.quality.allowed_formats``, default flac+mp3). Pairing
+    both with "did not match queue item" would send the user hunting for a
+    matching bug that does not exist.
+    """
+    if match_source == "unsupported_format":
+        return "Downloaded file type is not an allowed format; deleted and rescheduled"
+    return "Downloaded file did not match queue item; deleted and rescheduled"
 
 
 def _block_peer_for_queue_item(queue_id: int, found_filename: str | None = None) -> None:
@@ -2280,9 +2311,9 @@ def check_completed_downloads() -> dict[str, Any]:
                                     match_found = os.path.relpath(abs_path, downloads_dir)
                                     _claim_file(abs_path, claimed_files, downloads_dir)
                                 else:
-                                    _delete_mismatched_download(abs_path, queue_id, f"metadata mismatch ({match_source})")
+                                    _delete_mismatched_download(abs_path, queue_id, f"rejected ({match_source})")
                                     _block_peer_for_queue_item(queue_id, found_fn)
-                                    mark_failed(queue_id, "Downloaded file did not match queue item; deleted and rescheduled")
+                                    mark_failed(queue_id, _queue_reject_failure_reason(match_source))
                                     stats["failed"] += 1
                                     log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → failed: downloaded file did not match queue item (deleted + rescheduled)")
                                     _log_queue_event("failed", f"{item.get('artist') or ''} - {item.get('title') or ''} → failed: downloaded file did not match queue item (deleted + rescheduled)", queue_id)
@@ -2329,9 +2360,9 @@ def check_completed_downloads() -> dict[str, Any]:
                             continue
                         is_match, match_source = _file_matches_queue_item(candidate, item, rel)
                         if not is_match:
-                            _delete_mismatched_download(candidate, queue_id, f"metadata mismatch for exact filename match ({match_source})")
+                            _delete_mismatched_download(candidate, queue_id, f"rejected for exact filename match ({match_source})")
                             _block_peer_for_queue_item(queue_id, found_fn)
-                            mark_failed(queue_id, "Downloaded file did not match queue item; deleted and rescheduled")
+                            mark_failed(queue_id, _queue_reject_failure_reason(match_source))
                             stats["failed"] += 1
                             match_found = "__rejected__"
                             break

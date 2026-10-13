@@ -244,6 +244,7 @@ class SearchFile:
         min_bitrate: int = 192,
         min_sample_rate: int = 44100,
         reject_reasons: dict[str, int] | None = None,
+        allowed_formats: set[str] | None = None,
     ) -> bool:
         """Check if this file meets minimum quality thresholds.
 
@@ -253,12 +254,22 @@ class SearchFile:
         real copy of a rare track.  Every rejection is counted by reason in
         ``reject_reasons`` (when supplied) so `no_qualifying_result` stops
         being a mystery.
+
+        ``allowed_formats`` is a set of BARE lowercase extensions (no dot) a
+        download may be accepted in — ``{"flac", "mp3"}`` by default. A file
+        of any other type is rejected with reason ``format_not_allowed``
+        BEFORE the bitrate/sample-rate checks, because those rules cannot
+        apply to a container we will not accept at all (and an AIFF would
+        otherwise look "lossless" and sail through). ``None`` or an empty set
+        disables the check.
         """
         def _reject(reason: str) -> bool:
             if reject_reasons is not None:
                 reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
             return False
 
+        if allowed_formats and (self.extension or "") not in allowed_formats:
+            return _reject("format_not_allowed")
         if self.is_locked:
             return _reject("locked")
         if self.is_lossless:
@@ -870,6 +881,7 @@ class SlskdService:
         max_results: int | None = 50,
         query: str = "",
         reject_reasons: dict[str, int] | None = None,
+        allowed_formats: set[str] | None = None,
     ) -> list[dict]:
         """Qualify a poll snapshot; ``max_results=None`` keeps EVERYTHING.
 
@@ -877,11 +889,19 @@ class SlskdService:
         with ``max_results=None`` and applies the cap ONCE over the whole
         accumulated set, so a correct match that never made the top-50 of a
         single snapshot is still seen.
+
+        ``allowed_formats`` (bare lowercase extensions) filters out files whose
+        container we will not accept — see ``SearchFile.matches_quality``.
         """
         qualified: list[dict[str, Any]] = []
         for response in responses:
             for file in response.files:
-                if file.matches_quality(min_bitrate, min_sample_rate, reject_reasons=reject_reasons):
+                if file.matches_quality(
+                    min_bitrate,
+                    min_sample_rate,
+                    reject_reasons=reject_reasons,
+                    allowed_formats=allowed_formats,
+                ):
                     qualified.append({
                         "username": response.username,
                         "filename": file.filename,
@@ -923,6 +943,13 @@ class SlskdService:
         if min_bitrate is None:
             from helpers.config_helpers import get_search_quality_config
             min_bitrate = get_search_quality_config()["min_bitrate"]
+        # Format allow-list (default flac+mp3). Read here so the poll loop
+        # never re-reads the config on every snapshot.
+        try:
+            from helpers.config_helpers import get_search_quality_config as _gsqc
+            allowed_formats = _gsqc().get("allowed_formats") or set()
+        except Exception:
+            allowed_formats = set()
         if wait_seconds is None:
             from helpers.config_helpers import _SLSKD_SEARCH_MAX_WAIT_SECONDS
             wait_seconds = _SLSKD_SEARCH_MAX_WAIT_SECONDS
@@ -961,7 +988,8 @@ class SlskdService:
             responses, _state, _complete = self.get_search_results(search_id, timeout=timeout)
             raw_files_seen += _raw_file_count(responses)
             for item in self.filter_results_by_quality(
-                responses, min_bitrate=min_bitrate, query=query, max_results=None, reject_reasons=reject_reasons
+                responses, min_bitrate=min_bitrate, query=query, max_results=None,
+                reject_reasons=reject_reasons, allowed_formats=allowed_formats,
             ):
                 key = (item["username"], item["filename"].casefold())
                 if key not in seen:
@@ -983,7 +1011,8 @@ class SlskdService:
                 responses, _state, is_complete = self.get_search_results(search_id, timeout=timeout)
                 raw_files_seen += _raw_file_count(responses)
                 for item in self.filter_results_by_quality(
-                    responses, min_bitrate=min_bitrate, query=query, max_results=None, reject_reasons=reject_reasons
+                    responses, min_bitrate=min_bitrate, query=query, max_results=None,
+                    reject_reasons=reject_reasons, allowed_formats=allowed_formats,
                 ):
                     key = (item["username"], item["filename"].casefold())
                     if key not in seen:

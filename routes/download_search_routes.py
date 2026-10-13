@@ -98,12 +98,17 @@ def _file_meets_quality(
     min_bitrate: int,
     min_sample_rate: int,
     min_length: int,
+    allowed_formats: set[str] | None = None,
 ) -> bool:
     """Does this search file clear the configured quality minimum?
 
     Applies the SAME rule the automated pipeline applies, via
     ``SearchFile.matches_quality`` — one definition of "good enough", so the
     manual and automated views cannot disagree.
+
+    ``allowed_formats`` (bare lowercase extensions) rejects a container we
+    will not accept, so a manual result the download pipeline would refuse is
+    not offered as if it were downloadable.
 
     ⚠️ An UNKNOWN file is KEPT, never fatal.  This mirrors both
     ``SearchFile.matches_quality`` (a missing bitrate/sample rate is unknown,
@@ -114,7 +119,7 @@ def _file_meets_quality(
     uncertain quality last.
     """
     try:
-        meets = bool(file.matches_quality(min_bitrate, min_sample_rate))
+        meets = bool(file.matches_quality(min_bitrate, min_sample_rate, allowed_formats=allowed_formats))
     except Exception as exc:  # noqa: BLE001 — boundary: never lose the list
         logger.debug(
             "Quality check unavailable for search file; keeping it",
@@ -271,6 +276,12 @@ def slskd_search_results(search_id: str) -> Any:
         _min_bitrate = int(_quality_cfg.get("min_bitrate") or 0)
         _min_sample_rate = int(_quality_cfg.get("min_sample_rate") or 0)
         _min_length = int(_quality_cfg.get("min_length_seconds") or 0)
+        # Format allow-list (default flac+mp3). A disallowed container is
+        # DROPPED from the manual list rather than shown as downloadable: the
+        # pipeline would refuse it at completion, so offering it only invites
+        # a download that can never be imported.
+        _allowed_formats = set(_quality_cfg.get("allowed_formats") or set())
+        _format_filtered = 0
 
         results = []
         for resp in responses or []:
@@ -295,8 +306,14 @@ def slskd_search_results(search_id: str) -> Any:
             # naming so a future consumer does not need a third name for one fact.
             free_slot = bool(getattr(resp, "has_free_upload_slot", True))
             for file in getattr(resp, "files", []) or []:
+                # Drop a container we will not accept (default: only flac/mp3).
+                # ``extension`` is bare + lowercase on SearchFile.
+                if _allowed_formats and (getattr(file, "extension", "") or "") not in _allowed_formats:
+                    _format_filtered += 1
+                    continue
                 meets = _file_meets_quality(
-                    file, _min_bitrate, _min_sample_rate, _min_length
+                    file, _min_bitrate, _min_sample_rate, _min_length,
+                    allowed_formats=_allowed_formats,
                 )
                 results.append({
                     "username": username,
