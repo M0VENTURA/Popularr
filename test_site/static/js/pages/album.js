@@ -802,6 +802,11 @@
       ? global.busyPopup.show('Looking up MusicBrainz match…')
       : null;
 
+    // The picker only fires its callback on a CONFIRMED match; dismissing the
+    // modal (backdrop tap / Escape / X) closes it silently. Release the popup
+    // on the modal's close event so a dismissal cannot strand it.
+    bindLookupModalDismissal();
+
     global.openGlobalMbSearch(pageArtist(), pageAlbum(), function (selected) {
       if (selected) {
         // `.finally` guarantees the popup is released even if the match
@@ -833,6 +838,29 @@
   function endLookupBusy() {
     if (global.busyPopup) global.busyPopup.hide(lookupBusy);
     lookupBusy = null;
+  }
+
+  /**
+   * The MB picker fires the selection callback ONLY on a confirmed match
+   * (confirmReleaseSelection). Dismissing the modal — tapping the backdrop,
+   * pressing Escape, or hitting the X — closes it WITHOUT any signal, so the
+   * "Looking up MusicBrainz match…" popup stayed up forever. The backdrop tap
+   * is the primary dismiss gesture on mobile, which is exactly where this
+   * was reported.
+   *
+   * The popup is THIS page's payload, so THIS page releases it whenever the
+   * modal closes, for any reason. `hidden.bs.modal` fires on EVERY close —
+   * including the confirm path, where the callback's `.finally(endLookupBusy)`
+   * has already released it — and `endLookupBusy` is idempotent + null-safe,
+   * so the double-release is a harmless no-op. Bound once; if base.html's
+   * modal is missing at first open, don't mark it bound so a later open retries.
+   */
+  let _lookupModalHideBound = false;
+  function bindLookupModalDismissal() {
+    const modalEl = document.getElementById('musicBrainzModal');
+    if (!modalEl || _lookupModalHideBound) return;
+    _lookupModalHideBound = true;
+    modalEl.addEventListener('hidden.bs.modal', endLookupBusy);
   }
 
   /**

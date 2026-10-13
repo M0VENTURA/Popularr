@@ -326,6 +326,23 @@ function _endAlbumLookupBusy() {
     _albumLookupBusy = null;
 }
 
+// The MB picker fires its callback ONLY on a CONFIRMED match
+// (confirmReleaseSelection). Dismissing the modal — backdrop tap on mobile,
+// Escape, or the X button — closes it with no signal, so the popup stayed up
+// forever. The popup is this page's payload, so it is released whenever the
+// modal closes for any reason: `hidden.bs.modal` fires on EVERY close
+// (including the confirm path, where `.finally(_endAlbumLookupBusy)` already
+// released it — the double-release is a no-op, since the release is
+// idempotent). Bound once; a missing modal at first open must not mark it
+// bound, so a later open retries.
+let _albumLookupModalHideBound = false;
+function _bindAlbumLookupModalDismissal() {
+    const modalEl = document.getElementById('musicBrainzModal');
+    if (!modalEl || _albumLookupModalHideBound) return;
+    _albumLookupModalHideBound = true;
+    modalEl.addEventListener('hidden.bs.modal', _endAlbumLookupBusy);
+}
+
 window.openAlbumLookupModal = function () {
     const artist = window._pageData ? window._pageData.artistName : '';
     const album = window._pageData ? window._pageData.albumName : '';
@@ -343,6 +360,11 @@ window.openAlbumLookupModal = function () {
     _albumLookupBusy = window.busyPopup
         ? window.busyPopup.show('Looking up MusicBrainz match…')
         : null;
+
+    // The picker only fires its callback on a CONFIRMED match; dismissing the
+    // modal (backdrop tap / Escape / X) closes it silently. Release the popup
+    // on the modal's close event so a dismissal cannot strand it.
+    _bindAlbumLookupModalDismissal();
 
     window.openGlobalMbSearch(artist, album, function (selected) {
         if (selected && selected.id) {

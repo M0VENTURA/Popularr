@@ -457,12 +457,40 @@ class TestPagesCallIt:
         assert "Looking up MusicBrainz match" in source
 
     def test_album_page_releases_the_lookup_popup_on_dismissal(self):
-        """Cancelling the picker must release it, or it stays up forever."""
+        """Cancelling the picker must release it, or it stays up forever.
+
+        ⚠️ The picker fires its callback ONLY on a CONFIRMED match
+        (confirmReleaseSelection). Closing the modal any other way — backdrop
+        tap on mobile, Escape, the X button — fires NO callback, so the
+        release must be bound to the modal's `hidden.bs.modal` event, not
+        only to the callback's dismissal branch (which the picker never hits).
+        """
         source = self._read("test_site/static/js/pages/album.js")
         assert "endLookupBusy" in source
-        # The dismissal branch (no selection) must call the release.
+        # The dismissal branch (no selection) must call the release — defence
+        # in depth for a picker that grows a dismissal signal later.
         assert re.search(r"else\s*\{[^}]*endLookupBusy\(\)", source), (
             "the 'dismissed without a pick' branch does not release the popup"
+        )
+        # The REAL mechanism: every modal close must release the popup. The
+        # picker never calls the callback on dismissal, so binding the popup
+        # release to the modal's close event is what actually fixes the
+        # strand — and `hidden.bs.modal` also fires after a confirmed match
+        # (double-release is a no-op: busyPopup.hide is idempotent).
+        assert "musicBrainzModal" in source, (
+            "the release must bind to the MB modal element"
+        )
+        assert "hidden.bs.modal" in source, (
+            "the popup must be released on `hidden.bs.modal` — dismissal "
+            "(backdrop/Escape/X) fires no picker callback"
+        )
+        # The binder must reference the release function.
+        assert re.search(r"addEventListener\('hidden\.bs\.modal',\s*endLookupBusy\)", source), (
+            "the modal-close listener must call the popup release"
+        )
+        # And it must be called when the lookup opens.
+        assert re.search(r"bindLookupModalDismissal\(\)", source), (
+            "the dismissal binder must be wired into the lookup flow"
         )
 
     def test_album_page_releases_the_popup_even_if_applying_throws(self):
@@ -478,6 +506,19 @@ class TestPagesCallIt:
         assert "Looking up MusicBrainz match" in source
         assert "_endAlbumLookupBusy" in source
         assert ".finally(_endAlbumLookupBusy)" in source
+        # Same modal-close binding as rebuilt (see the rebuilt test above):
+        # dismissal fires no picker callback, so the popup must release on
+        # `hidden.bs.modal`.
+        assert "hidden.bs.modal" in source, (
+            "the live album page must also release the popup on modal close "
+            "— dismissal (backdrop/Escape/X) fires no picker callback"
+        )
+        assert re.search(
+            r"addEventListener\('hidden\.bs\.modal',\s*_endAlbumLookupBusy\)", source
+        ), "the live modal-close listener must call the popup release"
+        assert "_bindAlbumLookupModalDismissal()" in source, (
+            "the live dismissal binder must be wired into the lookup flow"
+        )
 
     def test_batch_queue_shows_a_popup(self):
         source = self._read("test_site/static/js/services/musicbrainz-queue.js")
@@ -787,7 +828,46 @@ def _guard_has_else(source: str, pos: int) -> bool:
     make the test wrong about two functions (``addSelectedTrack``,
     ``openReplacementTrackModal``) that are deliberately optional on a page
     that does not define them.
+
+    A TERNARY FALLBACK is the same "loud" class:
+
+        const X = typeof window.matchMedia === 'function'
+          ? window.matchMedia(...) : null;
+
+    The ``:`` branch runs when the guard fails, exactly like ``else`` — and it
+    is the canonical browser-global feature-detect (``matchMedia`` is never
+    "defined" in app JS, so a scan that only knows the else keyword mislabels
+    every such detect as a silent no-op).
     """
+    # Ternary fallback: scan the expression after the guard; a top-level `?`
+    # followed by a `:` (before any `{`/`;`, and outside any brackets/strings)
+    # is the fallback branch of a conditional.
+    depth = 0
+    quote: str | None = None
+    saw_question = False
+    i = pos
+    while i < len(source):
+        ch = source[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "\"'`":
+            quote = ch
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+        elif depth == 0 and ch == "?":
+            saw_question = True
+        elif depth == 0 and ch == ":" and saw_question:
+            return True
+        elif depth == 0 and ch in "{;":
+            break
+        i += 1
+
     brace = source.find("{", pos)
     semi = source.find(";", pos)
     if brace != -1 and (semi == -1 or brace < semi):
@@ -958,6 +1038,26 @@ class TestGuardedCallsAreNotGuardingAGhost:
                 "intentionally optional and must not be reported as a ghost"
             )
             assert name not in _silent_guarded_globals(REPO_ROOT / "test_site")
+
+    def test_a_ternary_fallback_is_not_a_silent_noop(self):
+        """A ``? cond : fallback`` degrades loudly exactly like ``else``.
+
+        The canonical case is a browser-global feature-detect —
+        ``typeof window.matchMedia === 'function' ? matchMedia(...) : null`` —
+        where the guarded name is NEVER "defined" in app JS. A scan that only
+        recognizes the ``else`` keyword mislabels every such detect as a
+        silent no-op (a live tree built from the mobile-navbar commit does
+        exactly this); the ``:`` branch is the loud fallback.
+        """
+        base = "const X = typeof window.dep === 'function' ? window.dep() : null;"
+        assert _guard_has_else(base, base.index("typeof")) is True, (
+            "a ternary with a `:` fallback must classify as loud — the "
+            "fallback branch runs when the guard fails, like else"
+        )
+        bare = "const X = typeof window.dep === 'function' ? window.dep() : null;"
+        # A nested ternary inside an argument is NOT a fallback for THIS guard.
+        nested = "const X = typeof window.dep === 'function' && (a ? b : c);"
+        assert _guard_has_else(nested, nested.index("typeof")) is False
 
     def test_the_probe_is_sensitive(self):
         """⭐ Non-vacuousness. A probe that always returned nothing would let
