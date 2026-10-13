@@ -331,7 +331,16 @@ class TestWiring:
 
     def test_test_site_template_and_js_have_the_controls(self):
         html = (REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html").read_text(encoding="utf-8")
-        assert 'name="album_lookup_skip"' in html
+        # The checkbox moved OUT of #albumMetadataForm into its OWN card with
+        # its own Save button (it used to ride the big save, which timed out on
+        # large albums for one album-wide UPDATE) — so it carries only an id,
+        # not a form ``name``: a name outside a form is dead markup that
+        # wrongly suggests the field posts with the form.
+        assert 'id="album_lookup_skip"' in html
+        assert 'name="album_lookup_skip"' not in html, (
+            "the flag is no longer part of the big form — a name attribute "
+            "here would imply it posts with it"
+        )
         assert "albumLookupSkipCsvCard" in html
         js = (REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js").read_text(encoding="utf-8")
         assert "uploadAlbumCsvTracklist" in js

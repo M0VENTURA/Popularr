@@ -2455,16 +2455,26 @@ async def album_detail(album_path: str) -> Any:
         # A custom album (not on MusicBrainz/Discogs) can be marked so the
         # album-release lookups are skipped. Written ALBUM-WIDE AFTER the
         # rename below so every track agrees on the final artist/album.
+        #
+        # ⚠️ PRESENCE-GATED: the checkbox now lives in its OWN card with its
+        # own Save button (POST /api/album/lookup-skip), so this big save no
+        # longer carries the field. If the handler kept reading
+        # ``form.get(...)`` unconditionally, every big save would compute False
+        # and CLEAR the flag — and a live-tree save (whose form never had the
+        # field at all) would clear a custom album marked from the rebuilt page.
+        # "Absent" must mean "not part of this save", so only write when the
+        # field was actually posted.
         try:
-            from services.metadata.album_lookup_skip_service import set_album_lookup_skip
-            _skip_lookup = str(form.get("album_lookup_skip") or "").strip().lower() in (
-                "1", "true", "on", "yes"
-            )
-            set_album_lookup_skip(
-                new_artist or artist_name,
-                new_title or album_name,
-                _skip_lookup,
-            )
+            if "album_lookup_skip" in form:
+                from services.metadata.album_lookup_skip_service import set_album_lookup_skip
+                _skip_lookup = str(form.get("album_lookup_skip") or "").strip().lower() in (
+                    "1", "true", "on", "yes"
+                )
+                set_album_lookup_skip(
+                    new_artist or artist_name,
+                    new_title or album_name,
+                    _skip_lookup,
+                )
         except Exception as _skip_lookup_err:
             logger.debug("Album lookup-skip flag write failed", error=str(_skip_lookup_err))
 

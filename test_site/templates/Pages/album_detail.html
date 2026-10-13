@@ -450,6 +450,63 @@
 
     <!-- TAB 2: EDIT METADATA -->
     <div class="tab-pane fade" id="tab-details" role="tabpanel" aria-labelledby="tab-details-btn">
+
+      {# ── Custom Album: its OWN card and its OWN Save button ─────────────
+         It used to be a checkbox inside #albumMetadataForm, so toggling this
+         single setting cost the WHOLE save — the album → tracks DB fan-out
+         plus a concurrent write of every file tag — and timed out on large
+         albums (it is one album-wide UPDATE). It also sat mid-form, below
+         the fold. It is now the first thing on the page, saved
+         independently via POST /api/album/lookup-skip, and the big save no
+         longer receives (or clears) the flag. #}
+      <div class="card mb-4 shadow-sm bg-dark text-light border-secondary" id="albumLookupSkipCard">
+        <div class="card-header border-secondary">
+          <h6 class="card-title mb-0 fw-bold"><i class="bi bi-upload me-1"></i>Custom Album</h6>
+        </div>
+        <div class="card-body">
+          <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" id="album_lookup_skip"
+                   {% if album_data.album_lookup_skip %}checked{% endif %}
+                   onchange="toggleAlbumLookupSkip()">
+            <label class="form-check-label" for="album_lookup_skip">
+              Do not search album release
+            </label>
+            <div class="form-text text-muted">
+              For a custom album that isn't on MusicBrainz or Discogs. Skipped: the MusicBrainz
+              album-type lookup, the Discogs release ID, online art (CAA/AudioDB/Discogs) and the
+              release-tracklist comparison. Track-level metadata (recording MBID, genres, scans)
+              is still processed normally.
+            </div>
+          </div>
+          <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
+            <button type="button" class="btn btn-sm btn-success" id="albumLookupSkipSaveBtn" onclick="saveAlbumLookupSkip(this)">
+              <i class="bi bi-check-lg me-1"></i>Save Custom Album Setting
+            </button>
+            <span class="form-text text-muted mb-0">Saved on its own — the rest of the form below is untouched.</span>
+          </div>
+          <div id="albumLookupSkipCsvCard" class="{% if album_data.album_lookup_skip %}d-block{% else %}d-none{% endif %} p-3 border border-secondary rounded">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+              <div class="me-2" style="min-width: 240px;">
+                <strong class="small">Upload a CSV tracklist</strong>
+                <div class="form-text">
+                  The CSV stands in for the MusicBrainz release: tracks the library doesn't have yet
+                  are added to the missing list and can be queued for download. Format:
+                  <code>title</code>, <code>track number,title</code>, or <code>disc,track number,title</code> —
+                  a header row (Title / Artist / Duration / …) works too.
+                </div>
+              </div>
+              <div class="d-flex align-items-center gap-2 flex-shrink-0">
+                <input type="file" id="albumCsvFile" accept=".csv,text/csv" class="form-control form-control-sm" style="max-width: 230px;">
+                <button type="button" class="btn btn-sm btn-outline-success flex-shrink-0" onclick="uploadAlbumCsvTracklist(this)">
+                  <i class="bi bi-cloud-upload me-1"></i>Upload
+                </button>
+              </div>
+            </div>
+            <div id="albumCsvStatus" class="small"></div>
+          </div>
+        </div>
+      </div>
+
       <form method="POST" action="/album/{{ artist_name|path_segment }}/{{ album_name|path_segment }}" id="albumMetadataForm" data-sticky-save>
         <div class="card mb-4 shadow-sm bg-dark text-light border-secondary" id="album-information-section">
           <div class="card-header border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
@@ -555,43 +612,6 @@
             </div>
 
             <hr class="border-secondary my-3">
-
-            <!-- Custom Album: do-not-search + CSV tracklist -->
-            <h6 class="text-muted mb-3"><i class="bi bi-upload me-1"></i>Custom Album</h6>
-            <div class="form-check mb-2">
-              <input class="form-check-input" type="checkbox" id="album_lookup_skip" name="album_lookup_skip" value="1"
-                     {% if album_data.album_lookup_skip %}checked{% endif %}
-                     onchange="toggleAlbumLookupSkip()">
-              <label class="form-check-label" for="album_lookup_skip">
-                Do not search album release
-              </label>
-              <div class="form-text text-muted">
-                For a custom album that isn't on MusicBrainz or Discogs. Skipped: the MusicBrainz
-                album-type lookup, the Discogs release ID, online art (CAA/AudioDB/Discogs) and the
-                release-tracklist comparison. Track-level metadata (recording MBID, genres, scans)
-                is still processed normally. Saved with the rest of this form.
-              </div>
-            </div>
-            <div id="albumLookupSkipCsvCard" class="{% if album_data.album_lookup_skip %}d-block{% else %}d-none{% endif %} mb-2 p-3 border border-secondary rounded">
-              <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
-                <div class="me-2" style="min-width: 240px;">
-                  <strong class="small">Upload a CSV tracklist</strong>
-                  <div class="form-text text-muted">
-                    The CSV stands in for the MusicBrainz release: tracks the library doesn't have yet
-                    are added to the missing list and can be queued for download. Format:
-                    <code>title</code>, <code>track number,title</code>, or <code>disc,track number,title</code> —
-                    a header row (Title / Artist / Duration / …) works too.
-                  </div>
-                </div>
-                <div class="d-flex align-items-center gap-2 flex-shrink-0">
-                  <input type="file" id="albumCsvFile" accept=".csv,text/csv" class="form-control form-control-sm" style="max-width: 230px;">
-                  <button type="button" class="btn btn-sm btn-outline-success flex-shrink-0" onclick="uploadAlbumCsvTracklist(this)">
-                    <i class="bi bi-cloud-upload me-1"></i>Upload
-                  </button>
-                </div>
-              </div>
-              <div id="albumCsvStatus" class="small"></div>
-            </div>
 
             <!-- Staged Album Genres -->
             <div class="mb-3">

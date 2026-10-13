@@ -826,6 +826,32 @@ async def api_album_tracklist_csv() -> Any:
         return jsonify({"error": str(exc)}), 500
 
 
+@album_bp.route("/lookup-skip", methods=["POST"])
+async def api_album_lookup_skip() -> Any:
+    """Save ONLY the "Do not search album release" (custom album) flag.
+
+    The flag used to be a checkbox on the big Edit Album Metadata form, so
+    toggling ONE setting cost the whole save — the album → tracks DB fan-out
+    plus a concurrent write of every file tag — which timed out on large
+    albums for a value that is a single album-wide UPDATE. The page now posts
+    here from the block's own Save button.
+    """
+    body = await request.get_json() or {}
+    artist = str(body.get("artist") or "").strip()
+    album = str(body.get("album") or "").strip()
+    if not artist or not album:
+        return jsonify({"error": "artist and album are required"}), 400
+    try:
+        from services.metadata.album_lookup_skip_service import set_album_lookup_skip
+
+        skip = bool(body.get("skip"))
+        set_album_lookup_skip(artist, album, skip)
+        return jsonify({"success": True, "skip": skip})
+    except Exception as exc:
+        logger.error("Album lookup-skip save failed", artist=artist, album=album, error=str(exc))
+        return jsonify({"error": str(exc)}), 500
+
+
 @album_bp.route("/duplicate-tracks", methods=["GET"])
 def api_album_duplicate_tracks() -> Any:
     """Tracks on this album that were downloaded more than once.

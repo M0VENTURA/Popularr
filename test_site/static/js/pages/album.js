@@ -1032,6 +1032,7 @@
 
   global.toggleAlbumLookupSkip = toggleAlbumLookupSkip;
   global.uploadAlbumCsvTracklist = uploadAlbumCsvTracklist;
+  global.saveAlbumLookupSkip = saveAlbumLookupSkip;
 
   /**
    * Rename this album's files to match the configured naming format.
@@ -3024,6 +3025,43 @@
     if (!cb || !card) return;
     card.classList.toggle('d-none', !cb.checked);
     card.classList.toggle('d-block', cb.checked);
+  }
+
+  /**
+   * Save ONLY the "Do not search album release" (custom album) flag.
+   *
+   * This checkbox used to ride on the big Edit Album Metadata form, so
+   * toggling ONE setting cost the whole save — the album → tracks DB fan-out
+   * plus a concurrent write of every file tag — and timed out on large albums
+   * for a value that is a single album-wide UPDATE. The block now has its own
+   * Save button and posts to the dedicated endpoint; the big save no longer
+   * carries (or clears) the flag — see the presence-gated write in ui_routes.
+   */
+  async function saveAlbumLookupSkip(btn) {
+    const cb = document.getElementById('album_lookup_skip');
+    const artist = pageArtist();
+    const album = pageAlbum();
+    if (!cb || !artist || !album) {
+      notifyError('Cannot save the custom-album setting without an album.');
+      return;
+    }
+    const skip = cb.checked;
+    return global.buttonState.withBusy(btn, 'Saving…', async () => {
+      try {
+        const data = await global.api.postJson('/api/album/lookup-skip', { artist, album, skip });
+        if (!data || !data.success) {
+          notifyError((data && data.error) || 'Could not save the custom-album setting.');
+          return;
+        }
+        notifySuccess(
+          skip
+            ? 'Custom album saved — album-release lookups will be skipped for this album.'
+            : 'Custom album setting saved — album-release lookups enabled.'
+        );
+      } catch (error) {
+        notifyError('Error: ' + error.message);
+      }
+    });
   }
 
   /** Upload a CSV tracklist as this custom album's missing-track source. */
