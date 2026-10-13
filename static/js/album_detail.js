@@ -1253,10 +1253,17 @@ function _buildMissingTrackRow(trackComp, data) {
     // outstanding"), leaving no way to see it or act on it.
     const queueStatus = String(trackComp.queue_status || '');
     const isQueued = queueStatus !== '';
+    // The track's own performer, shown only when it differs from the ALBUM
+    // artist — exactly the rule the library rows use (album_detail.html:
+    // `{% if track.artist and track.artist != artist_name %}`). On a various-
+    // artists compilation the album artist is "Various Artists", so this is
+    // what tells the user WHO performs a missing track before they queue it.
+    const trackArtist = String(trackComp.track_artist || trackComp.mb_artist || '').trim();
+    const showArtist = trackArtist && trackArtist !== String(pageArtist || '').trim();
     const missingBadge = isQueued
         ? `<span class="badge bg-info text-dark ms-2" style="font-size: 0.65rem;"`
             + ` title="In the download queue (${escapeHtml(queueStatus)})">`
-            + `${escapeHtml(_queueStatusLabel(queueStatus))}</span>`
+            + `<i class="bi bi-download me-1"></i>${escapeHtml(_queueStatusLabel(queueStatus))}</span>`
         : `<span class="badge bg-warning text-dark ms-2" style="font-size: 0.65rem;">Missing</span>`;
     const addTitle = isQueued
         ? `Already in the download queue (${escapeHtml(queueStatus)})`
@@ -1278,6 +1285,7 @@ function _buildMissingTrackRow(trackComp, data) {
         <td class="text-center text-muted fst-italic">${safeTrackNum || '?'}</td>
         <td class="fst-italic">
             ${safeTitle}
+            ${showArtist ? `<small class="text-muted ms-1">— ${escapeHtml(trackArtist)}</small>` : ''}
             ${missingBadge}
         </td>
         <td class="text-center text-muted small fst-italic">${shownDuration}</td>
@@ -1725,10 +1733,25 @@ function _renderMissingTracks(missing, tbody) {
     });
 }
 
-/** "Searching" / "Downloading" for a queue row's status value. */
+/**
+ * A user-facing label for a missing track's download-queue status.
+ *
+ * The album's missing list is a SNAPSHOT, so a track the download queue has
+ * already fetched (status ``imported``) can still be listed here. Echoing the
+ * raw DB status ("Imported") then reads as "this track is already in the
+ * library — why is it shown as missing?" and hides the fact that the QUEUE is
+ * the thing handling it. The badge's job is to say the download queue owns
+ * this track, so each stage maps to a queue-oriented phrase and the exact
+ * status stays in the badge's tooltip.
+ */
 function _queueStatusLabel(status) {
-    const text = String(status || '').replace(/_/g, ' ');
-    return text ? text.charAt(0).toUpperCase() + text.slice(1) : 'Queued';
+    const s = String(status || '').toLowerCase();
+    if (s === 'downloading' || s === 'processing' || s === 'moving') return 'Downloading';
+    if (s === 'searching') return 'Searching';
+    if (s === 'failed' || s === 'backed_off') return 'Retrying';
+    if (s === 'queued' || s === 'pending' || s === 'pending_match' || s === 'matched') return 'Queued';
+    // imported / completed / anything else — the queue row is what owns it.
+    return 'In download queue';
 }
 
 /**

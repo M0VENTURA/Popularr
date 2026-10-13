@@ -100,6 +100,10 @@ global.escapeHtml = (v) => String(v == null ? '' : v);
 global.esc = (v) => String(v == null ? '' : v);
 global.pageArtist = () => 'Various Artists';
 global.pageAlbum = () => 'Tribute';
+// The modules resolve the album artist from `_pageData` (not the global above),
+// so set it too — otherwise the album artist is '' and the "artist differs from
+// the album artist" logic can never be exercised.
+global._pageData = { artistName: 'Various Artists', albumName: 'Tribute' };
 global.queueMissingTrack = () => {};
 global.openMatchModal = () => {};
 global.openAlbumMatchModal = () => {};
@@ -148,6 +152,23 @@ const onlyExcluded = document.getElementById('albumMissingHeaderBadge').textCont
 __BADGE__(0, {});
 const cleared = document.getElementById('albumMissingHeaderBadge').textContent;
 
+// An IMPORTED queue row: the badge must read as the download queue, NOT echo
+// the raw DB status "Imported" (which reads as "already in the library").
+const importedComp = Object.assign({}, base, {
+  mb_title: 'Beds Are Burning', mb_track_number: 3, queue_status: 'imported',
+});
+const importedRow = __BUILD__(importedComp, data);
+// A track whose performer differs from the album artist must be shown; an
+// equal performer must be suppressed (the rule the library rows use).
+const otherArtistComp = Object.assign({}, base, {
+  mb_title: 'Forgotten Years', mb_track_number: 10, track_artist: 'Midnight Oil',
+});
+const otherArtistRow = __BUILD__(otherArtistComp, data);
+const sameArtistComp = Object.assign({}, base, {
+  mb_title: 'Home', mb_track_number: 12, track_artist: 'Various Artists',
+});
+const sameArtistRow = __BUILD__(sameArtistComp, data);
+
 console.log(JSON.stringify({
   queuedTitle: titleCell(queuedRow.innerHTML),
   plainTitle: titleCell(plainRow.innerHTML),
@@ -157,6 +178,9 @@ console.log(JSON.stringify({
   withExcluded: withExcluded,
   onlyExcluded: onlyExcluded,
   cleared: cleared,
+  importedTitle: titleCell(importedRow.innerHTML),
+  otherArtistTitle: titleCell(otherArtistRow.innerHTML),
+  sameArtistTitle: titleCell(sameArtistRow.innerHTML),
 }));
 """
 
@@ -250,6 +274,50 @@ class TestAnUndeliveredTrackIsVisible:
             "the refresh response's queue_status must survive the row conversion, "
             "or the badge can never appear"
         )
+
+
+# ===========================================================================
+# 1b. The badge says the DOWNLOAD QUEUE owns the track; the artist is shown
+# ===========================================================================
+class TestTheQueueBadgeAndTrackArtist:
+    """Two reported requests on the album's missing rows:
+
+    * "instead of showing imported, can it make it obvious that it's in the
+      download queue" — an ``imported`` queue row echoed the raw DB status
+      "Imported", which reads as "already in the library, why is it missing?";
+    * "can missing release items also show the track artist in the list (if
+      different than the album artist)" — the rows only showed the title.
+    """
+
+    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    def test_an_imported_row_reads_as_in_the_download_queue(self, run):
+        title = run()["importedTitle"]
+        assert "Beds Are Burning" in title, title
+        assert "In download queue" in title, (
+            "an 'imported' queue row must say the DOWNLOAD QUEUE owns it; the "
+            f"raw status reads as 'already in the library': {title}"
+        )
+        assert re.search(r">\s*Imported\s*<", title) is None, (
+            f"the raw 'Imported' badge text must not be the visible label: {title}"
+        )
+
+    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    def test_a_different_track_artist_is_shown(self, run):
+        title = run()["otherArtistTitle"]
+        assert "Midnight Oil" in title, (
+            f"a track whose performer differs from the album artist must be "
+            f"named on the row: {title}"
+        )
+        assert "—" in title, title
+
+    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    def test_an_equal_track_artist_is_suppressed(self, run):
+        """CONTROL — the library rows hide the artist when it IS the album
+        artist (album_detail.html: `{% if track.artist != artist_name %}`), so
+        the missing rows must not re-show "Various Artists" on every row."""
+        title = run()["sameArtistTitle"]
+        assert "Various Artists" not in title, title
+        assert "—" not in title, title
 
 
 # ===========================================================================
