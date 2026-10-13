@@ -307,6 +307,61 @@ class SearchResponse:
             self.files = converted
 
 
+def rank_search_results(items: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    """Rank candidate results: relevance to the QUERY first, then peer
+    availability, then quality.
+
+    Relevance weighs BASENAME matches (the real file name) above folder-
+    path matches — a query for "Track" must not be satisfied by a folder
+    named Track with a different song inside it.  Peer availability ranks
+    ABOVE bitrate: a 320k MP3 from an open-slot peer downloads instantly, a
+    perfect FLAC behind a 4000-deep queue sits in ``Queued, Remotely``.
+
+    Module-level so the manual-search route can rank WITHOUT a service
+    instance or class reference — the route tests substitute the whole
+    ``SlskdService`` with a lightweight fake, and reaching into the real
+    class by name from the route made every one of those tests fail with
+    ``'_Svc' object has no attribute '_rank_qualified'``.  Pure logic over
+    plain dicts, no I/O.
+    """
+    query_tokens = SlskdService._rank_query_tokens(query)
+    token_set = frozenset(query_tokens)
+
+    def _rank(item: dict) -> tuple:
+        filename = str(item.get("filename") or "")
+        base = _extension_from_filename(filename)
+        # Tokenise the ACTUAL file name separately from its directory: a
+        # query for "Track" must not be satisfied by a folder called Track
+        # that holds a different song.  ``os.path.basename``/``dirname``
+        # cope with the peer's "/" separators (and Windows "\\") alike.
+        basename = os.path.basename(filename) or filename
+        folder_path = os.path.dirname(filename)
+        basename_tokens = frozenset(SlskdService._rank_query_tokens(basename))
+        folder_tokens = frozenset(SlskdService._rank_query_tokens(folder_path))
+        basename_hits = len(basename_tokens & token_set)
+        folder_hits = len(folder_tokens & token_set)
+        # Weighted relevance: a basename match is worth 3x a folder match,
+        # so the file NAMED "Song" outranks a folder named "Song" holding a
+        # different track — while a genuine folder match still earns credit
+        # (the previous form credited every non-basename token, so folder
+        # matches added nothing to the ranking).
+        relevance = basename_hits * 3 + folder_hits
+        return (
+            -relevance,
+            # peer availability first: OPEN-slot peers sort before
+            # slot-less ones (ascending), and an unknown slot is NOT
+            # treated as full — a missing value is not evidence busy.
+            0 if item.get("has_free_upload_slot") is not False else 1,
+            -int(item.get("bitrate") or 0),
+            -int(item.get("sample_rate") or 0),
+            int(item.get("queue_length") or 0),
+            -(item.get("upload_speed") if isinstance(item.get("upload_speed"), (int, float)) else 0),
+            str(item.get("extension") or base),
+        )
+
+    return sorted(items, key=_rank)
+
+
 class SlskdService:
     """Application-level slskd behaviour."""
 
@@ -801,48 +856,11 @@ class SlskdService:
         """Rank qualified results: relevance to the QUERY first, then peer
         availability, then quality.
 
-        Relevance weighs BASENAME matches (the real file name) above folder-
-        path matches — a query for "Track" must not be satisfied by a folder
-        named Track with a different song inside it.  Peer availability ranks
-        ABOVE bitrate: a 320k MP3 from an open-slot peer downloads instantly, a
-        perfect FLAC behind a 4000-deep queue sits in ``Queued, Remotely``.
+        Thin delegate for callers that already hold a ``SlskdService`` — the
+        logic itself lives in :func:`rank_search_results` so the route and the
+        service CANNOT drift (and the route is testable without the class).
         """
-        query_tokens = SlskdService._rank_query_tokens(query)
-        token_set = frozenset(query_tokens)
-
-        def _rank(item: dict) -> tuple:
-            filename = str(item.get("filename") or "")
-            base = _extension_from_filename(filename)
-            # Tokenise the ACTUAL file name separately from its directory: a
-            # query for "Track" must not be satisfied by a folder called Track
-            # that holds a different song.  ``os.path.basename``/``dirname``
-            # cope with the peer's "/" separators (and Windows "\\") alike.
-            basename = os.path.basename(filename) or filename
-            folder_path = os.path.dirname(filename)
-            basename_tokens = frozenset(SlskdService._rank_query_tokens(basename))
-            folder_tokens = frozenset(SlskdService._rank_query_tokens(folder_path))
-            basename_hits = len(basename_tokens & token_set)
-            folder_hits = len(folder_tokens & token_set)
-            # Weighted relevance: a basename match is worth 3x a folder match,
-            # so the file NAMED "Song" outranks a folder named "Song" holding a
-            # different track — while a genuine folder match still earns credit
-            # (the previous form credited every non-basename token, so folder
-            # matches added nothing to the ranking).
-            relevance = basename_hits * 3 + folder_hits
-            return (
-                -relevance,
-                # peer availability first: OPEN-slot peers sort before
-                # slot-less ones (ascending), and an unknown slot is NOT
-                # treated as full — a missing value is not evidence busy.
-                0 if item.get("has_free_upload_slot") is not False else 1,
-                -int(item.get("bitrate") or 0),
-                -int(item.get("sample_rate") or 0),
-                int(item.get("queue_length") or 0),
-                -(item.get("upload_speed") if isinstance(item.get("upload_speed"), (int, float)) else 0),
-                str(item.get("extension") or base),
-            )
-
-        return sorted(items, key=_rank)
+        return rank_search_results(items, query)
 
     def filter_results_by_quality(
         self,

@@ -292,6 +292,10 @@
             ? raw.filter((r) => (r.freeUploadSlots === undefined ? 1 : r.freeUploadSlots) > 0)
             : raw;
           session.responseCount = data.responseCount || 0;
+          // What the server judged the list against (downloads.quality) and how
+          // many cleared it — reported instead of a bare result count.
+          session.quality = data.quality || null;
+          session.qualityFallback = !!data.qualityFallback;
           session.isComplete = data.isComplete || false;
           session.state = data.state || 'Searching';
 
@@ -399,6 +403,30 @@
   // ── Rendering ─────────────────────────────────────────────────────────
 
   /**
+   * Describe the configured quality minimum against the results.
+   *
+   * The server ranks files that MEET the minimum first and keeps the rest
+   * below, so this says how many led the list — and is explicit when nothing
+   * met it, because a silent list of low-bitrate files looks like a bug.
+   */
+  function qualityNote(session) {
+    const q = session && session.quality;
+    if (!q || !q.total) return '';
+    const bits = [];
+    if (q.min_bitrate) bits.push(`${q.min_bitrate} kbps`);
+    if (q.min_sample_rate) bits.push(`${Math.round(q.min_sample_rate / 1000)} kHz`);
+    if (!bits.length) return '';
+    const minimum = bits.join(' / ');
+    if (session.qualityFallback) {
+      return ` — no file met your quality minimum (${esc(minimum)}); showing all, best first`;
+    }
+    if (q.qualifying < q.total) {
+      return ` — ${q.qualifying} of ${q.total} meet your quality minimum (${esc(minimum)}), listed first`;
+    }
+    return ` — all meet your quality minimum (${esc(minimum)})`;
+  }
+
+  /**
    * Render a flat results table into a container.
    *
    * Consolidates the two near-identical table builders in artist_detail and
@@ -425,6 +453,14 @@
     const rows = results.map((result, index) => {
       const sizeMB = result.size_mb
         || (result.size ? (result.size / BYTES_TO_MB).toFixed(2) : 'N/A');
+      // Free upload slots. The server already ranks open-slot peers first, so
+      // this column is what makes that visible — "1 vs 8 slots" matters when
+      // picking a peer by hand. A missing value is UNKNOWN (not zero).
+      const slots = result.freeUploadSlots === undefined
+        ? result.has_free_upload_slot === false ? 0 : null
+        : result.freeUploadSlots;
+      const slotsText = slots === null ? '?' : String(slots);
+      const slotsClass = slots === 0 ? 'text-danger' : slots === null ? 'text-muted' : 'text-success';
       return `
         <tr>
           <td data-label="File">
@@ -434,6 +470,9 @@
           </td>
           <td class="text-center" data-label="User">
             <small class="text-muted">${esc(result.username || 'N/A')}</small>
+          </td>
+          <td class="text-center" data-label="Slots">
+            <small class="${slotsClass}" title="Free upload slots">${esc(slotsText)}</small>
           </td>
           <td class="text-center" data-label="Size">${esc(String(sizeMB))} MB</td>
           <td class="text-center" data-label="Bitrate">
@@ -454,6 +493,7 @@
             <tr>
               <th>File</th>
               <th class="text-center">User</th>
+              <th class="text-center" title="Free upload slots">Slots</th>
               <th class="text-center">Size</th>
               <th class="text-center">Bitrate</th>
               <th class="text-center">Action</th>
@@ -463,7 +503,7 @@
         </table>
       </div>
       <div class="text-muted small mt-2">
-        Found ${results.length} result(s) — ${esc(session.state)}${session.isComplete ? ' (complete)' : ''}
+        Found ${results.length} result(s) — ${esc(session.state)}${session.isComplete ? ' (complete)' : ''}${qualityNote(session)}
       </div>`;
 
     container.querySelectorAll('.slskd-download-btn').forEach((button) => {

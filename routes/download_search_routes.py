@@ -14,9 +14,9 @@ from quart import Blueprint, jsonify, request
 from api_clients.slskd_http import SlskdHttpClient
 from db.repositories.queue import update_queue_item
 from db.repositories.search_logs import log_slskd_search
-from helpers.config_helpers import get_config
+from helpers.config_helpers import get_config, get_search_quality_config
 from helpers.logging_config import log_queue, log_search
-from services.downloads.slskd_service import SlskdService
+from services.downloads.slskd_service import SlskdService, rank_search_results
 
 logger = structlog.get_logger(__name__)
 
@@ -91,6 +91,49 @@ def _coerce_optional_int(value: Any, allow_prefix: bool = False) -> int | None:
         return int(candidate)
     except (TypeError, ValueError):
         return None
+
+
+def _file_meets_quality(
+    file: Any,
+    min_bitrate: int,
+    min_sample_rate: int,
+    min_length: int,
+) -> bool:
+    """Does this search file clear the configured quality minimum?
+
+    Applies the SAME rule the automated pipeline applies, via
+    ``SearchFile.matches_quality`` — one definition of "good enough", so the
+    manual and automated views cannot disagree.
+
+    ⚠️ An UNKNOWN file is KEPT, never fatal.  This mirrors both
+    ``SearchFile.matches_quality`` (a missing bitrate/sample rate is unknown,
+    not failing) and ``SearchResponse.__post_init__`` ("a single non-dict or
+    mixed list must not drop the whole response").  Letting one odd file raise
+    here would empty the ENTIRE result list — a manual search returning
+    "0 results" when slskd returned 50 is far worse than showing a file of
+    uncertain quality last.
+    """
+    try:
+        meets = bool(file.matches_quality(min_bitrate, min_sample_rate))
+    except Exception as exc:  # noqa: BLE001 — boundary: never lose the list
+        logger.debug(
+            "Quality check unavailable for search file; keeping it",
+            filename=getattr(file, "filename", None),
+            error=str(exc),
+        )
+        return True
+
+    # ``min_length_seconds`` lives in the same config block, so it counts too —
+    # but only when the length is actually known.
+    if meets and min_length:
+        try:
+            length = int(getattr(file, "length", 0) or 0)
+        except (TypeError, ValueError):
+            length = 0
+        if length and length < min_length:
+            return False
+
+    return meets
 
 
 # ===========================================================================
@@ -216,6 +259,19 @@ def slskd_search_results(search_id: str) -> Any:
         slskd_service = SlskdService(http_client=client)
         responses, state, is_complete = slskd_service.get_search_results(search_id, timeout=10)
 
+        # The query drives relevance ranking, exactly as it does for the
+        # automated search. Recorded when the search was started.
+        with _manual_search_lock:
+            _query = str((_manual_search_state.get(search_id) or {}).get("query") or "")
+
+        # ⚠️ THE CONFIGURED QUALITY MINIMUM, not a hardcoded 192/44100.
+        # Same source the automated pipeline reads (``downloads.quality``), so
+        # the two paths cannot drift apart on what "good enough" means.
+        _quality_cfg = get_search_quality_config()
+        _min_bitrate = int(_quality_cfg.get("min_bitrate") or 0)
+        _min_sample_rate = int(_quality_cfg.get("min_sample_rate") or 0)
+        _min_length = int(_quality_cfg.get("min_length_seconds") or 0)
+
         results = []
         for resp in responses or []:
             username = getattr(resp, "username", "") or ""
@@ -239,6 +295,9 @@ def slskd_search_results(search_id: str) -> Any:
             # naming so a future consumer does not need a third name for one fact.
             free_slot = bool(getattr(resp, "has_free_upload_slot", True))
             for file in getattr(resp, "files", []) or []:
+                meets = _file_meets_quality(
+                    file, _min_bitrate, _min_sample_rate, _min_length
+                )
                 results.append({
                     "username": username,
                     "filename": getattr(file, "filename", "") or "",
@@ -252,9 +311,27 @@ def slskd_search_results(search_id: str) -> Any:
                     "has_free_upload_slot": free_slot,
                     "upload_speed": getattr(resp, "upload_speed", None),
                     "queue_length": getattr(resp, "queue_length", None),
+                    "meets_quality": bool(meets),
                 })
 
-        count = len(results or [])
+        # ⚠️ RANK THE MANUAL LIST — it used to be slskd's raw response order, so
+        # the 320 kbps peer with a free upload slot could sit anywhere in 50
+        # rows while the automated search picked it first. Uses the SAME
+        # ``rank_search_results`` the automated path uses (relevance to the
+        # query → free upload slot → bitrate → sample rate → queue length →
+        # speed), so the two views cannot disagree about which peer is best.
+        #
+        # Files that meet the configured quality come FIRST; the rest are kept
+        # and ranked below rather than dropped. A manual search is the tool you
+        # reach for when the automated one found nothing — hiding the only
+        # copy of a rare track because it is 128 kbps would defeat the point.
+        # The count is reported so the UI can say what was filtered.
+        ranked = rank_search_results(results, _query)
+        qualifying = [r for r in ranked if r.get("meets_quality")]
+        below_quality = [r for r in ranked if not r.get("meets_quality")]
+        ordered = qualifying + below_quality
+
+        count = len(ordered or [])
         response_count = len(responses or [])
 
         with _manual_search_lock:
@@ -284,11 +361,21 @@ def slskd_search_results(search_id: str) -> Any:
                         _manual_search_state.pop(search_id, None)
 
         return jsonify({
-            "results": results,
+            "results": ordered,
             "state": state or "InProgress",
             "responseCount": response_count,
             "fileCount": count,
             "isComplete": bool(is_complete),
+            # What the list was judged against, and how many cleared it — the
+            # UI reports this instead of a bare result count.
+            "quality": {
+                "min_bitrate": _min_bitrate,
+                "min_sample_rate": _min_sample_rate,
+                "min_length_seconds": _min_length,
+                "qualifying": len(qualifying),
+                "total": count,
+            },
+            "qualityFallback": bool(count) and not qualifying,
         })
     except Exception as exc:
         logger.error("Failed to poll search results", search_id=search_id, error=str(exc))

@@ -1410,12 +1410,19 @@ async function pollSlskdSearchResults() {
       return slots > 0;
     });
 
-    let html = '<div class="table-responsive"><table class="table table-hover" data-mobile-cards><thead><tr><th>File</th><th class="text-center">User</th><th class="text-center">Size</th><th class="text-center">Bitrate</th><th class="text-center">Action</th></tr></thead><tbody>';
+    let html = '<div class="table-responsive"><table class="table table-hover" data-mobile-cards><thead><tr><th>File</th><th class="text-center">User</th><th class="text-center" title="Free upload slots">Slots</th><th class="text-center">Size</th><th class="text-center">Bitrate</th><th class="text-center">Action</th></tr></thead><tbody>';
     validResults.forEach(r => {
       const sizeMB = r.size_mb || (r.size ? (r.size / (1024 * 1024)).toFixed(2) : 'N/A');
+      // Free upload slots. The server ranks open-slot peers first, so this is
+      // what makes that visible when picking a peer by hand. A missing value
+      // is UNKNOWN, not zero.
+      const slots = r.freeUploadSlots !== undefined ? r.freeUploadSlots : (r.has_free_upload_slot === false ? 0 : null);
+      const slotsText = slots === null ? '?' : String(slots);
+      const slotsClass = slots === 0 ? 'text-danger' : slots === null ? 'text-muted' : 'text-success';
       html += `<tr>
         <td data-label="File"><div class="small" style="max-width:500px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(r.filename || 'Unknown')}</div></td>
         <td class="text-center" data-label="User"><small class="text-muted">${escapeHtml(r.username || 'N/A')}</small></td>
+        <td class="text-center" data-label="Slots"><small class="${slotsClass}">${escapeHtml(slotsText)}</small></td>
         <td class="text-center" data-label="Size">${escapeHtml(String(sizeMB))} MB</td>
         <td class="text-center" data-label="Bitrate"><small class="text-muted">${escapeHtml(String(r.bitrate || 'unknown'))}</small></td>
         <td class="text-center" data-label="Action"><button class="btn btn-sm btn-success" onclick="downloadSlskdFile('${escapeJsString(r.username)}', '${escapeJsString(r.filename)}', ${parseInt(r.size) || 0})"><i class="bi bi-download"></i> Download</button></td>
@@ -1755,6 +1762,13 @@ function renderSoulseekManualSearchResults(results) {
     const rawLength = row.length_seconds !== undefined ? row.length_seconds : (row.length !== undefined ? row.length : 0);
     const length = Number.isFinite(Number(rawLength)) ? Math.round(Number(rawLength)) : 0;
 
+    // Free upload slots. The server ranks open-slot peers first, so this is
+    // what makes that visible when picking a peer by hand. A missing value
+    // is UNKNOWN, not zero.
+    const slots = row.freeUploadSlots !== undefined ? row.freeUploadSlots : (row.has_free_upload_slot === false ? 0 : null);
+    const slotsText = slots === null ? '?' : String(slots);
+    const slotsClass = slots === 0 ? 'text-danger' : slots === null ? 'text-muted' : 'text-success';
+
     // Encode parameters safely for inline JavaScript execution
     const encUser = encodeInlineArg(username);
     const encFile = encodeInlineArg(filename);
@@ -1763,6 +1777,7 @@ function renderSoulseekManualSearchResults(results) {
       <tr>
         <td data-label="User">${escapeHtml(username)}</td>
         <td style="word-break: break-word;" data-label="Filename">${escapeHtml(filename)}</td>
+        <td class="text-center" data-label="Slots"><small class="${slotsClass}">${escapeHtml(slotsText)}</small></td>
         <td data-label="Size">${escapeHtml(String(sizeMb))} MB</td>
         <td data-label="Bitrate">${escapeHtml(String(bitrate))}</td>
         <td data-label="Duration">${escapeHtml(String(duration))}</td>
@@ -1782,6 +1797,7 @@ function renderSoulseekManualSearchResults(results) {
           <tr>
             <th>User</th>
             <th>Filename</th>
+            <th class="text-center" title="Free upload slots">Slots</th>
             <th>Size MB</th>
             <th>Bitrate</th>
             <th>Duration</th>
