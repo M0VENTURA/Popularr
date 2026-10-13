@@ -284,6 +284,18 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "single_confidence": "TEXT", "single_confidence_score": "DOUBLE PRECISION",
         "single_status": "TEXT", "single_sources": "JSONB", "single_sources_used": "TEXT",
         "single_detection_last_updated": "TIMESTAMP", "single_manual_override": "BOOLEAN DEFAULT FALSE",
+        # Stamped in track_stage whenever a recording MusicBrainz search
+        # COMPLETED and resolved to no MBID — the durable counterpart of the
+        # in-memory negative _mbid_cache (which is per-process and therefore
+        # re-searched by every worker). is_album_incomplete treats a fresh
+        # stamp as terminal: re-running the search produces the same nothing,
+        # so an album with one unresolvable track must not be forced through
+        # the whole pipeline on every scan.
+        "recording_mbid_checked_at": "TIMESTAMP",
+        # Stamped for a track whenever sync_album_file_tags finished
+        # reconciling its file tags against the DB — a later scan skips the
+        # mutagen re-read when the DB row has not changed since.
+        "file_tags_synced_at": "TIMESTAMP",
         "genres": "TEXT", "genre": "TEXT", "manual_genres": "JSONB", "navidrome_genres": "JSONB", 
         "spotify_genres": "JSONB", "listenbrainz_genres": "JSONB", "discogs_genres": "JSONB", 
         "musicbrainz_genres": "JSONB", "essentia_genres": "JSONB", 

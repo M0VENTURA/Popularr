@@ -723,6 +723,12 @@ class MusicBrainzService:
     def get_suggested_mbid(self, title: str, artist: str, limit: int = 5, **kwargs: Any) -> tuple[str, float]:
         is_live_release = bool(kwargs.get("is_live_release"))
         edition_annotation = str(kwargs.get("edition_annotation") or "").strip() or None
+        # Fired ONLY when the search COMPLETED and confirmed a miss — the
+        # exact moment ``_record_mbid(cache_key, "", 0.0)`` runs (or the
+        # negative cache serves a stored miss). NOT fired on an exception or
+        # a disabled service: a transient error must not stamp a terminal
+        # "search resolved nothing" (the durable skip-gate signal).
+        on_miss = kwargs.get("on_miss")
         context = {
             "artist": artist,
             "track": title,
@@ -768,6 +774,11 @@ class MusicBrainzService:
                         "[MB] recording suggestion negative cache hit",
                         **context,
                     )
+                    try:
+                        if callable(on_miss):
+                            on_miss()
+                    except Exception:
+                        pass
                     return "", 0.0
 
         query_title = Normalize_title_for_lucene_query(Strip_search_keywords(title))
@@ -826,6 +837,11 @@ class MusicBrainzService:
                 # track — the largest repeatable per-track MB cost in a full
                 # scan (audit G1).
                 self._record_mbid(cache_key, "", 0.0)
+                try:
+                    if callable(on_miss):
+                        on_miss()
+                except Exception:
+                    pass
             self._maybe_flush_cache()
 
             Logger.info(
@@ -851,6 +867,7 @@ class MusicBrainzService:
         if not title or not artist:
             Logger.info("[MB] recording metadata skipped", reason="incomplete input", **context)
             return {}
+        on_miss = kwargs.get("on_miss")
         try:
             # A caller that already KNOWS the track's recording MBID (the
             # common case: the album's own release supplied it, or a previous
@@ -874,6 +891,7 @@ class MusicBrainzService:
                     artist,
                     is_live_release=is_live_release,
                     edition_annotation=edition_annotation,
+                    on_miss=on_miss,
                 )
             if not mbid:
                 return {}
@@ -898,6 +916,7 @@ class MusicBrainzService:
                     artist,
                     is_live_release=is_live_release,
                     edition_annotation=edition_annotation,
+                    on_miss=on_miss,
                 )
                 if not mbid:
                     return {}
@@ -1764,6 +1783,7 @@ def lookup_recording_metadata(
     is_live_release: bool = False,
     edition_annotation: str | None = None,
     mbid: str | None = None,
+    on_miss: Any = None,
 ) -> dict[str, Any]:
     return _get_service().lookup_recording_metadata(
         title,
@@ -1772,6 +1792,7 @@ def lookup_recording_metadata(
         is_live_release=is_live_release,
         edition_annotation=edition_annotation,
         mbid=mbid,
+        on_miss=on_miss,
     )
 
 def merge_metadata(base: dict[str, Any], mb: dict[str, Any], overrides: dict[str, Any] | None = None) -> dict[str, Any]:

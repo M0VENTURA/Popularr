@@ -510,6 +510,7 @@ def sync_album_file_tags(
     artist: str,
     album: str,
     corrected_title_ids: set[str] | None = None,
+    changed_track_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Fill missing file tags + record corrections for one album's tracks.
 
@@ -517,7 +518,16 @@ def sync_album_file_tags(
     JUST corrected (a MusicBrainz release-tracklist title promoted to the DB
     column). For exactly those tracks the TITLE tag is rewritten even when
     the file already holds a value; everything else stays strictly
-    fill-if-missing, so a deliberately-chosen local title is never clobbered.    """
+    fill-if-missing, so a deliberately-chosen local title is never clobbered.
+
+    ``changed_track_ids`` — the set of track ids the scan WROTE to this pass.
+    When the running scan changed nothing for a track, that track's tag
+    reconciliation was already proved clean on the pass that wrote it (or
+    earlier), so re-reading its audio file with mutagen on every scan is pure
+    waste — the reported ~90-120s per already-synced album was exactly this
+    repeat. Tracks in the set (or never synced) are re-read and stamped
+    ``file_tags_synced_at``; the rest are skipped.
+    """
     try:
         from helpers.config_helpers import get_tagging_config
         tagging = get_tagging_config()
@@ -530,6 +540,29 @@ def sync_album_file_tags(
     tracks = _load_fresh_tracks(artist, album)
     if not tracks:
         return {"skipped": "no_tracks", "files_updated": 0, "corrections_recorded": 0}
+
+    # ── Skip tracks the scan did not touch this pass ─────────────────────
+    # ``changed_track_ids`` is the ids the scan WROTE. A track not in it and
+    # already reconciled (``file_tags_synced_at`` set) cannot have drifted: its
+    # file tags were verified against the DB on the pass that wrote it. Reading
+    # every audio file on every scan (mutagen open ~1s per FLAC) was the
+    # dominant repeat cost in a re-scan of a recently-scanned artist.
+    if changed_track_ids is not None:
+        _changed = {str(i) for i in changed_track_ids}
+        tracks = [
+            t for t in tracks
+            if str(t.get("id") or "") in _changed
+            or not (t.get("file_tags_synced_at"))
+        ]
+        if not tracks:
+            return {
+                "artist": artist,
+                "album": album,
+                "skipped": "no_track_changes",
+                "files_updated": 0,
+                "corrections_recorded": 0,
+                "tracks": 0,
+            }
 
     # -------------------------------------------------------------------------
     # ACTIVE GENRE CLEANUP
@@ -597,10 +630,12 @@ def sync_album_file_tags(
     # loaded rows carry the same ids, but normalise anyway (ids are cast to
     # strings somewhere in the pipeline).
     _corrected_ids = {str(_i) for _i in (corrected_title_ids or set())}
+    _synced_ids: list[str] = []
     for track in tracks:
         file_path = str(track.get("file_path") or "").strip()
         if not file_path or not os.path.exists(file_path):
             continue
+        _synced_ids.append(str(track.get("id") or ""))
 
         file_values = _read_file_values(file_path)
         db_candidates = _db_tag_candidates(
@@ -667,6 +702,15 @@ def sync_album_file_tags(
 
         corrections_recorded += _record_corrections(track, file_values, db_candidates)
 
+    # ── Stamp the tracks this pass actually reconciled ───────────────────
+    # The skip gate above reads ``file_tags_synced_at``: a track stamped here
+    # was verified against the DB on THIS pass, so the NEXT scan (which re-runs
+    # the skip gate) can drop the track without re-reading its audio file.
+    # Only tracks whose FILE was read are stamped — a track whose file did not
+    # exist is NOT marked synced, so it is still visited once the file appears.
+    if _synced_ids:
+        _stamp_tag_sync(artist, album, _synced_ids)
+
     if files_updated or corrections_recorded:
         logger.info(
             "Album file tags synced",
@@ -680,6 +724,33 @@ def sync_album_file_tags(
         "corrections_recorded": corrections_recorded,
         "tracks": len(tracks),
     }
+
+
+def _stamp_tag_sync(artist: str, album: str, track_ids: list[str]) -> None:
+    """Mark exactly ``track_ids`` as file-tag-reconciled as of now.
+
+    Executed as ONE UPDATE (the skip-gate reads ``file_tags_synced_at`` per
+    track). Tracks whose files did not exist are deliberately EXCLUDED by the
+    caller: a track with no file must not read as "already synced", or the
+    missing file would never be filled when it appears. Failures are logged,
+    never fatal: a missing stamp only costs a future re-read.
+    """
+    from sqlalchemy import text as _text
+    from db.engine import db_session as _db_session
+
+    ids = [str(i) for i in track_ids if str(i or "").strip()]
+    if not ids:
+        return
+    placeholders = ", ".join(f":id{i}" for i in range(len(ids)))
+    params: dict[str, Any] = {f"id{i}": tid for i, tid in enumerate(ids)}
+    try:
+        with _db_session() as session:
+            session.execute(
+                _text(f"UPDATE tracks SET file_tags_synced_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})"),
+                params,
+            )
+    except Exception as exc:
+        logger.debug("File-tag sync stamp failed", album=album, error=str(exc))
 
 
 def _load_fresh_tracks(artist: str, album: str) -> list[dict[str, Any]]:

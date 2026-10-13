@@ -118,6 +118,14 @@ class Track(Base):
     single_detection_last_updated: Mapped[datetime | None] = mapped_column(DateTime)
     single_manual_override: Mapped[bool | None] = mapped_column(server_default=text("FALSE"))
 
+    # When a recording MusicBrainz search COMPLETED with no result (durable
+    # counterpart of the per-process in-memory negative _mbid_cache) — see
+    # db/schema.py for why is_album_incomplete treats a fresh stamp as
+    # terminal. And when sync_album_file_tags last reconciled this track's
+    # file tags against the DB.
+    recording_mbid_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    file_tags_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+
     # Genres & Classifications
     genres: Mapped[str | None] = mapped_column(Text)
     genre: Mapped[str | None] = mapped_column(String)

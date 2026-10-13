@@ -283,8 +283,66 @@ class TestTheExternalIdsAreGatedOnFillability:
         assert incomplete is False
 
     def test_the_pre_existing_rules_still_fire(self):
-        """CONTROL — the four original checks are untouched."""
-        assert _incomplete(_complete_track(final_score=0))[0] is True
+        """CONTROL — the genre/discogs/album-type checks are unchanged."""
+        assert _incomplete(_complete_track(final_score=None))[0] is True, (
+            "NULL final_score = never assessed; a re-run can fill it"
+        )
         assert _incomplete(_complete_track(musicbrainz_albumtype=""))[0] is True
-        assert _incomplete(_complete_track(recording_mbid=""))[0] is True
+        assert _incomplete(_complete_track(recording_mbid=""))[0] is True, (
+            "a missing MBID with NO checked_at stamp is still re-searchable"
+        )
         assert _incomplete(_complete_track())[0] is False
+
+    def test_a_stored_zero_score_is_a_completed_assessment(self):
+        """THE REPORTED LOOP: 'Score: 0.0' was read as 'not scored'.
+
+        A track whose scoring ran and answered genuinely zero (LF 0, LB 0 —
+        the '1996 #011 - Quad City Dj's' row in the re-scan log) is FINISHED.
+        Requiring ``> 0`` forced its album through the whole pipeline on every
+        scan; re-running the score computes the same zero each time.
+        """
+        incomplete, reason = _incomplete(_complete_track(final_score=0.0))
+        assert incomplete is False, (
+            f"a stored 0.0 is an assessment, not a gap: {reason}"
+        )
+
+    def test_a_fresh_recording_search_miss_is_terminal(self):
+        """A confirmed 'searched, found nothing' must not force a re-run.
+
+        track_stage stamps ``recording_mbid_checked_at`` the moment its
+        MusicBrainz recording search confirms a miss — the durable counterpart
+        of the per-process in-memory negative cache. An album with one
+        unresolvable track (the 'Papa Won't Leave You, Henry'
+        ``candidate_count=0`` rows in the log) must therefore SKIP instead of
+        re-running the whole pipeline on every pass.
+        """
+        incomplete, reason = _incomplete(_complete_track(
+            recording_mbid="",
+            recording_mbid_checked_at="2026-10-13T09:00:00+00:00",
+            mbid="",
+        ))
+        assert incomplete is False, (
+            f"a fresh confirmed miss must be terminal: {reason}"
+        )
+
+    def test_a_stale_recording_search_miss_is_re_searchable(self):
+        """Once the stamp ages past the negative-cache TTL, re-search applies."""
+        old = "2026-01-01T09:00:00+00:00"
+        incomplete, reason = _incomplete(_complete_track(
+            recording_mbid="",
+            recording_mbid_checked_at=old,
+            mbid="",
+        ))
+        assert incomplete is True
+        assert "recording MBID" in reason
+
+    def test_a_confirmed_miss_does_not_cover_other_missing_fields(self):
+        """CONTROL — the relief is scoped to the MBID, not the whole track."""
+        incomplete, reason = _incomplete(_complete_track(
+            recording_mbid="",
+            recording_mbid_checked_at="2026-10-13T09:00:00+00:00",
+            mbid="",
+            final_score=None,
+        ))
+        assert incomplete is True
+        assert "final score" in reason

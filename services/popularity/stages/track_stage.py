@@ -937,6 +937,20 @@ def _resolve_track_mb_metadata(
                     _album_type_indicates_live(track, album_context, album_result)
                     or is_live_or_alternate_track_title(title)
                 )
+
+                # ── Durable "search completed, no result" stamp ────────────
+                # Fired ONLY when lookup_recording_metadata's search CONFIRMS a
+                # miss (never on a transient error): the same moment the
+                # in-memory negative cache is recorded. Persisting the outcome
+                # means a later scan can skip a track whose MusicBrainz
+                # recording search already returned nothing — the in-memory
+                # cache is per-process, so the queue worker and web worker
+                # re-searched it on every pass.
+                def _stamp_recording_mbid_miss() -> None:
+                    from datetime import datetime, timezone
+
+                    payload["recording_mbid_checked_at"] = datetime.now(timezone.utc)
+
                 mb_data = mb_service.lookup_recording_metadata(
                     title,
                     artist,
@@ -944,6 +958,7 @@ def _resolve_track_mb_metadata(
                     is_live_release=_is_live_release,
                     edition_annotation=edition_annotation,
                     mbid=_track_mbid or None,
+                    on_miss=_stamp_recording_mbid_miss,
                 )
                 _from_batch = False
 
@@ -1757,15 +1772,25 @@ def process_track(
                                 if not recording_mbid:
                                     _batch_mb = options.get("mb_batch_metadata") or {}
                                     _mb_entry = _batch_mb.get(f"{artist.lower()}::{str(raw_title or title).lower()}")
-                                    if _mb_entry and _mb_entry.get("recording_mbid"):
-                                        recording_mbid = _mb_entry["recording_mbid"]
-                                    else:
-                                        recording_mbid, _conf = get_shared_mb_service().get_suggested_mbid(
-                                            raw_title or title,
-                                            artist,
-                                            is_live_release=is_live_release,
-                                            edition_annotation=_album_annotation,
-                                        )
+                                if _mb_entry and _mb_entry.get("recording_mbid"):
+                                    recording_mbid = _mb_entry["recording_mbid"]
+                                else:
+                                    # Durable "searched, found nothing" stamp for
+                                    # the ListenBrainz popularity path (see the
+                                    # metadata resolution path in
+                                    # _resolve_track_mb_metadata for the reasoning).
+                                    def _stamp_lb_mbid_miss() -> None:
+                                        from datetime import datetime, timezone
+
+                                        update_payload["recording_mbid_checked_at"] = datetime.now(timezone.utc)
+
+                                    recording_mbid, _conf = get_shared_mb_service().get_suggested_mbid(
+                                        raw_title or title,
+                                        artist,
+                                        is_live_release=is_live_release,
+                                        edition_annotation=_album_annotation,
+                                        on_miss=_stamp_lb_mbid_miss,
+                                    )
 
                                 if recording_mbid:
                                     _lb_source = _lb_source or "mbid_resolved"
@@ -2491,6 +2516,29 @@ def process_track(
     _ret_single_conf = str(update_payload.get("single_confidence") or track.get("single_confidence") or "low")
     _ret_single_srcs = update_payload.get("single_sources") or track.get("single_sources") or "[]"
 
+    # ── Did this pass change a FILE-TAG-relevant column? ────────────────
+    # The file-tag sync (sync_album_file_tags) re-opens every audio file with
+    # mutagen on every scan. Scoping its work to the tracks whose DB tag
+    # values ACTUALLY changed this pass turns a re-scan of an already-synced
+    # album from ~90-120s of file reads into a near-no-op. The columns below
+    # mirror exactly what _db_tag_candidates reads.
+    _TAG_FILE_COLUMNS = (
+        "title", "artist", "album", "album_artist", "originalyear", "originaldate",
+        "track_number", "disc_number", "isrc", "writer", "genres", "lyrics",
+        "recording_mbid", "mbid", "musicbrainz_albumid", "musicbrainz_album_mbid",
+        "musicbrainz_releasegroupid", "musicbrainz_artistid",
+        "musicbrainz_releasetrackid", "musicbrainz_workid",
+    )
+    _tag_changed = False
+    for _col in _TAG_FILE_COLUMNS:
+        if _col not in update_payload:
+            continue
+        _old = str((effective_track or track).get(_col) or "").strip()
+        _new = str(update_payload.get(_col) or "").strip()
+        if str(_old).casefold() != str(_new).casefold():
+            _tag_changed = True
+            break
+
     return {
         "track_id": track_id,
         "artist": _resolved_track_artist,
@@ -2502,6 +2550,11 @@ def process_track(
         # sync can REWRITE the TITLE tag (not just fill-if-missing) for
         # exactly these tracks.
         "title_corrected": bool((update_payload or {}).get("title")),
+        # True when THIS pass wrote a different file-tag-relevant DB value for
+        # the track (title/artist/album/genres/year/isrc/mbids/…). The runner
+        # scopes sync_album_file_tags to exactly these ids, so an unchanged
+        # album's files are not re-read on every scan.
+        "tag_changed": _tag_changed,
         # The recording/work ids the metadata scan just resolved. Published so
         # the deep cover pass can overlay them onto its (stale, load-time) rows
         # and skip the per-track MusicBrainz searches — the same mechanism that

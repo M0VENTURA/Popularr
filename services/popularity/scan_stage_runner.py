@@ -135,6 +135,39 @@ _GENRE_SOURCE_FIELDS: tuple[str, ...] = (
 _EMPTY_GENRE_MARKERS: tuple[Any, ...] = (None, "", [], {}, "null", "none", "[]", "{}")
 
 
+def _recording_mbid_checked_recently(track: dict[str, Any]) -> bool:
+    """Was this track's recording-MBID search completed within the window?
+
+    Mirrors the in-memory negative ``_mbid_cache`` TTL (``_MBID_NEGATIVE_TTL_
+    SECONDS``) so the DB stamp and the process-local cache cannot disagree
+    about how long a confirmed miss stays authoritative. A fresh stamp means
+    the MusicBrainz recording search already returned nothing for this track —
+    re-running it on the next scan would return the same nothing, so the
+    album-skip gate must not force the whole album through again for it.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    raw = track.get("recording_mbid_checked_at")
+    if not raw:
+        return False
+    if isinstance(raw, datetime):
+        checked = raw
+    else:
+        try:
+            checked = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return False
+    if checked.tzinfo is None:
+        checked = checked.replace(tzinfo=timezone.utc)
+    try:
+        from services.enrichment.musicbrainz_service import _MBID_NEGATIVE_TTL_SECONDS
+
+        window = timedelta(seconds=int(_MBID_NEGATIVE_TTL_SECONDS))
+    except Exception:
+        window = timedelta(days=7)
+    return datetime.now(timezone.utc) - checked < window
+
+
 def _bounded_call_report(
     func: Callable[..., T],
     *args: Any,
@@ -507,6 +540,13 @@ def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
     if not tracks:
         return True, "no tracks found"
 
+    # ⚠️ A stored 0.0 is a COMPLETED score, not a missing one. The scan writes
+    # ``final_score`` even when the answer is genuinely zero (LF 0, LB 0 — the
+    # "1996 #011 - Quad City Dj's" case in the reported log), and requiring
+    # ``> 0`` made that album FORCE through the whole pipeline on every scan:
+    # the zero track is "incomplete" forever even though re-running the score
+    # computes the same zero. Only NULL / empty means the pass never assessed
+    # the track.
     required_single_fields = ("final_score", "musicbrainz_albumtype")
 
     for track in tracks:
@@ -539,12 +579,33 @@ def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
 
         for field in required_single_fields:
             val = track.get(field)
-            if val is None or val == "" or (isinstance(val, (int, float)) and val <= 0):
+            # ⚠️ See the note above: 0.0 is a real assessment for final_score,
+            # so the ``<= 0`` arm must NOT run for it. ``musicbrainz_albumtype``
+            # is a text column, so ``<= 0`` never applied there anyway.
+            if field == "final_score":
+                if val is None or val == "":
+                    return True, f"track '{title}' missing final score"
+            elif val is None or val == "":
                 return True, f"track '{title}' missing {field}"
 
         mbid = str(track.get("recording_mbid") or track.get("mbid") or "").strip()
         if not mbid:
-            return True, f"track '{title}' missing recording MBID"
+            # ── Durable "searched, found nothing" relief ───────────────────
+            #
+            # A missing recording MBID used to force the album through the
+            # whole pipeline on every scan, because "a re-run could fill it".
+            # But track_stage now persists ``recording_mbid_checked_at`` the
+            # moment its MusicBrainz recording search CONFIRMS a miss — the
+            # same outcome the in-memory negative ``_mbid_cache`` records, made
+            # durable because that cache is per-process. A fresh stamp is
+            # terminal: re-running the search returns the same nothing, so the
+            # album may skip. The stamp ages out with the negative-cache TTL
+            # (matching ``_MBID_NEGATIVE_TTL_SECONDS``), at which point the
+            # track is re-searchable again (and the completeness gate re-applies).
+            if _recording_mbid_checked_recently(track):
+                pass
+            else:
+                return True, f"track '{title}' missing recording MBID"
 
         # ── External identities, only when the row proves they're fillable ──
         #
@@ -2265,13 +2326,22 @@ def run_scan(
                     # "Assessed" is asked through the ONE helper, so this gate
                     # and the gap fill below cannot disagree about it.
                     _singles_unassessed = _tracks_without_singles_verdict(tracks)
+                    # ⚠️ A stored 0.0 is a COMPLETED assessment — the score ran
+                    # and answered zero (the "1996 #011 - Quad City Dj's"
+                    # case). Requiring ``> 0`` made a genuinely-unknown track
+                    # block the skip forever: "no changes detected" never fired,
+                    # so the whole album re-ran on every scan and produced the
+                    # same 0.0. Only NULL means the pass never scored it.
+                    def _scored(t):
+                        return t.get("final_score") is not None and str(t.get("final_score") or "").strip() != ""
+
                     if _mode_singles:
                         all_done = not _singles_unassessed
                     elif _mode_pop:
-                        all_done = all(float(t.get("final_score") or 0) > 0 for t in tracks)
+                        all_done = all(_scored(t) for t in tracks)
                     else:
                         all_done = (
-                            all(float(t.get("final_score") or 0) > 0 for t in tracks)
+                            all(_scored(t) for t in tracks)
                             and not _singles_unassessed
                         )
                     if all_done:
@@ -3018,6 +3088,25 @@ def run_scan(
             except Exception as exc:
                 logger.warning("Bulk track persist failed", artist=artist, album=album, error=str(exc))
 
+            # ── THE ALBUM'S CHANGED TRACK IDS ──────────────────────────────
+            # ``sync_album_file_tags`` re-opens every audio file with mutagen
+            # on every scan; the reported ~90-120s per re-scan of an album was
+            # exactly that. Only tracks whose FILE-TAG-relevant DB values
+            # CHANGED this pass (track_stage's ``tag_changed``) need their
+            # files reconciled again — an unchanged track was already verified
+            # on the pass that wrote it. ``_corrected_title_ids`` are always
+            # included: their TITLE tag must be rewritten even when the rest of
+            # the payload matched.
+            _album_changed_track_ids: set[str] = set(_corrected_title_ids)
+            for _res in _track_results_ordered:
+                if not isinstance(_res, dict):
+                    continue
+                if not _res.get("tag_changed"):
+                    continue
+                _rid = str(_res.get("track_id") or "").strip()
+                if _rid:
+                    _album_changed_track_ids.add(_rid)
+
             for _track_i, ((_prepared, _tc, _opts, _frozen), track_result) in enumerate(zip(_track_jobs, _track_results_ordered)):
                 if track_result is not None:
                     results.append(track_result)
@@ -3201,6 +3290,10 @@ def run_scan(
                         artist=artist,
                         album=album,
                         corrected_title_ids=_corrected_title_ids or None,
+                        # Only the tracks the scan WROTE this pass — see the
+                        # changed-ids block above. A re-scan of an album whose
+                        # rows all matched skips the mutagen re-reads entirely.
+                        changed_track_ids=_album_changed_track_ids or None,
                     )
                     if _tag_sync and (_tag_sync.get("files_updated") or _tag_sync.get("corrections_recorded")):
                         _album_report["metadata_corrections"] = int(_tag_sync.get("corrections_recorded") or 0)
