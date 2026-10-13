@@ -48,10 +48,6 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _route() -> str:
-    return (REPO_ROOT / "routes" / "download_search_routes.py").read_text(encoding="utf-8")
-
-
 # ---------------------------------------------------------------------------
 # 1. The durable search-miss stamp is wired through the MB service
 # ---------------------------------------------------------------------------
@@ -179,14 +175,38 @@ class TestCompletedSectionsAreSkippable:
 
     def test_the_skip_gate_treats_zero_as_scored(self) -> None:
         """skip_unchanged_albums used ``> 0``; a genuinely-zero track blocked
-        "no changes detected" forever."""
+        "no changes detected" forever. Behavioural via the module-level
+        helper the runner's gate calls."""
+        from services.popularity.scan_stage_runner import _track_has_assessed_score
+
+        assert _track_has_assessed_score({"final_score": 0.0}) is True, (
+            "a stored float 0.0 IS an assessment — `or \"\"` would swallow it"
+        )
+        assert _track_has_assessed_score({"final_score": 0}) is True
+        assert _track_has_assessed_score({"final_score": 55.0}) is True
+        assert _track_has_assessed_score({"final_score": "0.0"}) is True
+        assert _track_has_assessed_score({"final_score": None}) is False
+        assert _track_has_assessed_score({"final_score": ""}) is False
+        assert _track_has_assessed_score({}) is False
+
+    def test_the_skip_gate_uses_the_module_helper(self) -> None:
+        """The gate must CALL the helper — a local re-derivation could drift."""
         src = (REPO_ROOT / "services" / "popularity" / "scan_stage_runner.py").read_text(
             encoding="utf-8"
         )
-        idx = src.index("def _scored(t)")
-        block = src[idx: idx + 260]
-        assert 't.get("final_score") is not None' in block
-        assert "> 0" not in block
+        idx = src.index("def _track_has_assessed_score(")
+        body = src[idx: idx + 1500]
+        assert 'return value is not None and str(value).strip() != ""' in body, (
+            "the return must treat a falsy zero as scored — `or \"\"` would "
+            "swallow 0.0 and recreate the reported never-skip loop"
+        )
+        # Code-body only: strip the leading docstring (its prose quotes the
+        # ``> 0`` trap it explains), then the remainder must hold no > 0 gate.
+        code = body.split('"""', 2)[2] if body.count('"""') >= 2 else body
+        assert "> 0" not in code
+        # The gate calls it for both the pop and combined modes.
+        gate = src[src.index("all_done = all(_track_has_assessed_score(t) for t in tracks)"):]
+        assert gate.count("_track_has_assessed_score(t) for t in tracks") >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -358,12 +378,21 @@ class TestTheRunnerScopesTheSync:
         src = (REPO_ROOT / "services" / "popularity" / "scan_stage_runner.py").read_text(
             encoding="utf-8"
         )
-        idx = src.index("_album_changed_track_ids: set[str] = set(_corrected_title_ids)")
+        # The collection must define the set BEFORE reading it — the first
+        # draft read `_corrected_title_ids` before its own assignment and
+        # crashed every scan with UnboundLocalError on the first album.
+        idx = src.index("_album_changed_track_ids: set[str] = set()")
         block = src[idx: idx + 700]
-        assert 'if not _res.get("tag_changed"):' in block
+        assert 'bool(_res.get("tag_changed"))' in block
         assert "_album_changed_track_ids.add(_rid)" in block
-        sync_call = src[src.index("changed_track_ids=_album_changed_track_ids") - 200:
-                        src.index("changed_track_ids=_album_changed_track_ids") + 80]
+        # And the collection must sit BEFORE the sync call consumes it.
+        collect_idx = src.index("_album_changed_track_ids: set[str] = set()")
+        sync_idx = src.index("changed_track_ids=_album_changed_track_ids")
+        assert collect_idx < sync_idx, (
+            "the changed-ids set must be collected before sync_album_file_tags "
+            "reads it, or the first album raises UnboundLocalError"
+        )
+        sync_call = src[sync_idx - 200: sync_idx + 80]
         assert "changed_track_ids=_album_changed_track_ids" in sync_call
 
 

@@ -1772,25 +1772,25 @@ def process_track(
                                 if not recording_mbid:
                                     _batch_mb = options.get("mb_batch_metadata") or {}
                                     _mb_entry = _batch_mb.get(f"{artist.lower()}::{str(raw_title or title).lower()}")
-                                if _mb_entry and _mb_entry.get("recording_mbid"):
-                                    recording_mbid = _mb_entry["recording_mbid"]
-                                else:
-                                    # Durable "searched, found nothing" stamp for
-                                    # the ListenBrainz popularity path (see the
-                                    # metadata resolution path in
-                                    # _resolve_track_mb_metadata for the reasoning).
-                                    def _stamp_lb_mbid_miss() -> None:
-                                        from datetime import datetime, timezone
+                                    if _mb_entry and _mb_entry.get("recording_mbid"):
+                                        recording_mbid = _mb_entry["recording_mbid"]
+                                    else:
+                                        # Durable "searched, found nothing" stamp for
+                                        # the ListenBrainz popularity path (see the
+                                        # metadata resolution path in
+                                        # _resolve_track_mb_metadata for the reasoning).
+                                        def _stamp_lb_mbid_miss() -> None:
+                                            from datetime import datetime, timezone
 
-                                        update_payload["recording_mbid_checked_at"] = datetime.now(timezone.utc)
+                                            update_payload["recording_mbid_checked_at"] = datetime.now(timezone.utc)
 
-                                    recording_mbid, _conf = get_shared_mb_service().get_suggested_mbid(
-                                        raw_title or title,
-                                        artist,
-                                        is_live_release=is_live_release,
-                                        edition_annotation=_album_annotation,
-                                        on_miss=_stamp_lb_mbid_miss,
-                                    )
+                                        recording_mbid, _conf = get_shared_mb_service().get_suggested_mbid(
+                                            raw_title or title,
+                                            artist,
+                                            is_live_release=is_live_release,
+                                            edition_annotation=_album_annotation,
+                                            on_miss=_stamp_lb_mbid_miss,
+                                        )
 
                                 if recording_mbid:
                                     _lb_source = _lb_source or "mbid_resolved"

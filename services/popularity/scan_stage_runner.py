@@ -135,6 +135,22 @@ _GENRE_SOURCE_FIELDS: tuple[str, ...] = (
 _EMPTY_GENRE_MARKERS: tuple[Any, ...] = (None, "", [], {}, "null", "none", "[]", "{}")
 
 
+def _track_has_assessed_score(track: dict[str, Any]) -> bool:
+    """Has this track's popularity score been ASSESSED (not necessarily > 0)?
+
+    ⚠️ The ``is not None`` guard is load-bearing, and so is NOT using
+    ``or ""``: ``0.0 or ""`` evaluates to ``""``, so a falsy zero would read
+    as "not scored". A stored 0.0 IS an assessment — the score ran and
+    answered genuinely zero (LF 0, LB 0 — the "1996 #011 - Quad City Dj's"
+    row in the reported re-scan log). Requiring ``> 0`` made a genuinely-
+    unknown track block its album's skip forever: "no changes detected" never
+    fired, so the whole album re-ran on every scan and produced the same 0.0.
+    Only NULL / empty means the pass never scored the track.
+    """
+    value = track.get("final_score")
+    return value is not None and str(value).strip() != ""
+
+
 def _recording_mbid_checked_recently(track: dict[str, Any]) -> bool:
     """Was this track's recording-MBID search completed within the window?
 
@@ -2326,22 +2342,16 @@ def run_scan(
                     # "Assessed" is asked through the ONE helper, so this gate
                     # and the gap fill below cannot disagree about it.
                     _singles_unassessed = _tracks_without_singles_verdict(tracks)
-                    # ⚠️ A stored 0.0 is a COMPLETED assessment — the score ran
-                    # and answered zero (the "1996 #011 - Quad City Dj's"
-                    # case). Requiring ``> 0`` made a genuinely-unknown track
-                    # block the skip forever: "no changes detected" never fired,
-                    # so the whole album re-ran on every scan and produced the
-                    # same 0.0. Only NULL means the pass never scored it.
-                    def _scored(t):
-                        return t.get("final_score") is not None and str(t.get("final_score") or "").strip() != ""
-
+                    # "Assessed" is ONE helper (module-level, tested behaviourally):
+                    # a stored 0.0 IS an assessment, only NULL means "never
+                    # scored" — see _track_has_assessed_score.
                     if _mode_singles:
                         all_done = not _singles_unassessed
                     elif _mode_pop:
-                        all_done = all(_scored(t) for t in tracks)
+                        all_done = all(_track_has_assessed_score(t) for t in tracks)
                     else:
                         all_done = (
-                            all(_scored(t) for t in tracks)
+                            all(_track_has_assessed_score(t) for t in tracks)
                             and not _singles_unassessed
                         )
                     if all_done:
@@ -3088,25 +3098,6 @@ def run_scan(
             except Exception as exc:
                 logger.warning("Bulk track persist failed", artist=artist, album=album, error=str(exc))
 
-            # ── THE ALBUM'S CHANGED TRACK IDS ──────────────────────────────
-            # ``sync_album_file_tags`` re-opens every audio file with mutagen
-            # on every scan; the reported ~90-120s per re-scan of an album was
-            # exactly that. Only tracks whose FILE-TAG-relevant DB values
-            # CHANGED this pass (track_stage's ``tag_changed``) need their
-            # files reconciled again — an unchanged track was already verified
-            # on the pass that wrote it. ``_corrected_title_ids`` are always
-            # included: their TITLE tag must be rewritten even when the rest of
-            # the payload matched.
-            _album_changed_track_ids: set[str] = set(_corrected_title_ids)
-            for _res in _track_results_ordered:
-                if not isinstance(_res, dict):
-                    continue
-                if not _res.get("tag_changed"):
-                    continue
-                _rid = str(_res.get("track_id") or "").strip()
-                if _rid:
-                    _album_changed_track_ids.add(_rid)
-
             for _track_i, ((_prepared, _tc, _opts, _frozen), track_result) in enumerate(zip(_track_jobs, _track_results_ordered)):
                 if track_result is not None:
                     results.append(track_result)
@@ -3197,6 +3188,15 @@ def run_scan(
             # ``sync_album_file_tags`` so the file TITLE tag is REWRITTEN for
             # exactly these tracks — not merely filled if missing.
             _corrected_title_ids: set[str] = set()
+            # Track ids whose FILE-TAG-relevant DB values changed this pass
+            # (track_stage's ``tag_changed``) — the scope handed to
+            # ``sync_album_file_tags`` so it does not re-open every audio file
+            # with mutagen on every scan (~90-120s of reads per re-scanned
+            # album). ``_corrected_title_ids`` are always included: their
+            # TITLE tag must be rewritten even when the rest of the payload
+            # matched. Collected HERE (not earlier) because this is the FIRST
+            # place both sets are known.
+            _album_changed_track_ids: set[str] = set()
             for _res in _track_results_ordered:
                 if not isinstance(_res, dict):
                     continue
@@ -3206,6 +3206,8 @@ def run_scan(
                     _resolved_artists[_rid] = _rartist
                 if _rid and bool(_res.get("title_corrected")):
                     _corrected_title_ids.add(_rid)
+                if _rid and bool(_res.get("tag_changed")):
+                    _album_changed_track_ids.add(_rid)
                 _rmbid = str(_res.get("recording_mbid") or "").strip()
                 _wmbid = str(_res.get("work_mbid") or "").strip()
                 if _rid and (_rmbid or _wmbid):
