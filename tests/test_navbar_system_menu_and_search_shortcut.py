@@ -114,8 +114,14 @@ class TestSearchShortcut:
         assert 'id="navSearchKbd"' in base
 
     def test_the_hint_is_hidden_where_the_navbar_is_tight(self, base: str):
-        """Below lg the search row wraps; the badge would crowd its own input."""
-        assert 'class="input-group-text bg-dark border-secondary text-muted search-kbd-hint d-none d-lg-flex' in base
+        """Below lg the search row wraps; the badge would crowd its own input.
+
+        (The ``bg-dark border-secondary`` classes were REMOVED with the
+        segmented-input-group styling — the pill is now ONE outline, so the
+        segment elements are transparent. ``d-none d-lg-flex`` is the
+        load-bearing part.)
+        """
+        assert 'class="input-group-text text-muted search-kbd-hint d-none d-lg-flex' in base
 
     def test_the_input_advertises_the_shortcut(self, base: str):
         assert 'aria-keyshortcuts="Control+K Meta+K"' in base
@@ -159,6 +165,77 @@ class TestSearchShortcut:
         block = css[css.index(".search-kbd-hint") : css.index(".search-kbd-hint") + 700]
         assert "var(--tertiary-bg)" in block
         assert "var(--border-color)" in block
+
+
+class TestTheSearchReadsAsOnePill:
+    """The promoted search must read as ONE clean pill, not a bigger
+    segmented input-group.
+
+    Follow-up to the "make search more prominent" change: making the field
+    large was not enough — it still rendered as four joined boxes (icon,
+    input, Ctrl+K badge, and a REDUNDANT second search button) with internal
+    border dividers, and the long placeholder clipped to "Search li" inside
+    the pill. The clean contract: one magnifying glass, no child borders,
+    one pill outline, and a placeholder short enough to never clip.
+    """
+
+    def test_only_one_magnifying_glass_in_the_search_group(self, base: str) -> None:
+        start = base.index('id="navSearchForm"')
+        window = base[start : base.index("</div>", base.index('id="navSearchForm"')) + 4000]
+        assert window.count('bi bi-search') == 1, (
+            "the search group must have ONE search icon — the redundant "
+            "right-hand search BUTTON was a second magnifying glass"
+        )
+        assert 'class="input-group-text nav-search-icon' in window, (
+            "the single icon belongs to the group's leading segment"
+        )
+
+    def test_no_redundant_search_button(self, base: str) -> None:
+        start = base.index('id="navSearchForm"')
+        end = base.index("</div>", base.index('id="navSearchForm"'))
+        window = base[start : end + 4000]
+        assert '<button class="btn btn-outline-secondary" type="button" title="Search"' not in window, (
+            "the search button duplicated the input's onfocus/Enter behaviour; "
+            "removed so the pill is icon + input + Ctrl+K badge only"
+        )
+
+    def test_the_placeholder_cannot_clip(self, base: str) -> None:
+        """The long placeholder read as "Search li"; the concise one never
+        clips at common navbar widths. Full context lives in the aria-label
+        and the wrapper title."""
+        assert 'placeholder="Search…"' in base
+        # Scope to the INPUT TAG itself — the Jinja comment above the input
+        # legitimately QUOTES the retired long placeholder to explain it.
+        tag_start = base.index('<input type="search" id="navSearchInput"')
+        tag = base[tag_start : base.index(">", tag_start)]
+        assert "MusicBrainz…" not in tag, (
+            "the long placeholder clipped inside the pill; the concise form "
+            "replaces it (aria-label still says 'Search library or MusicBrainz')"
+        )
+
+    def test_the_group_is_a_single_pill_outline(self, css: str) -> None:
+        """One border + one background on the GROUP; children transparent, so
+        no internal divider lines."""
+        idx = css.index(".nav-search-input-group {")
+        window = css[idx : idx + 900]
+        assert "border: 1px solid var(--border-color)" in window, (
+            "the pill needs the group's OWN outline — otherwise only the "
+            "input draws one and the segments read as separate boxes"
+        )
+        assert "background: var(--secondary-bg)" in window
+        assert "overflow: hidden" in window, (
+            "children must be clipped into the pill radius"
+        )
+        assert "border: 0;" in window, "segment elements must not draw dividers"
+
+    def test_the_focus_glow_lives_on_the_group_only(self, css: str) -> None:
+        idx = css.index(".nav-search-input-group {")
+        window = css[idx : idx + 900]
+        assert "&:focus-within" in window
+        # The input's own Bootstrap focus box-shadow is neutralized inside the
+        # group, so the single pill glow is the only focus treatment.
+        fc = window[window.index(".form-control") :]
+        assert "box-shadow: none" in fc
 
 
 class TestEnterPathStillWorks:

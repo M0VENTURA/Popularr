@@ -61,21 +61,25 @@
       <!-- Persistent Global Search Bar -->
       <div class="nav-search-wrapper" id="navSearchForm" title="Search library or MusicBrainz (Ctrl+K)">
         <div class="input-group input-group-lg nav-search-input-group">
-          <span class="input-group-text bg-dark border-secondary text-muted"><i class="bi bi-search"></i></span>
+          <span class="input-group-text nav-search-icon text-muted"><i class="bi bi-search"></i></span>
           {#
             type="search" + enterkeyhint="search" give the mobile keyboard a
             Search key instead of a plain Return; autocapitalize/autocorrect/
             spellcheck off stop artist names being "corrected" as they are
             typed. `inputmode="search"` keeps the search-optimised layout.
 
-            `input-group-lg` + `.nav-search-input-group` make this the visual
-            HERO of the toolbar on the main site — the user asked for a search
-            that is prominent even if the bar grows taller. The pre-existing
-            `input-group-sm` said "secondary control" and the search box read
-            as just another icon.
+            CLEAN-PILL styling: ONE search icon (the redundant right-hand
+            search BUTTON was removed — its click was the same as the input's
+            onfocus/Enter), no segment borders between the icon / input /
+            shortcut hint (the group renders as a single pill outline), and a
+            CONCISE placeholder because the long "Search library or
+            MusicBrainz…" text clipped inside the pill at common widths
+            (read as "Search li"). The full meaning lives in the aria-label
+            and the wrapper's title. The right-hand Ctrl+K badge is the only
+            sibling; the pill reads as one field, not four segments.
           #}
-          <input type="search" id="navSearchInput" class="form-control bg-dark text-light border-secondary shadow-none"
-                 placeholder="Search library or MusicBrainz…" autocomplete="off" aria-label="Search library or MusicBrainz"
+          <input type="search" id="navSearchInput" class="form-control text-light border-0 shadow-none"
+                 placeholder="Search…" autocomplete="off" aria-label="Search library or MusicBrainz"
                  aria-keyshortcuts="Control+K Meta+K"
                  inputmode="search" enterkeyhint="search"
                  autocapitalize="off" autocorrect="off" spellcheck="false"
@@ -86,13 +90,10 @@
              on top of the text the user is typing. `d-none d-lg-flex` hides it
              wherever the navbar is tight — below lg the search row wraps and
              the badge would crowd the input it labels. #}
-          <span class="input-group-text bg-dark border-secondary text-muted search-kbd-hint d-none d-lg-flex align-items-center"
+          <span class="input-group-text text-muted search-kbd-hint d-none d-lg-flex align-items-center"
                 id="navSearchKbdHint" title="Press Ctrl+K (⌘K on Mac) to search" aria-hidden="true">
             <kbd class="search-kbd" id="navSearchKbd">Ctrl</kbd><kbd class="search-kbd">K</kbd>
           </span>
-          <button class="btn btn-outline-secondary" type="button" title="Search" aria-label="Search" onclick="openUnifiedSearch()">
-            <i class="bi bi-search"></i>
-          </button>
         </div>
       </div>
 

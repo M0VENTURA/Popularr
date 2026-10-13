@@ -209,31 +209,48 @@ main.container-fluid {
     border-radius: var(--radius-sm, 0.25rem);
 }
 
-/* Promoted navbar search — the visual HERO of the toolbar on the main site.
-   `input-group-lg` in base.html grows the field; this cements it: the group
-   gets a pill shape, a subtle glow when focused, and the icon/button match
-   the larger field instead of looking like secondary controls. The toolbar
-   is allowed to grow taller to fit it (--navbar-height is measured, so every
-   consumer follows automatically). */
+/* Promoted navbar search — ONE clean pill (see base.html for the markup
+   contract). `overflow: hidden` + the group's own border-radius clip every
+   child into the pill, and the children are borderless/transparent, so the
+   field reads as a single outline instead of four segmented boxes. The old
+   `bg-dark border-secondary` on each `input-group-text` drew the internal
+   dividers, and the redundant right-hand search BUTTON (a second magnifying
+   glass) was removed — the input's onfocus/Enter already open and submit
+   the search. The focus glow stays on `:focus-within`. */
 .nav-search-input-group {
+    border: 1px solid var(--border-color);
+    background: var(--secondary-bg);
     border-radius: var(--radius-pill, 999px);
-    transition: box-shadow 0.15s ease;
+    overflow: hidden;
+    transition: box-shadow 0.15s ease, border-color 0.15s ease;
 
     &:focus-within {
+        border-color: var(--spotify-green);
         box-shadow: 0 0 0 3px color-mix(in srgb, var(--spotify-green) 25%, transparent);
     }
 
     .input-group-text,
     .btn {
+        border: 0;
+        background: transparent;
         border-radius: 0;
     }
-    .btn:last-child {
-        border-top-right-radius: var(--radius-pill, 999px);
-        border-bottom-right-radius: var(--radius-pill, 999px);
+    .form-control {
+        border: 0;
+        background: transparent;
+
+        &:focus {
+            box-shadow: none;
+        }
     }
-    .input-group-text:first-child {
-        border-top-left-radius: var(--radius-pill, 999px);
-        border-bottom-left-radius: var(--radius-pill, 999px);
+    /* Roomier pill ends for the icon (left) and Ctrl+K badge (right). */
+    > .input-group-text:first-child {
+        padding-left: 1rem;
+        padding-right: 0.25rem;
+    }
+    > .search-kbd-hint {
+        padding-left: 0.25rem;
+        padding-right: 1rem;
     }
 }
 
