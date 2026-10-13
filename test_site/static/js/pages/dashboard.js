@@ -789,6 +789,58 @@
     }
   }
 
+  // ── Recently Added / Recent Scans tabs ──────────────────────────────────
+  //
+  // The two historical lists share ONE card (see dashboard.html), so the tab
+  // choice is remembered — same sessionStorage pattern as dashboardTableFilter
+  // below — or every reload would bounce the user back to "Recently Added".
+  //
+  // Switching goes through Bootstrap's own Tab API rather than flipping
+  // classes: hand-toggling `.active` would desync the panes from the buttons'
+  // aria-selected state and from the fade transition.
+  const RECENT_TAB_KEY = 'dashboardRecentTab';
+  const RECENT_TAB_HINTS = {
+    recentAddedPane: 'Last 14 days',
+    recentScansPane: 'Latest first',
+  };
+
+  function initRecentHistoryTabs() {
+    const tabs = document.getElementById('recentHistoryTabs');
+    if (!tabs) return;
+
+    const hint = document.getElementById('recentHistoryHint');
+    const paneOf = (target) => String(target || '').replace('#', '');
+    const setHint = (target) => {
+      if (hint) hint.textContent = RECENT_TAB_HINTS[paneOf(target)] || '';
+    };
+
+    let stored = null;
+    try {
+      stored = sessionStorage.getItem(RECENT_TAB_KEY);
+    } catch (_e) {
+      /* private browsing */
+    }
+    if (stored) {
+      const btn = tabs.querySelector(`[data-bs-target="#${stored}"]`);
+      const Tab = global.bootstrap && global.bootstrap.Tab;
+      if (btn && Tab) Tab.getOrCreateInstance(btn).show();
+    }
+
+    tabs.addEventListener('shown.bs.tab', (event) => {
+      const target = event.target && event.target.getAttribute('data-bs-target');
+      setHint(target);
+      try {
+        sessionStorage.setItem(RECENT_TAB_KEY, paneOf(target));
+      } catch (_e) {
+        /* quota / private browsing */
+      }
+    });
+
+    // The hint must match whichever tab is active AFTER the restore above.
+    const activeBtn = tabs.querySelector('.nav-link.active');
+    setHint(activeBtn && activeBtn.getAttribute('data-bs-target'));
+  }
+
   // ── Init ────────────────────────────────────────────────────────────────
 
   function updateAll() {
@@ -805,6 +857,7 @@
   document.addEventListener('DOMContentLoaded', function () {
     checkNavidromeConnectivity();
     renderRecentScans((global._pd && global._pd.recentScans) || []);
+    initRecentHistoryTabs();
 
     try {
       const stored = sessionStorage.getItem('dashboardTableFilter');

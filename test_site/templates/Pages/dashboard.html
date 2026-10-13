@@ -235,15 +235,36 @@
                 </div>
             </div>
 
-            <!-- Recently Added Albums -->
-            <div class="card shadow-sm" id="recentAlbumsCard">
-                <div class="card-header py-2 d-flex justify-content-between align-items-center border-secondary">
-                    <h6 class="mb-0"><i class="bi bi-music-note-beamed text-primary me-1"></i> Recently Added</h6>
-                    <small class="text-muted">Last 14 days</small>
+            <!--
+              Recently Added + Recent Scans are BOTH historical logs and are
+              rarely wanted at the same time, so they share ONE card with a tab
+              strip instead of stacking two long scrolling lists in the rail.
+              Real Bootstrap tabs (not the data-mobile-tabs engine) so each
+              pane keeps its own scroll container at every breakpoint; the
+              chosen tab is remembered in sessionStorage (pages/dashboard.js).
+            -->
+            <div class="card shadow-sm" id="recentHistoryCard">
+                <div class="card-header py-2 border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <ul class="nav nav-pills nav-segmented mb-0" id="recentHistoryTabs" role="tablist">
+                        <li class="nav-item" role="presentation">
+                            <button type="button" class="nav-link active py-0 px-2" id="recentAddedTab" data-bs-toggle="pill" data-bs-target="#recentAddedPane" role="tab" aria-controls="recentAddedPane" aria-selected="true">
+                                <i class="bi bi-music-note-beamed text-primary me-1"></i> Recently Added
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button type="button" class="nav-link py-0 px-2" id="recentScansTab" data-bs-toggle="pill" data-bs-target="#recentScansPane" role="tab" aria-controls="recentScansPane" aria-selected="false">
+                                <i class="bi bi-clock-history text-warning me-1"></i> Recent Scans
+                            </button>
+                        </li>
+                    </ul>
+                    <small class="text-muted" id="recentHistoryHint">Last 14 days</small>
                 </div>
-                
+                <div class="tab-content" id="recentHistoryContent">
+
+                <!-- Recently Added pane -->
+                <div class="tab-pane fade show active" id="recentAddedPane" role="tabpanel" aria-labelledby="recentAddedTab">
                 {% if recent_albums %}
-                <div class="list-group list-group-flush" style="max-height: 380px; overflow-y: auto; scrollbar-width: thin;">
+                <div class="list-group list-group-flush" style="max-height: 420px; overflow-y: auto; scrollbar-width: thin;">
                     {% for al in recent_albums %}
                     <a href="{{ url_for('ui.album_detail', album_path=al.artist ~ '/' ~ al.album ~ (('/' ~ al.album_year) if al.album_year else '')) }}" 
                        class="list-group-item list-group-item-action bg-transparent border-secondary d-flex justify-content-between align-items-center gap-2 p-2 hover-bg-dark">
@@ -275,19 +296,19 @@
                     No albums added in the last 14 days.
                 </div>
                 {% endif %}
-            </div>
+                </div><!-- /recentAddedPane -->
 
-            <!-- Recent Scans -->
-            <div class="card shadow-sm" id="recentScansCard">
-                <div class="card-header py-2 border-secondary">
-                    <h6 class="mb-0"><i class="bi bi-clock-history text-warning me-1"></i> Recent Scans</h6>
-                </div>
-                <div class="card-body p-0 overflow-y-auto" style="max-height: 480px; scrollbar-width: thin;">
-                    <div class="list-group list-group-flush" id="recent-scans-body">
-                        <!-- Populated via javascript -->
+                <!-- Recent Scans pane -->
+                <div class="tab-pane fade" id="recentScansPane" role="tabpanel" aria-labelledby="recentScansTab">
+                    <div class="card-body p-0 overflow-y-auto" style="max-height: 420px; scrollbar-width: thin;">
+                        <div class="list-group list-group-flush" id="recent-scans-body">
+                            <!-- Populated via javascript -->
+                        </div>
                     </div>
                 </div>
-            </div>
+
+                </div><!-- /recentHistoryContent -->
+            </div><!-- /recentHistoryCard -->
             
         </div>
     </div>

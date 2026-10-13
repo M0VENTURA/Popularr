@@ -305,3 +305,97 @@ class TestMissingFoldedIntoDiscover:
         window = base[idx: idx + 1400]
         assert 'href="/discover"' in window
         assert "/downloads/discover/upcoming" in window
+
+
+# ---------------------------------------------------------------------------
+# 7. Recently Added / Recent Scans share ONE tabbed card
+# ---------------------------------------------------------------------------
+
+DASHBOARD_CSS = TS / "static" / "css" / "dashboard.css"
+
+
+class TestRecentHistoryTabs:
+    """Two historical logs, one card.
+
+    They were two stacked cards, each with its own long scrolling list, so the
+    right rail was dominated by history the user rarely needs simultaneously.
+    """
+
+    def test_one_card_with_two_tabs(self) -> None:
+        html = _read(DASHBOARD_HTML)
+        assert 'id="recentHistoryCard"' in html
+        assert 'id="recentHistoryTabs"' in html
+        assert 'data-bs-target="#recentAddedPane"' in html
+        assert 'data-bs-target="#recentScansPane"' in html
+
+    def test_both_panes_exist(self) -> None:
+        html = _read(DASHBOARD_HTML)
+        assert 'id="recentAddedPane"' in html
+        assert 'id="recentScansPane"' in html
+        # Exactly one RECENT pane starts active, or both lists show at once.
+        # Scoped to this card: the scanner's own tab set legitimately has an
+        # active pane of its own, so a whole-file count is not meaningful.
+        card = html[html.index('id="recentHistoryCard"'):]
+        assert card.count("tab-pane fade show active") == 1, (
+            "exactly one of the two recent panes may start active"
+        )
+
+    def test_the_old_two_card_ids_are_gone(self) -> None:
+        html = _read(DASHBOARD_HTML)
+        assert 'id="recentAlbumsCard"' not in html
+        assert 'id="recentScansCard"' not in html
+        css = _read(DASHBOARD_CSS)
+        assert "#recentScansCard" not in css, (
+            "the right-rail flex rule must move to the combined card, or the "
+            "rail no longer fills on xl"
+        )
+
+    def test_the_js_hook_survives(self) -> None:
+        """`renderRecentScans` writes into #recent-scans-body — the merge must
+        not rename it, or the list silently stops rendering."""
+        html = _read(DASHBOARD_HTML)
+        assert 'id="recent-scans-body"' in html
+        js = _read(DASHBOARD_JS)
+        assert "getElementById('recent-scans-body')" in js
+
+    def test_the_scans_list_is_inside_the_scans_pane(self) -> None:
+        html = _read(DASHBOARD_HTML)
+        pane_idx = html.index('id="recentScansPane"')
+        body_idx = html.index('id="recent-scans-body"')
+        # The body must come AFTER its pane opens, and the pane must close
+        # after it (otherwise the list is orphaned outside the tab set).
+        assert pane_idx < body_idx
+        assert html.index("/recentHistoryCard") > body_idx
+
+    def test_the_rail_fill_travels_the_tab_chain(self) -> None:
+        css = _read(DASHBOARD_CSS)
+        assert "#recentHistoryCard" in css
+        idx = css.index("#recentHistoryCard {")
+        window = css[idx: idx + 900]
+        # Bootstrap hides inactive panes with display:none, so the fill has to
+        # be re-established on the ACTIVE pane.
+        assert "> .tab-content > .tab-pane.active" in window, (
+            "the flex fill must target the active pane, or the list will not "
+            "grow to fill the rail on xl"
+        )
+
+    def test_the_tab_choice_is_remembered(self) -> None:
+        js = _read(DASHBOARD_JS)
+        assert "initRecentHistoryTabs" in js
+        assert "dashboardRecentTab" in js
+        assert "sessionStorage" in js
+
+    def test_switching_uses_the_bootstrap_tab_api(self) -> None:
+        js = _read(DASHBOARD_JS)
+        idx = js.index("function initRecentHistoryTabs()")
+        window = js[idx: idx + 1400]
+        # Hand-toggling `.active` would desync the panes from aria-selected.
+        assert "bootstrap.Tab" in window or "bootstrap && global.bootstrap.Tab" in window
+        assert ".show()" in window
+
+    def test_it_is_initialised_on_load(self) -> None:
+        js = _read(DASHBOARD_JS)
+        idx = js.index("document.addEventListener('DOMContentLoaded'")
+        window = js[idx: idx + 500]
+        assert "initRecentHistoryTabs()" in window
+
