@@ -3428,6 +3428,8 @@ def post_album_star_ratings(
     options: dict[str, Any],
     is_compilation: bool | None = None,
     is_va_compilation: bool = False,
+    stars_reconciled: bool | None = None,
+    provisional: bool = False,
 ) -> dict[str, int]:
     """Assign, persist, log and sync star ratings for ONE album.
 
@@ -3444,6 +3446,22 @@ def post_album_star_ratings(
 
     When the caller has no context (the ``finalise_scan`` grouping path),
     ``None`` falls back to the local title/artist heuristics.
+
+    ``stars_reconciled`` is written alongside the stars (tri-state):
+      * ``False`` — the PER-ALBUM pass posted these stars provisionally, with
+        only the artist context available at that moment;
+      * ``True``  — the artist-boundary RECONCILE pass re-rated the album with
+        the complete catalogue;
+      * ``None``  — leave the column untouched (callers that are not part of
+        the two-phase rating, e.g. the finalise grouping path).
+    See ``tracks.stars_reconciled`` in db/schema.py.
+
+    ``provisional`` marks the PER-ALBUM phase-1 call: it persists exactly the
+    same way (that is the whole point — durability), but suppresses the
+    per-track ``[TRACK_RESULT]`` lines and the SCAN RESULTS table, which are
+    only meaningful once the artist-boundary reconcile has applied the
+    complete-catalogue context. Phase 1 logs one compact line instead, so the
+    log still shows one full table per album — at reconcile time, as before.
     """
     album = (
         str(
@@ -3813,9 +3831,17 @@ def post_album_star_ratings(
 
                 nested = session.begin_nested()
                 try:
+                    _sets = "stars = :stars"
+                    _params: dict[str, Any] = {"stars": stars, "tid": track_id}
+                    # Write the reconcile flag ATOMICALLY with the stars so a
+                    # crash can never leave a star value whose provenance is
+                    # unknown (see tracks.stars_reconciled).
+                    if stars_reconciled is not None:
+                        _sets += ", stars_reconciled = :rec"
+                        _params["rec"] = bool(stars_reconciled)
                     session.execute(
-                        text("UPDATE tracks SET stars = :stars WHERE id = :tid"),
-                        {"stars": stars, "tid": track_id},
+                        text(f"UPDATE tracks SET {_sets} WHERE id = :tid"),
+                        _params,
                     )
                     if nested.is_active:
                         nested.commit()
@@ -3942,14 +3968,15 @@ def post_album_star_ratings(
             else:
                 _comparison_part = f"album_z={_album_z:.2f}, artist_z={_artist_z:.2f}"
 
-            log_unified(
-                f"[TRACK_RESULT] {artist} - {track.get('title')} → {stars}★ "
-                f"(final_score={_final_score:.1f}, {_comparison_part}, "
-                f"single={track.get('is_single')}/{track.get('single_confidence')}"
-                + (f", era={album_model.get('era')}/R={float(album_model.get('reff') or 0):.2f}" if album_model.get("has_benchmark") else "")
-                + _live_part
-                + f"{_src_part})"
-            )
+            if not provisional:
+                log_unified(
+                    f"[TRACK_RESULT] {artist} - {track.get('title')} → {stars}★ "
+                    f"(final_score={_final_score:.1f}, {_comparison_part}, "
+                    f"single={track.get('is_single')}/{track.get('single_confidence')}"
+                    + (f", era={album_model.get('era')}/R={float(album_model.get('reff') or 0):.2f}" if album_model.get("has_benchmark") else "")
+                    + _live_part
+                    + f"{_src_part})"
+                )
 
             if not track_id:
                 continue
@@ -3977,80 +4004,103 @@ def post_album_star_ratings(
 
             _pop_only = bool(options.get("popularity_only"))
             singles_detected = [] if _pop_only else [t for t in album_results if t.get("is_single")]
-            # Reported for EVERY album, not only when something was detected.
-            # Gating on ``singles_detected`` meant an album that yielded no
-            # singles left no trace in the Scanner tab, so while the status bar
-            # said "Singles Detection" the log looked exactly like a hung stage
-            # and the only proof of life was the raw info log.
-            if _pop_only:
-                log_unified(f"Singles Detection - skipped (popularity only) in '{album}'")
-            else:
+
+            # ── PER-ALBUM (provisional) phase: log, then continue ──────────
+            #
+            # The provisional call has already persisted the stars, the file
+            # tags and (below) the Navidrome ratings — the durability half is
+            # COMPLETE. What it must NOT print is the SCAN RESULTS table: that
+            # table is computed with the artist context available SO FAR, so
+            # printing it now AND again at the artist boundary would both double
+            # the log and present a not-yet-reconciled table as final. One
+            # compact line here; the full table is printed by the reconcile
+            # pass, exactly once per album, as before.
+            #
+            # ⚠️ Deliberately NOT an early return: the Navidrome sync further
+            # down is part of the durability this phase exists for. An early
+            # return would leave every provisionally-rated track unsynced.
+            if provisional:
                 log_unified(
-                    f"Singles Detection - Detected {len(singles_detected)} single(s) in '{album}'"
+                    f"[RATINGS] Provisional ratings for '{album}' "
+                    f"(reconciled at the artist boundary): "
+                    + " | ".join(f"{k}★: {v}" for k, v in sorted(star_counts.items(), reverse=True) if v)
                 )
-
-            rows: list[dict[str, Any]] = []
-            for t in album_results:
-                t_stars = int(t.get("stars") or 0)
-                t_conf = str(t.get("single_confidence") or "low").lower()
-                t_title = str(t.get("title") or "Unknown").strip()
-                t_score = float(t.get("popularity_score") or t.get("final_score") or 0)
-
-                if is_compilation:
-                    _ref_scores_for_row = compilation_track_artist_scores.get(
-                        _compilation_track_artist(t).casefold(), []
-                    )
-                    album_z, _ = _compute_artist_z(t_score, _ref_scores_for_row)
+            else:
+                # Reported for EVERY album, not only when something was
+                # detected. Gating on ``singles_detected`` meant an album that
+                # yielded no singles left no trace in the Scanner tab, so while
+                # the status bar said "Singles Detection" the log looked exactly
+                # like a hung stage and the only proof of life was the raw info
+                # log.
+                if _pop_only:
+                    log_unified(f"Singles Detection - skipped (popularity only) in '{album}'")
                 else:
-                    album_z, _ = _compute_album_z(t_score, album_scores)
+                    log_unified(
+                        f"Singles Detection - Detected {len(singles_detected)} single(s) in '{album}'"
+                    )
 
-                note = ""
-                try:
-                    sources = t.get("single_sources") or ""
-                    if isinstance(sources, str):
-                        parsed = json.loads(sources) if sources.strip() else []
+                rows: list[dict[str, Any]] = []
+                for t in album_results:
+                    t_stars = int(t.get("stars") or 0)
+                    t_conf = str(t.get("single_confidence") or "low").lower()
+                    t_title = str(t.get("title") or "Unknown").strip()
+                    t_score = float(t.get("popularity_score") or t.get("final_score") or 0)
+
+                    if is_compilation:
+                        _ref_scores_for_row = compilation_track_artist_scores.get(
+                            _compilation_track_artist(t).casefold(), []
+                        )
+                        album_z, _ = _compute_artist_z(t_score, _ref_scores_for_row)
                     else:
-                        parsed = sources
-                    if isinstance(parsed, list) and parsed:
-                        matched_sources = [
-                            str(s.get("source") or "") for s in parsed
-                            if isinstance(s, dict) and bool(s.get("matched"))
-                        ]
-                        if matched_sources:
-                            note = " (" + ", ".join(s.replace("_", " ").title() for s in matched_sources[:2]) + ")"
-                except Exception as note_exc:
-                    logger.debug("Summary note build failed", title=t_title, error=str(note_exc))
+                        album_z, _ = _compute_album_z(t_score, album_scores)
 
-                if not note and t_stars == 5 and t_conf == "low":
-                    note = " (Standout)"
+                    note = ""
+                    try:
+                        sources = t.get("single_sources") or ""
+                        if isinstance(sources, str):
+                            parsed = json.loads(sources) if sources.strip() else []
+                        else:
+                            parsed = sources
+                        if isinstance(parsed, list) and parsed:
+                            matched_sources = [
+                                str(s.get("source") or "") for s in parsed
+                                if isinstance(s, dict) and bool(s.get("matched"))
+                            ]
+                            if matched_sources:
+                                note = " (" + ", ".join(s.replace("_", " ").title() for s in matched_sources[:2]) + ")"
+                    except Exception as note_exc:
+                        logger.debug("Summary note build failed", title=t_title, error=str(note_exc))
 
-                rows.append({
-                    "stars": max(1, min(t_stars, 5)),
-                    "title": t_title[:34],
-                    "z": album_z,
-                    "score": t_score,
-                    "lf": _fmt_count(t.get("lastfm_listeners")),
-                    "conf": t_conf.upper() if t_conf in ("high", "medium") else "LOW",
-                    "note": note,
-                })
+                    if not note and t_stars == 5 and t_conf == "low":
+                        note = " (Standout)"
 
-            rows.sort(key=lambda r: (-r["stars"], -r["score"]))
+                    rows.append({
+                        "stars": max(1, min(t_stars, 5)),
+                        "title": t_title[:34],
+                        "z": album_z,
+                        "score": t_score,
+                        "lf": _fmt_count(t.get("lastfm_listeners")),
+                        "conf": t_conf.upper() if t_conf in ("high", "medium") else "LOW",
+                        "note": note,
+                    })
 
-            _header_suffix = " [LIVE]" if is_live_album else ""
-            if is_compilation:
-                _header_suffix += " [COMPILATION: per-track-artist rating]"
-            log_unified("=" * 80)
-            log_unified(f"📊 SCAN RESULTS: {str(artist or '').strip()} — {str(album or '').strip()}{_header_suffix} ({len(album_results)} Tracks)")
-            log_unified("=" * 80)
-            _z_header = "CAT-Z" if is_compilation else "Z-SCORE"
-            log_unified(f"{'RATING':<7} {'TRACK TITLE':<34} {_z_header:>7} {'SCORE':>6} {'LF LISTENS':>10}  SINGLE CONF")
-            log_unified("-" * 80)
-            for r in rows:
-                star_str = "★" * r["stars"] + "☆" * (5 - r["stars"])
-                log_unified(f"{star_str:<7} {r['title']:<34} {r['z']:>+7.2f} {r['score']:>6.1f} {r['lf']:>10}  {r['conf']}{r['note']}")
-            log_unified("-" * 80)
-            log_unified(f"⭐ Distribution: 5★: {star_counts[5]} | 4★: {star_counts[4]} | 3★: {star_counts[3]} | 2★: {star_counts[2]} | 1★: {star_counts[1]}")
-            log_unified("=" * 80)
+                rows.sort(key=lambda r: (-r["stars"], -r["score"]))
+
+                _header_suffix = " [LIVE]" if is_live_album else ""
+                if is_compilation:
+                    _header_suffix += " [COMPILATION: per-track-artist rating]"
+                log_unified("=" * 80)
+                log_unified(f"📊 SCAN RESULTS: {str(artist or '').strip()} — {str(album or '').strip()}{_header_suffix} ({len(album_results)} Tracks)")
+                log_unified("=" * 80)
+                _z_header = "CAT-Z" if is_compilation else "Z-SCORE"
+                log_unified(f"{'RATING':<7} {'TRACK TITLE':<34} {_z_header:>7} {'SCORE':>6} {'LF LISTENS':>10}  SINGLE CONF")
+                log_unified("-" * 80)
+                for r in rows:
+                    star_str = "★" * r["stars"] + "☆" * (5 - r["stars"])
+                    log_unified(f"{star_str:<7} {r['title']:<34} {r['z']:>+7.2f} {r['score']:>6.1f} {r['lf']:>10}  {r['conf']}{r['note']}")
+                log_unified("-" * 80)
+                log_unified(f"⭐ Distribution: 5★: {star_counts[5]} | 4★: {star_counts[4]} | 3★: {star_counts[3]} | 2★: {star_counts[2]} | 1★: {star_counts[1]}")
+                log_unified("=" * 80)
         except Exception as log_exc:
             logger.debug("Album progress log failed", artist=artist, album=album, error=str(log_exc))
 

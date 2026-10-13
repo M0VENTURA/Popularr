@@ -296,6 +296,21 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         # reconciling its file tags against the DB — a later scan skips the
         # mutagen re-read when the DB row has not changed since.
         "file_tags_synced_at": "TIMESTAMP",
+        # Two-phase star rating (2026-10-14). Per ALBUM (read as a group over
+        # its tracks), not a per-track fact:
+        #   * FALSE — the album's current ``stars`` were posted by the PER-ALBUM
+        #     pass, i.e. provisionally, using only the artist context available
+        #     at that moment (the albums scored so far this pass + whatever is
+        #     already in the DB). Durable, but NOT final.
+        #   * TRUE  — the artist-boundary RECONCILE pass ran and re-rated the
+        #     album with the COMPLETE artist catalogue (the global 5★ lock and
+        #     the popularity-marking cutoffs need every album).
+        # The skip gate treats FALSE as "still needs the artist pass", so an
+        # interrupted artist is reconciled on the next scan instead of keeping
+        # provisional ratings forever. Defaults TRUE so rows that predate this
+        # column (already fully reconciled by the old deferred flush) are not
+        # forced through a full re-scan on upgrade.
+        "stars_reconciled": "BOOLEAN DEFAULT TRUE",
         "genres": "TEXT", "genre": "TEXT", "manual_genres": "JSONB", "navidrome_genres": "JSONB", 
         "spotify_genres": "JSONB", "listenbrainz_genres": "JSONB", "discogs_genres": "JSONB", 
         "musicbrainz_genres": "JSONB", "essentia_genres": "JSONB", 

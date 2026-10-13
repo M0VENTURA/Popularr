@@ -712,6 +712,43 @@ def _album_scored_but_never_rated(tracks: list[dict[str, Any]] | None) -> bool:
     return bool(scored) and not rated
 
 
+def _stars_reconciled_is_false(value: Any) -> bool:
+    """True only for an EXPLICIT falsy ``stars_reconciled``.
+
+    ``None``/missing means "reconciled" — a row that predates the column was
+    already finalised by the old deferred flush — so it must NOT trigger a
+    re-run. Only a stored ``FALSE`` (provisional stars) does.
+    """
+    return value is not None and not value
+
+
+def _album_needs_star_reconcile(tracks: list[dict[str, Any]] | None) -> bool:
+    """True when an album's stars were posted PROVISIONALLY and never
+    reconciled against the artist's complete catalogue.
+
+    The two-phase rating posts each album's stars the moment it finishes
+    (``_post_album_stars(..., reconciled=False)``), so an interrupted artist
+    leaves every completed album RATED — which means the older
+    ``_album_scored_but_never_rated`` heal (scored but NO stars) no longer fires
+    for it. Without this check those albums would be SKIPPED on the next scan
+    and keep provisional ratings — computed against a partial artist context —
+    forever. Forcing them through re-runs the album (cached scores, no network)
+    so the artist boundary reconciles it.
+
+    Safe by construction, mirroring ``_album_scored_but_never_rated``:
+      * an album with NO stars is that heal's job, not this one;
+      * the flag defaults TRUE, so a row whose column predates this change (or
+        was never provisionally rated) is never forced through;
+      * a ``None``/missing value counts as reconciled (see the helper above),
+        so a SELECT that omits the column cannot trigger an endless re-run.
+    """
+    if not tracks:
+        return False
+    if not any(int(t.get("stars") or 0) > 0 for t in tracks):
+        return False
+    return any(_stars_reconciled_is_false(t.get("stars_reconciled")) for t in tracks)
+
+
 def _pass_runs_singles(options: dict[str, Any]) -> bool:
     """True when this pass runs the singles block at all.
 
@@ -1936,7 +1973,7 @@ def run_scan(
             logger.debug("Artist DB listen fetch failed", artist=artist, error=str(exc))
             return []
 
-    def _post_album_stars(artist: str, album_results: list[dict[str, Any]], is_compilation: bool = False, is_va_compilation: bool = False) -> bool:
+    def _post_album_stars(artist: str, album_results: list[dict[str, Any]], is_compilation: bool = False, is_va_compilation: bool = False, reconciled: bool = False, provisional: bool = False) -> bool:
         if not album_results or options.get("metadata_only"):
             return False
 
@@ -2018,6 +2055,11 @@ def run_scan(
                 # empty and every compilation was rated as a studio album.
                 is_compilation=bool(is_compilation),
                 is_va_compilation=bool(is_va_compilation),
+                # Two-phase rating: this call's provenance.
+                stars_reconciled=bool(reconciled),
+                # Phase 1 suppresses the per-track lines and the SCAN RESULTS
+                # table (partial artist context); the reconcile pass prints them.
+                provisional=bool(provisional),
             )
             if int(_outcome.get("star_ratings") or 0) > 0:
                 _per_album_posted_keys.add((artist, str(album_results[0].get("album") or "")))
@@ -2051,6 +2093,10 @@ def run_scan(
                 _album_results_this,
                 is_compilation=bool(_pending.get("is_compilation")),
                 is_va_compilation=bool(_pending.get("is_va_compilation")),
+                # The artist-boundary RECONCILE pass: the global 5★ lock and
+                # the popularity-marking cutoffs were computed over the artist's
+                # COMPLETE catalogue above, so this rating is FINAL.
+                reconciled=True,
             )
             if _posted:
                 _report_album_summary(_pending.get("report") or {}, _album_results_this)
@@ -2419,6 +2465,17 @@ def run_scan(
             log_unified(
                 f"Popularity Scan - Album \"{str(album or '').strip()}\" scored but never rated "
                 "(no stars) — running it to assign them"
+            )
+
+        # A PROVISIONALLY-rated album (phase 1 ran, the artist-boundary
+        # reconcile never did — an interrupted artist) must also be re-run, or
+        # its provisional stars would be skipped forever. Same shape as the heal
+        # above: reuse the stored scores, do NOT force a metadata re-run.
+        if skip_album and not options.get("metadata_only") and _album_needs_star_reconcile(tracks):
+            skip_album = False
+            log_unified(
+                f"Popularity Scan - Album \"{str(album or '').strip()}\" has provisional stars "
+                "(artist not reconciled) — running it to finalise ratings"
             )
 
         if skip_album:
@@ -3416,6 +3473,33 @@ def run_scan(
                     # after the album loop moves on.
                     "report": _album_report,
                 })
+
+                # ── PHASE 1: per-album PROVISIONAL rating ──────────────────
+                # Rate + persist THIS album's stars the moment it finishes, so
+                # an artist scan that is interrupted (crash, budget stop, hard
+                # error) still leaves every completed album RATED instead of
+                # scored-but-unrated. Written with ``stars_reconciled = False``
+                # because the artist context is still PARTIAL — the global 5★
+                # lock and the popularity-marking cutoffs need every album of
+                # the artist, so they are only correct at the boundary.
+                #
+                # Phase 2 (``_flush_artist_star_ratings``, at the artist
+                # boundary) RECONCILES with the complete catalogue and flips the
+                # flag to True; its unchanged-rating skip makes that a no-op for
+                # every album whose stars did not move. A track left at False
+                # (interrupted artist) makes the skip gate re-run its album on
+                # the next scan — see ``_album_needs_star_reconcile``.
+                try:
+                    _post_album_stars(
+                        artist,
+                        _album_results_this,
+                        is_compilation=bool(album_context.get("is_compilation")),
+                        is_va_compilation=bool(album_context.get("is_va_compilation")),
+                        reconciled=False,
+                        provisional=True,
+                    )
+                except Exception as exc:
+                    logger.debug("Per-album provisional star post failed", artist=artist, album=album, error=str(exc))
 
         except Exception as _album_exc:
             # Flush anything already buffered so a mid-album crash doesn't

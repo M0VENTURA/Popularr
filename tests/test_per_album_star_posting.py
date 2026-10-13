@@ -32,12 +32,36 @@ class _FakeResult:
         return self._rows[0] if self._rows else None
 
 
+class _Nested:
+    """Savepoint stand-in — ``post_album_star_ratings`` runs each star UPDATE
+    inside ``session.begin_nested()``.
+    """
+
+    def __init__(self, session):
+        self._session = session
+
+    @property
+    def is_active(self):
+        return True
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+
 class _RecordingSession:
     """Stub session that records executes and returns fixed (empty) rows.
 
     Mirrors the real ``db_session()`` contract: each ``execute`` returns a
     result with ``fetchall()``/``fetchone()``, and statements are recorded so
     tests can assert exactly which SQL/params ran.
+
+    ⚠️ ``begin_nested()`` is part of that contract too: the star UPDATE runs
+    inside a SAVEPOINT, so a session without it would raise and the UPDATE
+    would never be recorded (each failure is caught per-track, so the symptom
+    is a silent ``0 == N`` capture assertion).
     """
 
     def __init__(self, rows_by_execute=None):
@@ -50,6 +74,9 @@ class _RecordingSession:
         rows = self._results[self._index] if self._index < len(self._results) else []
         self._index += 1
         return _FakeResult(rows)
+
+    def begin_nested(self):
+        return _Nested(self)
 
     def commit(self):
         pass
@@ -505,7 +532,7 @@ class TestPostAlbumStarRatings:
         import db.engine as db_engine
 
         session = _RecordingSession()
-        monkeypatch.setattr(db_engine, "db_session", _session_factory(session))
+        monkeypatch.setattr(fs, "db_session", _session_factory(session))
         # Deterministic star value per track so assertions are stable.
         monkeypatch.setattr(
             fs, "_assign_stars",
@@ -542,7 +569,7 @@ class TestPostAlbumStarRatings:
         import db.engine as db_engine
 
         session = _RecordingSession()
-        monkeypatch.setattr(db_engine, "db_session", _session_factory(session))
+        monkeypatch.setattr(fs, "db_session", _session_factory(session))
         outcome = fs.post_album_star_ratings(
             album_results=[],
             artist="Muse",
@@ -679,13 +706,20 @@ class TestComputeArtistScoresExcludesScanned:
             rows = list(conn.execute(sa_text("SELECT title, album, final_score FROM t")).fetchall())
 
         session = _RecordingSession([rows])
-        monkeypatch.setattr(db_engine, "db_session", _session_factory(session))
+        monkeypatch.setattr(fs, "db_session", _session_factory(session))
 
         # Both scanned titles must be excluded → only the older track anchors.
+        # ⚠️ The exclusion set is keyed (album, essential-title) — the raw
+        # title-string kwarg (``scanned_titles``) predates the key-based
+        # dedupe the album-level merge also uses. Build the keys with the SAME
+        # normaliser the function filters with, or the test can never exclude.
         scores = fs.compute_artist_scores(
             "Artist",
             [80.0, 90.0],
-            scanned_titles={"scanned a", "scanned b"},
+            scanned_keys={
+                ("album", fs._normalise_essential_title("Scanned A")),
+                ("album", fs._normalise_essential_title("Scanned B")),
+            },
         )
         assert scores == [80.0, 90.0, 70.0]
 
@@ -749,7 +783,7 @@ class TestFinaliseScanPerAlbumFlag:
         import db.engine as db_engine
 
         session = _RecordingSession()
-        monkeypatch.setattr(db_engine, "db_session", _session_factory(session))
+        monkeypatch.setattr(fs, "db_session", _session_factory(session))
         posted = []
         monkeypatch.setattr(
             fs,
@@ -780,7 +814,7 @@ class TestFinaliseScanPerAlbumFlag:
         import db.engine as db_engine
 
         session = _RecordingSession()
-        monkeypatch.setattr(db_engine, "db_session", _session_factory(session))
+        monkeypatch.setattr(fs, "db_session", _session_factory(session))
         posted = []
         monkeypatch.setattr(
             fs,
@@ -871,7 +905,7 @@ class TestSkipUnchangedRatingWrites:
             [],                                  # album scaling model
             self._rows(tmp_path),                # batch rating/path load
         ])
-        monkeypatch.setattr(db_engine, "db_session", _session_factory(session))
+        monkeypatch.setattr(fs, "db_session", _session_factory(session))
         # t1 → 4★ (CHANGED from stored 5★), t2 → 5★ (UNCHANGED).
         monkeypatch.setattr(
             fs, "_assign_stars",
@@ -904,7 +938,14 @@ class TestSkipUnchangedRatingWrites:
         assert "skipped 1 unchanged rating(s)" in " ".join(logged)
 
         # The batch rating/path load replaced the per-track file-path lookup.
-        batch_loads = [e for e in session.executed if "SELECT id, stars, file_path" in str(e[0])]
+        # ⚠️ The needle is the CURRENT query text — it gained the
+        # ``COALESCE(stars, star_rating, 0)`` fallback with the star-rating
+        # column merge, so the old ``SELECT id, stars, file_path`` could never
+        # match again (a stale SQL needle fails with 0 == 1 forever).
+        batch_loads = [
+            e for e in session.executed
+            if "SELECT id, COALESCE(stars, star_rating, 0) AS stars, file_path" in str(e[0])
+        ]
         assert len(batch_loads) == 1
 
     def test_changed_ratings_still_rewrite_and_sync(self, monkeypatch, tmp_path):
@@ -917,7 +958,7 @@ class TestSkipUnchangedRatingWrites:
             [],                                  # album scaling model
             self._rows(tmp_path),                # batch rating/path load
         ])
-        monkeypatch.setattr(db_engine, "db_session", _session_factory(session))
+        monkeypatch.setattr(fs, "db_session", _session_factory(session))
         # Both tracks get a DIFFERENT rating than stored (stored 5★).
         monkeypatch.setattr(fs, "_assign_stars", lambda track, *args, **kwargs: 3)
         syncs = []
@@ -949,7 +990,7 @@ class TestPostAlbumStarRatingsResilience:
         import db.engine as db_engine
 
         session = _RecordingSession()
-        monkeypatch.setattr(db_engine, "db_session", _session_factory(session))
+        monkeypatch.setattr(fs, "db_session", _session_factory(session))
 
         def flaky_assign(track, *args, **kwargs):
             if track["title"] == "Time Is Running Out":
@@ -969,12 +1010,18 @@ class TestPostAlbumStarRatingsResilience:
             options={"sync_navidrome": True},
         )
 
-        # The failing track is skipped; the healthy one still gets rated.
-        assert outcome["star_ratings"] == 1
+        # The failing track FALLS BACK to its stored rating (minimum 1★)
+        # instead of being dropped: a track left with NO stars would leave the
+        # album half-rated, and the skip gates would then treat it as
+        # never-assessed (the WARNING path logs "falling back to stored
+        # rating"). ⚠️ This test previously expected the track to be SKIPPED
+        # (star_ratings 1 / stars None / one UPDATE) — that predates the
+        # fallback contract, so the expectations follow the current behaviour.
+        assert outcome["star_ratings"] == 2
         assert results[0]["stars"] == 4
-        assert results[1].get("stars") is None
+        assert results[1]["stars"] == 1
         star_updates = [e for e in session.executed if "UPDATE tracks SET stars" in str(e[0])]
-        assert len(star_updates) == 1
+        assert len(star_updates) == 2
         assert any("📊 SCAN RESULTS: Muse — Absolution" in m for m in logged)
 
 
@@ -1180,7 +1227,7 @@ class TestNavidromeClientReusePerAlbum:
         import db.engine as db_engine
 
         session = _RecordingSession()
-        monkeypatch.setattr(db_engine, "db_session", _session_factory(session))
+        monkeypatch.setattr(fs, "db_session", _session_factory(session))
         monkeypatch.setattr(
             fs, "_assign_stars",
             lambda track, *args, **kwargs: 4 if track["title"] == "Apocalypse Please" else 5
@@ -1227,7 +1274,7 @@ class TestNavidromeClientReusePerAlbum:
             [_Row({"id": "t1", "stars": 4, "file_path": "/x/t1.mp3"}),
              _Row({"id": "t2", "stars": 5, "file_path": "/x/t2.mp3"})],  # stored ratings
         ])
-        monkeypatch.setattr(db_engine, "db_session", _session_factory(session))
+        monkeypatch.setattr(fs, "db_session", _session_factory(session))
         monkeypatch.setattr(
             fs, "_assign_stars",
             lambda track, *args, **kwargs: 4 if track["title"] == "Apocalypse Please" else 5

@@ -126,6 +126,12 @@ class Track(Base):
     recording_mbid_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     file_tags_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
 
+    # Two-phase star rating (2026-10-14). FALSE = the album's stars were posted
+    # by the PER-ALBUM pass (provisional, partial artist context); TRUE = the
+    # artist-boundary reconcile pass re-rated it with the complete catalogue.
+    # Read as a GROUP over an album's tracks — see db/schema.py.
+    stars_reconciled: Mapped[bool | None] = mapped_column(server_default=text("TRUE"))
+
     # Genres & Classifications
     genres: Mapped[str | None] = mapped_column(Text)
     genre: Mapped[str | None] = mapped_column(String)
