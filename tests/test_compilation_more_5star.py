@@ -86,9 +86,26 @@ class TestCompilationQualifiesAlbumUsesArtistReference:
 
 
 class TestCompilationSlotCapSkipped:
-    """The era 5★ slot cap does not apply to single-artist compilations."""
+    """A single-artist compilation is rated on the ARTIST catalogue.
 
-    def test_many_hits_all_stay_five(self, monkeypatch):
+    ⚠️ REWRITTEN (star-rating routing fix). The previous assertion here — all
+    six hits return 5★ from ``_assign_stars`` — was satisfied by the ABSOLUTE
+    fallback's top band (``score >= 95.0 → 5★``), the last-resort rater used
+    when there is NO catalogue to rank against. It stopped holding once a
+    single-artist compilation backed by a real local catalogue is rated by
+    CAT-Z, which is the corrected behaviour: the online/absolute route capped
+    every track at the artist's GLOBAL top 2% (see
+    ``test_greatest_hits_artist_catalogue``).
+
+    The invariant this class owns — the era 5★ slot cap is NOT applied to
+    compilations — lives in ``post_album_star_ratings``, which collects
+    ``protected_five_star_tracks`` and skips the cap when ``is_compilation``.
+    What ``_assign_stars`` must guarantee is that a compilation track is rated
+    against the ARTIST catalogue (a CAT-Z mode recorded, CAT-Z used) instead of
+    being flattened onto an album band.
+    """
+
+    def test_hits_are_rated_on_the_artist_catalogue(self, monkeypatch):
         from services.popularity.stages import finalise_stage as fs
 
         results = [
@@ -97,7 +114,12 @@ class TestCompilationSlotCapSkipped:
         ]
         # All are high-confidence singles, all clear the catalog cutoff.
         album_scores = [95.0, 94.0, 93.0, 92.0, 91.0, 90.0]
-        artist_scores = [95.0, 94.0, 93.0, 92.0, 91.0, 90.0, 50.0, 45.0, 40.0]
+        # A REALISTIC artist catalogue: the six hits sit at the top of a long
+        # tail, so each is a genuine CAT-Z outlier. (The old fixture was six
+        # hits plus three filler scores — a bimodal catalogue whose tight top
+        # cluster makes every hit look average, which is not what a best-of
+        # looks like against a career.)
+        artist_scores = album_scores + [60.0 - 2 * i for i in range(24)]
         album_model = {
             "has_benchmark": True, "era": "peak",
             "catalog_cutoff": 89.0, "max_5star_slots": 4,  # would cap at 4
@@ -110,7 +132,15 @@ class TestCompilationSlotCapSkipped:
                 tr, album_scores, artist_scores,
                 album_model=album_model, is_compilation=True,
             ))
-        # All 6 hits reach 5★ — the slot cap is skipped for compilations.
+            assert tr.get("_compilation_rating_mode") == "track_artist_catalogue", (
+                "a single-artist compilation with a healthy local catalogue "
+                "must be rated by CAT-Z, not the online/absolute route"
+            )
+            assert tr.get("_compilation_artist_z") is not None
+
+        # Every track is the artist's catalogue top band, so every one reaches
+        # 5★ — the slot cap that would demote all but four is applied LATER, in
+        # ``post_album_star_ratings``, and is skipped for compilations.
         assert stars == [5, 5, 5, 5, 5, 5]
 
     def test_va_compilation_keeps_slot_cap(self, monkeypatch):

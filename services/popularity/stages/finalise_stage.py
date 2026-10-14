@@ -1179,7 +1179,13 @@ def _assign_stars(
     album_model: dict[str, Any] | None = None,
     is_compilation: bool = False,
     artist_listen_distribution: list[float] | None = None,
-    generic_compilation_artist: bool = False,
+    #: True only for a "Various Artists" compilation. It selects WHICH
+    #: catalogue rates the track: a VA compilation always uses the credited
+    #: artist's ONLINE chart (each credited artist owns too little locally),
+    #: while a single-artist compilation uses the local artist catalogue.
+    #: This replaced a ``generic_compilation_artist`` parameter that was
+    #: declared, threaded from the caller and never read.
+    is_va_compilation: bool = False,
     is_live_album: bool = False,
     source_unusable: bool = False,
     cohort_scores: list[float] | None = None,
@@ -1301,46 +1307,36 @@ def _assign_stars(
                 and artist_z >= th["star5_artist_z"] - _epsilon_art
             )
             if _clears_5star_bounds:
-                # The z-bounds say "catalogue-top"; the RATIO test asks the
-                # different question of whether this album actually CONTAINS a
-                # standout. An album can be the artist's most popular release
-                # (clearing every z-bound) while being internally flat — in
-                # which case its "top" track is only marginally ahead of the
-                # rest and is not a standout, however high its z-score.
-                
-                # THE FIX: Context-Aware Shape Gating
-                # We only apply the strict ratio test to older, unpopular albums to 
-                # prevent 14 vs 11 listen inflation. We bypass it for new releases 
-                # (<= 2 years old) or albums that are successful for this specific artist.
-                try:
-                    track_yr_raw = track.get("year") or track.get("release_year")
-                    if track_yr_raw:
-                        track_yr = int(str(track_yr_raw)[:4])
-                    else:
-                        track_yr = datetime.now().year
-                except (ValueError, TypeError):
-                    track_yr = datetime.now().year
-                    
-                album_age = datetime.now().year - track_yr
-                album_era = album_model.get("era", "peak") if album_model else "peak"
-                
-                # Apply test ONLY if album is > 2 years old AND is a "minor" (unpopular) release
-                if album_age > 2 and album_era == "minor":
-                    _ratio_ok, _ratio_reason = _album_ratio_standout_ok(
-                        track,
-                        album_lf_listeners=album_lf_listeners,
-                        album_lb_listens=album_lb_listens,
-                        live=is_live,
-                    )
-                else:
-                    # Bypass the test for successful albums (American Idiot) or new releases
-                    _ratio_ok = True
-                    _ratio_reason = f"bypassed_by_context(age={album_age}, era={album_era})"
-                    
-                track["_ratio_5star_reason"] = _ratio_reason
-                if _ratio_ok:
-                    track["_global_5star_locked"] = True
-                    return 5
+                # ⭐ A LOCKED TRACK IS NOT RE-LITIGATED BY THE ALBUM'S SHAPE.
+                #
+                # The lock is an ARTIST-wide verdict: the pre-pass
+                # (``_compute_global_5star_locked_titles``) ranks the artist's
+                # whole scanned catalogue by ``_raw_combined`` and locks the
+                # top ``global_5star_catalog_top_pct`` that ALSO clear
+                # ``global_5star_min_raw_score``. That raw floor IS the "these
+                # counts are real, not noise" test the album ratio gate exists
+                # to supply — so running the ratio test here double-counts the
+                # guard, and it does so with NARROWER evidence (one album's
+                # linear Last.fm spread) against a WIDER verdict.
+                #
+                # Measured on Abney Park: "The Wake" (6.8k LF, raw 74.4, the
+                # artist's catalogue top) held the lock and cleared both
+                # z-bounds, then failed the ratio test at
+                # ``runner_up=1.11x/1.50x`` — because the album's #2 ("The
+                # Only One", 6.1k LF) is ALSO one of the artist's best tracks.
+                # Two hits on one album can never be 1.5x apart, so NO track on
+                # that album could reach 5★. Every locked track in the report
+                # was demoted the same way, and the veto also ERASED the flag
+                # (``= False`` below), which disarmed the downstream
+                # protections that key off it — the era slot cap's protected
+                # list and ``_short_track_cap_is_protected``.
+                #
+                # Not an unconditional award: the z-bounds above still gate the
+                # lock. The ratio test stays in force on the ordinary
+                # (unlocked) 5★ path below, where it is the ONLY shape guard.
+                track["_global_5star_locked"] = True
+                track["_ratio_5star_reason"] = "lock_bypasses_album_shape_gate"
+                return 5
             track["_global_5star_locked"] = False
             track["_force_floor"] = 4
             return 4
@@ -1403,8 +1399,47 @@ def _assign_stars(
         valid_catalogue_scores = [
             float(v) for v in (artist_scores or []) if float(v or 0) > 0
         ]
-        # Force online catalogue lookup by bypassing the local threshold
-        has_usable_catalogue = False
+
+        # The online-catalogue block is read ONCE: ``min_local_catalogue``
+        # decides WHICH rater answers below, and the rank bands drive it when
+        # the local catalogue cannot.
+        try:
+            from helpers.config_helpers import get_compilation_online_catalogue_config
+            _online_rules = get_compilation_online_catalogue_config()
+        except Exception as exc:
+            logger.debug("Compilation online config read failed", error=str(exc))
+            _online_rules = {}
+
+        # ⭐ WHICH CATALOGUE ANSWERS DEPENDS ON WHO THE COMPILATION IS BY.
+        #
+        # * A **VA** compilation groups MANY credited artists, each owning one
+        #   or two songs in the library, so the LOCAL catalogue can never
+        #   answer "is this that artist's hit?" — always go online. That is the
+        #   2026-09-21 online-catalogue decision, and why this flag used to be
+        #   hard-wired ``False``.
+        # * A **SINGLE-ARTIST** compilation is that one artist's own record, so
+        #   ``artist_scores`` IS a real catalogue and the local z-bands answer
+        #   the same question. Forcing it online made a best-of unreachable at
+        #   the top: the online rater's 5★ band is the artist's GLOBAL top 2%
+        #   (``rank_percentile_5star``), which across Metallica's 150-track
+        #   career is its three biggest songs — so every track of "Garage Inc."
+        #   was capped at 4★ however strong its CAT-Z (reported: "Whiskey in
+        #   the Jar", CAT-Z +2.00, 928.2k LF, rank 12/150 = top 7.7% → 4★),
+        #   and tracks outside the online list fell through to the ABSOLUTE
+        #   fallback and flattened to 1★/2★ ("The Weight of Words": 22 of 24).
+        #
+        # ``min_local_catalogue`` is the thinness guard from the same config
+        # block: below it there is no distribution to compute a robust z
+        # against, so a single-artist compilation falls back to the online
+        # chart — which is what keeps a barely-owned artist working.
+        try:
+            _min_local = int(float(_online_rules.get("min_local_catalogue") or 5.0))
+        except (TypeError, ValueError):
+            _min_local = 5
+
+        has_usable_catalogue = (
+            not is_va_compilation and len(valid_catalogue_scores) >= _min_local
+        )
 
         if has_usable_catalogue:
             # ``album_z``/``artist_z`` were already computed above against
@@ -3693,10 +3728,13 @@ def post_album_star_ratings(
     navidrome_synced = 0
 
     try:
-        generic_compilation_artist = (
-            str(artist or "").strip().casefold() in _VA_ALBUM_ARTIST_NAMES
-        )
-
+        # NOTE: a local ``generic_compilation_artist`` (the album artist being
+        # one of ``_VA_ALBUM_ARTIST_NAMES``) used to be computed here and
+        # threaded into ``_assign_stars``, which never read it. The rating
+        # branch now keys off the caller's authoritative ``is_va_compilation``
+        # — the value ``_resolve_compilation_flags`` / the scan runner already
+        # produced, which also covers the "4+ credited artists" heuristic a
+        # name check cannot see.
         if is_compilation is None:
             is_compilation, is_va_compilation = _resolve_compilation_flags(
                 album_results=album_results,
@@ -3713,7 +3751,6 @@ def post_album_star_ratings(
                 album=album,
                 va_compilation=bool(is_va_compilation),
             )
-
         is_live_album = _detect_live_album(album_results)
         if is_live_album:
             logger.info(
@@ -3911,7 +3948,10 @@ def post_album_star_ratings(
                     album_model=album_model,
                     is_compilation=is_compilation,
                     artist_listen_distribution=_artist_listen_distribution,
-                    generic_compilation_artist=generic_compilation_artist,
+                    # The authoritative VA verdict from the caller. It selects
+                    # the catalogue that rates a compilation track: online for
+                    # VA, local artist catalogue for a single-artist record.
+                    is_va_compilation=bool(is_va_compilation),
                     is_live_album=is_live_album,
                     source_unusable=(
                         str(track.get("track_id") or "").strip() in _lb_unusable_ids

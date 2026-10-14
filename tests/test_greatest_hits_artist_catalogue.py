@@ -207,7 +207,7 @@ class TestTheRatingRunsOnTheArtistCatalogue:
     #: the global #1 (rank 1 of 200 = top 0.5%).
     ALBUM_SCORES = [95.0, 94.0, 93.0, 92.0, 91.0, 90.0]
 
-    def _assign(self, ctx, monkeypatch, track):
+    def _assign(self, ctx, monkeypatch, track, *, artist_scores=None):
         import services.popularity.popularity_sources as ps
         from services.popularity.stages import finalise_stage as fs
 
@@ -228,22 +228,90 @@ class TestTheRatingRunsOnTheArtistCatalogue:
             "catalog_cutoff": 95.0, "max_5star_slots": 4, "album_top_n": 3,
         }
         return fs._assign_stars(
-            track, list(self.ALBUM_SCORES), list(self.ALBUM_SCORES),
+            track, list(self.ALBUM_SCORES),
+            list(self.ALBUM_SCORES if artist_scores is None else artist_scores),
             album_model=album_model,
             is_compilation=bool(ctx["is_compilation"]),
+            # The album is a SINGLE-ARTIST compilation by construction here
+            # (``is_va_compilation`` is False for every fixture in this file),
+            # and the flag now selects the rater explicitly.
+            is_va_compilation=bool(ctx["is_va_compilation"]),
         )
 
-    def test_a_mid_album_track_can_reach_five_stars(self, monkeypatch):
-        """THE REPORTED CASE. The album is the artist's hits; a track that is
-        ranked last on the album (but is the artist's global #1) reaches 5★
-        because the rating runs on the artist catalogue."""
-        ctx = _album_context("Greatest Hits")
-        track = _hit_track(90.0)
+    def test_a_thin_local_catalogue_still_reaches_five_stars(self, monkeypatch):
+        """THE REPORTED CASE, under the corrected routing.
 
-        stars = self._assign(ctx, monkeypatch, track)
+        The library barely owns the artist, so there is no local distribution
+        to judge the track against — the artist's ONLINE chart answers, and a
+        track ranked last on its own album but #1 in the artist's global chart
+        still reaches 5★.
+
+        (Before the routing fix this test used a catalog-sized ``artist_scores``
+        list, which made the local catalogue look healthy and pinned the online
+        route for EVERY single-artist compilation — the behaviour the "Garage
+        Inc." report asked to stop. The intent is unchanged; only the catalogue
+        the fixture declares is now honest about being thin.)"""
+        ctx = _album_context("Greatest Hits")
+        track = _hit_track(90.0, title="Global Hit")
+
+        stars = self._assign(ctx, monkeypatch, track, artist_scores=[60.0, 55.0])
 
         assert stars == 5
         assert track["_compilation_rating_mode"] == "track_artist_online_catalogue"
+
+    def test_a_healthy_local_catalogue_rates_on_cat_z(self, monkeypatch):
+        """⭐ THE ROUTING FIX. A single-artist compilation backed by a real
+        local catalogue is rated by the LOCAL z-bands (CAT-Z), not the online
+        chart.
+
+        Forcing it online capped every track at the online 5★ band — the
+        artist's GLOBAL top 2% (``rank_percentile_5star``), which across a
+        150-track career is its three biggest songs. A best-of could therefore
+        never produce a 5★ (reported on "Garage Inc.": "Whiskey in the Jar",
+        CAT-Z +2.00, 928.2k LF, rank 12/150 = top 7.7% → 4★), and tracks
+        outside the online list fell through to the absolute fallback and
+        flattened to 1★/2★ ("The Weight of Words": 22 of 24 tracks)."""
+        ctx = _album_context("Greatest Hits")
+        # A real catalogue with the track at its top — an outlier against the
+        # rest, which is what CAT-Z's 5★ band asks for.
+        track = _hit_track(90.0, title="Catalogue Top")
+
+        stars = self._assign(
+            ctx, monkeypatch, track,
+            artist_scores=[90.0, 40.0, 38.0, 36.0, 34.0, 32.0, 30.0],
+        )
+
+        assert stars == 5, "a catalogue-top track on a best-of must reach 5★"
+        assert track["_compilation_rating_mode"] == "track_artist_catalogue"
+        assert track.get("_compilation_artist_z") is not None
+
+    def test_a_healthy_local_catalogue_never_calls_online(self, monkeypatch):
+        """COST CONTRACT — the health of the local catalogue is what saves the
+        online request. ``min_local_catalogue`` is the thinness guard, so a
+        well-represented artist is rated without touching the network."""
+        import services.popularity.popularity_sources as ps
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "helpers.config_helpers.get_compilation_online_catalogue_config",
+            lambda: RULES,
+        )
+        monkeypatch.setattr(
+            ps, "get_online_artist_track_rank",
+            lambda artist, title, lastfm_client=None: calls.append(title) or {
+                "rank": 1, "total": 200, "percentile": 0.005,
+                "listeners": 10_000, "top_listeners": 10_000,
+                "source": "lastfm_artist_top_tracks",
+            },
+        )
+
+        self._assign(
+            _album_context("Greatest Hits"), monkeypatch,
+            _hit_track(90.0, title="Catalogue Top"),
+            artist_scores=[90.0, 40.0, 38.0, 36.0, 34.0, 32.0, 30.0],
+        )
+
+        assert calls == [], "a healthy local catalogue must not go online"
 
     def test_the_same_track_on_a_studio_album_is_capped(self, monkeypatch):
         """CONTROL — without the promotion the studio ladder applies: the track

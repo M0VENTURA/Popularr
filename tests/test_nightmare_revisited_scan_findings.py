@@ -188,6 +188,15 @@ class TestTheOnlineCatalogueHonoursTheSingleFloor:
             album_model={"has_benchmark": True, "era": "solid", "catalog_cutoff": 99.0,
                          "max_5star_slots": 3, "album_top_n": 3},
             is_compilation=True,
+            # ⭐ "Nightmare Revisited" IS a Various Artists compilation, and the
+            # VA verdict is what selects the rater: ``is_va_compilation=True``
+            # forces the credited artist's ONLINE chart. Without it the local
+            # catalogue answers instead, and these three tests exercise the
+            # ONLINE path's percentile bands + single floor. Declaring the flag
+            # is required since the routing became explicit — before that,
+            # ``is_compilation=True`` implied the online route for every
+            # compilation, which is the behaviour being corrected.
+            is_va_compilation=True,
         )
         return stars, track
 
