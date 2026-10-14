@@ -9,7 +9,6 @@ Handles:
 from __future__ import annotations
 
 import asyncio
-import re
 from typing import Any
 
 from quart import Blueprint, request, jsonify, Response
@@ -28,6 +27,10 @@ from services.metadata.artist_scan_service import (
     fetch_missing_release_tracklist,
 )
 from services.metadata import artist_metadata_service as metadata
+from services.popularity.popularity_report_service import (
+    build_popularity_report,
+    popularity_report_filename,
+)
 from services.enrichment.musicbrainz_service import get_shared_mb_client
 from db.engine import db_session
 from helpers.artist_sort import artist_sort_sql
@@ -564,75 +567,10 @@ def api_missing_overview() -> Any:
 # POPULARITY REPORT (CSV download)
 # =============================
 
-#: Columns of the report, in file order. ``rank`` is assigned after the query
-#: has sorted; every other name is a real ``tracks`` column (checked against
-#: ``db.schema.COLUMN_REGISTRY`` — selecting one that does not exist would 500).
-_POPULARITY_REPORT_COLUMNS = (
-    "rank",
-    "title",
-    "artist",
-    "album",
-    "disc_number",
-    "track_number",
-    "year",
-    "final_score",
-    "popularity",
-    "stars",
-    "lastfm_listeners",
-    "lastfm_playcount",
-    "lastfm_score",
-    "listenbrainz_listens",
-    "listenbrainz_users",
-    "listenbrainz_score",
-    "is_single",
-    "single_confidence",
-    "single_confidence_score",
-    "is_live",
-    "popularity_frozen",
-)
-
-#: Most popular first. ``raw_score`` is the PRE-REMAP blend (migration 016):
-#: the weighted Last.fm/ListenBrainz mixture BEFORE
-#: ``apply_album_relative_popularity`` normalised it to the album's own band.
-#: ``final_score`` is that normalised value, so it is only comparable WITHIN an
-#: album — it is what let the top cut of a live album (a few thousand
-#: listeners) outrank the artist's biggest hit (a million listeners) in this
-#: report. The report promises "most popular first", so the cross-album number
-#: leads; ``final_score`` (and the page's own fallback chain) only serve rows
-#: written before ``raw_score`` existed.
-_POPULARITY_REPORT_SQL = """
-    SELECT title, artist, album, disc_number, track_number, year,
-           final_score, popularity, stars,
-           lastfm_listeners, lastfm_playcount, lastfm_score,
-           listenbrainz_listens, listenbrainz_users, listenbrainz_score,
-           is_single, single_confidence, single_confidence_score,
-           is_live, popularity_frozen
-    FROM tracks
-    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
-    ORDER BY COALESCE(NULLIF(raw_score, 0), final_score, popularity, stars, 0) DESC,
-             LOWER(COALESCE(title, ''))
-"""
-
-
-def _build_popularity_report(artist: str) -> str:
-    """CSV text for one artist, most popular first. BLOCKING — run in a thread."""
-    import csv as _csv
-    import io as _io
-
-    with db_session() as session:
-        rows = session.execute(
-            text(_POPULARITY_REPORT_SQL), {"artist": artist}
-        ).mappings().all()
-
-    buffer = _io.StringIO(newline="")
-    writer = _csv.writer(buffer)
-    writer.writerow(_POPULARITY_REPORT_COLUMNS)
-    for position, row in enumerate(rows, start=1):
-        # ``None`` becomes an empty cell; everything else is written as stored.
-        writer.writerow(
-            [position] + [row.get(column) for column in _POPULARITY_REPORT_COLUMNS[1:]]
-        )
-    return buffer.getvalue()
+# The report itself lives in ``services.popularity.popularity_report_service``:
+# the album page downloads the SAME file scoped to one album, and a second copy
+# of the SQL would eventually disagree about a column or a sort key — the
+# report is only useful if it agrees with itself.
 
 
 @artist_bp.route("/api/artist/popularity-report")
@@ -660,12 +598,11 @@ async def api_artist_popularity_report() -> Any:
     # The query reads every track the artist owns, so it runs OFF the event
     # loop — the async ratchet exempts a handler only when it offloads.
     try:
-        report = await asyncio.to_thread(_build_popularity_report, artist)
+        report = await asyncio.to_thread(build_popularity_report, artist=artist)
     except Exception as exc:
         logger.error("Popularity report failed", artist=artist, error=str(exc))
         return jsonify({"error": str(exc)}), 500
 
-    safe_artist = re.sub(r"[^A-Za-z0-9 _-]", "", artist).strip() or "artist"
     return Response(
         # ``\ufeff`` (UTF-8 BOM): titles carry accents, and without it Excel
         # reads the file as the local codepage and mangles them.
@@ -673,7 +610,7 @@ async def api_artist_popularity_report() -> Any:
         mimetype="text/csv",
         headers={
             "Content-Disposition": (
-                f'attachment; filename="{safe_artist} - popularity report.csv"'
+                f'attachment; filename="{popularity_report_filename(artist=artist)}"'
             )
         },
     )

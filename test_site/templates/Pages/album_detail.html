@@ -184,6 +184,13 @@
               <li><a class="dropdown-item" href="javascript:void(0)" onclick="renameAlbumFiles('{{ artist_name|escapejs }}', '{{ album_name|escapejs }}')"><i class="bi bi-files me-2"></i> Rename Files</a></li>
               <li><a class="dropdown-item" href="javascript:void(0)" onclick="autoLinkAllMbids()"><i class="bi bi-link-45deg me-2"></i> Auto-Link MBIDs</a></li>
               <li><a class="dropdown-item" href="javascript:void(0)" onclick="openAlbumArtModal()"><i class="bi bi-image me-2"></i> Change Album Art</a></li>
+              {#
+                A plain <a> download, not an onclick handler: the browser's own
+                download flow handles it, so there is no busy state to manage
+                and the file lands in the downloads folder — the same way the
+                artist page's copy of this report behaves.
+              #}
+              <li><a class="dropdown-item" href="{{ url_for('album_routes.api_album_popularity_report', artist=artist_name, album=album_name) }}" title="CSV of this album's tracks: Last.fm + ListenBrainz listens, source scores, combined score and stars — most popular first"><i class="bi bi-bar-chart-line me-2"></i> Download Popularity Report</a></li>
               {% if slskd_config is defined and slskd_config.enabled %}
                 <li><hr class="dropdown-divider"></li>
                 <li><a class="dropdown-item" href="javascript:void(0)" onclick="openSlskdSearchAlbum('{{ artist_name|escapejs }}', '{{ album_name|escapejs }}')"><i class="bi bi-music-note-beamed me-2"></i> Search Soulseek</a></li>
