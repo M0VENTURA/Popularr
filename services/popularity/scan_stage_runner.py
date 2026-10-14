@@ -2198,1402 +2198,1439 @@ def run_scan(
         if _essential_featured_rows is not None:
             options["_essential_featured_rows"] = _essential_featured_rows
 
-    for album_index, album_row in enumerate(albums, start=1):
-        if effective_stop_file and is_stop_requested(effective_stop_file):
-            _close_artist_section(_section_artist)
-            log_unified("Scan stopped by user request")
-            finish(success=False)
-            return False
-
-        # ── Per-artist cancellation (abandoned straggler) ──────────────
-        # When the full-scan loop abandons THIS artist for exceeding its
-        # budget, it asks us to stop here.  Same safe boundary as the user
-        # stop above: the previous album has completed, so unwinding cannot
-        # leave a half-written album — but unlike the user stop it unwinds
-        # one artist, not the whole scan.
-        #
-        # Without this the abandoned worker kept running: it held a DB
-        # connection and shared HTTP rate-limiter slots while the loop had
-        # already moved on, which made the NEXT artist likelier to time out
-        # too (probed: 8 slow artists -> 8 concurrent pipelines). It also kept
-        # writing its OWN artist index into the progress row, driving
-        # percent_complete BACKWARDS behind the main loop.
-        if _scan_cancellation.is_cancelled(album_row.get("artist") or artist_filter):
-            _close_artist_section(_section_artist)
-            log_unified(
-                f"Scan cancelled for artist '{album_row.get('artist') or artist_filter}' "
-                "— abandoned after exceeding its time budget; moving on"
-            )
-            finish(success=False)
-            return False
-
-        artist = album_row.get("artist") or ""
-        if artist and artist != _section_artist:
-            _artist_norm = str(artist).strip().lower()
-            _section_norm = str(_section_artist or "").strip().lower()
-            if _artist_norm != _section_norm:
+    try:
+        for album_index, album_row in enumerate(albums, start=1):
+            if effective_stop_file and is_stop_requested(effective_stop_file):
                 _close_artist_section(_section_artist)
-                _section_artist = artist
+                log_unified("Scan stopped by user request")
+                finish(success=False)
+                return False
 
-        # -------------------------------------------------------------
-        # Pass-1 artist pre-scan: preload catalogue score/listen baselines
-        # so track-level relative scoring has an artist anchor available
-        # before the first album of this artist is processed.
-        # -------------------------------------------------------------
-        if artist:
-            _artist_key_norm = str(artist).strip().casefold()
-            if _pre_scan_done_artist != _artist_key_norm:
-                _pre_scan_done_artist = _artist_key_norm
-                try:
-                    _section_albums = [_ar for _ar in albums if (_ar.get("artist") or "") == artist]
-                    _section_titles: set[str] = set()
-                    _pre_scores: list[float] = []
-                    _pre_listens: list[float] = []
+            # ── Per-artist cancellation (abandoned straggler) ──────────────
+            # When the full-scan loop abandons THIS artist for exceeding its
+            # budget, it asks us to stop here.  Same safe boundary as the user
+            # stop above: the previous album has completed, so unwinding cannot
+            # leave a half-written album — but unlike the user stop it unwinds
+            # one artist, not the whole scan.
+            #
+            # Without this the abandoned worker kept running: it held a DB
+            # connection and shared HTTP rate-limiter slots while the loop had
+            # already moved on, which made the NEXT artist likelier to time out
+            # too (probed: 8 slow artists -> 8 concurrent pipelines). It also kept
+            # writing its OWN artist index into the progress row, driving
+            # percent_complete BACKWARDS behind the main loop.
+            if _scan_cancellation.is_cancelled(album_row.get("artist") or artist_filter):
+                _close_artist_section(_section_artist)
+                log_unified(
+                    f"Scan cancelled for artist '{album_row.get('artist') or artist_filter}' "
+                    "— abandoned after exceeding its time budget; moving on"
+                )
+                finish(success=False)
+                return False
 
-                    for _ar in _section_albums:
-                        for _t in (_ar.get("tracks") or []):
-                            _t_title = str(_t.get("title") or "").strip().lower()
-                            _section_titles.add(_t_title)
-                            _score = float(_t.get("final_score") or _t.get("popularity") or _t.get("popularity_score") or 0)
-                            if _score > 0:
-                                _pre_scores.append(_score)
-                            _lf = float(_t.get("lastfm_listeners") or 0)
-                            if _lf > 0:
-                                _pre_listens.append(_lf)
+            artist = album_row.get("artist") or ""
+            if artist and artist != _section_artist:
+                _artist_norm = str(artist).strip().lower()
+                _section_norm = str(_section_artist or "").strip().lower()
+                if _artist_norm != _section_norm:
+                    _close_artist_section(_section_artist)
+                    _section_artist = artist
 
-                    _pre_scores += _load_artist_db_scores(artist, _section_titles)
+            # -------------------------------------------------------------
+            # Pass-1 artist pre-scan: preload catalogue score/listen baselines
+            # so track-level relative scoring has an artist anchor available
+            # before the first album of this artist is processed.
+            # -------------------------------------------------------------
+            if artist:
+                _artist_key_norm = str(artist).strip().casefold()
+                if _pre_scan_done_artist != _artist_key_norm:
+                    _pre_scan_done_artist = _artist_key_norm
                     try:
-                        _pre_listens += _load_artist_db_listeners(artist, _section_titles)
+                        _section_albums = [_ar for _ar in albums if (_ar.get("artist") or "") == artist]
+                        _section_titles: set[str] = set()
+                        _pre_scores: list[float] = []
+                        _pre_listens: list[float] = []
+
+                        for _ar in _section_albums:
+                            for _t in (_ar.get("tracks") or []):
+                                _t_title = str(_t.get("title") or "").strip().lower()
+                                _section_titles.add(_t_title)
+                                _score = float(_t.get("final_score") or _t.get("popularity") or _t.get("popularity_score") or 0)
+                                if _score > 0:
+                                    _pre_scores.append(_score)
+                                _lf = float(_t.get("lastfm_listeners") or 0)
+                                if _lf > 0:
+                                    _pre_listens.append(_lf)
+
+                        _pre_scores += _load_artist_db_scores(artist, _section_titles)
+                        try:
+                            _pre_listens += _load_artist_db_listeners(artist, _section_titles)
+                        except Exception as exc:
+                            logger.debug("Pass-1 listen baseline failed", artist=artist, error=str(exc))
+
+                        _pre_primary = strip_featured_artist(artist)
+                        if len(_pre_scores) >= ALBUM_RELATIVE_MIN_ALBUM_TRACKS:
+                            options["artist_stats_override"] = list(_pre_scores)
+                        else:
+                            options.pop("artist_stats_override", None)
+
+                        if len(_pre_listens) >= ALBUM_RELATIVE_MIN_ALBUM_TRACKS:
+                            options["artist_listen_override"] = list(_pre_listens)
+                        else:
+                            options.pop("artist_listen_override", None)
+
+                        log_unified(f"[scan_runner] Pass-1 artist pre-scan: {_pre_primary} — {len(_pre_scores)} catalogue score(s), {len(_pre_listens)} listen(s) pre-loaded")
                     except Exception as exc:
-                        logger.debug("Pass-1 listen baseline failed", artist=artist, error=str(exc))
-
-                    _pre_primary = strip_featured_artist(artist)
-                    if len(_pre_scores) >= ALBUM_RELATIVE_MIN_ALBUM_TRACKS:
-                        options["artist_stats_override"] = list(_pre_scores)
-                    else:
+                        logger.debug("Pass-1 artist pre-scan failed", artist=artist, error=str(exc))
                         options.pop("artist_stats_override", None)
-
-                    if len(_pre_listens) >= ALBUM_RELATIVE_MIN_ALBUM_TRACKS:
-                        options["artist_listen_override"] = list(_pre_listens)
-                    else:
                         options.pop("artist_listen_override", None)
 
-                    log_unified(f"[scan_runner] Pass-1 artist pre-scan: {_pre_primary} — {len(_pre_scores)} catalogue score(s), {len(_pre_listens)} listen(s) pre-loaded")
-                except Exception as exc:
-                    logger.debug("Pass-1 artist pre-scan failed", artist=artist, error=str(exc))
-                    options.pop("artist_stats_override", None)
-                    options.pop("artist_listen_override", None)
+            album = album_row.get("album") or ""
+            tracks = album_row.get("tracks") or []
+            _album_start = len(results)
+            # Report accumulator for this album's closing ALBUM SUMMARY block.
+            # Populated as each stage completes; emitted when the album's star
+            # ratings are assigned (see _flush_artist_star_ratings).
+            _album_report: dict[str, Any] = {
+                "album": album,
+                "artist": artist,
+                "tracks_processed": len(tracks or []),
+                "metadata_corrections": 0,
+                "genres_added": 0,
+                "genres_removed": 0,
+                "singles_detected": 0,
+                "playlists_updated": 0,
+                "started_at": time.monotonic(),
+                "release_year": None,
+                "album_type": "",
+                "release_mbid_found": False,
+            }
 
-        album = album_row.get("album") or ""
-        tracks = album_row.get("tracks") or []
-        _album_start = len(results)
-        # Report accumulator for this album's closing ALBUM SUMMARY block.
-        # Populated as each stage completes; emitted when the album's star
-        # ratings are assigned (see _flush_artist_star_ratings).
-        _album_report: dict[str, Any] = {
-            "album": album,
-            "artist": artist,
-            "tracks_processed": len(tracks or []),
-            "metadata_corrections": 0,
-            "genres_added": 0,
-            "genres_removed": 0,
-            "singles_detected": 0,
-            "playlists_updated": 0,
-            "started_at": time.monotonic(),
-            "release_year": None,
-            "album_type": "",
-            "release_mbid_found": False,
-        }
+            _first = (artist or " ")[0].upper()
+            _letter = "#" if not _first.isalpha() else _first
+            if _letter != _last_letter:
+                _last_letter = _letter
+                log_unified(f"Popularity Scan - Letter '{_letter}'")
 
-        _first = (artist or " ")[0].upper()
-        _letter = "#" if not _first.isalpha() else _first
-        if _letter != _last_letter:
-            _last_letter = _letter
-            log_unified(f"Popularity Scan - Letter '{_letter}'")
+            log_unified(f"[{album_index}/{total_albums}] Processing: \"{str(album or '').strip()}\" ({len(tracks or [])} Tracks)")
 
-        log_unified(f"[{album_index}/{total_albums}] Processing: \"{str(album or '').strip()}\" ({len(tracks or [])} Tracks)")
+            _is_compilation_artist = _is_comp_artist(artist)
+            if artist and artist not in artist_mb_singles_cache and not _is_compilation_artist:
+                artist_mb_singles_cache[artist] = _load_mb_single_titles(artist)
+            mb_cached_singles = artist_mb_singles_cache.get(artist) or set()
 
-        _is_compilation_artist = _is_comp_artist(artist)
-        if artist and artist not in artist_mb_singles_cache and not _is_compilation_artist:
-            artist_mb_singles_cache[artist] = _load_mb_single_titles(artist)
-        mb_cached_singles = artist_mb_singles_cache.get(artist) or set()
+            if artist and artist not in artist_discogs_singles_cache and not _is_compilation_artist:
+                artist_discogs_singles_cache[artist] = _load_discogs_single_titles(artist)
+            discogs_cached_singles = artist_discogs_singles_cache.get(artist) or set()
 
-        if artist and artist not in artist_discogs_singles_cache and not _is_compilation_artist:
-            artist_discogs_singles_cache[artist] = _load_discogs_single_titles(artist)
-        discogs_cached_singles = artist_discogs_singles_cache.get(artist) or set()
+            if artist and artist not in artist_discogs_promo_cache and not _is_compilation_artist:
+                artist_discogs_promo_cache[artist] = _load_discogs_promo_titles(artist)
+            discogs_cached_promos = artist_discogs_promo_cache.get(artist) or set()
 
-        if artist and artist not in artist_discogs_promo_cache and not _is_compilation_artist:
-            artist_discogs_promo_cache[artist] = _load_discogs_promo_titles(artist)
-        discogs_cached_promos = artist_discogs_promo_cache.get(artist) or set()
+            _mode_meta = bool(options.get("metadata_only"))
+            _mode_pop = bool(options.get("popularity_only"))
+            _mode_singles = bool(options.get("singles_only") or options.get("singles_with_missing_popularity"))
+            _mode_finalise = bool(options.get("finalise_only"))
+            _album_is_old = _album_release_is_old(tracks)
 
-        _mode_meta = bool(options.get("metadata_only"))
-        _mode_pop = bool(options.get("popularity_only"))
-        _mode_singles = bool(options.get("singles_only") or options.get("singles_with_missing_popularity"))
-        _mode_finalise = bool(options.get("finalise_only"))
-        _album_is_old = _album_release_is_old(tracks)
+            # Can this pass fill a singles gap at all? Same predicate
+            # ``track_stage`` uses for its singles section. See
+            # ``_singles_gap_fill``.
+            _runs_singles = _pass_runs_singles(options)
 
-        # Can this pass fill a singles gap at all? Same predicate
-        # ``track_stage`` uses for its singles section. See
-        # ``_singles_gap_fill``.
-        _runs_singles = _pass_runs_singles(options)
+            skip_album = False
+            force_metadata_for_this_album = False
 
-        skip_album = False
-        force_metadata_for_this_album = False
-
-        # FINALISE USED TO BYPASS THESE GATES ENTIRELY, on the reasoning that
-        # the per-album file-tag sync below is the whole point of the pass and
-        # the freshness gates would leave every already-scanned album (i.e.
-        # almost all of them) never finalised.
-        #
-        # Reported: *"a non forced Finalise scan took 3 minutes to complete"*
-        # for ONE album, with 12 more queued — because a non-forced run re-visited
-        # every album in the library no matter what Config said. It now follows
-        # the CONFIG RULES for the scan type it runs: `_resolve_scan_type` maps
-        # a finalise pass to ``singles`` (it is dispatched as `singles_only`),
-        # so the **Singles Scan Window** — and the singles half of
-        # `Skip Unchanged Albums` — decide, each against the ``singles`` history
-        # this very pass records. `0` still means always run, Force still
-        # bypasses, and the completeness override below still forces an
-        # incomplete album through.
-        #
-        # DELIBERATE TRADE-OFF: an album skipped here does NOT get its file-tag
-        # sync on this pass. That is what "skip" means, and it is the rule the
-        # user configured.
-        if not force and not album_filter:
-            try:
-                if _mode_meta:
-                    skip_days = int(get_feature("metadata_skip_days", 0) or 0)
-                    if _album_is_old:
-                        skip_days = int(get_feature("metadata_old_album_skip_days", 30) or 0)
-                elif _mode_pop:
-                    skip_days = int(get_feature("popularity_skip_days", 7) or 0)
-                    if _album_is_old:
-                        skip_days = int(get_feature("popularity_old_album_skip_days", 30) or 0)
-                elif _mode_singles:
-                    skip_days = int(get_feature("singles_skip_days", 7) or 0)
-                    if _album_is_old:
-                        skip_days = int(get_feature("singles_old_album_skip_days", 30) or 0)
-                else:
-                    skip_days = int(get_feature("album_skip_days", 7) or 0)
-                    if _album_is_old:
-                        skip_days = int(get_feature("album_old_album_skip_days", 30) or 0)
-            except Exception:
-                skip_days = 7
-
-            if skip_days > 0:
-                if was_album_scanned(artist, album, scan_type, skip_days):
-                    skip_album = True
-                    log_unified(f"Popularity Scan - Skipping album \"{str(album or '').strip()}\" (scanned within last {skip_days} days)")
-                elif get_feature("skip_unchanged_albums", True) and tracks and not _mode_meta:
-                    # "Assessed" is asked through the ONE helper, so this gate
-                    # and the gap fill below cannot disagree about it.
-                    _singles_unassessed = _tracks_without_singles_verdict(tracks)
-                    # "Assessed" is ONE helper (module-level, tested behaviourally):
-                    # a stored 0.0 IS an assessment, only NULL means "never
-                    # scored" — see _track_has_assessed_score.
-                    if _mode_singles:
-                        all_done = not _singles_unassessed
+            # FINALISE USED TO BYPASS THESE GATES ENTIRELY, on the reasoning that
+            # the per-album file-tag sync below is the whole point of the pass and
+            # the freshness gates would leave every already-scanned album (i.e.
+            # almost all of them) never finalised.
+            #
+            # Reported: *"a non forced Finalise scan took 3 minutes to complete"*
+            # for ONE album, with 12 more queued — because a non-forced run re-visited
+            # every album in the library no matter what Config said. It now follows
+            # the CONFIG RULES for the scan type it runs: `_resolve_scan_type` maps
+            # a finalise pass to ``singles`` (it is dispatched as `singles_only`),
+            # so the **Singles Scan Window** — and the singles half of
+            # `Skip Unchanged Albums` — decide, each against the ``singles`` history
+            # this very pass records. `0` still means always run, Force still
+            # bypasses, and the completeness override below still forces an
+            # incomplete album through.
+            #
+            # DELIBERATE TRADE-OFF: an album skipped here does NOT get its file-tag
+            # sync on this pass. That is what "skip" means, and it is the rule the
+            # user configured.
+            if not force and not album_filter:
+                try:
+                    if _mode_meta:
+                        skip_days = int(get_feature("metadata_skip_days", 0) or 0)
+                        if _album_is_old:
+                            skip_days = int(get_feature("metadata_old_album_skip_days", 30) or 0)
                     elif _mode_pop:
-                        all_done = all(_track_has_assessed_score(t) for t in tracks)
+                        skip_days = int(get_feature("popularity_skip_days", 7) or 0)
+                        if _album_is_old:
+                            skip_days = int(get_feature("popularity_old_album_skip_days", 30) or 0)
+                    elif _mode_singles:
+                        skip_days = int(get_feature("singles_skip_days", 7) or 0)
+                        if _album_is_old:
+                            skip_days = int(get_feature("singles_old_album_skip_days", 30) or 0)
                     else:
-                        all_done = (
-                            all(_track_has_assessed_score(t) for t in tracks)
-                            and not _singles_unassessed
-                        )
-                    if all_done:
+                        skip_days = int(get_feature("album_skip_days", 7) or 0)
+                        if _album_is_old:
+                            skip_days = int(get_feature("album_old_album_skip_days", 30) or 0)
+                except Exception:
+                    skip_days = 7
+
+                if skip_days > 0:
+                    if was_album_scanned(artist, album, scan_type, skip_days):
                         skip_album = True
-                        log_unified(f"Popularity Scan - Skipping album \"{str(album or '').strip()}\" (no changes detected)")
+                        log_unified(f"Popularity Scan - Skipping album \"{str(album or '').strip()}\" (scanned within last {skip_days} days)")
+                    elif get_feature("skip_unchanged_albums", True) and tracks and not _mode_meta:
+                        # "Assessed" is asked through the ONE helper, so this gate
+                        # and the gap fill below cannot disagree about it.
+                        _singles_unassessed = _tracks_without_singles_verdict(tracks)
+                        # "Assessed" is ONE helper (module-level, tested behaviourally):
+                        # a stored 0.0 IS an assessment, only NULL means "never
+                        # scored" — see _track_has_assessed_score.
+                        if _mode_singles:
+                            all_done = not _singles_unassessed
+                        elif _mode_pop:
+                            all_done = all(_track_has_assessed_score(t) for t in tracks)
+                        else:
+                            all_done = (
+                                all(_track_has_assessed_score(t) for t in tracks)
+                                and not _singles_unassessed
+                            )
+                        if all_done:
+                            skip_album = True
+                            log_unified(f"Popularity Scan - Skipping album \"{str(album or '').strip()}\" (no changes detected)")
 
-            # Completeness override: never skip an album that is still missing
-            # genres/tags, scores, album type, or recording MBIDs.
-            if skip_album:
-                incomplete, reason = is_album_incomplete(tracks)
-                if incomplete:
-                    skip_album = False
-                    force_metadata_for_this_album = True
-                    log_unified(f"Popularity Scan - Album recently scanned but incomplete — forcing rerun ({reason})")
+                # Completeness override: never skip an album that is still missing
+                # genres/tags, scores, album type, or recording MBIDs.
+                if skip_album:
+                    incomplete, reason = is_album_incomplete(tracks)
+                    if incomplete:
+                        skip_album = False
+                        force_metadata_for_this_album = True
+                        log_unified(f"Popularity Scan - Album recently scanned but incomplete — forcing rerun ({reason})")
 
-            # ── Opt-in singles gap fill (features.run_singles_on_skipped_albums)
-            #
-            # "The idea behind it was that if it had scanned an album but
-            # somehow missed a track it wouldn't keep skipping that track."
-            #
-            # The window above answers *"has this album been scanned?"* — which
-            # is NOT the same question as *"did every track get a verdict?"*.
-            # A track the earlier pass never reached (its worker abandoned on
-            # the per-album budget, a track added to the album afterwards, a
-            # detection that ERRORED and so stamped no timestamp) leaves the
-            # album looking finished, so ``was_album_scanned`` skips it again on
-            # every pass and the gap is never filled.
-            #
-            # Only the tracks WITHOUT a verdict do any work — the rest answer
-            # ``singles_detection_is_fresh`` and return "(cached)" at 0.0s — so
-            # the cost is one assessment per genuinely-missed track, ONCE: the
-            # verdict is then cached for its TTL and the window takes over again.
-            #
-            # Deliberately does NOT set ``force_metadata_for_this_album``: this
-            # fills the singles verdict, it does not re-run the metadata pass.
-            if skip_album:
-                _unassessed = _singles_gap_fill(
-                    tracks=tracks,
-                    runs_singles=_runs_singles,
-                    enabled=bool(get_feature("run_singles_on_skipped_albums", False)),
-                )
-                if _unassessed:
-                    skip_album = False
-                    log_unified(
-                        f"Popularity Scan - Album \"{str(album or '').strip()}\" has "
-                        f"{len(_unassessed)} of {len(tracks or [])} track(s) with no "
-                        "singles verdict — running it instead of skipping "
-                        "(Run Singles Detection on Skipped Albums)"
+                # ── Opt-in singles gap fill (features.run_singles_on_skipped_albums)
+                #
+                # "The idea behind it was that if it had scanned an album but
+                # somehow missed a track it wouldn't keep skipping that track."
+                #
+                # The window above answers *"has this album been scanned?"* — which
+                # is NOT the same question as *"did every track get a verdict?"*.
+                # A track the earlier pass never reached (its worker abandoned on
+                # the per-album budget, a track added to the album afterwards, a
+                # detection that ERRORED and so stamped no timestamp) leaves the
+                # album looking finished, so ``was_album_scanned`` skips it again on
+                # every pass and the gap is never filled.
+                #
+                # Only the tracks WITHOUT a verdict do any work — the rest answer
+                # ``singles_detection_is_fresh`` and return "(cached)" at 0.0s — so
+                # the cost is one assessment per genuinely-missed track, ONCE: the
+                # verdict is then cached for its TTL and the window takes over again.
+                #
+                # Deliberately does NOT set ``force_metadata_for_this_album``: this
+                # fills the singles verdict, it does not re-run the metadata pass.
+                if skip_album:
+                    _unassessed = _singles_gap_fill(
+                        tracks=tracks,
+                        runs_singles=_runs_singles,
+                        enabled=bool(get_feature("run_singles_on_skipped_albums", False)),
                     )
+                    if _unassessed:
+                        skip_album = False
+                        log_unified(
+                            f"Popularity Scan - Album \"{str(album or '').strip()}\" has "
+                            f"{len(_unassessed)} of {len(tracks or [])} track(s) with no "
+                            "singles verdict — running it instead of skipping "
+                            "(Run Singles Detection on Skipped Albums)"
+                        )
 
-        # ── Starless self-heal ─────────────────────────────────────────────
-        # An album whose tracks are scored but NONE have stars is the
-        # signature of a run interrupted BEFORE the deferred artist-level star
-        # flush (``_flush_artist_star_ratings`` runs at the ARTIST boundary,
-        # not per album). The next non-forced scan must NOT skip it as "no
-        # changes detected" — that leaves its stars NULL forever. Forcing it
-        # through here reuses the stored scores (no re-scoring, no metadata
-        # re-run — deliberately does NOT set ``force_metadata_for_this_album``)
-        # so ``_post_album_stars`` finally assigns them.
-        #
-        # Metadata-only passes never rate, so they must keep skipping these
-        # albums (else the completeness override would re-run them forever).
-        if skip_album and not options.get("metadata_only") and _album_scored_but_never_rated(tracks):
-            skip_album = False
-            log_unified(
-                f"Popularity Scan - Album \"{str(album or '').strip()}\" scored but never rated "
-                "(no stars) — running it to assign them"
-            )
-
-        # A PROVISIONALLY-rated album (phase 1 ran, the artist-boundary
-        # reconcile never did — an interrupted artist) must also be re-run, or
-        # its provisional stars would be skipped forever. Same shape as the heal
-        # above: reuse the stored scores, do NOT force a metadata re-run.
-        if skip_album and not options.get("metadata_only") and _album_needs_star_reconcile(tracks):
-            skip_album = False
-            log_unified(
-                f"Popularity Scan - Album \"{str(album or '').strip()}\" has provisional stars "
-                "(artist not reconciled) — running it to finalise ratings"
-            )
-
-        if skip_album:
-            skipped_albums += 1
-            continue
-
-        # -------------------------------------------------------------
-        # Annotation repair.
-        #
-        # Collapses duplicated annotations in this album's name and track
-        # titles before anything else touches them, so the rest of the
-        # iteration - enrichment, track processing, and the
-        # sync_album_file_tags() call further down - all operate on the
-        # corrected values and propagate them out to the audio file tags
-        # on this same pass.
-        #
-        # Skipped for popularity-only and singles passes, which write no
-        # metadata. Disable with features.repair_album_annotations.
-        # -------------------------------------------------------------
-        if not _mode_pop and not _mode_singles:
-            try:
-                _repair = repair_album_annotations(artist, album, tracks)
-                if _repair.get("album_repaired"):
-                    # Adopt the corrected name for the remainder of this
-                    # album iteration. Every subsequent DB query in this
-                    # loop filters on `album`, so this MUST be reassigned
-                    # or those queries will look for the old, now
-                    # non-existent name.
-                    album = str(_repair.get("album") or album)
-                    album_row["album"] = album
-            except Exception as exc:
-                logger.warning(
-                    "Album annotation repair failed",
-                    artist=artist, album=album, error=str(exc),
-                )
-
-        progress = 5 + int((album_index / total_albums) * 90)
-        current_item = f"{artist} - {album}"
-
-        _progress_cb = options.get("progress_callback")
-        if callable(_progress_cb):
-            try:
-                _progress_cb(album_index, total_albums, current_item)
-            except Exception as exc:
-                logger.debug("progress_callback failed", error=str(exc))
-
-        if effective_stop_file and artist and artist != last_checkpoint_artist:
-            try:
-                _row_scan_type = "full_scan" if effective_stop_file == get_scan_progress_path("full_scan") else "popularity_scan"
-                # PERCENTAGE OWNERSHIP: when the row is ``full_scan`` the OUTER
-                # orchestrator owns percent_complete — it reports progress across
-                # ALL artists (0-100), whereas ``progress`` here is only this
-                # artist's album fraction on a 5-95 scale.  Writing it to the
-                # shared row made the bar drop back to ~5% at every new artist,
-                # which is the reported "doesn't properly detail where the scan
-                # is".  The checkpoint exists to record WHERE we are (artist +
-                # item) for resume/display, so on the full_scan row it updates
-                # only those.
-                if _row_scan_type == "full_scan":
-                    _extra = {
-                        "status": "running",
-                        "current_item": current_item,
-                    }
-                else:
-                    _extra = {
-                        "status": "running",
-                        "percent_complete": progress,
-                        "current_item": current_item,
-                        "current_stage": "Albums",
-                        "processed_items": album_index,
-                        "total_items": total_albums,
-                    }
-                write_progress_with_current_artist(
-                    effective_stop_file, _row_scan_type, True,
-                    current_artist=artist,
-                    extra=_extra,
-                )
-                if not artist_filter and not album_filter:
-                    save_artist_scan_checkpoint(artist, effective_stop_file)
-                last_checkpoint_artist = artist
-            except Exception as exc:
-                logger.debug("Progress checkpoint write failed", error=str(exc))
-
-        if artist and artist not in artist_lf_context_cache and not _is_comp_artist(artist):
-            try:
-                artist_lf_context_cache[artist] = get_artist_lastfm_context(artist, None, None)
-            except Exception as exc:
-                logger.debug("Last.fm context fetch failed", artist=artist, error=str(exc))
-                artist_lf_context_cache[artist] = {"mean": 0, "stdev": 0, "total": 0, "values": []}
-
-        artist_lf_context = artist_lf_context_cache.get(artist) or {}
-
-        update(stage="album", progress=progress, message=f"Preparing {current_item}", current_item=current_item, processed=album_index, total_items=total_albums)
-
-        try:
-            album_context, track_contexts = prepare_tracks_for_album(
-                artist=artist,
-                album=album,
-                tracks=tracks,
-                album_artist=album_row.get("album_artist"),
-                spotify_album_type=album_row.get("spotify_album_type"),
-                musicbrainz_album_type=album_row.get("musicbrainz_album_type"),
-            )
-            stat_eligible_tracks = get_stat_eligible_tracks(track_contexts)
-        except Exception as exc:
-            logger.warning("Album prep failed", artist=artist, album=album, error=str(exc))
-            log_unified(f"[POPULARITY] Album '{str(artist or '').strip()} - {str(album or '').strip()}' skipped (prep error: {exc})")
-            record_scan(scan_type, "failed", message=f"Album prep failed: {exc}", artist=artist, album=album)
-            albums_processed += 1
-            continue
-
-        try:
-            record_scan(scan_type, "started", message=f"{scan_type} scan: {artist} - {album}", artist=artist, album=album)
-
-            _full_pass = not (_mode_meta or _mode_pop or _mode_singles or options.get("singles_detection_only"))
-            if _full_pass:
-                options["defer_full_enrichment"] = True
-
-            log_unified(f"[POPULARITY] Enriching album: {artist} - {album}")
-
-            album_result = _bounded_album_phase(
-                enrich_album,
-                album_row=album_row,
-                album_context=album_context,
-                stat_eligible_tracks=stat_eligible_tracks,
-                options=options,
-                section="enrich_album",
-                log_context={"artist": artist, "album": album},
-                seconds=_album_budget,
-            ) or {}
-
-            # An album that blew the per-album budget is SKIPPED — the artist
-            # keeps every remaining album.  This is deliberately NOT a
-            # cancellation: the scan_cancellation registry is keyed per ARTIST,
-            # so cancelling here would unwind the artist's remaining albums and
-            # recreate the whole-artist loss one level down.
-            _album_abandoned, _album_abandon_reason = _album_phase_was_abandoned(
-                album_result
-            )
-            if _album_abandoned:
-                skipped_albums += 1
-                abandoned_albums += 1
+            # ── Starless self-heal ─────────────────────────────────────────────
+            # An album whose tracks are scored but NONE have stars is the
+            # signature of a run interrupted BEFORE the deferred artist-level star
+            # flush (``_flush_artist_star_ratings`` runs at the ARTIST boundary,
+            # not per album). The next non-forced scan must NOT skip it as "no
+            # changes detected" — that leaves its stars NULL forever. Forcing it
+            # through here reuses the stored scores (no re-scoring, no metadata
+            # re-run — deliberately does NOT set ``force_metadata_for_this_album``)
+            # so ``_post_album_stars`` finally assigns them.
+            #
+            # Metadata-only passes never rate, so they must keep skipping these
+            # albums (else the completeness override would re-run them forever).
+            if skip_album and not options.get("metadata_only") and _album_scored_but_never_rated(tracks):
+                skip_album = False
                 log_unified(
-                    f"[POPULARITY] Album '{artist} - {album}' skipped "
-                    f"({_album_abandon_reason}) — continuing with the artist's "
-                    "remaining albums"
+                    f"Popularity Scan - Album \"{str(album or '').strip()}\" scored but never rated "
+                    "(no stars) — running it to assign them"
                 )
-                record_scan(
-                    scan_type, "failed",
-                    message=f"Album exceeded its time budget: {_album_abandon_reason}",
-                    artist=artist, album=album,
+
+            # A PROVISIONALLY-rated album (phase 1 ran, the artist-boundary
+            # reconcile never did — an interrupted artist) must also be re-run, or
+            # its provisional stars would be skipped forever. Same shape as the heal
+            # above: reuse the stored scores, do NOT force a metadata re-run.
+            if skip_album and not options.get("metadata_only") and _album_needs_star_reconcile(tracks):
+                skip_album = False
+                log_unified(
+                    f"Popularity Scan - Album \"{str(album or '').strip()}\" has provisional stars "
+                    "(artist not reconciled) — running it to finalise ratings"
                 )
-                albums_processed += 1
+
+            if skip_album:
+                skipped_albums += 1
                 continue
 
-            log_unified(f"[POPULARITY] Album enriched: {artist} - {album} (type={album_result.get('detected_album_type')})")
-
-            # Re-derive live-album context and per-track exclude_from_stats now
-            # that the detected album type is known.
-            _refresh_album_live_context(
-                album,
-                album_context,
-                track_contexts,
-                str((album_result or {}).get("detected_album_type") or ""),
-            )
-
-            track_dicts = [tc["track"] for tc in track_contexts if tc.get("track")]
-
             # -------------------------------------------------------------
-            # Per-artist prefetch: popularity cache, Discogs artist id,
-            # release cache, and missing-release tracklists.
-            # -------------------------------------------------------------
-            if artist and artist != last_prefetch_artist and not _is_compilation_artist:
-                last_prefetch_artist = artist
-                prefetched_popularity = {}
-                _prefetch_state: dict[str, Any] = {"prefetched_popularity": {}}
-
-                def _prefetch_artist_work() -> None:
-                    if not _singles_pass:
-                        try:
-                            _prefetch_state["prefetched_popularity"] = prefetch_artist_popularity(
-                                artist=artist,
-                                tracks=artist_all_tracks.get(artist) or track_dicts,
-                                force=bool(options.get("force")),
-                                cache_full_catalogue=True,
-                            )
-                        except Exception as exc:
-                            logger.warning("Popularity cache prefetch failed", artist=artist, error=str(exc))
-
-                        try:
-                            # Artist-level similar-artists refresh: the
-                            # per-album path is DB-READ-ONLY from here on
-                            # (the old per-album fetch re-fired the network
-                            # for every album whenever the cached list was
-                            # EMPTY — an artist with no similar artists paid
-                            # Last.fm + MB-id + ListenBrainz per album,
-                            # forever). Checked empties are remembered for
-                            # 90 days; failures retry once per ARTIST pass.
-                            from services.popularity.stages.album_stage import (
-                                refresh_similar_artists,
-                            )
-                            refresh_similar_artists(artist, options)
-                        except Exception as exc:
-                            logger.warning("Similar-artists prefetch failed", artist=artist, error=str(exc))
-
-                        try:
-                            # Artist-level biography/country/image/line-up
-                            # refresh: the per-album path is DB-READ-ONLY from
-                            # here on (_read_artist_metadata).  The old
-                            # per-album fetch re-ran the DB read + "already
-                            # cached" checks for EVERY album of the artist —
-                            # the cached values are artist-level, so one check
-                            # per artist pass is enough.  Cached values are
-                            # used verbatim; failures retry once per artist.
-                            from services.popularity.stages.album_stage import (
-                                _fetch_artist_metadata,
-                            )
-                            _fetch_artist_metadata(artist)
-                        except Exception as exc:
-                            logger.warning("Artist-metadata prefetch failed", artist=artist, error=str(exc))
-
-                    try:
-                        _discogs_id = ""
-                        for _t in artist_all_tracks.get(artist) or track_dicts:
-                            _discogs_id = str(_t.get("discogs_artist_id") or "").strip()
-                            if _discogs_id:
-                                break
-                        if not _discogs_id:
-                            try:
-                                _tok = ((get_config().get("api_integrations") or {}).get("discogs") or {}).get("token") or ""
-                                if _tok and _tok.lower() not in ("your_discogs_token", "your_token", "placeholder"):
-                                    # The artist's OWN album titles, already in
-                                    # memory: they are what tells two same-named
-                                    # Discogs artists apart, so the lookup picks
-                                    # the one with these albums instead of
-                                    # whichever Discogs ranks first.
-                                    _artist_albums = [
-                                        str(_t.get("album") or "").strip()
-                                        for _t in (artist_all_tracks.get(artist) or track_dicts)
-                                        if str(_t.get("album") or "").strip()
-                                    ]
-                                    _discogs_id = str(
-                                        DiscogsClient(token=_tok).get_artist_id(
-                                            artist, albums=_artist_albums
-                                        ) or ""
-                                    ).strip()
-                            except Exception as exc:
-                                logger.debug("Discogs artist id resolution failed", artist=artist, error=str(exc))
-
-                        prefetch_artist_releases(artist, _discogs_id)
-                    except Exception as exc:
-                        logger.warning("Release cache prefetch failed", artist=artist, error=str(exc))
-
-                    if not _is_compilation_artist and not _singles_pass:
-                        try:
-                            refresh_missing_releases_for_artist(artist)
-                            populate_missing_release_tracklists(artist, limit=3)
-                        except Exception as exc:
-                            logger.debug("Missing-releases refresh failed", artist=artist, error=str(exc))
-
-                log_unified(f"[POPULARITY] Prefetching popularity + release data for '{artist}'")
-                _prefetch_start = time.monotonic()
-                _prefetch_report = _bounded_call_report(
-                    _prefetch_artist_work,
-                    section="artist_prefetch",
-                    log_context={"artist": artist},
-                    seconds=_prefetch_budget,
-                    label=artist,
-                )
-                if isinstance(_prefetch_report, dict) and _prefetch_report.get("abandoned"):
-                    log_unified(f"[POPULARITY] Prefetch for '{artist}' abandoned ({_prefetch_report.get('reason')}) — continuing with partial data")
-
-                _prefetch_elapsed = time.monotonic() - _prefetch_start
-                prefetched_popularity = _prefetch_state["prefetched_popularity"]
-                log_unified(f"[POPULARITY] Prefetch complete for '{artist}' in {_prefetch_elapsed:.1f}s ({len(prefetched_popularity or {})} tracks pre-loaded)")
-
-            # -------------------------------------------------------------
-            # Album-level ListenBrainz tracklist resolution (+ cache write).
-            # -------------------------------------------------------------
-            if not _singles_pass:
-                try:
-                    _needs_album_lb = bool(options.get("force"))
-                    if not _needs_album_lb:
-                        for _t in track_dicts:
-                            if not _t.get("title"):
-                                continue
-                            _entry = (prefetched_popularity or {}).get(normalize_for_aggregation(_t["title"])) or {}
-                            # ``recording_mbid`` is demanded as well as the source
-                            # marker: the popularity cache persists the source but
-                            # NOT the identity, so keying off the source alone
-                            # would skip this pass on every rescan and leave the
-                            # album's tracks on whatever recording a title+artist
-                            # SEARCH happened to pick. The pass itself costs no
-                            # MusicBrainz requests once the release MBID is known
-                            # (it is read from the tracks table), so paying for it
-                            # every time is what keeps the identity stable.
-                            if _entry.get("source") != "album_tracklist" or not _entry.get("recording_mbid"):
-                                _needs_album_lb = True
-                                break
-                            # ⭐ A cached album-tracklist identity is trusted ONLY
-                            # when its stored RELEASE title still corroborates
-                            # the local title. Rows cached from a DIFFERENT
-                            # edition of the album (an 80-track local folder
-                            # against a 46-track stored release — the
-                            # "Alternative 90s" positional poison) carry no
-                            # corroboration, and rows written before the
-                            # ``release_track_title`` column existed have none
-                            # either: re-run the (cheap) pass once, which
-                            # either re-persists a valid identity or drops the
-                            # stale one.
-                            if not _cached_identity_corroborates(_t["title"], _entry):
-                                _needs_album_lb = True
-                                break
-
-                    if _needs_album_lb:
-                        _clean_album = _sanitize_release_name(album)
-                        try:
-                            _album_lb_by_title, _album_release_mbid = get_listenbrainz_album_tracklist_with_release(artist, _clean_album, track_dicts) or ({}, "")
-                        except Exception as e:
-                            logger.error(f"album-tracklist LB failed for '{artist} - {_clean_album}': {e}")
-                            _album_lb_by_title, _album_release_mbid = {}, ""
-
-                        _cache_rows: list[dict[str, Any]] = []
-                        for _t in track_dicts:
-                            if not _t.get("title"):
-                                continue
-                            _key = normalize_for_aggregation(_t["title"])
-                            # ⭐ The per-ROW alias FIRST (mirroring
-                            # ``_build_album_recording_batch``): it names THIS
-                            # row's recording. Reading the title key alone gave
-                            # every same-titled row one version's identity —
-                            # measured on "MMXX - Hypa Hypa Edition", where the
-                            # release lists eight "Hypa Hypa" tracks (seven
-                            # sharing the plain title) and every one of them
-                            # read whichever version the loop reached LAST
-                            # (186 listens, one recording).
-                            _alias_key = track_identity_key(
-                                _key, _t.get("disc_number"), _t.get("track_number")
-                            )
-                            _row_entry = _album_lb_by_title.get(_alias_key)
-                            _entry = _row_entry or _album_lb_by_title.get(_key)
-                            _cur = prefetched_popularity.setdefault(_key, {})
-
-                            # IDENTITY first, and INDEPENDENT of the listen count.
-                            # ``recording_mbid``/``release_track_title`` come from
-                            # the album's OWN MusicBrainz release, position and
-                            # duration matched, which is the only unambiguous
-                            # answer to "which recording is this track" — a
-                            # title+artist search cannot separate a plainly
-                            # titled version-marked track from its studio
-                            # namesake. Reading them only when
-                            # ``listenbrainz_listens`` was non-zero is what left
-                            # the unplugged tracks on "Helden X Hymnen" holding
-                            # the studio recordings.
-                            if _entry and _entry.get("recording_mbid"):
-                                _cur["recording_mbid"] = _entry.get("recording_mbid")
-                                _cur["release_track_title"] = _entry.get("release_track_title") or ""
-                                if _row_entry:
-                                    # Mirror the row's identity AND counts into
-                                    # its OWN slot. A title-keyed slot cannot
-                                    # hold one row's numbers without handing
-                                    # them to every same-titled sibling — the
-                                    # reported "both Oogie Boogie's Song rows
-                                    # scored LB 26.3k" — and the batch builder
-                                    # AND track_stage both read the alias
-                                    # FIRST, so the per-row answer the
-                                    # album-tracklist pass just resolved must
-                                    # land here or it never reaches the track.
-                                    _row = prefetched_popularity.setdefault(_alias_key, {})
-                                    _row["recording_mbid"] = _entry.get("recording_mbid")
-                                    _row["release_track_title"] = _entry.get("release_track_title") or ""
-                                    _row["length_verified"] = bool(_entry.get("length_verified"))
-                                    _row["listenbrainz_listens"] = int(_entry.get("listenbrainz_listens") or 0)
-                                    _row["listenbrainz_users"] = int(_entry.get("listenbrainz_users") or 0)
-                                    _row["_album_tracklist"] = True
-                                    _row["source"] = "album_tracklist"
-                            elif _cur.get("source") == "album_tracklist":
-                                # ⭐ The fresh pass has NO identity for this row
-                                # (its release no longer corroborates this
-                                # position — a different edition, or a
-                                # positional alias the source gate now refuses
-                                # to create). The PREVIOUS scan may still have
-                                # cached one: drop the stale identity here so
-                                # the batch and the per-track search resolve
-                                # from the track itself, and clear the source
-                                # marker so the next scan re-runs the pass
-                                # instead of trusting the stale row.
-                                _cur.pop("recording_mbid", None)
-                                _cur.pop("release_track_title", None)
-                                _cur["source"] = ""
-                                log_unified(
-                                    f"[scan_runner] Album-tracklist identity dropped — release no longer "
-                                    f"corroborates title='{_t.get('title')}' ({artist} - {album})"
-                                )
-
-                            if _entry and _entry.get("listenbrainz_listens"):
-                                # ⚠️ MAX, not assignment. For a compilation the
-                                # release-bound count is FRAGMENTED — ListenBrainz
-                                # reports listens per (recording, release), so
-                                # "Burn" on a soundtrack can read 577 while the
-                                # recording's GLOBAL count is ~150k. Assigning
-                                # here used to overwrite the larger, already
-                                # prefetched global with that fragment, which is
-                                # why compilation tracks scored far too low
-                                # against their true popularity. The higher of
-                                # the two wins, and the pair (listens + users)
-                                # stays from the source that won.
-                                _rel_listens = int(_entry["listenbrainz_listens"] or 0)
-                                _rel_users = int(_entry.get("listenbrainz_users") or 0)
-                                _known_listens = int(_cur.get("listenbrainz_listens") or 0)
-                                if _rel_listens >= _known_listens:
-                                    _cur["listenbrainz_listens"] = _rel_listens
-                                    _cur["listenbrainz_users"] = _rel_users
-                                    _lb_won = "release"
-                                else:
-                                    _lb_won = "recording-global"
-                                _cur["_album_tracklist"] = True
-                                _cur["source"] = "album_tracklist"
-                                # Show the ROW's own count when the per-row alias
-                                # answered: the title slot is shared by every
-                                # same-titled row, so printing it made eight
-                                # different versions log the same number.
-                                _shown_listens = (
-                                    int(_row_entry.get("listenbrainz_listens") or 0)
-                                    if _row_entry
-                                    else int(_cur["listenbrainz_listens"] or 0)
-                                )
-                                log_unified(
-                                    f"[scan_runner] Album-tracklist LB match for '{_t.get('title')}' "
-                                    f"({artist} - {album}): {_shown_listens} listens "
-                                    f"(release={_rel_listens}, kept={_lb_won}, "
-                                    f"via={'row-alias' if _row_entry else 'title'})"
-                                )
-                            if _album_release_mbid:
-                                if _entry and _entry.get("recording_mbid"):
-                                    _cur["_album_tracklist"] = True
-                                    _cur["source"] = "album_tracklist"
-                                    _cache_rows.append({
-                                        "artist": artist,
-                                        "title": str(_t["title"]),
-                                        "lastfm_listeners": int(_cur.get("lastfm_listeners") or 0),
-                                        "lastfm_playcount": int(_cur.get("lastfm_playcount") or 0),
-                                        "listenbrainz_listens": int(_cur.get("listenbrainz_listens") or 0),
-                                        "listenbrainz_users": int(_cur.get("listenbrainz_users") or 0),
-                                        "source": "album_tracklist",
-                                        # Persist the IDENTITY too (audit G3): the
-                                        # runner's guard above skips the whole LB
-                                        # tracklist lookup when the seeded entry
-                                        # carries source + mbid, so the mapping
-                                        # resolved NOW serves every later pass.
-                                        "recording_mbid": str(_cur.get("recording_mbid") or "").strip() or None,
-                                        # Persist WHICH release title the identity
-                                        # was resolved from (migration 020): the
-                                        # guard corroborates it against the LOCAL
-                                        # title before trusting the row — a row
-                                        # cached from a different EDITION is
-                                        # re-resolved, not re-applied.
-                                        "release_track_title": str(_cur.get("release_track_title") or "").strip() or None,
-                                    })
-
-                        if _cache_rows:
-                            try:
-                                upsert_track_popularity_bulk(_cache_rows)
-                            except Exception as exc:
-                                logger.debug("Album-tracklist cache persist failed", error=str(exc))
-                except Exception as exc:
-                    logger.debug("Album-tracklist LB lookup failed", artist=artist, album=album, error=str(exc))
-
-            album_lb_listens: list[int] = []
-            for _t in track_dicts:
-                _e = (prefetched_popularity or {}).get(normalize_for_aggregation(_t.get("title") or "")) or {}
-                _tc = int(_e.get("listenbrainz_listens") or 0)
-                if _tc > 0:
-                    album_lb_listens.append(_tc)
-
-            artist_max_lf = 0
-            if not _singles_pass:
-                try:
-                    artist_max_lf = get_lastfm_artist_max_listeners(artist) or 0
-                except Exception as e:
-                    logger.error(f"artist max LF listeners failed for '{artist}': {e}")
-                    artist_max_lf = 0
-
-            album_count = len(track_contexts)
-            log_unified(f"[POPULARITY] Album {album_index}/{total_albums} ({scan_type}): {artist} - {album} ({album_count} tracks)")
-            try:
-                from helpers.scan_report import album_started as _report_album
-
-                _report_album(index=album_index, total=total_albums, album=f"{artist} — {album}")
-            except Exception as exc:
-                logger.debug("Album report header failed", error=str(exc))
-
-            # -------------------------------------------------------------
-            # MusicBrainz recording identity for this album's tracks.
+            # Annotation repair.
             #
-            # ``track_stage`` consumes this as a batch: a hit supplies the
-            # recording MBID -- together with the metadata a search would have
-            # fetched for it -- so the ambiguous per-track recording SEARCH is
-            # skipped entirely. The map is built from the album's OWN
-            # MusicBrainz release (the identity the album-tracklist pass above
-            # just resolved, position and duration matched), because a
-            # title+artist search cannot tell a plainly titled version-marked
-            # track from its studio namesake.
-            # -------------------------------------------------------------
-            if not _singles_pass and not options.get("popularity_only"):
-                try:
-                    options["mb_batch_metadata"] = _build_album_recording_batch(
-                        album=album,
-                        track_dicts=track_dicts,
-                        prefetched_popularity=prefetched_popularity,
-                    )
-                    if options["mb_batch_metadata"]:
-                        logger.debug(
-                            "[POPULARITY] MusicBrainz recording identity from the album release",
-                            artist=artist,
-                            album=album,
-                            tracks=len(options["mb_batch_metadata"]),
-                        )
-                except Exception as exc:
-                    logger.debug("MusicBrainz album recording identity failed", artist=artist, album=album, error=str(exc))
-
-            # -------------------------------------------------------------
-            # ListenBrainz recording-tag batch (populates listenbrainz_genres,
-            # one of the eight sources read by the genre aggregation service).
-            # -------------------------------------------------------------
-            if not _singles_pass and not options.get("popularity_only"):
-                try:
-                    _lb_tag_mbids: list[str] = []
-                    for _tc in track_contexts:
-                        _t = _tc.get("track") or {}
-                        if _t.get("listenbrainz_genres"):
-                            continue
-                        _m = str(_t.get("recording_mbid") or _t.get("mbid") or _t.get("musicbrainz_trackid") or "").strip()
-                        if _m and _m not in _lb_tag_mbids:
-                            _lb_tag_mbids.append(_m)
-
-                    for _mb_entry in (options.get("mb_batch_metadata") or {}).values():
-                        _m = str((_mb_entry or {}).get("recording_mbid") or "").strip()
-                        if _m and _m not in _lb_tag_mbids:
-                            _lb_tag_mbids.append(_m)
-
-                    if _lb_tag_mbids:
-                        try:
-                            options["lb_recording_tags_batch"] = get_recording_tags_batch(_lb_tag_mbids) or {}
-                        except Exception as e:
-                            logger.error(f"LB tag batch failed for '{artist} - {album}': {e}")
-                            options["lb_recording_tags_batch"] = {}
-                except Exception as exc:
-                    logger.debug("LB tag batch failed", artist=artist, album=album, error=str(exc))
-
-            # Singles pass: decide whether popularity is also due for a refresh.
+            # Collapses duplicated annotations in this album's name and track
+            # titles before anything else touches them, so the rest of the
+            # iteration - enrichment, track processing, and the
+            # sync_album_file_tags() call further down - all operate on the
+            # corrected values and propagate them out to the audio file tags
+            # on this same pass.
             #
-            # The finalise half of that decision now lives at the FRONT of
-            # ``_singles_popularity_due``: "…only running the popularity … for
-            # files that are missing the information." A stored score is reused
-            # whenever ``_has_stored_popularity`` holds (track_stage), and
-            # ``refresh_popularity_if_due`` would widen that to a window refresh
-            # — finalise must never touch a score that exists (a track with NO
-            # stored score computes regardless of this flag). Asking the two
-            # scan_history questions first and throwing the answer away was
-            # pure cost, so it is no longer asked.
-            _pop_due = (
-                _singles_popularity_due(
-                    artist=artist,
-                    album=album,
-                    album_is_old=_album_is_old,
-                    finalise=_mode_finalise,
-                )
-                if _mode_singles
-                else False
-            )
-
-            # -------------------------------------------------------------
-            # Album-authoritative release year.
-            #
-            # Resolved ONCE here, from every track's stored year plus the
-            # album's MusicBrainz batch, and handed to each track through
-            # ``album_context`` — so all tracks in the folder persist the same
-            # ``year`` AND the same ``release_year``.
-            #
-            # Without this the enrichment stage writes whatever edition each
-            # individual recording resolved to, and the UI (which groups albums
-            # on (name, year), falling back to ``release_year``) renders one
-            # folder as two or three separate albums.  Runs for every pass
-            # that writes metadata: the singles pass touches neither column,
-            # and popularity-only skips album identity entirely.
+            # Skipped for popularity-only and singles passes, which write no
+            # metadata. Disable with features.repair_album_annotations.
             # -------------------------------------------------------------
             if not _mode_pop and not _mode_singles:
                 try:
-                    _auth_original, _auth_edition = _resolve_album_authoritative_year(
-                        track_dicts,
-                        options.get("mb_batch_metadata"),
-                    )
-                    if _auth_original is not None:
-                        album_context["authoritative_year"] = _auth_original
-                    if _auth_edition is not None:
-                        album_context["authoritative_release_year"] = _auth_edition
-                    if _auth_original is not None or _auth_edition is not None:
-                        logger.info(
-                            "Album release year unified",
-                            artist=artist,
-                            album=album,
-                            original_year=_auth_original,
-                            edition_year=_auth_edition,
-                            track_count=len(track_dicts),
-                        )
+                    _repair = repair_album_annotations(artist, album, tracks)
+                    if _repair.get("album_repaired"):
+                        # Adopt the corrected name for the remainder of this
+                        # album iteration. Every subsequent DB query in this
+                        # loop filters on `album`, so this MUST be reassigned
+                        # or those queries will look for the old, now
+                        # non-existent name.
+                        album = str(_repair.get("album") or album)
+                        album_row["album"] = album
                 except Exception as exc:
-                    logger.debug(
-                        "Album authoritative year resolution failed",
-                        artist=artist,
-                        album=album,
-                        error=str(exc),
+                    logger.warning(
+                        "Album annotation repair failed",
+                        artist=artist, album=album, error=str(exc),
                     )
 
-            _track_jobs: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]] = []
-            for track_context in track_contexts:
-                prepared_track = apply_context_fields_to_track(track_context)
-                _frozen = False
+            progress = 5 + int((album_index / total_albums) * 90)
+            current_item = f"{artist} - {album}"
 
-                if not options.get("force") and should_freeze_track(prepared_track):
-                    _frozen = True
-                    logger.debug("Freezing mature track", track=prepared_track.get("title", "?"), existing_score=prepared_track.get("final_score", 0))
-                    if not prepared_track.get("popularity_frozen"):
-                        try:
-                            with db_session() as session:
-                                session.execute(
-                                    text(
-                                        "UPDATE tracks SET popularity_frozen = TRUE, popularity_frozen_at = CURRENT_TIMESTAMP "
-                                        "WHERE id = :id AND COALESCE(popularity_frozen, FALSE) = FALSE"
-                                    ),
-                                    {"id": prepared_track.get("id")},
-                                )
-                        except Exception as exc:
-                            logger.debug("Could not persist freeze flag", track_id=prepared_track.get("id"), error=str(exc))
-
-                _track_options = dict(options)
-                _track_options["_deferred_persist"] = _deferred_persist
-                _track_options["refresh_popularity_if_due"] = _pop_due
-                _track_options["album_context"] = album_context
-                _track_options["album_result"] = album_result
-                _track_options["album_lb_listens"] = album_lb_listens if album_lb_listens else None
-                _track_options["artist_max_lf_listeners"] = artist_max_lf
-                _track_options["artist_lf_context"] = artist_lf_context
-                _track_options["album_tracks"] = track_dicts
-                _track_options["mb_cached_singles"] = mb_cached_singles
-                _track_options["discogs_cached_singles"] = discogs_cached_singles
-                _track_options["discogs_cached_promos"] = discogs_cached_promos
-                _track_options["prefetched_popularity"] = prefetched_popularity
-
-                if force_metadata_for_this_album:
-                    _track_options["force_metadata"] = True
-                
-                if _frozen:
-                    _track_options["frozen_track"] = True
-                    # Preserve existing singles metadata from DB
-                    prepared_track["is_single"] = bool(track_context.get("track", {}).get("is_single"))
-                    prepared_track["single_confidence"] = track_context.get("track", {}).get("single_confidence") or "low"
-                    prepared_track["single_sources"] = track_context.get("track", {}).get("single_sources") or []
-
-                _track_jobs.append((prepared_track, track_context, _track_options, _frozen))
-
-            _track_results_ordered = _bounded_album_phase(
-                _execute_track_jobs_safely,
-                track_jobs=_track_jobs,
-                max_workers=_scan_threads,
-                artist=artist,
-                album=album,
-                section="album_track_phase",
-                log_context={"artist": artist, "album": album},
-                # SCALE the per-album budget by the track count. A large album
-                # (a compilation with no release MBIDs, say) legitimately needs
-                # a full per-track online lookup per track; a flat 900 s cap
-                # cuts it mid-progress and the runner then discards every
-                # finished track's star rating (the reported "no-MBID albums
-                # fail at the end before finalise"). ``_album_budget`` stays the
-                # configured FLOOR, so this only ever gives slow albums room —
-                # the enrich/post-singles phases keep the base (they have their
-                # own per-artist prefetch budget).
-                seconds=_scale_album_budget(_album_budget, len(_track_jobs)),
-            )
-
-            # ⚠️ The track phase is where most of an album's wall-clock goes,
-            # so it MUST be bounded too — otherwise a hung album never reaches
-            # the budget at all, burns the whole ARTIST budget, and the artist
-            # is still abandoned wholesale (the reported behaviour).
-            #
-            # NOTE this bounds the CALL, not the per-track futures.  The
-            # per-track timeouts were deliberately removed (see
-            # ``_execute_track_jobs_safely``) because abandoning individual
-            # futures leaked zombie threads and starved the DB pool.  Skipping
-            # the whole ALBUM is the safe granularity: the workers that did
-            # finish have already persisted through the deferred sink.
-            if _track_phase_is_incomplete(_track_results_ordered):
-                _track_reason = (
-                    str(_track_results_ordered.get("reason") or "did not complete")
-                    if isinstance(_track_results_ordered, dict)
-                    else "did not complete"
-                )
-                skipped_albums += 1
-                abandoned_albums += 1
-                log_unified(
-                    f"[POPULARITY] Album '{artist} - {album}' skipped "
-                    f"({_track_reason}) — continuing with the artist's "
-                    "remaining albums"
-                )
-                record_scan(
-                    scan_type, "failed",
-                    message="Album track phase exceeded its time budget",
-                    artist=artist, album=album,
-                )
+            _progress_cb = options.get("progress_callback")
+            if callable(_progress_cb):
                 try:
-                    _deferred_persist.drain()
+                    _progress_cb(album_index, total_albums, current_item)
                 except Exception as exc:
-                    logger.debug("Deferred persist drain failed", error=str(exc))
+                    logger.debug("progress_callback failed", error=str(exc))
+
+            if effective_stop_file and artist and artist != last_checkpoint_artist:
+                try:
+                    _row_scan_type = "full_scan" if effective_stop_file == get_scan_progress_path("full_scan") else "popularity_scan"
+                    # PERCENTAGE OWNERSHIP: when the row is ``full_scan`` the OUTER
+                    # orchestrator owns percent_complete — it reports progress across
+                    # ALL artists (0-100), whereas ``progress`` here is only this
+                    # artist's album fraction on a 5-95 scale.  Writing it to the
+                    # shared row made the bar drop back to ~5% at every new artist,
+                    # which is the reported "doesn't properly detail where the scan
+                    # is".  The checkpoint exists to record WHERE we are (artist +
+                    # item) for resume/display, so on the full_scan row it updates
+                    # only those.
+                    if _row_scan_type == "full_scan":
+                        _extra = {
+                            "status": "running",
+                            "current_item": current_item,
+                        }
+                    else:
+                        _extra = {
+                            "status": "running",
+                            "percent_complete": progress,
+                            "current_item": current_item,
+                            "current_stage": "Albums",
+                            "processed_items": album_index,
+                            "total_items": total_albums,
+                        }
+                    write_progress_with_current_artist(
+                        effective_stop_file, _row_scan_type, True,
+                        current_artist=artist,
+                        extra=_extra,
+                    )
+                    if not artist_filter and not album_filter:
+                        save_artist_scan_checkpoint(artist, effective_stop_file)
+                    last_checkpoint_artist = artist
+                except Exception as exc:
+                    logger.debug("Progress checkpoint write failed", error=str(exc))
+
+            if artist and artist not in artist_lf_context_cache and not _is_comp_artist(artist):
+                try:
+                    artist_lf_context_cache[artist] = get_artist_lastfm_context(artist, None, None)
+                except Exception as exc:
+                    logger.debug("Last.fm context fetch failed", artist=artist, error=str(exc))
+                    artist_lf_context_cache[artist] = {"mean": 0, "stdev": 0, "total": 0, "values": []}
+
+            artist_lf_context = artist_lf_context_cache.get(artist) or {}
+
+            update(stage="album", progress=progress, message=f"Preparing {current_item}", current_item=current_item, processed=album_index, total_items=total_albums)
+
+            try:
+                album_context, track_contexts = prepare_tracks_for_album(
+                    artist=artist,
+                    album=album,
+                    tracks=tracks,
+                    album_artist=album_row.get("album_artist"),
+                    spotify_album_type=album_row.get("spotify_album_type"),
+                    musicbrainz_album_type=album_row.get("musicbrainz_album_type"),
+                )
+                stat_eligible_tracks = get_stat_eligible_tracks(track_contexts)
+            except Exception as exc:
+                logger.warning("Album prep failed", artist=artist, album=album, error=str(exc))
+                log_unified(f"[POPULARITY] Album '{str(artist or '').strip()} - {str(album or '').strip()}' skipped (prep error: {exc})")
+                record_scan(scan_type, "failed", message=f"Album prep failed: {exc}", artist=artist, album=album)
                 albums_processed += 1
                 continue
 
             try:
-                _deferred_payloads = _deferred_persist.drain()
-                if _deferred_payloads:
-                    # ⚠️ The return value is CHECKED. It was discarded, so a
-                    # wholly refused batch (e.g. a JSONB genre column rejecting
-                    # a CSV string) was indistinguishable from success — the
-                    # scan carried on and the album simply had no rows.
-                    if not upsert_tracks_bulk(_deferred_payloads):
-                        logger.warning(
-                            "Bulk track persist reported FAILURES — some rows were "
-                            "refused by the database",
-                            artist=artist, album=album, count=len(_deferred_payloads),
-                        )
-                    else:
-                        logger.debug("Bulk-persisted track(s)", count=len(_deferred_payloads), artist=artist, album=album)
-            except Exception as exc:
-                logger.warning("Bulk track persist failed", artist=artist, album=album, error=str(exc))
+                record_scan(scan_type, "started", message=f"{scan_type} scan: {artist} - {album}", artist=artist, album=album)
 
-            for _track_i, ((_prepared, _tc, _opts, _frozen), track_result) in enumerate(zip(_track_jobs, _track_results_ordered)):
-                if track_result is not None:
-                    results.append(track_result)
-                    if not options.get("metadata_only") and isinstance(track_result, dict):
-                        _tt = _prepared.get("title", "Unknown Track")
-                        _fs = track_result.get("popularity_score")
-                        _lf = float(track_result.get('lastfm_score') or 0.0)
-                        _lb = float(track_result.get('listenbrainz_score') or 0.0)
-                        if _frozen:
-                            log_unified(f"[TRACK_RESULT] '{_tt}' -> Final: {float(_fs or 0.0):.1f} (frozen | LF: {_lf:.1f} | LB: {_lb:.1f})")
-                        else:
-                            log_unified(f"[TRACK_RESULT] '{_tt}' -> Final: {float(_fs or 0.0):.1f} (LF: {_lf:.1f} | LB: {_lb:.1f})")
-                tracks_processed += 1
+                _full_pass = not (_mode_meta or _mode_pop or _mode_singles or options.get("singles_detection_only"))
+                if _full_pass:
+                    options["defer_full_enrichment"] = True
 
-                try:
-                    _track_denom = max(1, len(_track_jobs) - 1)
-                    _track_frac = (_track_i / _track_denom) if len(_track_jobs) > 1 else 1.0
-                    _track_item = f"{current_item} — {_prepared.get('title', '?')}"
-                    if callable(_progress_cb):
-                        try:
-                            _progress_cb(album_index, total_albums, _track_item, _track_frac)
-                        except Exception:
-                            pass
-                    _track_progress = min(100, progress + int(_track_frac * (90 / max(1, total_albums))))
-                    update(
-                        stage="album",
-                        progress=_track_progress,
-                        message=f"Processing {_prepared.get('title', '?')}",
-                        current_item=_track_item,
-                        processed=album_index,
-                        total_items=total_albums,
-                    )
-                except Exception:
-                    pass
+                log_unified(f"[POPULARITY] Enriching album: {artist} - {album}")
 
-            # -------------------------------------------------------------
-            # Post-singles enrichment (covers, genres, artist metadata).
-            # -------------------------------------------------------------
-            if _full_pass or _mode_meta:
-                def _post_singles_enrichment_work() -> None:
-                    try:
-                        _extra_ctx, _extra_similar, _extra_meta = enrich_album_extras(
-                            artist=artist,
-                            album=album,
-                            album_context=album_context,
-                            album_tracks=tracks,
-                            detected_type=str((album_result or {}).get("detected_album_type") or ""),
-                            options=options,
-                        )
-                        if album_result is not None:
-                            album_result.setdefault("album_context", {}).update(_extra_ctx)
-                            album_result["similar_artists"] = _extra_similar
-                            album_result["artist_metadata"] = _extra_meta
-                    except Exception as exc:
-                        logger.debug("Post-singles enrichment failed", artist=artist, album=album, error=str(exc))
-
-                log_unified(f"[POPULARITY] Post-singles enrichment for '{artist} - {album}' (covers, genres, artist metadata)")
-                _bounded_album_phase(
-                    _post_singles_enrichment_work,
-                    section="post_singles_enrichment",
+                album_result = _bounded_album_phase(
+                    enrich_album,
+                    album_row=album_row,
+                    album_context=album_context,
+                    stat_eligible_tracks=stat_eligible_tracks,
+                    options=options,
+                    section="enrich_album",
                     log_context={"artist": artist, "album": album},
                     seconds=_album_budget,
+                ) or {}
+
+                # An album that blew the per-album budget is SKIPPED — the artist
+                # keeps every remaining album.  This is deliberately NOT a
+                # cancellation: the scan_cancellation registry is keyed per ARTIST,
+                # so cancelling here would unwind the artist's remaining albums and
+                # recreate the whole-artist loss one level down.
+                _album_abandoned, _album_abandon_reason = _album_phase_was_abandoned(
+                    album_result
+                )
+                if _album_abandoned:
+                    skipped_albums += 1
+                    abandoned_albums += 1
+                    log_unified(
+                        f"[POPULARITY] Album '{artist} - {album}' skipped "
+                        f"({_album_abandon_reason}) — continuing with the artist's "
+                        "remaining albums"
+                    )
+                    record_scan(
+                        scan_type, "failed",
+                        message=f"Album exceeded its time budget: {_album_abandon_reason}",
+                        artist=artist, album=album,
+                    )
+                    albums_processed += 1
+                    continue
+
+                log_unified(f"[POPULARITY] Album enriched: {artist} - {album} (type={album_result.get('detected_album_type')})")
+
+                # Re-derive live-album context and per-track exclude_from_stats now
+                # that the detected album type is known.
+                _refresh_album_live_context(
+                    album,
+                    album_context,
+                    track_contexts,
+                    str((album_result or {}).get("detected_album_type") or ""),
                 )
 
-            # ------------------------------------------------------------------
-            # Cover detection — given the artists the track stage RESOLVED.
-            #
-            # The raw rows in ``tracks`` still carry the album-level artist for
-            # any track whose performer the identity pass resolved separately
-            # ("Various Artists" -> P.O.D./Incubus/…), because the track stage
-            # applies its result to a COPY. Publishing the resolved value here
-            # lets ``_run_album_cover_detection`` overlay it, so the cover
-            # heuristics compare the found original against the track's real
-            # performer instead of the placeholder. Without it, a track's OWN
-            # recording reads as "a different artist" and the false
-            # "(X Cover)" title is written back — the reported reversion of a
-            # metadata scan's cover fix by the following popularity scan.
-            _resolved_artists: dict[str, str] = {}
-            # Per-track recording/work MBIDs the track stage RESOLVED this
-            # pass (from MusicBrainz). ``tracks`` here are the load-time raw
-            # rows, so they do not yet carry what the stage just persisted.
-            # Publishing them lets the deep cover pass skip its own per-track
-            # MusicBrainz searches — the work id in particular feeds the
-            # work-based cover fallback without re-resolving the recording.
-            _resolved_mbids: dict[str, dict[str, str]] = {}
-            # Track ids whose ``title`` the track stage PROMOTED this pass
-            # (the release tracklist title applied to the DB column). Handed to
-            # ``sync_album_file_tags`` so the file TITLE tag is REWRITTEN for
-            # exactly these tracks — not merely filled if missing.
-            _corrected_title_ids: set[str] = set()
-            # Track ids whose FILE-TAG-relevant DB values changed this pass
-            # (track_stage's ``tag_changed``) — the scope handed to
-            # ``sync_album_file_tags`` so it does not re-open every audio file
-            # with mutagen on every scan (~90-120s of reads per re-scanned
-            # album). ``_corrected_title_ids`` are always included: their
-            # TITLE tag must be rewritten even when the rest of the payload
-            # matched. Collected HERE (not earlier) because this is the FIRST
-            # place both sets are known.
-            _album_changed_track_ids: set[str] = set()
-            for _res in _track_results_ordered:
-                if not isinstance(_res, dict):
-                    continue
-                _rid = str(_res.get("track_id") or "").strip()
-                _rartist = str(_res.get("artist") or "").strip()
-                if _rid and _rartist:
-                    _resolved_artists[_rid] = _rartist
-                if _rid and bool(_res.get("title_corrected")):
-                    _corrected_title_ids.add(_rid)
-                if _rid and bool(_res.get("tag_changed")):
-                    _album_changed_track_ids.add(_rid)
-                _rmbid = str(_res.get("recording_mbid") or "").strip()
-                _wmbid = str(_res.get("work_mbid") or "").strip()
-                if _rid and (_rmbid or _wmbid):
-                    _resolved_mbids[_rid] = {
-                        "recording_mbid": _rmbid,
-                        "work_mbid": _wmbid,
-                    }
-            if _resolved_artists:
-                options["resolved_track_artists"] = _resolved_artists
-            if _resolved_mbids:
-                options["resolved_track_mbids"] = _resolved_mbids
+                track_dicts = [tc["track"] for tc in track_contexts if tc.get("track")]
 
-            _run_album_cover_detection(artist=artist, album=album, tracks=tracks, options=options)
+                # -------------------------------------------------------------
+                # Per-artist prefetch: popularity cache, Discogs artist id,
+                # release cache, and missing-release tracklists.
+                # -------------------------------------------------------------
+                if artist and artist != last_prefetch_artist and not _is_compilation_artist:
+                    last_prefetch_artist = artist
+                    prefetched_popularity = {}
+                    _prefetch_state: dict[str, Any] = {"prefetched_popularity": {}}
 
-            # --- RECOMMEND-INSTEAD-OF-APPLY (metadata_update.apply_during_scan) ---
-            # When the Config page has metadata updating set to "Recommend only",
-            # the scan must NOT write MusicBrainz metadata. Instead it records
-            # the changes it would have made against the album's tracks
-            # (tracks.pending_mb_updates) so the album and artist pages can offer
-            # them with save/discard.
-            #
-            # Deliberately placed here — after the album stage has resolved and
-            # persisted the album's release MBID, so the proposal is built from a
-            # known release rather than a fresh search — and BEFORE the file-tag
-            # sync below, so the same pass does not then write the very metadata
-            # that was deferred.
-            _stash_only = False
-            try:
-                from helpers.config_helpers import get_metadata_update_config as _get_mu
-                _stash_only = not bool((_get_mu() or {}).get("apply_during_scan", True))
-            except Exception as exc:
-                # Fail OPEN: an unreadable config must not silently stop the
-                # scan from applying metadata it has always applied.
-                logger.debug("Could not read metadata_update config", error=str(exc))
-                _stash_only = False
+                    def _prefetch_artist_work() -> None:
+                        if not _singles_pass:
+                            try:
+                                _prefetch_state["prefetched_popularity"] = prefetch_artist_popularity(
+                                    artist=artist,
+                                    tracks=artist_all_tracks.get(artist) or track_dicts,
+                                    force=bool(options.get("force")),
+                                    cache_full_catalogue=True,
+                                )
+                            except Exception as exc:
+                                logger.warning("Popularity cache prefetch failed", artist=artist, error=str(exc))
 
-            if _stash_only and not options.get("popularity_only") and not options.get("singles_detection_only") and not _mode_finalise:
-                try:
-                    _release_mbid = ""
-                    for _ctx in track_contexts:
-                        _row = _ctx.get("track") or {}
-                        for _col in ("musicbrainz_releasegroupid", "musicbrainz_album_mbid",
-                                     "musicbrainz_albumid"):
-                            _candidate = str(_row.get(_col) or "").strip()
-                            if _candidate:
-                                _release_mbid = _candidate
-                                break
-                        if _release_mbid:
-                            break
+                            try:
+                                # Artist-level similar-artists refresh: the
+                                # per-album path is DB-READ-ONLY from here on
+                                # (the old per-album fetch re-fired the network
+                                # for every album whenever the cached list was
+                                # EMPTY — an artist with no similar artists paid
+                                # Last.fm + MB-id + ListenBrainz per album,
+                                # forever). Checked empties are remembered for
+                                # 90 days; failures retry once per ARTIST pass.
+                                from services.popularity.stages.album_stage import (
+                                    refresh_similar_artists,
+                                )
+                                refresh_similar_artists(artist, options)
+                            except Exception as exc:
+                                logger.warning("Similar-artists prefetch failed", artist=artist, error=str(exc))
 
-                    if _release_mbid:
-                        from services.metadata.metadata_proposal_service import (
-                            propose_album_metadata,
-                        )
-                        from services.metadata.pending_update_service import (
-                            stash_album_recommendations,
-                        )
+                            try:
+                                # Artist-level biography/country/image/line-up
+                                # refresh: the per-album path is DB-READ-ONLY from
+                                # here on (_read_artist_metadata).  The old
+                                # per-album fetch re-ran the DB read + "already
+                                # cached" checks for EVERY album of the artist —
+                                # the cached values are artist-level, so one check
+                                # per artist pass is enough.  Cached values are
+                                # used verbatim; failures retry once per artist.
+                                from services.popularity.stages.album_stage import (
+                                    _fetch_artist_metadata,
+                                )
+                                _fetch_artist_metadata(artist)
+                            except Exception as exc:
+                                logger.warning("Artist-metadata prefetch failed", artist=artist, error=str(exc))
 
-                        _proposal = propose_album_metadata(artist, album, _release_mbid)
-                        _stash = stash_album_recommendations(artist, album, _proposal)
-                        if _stash.get("stashed"):
-                            logger.debug(
-                                "[METADATA_REVIEW] stashed recommendations instead of applying",
-                                artist=artist, album=album, stashed=_stash.get("stashed"),
-                            )
-                    else:
-                        logger.debug(
-                            "[METADATA_REVIEW] no release MBID resolved — nothing to recommend",
-                            artist=artist, album=album,
-                        )
-                except Exception as exc:
-                    logger.warning(
-                        "Could not stash MusicBrainz recommendations",
-                        artist=artist, album=album, error=str(exc),
+                        try:
+                            _discogs_id = ""
+                            for _t in artist_all_tracks.get(artist) or track_dicts:
+                                _discogs_id = str(_t.get("discogs_artist_id") or "").strip()
+                                if _discogs_id:
+                                    break
+                            if not _discogs_id:
+                                try:
+                                    _tok = ((get_config().get("api_integrations") or {}).get("discogs") or {}).get("token") or ""
+                                    if _tok and _tok.lower() not in ("your_discogs_token", "your_token", "placeholder"):
+                                        # The artist's OWN album titles, already in
+                                        # memory: they are what tells two same-named
+                                        # Discogs artists apart, so the lookup picks
+                                        # the one with these albums instead of
+                                        # whichever Discogs ranks first.
+                                        _artist_albums = [
+                                            str(_t.get("album") or "").strip()
+                                            for _t in (artist_all_tracks.get(artist) or track_dicts)
+                                            if str(_t.get("album") or "").strip()
+                                        ]
+                                        _discogs_id = str(
+                                            DiscogsClient(token=_tok).get_artist_id(
+                                                artist, albums=_artist_albums
+                                            ) or ""
+                                        ).strip()
+                                except Exception as exc:
+                                    logger.debug("Discogs artist id resolution failed", artist=artist, error=str(exc))
+
+                            prefetch_artist_releases(artist, _discogs_id)
+                        except Exception as exc:
+                            logger.warning("Release cache prefetch failed", artist=artist, error=str(exc))
+
+                        if not _is_compilation_artist and not _singles_pass:
+                            try:
+                                refresh_missing_releases_for_artist(artist)
+                                populate_missing_release_tracklists(artist, limit=3)
+                            except Exception as exc:
+                                logger.debug("Missing-releases refresh failed", artist=artist, error=str(exc))
+
+                    log_unified(f"[POPULARITY] Prefetching popularity + release data for '{artist}'")
+                    _prefetch_start = time.monotonic()
+                    _prefetch_report = _bounded_call_report(
+                        _prefetch_artist_work,
+                        section="artist_prefetch",
+                        log_context={"artist": artist},
+                        seconds=_prefetch_budget,
+                        label=artist,
                     )
+                    if isinstance(_prefetch_report, dict) and _prefetch_report.get("abandoned"):
+                        log_unified(f"[POPULARITY] Prefetch for '{artist}' abandoned ({_prefetch_report.get('reason')}) — continuing with partial data")
 
-            # --- FILE TAG SYNC ---
-            if not options.get("popularity_only") and not options.get("singles_detection_only"):
-                try:
-                    log_unified(f"[TAG_SYNC] Syncing cleaned metadata to audio files for '{album}'...")
-                    _tag_sync = sync_album_file_tags(
-                        artist=artist,
-                        album=album,
-                        corrected_title_ids=_corrected_title_ids or None,
-                        # Only the tracks the scan WROTE this pass — see the
-                        # changed-ids block above. A re-scan of an album whose
-                        # rows all matched skips the mutagen re-reads entirely.
-                        changed_track_ids=_album_changed_track_ids or None,
-                    )
-                    if _tag_sync and (_tag_sync.get("files_updated") or _tag_sync.get("corrections_recorded")):
-                        _album_report["metadata_corrections"] = int(_tag_sync.get("corrections_recorded") or 0)
-                        # The per-album file-tag result is DETAIL; the section
-                        # report's TAG SYNCHRONISATION block carries the totals.
-                        logger.debug(
-                            "[ALBUM_TAG_SYNC] album file tags written",
-                            artist=artist,
-                            album=album,
-                            files_updated=_tag_sync.get("files_updated", 0),
-                            corrections_recorded=_tag_sync.get("corrections_recorded", 0),
-                            perfect_match=bool(_tag_sync.get("perfect_match")),
-                        )
-                except Exception as exc:
-                    logger.warning("Failed to sync file tags", artist=artist, album=album, error=str(exc))
-            # ---------------------
+                    _prefetch_elapsed = time.monotonic() - _prefetch_start
+                    prefetched_popularity = _prefetch_state["prefetched_popularity"]
+                    log_unified(f"[POPULARITY] Prefetch complete for '{artist}' in {_prefetch_elapsed:.1f}s ({len(prefetched_popularity or {})} tracks pre-loaded)")
 
-            # --- MISSING-TRACK SNAPSHOT ---
-            # The artist page's per-album "N tracks missing" badge reads
-            # ``missing_album_tracks`` from the DATABASE (the endpoint no longer
-            # recomputes), so the scan is what keeps that table current. This is
-            # the same switch the file-tag sync above uses: metadata and combined
-            # passes refresh it, a popularity-only or singles-only pass never
-            # touches album identity.
-            #
-            # Cost note: by this point the album stage has resolved and
-            # persisted the album's MusicBrainz release, so the release-metadata
-            # fetch inside is normally a CACHE HIT. The previous arrangement paid
-            # that cost per PAGE LOAD per owned album instead — and the release
-            # SEARCH it falls back to when an album has no stored MBID was paid
-            # one-per-album every time the artist page was opened.
-            if not options.get("popularity_only") and not options.get("singles_detection_only") and not _mode_finalise:
-                # A "do not search album release" album is SKIPPED: its
-                # missing list comes from the user's CSV tracklist (or is
-                # simply absent), not from a MusicBrainz release — the MB
-                # refresh would either find nothing or resolve the WRONG
-                # release and DELETE the CSV-persisted rows ("not in the MB
-                # release").
-                try:
-                    from services.metadata.album_lookup_skip_service import album_lookup_skip as _album_skip_lookup
-                    _skip_missing_refresh = _album_skip_lookup(artist, album)
-                except Exception:
-                    _skip_missing_refresh = False
-                if not _skip_missing_refresh:
+                # -------------------------------------------------------------
+                # Album-level ListenBrainz tracklist resolution (+ cache write).
+                # -------------------------------------------------------------
+                if not _singles_pass:
                     try:
-                        _missing = get_missing_tracks(artist=artist, album=album)
-                        if _missing and _missing.get("missing_count"):
+                        _needs_album_lb = bool(options.get("force"))
+                        if not _needs_album_lb:
+                            for _t in track_dicts:
+                                if not _t.get("title"):
+                                    continue
+                                _entry = (prefetched_popularity or {}).get(normalize_for_aggregation(_t["title"])) or {}
+                                # ``recording_mbid`` is demanded as well as the source
+                                # marker: the popularity cache persists the source but
+                                # NOT the identity, so keying off the source alone
+                                # would skip this pass on every rescan and leave the
+                                # album's tracks on whatever recording a title+artist
+                                # SEARCH happened to pick. The pass itself costs no
+                                # MusicBrainz requests once the release MBID is known
+                                # (it is read from the tracks table), so paying for it
+                                # every time is what keeps the identity stable.
+                                if _entry.get("source") != "album_tracklist" or not _entry.get("recording_mbid"):
+                                    _needs_album_lb = True
+                                    break
+                                # ⭐ A cached album-tracklist identity is trusted ONLY
+                                # when its stored RELEASE title still corroborates
+                                # the local title. Rows cached from a DIFFERENT
+                                # edition of the album (an 80-track local folder
+                                # against a 46-track stored release — the
+                                # "Alternative 90s" positional poison) carry no
+                                # corroboration, and rows written before the
+                                # ``release_track_title`` column existed have none
+                                # either: re-run the (cheap) pass once, which
+                                # either re-persists a valid identity or drops the
+                                # stale one.
+                                if not _cached_identity_corroborates(_t["title"], _entry):
+                                    _needs_album_lb = True
+                                    break
+
+                        if _needs_album_lb:
+                            _clean_album = _sanitize_release_name(album)
+                            try:
+                                _album_lb_by_title, _album_release_mbid = get_listenbrainz_album_tracklist_with_release(artist, _clean_album, track_dicts) or ({}, "")
+                            except Exception as e:
+                                logger.error(f"album-tracklist LB failed for '{artist} - {_clean_album}': {e}")
+                                _album_lb_by_title, _album_release_mbid = {}, ""
+
+                            _cache_rows: list[dict[str, Any]] = []
+                            for _t in track_dicts:
+                                if not _t.get("title"):
+                                    continue
+                                _key = normalize_for_aggregation(_t["title"])
+                                # ⭐ The per-ROW alias FIRST (mirroring
+                                # ``_build_album_recording_batch``): it names THIS
+                                # row's recording. Reading the title key alone gave
+                                # every same-titled row one version's identity —
+                                # measured on "MMXX - Hypa Hypa Edition", where the
+                                # release lists eight "Hypa Hypa" tracks (seven
+                                # sharing the plain title) and every one of them
+                                # read whichever version the loop reached LAST
+                                # (186 listens, one recording).
+                                _alias_key = track_identity_key(
+                                    _key, _t.get("disc_number"), _t.get("track_number")
+                                )
+                                _row_entry = _album_lb_by_title.get(_alias_key)
+                                _entry = _row_entry or _album_lb_by_title.get(_key)
+                                _cur = prefetched_popularity.setdefault(_key, {})
+
+                                # IDENTITY first, and INDEPENDENT of the listen count.
+                                # ``recording_mbid``/``release_track_title`` come from
+                                # the album's OWN MusicBrainz release, position and
+                                # duration matched, which is the only unambiguous
+                                # answer to "which recording is this track" — a
+                                # title+artist search cannot separate a plainly
+                                # titled version-marked track from its studio
+                                # namesake. Reading them only when
+                                # ``listenbrainz_listens`` was non-zero is what left
+                                # the unplugged tracks on "Helden X Hymnen" holding
+                                # the studio recordings.
+                                if _entry and _entry.get("recording_mbid"):
+                                    _cur["recording_mbid"] = _entry.get("recording_mbid")
+                                    _cur["release_track_title"] = _entry.get("release_track_title") or ""
+                                    if _row_entry:
+                                        # Mirror the row's identity AND counts into
+                                        # its OWN slot. A title-keyed slot cannot
+                                        # hold one row's numbers without handing
+                                        # them to every same-titled sibling — the
+                                        # reported "both Oogie Boogie's Song rows
+                                        # scored LB 26.3k" — and the batch builder
+                                        # AND track_stage both read the alias
+                                        # FIRST, so the per-row answer the
+                                        # album-tracklist pass just resolved must
+                                        # land here or it never reaches the track.
+                                        _row = prefetched_popularity.setdefault(_alias_key, {})
+                                        _row["recording_mbid"] = _entry.get("recording_mbid")
+                                        _row["release_track_title"] = _entry.get("release_track_title") or ""
+                                        _row["length_verified"] = bool(_entry.get("length_verified"))
+                                        _row["listenbrainz_listens"] = int(_entry.get("listenbrainz_listens") or 0)
+                                        _row["listenbrainz_users"] = int(_entry.get("listenbrainz_users") or 0)
+                                        _row["_album_tracklist"] = True
+                                        _row["source"] = "album_tracklist"
+                                elif _cur.get("source") == "album_tracklist":
+                                    # ⭐ The fresh pass has NO identity for this row
+                                    # (its release no longer corroborates this
+                                    # position — a different edition, or a
+                                    # positional alias the source gate now refuses
+                                    # to create). The PREVIOUS scan may still have
+                                    # cached one: drop the stale identity here so
+                                    # the batch and the per-track search resolve
+                                    # from the track itself, and clear the source
+                                    # marker so the next scan re-runs the pass
+                                    # instead of trusting the stale row.
+                                    _cur.pop("recording_mbid", None)
+                                    _cur.pop("release_track_title", None)
+                                    _cur["source"] = ""
+                                    log_unified(
+                                        f"[scan_runner] Album-tracklist identity dropped — release no longer "
+                                        f"corroborates title='{_t.get('title')}' ({artist} - {album})"
+                                    )
+
+                                if _entry and _entry.get("listenbrainz_listens"):
+                                    # ⚠️ MAX, not assignment. For a compilation the
+                                    # release-bound count is FRAGMENTED — ListenBrainz
+                                    # reports listens per (recording, release), so
+                                    # "Burn" on a soundtrack can read 577 while the
+                                    # recording's GLOBAL count is ~150k. Assigning
+                                    # here used to overwrite the larger, already
+                                    # prefetched global with that fragment, which is
+                                    # why compilation tracks scored far too low
+                                    # against their true popularity. The higher of
+                                    # the two wins, and the pair (listens + users)
+                                    # stays from the source that won.
+                                    _rel_listens = int(_entry["listenbrainz_listens"] or 0)
+                                    _rel_users = int(_entry.get("listenbrainz_users") or 0)
+                                    _known_listens = int(_cur.get("listenbrainz_listens") or 0)
+                                    if _rel_listens >= _known_listens:
+                                        _cur["listenbrainz_listens"] = _rel_listens
+                                        _cur["listenbrainz_users"] = _rel_users
+                                        _lb_won = "release"
+                                    else:
+                                        _lb_won = "recording-global"
+                                    _cur["_album_tracklist"] = True
+                                    _cur["source"] = "album_tracklist"
+                                    # Show the ROW's own count when the per-row alias
+                                    # answered: the title slot is shared by every
+                                    # same-titled row, so printing it made eight
+                                    # different versions log the same number.
+                                    _shown_listens = (
+                                        int(_row_entry.get("listenbrainz_listens") or 0)
+                                        if _row_entry
+                                        else int(_cur["listenbrainz_listens"] or 0)
+                                    )
+                                    log_unified(
+                                        f"[scan_runner] Album-tracklist LB match for '{_t.get('title')}' "
+                                        f"({artist} - {album}): {_shown_listens} listens "
+                                        f"(release={_rel_listens}, kept={_lb_won}, "
+                                        f"via={'row-alias' if _row_entry else 'title'})"
+                                    )
+                                if _album_release_mbid:
+                                    if _entry and _entry.get("recording_mbid"):
+                                        _cur["_album_tracklist"] = True
+                                        _cur["source"] = "album_tracklist"
+                                        _cache_rows.append({
+                                            "artist": artist,
+                                            "title": str(_t["title"]),
+                                            "lastfm_listeners": int(_cur.get("lastfm_listeners") or 0),
+                                            "lastfm_playcount": int(_cur.get("lastfm_playcount") or 0),
+                                            "listenbrainz_listens": int(_cur.get("listenbrainz_listens") or 0),
+                                            "listenbrainz_users": int(_cur.get("listenbrainz_users") or 0),
+                                            "source": "album_tracklist",
+                                            # Persist the IDENTITY too (audit G3): the
+                                            # runner's guard above skips the whole LB
+                                            # tracklist lookup when the seeded entry
+                                            # carries source + mbid, so the mapping
+                                            # resolved NOW serves every later pass.
+                                            "recording_mbid": str(_cur.get("recording_mbid") or "").strip() or None,
+                                            # Persist WHICH release title the identity
+                                            # was resolved from (migration 020): the
+                                            # guard corroborates it against the LOCAL
+                                            # title before trusting the row — a row
+                                            # cached from a different EDITION is
+                                            # re-resolved, not re-applied.
+                                            "release_track_title": str(_cur.get("release_track_title") or "").strip() or None,
+                                        })
+
+                            if _cache_rows:
+                                try:
+                                    upsert_track_popularity_bulk(_cache_rows)
+                                except Exception as exc:
+                                    logger.debug("Album-tracklist cache persist failed", error=str(exc))
+                    except Exception as exc:
+                        logger.debug("Album-tracklist LB lookup failed", artist=artist, album=album, error=str(exc))
+
+                album_lb_listens: list[int] = []
+                for _t in track_dicts:
+                    _e = (prefetched_popularity or {}).get(normalize_for_aggregation(_t.get("title") or "")) or {}
+                    _tc = int(_e.get("listenbrainz_listens") or 0)
+                    if _tc > 0:
+                        album_lb_listens.append(_tc)
+
+                artist_max_lf = 0
+                if not _singles_pass:
+                    try:
+                        artist_max_lf = get_lastfm_artist_max_listeners(artist) or 0
+                    except Exception as e:
+                        logger.error(f"artist max LF listeners failed for '{artist}': {e}")
+                        artist_max_lf = 0
+
+                album_count = len(track_contexts)
+                log_unified(f"[POPULARITY] Album {album_index}/{total_albums} ({scan_type}): {artist} - {album} ({album_count} tracks)")
+                try:
+                    from helpers.scan_report import album_started as _report_album
+
+                    _report_album(index=album_index, total=total_albums, album=f"{artist} — {album}")
+                except Exception as exc:
+                    logger.debug("Album report header failed", error=str(exc))
+
+                # -------------------------------------------------------------
+                # MusicBrainz recording identity for this album's tracks.
+                #
+                # ``track_stage`` consumes this as a batch: a hit supplies the
+                # recording MBID -- together with the metadata a search would have
+                # fetched for it -- so the ambiguous per-track recording SEARCH is
+                # skipped entirely. The map is built from the album's OWN
+                # MusicBrainz release (the identity the album-tracklist pass above
+                # just resolved, position and duration matched), because a
+                # title+artist search cannot tell a plainly titled version-marked
+                # track from its studio namesake.
+                # -------------------------------------------------------------
+                if not _singles_pass and not options.get("popularity_only"):
+                    try:
+                        options["mb_batch_metadata"] = _build_album_recording_batch(
+                            album=album,
+                            track_dicts=track_dicts,
+                            prefetched_popularity=prefetched_popularity,
+                        )
+                        if options["mb_batch_metadata"]:
                             logger.debug(
-                                "[MISSING_TRACKS] album missing tracks refreshed",
+                                "[POPULARITY] MusicBrainz recording identity from the album release",
                                 artist=artist,
                                 album=album,
-                                missing_count=_missing.get("missing_count"),
+                                tracks=len(options["mb_batch_metadata"]),
+                            )
+                    except Exception as exc:
+                        logger.debug("MusicBrainz album recording identity failed", artist=artist, album=album, error=str(exc))
+
+                # -------------------------------------------------------------
+                # ListenBrainz recording-tag batch (populates listenbrainz_genres,
+                # one of the eight sources read by the genre aggregation service).
+                # -------------------------------------------------------------
+                if not _singles_pass and not options.get("popularity_only"):
+                    try:
+                        _lb_tag_mbids: list[str] = []
+                        for _tc in track_contexts:
+                            _t = _tc.get("track") or {}
+                            if _t.get("listenbrainz_genres"):
+                                continue
+                            _m = str(_t.get("recording_mbid") or _t.get("mbid") or _t.get("musicbrainz_trackid") or "").strip()
+                            if _m and _m not in _lb_tag_mbids:
+                                _lb_tag_mbids.append(_m)
+
+                        for _mb_entry in (options.get("mb_batch_metadata") or {}).values():
+                            _m = str((_mb_entry or {}).get("recording_mbid") or "").strip()
+                            if _m and _m not in _lb_tag_mbids:
+                                _lb_tag_mbids.append(_m)
+
+                        if _lb_tag_mbids:
+                            try:
+                                options["lb_recording_tags_batch"] = get_recording_tags_batch(_lb_tag_mbids) or {}
+                            except Exception as e:
+                                logger.error(f"LB tag batch failed for '{artist} - {album}': {e}")
+                                options["lb_recording_tags_batch"] = {}
+                    except Exception as exc:
+                        logger.debug("LB tag batch failed", artist=artist, album=album, error=str(exc))
+
+                # Singles pass: decide whether popularity is also due for a refresh.
+                #
+                # The finalise half of that decision now lives at the FRONT of
+                # ``_singles_popularity_due``: "…only running the popularity … for
+                # files that are missing the information." A stored score is reused
+                # whenever ``_has_stored_popularity`` holds (track_stage), and
+                # ``refresh_popularity_if_due`` would widen that to a window refresh
+                # — finalise must never touch a score that exists (a track with NO
+                # stored score computes regardless of this flag). Asking the two
+                # scan_history questions first and throwing the answer away was
+                # pure cost, so it is no longer asked.
+                _pop_due = (
+                    _singles_popularity_due(
+                        artist=artist,
+                        album=album,
+                        album_is_old=_album_is_old,
+                        finalise=_mode_finalise,
+                    )
+                    if _mode_singles
+                    else False
+                )
+
+                # -------------------------------------------------------------
+                # Album-authoritative release year.
+                #
+                # Resolved ONCE here, from every track's stored year plus the
+                # album's MusicBrainz batch, and handed to each track through
+                # ``album_context`` — so all tracks in the folder persist the same
+                # ``year`` AND the same ``release_year``.
+                #
+                # Without this the enrichment stage writes whatever edition each
+                # individual recording resolved to, and the UI (which groups albums
+                # on (name, year), falling back to ``release_year``) renders one
+                # folder as two or three separate albums.  Runs for every pass
+                # that writes metadata: the singles pass touches neither column,
+                # and popularity-only skips album identity entirely.
+                # -------------------------------------------------------------
+                if not _mode_pop and not _mode_singles:
+                    try:
+                        _auth_original, _auth_edition = _resolve_album_authoritative_year(
+                            track_dicts,
+                            options.get("mb_batch_metadata"),
+                        )
+                        if _auth_original is not None:
+                            album_context["authoritative_year"] = _auth_original
+                        if _auth_edition is not None:
+                            album_context["authoritative_release_year"] = _auth_edition
+                        if _auth_original is not None or _auth_edition is not None:
+                            logger.info(
+                                "Album release year unified",
+                                artist=artist,
+                                album=album,
+                                original_year=_auth_original,
+                                edition_year=_auth_edition,
+                                track_count=len(track_dicts),
                             )
                     except Exception as exc:
                         logger.debug(
-                            "Missing-track refresh failed",
-                            artist=artist, album=album, error=str(exc),
+                            "Album authoritative year resolution failed",
+                            artist=artist,
+                            album=album,
+                            error=str(exc),
                         )
-            # ------------------------------
 
-            # Deferred album rename detection.
-            if not _mode_singles:
+                _track_jobs: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]] = []
+                for track_context in track_contexts:
+                    prepared_track = apply_context_fields_to_track(track_context)
+                    _frozen = False
+
+                    if not options.get("force") and should_freeze_track(prepared_track):
+                        _frozen = True
+                        logger.debug("Freezing mature track", track=prepared_track.get("title", "?"), existing_score=prepared_track.get("final_score", 0))
+                        if not prepared_track.get("popularity_frozen"):
+                            try:
+                                with db_session() as session:
+                                    session.execute(
+                                        text(
+                                            "UPDATE tracks SET popularity_frozen = TRUE, popularity_frozen_at = CURRENT_TIMESTAMP "
+                                            "WHERE id = :id AND COALESCE(popularity_frozen, FALSE) = FALSE"
+                                        ),
+                                        {"id": prepared_track.get("id")},
+                                    )
+                            except Exception as exc:
+                                logger.debug("Could not persist freeze flag", track_id=prepared_track.get("id"), error=str(exc))
+
+                    _track_options = dict(options)
+                    _track_options["_deferred_persist"] = _deferred_persist
+                    _track_options["refresh_popularity_if_due"] = _pop_due
+                    _track_options["album_context"] = album_context
+                    _track_options["album_result"] = album_result
+                    _track_options["album_lb_listens"] = album_lb_listens if album_lb_listens else None
+                    _track_options["artist_max_lf_listeners"] = artist_max_lf
+                    _track_options["artist_lf_context"] = artist_lf_context
+                    _track_options["album_tracks"] = track_dicts
+                    _track_options["mb_cached_singles"] = mb_cached_singles
+                    _track_options["discogs_cached_singles"] = discogs_cached_singles
+                    _track_options["discogs_cached_promos"] = discogs_cached_promos
+                    _track_options["prefetched_popularity"] = prefetched_popularity
+
+                    if force_metadata_for_this_album:
+                        _track_options["force_metadata"] = True
+                
+                    if _frozen:
+                        _track_options["frozen_track"] = True
+                        # Preserve existing singles metadata from DB
+                        prepared_track["is_single"] = bool(track_context.get("track", {}).get("is_single"))
+                        prepared_track["single_confidence"] = track_context.get("track", {}).get("single_confidence") or "low"
+                        prepared_track["single_sources"] = track_context.get("track", {}).get("single_sources") or []
+
+                    _track_jobs.append((prepared_track, track_context, _track_options, _frozen))
+
+                _track_results_ordered = _bounded_album_phase(
+                    _execute_track_jobs_safely,
+                    track_jobs=_track_jobs,
+                    max_workers=_scan_threads,
+                    artist=artist,
+                    album=album,
+                    section="album_track_phase",
+                    log_context={"artist": artist, "album": album},
+                    # SCALE the per-album budget by the track count. A large album
+                    # (a compilation with no release MBIDs, say) legitimately needs
+                    # a full per-track online lookup per track; a flat 900 s cap
+                    # cuts it mid-progress and the runner then discards every
+                    # finished track's star rating (the reported "no-MBID albums
+                    # fail at the end before finalise"). ``_album_budget`` stays the
+                    # configured FLOOR, so this only ever gives slow albums room —
+                    # the enrich/post-singles phases keep the base (they have their
+                    # own per-artist prefetch budget).
+                    seconds=_scale_album_budget(_album_budget, len(_track_jobs)),
+                )
+
+                # ⚠️ The track phase is where most of an album's wall-clock goes,
+                # so it MUST be bounded too — otherwise a hung album never reaches
+                # the budget at all, burns the whole ARTIST budget, and the artist
+                # is still abandoned wholesale (the reported behaviour).
+                #
+                # NOTE this bounds the CALL, not the per-track futures.  The
+                # per-track timeouts were deliberately removed (see
+                # ``_execute_track_jobs_safely``) because abandoning individual
+                # futures leaked zombie threads and starved the DB pool.  Skipping
+                # the whole ALBUM is the safe granularity: the workers that did
+                # finish have already persisted through the deferred sink.
+                if _track_phase_is_incomplete(_track_results_ordered):
+                    _track_reason = (
+                        str(_track_results_ordered.get("reason") or "did not complete")
+                        if isinstance(_track_results_ordered, dict)
+                        else "did not complete"
+                    )
+                    skipped_albums += 1
+                    abandoned_albums += 1
+                    log_unified(
+                        f"[POPULARITY] Album '{artist} - {album}' skipped "
+                        f"({_track_reason}) — continuing with the artist's "
+                        "remaining albums"
+                    )
+                    record_scan(
+                        scan_type, "failed",
+                        message="Album track phase exceeded its time budget",
+                        artist=artist, album=album,
+                    )
+                    try:
+                        _deferred_persist.drain()
+                    except Exception as exc:
+                        logger.debug("Deferred persist drain failed", error=str(exc))
+                    albums_processed += 1
+                    continue
+
                 try:
-                    _new_name, _reason = resolve_album_name(artist=artist, album=album)
-                    if _reason and _new_name and _new_name != album:
-                        # Validate BEFORE queueing: reject a proposal that only
-                        # repeats an annotation the album already carries (the
-                        # "(tour edition) (tour edition)" defect), or that would
-                        # drop the edition the library uses to keep pressings
-                        # distinct. A partly-duplicated proposal is salvaged to
-                        # its collapsed form.
-                        _resolved, _verdict = safe_album_rename(album, _new_name)
-                        if not _resolved:
-                            logger.debug(
-                                "[ALBUM_NAME] Rename rejected",
-                                artist=artist, album=album,
-                                proposed=_new_name, reason=_verdict,
+                    _deferred_payloads = _deferred_persist.drain()
+                    if _deferred_payloads:
+                        # ⚠️ The return value is CHECKED. It was discarded, so a
+                        # wholly refused batch (e.g. a JSONB genre column rejecting
+                        # a CSV string) was indistinguishable from success — the
+                        # scan carried on and the album simply had no rows.
+                        if not upsert_tracks_bulk(_deferred_payloads):
+                            logger.warning(
+                                "Bulk track persist reported FAILURES — some rows were "
+                                "refused by the database",
+                                artist=artist, album=album, count=len(_deferred_payloads),
                             )
-                            if "duplicat" in _verdict:
-                                log_unified(
-                                    f"[ALBUM_NAME] Rejected duplicate-annotation rename for "
-                                    f"'{artist} - {album}' → '{_new_name}' ({_verdict})"
+                        else:
+                            logger.debug("Bulk-persisted track(s)", count=len(_deferred_payloads), artist=artist, album=album)
+                except Exception as exc:
+                    logger.warning("Bulk track persist failed", artist=artist, album=album, error=str(exc))
+
+                for _track_i, ((_prepared, _tc, _opts, _frozen), track_result) in enumerate(zip(_track_jobs, _track_results_ordered)):
+                    if track_result is not None:
+                        results.append(track_result)
+                        if not options.get("metadata_only") and isinstance(track_result, dict):
+                            _tt = _prepared.get("title", "Unknown Track")
+                            _fs = track_result.get("popularity_score")
+                            _lf = float(track_result.get('lastfm_score') or 0.0)
+                            _lb = float(track_result.get('listenbrainz_score') or 0.0)
+                            if _frozen:
+                                log_unified(f"[TRACK_RESULT] '{_tt}' -> Final: {float(_fs or 0.0):.1f} (frozen | LF: {_lf:.1f} | LB: {_lb:.1f})")
+                            else:
+                                log_unified(f"[TRACK_RESULT] '{_tt}' -> Final: {float(_fs or 0.0):.1f} (LF: {_lf:.1f} | LB: {_lb:.1f})")
+                    tracks_processed += 1
+
+                    try:
+                        _track_denom = max(1, len(_track_jobs) - 1)
+                        _track_frac = (_track_i / _track_denom) if len(_track_jobs) > 1 else 1.0
+                        _track_item = f"{current_item} — {_prepared.get('title', '?')}"
+                        if callable(_progress_cb):
+                            try:
+                                _progress_cb(album_index, total_albums, _track_item, _track_frac)
+                            except Exception:
+                                pass
+                        _track_progress = min(100, progress + int(_track_frac * (90 / max(1, total_albums))))
+                        update(
+                            stage="album",
+                            progress=_track_progress,
+                            message=f"Processing {_prepared.get('title', '?')}",
+                            current_item=_track_item,
+                            processed=album_index,
+                            total_items=total_albums,
+                        )
+                    except Exception:
+                        pass
+
+                # -------------------------------------------------------------
+                # Post-singles enrichment (covers, genres, artist metadata).
+                # -------------------------------------------------------------
+                if _full_pass or _mode_meta:
+                    def _post_singles_enrichment_work() -> None:
+                        try:
+                            _extra_ctx, _extra_similar, _extra_meta = enrich_album_extras(
+                                artist=artist,
+                                album=album,
+                                album_context=album_context,
+                                album_tracks=tracks,
+                                detected_type=str((album_result or {}).get("detected_album_type") or ""),
+                                options=options,
+                            )
+                            if album_result is not None:
+                                album_result.setdefault("album_context", {}).update(_extra_ctx)
+                                album_result["similar_artists"] = _extra_similar
+                                album_result["artist_metadata"] = _extra_meta
+                        except Exception as exc:
+                            logger.debug("Post-singles enrichment failed", artist=artist, album=album, error=str(exc))
+
+                    log_unified(f"[POPULARITY] Post-singles enrichment for '{artist} - {album}' (covers, genres, artist metadata)")
+                    _bounded_album_phase(
+                        _post_singles_enrichment_work,
+                        section="post_singles_enrichment",
+                        log_context={"artist": artist, "album": album},
+                        seconds=_album_budget,
+                    )
+
+                # ------------------------------------------------------------------
+                # Cover detection — given the artists the track stage RESOLVED.
+                #
+                # The raw rows in ``tracks`` still carry the album-level artist for
+                # any track whose performer the identity pass resolved separately
+                # ("Various Artists" -> P.O.D./Incubus/…), because the track stage
+                # applies its result to a COPY. Publishing the resolved value here
+                # lets ``_run_album_cover_detection`` overlay it, so the cover
+                # heuristics compare the found original against the track's real
+                # performer instead of the placeholder. Without it, a track's OWN
+                # recording reads as "a different artist" and the false
+                # "(X Cover)" title is written back — the reported reversion of a
+                # metadata scan's cover fix by the following popularity scan.
+                _resolved_artists: dict[str, str] = {}
+                # Per-track recording/work MBIDs the track stage RESOLVED this
+                # pass (from MusicBrainz). ``tracks`` here are the load-time raw
+                # rows, so they do not yet carry what the stage just persisted.
+                # Publishing them lets the deep cover pass skip its own per-track
+                # MusicBrainz searches — the work id in particular feeds the
+                # work-based cover fallback without re-resolving the recording.
+                _resolved_mbids: dict[str, dict[str, str]] = {}
+                # Track ids whose ``title`` the track stage PROMOTED this pass
+                # (the release tracklist title applied to the DB column). Handed to
+                # ``sync_album_file_tags`` so the file TITLE tag is REWRITTEN for
+                # exactly these tracks — not merely filled if missing.
+                _corrected_title_ids: set[str] = set()
+                # Track ids whose FILE-TAG-relevant DB values changed this pass
+                # (track_stage's ``tag_changed``) — the scope handed to
+                # ``sync_album_file_tags`` so it does not re-open every audio file
+                # with mutagen on every scan (~90-120s of reads per re-scanned
+                # album). ``_corrected_title_ids`` are always included: their
+                # TITLE tag must be rewritten even when the rest of the payload
+                # matched. Collected HERE (not earlier) because this is the FIRST
+                # place both sets are known.
+                _album_changed_track_ids: set[str] = set()
+                for _res in _track_results_ordered:
+                    if not isinstance(_res, dict):
+                        continue
+                    _rid = str(_res.get("track_id") or "").strip()
+                    _rartist = str(_res.get("artist") or "").strip()
+                    if _rid and _rartist:
+                        _resolved_artists[_rid] = _rartist
+                    if _rid and bool(_res.get("title_corrected")):
+                        _corrected_title_ids.add(_rid)
+                    if _rid and bool(_res.get("tag_changed")):
+                        _album_changed_track_ids.add(_rid)
+                    _rmbid = str(_res.get("recording_mbid") or "").strip()
+                    _wmbid = str(_res.get("work_mbid") or "").strip()
+                    if _rid and (_rmbid or _wmbid):
+                        _resolved_mbids[_rid] = {
+                            "recording_mbid": _rmbid,
+                            "work_mbid": _wmbid,
+                        }
+                if _resolved_artists:
+                    options["resolved_track_artists"] = _resolved_artists
+                if _resolved_mbids:
+                    options["resolved_track_mbids"] = _resolved_mbids
+
+                _run_album_cover_detection(artist=artist, album=album, tracks=tracks, options=options)
+
+                # --- RECOMMEND-INSTEAD-OF-APPLY (metadata_update.apply_during_scan) ---
+                # When the Config page has metadata updating set to "Recommend only",
+                # the scan must NOT write MusicBrainz metadata. Instead it records
+                # the changes it would have made against the album's tracks
+                # (tracks.pending_mb_updates) so the album and artist pages can offer
+                # them with save/discard.
+                #
+                # Deliberately placed here — after the album stage has resolved and
+                # persisted the album's release MBID, so the proposal is built from a
+                # known release rather than a fresh search — and BEFORE the file-tag
+                # sync below, so the same pass does not then write the very metadata
+                # that was deferred.
+                _stash_only = False
+                try:
+                    from helpers.config_helpers import get_metadata_update_config as _get_mu
+                    _stash_only = not bool((_get_mu() or {}).get("apply_during_scan", True))
+                except Exception as exc:
+                    # Fail OPEN: an unreadable config must not silently stop the
+                    # scan from applying metadata it has always applied.
+                    logger.debug("Could not read metadata_update config", error=str(exc))
+                    _stash_only = False
+
+                if _stash_only and not options.get("popularity_only") and not options.get("singles_detection_only") and not _mode_finalise:
+                    try:
+                        _release_mbid = ""
+                        for _ctx in track_contexts:
+                            _row = _ctx.get("track") or {}
+                            for _col in ("musicbrainz_releasegroupid", "musicbrainz_album_mbid",
+                                         "musicbrainz_albumid"):
+                                _candidate = str(_row.get(_col) or "").strip()
+                                if _candidate:
+                                    _release_mbid = _candidate
+                                    break
+                            if _release_mbid:
+                                break
+
+                        if _release_mbid:
+                            from services.metadata.metadata_proposal_service import (
+                                propose_album_metadata,
+                            )
+                            from services.metadata.pending_update_service import (
+                                stash_album_recommendations,
+                            )
+
+                            _proposal = propose_album_metadata(artist, album, _release_mbid)
+                            _stash = stash_album_recommendations(artist, album, _proposal)
+                            if _stash.get("stashed"):
+                                logger.debug(
+                                    "[METADATA_REVIEW] stashed recommendations instead of applying",
+                                    artist=artist, album=album, stashed=_stash.get("stashed"),
                                 )
                         else:
-                            # Keyed on the casefolded source album so the same
-                            # rename cannot be queued twice for one artist.
-                            _rename_key = str(album).strip().casefold()
-                            _rename_bucket = _deferred_album_renames.setdefault(artist, {})
-                            if _rename_key not in _rename_bucket:
-                                _rename_bucket[_rename_key] = {
-                                    "album": album,
-                                    "new_name": _resolved,
-                                    "reason": f"{_reason}; {_verdict}",
-                                }
-                except Exception as exc:
-                    logger.debug("[ALBUM_NAME] Cleaning skipped", artist=artist, album=album, error=str(exc))
+                            logger.debug(
+                                "[METADATA_REVIEW] no release MBID resolved — nothing to recommend",
+                                artist=artist, album=album,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not stash MusicBrainz recommendations",
+                            artist=artist, album=album, error=str(exc),
+                        )
 
-            try:
-                record_scan(scan_type, "completed", message=f"{scan_type} scan: {artist} - {album}", artist=artist, album=album)
-            except Exception as exc:
-                logger.debug("record_scan(completed) failed", artist=artist, album=album, error=str(exc))
+                # --- FILE TAG SYNC ---
+                if not options.get("popularity_only") and not options.get("singles_detection_only"):
+                    try:
+                        log_unified(f"[TAG_SYNC] Syncing cleaned metadata to audio files for '{album}'...")
+                        _tag_sync = sync_album_file_tags(
+                            artist=artist,
+                            album=album,
+                            corrected_title_ids=_corrected_title_ids or None,
+                            # Only the tracks the scan WROTE this pass — see the
+                            # changed-ids block above. A re-scan of an album whose
+                            # rows all matched skips the mutagen re-reads entirely.
+                            changed_track_ids=_album_changed_track_ids or None,
+                        )
+                        if _tag_sync and (_tag_sync.get("files_updated") or _tag_sync.get("corrections_recorded")):
+                            _album_report["metadata_corrections"] = int(_tag_sync.get("corrections_recorded") or 0)
+                            # The per-album file-tag result is DETAIL; the section
+                            # report's TAG SYNCHRONISATION block carries the totals.
+                            logger.debug(
+                                "[ALBUM_TAG_SYNC] album file tags written",
+                                artist=artist,
+                                album=album,
+                                files_updated=_tag_sync.get("files_updated", 0),
+                                corrections_recorded=_tag_sync.get("corrections_recorded", 0),
+                                perfect_match=bool(_tag_sync.get("perfect_match")),
+                            )
+                    except Exception as exc:
+                        logger.warning("Failed to sync file tags", artist=artist, album=album, error=str(exc))
+                # ---------------------
 
-            _album_results_this = results[_album_start:]
-            _album_report["singles_detected"] = sum(
-                1 for _r in _album_results_this if isinstance(_r, dict) and bool(_r.get("is_single"))
-            )
-            if _album_results_this:
-                _artist_scan_results.setdefault(artist, []).extend(_album_results_this)
-                _artist_pending_albums.setdefault(artist, []).append({
-                    "album_results": _album_results_this,
-                    "is_compilation": bool(album_context.get("is_compilation")),
-                    "is_va_compilation": bool(album_context.get("is_va_compilation")),
-                    "album": album,
-                    # Report metadata for the closing ALBUM SUMMARY. Carried
-                    # here because the star ratings this summary reports are
-                    # only assigned when the artist's pending albums are
-                    # flushed (``_flush_artist_star_ratings``), which happens
-                    # after the album loop moves on.
-                    "report": _album_report,
-                })
-
-                # ── PHASE 1: per-album PROVISIONAL rating ──────────────────
-                # Rate + persist THIS album's stars the moment it finishes, so
-                # an artist scan that is interrupted (crash, budget stop, hard
-                # error) still leaves every completed album RATED instead of
-                # scored-but-unrated. Written with ``stars_reconciled = False``
-                # because the artist context is still PARTIAL — the global 5★
-                # lock and the popularity-marking cutoffs need every album of
-                # the artist, so they are only correct at the boundary.
+                # --- MISSING-TRACK SNAPSHOT ---
+                # The artist page's per-album "N tracks missing" badge reads
+                # ``missing_album_tracks`` from the DATABASE (the endpoint no longer
+                # recomputes), so the scan is what keeps that table current. This is
+                # the same switch the file-tag sync above uses: metadata and combined
+                # passes refresh it, a popularity-only or singles-only pass never
+                # touches album identity.
                 #
-                # Phase 2 (``_flush_artist_star_ratings``, at the artist
-                # boundary) RECONCILES with the complete catalogue and flips the
-                # flag to True; its unchanged-rating skip makes that a no-op for
-                # every album whose stars did not move. A track left at False
-                # (interrupted artist) makes the skip gate re-run its album on
-                # the next scan — see ``_album_needs_star_reconcile``.
+                # Cost note: by this point the album stage has resolved and
+                # persisted the album's MusicBrainz release, so the release-metadata
+                # fetch inside is normally a CACHE HIT. The previous arrangement paid
+                # that cost per PAGE LOAD per owned album instead — and the release
+                # SEARCH it falls back to when an album has no stored MBID was paid
+                # one-per-album every time the artist page was opened.
+                if not options.get("popularity_only") and not options.get("singles_detection_only") and not _mode_finalise:
+                    # A "do not search album release" album is SKIPPED: its
+                    # missing list comes from the user's CSV tracklist (or is
+                    # simply absent), not from a MusicBrainz release — the MB
+                    # refresh would either find nothing or resolve the WRONG
+                    # release and DELETE the CSV-persisted rows ("not in the MB
+                    # release").
+                    try:
+                        from services.metadata.album_lookup_skip_service import album_lookup_skip as _album_skip_lookup
+                        _skip_missing_refresh = _album_skip_lookup(artist, album)
+                    except Exception:
+                        _skip_missing_refresh = False
+                    if not _skip_missing_refresh:
+                        try:
+                            _missing = get_missing_tracks(artist=artist, album=album)
+                            if _missing and _missing.get("missing_count"):
+                                logger.debug(
+                                    "[MISSING_TRACKS] album missing tracks refreshed",
+                                    artist=artist,
+                                    album=album,
+                                    missing_count=_missing.get("missing_count"),
+                                )
+                        except Exception as exc:
+                            logger.debug(
+                                "Missing-track refresh failed",
+                                artist=artist, album=album, error=str(exc),
+                            )
+                # ------------------------------
+
+                # Deferred album rename detection.
+                if not _mode_singles:
+                    try:
+                        _new_name, _reason = resolve_album_name(artist=artist, album=album)
+                        if _reason and _new_name and _new_name != album:
+                            # Validate BEFORE queueing: reject a proposal that only
+                            # repeats an annotation the album already carries (the
+                            # "(tour edition) (tour edition)" defect), or that would
+                            # drop the edition the library uses to keep pressings
+                            # distinct. A partly-duplicated proposal is salvaged to
+                            # its collapsed form.
+                            _resolved, _verdict = safe_album_rename(album, _new_name)
+                            if not _resolved:
+                                logger.debug(
+                                    "[ALBUM_NAME] Rename rejected",
+                                    artist=artist, album=album,
+                                    proposed=_new_name, reason=_verdict,
+                                )
+                                if "duplicat" in _verdict:
+                                    log_unified(
+                                        f"[ALBUM_NAME] Rejected duplicate-annotation rename for "
+                                        f"'{artist} - {album}' → '{_new_name}' ({_verdict})"
+                                    )
+                            else:
+                                # Keyed on the casefolded source album so the same
+                                # rename cannot be queued twice for one artist.
+                                _rename_key = str(album).strip().casefold()
+                                _rename_bucket = _deferred_album_renames.setdefault(artist, {})
+                                if _rename_key not in _rename_bucket:
+                                    _rename_bucket[_rename_key] = {
+                                        "album": album,
+                                        "new_name": _resolved,
+                                        "reason": f"{_reason}; {_verdict}",
+                                    }
+                    except Exception as exc:
+                        logger.debug("[ALBUM_NAME] Cleaning skipped", artist=artist, album=album, error=str(exc))
+
                 try:
-                    _post_album_stars(
-                        artist,
-                        _album_results_this,
-                        is_compilation=bool(album_context.get("is_compilation")),
-                        is_va_compilation=bool(album_context.get("is_va_compilation")),
-                        reconciled=False,
-                        provisional=True,
-                    )
+                    record_scan(scan_type, "completed", message=f"{scan_type} scan: {artist} - {album}", artist=artist, album=album)
                 except Exception as exc:
-                    logger.debug("Per-album provisional star post failed", artist=artist, album=album, error=str(exc))
+                    logger.debug("record_scan(completed) failed", artist=artist, album=album, error=str(exc))
 
-        except Exception as _album_exc:
-            # Flush anything already buffered so a mid-album crash doesn't
-            # discard completed track writes.
-            try:
-                _deferred_payloads = _deferred_persist.drain()
-                if _deferred_payloads:
-                    upsert_tracks_bulk(_deferred_payloads)
-            except Exception as exc:
-                logger.warning("Deferred persist flush failed during album failure", artist=artist, album=album, error=str(exc))
+                _album_results_this = results[_album_start:]
+                _album_report["singles_detected"] = sum(
+                    1 for _r in _album_results_this if isinstance(_r, dict) and bool(_r.get("is_single"))
+                )
+                if _album_results_this:
+                    _artist_scan_results.setdefault(artist, []).extend(_album_results_this)
+                    _artist_pending_albums.setdefault(artist, []).append({
+                        "album_results": _album_results_this,
+                        "is_compilation": bool(album_context.get("is_compilation")),
+                        "is_va_compilation": bool(album_context.get("is_va_compilation")),
+                        "album": album,
+                        # Report metadata for the closing ALBUM SUMMARY. Carried
+                        # here because the star ratings this summary reports are
+                        # only assigned when the artist's pending albums are
+                        # flushed (``_flush_artist_star_ratings``), which happens
+                        # after the album loop moves on.
+                        "report": _album_report,
+                    })
 
-            logger.warning("Album failed completely", artist=artist, album=album, error=str(_album_exc))
-            try:
-                log_unified(f"[POPULARITY] Album '{artist} - {album}' failed ({_album_exc})")
-                record_scan(scan_type, "failed", message=f"Album failed: {_album_exc}", artist=artist, album=album)
-            except Exception as exc:
-                logger.debug("Album failure reporting failed", artist=artist, album=album, error=str(exc))
+                    # ── PHASE 1: per-album PROVISIONAL rating ──────────────────
+                    # Rate + persist THIS album's stars the moment it finishes, so
+                    # an artist scan that is interrupted (crash, budget stop, hard
+                    # error) still leaves every completed album RATED instead of
+                    # scored-but-unrated. Written with ``stars_reconciled = False``
+                    # because the artist context is still PARTIAL — the global 5★
+                    # lock and the popularity-marking cutoffs need every album of
+                    # the artist, so they are only correct at the boundary.
+                    #
+                    # Phase 2 (``_flush_artist_star_ratings``, at the artist
+                    # boundary) RECONCILES with the complete catalogue and flips the
+                    # flag to True; its unchanged-rating skip makes that a no-op for
+                    # every album whose stars did not move. A track left at False
+                    # (interrupted artist) makes the skip gate re-run its album on
+                    # the next scan — see ``_album_needs_star_reconcile``.
+                    try:
+                        _post_album_stars(
+                            artist,
+                            _album_results_this,
+                            is_compilation=bool(album_context.get("is_compilation")),
+                            is_va_compilation=bool(album_context.get("is_va_compilation")),
+                            reconciled=False,
+                            provisional=True,
+                        )
+                    except Exception as exc:
+                        logger.debug("Per-album provisional star post failed", artist=artist, album=album, error=str(exc))
 
-        albums_processed += 1
+            except Exception as _album_exc:
+                # Flush anything already buffered so a mid-album crash doesn't
+                # discard completed track writes.
+                try:
+                    _deferred_payloads = _deferred_persist.drain()
+                    if _deferred_payloads:
+                        upsert_tracks_bulk(_deferred_payloads)
+                except Exception as exc:
+                    logger.warning("Deferred persist flush failed during album failure", artist=artist, album=album, error=str(exc))
 
-        _quarter = (albums_processed * 4) // total_albums
-        if _quarter > _last_quarter:
-            _last_quarter = _quarter
-            log_unified(f"[POPULARITY] {_quarter * 25}% complete ({albums_processed}/{total_albums} albums processed)")
+                logger.warning("Album failed completely", artist=artist, album=album, error=str(_album_exc))
+                try:
+                    log_unified(f"[POPULARITY] Album '{artist} - {album}' failed ({_album_exc})")
+                    record_scan(scan_type, "failed", message=f"Album failed: {_album_exc}", artist=artist, album=album)
+                except Exception as exc:
+                    logger.debug("Album failure reporting failed", artist=artist, album=album, error=str(exc))
 
-    if tracks_processed == 0:
-        log_unified(_zero_track_summary(abandoned_albums, skipped_albums))
-        if abandoned_albums:
-            # Actionable, and loud: every album was cut short, so the operator
-            # needs to know the budget (not the freshness check) is the cause.
+            albums_processed += 1
+
+            _quarter = (albums_processed * 4) // total_albums
+            if _quarter > _last_quarter:
+                _last_quarter = _quarter
+                log_unified(f"[POPULARITY] {_quarter * 25}% complete ({albums_processed}/{total_albums} albums processed)")
+
+        if tracks_processed == 0:
+            log_unified(_zero_track_summary(abandoned_albums, skipped_albums))
+            if abandoned_albums:
+                # Actionable, and loud: every album was cut short, so the operator
+                # needs to know the budget (not the freshness check) is the cause.
+                logger.warning(
+                    "Popularity scan processed 0 tracks — albums were abandoned on budget",
+                    abandoned_albums=abandoned_albums,
+                    skipped_albums=skipped_albums,
+                    total_albums=total_albums,
+                )
+
+    finally:
+        # ── THE ARTIST BOUNDARY — runs on EVERY exit from the loop ─────────
+        #
+        # This close used to run only after the loop had completed, so
+        # anything that ESCAPED the loop's per-album try islands skipped it
+        # entirely: the loop-level `update()` (a progress write),
+        # `log_unified` (structlog has raised UnicodeEncodeError here),
+        # the pass-1 pre-scan, the singles-cache loads
+        # (`_load_mb_single_titles` and friends, both DB-backed), or a
+        # Ctrl-C. Only the two `return False` paths — stop and cancel —
+        # closed for themselves.
+        #
+        # What that costs: the ratings are safe (phase 1 already persisted
+        # them, and `_album_needs_star_reconcile` force-runs a provisional
+        # album on the next scan) and the essential playlists re-derive
+        # every run — but the DEFERRED ALBUM RENAMES do not. They live in
+        # this function's in-memory `_deferred_album_renames` and are popped
+        # here, so a skipped boundary lost them until the album was
+        # resolved again by hand or by a forced scan.
+        #
+        # The in-loop stop/cancel paths keep their own close, which happens
+        # BEFORE `finish()` reports the scan as stopped; a second call here
+        # is a deliberate no-op (the flush and the rename batch both
+        # `.pop()` their bucket, and the essential section is keyed by a
+        # `done` set). The redundancy buys the ordering those two paths
+        # need, and costs one dict lookup each.
+        #
+        # Guarded, because an exception raised in a `finally` REPLACES the
+        # one in flight: a failure here would turn a diagnosable crash into
+        # a confusing one. Log it and let the original propagate.
+        try:
+            _close_artist_section(_section_artist)
+        except Exception as exc:
             logger.warning(
-                "Popularity scan processed 0 tracks — albums were abandoned on budget",
-                abandoned_albums=abandoned_albums,
-                skipped_albums=skipped_albums,
-                total_albums=total_albums,
+                "Artist boundary unwind failed",
+                artist=_section_artist, error=str(exc),
             )
-
-    _close_artist_section(_section_artist)
 
     update(stage="finalising", progress=98, message="Finalising popularity scan...", processed=total_albums, total_items=total_albums)
 
