@@ -1377,6 +1377,17 @@ def _assign_stars(
 
             if _online_stars > 0:
                 comp_stars = _online_stars
+                # ⭐ A VERIFIED SINGLE floors at 3★ on this path too. The
+                # local-catalogue branch above and the absolute fallback below
+                # BOTH apply this floor, so the online path skipping it demoted
+                # tracks independent sources confirm were RELEASED as singles —
+                # measured on "Nightmare Revisited", where "Making Christmas"
+                # (Rise Against) and "Oogie Boogie's Song" (Tiger Army) are both
+                # single=high and both landed 2★. The online rank still decides
+                # anything ABOVE the floor; the floor only stops it burying a
+                # confirmed single below what the other two paths guarantee.
+                if is_verified_single and organic and not popularity_only:
+                    comp_stars = max(comp_stars, 3)
                 track["_compilation_rating_mode"] = "track_artist_online_catalogue"
                 track["_compilation_artist_z"] = None
                 track["_compilation_online_rank"] = int(_online_detail.get("rank") or 0)
@@ -3409,8 +3420,18 @@ def _apply_short_track_star_cap(
 
 
 def _short_track_cap_is_protected(track: dict[str, Any]) -> bool:
-    """True when a track's rating is an explicit instruction, not a guess."""
-    if bool(track.get("_global_5star_locked")):
+    """True when a track's rating is an explicit instruction, not a guess.
+
+    ⚠️ The lock is honoured ONLY when it actually DROVE the rating. The
+    compilation branch ignores ``_global_5star_locked`` by design — it rates on
+    the credited artist's catalogue — so a locked COMPILATION track is still an
+    algorithmic rating and the short-track cap must apply to it. Reading the
+    flag alone exempted it, which is the reported "Opening stays 4★": the
+    artist-boundary pre-pass locked Danny Elfman's 60-second "Opening" (the
+    provisional pass had correctly capped it to 2★), and the reconcile pass
+    then skipped the cap because of that inert lock.
+    """
+    if bool(track.get("_global_5star_locked")) and not track.get("_compilation_rating_mode"):
         return True
     if str(track.get("single_confidence") or "").strip().casefold() == "user":
         return True

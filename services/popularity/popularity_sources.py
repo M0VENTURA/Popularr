@@ -28,6 +28,7 @@ from api_clients.listenbrainz import (
     get_release_metadata_batch as lb_get_release_metadata_batch,
 )
 from helpers.normalization_service import (
+    normalize_unicode_punctuation,
     strip_cover_attribution,
     strip_diacritics,
     strip_featured_artist,
@@ -1354,6 +1355,15 @@ def get_aggregated_lastfm_popularity(
     # differently-typed take) must not be summed into it.
     target_is_alt = bool(is_live_release) or bool(target_is_alt_rendition)
 
+    # ⭐ Fold Unicode punctuation BEFORE the provider sees it. Last.fm indexes
+    # the ASCII spelling, so the U+2010 hyphen MusicBrainz uses in
+    # "The All‐American Rejects" and the U+2019 apostrophe in "Plain White T’s"
+    # queried as-is return NOTHING — the reported "Jack's Lament LF 99 vs LB
+    # 44.2k" and "Poor Jack LF 58 vs LB 23.3k". The fold also keeps the artist
+    # catalogue cache key aligned with the spelling the provider knows.
+    artist = normalize_unicode_punctuation(artist)
+    track_title = normalize_unicode_punctuation(track_title)
+
     track_title = strip_cover_attribution(track_title) or track_title
     is_featured = (
         "feat" in str(artist or "").casefold()
@@ -1585,6 +1595,12 @@ def get_search_aggregated_lastfm_popularity(
         return {"listeners": 0, "track_play": 0, "matched_tracks": []}
 
     target_is_alt = bool(is_live_release) or bool(target_is_alt_rendition)
+
+    # Fold Unicode punctuation before the SEARCH too — the provider indexes the
+    # ASCII spelling, so a U+2010 hyphen or a U+2019 apostrophe queried as-is
+    # matches nothing (see ``get_aggregated_lastfm_popularity``).
+    artist = normalize_unicode_punctuation(artist)
+    track_title = normalize_unicode_punctuation(track_title)
 
     track_title = strip_cover_attribution(track_title) or track_title
     target = normalize_for_aggregation(track_title)

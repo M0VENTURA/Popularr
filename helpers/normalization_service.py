@@ -23,6 +23,7 @@ from helpers.config_helpers import get_queue_matching_config_v2
 UNICODE_PUNCT_MAP = str.maketrans({
     "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",  # ‘’‚‛
     "\u201c": '"', "\u201d": '"', "\u2032": "'", "\u2033": '"',  # “”′″
+    "\u2010": "-", "\u2011": "-", "\u2012": "-",  # ‐ ‑ ‒ (MusicBrainz hyphenates with U+2010)
     "\u2013": "-", "\u2014": "-", "\u2015": "-",  # – — ―
     "\u00a0": " ",  # non-breaking space
 })

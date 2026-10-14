@@ -61,6 +61,7 @@ from services.popularity.popularity_sources import (
     get_aggregated_listenbrainz_popularity,
     get_search_aggregated_lastfm_popularity,
     get_work_level_listenbrainz_popularity,
+    track_identity_key,
 )
 
 # Detection
@@ -1630,9 +1631,24 @@ def process_track(
                 lastfm_listeners = _as_int(effective_track.get("lastfm_listeners") or 0)
                 lastfm_playcount = _as_int(effective_track.get("lastfm_playcount") or 0)
 
-                _prefetch_entry = (prefetched_popularity or {}).get(
-                    normalize_for_aggregation(raw_title or title or "")
-                )
+                # ⭐ The per-ROW alias FIRST. A normalised title cannot
+                # identify a ROW, so on an album carrying two same-titled
+                # tracks (both "Oogie Boogie's Song" on Nightmare Revisited)
+                # the title key handed BOTH rows whichever count that one slot
+                # held — the reported "both rows scored LB 26.3k". The
+                # album-tracklist pass publishes each row's own counts under
+                # ``track_identity_key``; read that before the title fallback,
+                # which stays for a row with no usable position.
+                _prefetch_key = normalize_for_aggregation(raw_title or title or "")
+                _prefetch_entry = None
+                if _prefetch_key:
+                    _prefetch_entry = (prefetched_popularity or {}).get(
+                        track_identity_key(
+                            _prefetch_key,
+                            effective_track.get("disc_number"),
+                            effective_track.get("track_number"),
+                        )
+                    ) or (prefetched_popularity or {}).get(_prefetch_key)
                 if _force and _prefetch_entry and not _prefetch_entry.get("_album_tracklist"):
                     _prefetch_entry = None
 

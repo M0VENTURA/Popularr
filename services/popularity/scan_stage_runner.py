@@ -2834,18 +2834,24 @@ def run_scan(
                                 _cur["recording_mbid"] = _entry.get("recording_mbid")
                                 _cur["release_track_title"] = _entry.get("release_track_title") or ""
                                 if _row_entry:
-                                    # Mirror the row's identity into its OWN
-                                    # slot as well. A title-keyed slot cannot
-                                    # hold one row's identity without handing
-                                    # it to every same-titled sibling, and the
-                                    # batch builder reads the alias FIRST — so
-                                    # without this the per-row answer the
-                                    # album-tracklist pass just resolved would
-                                    # never reach the track.
+                                    # Mirror the row's identity AND counts into
+                                    # its OWN slot. A title-keyed slot cannot
+                                    # hold one row's numbers without handing
+                                    # them to every same-titled sibling — the
+                                    # reported "both Oogie Boogie's Song rows
+                                    # scored LB 26.3k" — and the batch builder
+                                    # AND track_stage both read the alias
+                                    # FIRST, so the per-row answer the
+                                    # album-tracklist pass just resolved must
+                                    # land here or it never reaches the track.
                                     _row = prefetched_popularity.setdefault(_alias_key, {})
                                     _row["recording_mbid"] = _entry.get("recording_mbid")
                                     _row["release_track_title"] = _entry.get("release_track_title") or ""
                                     _row["length_verified"] = bool(_entry.get("length_verified"))
+                                    _row["listenbrainz_listens"] = int(_entry.get("listenbrainz_listens") or 0)
+                                    _row["listenbrainz_users"] = int(_entry.get("listenbrainz_users") or 0)
+                                    _row["_album_tracklist"] = True
+                                    _row["source"] = "album_tracklist"
                             elif _cur.get("source") == "album_tracklist":
                                 # ⭐ The fresh pass has NO identity for this row
                                 # (its release no longer corroborates this
