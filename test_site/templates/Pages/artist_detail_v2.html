@@ -130,7 +130,15 @@
           </div>
 
           {% if artist_bio %}
-            <p class="small text-muted bio-clamp-2 mb-0">{{ artist_bio|striptags }}</p>
+            {#
+              bio-clamp-4: 4 lines before the [more] link. The class used to
+              be `bio-clamp-2`, which this tree's artist.css never defined —
+              so the hero bio rendered at full length and pushed the albums
+              below the first viewport. The clamp now exists in BOTH css
+              copies (and the live copy keeps its 2-line rule for the live
+              template).
+            #}
+            <p class="small text-muted bio-clamp-4 mb-0">{{ artist_bio|striptags }}</p>
             <a href="javascript:void(0)" onclick="goToArtistAbout()" class="text-info text-decoration-none fw-bold extra-small">[more]</a>
           {% endif %}
         </div>

@@ -148,6 +148,20 @@
         <input type="hidden" name="artist" value="{{ artist_name }}">
         <input type="hidden" name="album" value="{{ album_name }}">
 
+        {#
+          Phones only (d-md-none): the Full / Restart / Run / Force / Actions
+          block used to sit above the tracklist at full width, pushing the songs
+          below the fold. It collapses behind this ONE button; the controls move
+          into .scan-toolbar-controls, which the mobile CSS reveals only while
+          the form carries .is-open. On desktop the button is hidden and the
+          wrapper is a full-width flex row, so the layout is what it was.
+        #}
+        <button type="button" class="btn btn-sm btn-outline-secondary w-100 d-md-none scan-toolbar-toggle"
+                onclick="toggleScanToolbar(this)" aria-expanded="false">
+          <i class="bi bi-sliders me-1"></i> Scan Options
+        </button>
+
+        <div class="scan-toolbar-controls d-flex align-items-center justify-content-between gap-2 flex-wrap w-100">
         <div class="d-flex align-items-center gap-2 flex-wrap">
           {#
             No fixed width on this wrapper. The partial emits BOTH the
@@ -198,6 +212,7 @@
             </ul>
           </div>
         </div>
+        </div><!-- /.scan-toolbar-controls -->
       </form>
 
       <!-- Play Album CTA -->
@@ -351,7 +366,7 @@
              non-columnar (an empty cell plus a colspan=3 cell), so the stacked-card
              layout — which labels each cell from its data-label — would render those
              rows unlabelled. Opting in would degrade them, not improve them. #}
-          <table class="table table-hover table-dark align-middle mb-0">
+          <table class="table table-hover table-dark align-middle mb-0 tracklist-table">
             <thead>
               <tr class="text-muted small">
                 <th style="width: 56px;" class="text-center text-nowrap">
@@ -359,8 +374,8 @@
                   <span class="ms-1">#</span>
                 </th>
                 <th>Title</th>
-                <th class="text-center" style="width: 100px;">Duration</th>
-                <th class="text-center" style="width: 120px;">Rating</th>
+                <th class="text-center col-track-duration" style="width: 100px;">Duration</th>
+                <th class="text-center col-track-rating" style="width: 120px;">Rating</th>
                 <th class="text-end" style="width: 100px;">Actions</th>
               </tr>
             </thead>
@@ -395,29 +410,47 @@
                   <a href="{{ url_for('ui.track_detail', track_id=track.id) }}" class="fw-bold text-light text-decoration-none">
                     {{ track.title }}
                   </a>
+                  {#
+                    Phones hide the Duration column, so the number travels with
+                    the title instead (see .track-inline-duration in
+                    popularr.css). Hidden on desktop next to the real column.
+                  #}
+                  <span class="track-inline-duration">
+                    {% if track.duration %}{{ (track.duration / 60)|int }}:{{ "%02d"|format((track.duration % 60)|int) }}{% endif %}
+                  </span>
                   {% if track.artist and track.artist != artist_name %}
                     <small class="text-muted ms-1">— {{ track.artist }}</small>
+                  {% endif %}
+                  {#
+                    Same story for Rating: the stars sit compactly UNDER the
+                    title on phones, where the column is gone.
+                  #}
+                  {% if track.stars %}
+                    <div class="track-inline-rating text-warning">{% for i in range(track.stars) %}★{% endfor %}</div>
                   {% endif %}
                   {# The file path is rendered UNDER the title rather than as its own
                      column: this table's rows are only partly server-rendered, and
                      the MusicBrainz sub-rows injected by album.js use a hard-coded
-                     colspan. Adding a column would shift those and misalign them. #}
+                     colspan. Adding a column would shift those and misalign them.
+                     Hidden on phones — it is desktop forensics, not on-the-go
+                     browsing (the request), so it keeps its data attribute and
+                     only loses its screen space. #}
                   {% if track.file_path %}
-                    <div class="extra-small text-muted font-monospace text-break" data-track-file-path="{{ track.file_path|e }}" title="{{ track.file_path|e }}">
+                    <div class="extra-small text-muted font-monospace text-break track-file-path" data-track-file-path="{{ track.file_path|e }}" title="{{ track.file_path|e }}">
                       <i class="bi bi-file-earmark-music me-1"></i>{{ track.file_path }}
                     </div>
                   {% else %}
-                    <div class="extra-small text-muted fst-italic">No file path recorded</div>
+                    <div class="extra-small text-muted fst-italic track-file-path">No file path recorded</div>
                   {% endif %}
                 </td>
-                <td class="text-center text-muted small">
+                <td class="text-center text-muted small col-track-duration">
                   {% if track.duration %}
                     {% set mins = (track.duration / 60)|int %}
                     {% set secs = (track.duration % 60)|int %}
                     {{ mins }}:{{ "%02d"|format(secs) }}
                   {% else %}—{% endif %}
                 </td>
-                <td class="text-center text-warning">
+                <td class="text-center text-warning col-track-rating">
                   {% if track.stars %}{% for i in range(track.stars) %}★{% endfor %}{% else %}<span class="text-muted">—</span>{% endif %}
                 </td>
                 <td class="text-end">

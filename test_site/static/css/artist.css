@@ -138,3 +138,73 @@
   .release-jump-bar { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 0.25rem; }
   .release-section-controls { width: 100%; }
 }
+
+/* ── Bio "Read More" clamp ─────────────────────────────────────────────────
+   This tree's copy never carried these rules, so the hero bio rendered at
+   full length (the reported "wall of text just to see the albums") and the
+   About tab's Read More toggled a class that did nothing.
+   The CHILD selector is load-bearing: -webkit-line-clamp does not apply
+   through a block <p> child, so clamping only the wrapper div was a no-op.
+   NOTE: the live tree's copy already defines .bio-clamp / .bio-clamp-2 for
+   its own template — only this tree needed them.
+   ─────────────────────────────────────────────────────────────────────────── */
+.bio-clamp,
+.bio-clamp > p {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.bio-clamp.expanded,
+.bio-clamp.expanded > p {
+  -webkit-line-clamp: unset;
+  display: block;
+}
+/* Hero bio snippet: strictly 2 lines with an inline [more] prompt. */
+.bio-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.35;
+  max-height: 2.7em;
+}
+/* Hero bio, 4 lines — the requested "3 or 4 lines" default before [more]. */
+.bio-clamp-4 {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.35;
+  max-height: 5.4em;
+}
+
+/* ── Artist page on phones (≤767.98px) ────────────────────────────────────
+   Density pass, per the mobile review:
+   1. the category jump chips become ONE swipeable row at phone AND small
+      tablet widths (the old rule only kicked in below 576px, so a 600px
+      phone still wrapped them into three lines above the albums);
+   2. the green "In Library" badge hides — in a library app that is the
+      default state; "Missing"/"Upcoming" keep theirs, because they are the
+      exceptions;
+   3. the per-row action buttons collapse into the one ⋮ dropdown
+      (.release-inline-only hides — the ⋮ itself is `d-md-none` in
+      components/_release_section.html) and that ⋮ is a 44x44 target.
+   ─────────────────────────────────────────────────────────────────────────── */
+@media (max-width: 767.98px) {
+  .release-jump-bar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scroll-snap-type: x proximity;
+    padding-bottom: 0.25rem;
+  }
+  .release-jump-chip { flex-shrink: 0; scroll-snap-align: start; }
+
+  .release-badge-library { display: none; }
+
+  .release-inline-only { display: none; }
+  .release-actions-overflow > .btn { min-width: 44px; min-height: 44px; }
+}

@@ -2201,15 +2201,21 @@
     // a colspan=3 title, then the buttons — so every column after the first
     // shifted left, the title sat under "Duration", and the action buttons
     // hung outside the table altogether.
+    //
+    // Duration/Rating carry the SAME column classes as the server-rendered
+    // rows (col-track-duration / col-track-rating): the phone CSS hides those
+    // two columns, and a row without the classes would keep showing five cells
+    // beside three — the title shifting left exactly like the six-cell bug.
     row.innerHTML = `
       <td class="text-center text-muted fst-italic">${trackNum || '?'}</td>
       <td class="fst-italic">
         ${esc(trackComp.mb_title || '')}
+        ${shownDuration && shownDuration !== '—' ? `<span class="track-inline-duration">${shownDuration}</span>` : ''}
         ${showArtist ? `<small class="text-muted ms-1">— ${esc(trackArtist)}</small>` : ''}
         ${missingBadge}
       </td>
-      <td class="text-center text-muted small fst-italic">${shownDuration}</td>
-      <td class="text-center text-warning"><span class="text-muted">—</span></td>
+      <td class="text-center text-muted small fst-italic col-track-duration">${shownDuration}</td>
+      <td class="text-center text-warning col-track-rating"><span class="text-muted">—</span></td>
       <td class="text-end">
         <div class="btn-group btn-group-sm">
           <button class="btn btn-outline-success py-0 px-2 mb-queue-missing" title="${addTitle}" ${addDisabled}>
@@ -3362,6 +3368,24 @@
     }
   });
 
+  // ── Scan toolbar (phones) ─────────────────────────────────────────────────
+
+  /**
+   * Reveal / hide the scan controls on phones.
+   *
+   * The Full / Restart / Run / Force / Actions block sits above the tracklist
+   * and used to claim the whole first screen on a phone, pushing the songs
+   * below the fold. It is hidden behind this button below 768px (see
+   * .scan-toolbar-controls in popularr.css); the class is read off the FORM so
+   * the button can live outside the controls it reveals.
+   */
+  function toggleScanToolbar(btn) {
+    const toolbar = btn && btn.closest ? btn.closest('.scan-toolbar') : null;
+    if (!toolbar) return;
+    const open = toolbar.classList.toggle('is-open');
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
   // ── Public API ──────────────────────────────────────────────────────────
 
   global.albumDetail = {
@@ -3417,6 +3441,9 @@
   global.ignoreMBField = ignoreMBField;
   global.updateAllTracksFromMB = updateAllTracksFromMB;
   global.toggleSelectAll = toggleSelectAll;
+  // Inline onclick="toggleScanToolbar(this)" on the phone-only Scan Options
+  // button in album_detail.html (templates have no compiler).
+  global.toggleScanToolbar = toggleScanToolbar;
   global.selectAllTracks = selectAllTracks;
   global.clearAllTracks = clearAllTracks;
   global.updateBulkActionsUI = updateBulkActionsUI;

@@ -137,9 +137,23 @@
           <i class="bi bi-calendar-event"></i> Upcoming{% if year %} {{ year }}{% endif %}
         </span>
         {% else %}
-        <span class="badge {{ 'bg-warning text-dark' if is_missing else 'bg-success' }} release-status-badge">
-          {{ 'Missing' if is_missing else 'In Library' }}
+        {#- The two non-upcoming states stay SEPARATE spans (they used to be
+            one span with inline conditionals): "In Library" is the DEFAULT in
+            a library app, not news — it hides on phones (artist.css
+            @≤767.98px) where every pixel belongs to the album list, while
+            "Missing" is the exception and always shows. Each class sits
+            PLAINLY in its attribute (not inside a {{ }} conditional) or the
+            release-CSS agreement guard cannot see it and flags the rule as
+            dead. -#}
+        {% if is_missing %}
+        <span class="badge bg-warning text-dark release-status-badge">
+          Missing
         </span>
+        {% else %}
+        <span class="badge bg-success release-status-badge release-badge-library">
+          In Library
+        </span>
+        {% endif %}
         {% endif %}
         {#- Populated by static/js/artist-releases.js via /api/album/missing-tracks.
             Hidden until a count arrives, so an album with no gap never shows a
@@ -158,16 +172,40 @@
       <div class="release-sub text-muted small">{{ year or '—' }}</div>
     </div>
     <div class="release-actions" onclick="event.stopPropagation();">
+      {#- Desktop keeps the inline buttons; phones hide them
+          (.release-inline-only) and show the ⋮ dropdown instead — three
+          tight 24px buttons were a constant source of mis-taps. The dropdown
+          items carry the SAME classes and data attributes as the inline
+          copies, and artist-detail-extras.js FORWARDS a dropdown click to the
+          matching inline button (which is already wired) — so the shared
+          artist-releases.js module needs no change and cannot drift from the
+          live tree's copy. -#}
       {% if not is_missing %}
-        <a class="btn btn-sm btn-outline-secondary release-open-btn"
+        <a class="btn btn-sm btn-outline-secondary release-open-btn release-inline-only"
            href="/album/{{ artist_name|path_segment }}/{{ title|path_segment }}{% if year %}/{{ year }}{% endif %}"
            title="Open album"><i class="bi bi-box-arrow-up-right"></i></a>
-        <button type="button" class="btn btn-sm btn-outline-secondary release-edit-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-rgid="{{ rgid|e }}" data-year="{{ year|e }}" title="Edit release"><i class="bi bi-pencil"></i></button>
+        <button type="button" class="btn btn-sm btn-outline-secondary release-edit-btn release-inline-only" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-rgid="{{ rgid|e }}" data-year="{{ year|e }}" title="Edit release"><i class="bi bi-pencil"></i></button>
       {% else %}
-        <button type="button" class="btn btn-sm btn-outline-success release-import-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-release-id="{{ album.release_id|e }}" title="Import release"><i class="bi bi-download"></i></button>
-        <button type="button" class="btn btn-sm btn-outline-info release-mb-search-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" title="Search MusicBrainz"><i class="bi bi-search"></i></button>
+        <button type="button" class="btn btn-sm btn-outline-success release-import-btn release-inline-only" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-release-id="{{ album.release_id|e }}" title="Import release"><i class="bi bi-download"></i></button>
+        <button type="button" class="btn btn-sm btn-outline-info release-mb-search-btn release-inline-only" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" title="Search MusicBrainz"><i class="bi bi-search"></i></button>
       {% endif %}
-      <button type="button" class="btn btn-sm btn-outline-info release-toggle-btn" aria-expanded="false" title="Show tracklist"><i class="bi bi-chevron-down"></i></button>
+      <button type="button" class="btn btn-sm btn-outline-info release-toggle-btn release-inline-only" aria-expanded="false" title="Show tracklist"><i class="bi bi-chevron-down"></i></button>
+      {#- The phone copy: one ⋮ menu carrying the same actions. Each item
+          carries the SAME class as its inline twin, which is what the
+          forwarding handler looks up. -#}
+      <div class="dropdown release-actions-overflow d-md-none">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="dropdown" aria-expanded="false" aria-label="More release actions" title="More actions"><i class="bi bi-three-dots-vertical"></i></button>
+        <ul class="dropdown-menu dropdown-menu-end">
+          {% if not is_missing %}
+          <li><a class="dropdown-item release-open-btn" href="/album/{{ artist_name|path_segment }}/{{ title|path_segment }}{% if year %}/{{ year }}{% endif %}" title="Open album"><i class="bi bi-box-arrow-up-right me-2"></i> Open album</a></li>
+          <li><button type="button" class="dropdown-item release-edit-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-rgid="{{ rgid|e }}" data-year="{{ year|e }}" title="Edit release"><i class="bi bi-pencil me-2"></i> Edit release</button></li>
+          {% else %}
+          <li><button type="button" class="dropdown-item release-import-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-release-id="{{ album.release_id|e }}" title="Import release"><i class="bi bi-download me-2"></i> Import release</button></li>
+          <li><button type="button" class="dropdown-item release-mb-search-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" title="Search MusicBrainz"><i class="bi bi-search me-2"></i> Search MusicBrainz</button></li>
+          {% endif %}
+          <li><button type="button" class="dropdown-item release-toggle-btn" aria-expanded="false" title="Show tracklist"><i class="bi bi-chevron-down me-2"></i> Show tracklist</button></li>
+        </ul>
+      </div>
     </div>
   </div>
   <div class="release-tracklist" style="display:none;"><div class="release-tracklist-content pt-2"></div></div>

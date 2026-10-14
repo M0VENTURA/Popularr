@@ -398,6 +398,47 @@
       removeArtistAlias(btn.getAttribute('data-alias') || '');
     });
 
+    // ── Phone ⋮ menu: forward to the already-wired inline button ─────────
+    //
+    // On phones the release row's actions collapse into one ⋮ dropdown (see
+    // components/_release_section.html). Its items carry the SAME class as
+    // their inline twins — Open album / Edit release / Import / Search
+    // MusicBrainz / Show tracklist — and this handler FORWARDS the click to
+    // that twin, which artist-releases.js has already bound.
+    //
+    // WHY FORWARD instead of calling the handlers directly: they live inside
+    // the shared artist-releases.js module and are not exported. Forwarding
+    // keeps this file test_site-only, so the shared module stays byte-
+    // identical to the live tree's copy (test_shared_module_copies_do_not_drift)
+    // and the mobile menu cannot make the two trees behave differently.
+    //
+    // `.click()` works on the inline button even though it is display:none on
+    // phones — visibility does not gate a programmatic click.
+    doc.addEventListener('click', function (e) {
+      var action = e.target.closest && e.target.closest('.release-actions-overflow .dropdown-item');
+      if (!action) return;
+      var item = action.closest('.release-item');
+      if (!item) return;
+
+      // The ⋮ items reuse the inline classes, so the twin is the inline one.
+      var inlineClass = null;
+      var classes = ['release-open-btn', 'release-edit-btn', 'release-import-btn',
+                     'release-mb-search-btn', 'release-toggle-btn'];
+      for (var i = 0; i < classes.length; i += 1) {
+        if (action.classList.contains(classes[i])) { inlineClass = classes[i]; break; }
+      }
+      if (!inlineClass) return;
+
+      var twin = item.querySelector('.release-inline-only.' + inlineClass);
+      if (!twin) return;
+
+      // An <a> twin (Open album) is a navigation, not a bound button — click
+      // it so the browser follows the href; the rest are buttons with their
+      // own listeners.
+      e.preventDefault();
+      twin.click();
+    });
+
     // Enter submits the alternate-name field — the button's onclick does not
     // fire on a keypress, and a form wrapper here would submit the page.
     var aliasInput = doc.getElementById('artistAliasInput');
