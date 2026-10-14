@@ -845,9 +845,89 @@ def _online_catalogue_stars(
         # never spend a request (or borrow someone else's chart) for them.
         return 0, {"source": "pseudo_artist"}
 
+    # ⭐ Try the credited artist, then each name WITHIN the credit. A
+    # multi-artist collaboration ("Poppy, Amy Lee & Courtney LaPlante") is not
+    # an entity Last.fm indexes, so the lookup returns an empty catalogue —
+    # the reported "End of You": LF 5 listeners, catalogue_n=0, then
+    # ``absolute_thin_catalogue_fallback`` on a 0.0 score → 1★ for a track by
+    # three well-known artists. The same string also shrank
+    # "(un)familiar., STOMACH BOOK, …" to a 5-entry catalogue.
+    #
+    # The PRIMARY (first credited) artist is the right entity to ask: it is the
+    # one the release is filed under and the one the provider charts.
+    #
+    # ⚠️ Expansion happens ONLY for a credit that actually joins several
+    # artists. A single-artist credit keeps its exact previous behaviour —
+    # one lookup, one answer — so nothing about the ordinary path (including
+    # its call count) changes.
+    candidates: list[str] = []
+    _seen_candidates: set[str] = set()
+
+    def _add_candidate(value: str) -> None:
+        text_value = str(value or "").strip()
+        key = text_value.casefold()
+        if text_value and key not in _seen_candidates:
+            _seen_candidates.add(key)
+            candidates.append(text_value)
+
+    _add_candidate(credited_artist)
+    try:
+        import re as _re
+
+        _MULTI_ARTIST_RE = _re.compile(
+            r"[,&/]|\s+(?:and|with|feat\.?|ft\.?|featuring)\s+",
+            _re.IGNORECASE,
+        )
+        if _MULTI_ARTIST_RE.search(credited_artist):
+            from services.popularity.popularity_matching import (
+                get_artist_lookup_candidates,
+                get_primary_artist_preserve_case,
+            )
+
+            # The credited string first (unchanged behaviour for a single
+            # artist), then the library's own variant builder, then the primary
+            # artist, then every name the credit lists on its own.
+            for candidate in get_artist_lookup_candidates(credited_artist):
+                _add_candidate(candidate)
+            _add_candidate(get_primary_artist_preserve_case(credited_artist))
+            for part in _MULTI_ARTIST_RE.split(credited_artist):
+                _add_candidate(part)
+    except Exception as exc:
+        logger.debug("Artist candidate expansion failed", artist=credited_artist, error=str(exc))
+
     try:
         from services.popularity.popularity_sources import get_online_artist_track_rank
-        rank_info = get_online_artist_track_rank(credited_artist, track_title)
+
+        rank_info: dict[str, Any] = {}
+        matched_candidate = ""
+        _min_catalogue = int(rules.get("min_catalogue_size", 5))
+        for candidate in candidates:
+            try:
+                _info = get_online_artist_track_rank(candidate, track_title) or {}
+            except Exception as exc:
+                logger.debug(
+                    "Online catalogue rank lookup failed",
+                    artist=candidate, title=track_title, error=str(exc),
+                )
+                continue
+            if int(_info.get("rank") or 0) > 0 and int(_info.get("total") or 0) >= _min_catalogue:
+                rank_info = _info
+                matched_candidate = candidate
+                break
+            # Keep the FIRST answer that came back, so the detail dict reports
+            # the real source ("…_beyond" for a title off the chart) — a miss
+            # must stay "unknown", never "unpopular".
+            if not rank_info:
+                rank_info = _info
+        if not rank_info:
+            rank_info = {"source": "none"}
+        if matched_candidate and matched_candidate != credited_artist:
+            logger.info(
+                "Online catalogue resolved via a credited artist within the credit",
+                credited_artist=credited_artist,
+                matched_artist=matched_candidate,
+                title=track_title,
+            )
     except Exception as exc:
         logger.debug(
             "Online catalogue rank lookup failed",

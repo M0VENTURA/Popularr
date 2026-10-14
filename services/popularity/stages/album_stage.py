@@ -1693,6 +1693,34 @@ def _release_group_from_stored_release(
             log_context=context,
         ) or {}
         release_group_mbid = str(release.get("release_group_mbid") or "").strip()
+
+        # ⭐ PLAUSIBILITY GATE. One track's release MBID is adopted as the
+        # ALBUM's release, so a single row that happens to know its own
+        # SINGLE's release hijacks the whole folder: reported on an 81-track
+        # playlist compilation, where Mudvayne's "Hurt People Hurt People"
+        # carried its single's MBID and every other row was then stamped with
+        # it — the album's ListenBrainz tracklist came back with count=1, and
+        # that single's barcode/label/date were written to all 81 rows.
+        #
+        # A release far smaller than the local album is a DIFFERENT release
+        # (the track's own single), never this album's. Counted defensively:
+        # when the payload does not carry a tracklist the gate cannot judge and
+        # the previous behaviour stands, so nothing regresses.
+        _release_tracks = sum(
+            len(medium.get("tracks") or [])
+            for medium in (release.get("media") or [])
+            if isinstance(medium, dict)
+        )
+        _local_tracks = len([t for t in tracks or [] if str(t.get("title") or "").strip()])
+        if _release_tracks and _local_tracks and _release_tracks * 2 < _local_tracks:
+            Logger.info(
+                "[ENRICH] release MBID adoption refused — release is a different (smaller) release",
+                release_mbid=release_mbid,
+                release_tracks=_release_tracks,
+                local_tracks=_local_tracks,
+                **context,
+            )
+            return None, None
     except Exception as exc:
         Logger.info(
             "[ENRICH] release group from the album's own release MBID failed",
