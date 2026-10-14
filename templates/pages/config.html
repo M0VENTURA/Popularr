@@ -2704,6 +2704,29 @@
         </div>
       </div>
 
+      <!-- Genre exclusions — which playlists a metal track may not enter -->
+      <div class="thresholds-grid">
+        <div class="input-card">
+          <label for="playlists_genre_exclusions_enabled">Genre Exclusions</label>
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_genre_exclusions_enabled" {% if config.get('playlists', {}).get('genre_exclusions', {}).get('enabled', True) %}checked{% endif %}>
+          </div>
+          <span class="help-text">Keeps a crossover artist out of a playlist that is not their genre — a band filed under both <em>alternative rock</em> and <em>alternative metal</em> (Tool, Deftones, Slipknot) otherwise takes over the rock playlist. Default: <strong>on</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_genre_own_tags_win">Judge Tracks On Their Own Genre Tags</label>
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_genre_own_tags_win" {% if config.get('playlists', {}).get('genre_exclusions', {}).get('own_tags_win', True) %}checked{% endif %}>
+          </div>
+          <span class="help-text">A track is judged on the genre tags it carries itself; the album-wide genre blend is used only for a track that has none of its own. Without this, every track of a mixed album shares one genre list, so a soft electronic song joins the metal playlist and a metal song joins the rock one. Default: <strong>on</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_genre_metal_excluded_from">Keep Metal Out Of These Playlists</label>
+          <input type="text" class="form-control form-control-sm" id="playlists_genre_metal_excluded_from" placeholder="alternative rock" value="{{ (config.get('playlists', {}).get('genre_exclusions', {}).get('metal_excluded_from', ['alternative rock']) or [])|join(', ') }}">
+          <span class="help-text">Comma-separated playlist genres. A track carrying any <code>*metal*</code> tag (alternative metal, nu metal, metalcore, death metal…) is left out of these playlists. Leave empty to disable. Default: <strong>alternative rock</strong></span>
+        </div>
+      </div>
+
       <!-- 3. Naming templates — full-width input cards -->
       <div class="input-card naming-card">
         <label for="playlists_genre_name_template">Genre Playlist Name Template</label>

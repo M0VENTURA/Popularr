@@ -3578,6 +3578,10 @@ def _sanitize_config_sections(config: dict) -> dict:
         "popularity": ("weights",),
         "genres": ("weights", "synonyms"),
         "metadata_update": ("update_on_files", "album_mbid_guard"),
+        # ``playlists.genre_exclusions`` holds two booleans AND a list, so it
+        # must be kept as a dict — without this entry the Config page save
+        # coerced it to ``{}`` and the rules silently stopped applying.
+        "playlists": ("genre_exclusions",),
     }
     
     for parent, children in nested_children.items():

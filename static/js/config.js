@@ -309,6 +309,19 @@ function buildConfigObject() {
         return Number.isFinite(raw) ? Math.max(0, raw) : 25;
       })(),
       playlist_interleave_artists: getChecked('playlists_interleave_artists', true),
+      // Nested block: ``_sanitize_config_sections`` must list it under
+      // ``playlists`` or the dict is coerced to {} on save.
+      genre_exclusions: {
+        enabled: getChecked('playlists_genre_exclusions_enabled', true),
+        own_tags_win: getChecked('playlists_genre_own_tags_win', true),
+        // ⚠️ Split on commas and DROP empties: an empty field means "no
+        // playlists are protected", which is a real choice, but it must not
+        // become a list containing one empty string.
+        metal_excluded_from: (getValue('playlists_genre_metal_excluded_from', 'alternative rock') || '')
+          .split(',')
+          .map((g) => g.trim().toLowerCase())
+          .filter((g) => g.length > 0),
+      },
       exclude_christmas_from_playlists: getChecked('playlists_exclude_christmas', true),
       christmas_playlist_marker: getValue('playlists_christmas_marker', 'christmas') || 'christmas',
       genre_playlists_name_template: getValue('playlists_genre_name_template', '{genre} - Top Tracks')

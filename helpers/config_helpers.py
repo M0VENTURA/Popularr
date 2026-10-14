@@ -1232,6 +1232,62 @@ def get_album_mbid_guard_config() -> dict[str, Any]:
 # Playlist Configuration
 # -----------------------------------------------------------------------------
 
+#: A track carrying a metal genre is left out of these playlists by default.
+#: The crossover case is the reason: a band filed under both "alternative rock"
+#: and "alternative metal" (Tool, Deftones, Manson, Slipknot) would otherwise
+#: take over the rock playlist, which is meant for rock/indie/grunge acts.
+DEFAULT_METAL_EXCLUDED_FROM: tuple[str, ...] = ("alternative rock",)
+
+
+def get_genre_exclusion_config() -> dict[str, Any]:
+    """Genre-playlist exclusion rules. Config section: ``playlists.genre_exclusions``.
+
+    Two independent rules, both about a track's genre identity rather than its
+    popularity:
+
+    * ``own_tags_win`` — judge a track on ITS OWN genre tags whenever it has
+      any, and consult the album-level blend (``tracks.genres``) only for a
+      track that has none of its own. This exists because ``genres`` is NOT a
+      per-track value on an ordinary album: ``sync_album_file_tags`` writes one
+      blended list to every row, so a Linkin Park album gives "Iridescent" the
+      same ``genres`` string as its nu-metal tracks. Without this, any
+      fallback-inherited tag moves a track between playlists.
+    * ``metal_excluded_from`` — a track whose genre set is metal may not enter
+      these playlists. This is the "keep Alternative Rock to rock/indie/grunge"
+      rule; the metal crossover belongs in the metal playlists.
+
+    Default Values:
+        - enabled: True
+        - own_tags_win: True
+        - metal_excluded_from: ["alternative rock"]
+    """
+    cfg = get_config() or {}
+    p = cfg.get("playlists") or {}
+    if not isinstance(p, dict):
+        p = {}
+    block = p.get("genre_exclusions")
+    if not isinstance(block, dict):
+        block = {}
+
+    raw_genres = block.get("metal_excluded_from", DEFAULT_METAL_EXCLUDED_FROM)
+    if isinstance(raw_genres, str):
+        raw_genres = [g for g in re.split(r"[,;/\\|]+", raw_genres)]
+    if not isinstance(raw_genres, (list, tuple)):
+        raw_genres = list(DEFAULT_METAL_EXCLUDED_FROM)
+
+    genres: list[str] = []
+    for genre in raw_genres:
+        name = str(genre or "").strip().lower()
+        if name and name not in genres:
+            genres.append(name)
+
+    return {
+        "enabled": bool(block.get("enabled", True)),
+        "own_tags_win": bool(block.get("own_tags_win", True)),
+        "metal_excluded_from": genres,
+    }
+
+
 def get_playlists_config() -> dict[str, Any]:
     """Get playlist generation settings.
 
@@ -1269,6 +1325,10 @@ def get_playlists_config() -> dict[str, Any]:
     ``christmas_playlist_marker`` (default "christmas"), which is what lets the
     "Christmas - Top Tracks" / "Christmas Pop - Top Tracks" playlists exist
     while ordinary genre, Essential and New Music playlists stay seasonal-free.
+
+    NOTE: ``playlists.genre_exclusions`` is read separately by
+    ``get_genre_exclusion_config`` — it is a nested block, so it is not part of
+    this flat mapping.
     """
     cfg = get_config() or {}
     p = cfg.get("playlists") or {}

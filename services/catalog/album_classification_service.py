@@ -358,16 +358,30 @@ CHRISTMAS_GENRE_TOKENS = frozenset({
 })
 
 
-def is_christmas_genre(genres: Any) -> bool:
-    """True when any genre token marks the track as Christmas music.
+# ---------------------------------------------------------------------------
+# Genre-token vocabulary
+#
+# ONE parser for every DB genre form, and ONE place that answers "is this
+# token part of family X?". Both tests live here rather than in the caller
+# because a substring test written per-caller is exactly how "Holiday Rock"
+# ends up treated as Christmas music.
+# ---------------------------------------------------------------------------
 
-    Accepts the DB forms a caller might hold: a comma/semicolon/backslash
-    separated string, a JSON list string, or an actual list. Tokens are matched
-    whole (after light normalisation) so "holiday" matches but a genre such as
-    "Holiday Rock" — a real genre — does not.
+def iter_genre_tokens(genres: Any) -> list[str]:
+    """Normalise ANY stored genre form into whole, comparable tokens.
+
+    Accepts every shape the DB hands a caller: a real list/tuple/set, a JSON
+    list string, or a delimiter-separated plain string (``,`` ``;`` ``/``
+    ``\\`` ``|``).
+
+    Normalisation strips punctuation (keeping word characters, spaces and
+    hyphens) and lower-cases, so "Alternative-Metal" and "alternative metal"
+    compare equal. It deliberately does NOT split on the hyphen: "nu-metal"
+    and "nu metal" are one genre, and "progressive-metal" must not become
+    two tokens.
     """
     if not genres:
-        return False
+        return []
 
     tokens: list[str] = []
     if isinstance(genres, (list, tuple, set)):
@@ -384,11 +398,50 @@ def is_christmas_genre(genres: Any) -> bool:
         if not tokens:
             tokens = [g for g in re.split(r"[,;/\\|]+", raw) if g]
 
+    out: list[str] = []
     for token in tokens:
         norm = re.sub(r"[^\w\s-]", "", str(token).strip().lower()).strip()
-        if norm in CHRISTMAS_GENRE_TOKENS:
-            return True
-    return False
+        if norm:
+            out.append(norm)
+    return out
+
+
+#: A genre belongs to the METAL family when the word appears anywhere in the
+#: token: "alternative metal", "nu metal", "heavy metal", "progressive metal",
+#: "industrial metal", "sludge metal", "death metal", "metalcore",
+#: "post-metal", "nu-metal"…
+#:
+#: SUBSTRING, not a fixed list, on purpose — the vocabulary is unbounded (any
+#: new subgenre is "something metal") and every known spelling contains the
+#: word itself. A closed set would silently stop matching the moment a source
+#: returns "groove metal".
+METAL_GENRE_SUBSTRING = "metal"
+
+
+def genre_tokens_contain(genres: Any, needle: str) -> bool:
+    """True when any of ``genres`` carries ``needle`` as part of the word.
+
+    ``needle`` is normalised the same way the tokens are, so a caller may pass
+    "Metal" or "metal".
+    """
+    wanted = re.sub(r"[^\w\s-]", "", str(needle or "").strip().lower()).strip()
+    if not wanted:
+        return False
+    return any(wanted in token for token in iter_genre_tokens(genres))
+
+
+def is_metal_genre(genres: Any) -> bool:
+    """Is any of these tokens a metal genre? See ``METAL_GENRE_SUBSTRING``."""
+    return genre_tokens_contain(genres, METAL_GENRE_SUBSTRING)
+
+
+def is_christmas_genre(genres: Any) -> bool:
+    """True when any genre token marks the track as Christmas music.
+
+    Tokens are matched WHOLE (after light normalisation) so "holiday" matches
+    but a genre such as "Holiday Rock" — a real genre — does not.
+    """
+    return any(token in CHRISTMAS_GENRE_TOKENS for token in iter_genre_tokens(genres))
 
 
 def is_christmas_track(

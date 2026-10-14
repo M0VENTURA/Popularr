@@ -111,6 +111,10 @@ from services.catalog.album_classification_service import (
     is_christmas_track,
     is_instrumental_track_title,
     is_live_or_alternate_track_title,
+    # The genre-playlist family tests: one parser for every stored genre form
+    # (``iter_genre_tokens``) and the metal-family question beside it.
+    is_metal_genre,
+    iter_genre_tokens,
 )
 from helpers.config_helpers import get_standout_config
 from helpers.logging_config import log_unified
@@ -3030,6 +3034,114 @@ def _sync_playlist_to_navidrome(
     return synced
 
 
+#: The per-source genre columns a track OWNS (written for that track by the
+#: track stage), as opposed to ``tracks.genres``, which on an ordinary album is
+#: a single blended list fanned out to every row.
+_TRACK_OWN_GENRE_COLUMNS: tuple[str, ...] = (
+    "lastfm_tags",
+    "musicbrainz_genres",
+    "discogs_genres",
+    "listenbrainz_genres",
+    "spotify_genres",
+    "essentia_genres",
+    "manual_genres",
+    "navidrome_genres",
+    "audiodb_genres",
+    "wikidata_genres",
+)
+
+
+def _track_own_genre_tokens(row: dict[str, Any]) -> list[str]:
+    """Every genre token the TRACK itself carries, from its per-source columns.
+
+    ⚠️ ``tracks.genres`` deliberately is NOT consulted here. On an ordinary
+    album it is one blended list written to every row by
+    ``sync_album_file_tags``, so it cannot answer "is THIS track metal?" — it
+    only answers "is anything on this album metal?". A Various-Artists album is
+    the exception (its per-track genres are written per track), which is why the
+    caller unions the two surfaces rather than trusting either alone.
+    """
+    tokens: list[str] = []
+    for column in _TRACK_OWN_GENRE_COLUMNS:
+        raw = row.get(column)
+        if not raw:
+            continue
+        tokens.extend(iter_genre_tokens(raw))
+    # De-duplicate, preserving order (the columns are already priority-ordered).
+    seen: set[str] = set()
+    out: list[str] = []
+    for token in tokens:
+        if token not in seen:
+            seen.add(token)
+            out.append(token)
+    return out
+
+
+def _resolve_playlist_genres(
+    row: dict[str, Any],
+    *,
+    max_genres: int,
+) -> tuple[list[str], bool]:
+    """The genres a track is POOLED BY, and whether they are the track's own.
+
+    Returns ``(genres, owned)``.
+
+    ``owned=True`` means the track carries genre tags of its own, so those
+    decide — the album blend is ignored. ``owned=False`` means the track has no
+    tags of its own and the album-level blend is all there is to go on, which is
+    the sparse-track case the fallback exists for.
+
+    ⭐ Why this matters (the reported "Iridescent in Alternative Metal"): with a
+    single blended ``genres`` value per album, EVERY track of a Linkin Park
+    album carries the same metal tag, so a soft electronic track joins the metal
+    playlist and a metal track joins the rock one. Reading the track's own
+    columns is what separates them.
+    """
+    own = _track_own_genre_tokens(row)
+    if own:
+        return own, True
+    return _genre_playlist_track_genres(row, max_genres=max_genres), False
+
+
+def _full_genre_tokens(row: dict[str, Any]) -> list[str]:
+    """Every genre token available for this track: its own plus the blend.
+
+    UNTRUNCATED, unlike ``_genre_playlist_track_genres``. Family tests ("is this
+    metal?") must never run against a truncated window — the same trap the
+    Christmas check documents, where a fourth-position tag was invisible and a
+    Christmas track pooled into the ordinary playlists.
+    """
+    tokens = _track_own_genre_tokens(row)
+    tokens.extend(iter_genre_tokens(row.get("genres")))
+    seen: set[str] = set()
+    out: list[str] = []
+    for token in tokens:
+        if token not in seen:
+            seen.add(token)
+            out.append(token)
+    return out
+
+
+def _playlist_identity_tokens(
+    row: dict[str, Any],
+    *,
+    own_tags_win: bool,
+) -> list[str]:
+    """The genre tokens that decide which podcast… playlists a track may enter.
+
+    ``own_tags_win`` implements the requested rule: a track is judged on ITS OWN
+    tags whenever it has any, and only a track with none of its own falls back
+    to the album-level blend. That is what stops a fallback-inherited tag —
+    "this album is alternative metal" — from moving a track that is itself only
+    tagged alternative rock / pop rock / electronic.
+    """
+    if own_tags_win:
+        own = _track_own_genre_tokens(row)
+        if own:
+            return own
+    return _full_genre_tokens(row)
+
+
 def _genre_playlist_track_genres(
     row: dict[str, Any],
     *,
@@ -3076,7 +3188,10 @@ _GENRE_ROWS_SQL = """
            COALESCE(is_compilation, 0) AS is_compilation,
            COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
            COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
-           genres
+           genres,
+           lastfm_tags, musicbrainz_genres, discogs_genres,
+           listenbrainz_genres, spotify_genres, essentia_genres,
+           manual_genres, navidrome_genres, audiodb_genres, wikidata_genres
     FROM tracks
     WHERE COALESCE(stars, star_rating) >= :min_stars
 """
@@ -3136,7 +3251,11 @@ def refresh_genre_playlists_for_album(artist: str, album: str) -> int:
                            COALESCE(popularity, final_score, 0) AS popularity_score,
                            COALESCE(is_live, 0) AS is_live,
                            COALESCE(is_compilation, 0) AS is_compilation,
-                           genres
+                           genres,
+                           lastfm_tags, musicbrainz_genres, discogs_genres,
+                           listenbrainz_genres, spotify_genres, essentia_genres,
+                           manual_genres, navidrome_genres, audiodb_genres,
+                           wikidata_genres
                     FROM tracks
                     WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
                       AND album = :album
@@ -3152,7 +3271,10 @@ def refresh_genre_playlists_for_album(artist: str, album: str) -> int:
         max_genres = max(1, int(_cfg.get("genre_playlists_max_genres", 3) or 3))
         affected: set[str] = set()
         for row in rows:
-            for genre in _genre_playlist_track_genres(row, max_genres=max_genres):
+            # The SAME resolver the full builder uses, so a per-album refresh
+            # re-derives exactly the pools the next full pass would.
+            _resolved, _owned = _resolve_playlist_genres(row, max_genres=max_genres)
+            for genre in _resolved:
                 affected.add(genre)
 
         if not affected:
@@ -3208,12 +3330,43 @@ def _create_genre_top_track_playlists(
             max_genres=max_genres,
         )
 
+    # ── Genre exclusion rules (see get_genre_exclusion_config) ─────────────
+    #
+    # A track's GENRE IDENTITY is read from its own per-source columns whenever
+    # it has any, because ``tracks.genres`` is one blended list fanned out to
+    # every track of an album — it can say "something on this album is metal",
+    # never "this track is metal". Pooling by the blend is what put a soft
+    # electronic Linkin Park track into Alternative Metal and the band's metal
+    # tracks into Alternative Rock.
+    try:
+        from helpers.config_helpers import get_genre_exclusion_config
+        _excl = get_genre_exclusion_config()
+    except Exception as exc:
+        logger.debug("Genre exclusion config read failed", error=str(exc))
+        _excl = {"enabled": True, "own_tags_win": True,
+                 "metal_excluded_from": ["alternative rock"]}
+
+    _excl_enabled = bool(_excl.get("enabled", True))
+    _own_tags_win = bool(_excl.get("own_tags_win", True))
+    _metal_excluded_from = {
+        re.sub(r"[^\w\s-]", "", str(g).strip().lower()).strip()
+        for g in (_excl.get("metal_excluded_from") or [])
+    }
+    _metal_excluded_from.discard("")
+    _excluded_counts: dict[str, int] = defaultdict(int)
+
     pools: dict[str, list[dict[str, Any]]] = defaultdict(list)
     genre_freq: dict[str, int] = defaultdict(int)
     genre_display: dict[str, str] = {}
 
     for row in rows:
         track_genres = _track_genres(row)
+
+        # The FULL per-track set for the family tests below. Reusing the
+        # truncated ``track_genres`` would test only the first N genres — the
+        # trap the Christmas check documents next door.
+        _identity = _playlist_identity_tokens(row, own_tags_win=_own_tags_win)
+        _track_is_metal = _excl_enabled and is_metal_genre(_identity)
 
         # Christmas detection MUST use the FULL genre list, not the truncated
         # window above.
@@ -3256,6 +3409,16 @@ def _create_genre_top_track_playlists(
                 target_norm_key = norm_key
                 target_display = genre
 
+            # ── Genre exclusion: a metal track may not enter a rock playlist ──
+            #
+            # Asked of the track's GENRE IDENTITY (its own tags, or the album
+            # blend for a track with none of its own), never of the truncated
+            # window — a metal tag in the fourth position must still disqualify.
+            # See ``get_genre_exclusion_config``.
+            if _track_is_metal and norm_key in _metal_excluded_from:
+                _excluded_counts[norm_key] += 1
+                continue
+
             pools[target_norm_key].append({
                 "id": str(row.get("id") or ""),
                 "title": str(row.get("title") or "Unknown"),
@@ -3284,6 +3447,24 @@ def _create_genre_top_track_playlists(
             -item["stars"],
             -item["score"],
             item["title"].casefold(),
+        )
+
+    # Report the genre-exclusion verdicts. A rule that silently drops tracks is
+    # indistinguishable from a bug ("why is this song not in Alternatives?"), so
+    # the count per playlist is logged at INFO — one line, only when it fires.
+    if _excluded_counts:
+        _parts = ", ".join(
+            f"{genre}: {count}" for genre, count in sorted(_excluded_counts.items())
+        )
+        total_excluded = sum(_excluded_counts.values())
+        log_unified(
+            f"[FINALISE_STAGE] Genre exclusion — {total_excluded} metal track(s) "
+            f"kept out of {len(_excluded_counts)} playlist(s): {_parts}"
+        )
+        logger.info(
+            "Genre playlists excluded metal tracks",
+            per_genre=dict(_excluded_counts),
+            total=total_excluded,
         )
 
     written = 0
