@@ -87,7 +87,11 @@ class TestUploadGoesToTheNativeEndpoint:
 
         assert upload["method"] == "post"
         assert upload["url"] == "http://nav.local:4533/api/playlist/pl-1/image"
-        assert upload["headers"]["Authorization"] == "Bearer jwt-1"
+        # ⚠️ Navidrome's OWN header (``consts.UIAuthorizationHeader``), not the
+        # standard ``Authorization``: its verifier reads the token through
+        # ``tokenFromHeader``, which does ``r.Header.Get("X-ND-Authorization")``.
+        # A standard header is never seen, so every upload answered 401.
+        assert upload["headers"]["X-ND-Authorization"] == "Bearer jwt-1"
         # The handler reads ``r.FormFile("image")`` — the field name is load-bearing.
         assert "image" in upload["files"]
         assert upload["files"]["image"][1] == b"\xff\xd8\xff\xe0art"
@@ -120,7 +124,9 @@ class TestUploadGoesToTheNativeEndpoint:
         ])
         ok, reason = client.upload_playlist_cover("pl-1", b"art")
         assert (ok, reason) == (True, "")
-        assert session.calls[-1]["headers"]["Authorization"] == "Bearer jwt-2"
+        # The RETRY path carries its own copy of the header — it must use the
+        # same (correct) one as the first attempt.
+        assert session.calls[-1]["headers"]["X-ND-Authorization"] == "Bearer jwt-2"
 
 
 class TestFailuresAreReportedHonestly:

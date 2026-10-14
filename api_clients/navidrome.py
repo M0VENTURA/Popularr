@@ -802,6 +802,20 @@ class NavidromeClient:
         requires ``EnableArtworkUpload`` for non-admin users),
         ``not_found`` (no such playlist), ``http_<code>``, and
         ``exception``.
+
+        ⭐ THE TOKEN GOES IN ``X-ND-Authorization``, NOT ``Authorization``.
+        Navidrome's own constant names it (``consts.UIAuthorizationHeader =
+        "X-ND-Authorization"``) and its verifier reads exactly that header:
+
+            jwtauth.Verify(auth.TokenAuth, tokenFromHeader,
+                           jwtauth.TokenFromCookie, jwtauth.TokenFromQuery)
+            // tokenFromHeader: r.Header.Get(consts.UIAuthorizationHeader)
+
+        A standard ``Authorization: Bearer`` header is therefore NEVER seen —
+        no token reaches the context, ``Authenticator`` answers 401 "Not
+        authenticated" and the upload fails however many times it re-logs in.
+        That was the reported permanent 401: the login SUCCEEDED (so the
+        reason was never ``no_login``), yet every attempt was rejected.
         """
         if not playlist_id or not image_bytes:
             return False, "no_image"
@@ -814,10 +828,11 @@ class NavidromeClient:
         # The file field MUST be named "image": the handler reads it with
         # ``r.FormFile("image")`` and 400s with "missing image file" otherwise.
         filename = "cover.png" if "png" in str(mime_type).lower() else "cover.jpg"
+        headers = {"X-ND-Authorization": f"Bearer {token}"}
         try:
             response = self.session.post(
                 url,
-                headers={"Authorization": f"Bearer {token}"},
+                headers=headers,
                 files={"image": (filename, image_bytes, mime_type)},
                 timeout=30,
             )
@@ -829,7 +844,7 @@ class NavidromeClient:
                     return False, "no_login"
                 response = self.session.post(
                     url,
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"X-ND-Authorization": f"Bearer {token}"},
                     files={"image": (filename, image_bytes, mime_type)},
                     timeout=30,
                 )

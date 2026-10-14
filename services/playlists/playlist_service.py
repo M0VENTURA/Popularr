@@ -443,6 +443,10 @@ def attach_playlist_cover(playlist_name: str, artist_name: str) -> dict:
                     "disabled": "artwork upload disabled on the server",
                     "no_login": "navidrome login failed",
                     "not_found": "playlist not found on the server",
+                    # A 401 that survived the client's own re-login+retry is
+                    # never a stale token — say so, because the obvious reading
+                    # ("expired session") sends you looking in the wrong place.
+                    "http_401": "unauthorized — the server rejected the session token",
                 }.get(reason, reason or "upload rejected")
                 logger.warning(
                     "[PLAYLISTS] Cover upload rejected for %s: %s", playlist_name, last_reason
