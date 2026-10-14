@@ -397,6 +397,7 @@
     unreadCount = 0;
     updateJumpButton();
   }
+
   // ── Modal lifecycle (main.js calls onOpen/onClose on shown/hidden) ──────
 
   function formatSize(bytes) {
@@ -513,6 +514,7 @@
   function onClose() {
     stopStream();
   }
+
   // ── Load ────────────────────────────────────────────────────────────────
 
   function loadLog(opts) {
