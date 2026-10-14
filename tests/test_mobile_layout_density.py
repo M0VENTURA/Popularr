@@ -16,8 +16,9 @@ Reported (mobile review of the Album and Artist pages)
 
 The change is CSS-first and phone-only (``@media (max-width: 767.98px)``):
 markup moves values inline, the toolbar collapses behind one button, and the
-release actions collapse into a single ``⋮`` menu — with the JS bound to
-**every** copy of each button, not the first one found.
+release actions collapse into a single ``⋮`` menu whose items FORWARD their
+click to the already-bound inline buttons — so the shared release module
+stays untouched and both trees keep behaving identically.
 """
 
 from __future__ import annotations
