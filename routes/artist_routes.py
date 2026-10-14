@@ -27,6 +27,7 @@ from services.metadata.artist_scan_service import (
     fetch_missing_release_tracklist,
 )
 from services.metadata import artist_metadata_service as metadata
+from services.metadata import artist_alias_service as alias_service
 from services.popularity.popularity_report_service import (
     build_popularity_report,
     popularity_report_filename,
@@ -350,6 +351,53 @@ async def api_artist_lookup_ids() -> Any:
         from helpers.logging_config import log_unified
         log_unified(f"[ARTIST] Looked up + saved external IDs for '{payload.get('name') or '?'}'")
     return jsonify(data), code
+
+# ----------------------------
+# ALTERNATE NAMES (aliases)
+# ----------------------------
+# "One artist under many names" for renamed/rebranded bands (Electric
+# Callboy was Eskimo Callboy). The mapping is what keeps the cover detector
+# from flagging a band's own recording under its other name as a cover — see
+# ``services.metadata.artist_alias_service``.
+
+
+@artist_bp.route("/api/artist/aliases", methods=["GET"])
+async def api_artist_aliases() -> Any:
+    """Every name in this artist's group (both pages of a pair show the same)."""
+    artist = str(request.args.get("artist") or "").strip()
+    if not artist:
+        return jsonify({"error": "artist is required"}), 400
+    data, code = alias_service.get_alias_group(artist)
+    return jsonify(data), code
+
+
+@artist_bp.route("/api/artist/aliases", methods=["POST"])
+async def api_artist_aliases_add() -> Any:
+    """Register ``alias`` as another name for ``artist``'s group."""
+    payload = (await request.get_json(silent=True)) or {}
+    data, code = alias_service.add_alias(payload.get("artist"), payload.get("alias"))
+    if code == 200 and data.get("success"):
+        from helpers.logging_config import log_unified
+        log_unified(
+            f"[ARTIST] Added alternate name '{payload.get('alias') or '?'}' "
+            f"-> '{data.get('canonical') or payload.get('artist') or '?'}'"
+        )
+    return jsonify(data), code
+
+
+@artist_bp.route("/api/artist/aliases/remove", methods=["POST"])
+async def api_artist_aliases_remove() -> Any:
+    """Unlink a name from the group (idempotent: already-gone still succeeds)."""
+    payload = (await request.get_json(silent=True)) or {}
+    data, code = alias_service.remove_alias(payload.get("artist"), payload.get("alias"))
+    if code == 200 and data.get("success"):
+        from helpers.logging_config import log_unified
+        log_unified(
+            f"[ARTIST] Removed alternate name '{payload.get('alias') or '?'}' "
+            f"from '{payload.get('artist') or '?'}'"
+        )
+    return jsonify(data), code
+
 
 
 @artist_bp.route("/api/artist/<path:artist>/similar")

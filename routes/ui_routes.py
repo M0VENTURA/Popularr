@@ -1273,6 +1273,22 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
     except Exception as exc:
         logger.debug("Failed to load similar artists", artist=name, error=str(exc))
 
+    # Alternate names (Electric Callboy / Eskimo Callboy): the About tab's
+    # list, plus the group's canonical name so the page can say "merged as".
+    # A failure must never take the page down — the section simply renders
+    # empty.
+    artist_aliases: list[str] = []
+    artist_alias_canonical = name
+    try:
+        from services.metadata.artist_alias_service import get_alias_group
+
+        _alias_group, _alias_code = get_alias_group(name)
+        if _alias_code == 200:
+            artist_aliases = list(_alias_group.get("aliases") or [])
+            artist_alias_canonical = str(_alias_group.get("canonical") or name)
+    except Exception as exc:
+        logger.debug("Failed to load artist aliases", artist=name, error=str(exc))
+
     return {
         "artist_name": name,
         "albums": albums,
@@ -1288,6 +1304,8 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
         "artist_bio": artist_bio,
         "artist_country": artist_country,
         "artist_members": artist_members,
+        "artist_aliases": artist_aliases,
+        "artist_alias_canonical": artist_alias_canonical,
         "similar_artists": similar_artists,
         "scan_active": scan_active,
         "slskd_config": cfg.get("slskd", {}),

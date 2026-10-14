@@ -98,7 +98,7 @@ def _recreate_test_schema():
     # table — so the NEXT test's teardown died with "no such table: tracks".
     # Recreated here for the same reason ``tracks`` itself is.
     with engine.begin() as conn:
-        for _name in ("album_art", "missing_releases"):
+        for _name in ("album_art", "missing_releases", "artist_aliases"):
             _ddl = TABLES_TO_ENSURE.get(_name)
             if _ddl:
                 conn.execute(_text(_ddl))

@@ -306,6 +306,76 @@
       });
   }
 
+  // ── Alternate names ───────────────────────────────────────────────────────
+
+  /** Re-render the group list from an API reply ({aliases: [...]}). */
+  function renderArtistAliases(group) {
+    var list = doc.getElementById('artistAliasesList');
+    if (!list) return;
+    var aliases = (group && group.aliases) || [];
+    if (!aliases.length) {
+      list.innerHTML = '<span class="text-muted small" id="artistAliasesEmpty">No alternate names.</span>';
+      return;
+    }
+    var html = '';
+    aliases.forEach(function (alias) {
+      html += '<span class="badge bg-secondary artist-alias-badge d-inline-flex align-items-center gap-1">'
+        + esc(alias)
+        + '<button type="button" class="btn btn-link p-0 lh-1 text-decoration-none text-white-50"'
+        + ' title="Remove this name" aria-label="Remove ' + esc(alias) + '"'
+        + ' data-action="remove-artist-alias" data-alias="' + esc(alias) + '">&times;</button>'
+        + '</span>';
+    });
+    list.innerHTML = html;
+  }
+
+  /**
+   * Add the input's name to this artist's group.
+   *
+   * Errors come back IN the JSON body (409 for a name already owned by
+   * another artist), so they are surfaced from the reply, not swallowed by a
+   * generic catch — the user needs to know the name belongs elsewhere.
+   */
+  function addArtistAlias() {
+    var input = doc.getElementById('artistAliasInput');
+    var value = input ? String(input.value || '').trim() : '';
+    if (!value) { notifyError('Enter an alternate name first.'); return; }
+
+    postJson('/api/artist/aliases', { artist: artistName(), alias: value })
+      .then(function (data) {
+        if (data && data.success) {
+          if (input) input.value = '';
+          renderArtistAliases(data);
+          notifySuccess(data.already
+            ? 'That name is already linked.'
+            : 'Alternate name added.');
+        } else {
+          notifyError((data && (data.error || data.message)) || 'Could not add the name.');
+        }
+      })
+      .catch(function (err) {
+        notifyError((err && (err.error || err.message)) || 'Could not add the name.');
+      });
+  }
+
+  /** Unlink one name; the reply carries the refreshed group. */
+  function removeArtistAlias(alias) {
+    if (!alias) return;
+
+    postJson('/api/artist/aliases/remove', { artist: artistName(), alias: alias })
+      .then(function (data) {
+        if (data && data.success) {
+          renderArtistAliases(data);
+          notifySuccess('Alternate name removed.');
+        } else {
+          notifyError((data && (data.error || data.message)) || 'Could not remove the name.');
+        }
+      })
+      .catch(function (err) {
+        notifyError((err && (err.error || err.message)) || 'Could not remove the name.');
+      });
+  }
+
   // ── Init ────────────────────────────────────────────────────────────────
 
   function init() {
@@ -318,6 +388,27 @@
       if (!btn) return;
       setArtistImage(btn.getAttribute('data-url') || '');
     });
+
+    // Alias badges (server-rendered AND re-rendered) carry data-alias rather
+    // than an inline onclick: names can contain quotes, so the value is read
+    // back HTML-escaped from the attribute instead of embedded in JS.
+    doc.addEventListener('click', function (e) {
+      var btn = e.target.closest && e.target.closest('[data-action="remove-artist-alias"]');
+      if (!btn) return;
+      removeArtistAlias(btn.getAttribute('data-alias') || '');
+    });
+
+    // Enter submits the alternate-name field — the button's onclick does not
+    // fire on a keypress, and a form wrapper here would submit the page.
+    var aliasInput = doc.getElementById('artistAliasInput');
+    if (aliasInput) {
+      aliasInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          addArtistAlias();
+        }
+      });
+    }
 
     // The region banner is hidden until the API says otherwise; asking
     // unconditionally would flag every artist whose scan found nothing.
@@ -352,6 +443,7 @@
   global.toggleArtistBio = toggleArtistBio;
   global.goToArtistAbout = goToArtistAbout;
   global.checkMissingReleases = checkMissingReleases;
+  global.addArtistAlias = addArtistAlias;
 
   global.artistPage = global.artistPage || {};
   global.artistPage.playTopTracks = playArtistTopTracks;

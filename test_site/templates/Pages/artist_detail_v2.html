@@ -492,6 +492,52 @@
         </div>
       </div>
 
+      {#
+        Alternate names — a second name for the SAME artist (Electric Callboy
+        was Eskimo Callboy). Registered names resolve to one canonical artist
+        in every identity comparison, which is what stops the cover detector
+        from flagging a band's own recording under its other name as a cover.
+
+        Remove buttons carry data-action (not onclick): aliases can contain
+        quotes, and a delegated handler reads them back HTML-escaped from the
+        attribute. `artist-detail-extras.js` binds the list once on init.
+      #}
+      <div class="card mb-3" id="artist-aliases-section">
+        <div class="card-body p-3">
+          <h6 class="fw-bold mb-2"><i class="bi bi-signpost me-2"></i>Alternate Names</h6>
+          <p class="text-muted small mb-2">
+            Other names this artist has been known as (renames, rebrands). Every name listed
+            here is treated as the <strong>same artist</strong>, so tracks credited under it are
+            not mistaken for cover songs — e.g. Electric Callboy and Eskimo Callboy.
+          </p>
+          <div id="artistAliasesList" class="d-flex flex-wrap gap-1 mb-2">
+            {% for alias in (artist_aliases or []) %}
+              <span class="badge bg-secondary artist-alias-badge d-inline-flex align-items-center gap-1">
+                {{ alias }}
+                <button type="button" class="btn btn-link p-0 lh-1 text-decoration-none text-white-50"
+                        title="Remove this name" aria-label="Remove {{ alias }}"
+                        data-action="remove-artist-alias" data-alias="{{ alias }}">&times;</button>
+              </span>
+            {% else %}
+              <span class="text-muted small" id="artistAliasesEmpty">No alternate names.</span>
+            {% endfor %}
+          </div>
+          <div class="input-group input-group-sm" style="max-width: 420px;">
+            <input type="text" class="form-control" id="artistAliasInput"
+                   placeholder="e.g. Eskimo Callboy" autocomplete="off"
+                   aria-label="Alternate name for this artist">
+            <button class="btn btn-outline-primary" type="button" onclick="addArtistAlias()">
+              <i class="bi bi-plus-lg"></i> Add
+            </button>
+          </div>
+          {% if artist_alias_canonical and (artist_alias_canonical | lower) != (artist_name | lower) %}
+            <div class="small text-info mt-2 mb-0">
+              <i class="bi bi-signpost-split me-1"></i>This artist is merged as <strong>{{ artist_alias_canonical }}</strong>.
+            </div>
+          {% endif %}
+        </div>
+      </div>
+
       <div class="card mb-3" id="artist-similar-section">
         <div class="card-body p-3">
           <h6 class="fw-bold mb-2"><i class="bi bi-people me-2"></i>Similar Artists</h6>

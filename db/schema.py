@@ -33,6 +33,15 @@ TABLES_TO_ENSURE: dict[str, str] = {
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """,
+    "artist_aliases": """
+        CREATE TABLE IF NOT EXISTS artist_aliases (
+            alias_key TEXT PRIMARY KEY,
+            alias TEXT NOT NULL,
+            artist_key TEXT NOT NULL,
+            artist TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """,
     "scan_history": """
         CREATE TABLE IF NOT EXISTS scan_history (
             id BIGSERIAL PRIMARY KEY, scan_type TEXT, artist TEXT, album TEXT, 
@@ -497,6 +506,7 @@ INDEXES_TO_ENSURE: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_slskd_search_logs_created_at ON slskd_search_logs (created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_missing_releases_artist ON missing_releases (artist)",
     "CREATE INDEX IF NOT EXISTS idx_missing_releases_release_id ON missing_releases (release_id)",
+    "CREATE INDEX IF NOT EXISTS idx_artist_aliases_artist_key ON artist_aliases (artist_key)",
     "CREATE INDEX IF NOT EXISTS idx_scan_history_scope ON scan_history (scan_type, artist, album, status, started_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_tracks_album_scope ON tracks (LOWER(COALESCE(NULLIF(album_artist, ''), artist)), LOWER(COALESCE(album, '')))",
     "CREATE INDEX IF NOT EXISTS idx_tracks_artist_norm ON tracks (LOWER(COALESCE(NULLIF(album_artist, ''), artist)))",

@@ -1639,8 +1639,36 @@ def normalize_name(value: str) -> str:
     return normalized.strip()
 
 
+def _resolve_artist_alias(name: str) -> str:
+    """Resolve one name through the artist-alias map; NEVER raise.
+
+    Cover detection calls ``names_match`` in tight loops over MusicBrainz
+    results, so this must degrade to the input (the pre-alias behaviour)
+    whenever the alias service is unavailable — a broken alias map must not
+    break matching. The service caches the whole table, so after the first
+    load this is a dict lookup.
+    """
+    if not name:
+        return name or ""
+    try:
+        from services.metadata.artist_alias_service import resolve_artist_alias
+
+        return resolve_artist_alias(name)
+    except Exception:
+        return name
+
+
 def names_match(left: str, right: str) -> bool:
-    """Match names with token overlap to handle middle names and variants."""
+    """Match names with token overlap to handle middle names and variants.
+
+    ⭐ ALIAS MERGE: names registered as alternate names of the SAME artist
+    (Electric Callboy / Eskimo Callboy) resolve to one canonical name first,
+    so the cover detector cannot report a band's own recording under its other
+    name as a cover. With no aliases registered the resolution is a lookup on
+    an empty map and the behaviour is exactly what it was before.
+    """
+    left = _resolve_artist_alias(left) or left
+    right = _resolve_artist_alias(right) or right
     left_norm = normalize_name(left)
     right_norm = normalize_name(right)
     if not left_norm or not right_norm:
