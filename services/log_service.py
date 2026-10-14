@@ -200,6 +200,88 @@ _LOG_SOURCE_FILES = {
 }
 
 
+# =============================================================================
+# THE LOG FILE PICKER (the modal, and the /logs route in live mode)
+# =============================================================================
+
+#: Every file the UI may offer to open. An ALLOW-LIST, never a directory scan
+#: turned into links: the picker must not be able to enumerate (or leak) a file
+#: the user did not create, and ``resolve_log_file_path`` is the only thing
+#: that ever opens one.
+#:
+#: Two of these are written by OTHER processes: the alert→toast shim in main.js
+#: records every converted UI alert in ``client.log``, and the queue worker
+#: (entrypoint) redirects its stdout to ``queue_processor.log``. Both belong in
+#: the picker for the same reason they belong on the /logs page.
+LOG_FILE_ALLOWLIST: tuple[str, ...] = (
+    "unified_scan.log",
+    "queue.log",
+    "search.log",
+    "info.log",
+    "error.log",
+    "debug.log",
+    "access.log",
+    "client.log",
+    "queue_processor.log",
+)
+
+#: Files worth NAMING. The modal used to carry five tabs (Scanner / Queue /
+#: Soulseek / Navidrome / System) that mapped one-to-one onto five files; the
+#: consolidation collapsed them into a single file picker, so these labels
+#: preserve the meaning those tabs carried. A file not listed here is offered
+#: under its own name.
+#: Keys are FILENAMES — the label and the file are the same row, which is why
+#: the picker never shows a file twice.
+LOG_VIEW_LABELS: dict[str, str] = {
+    "unified_scan.log": "Scanner",
+    "queue.log": "Queue",
+    "search.log": "Soulseek",
+    "info.log": "Navidrome",
+    "error.log": "System",
+}
+
+#: Presentation order: the curated views first (in tab order), then everything
+#: else alphabetically. Declared once so the route and the API cannot disagree.
+_LOG_VIEW_ORDER: tuple[str, ...] = ("unified_scan.log", "queue.log", "search.log", "info.log", "error.log")
+
+
+def list_log_files() -> list[dict]:
+    """The log files the viewer may open, most useful first.
+
+    Shared by ``routes/ui_routes.logs`` (the /logs page, live mode) and
+    ``GET /api/logs/list`` (the modal's file picker) so the two surfaces can
+    never disagree about which files exist or which are allowed.
+
+    Returns one entry per EXISTING file: ``name`` (the value the viewer passes
+    back), ``size`` in bytes, and ``label`` — a curated name for the five
+    sources the old tabs named, the filename itself for the rest.
+    """
+    log_dir = resolve_log_dir()
+    found: dict[str, dict] = {}
+
+    if os.path.isdir(log_dir):
+        for name in os.listdir(log_dir):
+            if not name.endswith(".log") or name not in LOG_FILE_ALLOWLIST:
+                continue
+            path = os.path.join(log_dir, name)
+            try:
+                size = os.path.getsize(path) if os.path.isfile(path) else 0
+            except OSError:
+                # A file that vanished between listdir and stat is not a
+                # failure the viewer should hear about.
+                continue
+            found[name] = {
+                "name": name,
+                "size": size,
+                "label": LOG_VIEW_LABELS.get(name, name),
+            }
+
+    ordered = [name for name in _LOG_VIEW_ORDER if name in found]
+    ordered += sorted(name for name in found if name not in _LOG_VIEW_ORDER)
+    return [found[name] for name in ordered]
+
+
+
 def _filter_lines_since(lines: list[str], hours: float) -> list[str]:
     """Keep only lines whose leading timestamp falls within the last *hours*.
 

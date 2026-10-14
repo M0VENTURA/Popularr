@@ -30,6 +30,14 @@
   {% endif %}
 
   <link rel="stylesheet" href="{{ versioned_static('css/popularr.css') }}">
+  {#
+    The global log modal's stylesheet (components/_log_modal.html). Loaded in
+    the SHELL rather than by a page because the modal is on every page, and
+    because its .log-line / .log-level-* rules are what give the stream its
+    level colour-coding — nothing else in the theme defines them.
+    AFTER popularr.css so these win on any overlap.
+  #}
+  <link rel="stylesheet" href="{{ versioned_static('css/logs.css') }}">
 
   {#
     The navbar layout rules that used to live in an inline <style> block here
@@ -170,7 +178,16 @@
               <i class="bi bi-gear-wide-connected"></i> <span class="d-none d-xl-inline">System</span>
             </a>
             <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end" aria-labelledby="systemDropdown">
-              <li><a class="dropdown-item" href="{{ url_for('ui.logs') }}"><i class="bi bi-file-text me-2"></i> Logs</a></li>
+              {#
+                The href stays REAL on purpose: it is the fallback for a
+                click the handler misses (keyboard activation with JS broken,
+                middle-click, "open in new tab"), and it lands on the same
+                viewer — ui_routes.logs redirects to the dashboard with
+                ?logs=1, which opens this very modal. The onclick only skips
+                that round-trip, because navigating away would defeat the
+                point of a modal that preserves the page you were browsing.
+              #}
+              <li><a class="dropdown-item" href="{{ url_for('ui.logs') }}" onclick="event.preventDefault(); openUnifiedLogModal();"><i class="bi bi-file-text me-2"></i> Logs</a></li>
               <li><a class="dropdown-item" href="{{ url_for('ui.correcting') }}"><i class="bi bi-tools me-2"></i> Tag Corrections</a></li>
               <li><hr class="dropdown-divider"></li>
               <li><a class="dropdown-item" href="{{ url_for('ui.help_page') }}"><i class="bi bi-question-circle me-2"></i> Help</a></li>
@@ -386,45 +403,18 @@
     <span class="scan-status-open"><i class="bi bi-terminal"></i> Log</span>
   </div>
 
-  <div class="modal fade modal-fullscreen" id="unifiedLogModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-fullscreen">
-      <div class="modal-content bg-dark">
-        <div class="modal-header py-2 px-3 border-secondary d-flex flex-column align-items-stretch gap-2" style="background: var(--tertiary-bg);">
-          <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-            <h6 class="modal-title mb-0 fw-bold"><i class="bi bi-terminal text-info me-2"></i> System Logs</h6>
-            <div class="d-flex gap-2 align-items-center log-toolbar">
-              <button type="button" class="btn btn-sm btn-outline-success py-0" onclick="downloadActiveLogLastHour()" title="Export last 60 minutes">
-                <i class="bi bi-download"></i> <span class="d-none d-sm-inline">Last 1hr</span>
-              </button>
-              <button id="clearLogBtn" type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="clearUnifiedLog()" title="Clear active log">
-                <i class="bi bi-eraser"></i> <span class="d-none d-sm-inline">Clear</span>
-              </button>
-              <button id="pauseLogBtn" type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="toggleLogPause()"><i class="bi bi-pause"></i> <span class="d-none d-sm-inline">Pause</span></button>
-              <button type="button" class="btn-close btn-close-white ms-2" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-          </div>
-          <div class="d-flex align-items-center gap-1 overflow-x-auto pb-1 flex-nowrap" style="scrollbar-width: none;">
-            <button type="button" class="btn btn-sm btn-dark border-secondary log-source-tab active" data-source="scanner" onclick="switchLogSource('scanner')"><i class="bi bi-lightning-charge me-1"></i>Scanner</button>
-            <button type="button" class="btn btn-sm btn-dark border-secondary log-source-tab" data-source="queue" onclick="switchLogSource('queue')"><i class="bi bi-list-task me-1"></i>Queue</button>
-            <button type="button" class="btn btn-sm btn-dark border-secondary log-source-tab" data-source="soulseek" onclick="switchLogSource('soulseek')"><i class="bi bi-search me-1"></i>Soulseek</button>
-            <button type="button" class="btn btn-sm btn-dark border-secondary log-source-tab" data-source="navidrome" onclick="switchLogSource('navidrome')"><i class="bi bi-cloud-arrow-down me-1"></i>Navidrome</button>
-            <button type="button" class="btn btn-sm btn-dark border-secondary log-source-tab" data-source="system" onclick="switchLogSource('system')"><i class="bi bi-gear me-1"></i>System</button>
-          </div>
-        </div>
+  {#
+    THE log viewer — file picker, filter, level toggles, wrap.
 
-        <div class="modal-body p-0 d-flex flex-column" style="background: #111;">
-          <div class="d-flex align-items-center justify-content-between p-2" style="background: #1a1a1a; border-bottom: 1px solid #333;">
-            <small class="text-muted fw-bold text-uppercase"><i class="bi bi-broadcast me-1"></i>Live stream</small>
-            <div class="form-check form-switch mb-0">
-              <input class="form-check-input" type="checkbox" id="logTimestampToggle" onchange="toggleLogTimestamps(this.checked)">
-              <label class="form-check-label small text-muted ms-1" for="logTimestampToggle">Timestamps</label>
-            </div>
-          </div>
-          <pre id="unifiedLog" class="p-3 mb-0 flex-grow-1 text-light" style="max-height: none; height: 100%; overflow-y: auto; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; line-height: 1.4; background: transparent;"></pre>
-        </div>
-      </div>
-    </div>
-  </div>
+    Moved out of base.html when the dedicated /logs page was retired: it is
+    ~130 lines of markup that would otherwise sit inline in the global shell
+    forever, and components/ is where every other modal lives. The component's
+    own header documents the consolidation and pins why each control exists.
+
+    Its engine is js/pages/logs.js (loaded below), NOT this file — see the
+    note beside that script tag.
+  #}
+  {% include "components/_log_modal.html" %}
 
   {#
     --navbar-height is kept in sync by syncNavbarHeight() in static/js/main.js,
@@ -509,6 +499,15 @@
 
   <script src="{{ versioned_static('js/ui/player.js') }}"></script>
   <script src="{{ versioned_static('js/main.js') }}"></script>
+  {#
+    The log modal's engine (NOT main.js): it owns the file picker, the tail
+    load, the filter / level / wrap controls and the SSE stream for
+    components/_log_modal.html. It used to be driven by the /logs page; the
+    page is gone (ui_routes.logs redirects here) so the module now loads from
+    the shell, on every page — the modal is reachable from any screen.
+    MUST follow main.js: openUnifiedLogModal() calls global.logsPage.
+  #}
+  <script src="{{ versioned_static('js/pages/logs.js') }}"></script>
   <script src="{{ versioned_static('js/ui/search-flyout.js') }}"></script>
   {#
     album-soulseek.js defines global.openSlskdSearchAlbum for the album page's

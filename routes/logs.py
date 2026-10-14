@@ -24,6 +24,7 @@ from services.log_service import (
     resolve_log_file_path,
     stream_append_log,
     export_log_lines_since,
+    list_log_files,
 )
 
 logs_bp = Blueprint(
@@ -52,6 +53,26 @@ def api_log_file():
         payload, status = result
         return jsonify(payload), status
     return jsonify(result)
+
+
+# =============================================================================
+# LOG FILE PICKER (the modal's file selector)
+# =============================================================================
+
+@logs_bp.route("/api/logs/list", methods=["GET"])
+def api_logs_list():
+    """Return the log files the viewer is allowed to open.
+
+    The consolidated log viewer (``#unifiedLogModal``) grew a file picker when
+    the dedicated /logs page was retired, so it needs the list that page used
+    to receive as render context. Every name here is allow-listed in
+    ``services.log_service.LOG_FILE_ALLOWLIST`` and the label preserves what
+    the modal's old Scanner / Queue / Soulseek / Navidrome / System tabs meant.
+
+    Returns ``{"files": [{"name", "size", "label"}, ...]}``, curated views
+    first, then the rest alphabetically. Never a directory listing.
+    """
+    return jsonify({"files": list_log_files()})
 
 
 # =============================================================================

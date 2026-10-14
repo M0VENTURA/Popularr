@@ -1,5 +1,24 @@
 {% extends "base.html" %}
 
+{#
+  ⛔ DEAD IN THIS TREE — DO NOT PORT FEATURES HERE (2026-10-14)
+
+  The /logs route now redirects to the dashboard with ?logs=1 whenever the
+  rebuilt UI is active (routes/ui_routes.py), because the modal opened from the
+  status bar is the one viewer: it kept the file picker, the filter, the level
+  toggles and the Wrap switch that used to live on this page. The engine that
+  drove this template (static/js/pages/logs.js) now drives that modal from
+  templates/components/_log_modal.html instead.
+
+  This file is unreachable in test_site mode and is kept only because the
+  virtual workspace cannot delete files — delete it (and its live-tree twin)
+  when the cutover finishes. Its LIVE twin, templates/pages/logs.html, is
+  still served in live mode and is NOT dead.
+
+  If you find yourself about to add something here: add it to the modal's
+  partial, and guard it in tests/test_log_view_consolidation.py.
+#}
+
 {% block title %}Logs - Popularr{% endblock %}
 
 {% block content %}

@@ -3724,31 +3724,36 @@ def config_migrate_postgres() -> Any:
 
 @ui_bp.route("/logs")
 async def logs() -> Any:
-    _USED_LOG_FILES = {
-        "unified_scan.log",
-        "info.log",
-        "debug.log",
-        "queue.log",
-        "search.log",
-        "access.log",
-        "error.log",
-        # The alert→toast shim (main.js) records every converted UI alert
-        # here; the queue worker process (entrypoint) redirects its stdout to
-        # queue_processor.log.  Both belong on the /logs page.
-        "client.log",
-        "queue_processor.log",
-    }
+    # ── CONSOLIDATION (2026-10-14): the rebuilt UI has no logs PAGE ────────
+    # Two viewers existed side by side — this page and the global modal opened
+    # from the status bar — showing the same data with different controls. The
+    # modal wins: it preserves the page the user was on, it carries the file
+    # picker / filter / level toggles this page used to own, and it is reachable
+    # from every screen. So this route hands old bookmarks to the dashboard
+    # WITH the flag that opens the modal (`?logs=1`, honoured by base.html)
+    # rather than to a page that no longer exists.
+    #
+    # Gate = the SAME helper the cutover uses, never a re-read of
+    # `features.use_test_site`. Live mode keeps its own page: its viewer is an
+    # inline script with no stylesheet and none of the modal work shipped with
+    # this change, so redirecting there would remove functionality outright.
+    from helpers.test_site_mode import config_enables_test_site
+
+    if config_enables_test_site():
+        return redirect(url_for("ui.dashboard", logs="1"))
+
+    # Live mode: unchanged behaviour, but the file list now comes from the
+    # shared allow-listed helper so the page and the modal's picker
+    # (GET /api/logs/list) cannot drift apart. The route enriches it with the
+    # absolute path its template renders into `data-path` — deliberately NOT
+    # part of the API payload, which the modal does not need.
+    from services.log_service import list_log_files
+
     log_dir = resolve_log_dir()
-    log_files = []
-    
-    if os.path.isdir(log_dir):
-        for f in sorted(os.listdir(log_dir)):
-            if f.endswith(".log") and f in _USED_LOG_FILES:
-                full = os.path.join(log_dir, f)
-                size = os.path.getsize(full) if os.path.isfile(full) else 0
-                log_files.append({"name": f, "path": full, "size": size})
-                
-    log_files.sort(key=lambda f: (f["name"] != "unified_scan.log", f["name"]))
+    log_files = list_log_files()
+    for entry in log_files:
+        entry["path"] = os.path.join(log_dir, entry["name"])
+
     return await render_template("pages/logs.html", log_dir=log_dir, log_files=log_files)
 
 

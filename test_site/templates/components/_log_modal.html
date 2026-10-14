@@ -1,0 +1,172 @@
+{#
+  ═══════════════════════════════════════════════════════════════════════
+  THE log viewer — one viewer, opened from the status bar's ticker or the
+  System ▸ Logs menu item, on top of whatever page the user is on.
+
+  ═══════════════════════════════════════════════════════════════════════
+  CONSOLIDATION (2026-10-14). This app had TWO log views showing the same
+  data: the dedicated /logs page and this modal. The page's route now
+  redirects here (test_site mode), and every control it owned moved in:
+
+    * the FILE PICKER — ``#logSelector`` used to be the page's dropdown
+      listing unified_scan.log / access.log / …; the modal's five source
+      tabs (Scanner / Queue / Soulseek / Navidrome / System) mapped onto
+      five of those same files. Both are ONE control now: a picker whose
+      options carry the tab's label as the option text, populated by
+      logs.js from ``GET /api/logs/list``.
+    * the FILTER box (+ ``.*`` regex and ``Aa`` case modes) and the LEVEL
+      toggles, sitting on top of the stream window so filtering never
+      means scrolling away from the output it filters.
+    * the WRAP toggle — ON by default. Long lines are the whole reason the
+      horizontal scrollbar existed; both viewers suffered from it.
+
+  The header is ONE row (title · picker · ⋮ · close). The old second row of
+  five large tab buttons and the Download/Clear/Pause icon cluster are now
+  a single ⋮ overflow menu, so the header costs ~40px instead of ~100px —
+  which matters most on the phone this modal is opened from.
+
+  ⚠️ EVERY ``id`` BELOW IS BINDABLE. logs.js's ``bind()`` silently skips a
+  missing id, so a typo here is a button that does nothing —
+  ``tests/test_log_viewer_filters_and_jump.py::TestIdsAgree`` asserts each
+  one exists, and that file also pins the jump button's placement (outside
+  the scrolling <pre>, inside a positioning context) and the badge's
+  ``aria-hidden``.
+
+  The page template this replaced stays on disk in this tree ONLY because
+  the virtual workspace cannot delete files; it is unreachable (see
+  ui_routes.logs). The live tree still has its own page + inline script.
+#}
+<div class="modal fade modal-fullscreen" id="unifiedLogModal" tabindex="-1" aria-hidden="true" aria-labelledby="unifiedLogModalTitle">
+  <div class="modal-dialog modal-fullscreen">
+    <div class="modal-content bg-dark">
+
+      <!-- ── HEADER · one thin row ─────────────────────────────────────── -->
+      <div class="modal-header py-2 px-3 border-secondary" style="background: var(--tertiary-bg);">
+        <div class="d-flex align-items-center gap-2 w-100">
+          <h6 class="modal-title mb-0 fw-bold text-truncate" id="unifiedLogModalTitle">
+            <i class="bi bi-terminal text-info me-1"></i>Logs
+          </h6>
+
+          {# The file picker: replaces BOTH the page's dropdown and the modal's
+             five category tabs. Options are populated by logs.js (label first,
+             filename in parens); an empty <select> is fine, since currentFile()
+             returns '' and loadLog() no-ops until a file is chosen. #}
+          <select id="logSelector" class="form-select form-select-sm log-file-select" aria-label="Log file to view"></select>
+
+          <div class="d-flex align-items-center gap-1 ms-auto">
+            {# Everything the old icon cluster did, behind one ⋮. ids are kept
+               because logs.js binds them — a dropdown item is a button and
+               listens exactly like a toolbar button did. #}
+            <div class="dropdown">
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Log actions" title="Log actions">
+                <i class="bi bi-three-dots-vertical"></i>
+              </button>
+              <ul class="dropdown-menu dropdown-menu-end">
+                <li>
+                  <button type="button" class="dropdown-item" id="streamLogBtn" title="Stream new log lines live (SSE)">
+                    <i class="bi bi-broadcast me-2"></i><span id="streamLogLabel">Live Stream</span>
+                  </button>
+                </li>
+                <li>
+                  <button type="button" class="dropdown-item" id="refreshLogBtn" title="Reload the tail of this log">
+                    <i class="bi bi-arrow-clockwise me-2"></i>Refresh
+                  </button>
+                </li>
+                <li><hr class="dropdown-divider"></li>
+                <li>
+                  <button type="button" class="dropdown-item" id="downloadLogBtn" title="Download this log file">
+                    <i class="bi bi-download me-2"></i>Download
+                  </button>
+                </li>
+                <li>
+                  <button type="button" class="dropdown-item" id="copyLogBtn" title="Copy the buffered lines to the clipboard">
+                    <i class="bi bi-clipboard me-2"></i>Copy
+                  </button>
+                </li>
+                <li>
+                  <button type="button" class="dropdown-item" id="clearLogBtn" title="Clear the visible buffer (the file on disk is untouched)">
+                    <i class="bi bi-eraser me-2"></i>Clear
+                  </button>
+                </li>
+              </ul>
+            </div>
+
+            <button type="button" class="btn-close btn-close-white ms-1" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── BODY · controls sit on top of the stream they filter ───────── -->
+      {# position-relative is LOAD-BEARING: .log-jump-btn is absolutely
+         positioned against this box (the old page used its viewer card).
+         tests/…/test_log_viewer_filters_and_jump.py pins both this and the
+         fact that the jump button is NOT inside the scrolling <pre>. #}
+      <div class="modal-body p-0 d-flex flex-column position-relative" style="background: #111; min-height: 0;">
+
+        <div class="d-flex align-items-center gap-2 flex-wrap p-2 border-bottom border-secondary flex-shrink-0" style="background: #1a1a1a;">
+          <div class="input-group input-group-sm" style="max-width: 20rem; min-width: 10rem; flex: 1 1 12rem;">
+            <span class="input-group-text bg-dark border-secondary"><i class="bi bi-search text-muted"></i></span>
+            <input type="text" id="logFilterInput" class="form-control bg-dark text-light border-secondary" placeholder="Filter output (e.g. 'Error')…" autocomplete="off">
+            {# `aria-pressed` is the source of truth for the two mode toggles:
+               `.active` on an outline button conveys nothing to assistive
+               tech, and the two must not be able to disagree. #}
+            <button type="button" class="btn btn-outline-secondary log-filter-mode" id="filterRegexBtn"
+                    title="Treat the filter as a regular expression" aria-pressed="false" aria-label="Regular expression mode"><code>.*</code></button>
+            <button type="button" class="btn btn-outline-secondary log-filter-mode" id="filterCaseBtn"
+                    title="Match case" aria-pressed="false" aria-label="Case-sensitive mode"><code>Aa</code></button>
+          </div>
+
+          {# Kept in the DOM unconditionally: logs.js writes "N / M lines"
+             into it, or "Invalid pattern", on every render. aria-live so a
+             screen reader hears the count change as you type. #}
+          <small class="text-muted" id="logMatchCount" aria-live="polite"></small>
+
+          <div class="btn-group btn-group-sm" role="group" aria-label="Log level filter" id="logLevelFilters">
+            <button type="button" class="btn btn-outline-secondary active fw-bold" data-level="all">All</button>
+            <button type="button" class="btn btn-outline-danger" data-level="error" title="ERROR / CRITICAL"><i class="bi bi-x-octagon d-none d-md-inline"></i> Errors</button>
+            <button type="button" class="btn btn-outline-warning" data-level="warning" title="WARNING"><i class="bi bi-exclamation-triangle d-none d-md-inline"></i> Warnings</button>
+            <button type="button" class="btn btn-outline-info" data-level="info" title="INFO"><i class="bi bi-info-circle d-none d-md-inline"></i> Info</button>
+            <button type="button" class="btn btn-outline-secondary" data-level="debug" title="DEBUG"><i class="bi bi-bug d-none d-md-inline"></i> Debug</button>
+          </div>
+
+          <div class="d-flex align-items-center gap-3 ms-auto">
+            {# Wrap is ON by default — the whole point of the consolidation's
+               fourth item. Checked here AND applied by logs.js on init, so the
+               <pre> is wrapped before the first line paints (a `change` event
+               never fires for a checkbox that starts checked). #}
+            <div class="form-check form-switch mb-0" title="Wrap long lines">
+              <input class="form-check-input" type="checkbox" id="wrapLinesCheck" role="switch" checked>
+              <label class="form-check-label small text-muted fw-semibold" for="wrapLinesCheck">Wrap</label>
+            </div>
+            <div class="form-check form-switch mb-0" title="Show each line's timestamp">
+              <input class="form-check-input" type="checkbox" id="logTimestampToggle">
+              <label class="form-check-label small text-muted fw-semibold" for="logTimestampToggle">Timestamps</label>
+            </div>
+          </div>
+        </div>
+
+        {# Tail banner + "Load Full Log": the first load asks for 500 lines, not
+           the whole 2 MB file — dumping it into the DOM is what the tail exists
+           to avoid. The banner reports "Viewing 500 / 12,017 lines" and the
+           button appears only when the server says the file was truncated. #}
+        <div class="d-flex align-items-center justify-content-between px-3 py-1 border-bottom border-secondary flex-shrink-0" style="background: #1a1a1a;">
+          <span id="tailBannerText" class="small text-warning fw-semibold d-none"></span>
+          <button type="button" id="loadFullLogBtn" class="btn btn-sm btn-link text-info text-decoration-none py-0 ms-auto d-none" title="Load the entire log file">Load Full Log</button>
+        </div>
+
+        <pre id="logOutput" class="p-3 mb-0 flex-grow-1 text-light" style="max-height: none; min-height: 0; overflow-y: auto; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; line-height: 1.5; background: transparent;"></pre>
+
+        {# Scroll-to-bottom affordance. Outside the scrolling <pre> so it does
+           not scroll away; revealed by updateJumpButton() once the view leaves
+           the bottom, so it is hidden on first paint. The badge is aria-hidden
+           because the button's own aria-label already reports the count. #}
+        <button type="button" id="scrollToBottomBtn"
+                class="btn btn-primary btn-sm rounded-circle shadow log-jump-btn d-none"
+                title="Jump to newest lines" aria-label="Jump to newest lines">
+          <i class="bi bi-arrow-down"></i>
+          <span class="badge bg-danger rounded-pill log-jump-badge d-none" id="unreadLogBadge" aria-hidden="true">0</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>

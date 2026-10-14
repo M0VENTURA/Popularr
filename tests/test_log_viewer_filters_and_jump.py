@@ -20,13 +20,18 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE = REPO_ROOT / "test_site" / "templates" / "Pages" / "logs.html"
+# The subject of this suite MOVED (2026-10-14): it used to read
+# ``templates/Pages/logs.html``. That page was retired — its route now
+# redirects to the dashboard with ``?logs=1`` — and its markup moved into the
+# modal, which is the one viewer left. The guards below are unchanged; only
+# what they guard moved.
+TEMPLATE = REPO_ROOT / "test_site" / "templates" / "components" / "_log_modal.html"
 JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "logs.js"
 CSS = REPO_ROOT / "test_site" / "static" / "css" / "logs.css"
 
-#: Logs is a test_site-only page. The live tree's viewer is an inline IIFE with
-#: no stylesheet at all, so a change here cannot be mirrored to it — these
-#: assertions are deliberately scoped to the rebuilt tree.
+#: The log viewer is a test_site-only component. The live tree's viewer is an
+#: inline IIFE with no stylesheet at all, so a change here cannot be mirrored to
+#: it — these assertions are deliberately scoped to the rebuilt tree.
 SCOPE = "test_site"
 
 

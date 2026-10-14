@@ -1,14 +1,28 @@
 /* ==========================================================================
    static/js/pages/logs.js
-   Application log viewer — file picker, tail load, client-side filtering,
-   live SSE streaming, copy / download / clear.
+   The app's ONE log viewer — file picker, tail load, client-side filtering,
+   level filters, wrap, live SSE streaming, copy / download / clear.
 
-   Load order: utils/dom.js → utils/api.js → ui/toast.js, then this file.
+   Load order: utils/dom.js → utils/api.js → ui/toast.js → main.js, then this
+   file (base.html loads it from the shell, because its consumer is the global
+   #unifiedLogModal, not a page).
 
-   ── WHAT WAS REMOVED FROM THE TEMPLATE ────────────────────────────────────
-   templates/pages/logs.html carried a 251-line inline IIFE with 11 functions.
-   The script is this file. There was no inline <style> and the page needs no
-   new markup, so the template is otherwise unchanged.
+   ── WHAT THIS FILE USED TO BE ──────────────────────────────────────────────
+   The controller for the dedicated /logs PAGE. That page and the modal opened
+   from the status bar were two competing viewers of the same files, so the
+   page was retired (ui_routes.logs redirects to the dashboard with ?logs=1)
+   and its engine moved here to drive the modal instead. The markup it binds
+   now lives in templates/components/_log_modal.html.
+
+   What that consolidation actually cost, mechanically:
+     * the FILE PICKER is no longer server-rendered by the page's route, so it
+       is populated from GET /api/logs/list on first open (and re-populated if
+       that fetch failed — see pickerPromise).
+     * there is no page to load ON, so DOMContentLoaded must NOT fetch a log:
+       a 500-line request on every screen for a panel nobody opened is exactly
+       the waste the old bare setInterval was. The fetch happens in onOpen().
+     * the modal's `shown`/`hidden` events are the lifecycle (main.js calls
+       logsPage.onOpen/onClose), so the SSE stream stops when the panel closes.
 
    ── BUGS FIXED / GAPS CLOSED ──────────────────────────────────────────────
    1. THE `log-*` CLASSES HAD NO STYLES ANYWHERE. renderLineHtml wraps the
@@ -17,7 +31,7 @@
       Grepping popularr.css and every other stylesheet finds NONE of them, so
       the viewer rendered as flat monochrome text — the level colour-coding the
       markup was clearly written for never appeared. static/css/logs.css now
-      defines them.
+      defines them, and base.html loads it (the modal needs it on every page).
 
    2. `logSelector` WAS DEREFERENCED WITHOUT A GUARD. Every entry point did
       `logSelector.options[logSelector.selectedIndex]`. With no log files the
@@ -54,6 +68,8 @@
   const LOG_ENDPOINT = '/api/log-file';
   const STREAM_ENDPOINT = '/api/logs/stream';
   const DOWNLOAD_ENDPOINT = '/api/logs/download';
+  /** The allow-listed log files + their labels (the old source tabs). */
+  const LIST_ENDPOINT = '/api/logs/list';
   const TAIL_LINES = 500;
   const MAX_STREAM_LINES = 5000;
   /** How close to the bottom still counts as "following the tail". */
@@ -67,6 +83,21 @@
   let levelFilter = 'all';
   let streamSource = null;
   let loadingAll = false;
+
+  // ── Modal lifecycle ────────────────────────────────────────────────────
+  //
+  // The picker is populated ONCE per session (not per open) and the flag
+  // doubles as "has this ever loaded": a failed fetch leaves it null so the
+  // next open retries, rather than an empty dropdown wedging the panel for the
+  // rest of the session.
+  let pickerPromise = null;
+
+  /**
+   * Timestamps in the stream window. OFF by default — that is what the modal
+   * always did, and a tail of 500 lines reads faster without 500 identical
+   * prefixes. The switch re-renders; the file on disk keeps every timestamp.
+   */
+  let showTimestamps = false;
 
   // ── Filter modes ────────────────────────────────────────────────────────
   // Both default OFF, which is exactly the previous behaviour (plain
@@ -195,8 +226,14 @@
 
     const tsMatch = TS_RE.exec(rest);
     if (tsMatch) {
-      html += `<span class="log-ts opacity-75">${esc(tsMatch[1])}</span> `;
-      rest = rest.slice(tsMatch[0].length);
+      // The timestamp is always STRIPPED from the message and re-emitted only
+      // when the Timestamps switch is on. `.replace(/^\s+/)` matters because
+      // TS_RE stops at the seconds: slicing alone leaves the separator space
+      // behind, so a hidden timestamp would still indent the line in the `<pre>`.
+      rest = rest.slice(tsMatch[0].length).replace(/^\s+/, '');
+      if (showTimestamps) {
+        html += `<span class="log-ts opacity-75">${esc(tsMatch[1])}</span> `;
+      }
     }
 
     const lvlMatch = LEVEL_RE.exec(rest);
@@ -360,7 +397,122 @@
     unreadCount = 0;
     updateJumpButton();
   }
+  // ── Modal lifecycle (main.js calls onOpen/onClose on shown/hidden) ──────
 
+  function formatSize(bytes) {
+    const size = Number(bytes) || 0;
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  /**
+   * Fill ``#logSelector`` from ``GET /api/logs/list``, once per session.
+   *
+   * The page's route used to render these options; the modal is global, so it
+   * asks the API instead. Every name there is allow-listed server-side, and the
+   * `label` is what the modal's five old source tabs said (Scanner, Queue, …),
+   * shown ahead of the filename so the picker reads the way the tabs did.
+   *
+   * A FAILED fetch clears the promise so the next open retries — otherwise an
+   * empty dropdown would wedge the panel for the rest of the session.
+   */
+  function populatePicker() {
+    if (pickerPromise) return pickerPromise;
+
+    pickerPromise = global.api
+      .getJson(LIST_ENDPOINT)
+      .then((data) => {
+        const files = (data && data.files) || [];
+        const selector = byId('logSelector');
+        if (!selector) return;
+
+        const previous = currentFile();
+        selector.innerHTML = '';
+        files.forEach((file) => {
+          const option = document.createElement('option');
+          option.value = file.name;
+          option.textContent =
+            file.label && file.label !== file.name
+              ? `${file.label} — ${file.name} (${formatSize(file.size)})`
+              : `${file.name} (${formatSize(file.size)})`;
+          selector.appendChild(option);
+        });
+
+        // Re-opening must not throw away what the user was reading.
+        if (previous && files.some((file) => file.name === previous)) {
+          selector.value = previous;
+        }
+      })
+      .catch(() => {
+        pickerPromise = null;
+        const selector = byId('logSelector');
+        if (selector) {
+          selector.innerHTML = '<option value="">— no log files available —</option>';
+        }
+      });
+
+    return pickerPromise;
+  }
+
+  /** Point the picker at ``name`` when it is listed; null when it is not. */
+  function selectFileByName(name) {
+    const selector = byId('logSelector');
+    if (!selector) return null;
+    const listed = Array.prototype.some.call(
+      selector.options,
+      (option) => option.value === name
+    );
+    if (!listed) return null;
+    selector.value = name;
+    return name;
+  }
+
+  /**
+   * Context-aware default FILE when the modal opens: a running scan wins,
+   * then active Soulseek downloads, otherwise leave the picker alone — the
+   * last choice is still selected, so re-opening never discards what you were
+   * reading.
+   *
+   * (This is the old ``smartSelectLogSource`` from main.js. It needs the
+   * picker, which is this file's, so it moved with it.)
+   */
+  async function chooseDefaultFile() {
+    try {
+      const scan = await global.api.getJson('/api/scan-progress?_ts=' + Date.now());
+      if ((scan.active_scans || []).some((s) => s.is_running)) {
+        return selectFileByName('unified_scan.log');
+      }
+      const queue = await global.api.getJson('/api/queue/status?limit=1');
+      if ((Number((queue.counts || {}).downloading) || 0) > 0) {
+        return selectFileByName('search.log');
+      }
+    } catch (_error) {
+      /* transient — the picker keeps whatever it had */
+    }
+    return null;
+  }
+
+  /** Modal opened: fill the picker, pick the contextual file, show it live. */
+  function onOpen() {
+    populatePicker()
+      .then(chooseDefaultFile)
+      .then(() => {
+        // No file means nothing to fetch (empty log dir, or a failed picker
+        // fetch that already reported itself). loadLog() would no-op anyway;
+        // returning here keeps the promise chain free of pointless work.
+        if (!currentFile()) return;
+        loadLog({});
+        startStream();
+      });
+  }
+
+  /** Modal closed: stop the stream. An open SSE connection behind a dismissed
+   *  panel is exactly the background traffic the old bare setInterval was
+   *  fixed for. */
+  function onClose() {
+    stopStream();
+  }
   // ── Load ────────────────────────────────────────────────────────────────
 
   function loadLog(opts) {
@@ -464,7 +616,9 @@
       console.warn('[logs] SSE stream connection lost or reset.');
     };
 
-    if (stream) stream.classList.replace('btn-success', 'btn-danger');
+    // The stream button is a dropdown ITEM now (the old toolbar had it as a
+    // btn-success / btn-danger pair), so `.active` is what carries the state.
+    if (stream) stream.classList.add('active');
     if (streamLabel) streamLabel.textContent = 'Stop Stream';
     if (refresh) refresh.disabled = true;
   }
@@ -475,7 +629,7 @@
       streamSource.close();
       streamSource = null;
     }
-    if (stream) stream.classList.replace('btn-danger', 'btn-success');
+    if (stream) stream.classList.remove('active');
     if (streamLabel) streamLabel.textContent = 'Live Stream';
     if (refresh) refresh.disabled = false;
   }
@@ -641,6 +795,12 @@
       loadLog({});
     });
 
+    bind('logTimestampToggle', 'change', function () {
+      showTimestamps = !!this.checked;
+      render();
+      updateJumpButton();
+    });
+
     // One delegated listener for the level filters.
     const levelBar = byId('logLevelFilters');
     if (levelBar) {
@@ -659,7 +819,18 @@
 
   document.addEventListener('DOMContentLoaded', function () {
     initToolbar();
-    loadLog({});
+
+    // Wrap is ON by default (the consolidation's fourth item) and must be
+    // APPLIED, not merely bound: a checkbox that starts `checked` never fires
+    // `change`, so binding alone would leave the <pre> un-wrapped — and
+    // un-wrapped is the horizontal-scrollbar state the change exists to end.
+    const wrapBox = byId('wrapLinesCheck');
+    if (wrapBox) setWrap(!!wrapBox.checked);
+
+    // NOT loadLog(). This module is loaded by base.html on EVERY screen now,
+    // so fetching here would cost a 500-line request per page view for a panel
+    // that may never be opened. The fetch happens in onOpen(), driven by the
+    // modal's `shown` event.
   });
 
   global.logsPage = {
@@ -669,5 +840,7 @@
     render,
     lineLevel,
     renderLineHtml,
+    onOpen,
+    onClose,
   };
 })(window);

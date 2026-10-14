@@ -39,7 +39,8 @@
    version; both originals should go.
 
    ── BUG FIXED ─────────────────────────────────────────────────────────────
-   updateUnifiedLog / updateQueueStatusBar ran on a bare 5s setInterval that
+   updateQueueStatusBar (and updateUnifiedLog, since moved to js/pages/
+   logs.js with the rest of the log engine) ran on a bare 5s setInterval that
    was never cleared and never paused. On a backgrounded tab it kept issuing
    two requests every five seconds indefinitely. Now a managed poller:
    pauses when hidden, never overlaps, stops on teardown.
@@ -49,8 +50,6 @@
   'use strict';
 
   const LOG_POLL_INTERVAL_MS = 5000;
-  const LOG_FETCH_TIMEOUT_MS = 8000;
-  const LOG_LINES = 300;
 
   function esc(value) {
     return (global.escapeHtml || ((v) => String(v == null ? '' : v)))(value);
@@ -213,128 +212,29 @@
   }
 
   // ── Unified log viewer ──────────────────────────────────────────────────
-
-  const LOG_SOURCE_FILES = {
-    scanner: 'unified_scan.log',
-    queue: 'queue.log',
-    soulseek: 'search.log',
-    navidrome: 'info.log',
-    system: 'error.log',
-  };
-
-  const LOG_TAG_CLASSES = {
-    INFO: 'log-tag-info', DEBUG: 'log-tag-info',
-    TRACK_RESULT: 'log-tag-track-result', ALBUM_RESULT: 'log-tag-track-result',
-    FINALISE_STAGE: 'log-tag-finalise', POPULARITY_STAGE: 'log-tag-finalise',
-    SINGLE_DETECTION: 'log-tag-finalise', LOAD_STAGE: 'log-tag-finalise',
-    ALBUM_STAGE: 'log-tag-finalise', TRACK_STAGE: 'log-tag-finalise',
-    WARNING: 'log-tag-warning', WARN: 'log-tag-warning',
-    ERROR: 'log-tag-error', CRITICAL: 'log-tag-error',
-    QUEUE: 'log-tag-queue', QUEUE_PROCESSOR: 'log-tag-queue',
-    SOULSEEK: 'log-tag-soulseek', SLSKD: 'log-tag-soulseek',
-  };
-
-  let activeLogSource = 'scanner';
-  let logPaused = false;
-  let logModalVisible = false;
-  let logShowTimestamps = false;
-  let logRawLines = [];
+  //
+  // ⚠️ main.js no longer OWNS the log viewer — js/pages/logs.js does, because
+  // this app had two competing log views (the modal and the /logs page) and
+  // the consolidation made the page's engine the only one. Duplicating the
+  // fetch/render loop here is exactly what produced the two-view problem in
+  // the first place, so this file now does two things only:
+  //
+  //   1. opens the modal (openUnifiedLogModal, called by the status bar and
+  //      the System ▸ Logs menu item);
+  //   2. drives the modal's LIFETIME — `shown`/`hidden` hand off to
+  //      logsPage.onOpen()/onClose() (the engine fills the panel and starts
+  //      the stream only when the panel is actually visible), and the managed
+  //      poller below keeps the STATUS BAR's queue summary fresh on every
+  //      page, modal open or not.
+  //
+  // The old constants here (LOG_SOURCE_FILES, LOG_TAG_CLASSES), the five
+  // source tabs, the pause/timestamp/clear/export buttons and the 5s log poll
+  // all moved to logs.js or died with the tabs.
   let logPoller = null;
-
-  function logTagClass(tag) {
-    return LOG_TAG_CLASSES[tag] || LOG_TAG_CLASSES[String(tag).toUpperCase()] || '';
-  }
-
-  /** Escape FIRST, then wrap [TAG] tokens and ★ glyphs in styled spans. */
-  function formatLogLine(line) {
-    let s = esc(line);
-    if (!logShowTimestamps) {
-      s = s.replace(/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\s*/, '');
-    }
-    s = s.replace(/\[([A-Za-z0-9_]+)\]/g, (m, tag) => {
-      const cls = logTagClass(tag);
-      return cls ? `<span class="log-tag ${cls}">${m}</span>` : m;
-    });
-    return s.replace(/(★+)/g, '<span class="log-stars">$1</span>');
-  }
-
-  function renderLogLines() {
-    const logEl = document.getElementById('unifiedLog');
-    if (!logEl) return;
-    const html = logRawLines.map(formatLogLine).join('\n');
-    logEl.innerHTML = html || '<span class="text-muted">— no output —</span>';
-    if (logModalVisible && !logPaused) logEl.scrollTop = logEl.scrollHeight;
-  }
 
   function openUnifiedLogModal() {
     const modalEl = document.getElementById('unifiedLogModal');
     if (modalEl && global.modal) global.modal.show(modalEl);
-  }
-
-  function toggleLogPause() {
-    logPaused = !logPaused;
-    const pauseBtn = document.getElementById('pauseLogBtn');
-    if (!pauseBtn) return;
-    pauseBtn.innerHTML = logPaused
-      ? '<i class="bi bi-play"></i> <span class="d-none d-sm-inline">Resume</span>'
-      : '<i class="bi bi-pause"></i> <span class="d-none d-sm-inline">Pause</span>';
-    pauseBtn.classList.toggle('log-pause-active', logPaused);
-  }
-
-  function toggleLogTimestamps(show) {
-    logShowTimestamps = !!show;
-    renderLogLines();
-  }
-
-  function clearUnifiedLog() {
-    logRawLines = [];
-    renderLogLines();
-  }
-
-  function switchLogSource(source) {
-    activeLogSource = LOG_SOURCE_FILES[source] ? source : 'scanner';
-    document.querySelectorAll('.log-source-tab').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.source === activeLogSource);
-    });
-    updateUnifiedLog();
-  }
-
-  function downloadActiveLogLastHour() {
-    const link = document.createElement('a');
-    link.href = '/api/logs/export?source=' + encodeURIComponent(activeLogSource) + '&hours=1';
-    link.download = activeLogSource + '_log_last_1hr.log';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  }
-
-  async function updateUnifiedLog() {
-    if (logPaused) return;
-    const logEl = document.getElementById('unifiedLog');
-    if (!logEl) return;
-
-    try {
-      const data = await global.api.getJson(
-        '/api/log-file?name=' + encodeURIComponent(LOG_SOURCE_FILES[activeLogSource]) +
-        '&lines=' + LOG_LINES,
-        { timeoutMs: LOG_FETCH_TIMEOUT_MS }
-      );
-      if (data && Array.isArray(data.lines)) {
-        logRawLines = data.lines;
-        renderLogLines();
-      }
-    } catch (_error) {
-      // A hung or failed poll must not freeze the panel; the next tick retries.
-    }
-  }
-
-  function setLogTabDot(source, active) {
-    const dot = document.querySelector(
-      '.log-source-tab[data-source="' + source + '"] .log-tab-dot'
-    );
-    if (!dot) return;
-    dot.classList.toggle('d-none', !active);
-    dot.classList.toggle('log-tab-dot-active', active);
   }
 
   async function updateQueueStatusBar() {
@@ -346,11 +246,12 @@
       const counts = data.counts || {};
       const downloading = Number(counts.downloading) || 0;
       const queued = Number(counts.queued) || 0;
-      const activeTotal = Number(data.total_active) || 0;
 
-      setLogTabDot('queue', activeTotal > 0);
-      setLogTabDot('soulseek', downloading > 0);
 
+      // The Queue/Soulseek activity DOTS died with the modal's source tabs,
+      // which were folded into the file picker. The signal itself was never
+      // lost: it is printed here, on the status bar, which is visible whether
+      // or not the log modal is open.
       if ((downloading + queued) > 0) {
         el.innerHTML = '<i class="bi bi-cloud-arrow-down me-1"></i>' +
           `${downloading} Downloading · ${queued} Queued`;
@@ -360,26 +261,6 @@
       }
     } catch (_error) {
       /* transient — next tick retries */
-    }
-  }
-
-  /**
-   * Context-aware default tab when the modal opens: a running scan wins,
-   * then active Soulseek downloads, otherwise keep the last-viewed source.
-   */
-  async function smartSelectLogSource() {
-    try {
-      const data = await global.api.getJson('/api/scan-progress?_ts=' + Date.now());
-      if ((data.active_scans || []).some((s) => s.is_running)) {
-        switchLogSource('scanner');
-        return;
-      }
-      const queue = await global.api.getJson('/api/queue/status?limit=1');
-      if ((Number((queue.counts || {}).downloading) || 0) > 0) {
-        switchLogSource('soulseek');
-      }
-    } catch (_error) {
-      /* keep the current source */
     }
   }
 
@@ -412,7 +293,10 @@
 
     const active = (data && (data.active_scans || [])) || [];
     const scan = active.find((s) => s && s.is_running);
-    setLogTabDot('scanner', !!scan);
+    // NOTE: this used to call setLogTabDot('scanner', …), which lit a dot on
+    // the modal's Scanner tab. The tabs are folded into the file picker now,
+    // so there is nothing left to light — and the scan state the dot
+    // communicated is printed right here, on the status bar line.
 
     if (!scan) {
       line.textContent = 'Idle';
@@ -809,21 +693,44 @@
 
     const logModalEl = document.getElementById('unifiedLogModal');
     if (logModalEl) {
+      // The ENGINE owns the panel's content: on open it fills the file picker,
+      // loads the tail and starts the stream; on close it stops the stream.
+      // main.js only signals lifetime — fetching a log nobody can see (or
+      // leaving an SSE connection open behind a dismissed modal) is the whole
+      // reason this hand-off exists.
       logModalEl.addEventListener('shown.bs.modal', () => {
-        logModalVisible = true;
-        smartSelectLogSource();
-        updateUnifiedLog();
+        if (global.logsPage) global.logsPage.onOpen();
       });
-      logModalEl.addEventListener('hidden.bs.modal', () => { logModalVisible = false; });
+      logModalEl.addEventListener('hidden.bs.modal', () => {
+        if (global.logsPage) global.logsPage.onClose();
+      });
+    }
+
+    // Old /logs bookmarks: ui_routes.logs redirects test_site mode here with
+    // ?logs=1, so a link from a doc or a browser history entry still opens the
+    // viewer instead of a page that no longer exists. The param is stripped
+    // afterwards so a refresh does not re-open a modal the user just closed.
+    if (/[?&]logs=1\b/.test(global.location.search)) {
+      const strip = new URLSearchParams(global.location.search);
+      strip.delete('logs');
+      const query = strip.toString();
+      if (global.history && history.replaceState) {
+        history.replaceState(null, '', global.location.pathname + (query ? `?${query}` : ''));
+      }
+      setTimeout(() => openUnifiedLogModal(), 0);
     }
 
     // Managed poller: pauses when the tab is hidden, never overlaps, and is
     // released on teardown. The previous bare setInterval kept firing two
     // requests every five seconds in a background tab, forever.
+    //
+    // NOTE: the log stream is NOT in this loop any more — logs.js streams
+    // over SSE while the modal is open, so polling it here would fetch the
+    // same 300 lines twice. This tick keeps the STATUS BAR's queue summary
+    // fresh, which is needed on every page regardless of the modal.
     logPoller = global.poller.create({
       interval: LOG_POLL_INTERVAL_MS,
       onTick: async () => {
-        if (logModalVisible) await updateUnifiedLog();
         await updateQueueStatusBar();
       },
     });
@@ -856,10 +763,11 @@
   global.addBookmark = addBookmark;
   global.navSearch = navSearch;
   global.openUnifiedLogModal = openUnifiedLogModal;
-  global.toggleLogPause = toggleLogPause;
-  global.toggleLogTimestamps = toggleLogTimestamps;
-  global.clearUnifiedLog = clearUnifiedLog;
-  global.switchLogSource = switchLogSource;
-  global.downloadActiveLogLastHour = downloadActiveLogLastHour;
-  global.updateUnifiedLog = updateUnifiedLog;
+  // ⚠️ The other log handlers this file used to export (toggleLogPause,
+  // toggleLogTimestamps, clearUnifiedLog, switchLogSource,
+  // downloadActiveLogLastHour) were bound by inline onclick in the old modal
+  // markup. That markup is gone: the buttons now live in components/
+  // _log_modal.html and logs.js binds them by id, so exporting a second
+  // implementation of each would be the duplication this consolidation
+  // removed. (Same for updateUnifiedLog — its whole body moved with them.)
 })(window);
