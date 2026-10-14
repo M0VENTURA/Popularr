@@ -19,6 +19,7 @@ from services.scanning.runtime_state import (
     set_runtime,
 )
 from services.scanning.scan_state import (
+    get_library_progress_path,
     get_scan_progress_path,
     read_progress_file,
     request_scan_stop,
@@ -140,10 +141,17 @@ async def scan_start() -> Any:
 
 @scans_bp.route("/scan/stop", methods=["POST"])
 async def scan_stop() -> Any:
-    path = get_scan_progress_path("library_scan")
+    # ⚠️ The LIBRARY scan writes and reads the scan_type ``"library"``
+    # (``get_library_progress_path()`` — see ``run_full_library_scan``), NOT
+    # ``"library_scan"``. Flagging the ``_scan`` spelling set
+    # ``stop_requested`` on a row nothing ever reads, so the library scan ran
+    # to completion no matter how many times Stop was pressed. Reported
+    # alongside the "scan stopped" button appearing to work while a 5,363-album
+    # library scan kept going.
+    path = get_library_progress_path()
     request_scan_stop(path)
-    
-    logger.info("Stop requested for library scan")
+
+    logger.info("Stop requested for library scan", scan_type=path)
     return await stop_response("Stop requested for library scan")
 
 
@@ -174,6 +182,14 @@ async def scan_stop_singles() -> Any:
 
 @scans_bp.route("/scan/stop-all", methods=["POST"])
 async def scan_stop_all() -> Any:
+    # ⚠️ Each entry must be the scan_type the RUNNING scan actually reads —
+    # not a prettier spelling of it. ``"library_scan"`` used to sit in this
+    # list while the library scan reads ``"library"``, so Stop All cleared
+    # nine scans and silently missed the tenth; the library scan then kept
+    # running alongside whatever the user started next, and the two scans
+    # deadlocked on ``tracks``. ``get_library_progress_path()`` is the
+    # canonical accessor for that name, so the reader and this writer cannot
+    # drift apart again.
     scan_types = [
         "full_scan",
         "navidrome_scan",
@@ -183,7 +199,7 @@ async def scan_stop_all() -> Any:
         "combined_scan",
         "missing_releases_scan",
         "mp3_import",
-        "library_scan",
+        get_library_progress_path(),
         "metadata_lookup_scan",
     ]
     
@@ -222,6 +238,9 @@ async def scan_clear_stuck() -> Any:
         "combined_scan",
         "missing_releases_scan",
         "mp3_import",
+        # The library scan reads ``"library"``, so without this entry a stuck
+        # library scan could never be cleared (same naming trap as Stop All).
+        get_library_progress_path(),
     ]
 
     for scan_type in scan_types:
