@@ -1082,6 +1082,8 @@ def _resolve_compilation_flags(
 def compute_track_artist_scores(
     track_artist: str,
     scan_results: list[dict[str, Any]],
+    *,
+    exclude_album: str | None = None,
 ) -> list[float]:
     """Build the credited track artist's catalogue score distribution.
 
@@ -1090,10 +1092,35 @@ def compute_track_artist_scores(
     distribution even before anything is persisted) with the artist's
     existing database history, excluding any (album, title) pair already
     covered by the in-memory scores so nothing is double-counted.
+
+    ⭐ ``exclude_album`` keeps the album UNDER RATING out of its own reference:
+    an album must not help set the distribution it is then measured against.
+
+    This matters most for exactly the album this function exists for — a
+    greatest-hits / best-of. Every one of its tracks is a hit by construction,
+    so leaving them in does two things at once, both wrong:
+
+    * the artist's catalogue mean is dragged UP by the album's own hits, which
+      pushes every track's z DOWN and flattens the whole album (measured: an
+      8-track best-of against a 27-track catalogue of the same artist went from
+      "4 tracks at 5★" to "no track above 4★, seven at 3★" purely from the
+      album being counted in its own reference);
+    * the same recording is counted twice — once on the best-of and once on the
+      album it was lifted from — so the hits carry double weight in a
+      distribution they are supposed to be exceptional against.
+
+    The (album, title) dedupe above cannot catch the second case: the two
+    copies are different (album, title) pairs.
+
+    A library that owns ONLY the best-of is left with a thin catalogue, which
+    is the honest answer — a best-of cannot evidence anything about the artist's
+    range — and it falls through to the online/thin path.
     """
     artist_key = str(track_artist or "").strip().casefold()
     if not artist_key:
         return []
+
+    exclude_key = str(exclude_album or "").strip().casefold()
 
     scanned_keys: set[tuple[str, str]] = set()
     scores: list[float] = []
@@ -1107,13 +1134,19 @@ def compute_track_artist_scores(
         if score <= 0 or bool(result.get("exclude_from_stats")):
             continue
 
-        scores.append(score)
+        result_album = str(result.get("album") or "").strip().casefold()
+        # Register the key FIRST, so a DB row for this album is skipped by the
+        # dedupe below even when the score itself is being excluded.
         scanned_keys.add(
             (
-                str(result.get("album") or "").strip().casefold(),
+                result_album,
                 _normalise_essential_title(str(result.get("title") or "")),
             )
         )
+        if exclude_key and result_album == exclude_key:
+            continue
+
+        scores.append(score)
 
     db_rows: list[tuple[str, float]] = []
     try:
@@ -1136,6 +1169,13 @@ def compute_track_artist_scores(
             if score <= 0 or is_bonus_track_title(title):
                 continue
 
+            # Album-level exclusion, NOT just the (album, title) dedupe below:
+            # a stored title can differ from the scanned one (a rename, or a
+            # feat. credit the scan moved onto the artist), and those rows still
+            # belong to the album under rating.
+            if exclude_key and album.casefold() == exclude_key:
+                continue
+
             key = (album.casefold(), _normalise_essential_title(title))
             if key in scanned_keys:
                 continue
@@ -1156,8 +1196,16 @@ def compute_track_artist_scores(
 
 def _build_compilation_track_artist_scores(
     album_results: list[dict[str, Any]],
+    *,
+    exclude_album: str | None = None,
 ) -> dict[str, list[float]]:
-    """Build one score distribution per credited artist on a compilation."""
+    """Build one score distribution per credited artist on a compilation.
+
+    ``exclude_album`` is the compilation being rated: its own tracks must not
+    be part of the distribution it is judged against. See
+    ``compute_track_artist_scores`` for why that matters (it is the difference
+    between a best-of being able to produce 5★ tracks and not).
+    """
     credited_artists = {
         _compilation_track_artist(track)
         for track in album_results
@@ -1169,6 +1217,7 @@ def _build_compilation_track_artist_scores(
         score_map[credited_artist.casefold()] = compute_track_artist_scores(
             credited_artist,
             album_results,
+            exclude_album=exclude_album,
         )
     return score_map
 
@@ -4017,13 +4066,19 @@ def post_album_star_ratings(
         #: blend is, and that is what the standout floor ranks against.
         compilation_raw_scores: list[float] = []
         if is_compilation:
-            compilation_track_artist_scores = _build_compilation_track_artist_scores(album_results)
+            # ⭐ ``exclude_album``: the compilation is not evidence about itself.
+            # Without it the album's own hits lift the credited artist's
+            # catalogue mean, which flattens the whole album downwards — a
+            # greatest-hits record could produce no 5★ at all, however big its
+            # hits (see ``compute_track_artist_scores``).
+            compilation_track_artist_scores = _build_compilation_track_artist_scores(
+                album_results, exclude_album=album
+            )
             compilation_raw_scores = [
                 float(r.get("_raw_combined") or 0)
                 for r in album_results
                 if float(r.get("_raw_combined") or 0) > 0
             ]
-            compilation_track_artist_scores = _build_compilation_track_artist_scores(album_results)
 
         _stored_stars: dict[str, int] = {}
         _stored_paths: dict[str, str] = {}

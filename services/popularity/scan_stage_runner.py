@@ -1503,12 +1503,27 @@ def _mark_track_artist_top_band(album_results: list[dict[str, Any]]) -> None:
         _tr["popularity_marked"] = bool(_top_marked or _medium_marked)
 
 
-def _load_track_artist_scores(track_artist: str) -> list[float]:
+def _load_track_artist_scores(
+    track_artist: str,
+    *,
+    exclude_album: str | None = None,
+) -> list[float]:
+    """The artist's stored catalogue scores, re-anchored to the album scale.
+
+    ``exclude_album`` drops the album being rated from its own reference. The
+    same reasoning as ``compute_track_artist_scores`` (finalise stage): a
+    best-of must not help set the distribution it is judged against, or its
+    own hits raise the artist's mean and flatten the album downwards. Applied
+    here as well so the remap and the rating share ONE reference — they are two
+    halves of the same decision.
+    """
     if not track_artist:
         return []
     primary = strip_featured_artist(track_artist)
     if not primary:
         return []
+
+    exclude_key = str(exclude_album or "").strip().casefold()
 
     db_rows: list[tuple[str, str]] = []
     try:
@@ -1524,7 +1539,12 @@ def _load_track_artist_scores(track_artist: str) -> list[float]:
             db_rows = [
                 (str(r[1] or ""), float(r[2] or 0))
                 for r in rows or []
-                if r[2] and not is_bonus_track_title(str(r[0] or ""))
+                if r[2]
+                and not is_bonus_track_title(str(r[0] or ""))
+                and not (
+                    exclude_key
+                    and str(r[1] or "").strip().casefold() == exclude_key
+                )
             ]
     except Exception as exc:
         logger.debug("Track artist score load failed", track_artist=track_artist, error=str(exc))
@@ -1585,10 +1605,19 @@ def _apply_album_relative_normalization(album_results: list[dict[str, Any]], is_
 
 
 def _apply_track_artist_relative_normalization(album_results: list[dict[str, Any]]) -> int:
+    """Remap each track's score onto its credited artist's catalogue band.
+
+    The album under rating is EXCLUDED from that band (see
+    ``_load_track_artist_scores``): on a compilation its own tracks are the
+    hits being judged, and letting them define the reference is circular.
+    """
     changed = 0
     rows: list[dict[str, Any]] = []
     artist_scores_cache: dict[str, list[float]] = {}
     album_raw_scores = _album_reference_scores(album_results, score_key="_raw_combined")
+    _exclude_album = str(
+        (album_results[0].get("album") if album_results else "") or ""
+    ).strip()
 
     for tr in album_results:
         raw = float(tr.get("_raw_combined") or 0)
@@ -1601,7 +1630,9 @@ def _apply_track_artist_relative_normalization(album_results: list[dict[str, Any
 
         primary = strip_featured_artist(track_artist)
         if primary not in artist_scores_cache:
-            artist_scores_cache[primary] = _load_track_artist_scores(primary)
+            artist_scores_cache[primary] = _load_track_artist_scores(
+                primary, exclude_album=_exclude_album or None
+            )
 
         artist_scores = artist_scores_cache[primary]
         if len(artist_scores) >= ALBUM_RELATIVE_MIN_ALBUM_TRACKS:
