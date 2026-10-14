@@ -2834,7 +2834,10 @@
     const img = document.createElement('img');
     img.className = 'card-img-top';
     img.style.cssText = 'aspect-ratio:1;object-fit:cover;';
-    img.src = `/api/artist/${encodeURIComponent(artist.name)}/image`;
+    // ⚠️ ``/api/artist/image`` is a QUERY-PARAM route (``?name=``); the
+    // ``/api/artist/<name>/image`` form this used to build matched no rule and
+    // 404'd for every card, so the placeholder showed every time.
+    img.src = `/api/artist/image?name=${encodeURIComponent(artist.name)}`;
     img.addEventListener('error', function handle() {
       this.removeEventListener('error', handle);
       this.src = SIMILAR_IMG_PLACEHOLDER;
@@ -2933,15 +2936,28 @@
     if (hasPreSplitShape) {
       uniqueArtists.forEach(({ artist, tagged }) => (tagged ? inCollection : missing).push(artist));
     } else {
-      // Each check runs in parallel and defaults to "missing" on failure
-      // rather than blocking the whole render on one bad request.
-      await Promise.all(uniqueArtists.map(async ({ artist }) => {
+      // The server annotates EVERY similar-artist entry with
+      // ``in_collection`` (artist_metadata_service._annotate_similar_artist —
+      // a punctuation/"The"-tolerant key, so it is MORE accurate than the
+      // exact lowercase compare this used to run). Read the flag; only a
+      // payload that carries none falls back to a search.
+      //
+      // ⚠️ The fallback used to GET ``/api/search/unified``, which no route
+      // serves — every candidate 404'd, so the whole grid rendered as
+      // "Not in Collection" behind a burst of failed requests. The real
+      // endpoint is POST ``/api/search`` (the same one unified_search.js uses).
+      const unknown = [];
+      uniqueArtists.forEach(({ artist }) => {
+        if (artist.in_collection === true) inCollection.push(artist);
+        else if (artist.in_collection === false) missing.push(artist);
+        else unknown.push(artist);
+      });
+
+      await Promise.all(unknown.map(async (artist) => {
         try {
-          const searchData = await global.api.getJson(
-            `/api/search/unified?q=${encodeURIComponent(artist.name)}`
-          );
+          const searchData = await global.api.postJson('/api/search', { query: artist.name });
           const match = (searchData.artists || [])
-            .find((x) => x.name.toLowerCase() === artist.name.toLowerCase());
+            .find((x) => String(x.name || '').toLowerCase() === artist.name.toLowerCase());
           (match ? inCollection : missing).push(artist);
         } catch (_e) {
           missing.push(artist);

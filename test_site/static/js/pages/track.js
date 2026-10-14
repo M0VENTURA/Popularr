@@ -60,8 +60,10 @@
       `data.similar_artists.in_collection` — but only to build the candidate
       list; it then classified every candidate AGAIN with a parallel
       `/api/search/unified` request and ignored the server's answer. The
-      server's split is used first now, and the unified-search fallback only
-      runs when the payload has no `in_collection`/`missing` arrays at all.
+      per-entry flag is used FIRST now, the `in_collection`/`missing` arrays
+      second, and a search LAST — and that search posts to the real
+      `/api/search` route (the `/api/search/unified` URL it used to GET serves
+      nothing, so every candidate 404'd and the whole grid read "missing").
 
    5. `alert()` / `confirm()` / raw `fetch()` → ui/toast.js, ui/confirm.js and
       utils/api.js (so an HTML error page no longer surfaces as
@@ -406,7 +408,10 @@
     if (!artists.length) return '';
     const cards = artists.map((artist) => {
       const name = artist.name || '';
-      const img = `/api/artist/${encodeURIComponent(name)}/image`;
+      // ⚠️ ``/api/artist/image`` is a QUERY-PARAM route (``?name=``); the
+      // ``/api/artist/<name>/image`` form built here matched no rule and 404'd
+      // for every card, so the placeholder showed every time.
+      const img = `/api/artist/image?name=${encodeURIComponent(name)}`;
       const placeholder =
         "this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 " +
         'width=%22200%22 height=%22200%22%3E%3Crect fill=%22%232a2a2a%22 width=%22200%22 ' +
@@ -445,10 +450,13 @@
    * Fill #similarArtistsContainer.
    *
    * Order of preference for the in-collection split:
-   *   1. the server's `in_collection` / `missing` arrays (already annotated by
-   *      artist_metadata_service) — one request, authoritative;
-   *   2. a per-candidate /api/search/unified lookup, ONLY when the payload
-   *      carries neither array (older/partial API responses).
+   *   1. the server's per-entry `in_collection` flag (artist_metadata_service
+   *      `_annotate_similar_artist`, a punctuation/"The"-tolerant key) — the
+   *      authoritative answer, already in the payload;
+   *   2. the server's `in_collection` / `missing` ARRAYS, for a pre-split
+   *      response shape;
+   *   3. a per-candidate POST /api/search lookup, ONLY when an entry carries
+   *      no flag (older/partial API responses).
    */
   async function loadSimilarArtists() {
     const container = document.getElementById('similarArtistsContainer');
@@ -461,6 +469,9 @@
       const payload = data.similar_artists || {};
       const serverSplit = Array.isArray(payload.in_collection) || Array.isArray(payload.missing);
 
+      // ``in_collection`` travels WITH the name: the server annotates every
+      // entry, and dropping it here is what forced the per-candidate search
+      // below to re-derive an answer the payload already carried.
       const dedupe = (list) => {
         const seen = new Set();
         const out = [];
@@ -468,7 +479,11 @@
           const name = (typeof entry === 'string' ? entry : (entry && entry.name) || '').trim();
           if (!name || seen.has(name)) return;
           seen.add(name);
-          out.push({ name });
+          const row = { name };
+          if (entry && typeof entry === 'object' && typeof entry.in_collection === 'boolean') {
+            row.in_collection = entry.in_collection;
+          }
+          out.push(row);
         });
         return out;
       };
@@ -485,11 +500,20 @@
           ...(payload.listenbrainz || []),
         ]).slice(0, SIMILAR_LIMIT);
 
-        await Promise.all(candidates.map(async (candidate) => {
+        // ⚠️ The fallback used to GET ``/api/search/unified``, which no route
+        // serves — every candidate 404'd, so the whole grid read "missing"
+        // behind a burst of failed requests. The real endpoint is POST
+        // ``/api/search`` (the one unified_search.js uses).
+        const unknown = [];
+        candidates.forEach((candidate) => {
+          if (candidate.in_collection === true) inCollection.push(candidate);
+          else if (candidate.in_collection === false) missing.push(candidate);
+          else unknown.push(candidate);
+        });
+
+        await Promise.all(unknown.map(async (candidate) => {
           try {
-            const search = await global.api.getJson(
-              `/api/search/unified?q=${encodeURIComponent(candidate.name)}`
-            );
+            const search = await global.api.postJson('/api/search', { query: candidate.name });
             const match = (search.artists || []).some(
               (a) => String(a.name || '').toLowerCase() === candidate.name.toLowerCase()
             );

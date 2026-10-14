@@ -795,12 +795,31 @@ document.addEventListener('DOMContentLoaded', function() {
             let inCollection = [];
             let missing = [];
 
-            // Check library visually by fetching unified search endpoint
-            await Promise.all(uniqueArtists.map(async (a) => {
+            // The server annotates EVERY similar-artist entry with
+            // ``in_collection`` (artist_metadata_service._annotate_similar_artist),
+            // so use it — it is a punctuation/"The"-tolerant key and therefore
+            // MORE accurate than the exact compare below.
+            //
+            // ⚠️ The per-candidate GET of ``/api/search/unified`` 404'd — no
+            // route serves it — so every artist rendered as "missing" behind a
+            // burst of failed requests. The real endpoint is POST ``/api/search``
+            // (the one unified_search.js uses), kept only for a payload that
+            // carries no flag at all.
+            const unknown = [];
+            uniqueArtists.forEach(a => {
+                if (a.in_collection === true) inCollection.push(a);
+                else if (a.in_collection === false) missing.push(a);
+                else unknown.push(a);
+            });
+            await Promise.all(unknown.map(async (a) => {
                 try {
-                    const res = await fetch(`/api/search/unified?q=${encodeURIComponent(a.name)}`);
+                    const res = await fetch('/api/search', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ query: a.name })
+                    });
                     const searchData = await res.json();
-                    const match = (searchData.artists || []).find(x => x.name.toLowerCase() === a.name.toLowerCase());
+                    const match = (searchData.artists || []).find(x => String(x.name || '').toLowerCase() === a.name.toLowerCase());
                     if (match) {
                         inCollection.push(a);
                     } else {
@@ -814,7 +833,10 @@ document.addEventListener('DOMContentLoaded', function() {
             const renderGrid = (artists, inCol) => {
                 let html = '<div class="row g-2">';
                 artists.forEach(a => {
-                    const img = `/api/artist/${encodeURIComponent(a.name)}/image`;
+                    // ⚠️ ``/api/artist/image`` is a QUERY-PARAM route
+                    // (``?name=``); the ``/api/artist/<name>/image`` form this
+                    // used to build matched no rule and 404'd for every card.
+                    const img = `/api/artist/image?name=${encodeURIComponent(a.name)}`;
                     const action = inCol 
                         ? `window.location.href='/artist/${encodeURIComponent(a.name)}'` 
                         : `if(typeof openGlobalMbSearch === 'function'){ openGlobalMbSearch('${escapeHtml(a.name).replace(/'/g, "\\\\'")}', ''); } else { alert('Search unavailable'); }`;
