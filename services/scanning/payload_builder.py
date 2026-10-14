@@ -24,9 +24,13 @@ from datetime import datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+import structlog
+
 from helpers.musicbrainz_helpers import normalize_single_mbid
 from helpers.normalization_service import clean_artist_name_for_storage
 from services.scanning.metadata_extractor import extract_track_metadata
+
+logger = structlog.get_logger(__name__)
 
 LOCAL_TZ = os.environ.get("TIMEZONE") or os.environ.get("TZ") or "UTC"
 JSON_EMPTY_LIST = json.dumps([])
