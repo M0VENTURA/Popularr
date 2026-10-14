@@ -3925,8 +3925,20 @@ def post_album_star_ratings(
         else:
             is_compilation = bool(is_compilation or is_va_compilation)
 
+        #: The compilation's OWN cross-artist distribution, from the PRE-REMAP
+        #: blend. ``album_scores`` cannot serve this: for a compilation every
+        #: track's ``popularity_score`` has already been remapped onto its own
+        #: artist's catalogue (``_apply_track_artist_relative_normalization``),
+        #: so those values are no longer comparable across artists. The raw
+        #: blend is, and that is what the standout floor ranks against.
+        compilation_raw_scores: list[float] = []
         if is_compilation:
-            logger.info(
+            compilation_track_artist_scores = _build_compilation_track_artist_scores(album_results)
+            compilation_raw_scores = [
+                float(r.get("_raw_combined") or 0)
+                for r in album_results
+                if float(r.get("_raw_combined") or 0) > 0
+            ]
                 "Compilation detected — rating on per-track-artist catalogues",
                 artist=artist,
                 album=album,
@@ -4037,6 +4049,7 @@ def post_album_star_ratings(
             if _album_ids:
                 with db_session() as _sess:
                     _rows = _sess.execute(
+                    compilation_raw_scores=compilation_raw_scores,
                         text(
                             "SELECT id, COALESCE(stars, star_rating, 0) AS stars, file_path, duration "
                             "FROM tracks WHERE CAST(id AS TEXT) IN :ids"
