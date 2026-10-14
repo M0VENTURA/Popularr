@@ -908,6 +908,15 @@ def _resolve_compilation_flags(
        tag and the TITLE, so a folder named "Little Nicky" filed under
        "Various Artists" returns False from it — the reported reason a real
        compilation was rated as a studio album.
+    3. The album TITLE (``detect_greatest_hits_album``) — a third source
+       because the first two cannot see a tagless greatest-hits album. This
+       mirrors ``prepare_album_context``, which promotes exactly those albums
+       to single-artist compilations: if the two paths disagreed, the
+       end-of-run ``finalise_scan`` would re-rate the album as a STUDIO album
+       and wipe the artist-catalogue rating the scan just posted — the same
+       class of bug sources 1./2. exist to prevent. Like the live verdict,
+       this is a FALLBACK: a type tag that positively says "album" still wins
+       (``test_a_plain_album_stays_plain`` pins that for a real best-of).
     """
     row = album_results[0] if album_results else {}
     # ⭐⭐ JOIN every type column — never ``or``-chain them.
@@ -954,19 +963,36 @@ def _resolve_compilation_flags(
             album_artist=album_artist,
             musicbrainz_album_type=type_text,
         ) or ""
-        if category:
-            return True, category == "va"
-        if generic_artist:
-            # A folder filed under "Various Artists" (etc.) is a compilation
-            # whatever the type tag and title say.
-            return True, True
-        return False, False
     except Exception as exc:
+        # A classification failure must not silently claim "studio album":
+        # the title check below still runs, and ``category`` stays "" so the
+        # artist/title sources decide.
         logger.debug(
             "Compilation classification failed",
             artist=artist, album=album, error=str(exc),
         )
-        return (True, True) if generic_artist else (False, False)
+        category = ""
+
+    if category:
+        return True, category == "va"
+    if generic_artist:
+        # A folder filed under "Various Artists" (etc.) is a compilation
+        # whatever the type tag and title say.
+        return True, True
+
+    # A greatest-hits / best-of TITLE is a compilation on its own evidence
+    # (see the docstring), but ONLY when no type tag spoke: a tag that says
+    # "album" keeps the album a studio album, exactly like the guard in
+    # ``prepare_album_context``. Checked AFTER the VA sources so a
+    # Various-Artists record titled "Greatest Hits" keeps its VA flags.
+    from services.catalog.album_classification_service import (
+        detect_greatest_hits_album,
+    )
+
+    if not type_text and detect_greatest_hits_album(album=album, artist=artist):
+        return True, False
+
+    return False, False
 
 
 def compute_track_artist_scores(

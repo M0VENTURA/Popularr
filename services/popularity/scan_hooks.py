@@ -75,9 +75,10 @@ def prepare_album_context(
     )
 
     # Compilation classification is split into VA (per-track artist context
-    # required) vs single-artist (Greatest Hits — treated like a studio
-    # album).  ``is_compilation`` keeps the boolean "any compilation" view
-    # for legacy consumers; downstream stages use the subtype flags.
+    # required) vs single-artist (Greatest Hits — rated against the ARTIST's
+    # catalogue, where any track can reach 5★).  ``is_compilation`` keeps the
+    # boolean "any compilation" view for legacy consumers; downstream stages
+    # use the subtype flags.
     comp_category = classify_compilation_category(
         artist=artist,
         album=album,
@@ -91,6 +92,39 @@ def prepare_album_context(
     is_single_artist_compilation = comp_category == "single_artist"
 
     is_greatest_hits = detect_greatest_hits_album(album=album, artist=artist)
+
+    # A greatest-hits / best-of album IS a compilation even when NOTHING
+    # carries a compilation TYPE TAG.
+    #
+    # ``classify_compilation_category`` reads the type tag, the generic
+    # album-artist names and a "4+ credited artists" heuristic — never the
+    # TITLE. So a "Greatest Hits" album whose MusicBrainz/Spotify match has
+    # no compilation marking came back as "" and was rated on the studio-album
+    # ladder: the album's own median band plus the album-rank gate and the 5★
+    # slot cap. Measured on such a release every track sat on the album's own
+    # band (median ≈ 50) and almost nothing could reach 5★ — even though the
+    # album is nothing BUT the artist's hits. The compilation branch in
+    # ``_assign_stars`` is the rating that belongs here: it rates each track
+    # against the artist's catalogue, where any track can score 5★.
+    #
+    # The title is a FALLBACK, never an override — the same rule the live
+    # verdict above uses. A matched album type stays authoritative: an album
+    # the sources call plain "album" is a studio album whatever its title says
+    # (``test_a_plain_album_stays_plain`` pins a real best-of with agreeing
+    # plain types for exactly that reason), and the album page reads the
+    # stored type the same way. The title only fills in where the page's own
+    # category does — when there is NO type at all
+    # (``release_categories.test_no_type_falls_back_to_title``) — so the badge
+    # and the rating agree instead of contradicting each other. The tokens are
+    # the SAME ones those display paths use (``release_categories`` /
+    # ``release_cache_service`` both call ``detect_greatest_hits_album``).
+    #
+    # Guarded on ``not is_va_compilation``: a Various-Artists record titled
+    # "Greatest Hits" belongs to the VA path (per-track artist context), never
+    # the single-artist one.
+    if is_greatest_hits and not is_va_compilation and not album_type_from_field:
+        is_compilation = True
+        is_single_artist_compilation = True
 
     alternate_takes = detect_alternate_takes(tracks)
 
