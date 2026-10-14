@@ -352,6 +352,30 @@ async def api_artist_lookup_ids() -> Any:
         log_unified(f"[ARTIST] Looked up + saved external IDs for '{payload.get('name') or '?'}'")
     return jsonify(data), code
 
+
+@artist_bp.route("/api/artist/discogs-search")
+async def api_artist_discogs_search() -> Any:
+    """Discogs artists sharing this name, best album match first.
+
+    Backs the Edit-External-IDs modal's "Search Discogs" button: the automatic
+    lookup can only guess between same-named artists, so the user picks the
+    right one from the candidates (each scored by how many of the artist's
+    library albums its Discogs release list contains).
+
+    The search + per-candidate release fetches are rate-limited network work
+    (Discogs allows 1 req/sec), so they run OFF the event loop.
+    """
+    artist = str(request.args.get("artist") or "").strip()
+    if not artist:
+        return jsonify({"error": "artist is required"}), 400
+
+    try:
+        data, code = await asyncio.to_thread(metadata.search_discogs_artists, artist)
+    except Exception as exc:
+        logger.error("Discogs artist search failed", artist=artist, error=str(exc))
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(data), code
+
 # ----------------------------
 # ALTERNATE NAMES (aliases)
 # ----------------------------

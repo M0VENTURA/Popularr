@@ -1091,17 +1091,18 @@ class DiscogsService:
 
     # -- misc lookups -----------------------------------------------------
 
-    def get_artist_id(self, artist: str) -> str | None:
+    def get_artist_id(self, artist: str, albums: list[str] | None = None) -> str | None:
+        """Resolve an artist to a Discogs id.
+
+        ``albums`` (the library's album titles for this artist) is what lets
+        the shared client tell same-named Discogs artists apart: the one whose
+        release list contains the albums the library holds wins. Omit it and
+        the resolution still prefers an exact name match over the first hit.
+        """
         if not self._usable() or not artist:
             return None
         try:
-            results = self.http.search_database(
-                {"q": artist, "type": "artist", "per_page": 5}
-            )
-            if results and isinstance(results, list):
-                first = results[0]
-                if isinstance(first, dict) and first.get("id"):
-                    return str(first["id"])
+            return self.http.get_artist_id(artist, albums=albums)  # type: ignore[return-value]
         except Exception as exc:
             logger.debug("Artist ID lookup failed", artist=artist, error=str(exc))
         return None

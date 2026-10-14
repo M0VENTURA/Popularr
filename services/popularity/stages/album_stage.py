@@ -1258,10 +1258,31 @@ def _fetch_discogs_artist_id(artist: str, options: dict[str, Any]) -> None:
             Logger.info("[ENRICH] Discogs artist ID memory-cache hit", discogs_id=discogs_artist_id, **context)
         else:
             from api_clients.discogs_http import DiscogsHttpClient
+            # The artist's own album titles are the discriminator for a name
+            # several Discogs artists share: the lookup scores same-named
+            # candidates against them and picks the one with these albums
+            # instead of whichever Discogs ranks first. One cheap query, once
+            # per artist (the id itself is memory-cached below).
+            _artist_albums: list[str] = []
+            try:
+                with db_session() as session:
+                    _rows = session.execute(
+                        text(
+                            "SELECT DISTINCT album FROM tracks "
+                            "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                            "AND album IS NOT NULL AND TRIM(album) <> ''"
+                        ),
+                        {"artist": artist},
+                    ).fetchall()
+                _artist_albums = [str(row[0]).strip() for row in _rows if row and row[0]]
+            except Exception as exc:
+                Logger.debug("[ENRICH] Discogs artist albums probe failed", error=str(exc), **context)
+
             value = _call_with_heartbeat(
                 "artist_id.discogs.lookup",
                 DiscogsHttpClient(token=token).get_artist_id,
                 artist,
+                _artist_albums,
                 log_context=context,
             )
             discogs_artist_id = str(value or "").strip()

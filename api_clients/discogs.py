@@ -45,8 +45,8 @@ class DiscogsClient:
     def has_official_video(self, title: str, artist: str, timeout: float = 10.0) -> bool:
         return self.service.has_official_video(title, artist, timeout=timeout)
 
-    def get_artist_id(self, artist: str, timeout: float = 10.0) -> str | None:
-        return self.service.get_artist_id(artist, timeout=timeout)
+    def get_artist_id(self, artist: str, albums: list[str] | None = None, timeout: float = 10.0) -> str | None:
+        return self.service.get_artist_id(artist, albums=albums, timeout=timeout)
 
     def get_genres(self, title: str, artist: str, timeout: float = 10.0) -> list[str]:
         return self.service.get_genres(title, artist, timeout=timeout)

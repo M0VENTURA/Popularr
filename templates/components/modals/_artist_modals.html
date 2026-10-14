@@ -63,6 +63,57 @@
   </div>
 </div>
 
+<!-- External IDs Modal -->
+{#
+  ⚠️ This modal was MISSING from the live tree while the artist page rendered
+  its "Edit External IDs" buttons and `js/artist-page.js` bound
+  `#editArtistIdsSaveBtn` — `showModal('editArtistIdsModal')` found no element,
+  so the button did nothing. The markup below is the test_site contract
+  (components/modals/_artist_modals.html) so both trees expose the same ids.
+#}
+<div class="modal fade" id="editArtistIdsModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-link-45deg"></i> Edit External IDs</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label" for="editMusicbrainzArtistId">MusicBrainz Artist ID</label>
+          <input type="text" class="form-control" id="editMusicbrainzArtistId" placeholder="e.g. a74b1b7f-71a5-4011-9441-d0b5e4122711">
+        </div>
+        <div class="mb-3">
+          <label class="form-label" for="editDiscogsArtistId">Discogs Artist ID</label>
+          <div class="input-group">
+            <input type="text" class="form-control" id="editDiscogsArtistId" placeholder="e.g. 123456">
+            {#
+              Discogs lists several artists under one name, and the automatic
+              match can only guess — so the user gets the candidate list and
+              picks. `searchDiscogsArtists` renders into
+              #discogsArtistSearchResults; each row carries its own id.
+            #}
+            <button class="btn btn-outline-info" type="button" id="discogsArtistSearchBtn"
+                    onclick="searchDiscogsArtists()" title="Search Discogs for artists with this name">
+              <i class="bi bi-search"></i> Find
+            </button>
+          </div>
+          <div class="form-text">
+            Discogs often has several artists with the same name — search to pick the one
+            whose releases match your albums.
+          </div>
+          <div id="discogsArtistSearchResults" class="mt-2"></div>
+        </div>
+        <div id="editArtistIdsStatus" class="small" role="status" aria-live="polite"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="editArtistIdsSaveBtn">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Comprehensive Track Edit Modal -->
 <div class="modal fade" id="editTrackFromArtistModal" tabindex="-1">
     <div class="modal-dialog modal-lg">

@@ -229,21 +229,95 @@
     var artist = artistName();
     var mb = doc.getElementById('editMusicbrainzArtistId');
     var dc = doc.getElementById('editDiscogsArtistId');
+    setArtistIdsStatus('Saving…');
     postJson('/api/artist/update-ids', {
       artist: artist,
       musicbrainz_artist_id: mb ? mb.value.trim() : '',
       discogs_artist_id: dc ? dc.value.trim() : '',
     })
       .then(function (data) {
+        // ⚠️ Report the failure. The old handler reloaded ONLY on success and
+        // swallowed every error, so a save that matched no tracks looked
+        // identical to a button that was never wired up.
         if (data && data.success !== false) {
+          setArtistIdsStatus((data && data.message) || 'Saved.', 'success');
           toast('Artist IDs', 'Saved.', 'success');
           hideModal('editArtistIdsModal');
           global.setTimeout(function () { global.location.reload(); }, 400);
         } else {
+          setArtistIdsStatus((data && (data.error || data.message)) || 'Save failed.', 'error');
           toast('Artist IDs', (data && data.error) || 'Save failed.', 'error');
         }
       })
-      .catch(function () { toast('Artist IDs', 'Save failed.', 'error'); });
+      .catch(function (err) {
+        setArtistIdsStatus('Save failed: ' + ((err && err.message) || 'network error'), 'error');
+        toast('Artist IDs', 'Save failed.', 'error');
+      });
+  }
+
+  /** Inline status line: feedback that does not depend on the toast helper. */
+  function setArtistIdsStatus(message, kind) {
+    var el = doc.getElementById('editArtistIdsStatus');
+    if (!el) return;
+    el.className = 'small' + (kind === 'error' ? ' text-danger' : kind === 'success' ? ' text-success' : ' text-muted');
+    el.textContent = message || '';
+  }
+
+  /** Discogs artists sharing this name, best album match first. */
+  function searchDiscogsArtists() {
+    var artist = artistName();
+    var results = doc.getElementById('discogsArtistSearchResults');
+    if (!artist || !results) return;
+    var btn = doc.getElementById('discogsArtistSearchBtn');
+    if (btn) btn.disabled = true;
+    results.innerHTML = '<div class="text-muted small"><span class="spinner-border spinner-border-sm me-2"></span>Searching Discogs…</div>';
+    setArtistIdsStatus('');
+
+    getJson('/api/artist/discogs-search?artist=' + encodeURIComponent(artist))
+      .then(function (data) {
+        if (!data || data.success === false) {
+          results.innerHTML = '<div class="text-danger small">' + esc((data && (data.error || data.message)) || 'Discogs search failed.') + '</div>';
+          return;
+        }
+        var candidates = (data && data.candidates) || [];
+        if (!candidates.length) {
+          results.innerHTML = '<div class="text-muted small">No Discogs artists found for this name.</div>';
+          return;
+        }
+        var html = '<div class="list-group">';
+        candidates.forEach(function (c) {
+          var matched = c.matched_albums || [];
+          var badge = matched.length
+            ? '<span class="badge bg-success ms-2">' + matched.length + ' album' + (matched.length === 1 ? '' : 's') + ' match</span>'
+            : '<span class="badge bg-secondary ms-2">no album match</span>';
+          var albumLine = matched.length
+            ? '<div class="small text-success">' + esc(matched.slice(0, 4).join(', ')) + (matched.length > 4 ? ' …' : '') + '</div>'
+            : '';
+          html += '<div class="list-group-item bg-transparent border-secondary text-light d-flex justify-content-between align-items-start gap-2">'
+            + '<div class="flex-grow-1">'
+            + '<div class="fw-bold">' + esc(c.name) + badge + '</div>'
+            + '<div class="small text-muted">Discogs ID ' + esc(String(c.id)) + '</div>'
+            + albumLine
+            + '</div>'
+            + '<div class="d-flex flex-column gap-1">'
+            + '<button class="btn btn-sm btn-outline-primary" type="button" data-action="use-discogs-artist" data-id="' + esc(String(c.id)) + '">Use this ID</button>'
+            + '<a class="btn btn-sm btn-outline-secondary" href="' + esc(c.discogs_url || '#') + '" target="_blank" rel="noopener">Open</a>'
+            + '</div></div>';
+        });
+        results.innerHTML = html + '</div>';
+      })
+      .catch(function (err) {
+        results.innerHTML = '<div class="text-danger small">Discogs search failed: ' + esc((err && err.message) || 'network error') + '</div>';
+      })
+      .then(function () { if (btn) btn.disabled = false; });
+  }
+
+  /** Fill the Discogs ID field from a chosen candidate (Save commits it). */
+  function useDiscogsArtist(artistId) {
+    var input = doc.getElementById('editDiscogsArtistId');
+    if (!input || !artistId) return;
+    input.value = String(artistId).trim();
+    setArtistIdsStatus('Selected Discogs artist ' + input.value + ' — press Save to apply.', 'success');
   }
 
   // ── Country ─────────────────────────────────────────────────────────────
@@ -422,6 +496,15 @@
 
     var saveIds = doc.getElementById('editArtistIdsSaveBtn');
     if (saveIds) saveIds.addEventListener('click', saveArtistIds);
+
+    // Discogs candidates are re-rendered after every search, so one delegated
+    // handler covers every row (and the id travels in a data attribute — a
+    // name with a quote would break an inline onclick).
+    doc.addEventListener('click', function (e) {
+      var btn = e.target.closest && e.target.closest('[data-action="use-discogs-artist"]');
+      if (!btn) return;
+      useDiscogsArtist(btn.getAttribute('data-id'));
+    });
   }
 
   if (doc.readyState === 'loading') {
@@ -453,6 +536,7 @@
   global.openArtistImageModal = openArtistImageModal;
   global.openEditArtistIdsModal = openEditArtistIdsModal;
   global.saveArtistIds = saveArtistIds;
+  global.searchDiscogsArtists = searchDiscogsArtists;
   global.fetchArtistCountry = fetchArtistCountry;
   global.editArtistCountry = editArtistCountry;
   global.forceArtistMetadataRefresh = forceArtistMetadataRefresh;

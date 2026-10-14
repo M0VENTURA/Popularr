@@ -138,8 +138,28 @@
         </div>
         <div class="mb-3">
           <label class="form-label" for="editDiscogsArtistId">Discogs Artist ID</label>
-          <input type="text" class="form-control" id="editDiscogsArtistId" placeholder="e.g. 123456">
+          <div class="input-group">
+            <input type="text" class="form-control" id="editDiscogsArtistId" placeholder="e.g. 123456">
+            {#
+              Discogs lists several artists under one name, and the automatic
+              match can only guess — so the user gets the candidate list and
+              picks. `searchDiscogsArtists` renders into
+              #discogsArtistSearchResults; each row carries its own id.
+            #}
+            <button class="btn btn-outline-info" type="button" id="discogsArtistSearchBtn"
+                    onclick="searchDiscogsArtists()" title="Search Discogs for artists with this name">
+              <i class="bi bi-search"></i> Find
+            </button>
+          </div>
+          <div class="form-text">
+            Discogs often has several artists with the same name — search to pick the one
+            whose releases match your albums.
+          </div>
+          <div id="discogsArtistSearchResults" class="mt-2"></div>
         </div>
+        {# The save reply (including "no tracks matched", which the old modal
+           reported as success) lands here when no toast helper is loaded. #}
+        <div id="editArtistIdsStatus" class="small" role="status" aria-live="polite"></div>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>

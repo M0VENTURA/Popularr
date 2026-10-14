@@ -141,17 +141,129 @@ function addTorrent(url) {
 }
 
 // Artist IDs Modal
+/**
+ * Show the Edit External IDs modal, SEEDED with what is saved.
+ *
+ * ⚠️ The seed matters: the modal's inputs are empty markup, so without it the
+ * form showed blank fields over an artist whose ids are set — and saving the
+ * blank form then wrote NULL over the stored ids.
+ */
 function openEditArtistIdsModal() {
+  const mbShown = document.getElementById('musicbrainzArtistId');
+  const dcShown = document.getElementById('discogsArtistId');
+  const mb = document.getElementById('editMusicbrainzArtistId');
+  const dc = document.getElementById('editDiscogsArtistId');
+  const seed = (el) => (el ? (el.textContent || '').trim().replace(/^Not linked$/i, '') : '');
+  if (mb && mbShown) mb.value = seed(mbShown);
+  if (dc && dcShown) dc.value = seed(dcShown);
+  setArtistIdsStatus('');
+  const results = document.getElementById('discogsArtistSearchResults');
+  if (results) results.innerHTML = '';
   new bootstrap.Modal(document.getElementById('editArtistIdsModal')).show();
+}
+
+/** Inline status line: the modal's own feedback, independent of any toast. */
+function setArtistIdsStatus(message, kind) {
+  const el = document.getElementById('editArtistIdsStatus');
+  if (!el) return;
+  el.className = 'small' + (kind === 'error' ? ' text-danger' : kind === 'success' ? ' text-success' : ' text-muted');
+  el.textContent = message || '';
 }
 
 function saveArtistIds() {
   const artist = getArtistName();
   const musicbrainz_artist_id = document.getElementById('editMusicbrainzArtistId').value.trim();
   const discogs_artist_id = document.getElementById('editDiscogsArtistId').value.trim();
+  setArtistIdsStatus('Saving…');
   fetch('/api/artist/update-ids', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ artist, musicbrainz_artist_id, discogs_artist_id }) })
-  .then(r => r.json()).then(data => { if (data.success) location.reload(); });
+  .then(r => r.json().then(data => ({ ok: r.ok, data })))
+  .then(({ ok, data }) => {
+    // ⚠️ Report the failure instead of silently doing nothing. The old handler
+    // reloaded ONLY on success and swallowed every error, so a save that
+    // matched no tracks (or a rejected request) looked identical to a button
+    // that was not wired up — the reported "doesn't save".
+    if (data && data.success) {
+      setArtistIdsStatus(data.message || 'Saved.', 'success');
+      location.reload();
+      return;
+    }
+    setArtistIdsStatus((data && (data.error || data.message)) || ('Save failed (HTTP ' + (ok ? '200' : 'error') + ')'), 'error');
+  })
+  .catch((err) => setArtistIdsStatus('Save failed: ' + (err && err.message ? err.message : 'network error'), 'error'));
 }
+
+/** Discogs artists sharing this name, best album match first. */
+function searchDiscogsArtists() {
+  const artist = getArtistName();
+  const results = document.getElementById('discogsArtistSearchResults');
+  if (!artist || !results) return;
+  const btn = document.getElementById('discogsArtistSearchBtn');
+  if (btn) btn.disabled = true;
+  results.innerHTML = '<div class="text-muted small"><span class="spinner-border spinner-border-sm me-2"></span>Searching Discogs…</div>';
+  setArtistIdsStatus('');
+
+  fetch(`/api/artist/discogs-search?artist=${encodeURIComponent(artist)}`)
+  .then(r => r.json().then(data => ({ ok: r.ok, data })))
+  .then(({ ok, data }) => {
+    if (!data || data.success === false) {
+      results.innerHTML = `<div class="text-danger small">${escapeHtml((data && (data.error || data.message)) || ('Discogs search failed (HTTP ' + (ok ? '200' : 'error') + ')'))}</div>`;
+      return;
+    }
+    const candidates = data.candidates || [];
+    if (!candidates.length) {
+      results.innerHTML = '<div class="text-muted small">No Discogs artists found for this name.</div>';
+      return;
+    }
+    let html = '<div class="list-group">';
+    candidates.forEach((c) => {
+      const matched = (c.matched_albums || []);
+      const badge = matched.length
+        ? `<span class="badge bg-success ms-2">${matched.length} album${matched.length === 1 ? '' : 's'} match</span>`
+        : '<span class="badge bg-secondary ms-2">no album match</span>';
+      const albumLine = matched.length
+        ? `<div class="small text-success">${escapeHtml(matched.slice(0, 4).join(', '))}${matched.length > 4 ? ' …' : ''}</div>`
+        : '';
+      html += `<div class="list-group-item bg-transparent border-secondary text-light d-flex justify-content-between align-items-start gap-2">
+        <div class="flex-grow-1">
+          <div class="fw-bold">${escapeHtml(c.name)}${badge}</div>
+          <div class="small text-muted">Discogs ID ${escapeHtml(String(c.id))}</div>
+          ${albumLine}
+        </div>
+        <div class="d-flex flex-column gap-1">
+          <button class="btn btn-sm btn-outline-primary" type="button" data-action="use-discogs-artist" data-id="${escapeHtml(String(c.id))}">Use this ID</button>
+          <a class="btn btn-sm btn-outline-secondary" href="${escapeHtml(c.discogs_url || '#')}" target="_blank" rel="noopener">Open</a>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+    results.innerHTML = html;
+  })
+  .catch((err) => {
+    results.innerHTML = `<div class="text-danger small">Discogs search failed: ${escapeHtml(err && err.message ? err.message : 'network error')}</div>`;
+  })
+  .finally(() => { if (btn) btn.disabled = false; });
+}
+
+/** Fill the Discogs ID field from a chosen candidate (Save commits it). */
+function useDiscogsArtist(artistId) {
+  const input = document.getElementById('editDiscogsArtistId');
+  if (!input || !artistId) return;
+  input.value = String(artistId).trim();
+  setArtistIdsStatus('Selected Discogs artist ' + input.value + ' — press Save to apply.', 'success');
+}
+
+document.addEventListener('click', (event) => {
+  const btn = event.target.closest && event.target.closest('[data-action="use-discogs-artist"]');
+  if (!btn) return;
+  useDiscogsArtist(btn.getAttribute('data-id'));
+});
+
+// Bind the modal's Save button once the DOM is ready. ⚠️ It carries no inline
+// onclick, so an unbound button is a dead button — the reported "doesn't save".
+document.addEventListener('DOMContentLoaded', () => {
+  const saveBtn = document.getElementById('editArtistIdsSaveBtn');
+  if (saveBtn) saveBtn.addEventListener('click', saveArtistIds);
+});
 
 // Global MusicBrainz Search
 window.artistPage.searchAllReleases = function(artist) {

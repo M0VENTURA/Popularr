@@ -170,6 +170,12 @@ _ARTIST_IMAGE_CACHE_TTL_SECONDS = 6 * 3600
 _ARTIST_IMAGE_NEGATIVE_TTL_SECONDS = 60
 _ARTIST_IMAGE_CACHE_MAX_ENTRIES = 5000
 
+#: How many same-named Discogs candidates the search endpoint scores against
+#: the artist's albums. Each scored candidate costs one ``/artists/{id}/
+#: releases`` request at Discogs' 1 req/sec budget, so this cap is what keeps
+#: the button responsive; unscored candidates are still listed.
+_MAX_SCORED_DISCOGS_CANDIDATES = 5
+
 
 def get_artist_image(artist: str) -> tuple[dict[str, Any], int]:
     """Get the artist's image URL from the DATABASE ONLY.
@@ -330,6 +336,14 @@ def update_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     ``discogs_artist_id`` do).  Writing them previously raised
     "column does not exist" — the MBID from the Edit-Artist-IDs form lands
     in ``musicbrainz_artistid`` instead.
+
+    ⭐ A key that is PRESENT in the payload is written even when EMPTY, which
+    sets the column to NULL. Only writing truthy values made a WRONG id
+    impossible to remove: the form posts both fields, so clearing the Discogs
+    box looked like a save that did nothing (the reported "doesn't save when
+    updating the discogs ID" — the wrong id survived and the page kept showing
+    it). A key that is ABSENT is still skipped, so a caller updating one field
+    never wipes the other.
     """
     artist = str(payload.get("artist") or "").strip()
     if not artist:
@@ -343,10 +357,11 @@ def update_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
             ("discogs_artist_id", "discogs_artist_id"),
         )
     ):
+        if key not in payload:
+            continue
         value = str(payload.get(key) or "").strip()
-        if value:
-            updates.append(f"{column} = :v{idx}")
-            bind_values[f"v{idx}"] = value
+        updates.append(f"{column} = :v{idx}")
+        bind_values[f"v{idx}"] = value or None
 
     if not updates:
         return {"success": False, "error": "No IDs provided"}, 400
@@ -362,6 +377,16 @@ def update_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
                 bind_values,
             )
             rows_updated = result.rowcount or 0
+        if rows_updated == 0:
+            # The form saved NOTHING and the old reply still said success —
+            # the second half of "it doesn't save": a name that matches no
+            # tracks (a spelling difference, or an artist with no rows) must
+            # say so instead of reloading onto an unchanged page.
+            return {
+                "success": False,
+                "error": f"No tracks found for '{artist}' — the ID was not saved.",
+                "rows_updated": 0,
+            }, 404
         return {
             "success": True,
             "message": f"Artist IDs updated for {artist}",
@@ -374,6 +399,97 @@ def update_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     except Exception as exc:
         logger.error("Update IDs failed", artist=artist, error=str(exc), exc_info=True)
         return {"success": False, "error": str(exc)}, 500
+
+
+def search_discogs_artists(artist: str) -> tuple[dict[str, Any], int]:
+    """Discogs artist candidates for one artist name, best album match first.
+
+    Backs the Edit-External-IDs modal's "Search Discogs" button: Discogs
+    returns every artist with this name, and the automatic lookup can only
+    guess, so the user needs to see the candidates and pick the right one.
+
+    Each candidate is scored by how many of THIS artist's library albums
+    appear in its Discogs release list — the same "same albums" rule the
+    automatic resolution uses — so the likely match sorts first. One request
+    per scored candidate at Discogs' 1 req/sec budget, hence the cap.
+    """
+    artist = str(artist or "").strip()
+    if not artist:
+        return {"success": False, "error": "artist is required"}, 400
+
+    try:
+        from helpers.config_helpers import get_config
+
+        discogs_config = (get_config().get("api_integrations") or {}).get("discogs") or {}
+        token = str(discogs_config.get("token") or "")
+        if not discogs_config.get("enabled") or token.casefold() in {
+            "", "your_discogs_token", "your_token", "placeholder"
+        }:
+            return {
+                "success": False,
+                "error": "Discogs is not configured (enable the integration and add a token).",
+            }, 400
+    except Exception as exc:
+        logger.error("Discogs config read failed", artist=artist, error=str(exc))
+        return {"success": False, "error": str(exc)}, 500
+
+    try:
+        from api_clients.discogs_http import DiscogsHttpClient
+
+        client = DiscogsHttpClient(token=token)
+        candidates = client.search_artists(artist, limit=10)
+    except Exception as exc:
+        logger.error("Discogs artist search failed", artist=artist, error=str(exc))
+        return {"success": False, "error": str(exc)}, 500
+
+    if not candidates:
+        return {"success": True, "artist": artist, "candidates": [], "albums_checked": []}, 200
+
+    try:
+        with db_session() as session:
+            rows = session.execute(
+                text(
+                    "SELECT DISTINCT album FROM tracks "
+                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                    "AND album IS NOT NULL AND TRIM(album) <> ''"
+                ),
+                {"artist": artist},
+            ).fetchall()
+        library_albums = [str(row[0]).strip() for row in rows if row and row[0]]
+    except Exception as exc:
+        logger.debug("Discogs search album probe failed", artist=artist, error=str(exc))
+        library_albums = []
+
+    scored: list[dict[str, Any]] = []
+    for candidate in candidates[:_MAX_SCORED_DISCOGS_CANDIDATES]:
+        matched = client.matched_artist_albums(candidate["id"], library_albums)
+        scored.append({
+            "id": candidate["id"],
+            "name": candidate["name"],
+            "discogs_url": f"https://www.discogs.com/artist/{candidate['id']}",
+            "thumb": candidate.get("thumb") or "",
+            "matched_albums": matched,
+            "match_count": len(matched),
+        })
+    # Unscored candidates still belong in the list — the user may know the id —
+    # they simply sort last with no album evidence.
+    for candidate in candidates[_MAX_SCORED_DISCOGS_CANDIDATES:]:
+        scored.append({
+            "id": candidate["id"],
+            "name": candidate["name"],
+            "discogs_url": f"https://www.discogs.com/artist/{candidate['id']}",
+            "thumb": candidate.get("thumb") or "",
+            "matched_albums": [],
+            "match_count": 0,
+        })
+
+    scored.sort(key=lambda item: (-item["match_count"], item["name"].casefold()))
+    return {
+        "success": True,
+        "artist": artist,
+        "candidates": scored,
+        "albums_checked": library_albums,
+    }, 200
 
 
 def lookup_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:

@@ -2707,7 +2707,21 @@ def run_scan(
                             try:
                                 _tok = ((get_config().get("api_integrations") or {}).get("discogs") or {}).get("token") or ""
                                 if _tok and _tok.lower() not in ("your_discogs_token", "your_token", "placeholder"):
-                                    _discogs_id = str(DiscogsClient(token=_tok).get_artist_id(artist) or "").strip()
+                                    # The artist's OWN album titles, already in
+                                    # memory: they are what tells two same-named
+                                    # Discogs artists apart, so the lookup picks
+                                    # the one with these albums instead of
+                                    # whichever Discogs ranks first.
+                                    _artist_albums = [
+                                        str(_t.get("album") or "").strip()
+                                        for _t in (artist_all_tracks.get(artist) or track_dicts)
+                                        if str(_t.get("album") or "").strip()
+                                    ]
+                                    _discogs_id = str(
+                                        DiscogsClient(token=_tok).get_artist_id(
+                                            artist, albums=_artist_albums
+                                        ) or ""
+                                    ).strip()
                             except Exception as exc:
                                 logger.debug("Discogs artist id resolution failed", artist=artist, error=str(exc))
 
