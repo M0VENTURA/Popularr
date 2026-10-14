@@ -606,7 +606,15 @@
             rank_percentile_5star: parseFloat(getValue('compilation_online_rank_percentile_5star', '0.02')) || 0.02,
             rank_percentile_4star: parseFloat(getValue('compilation_online_rank_percentile_4star', '0.10')) || 0.10,
             rank_percentile_3star: parseFloat(getValue('compilation_online_rank_percentile_3star', '0.35')) || 0.35,
-            rank_percentile_2star: parseFloat(getValue('compilation_online_rank_percentile_2star', '0.65')) || 0.65
+            rank_percentile_2star: parseFloat(getValue('compilation_online_rank_percentile_2star', '0.65')) || 0.65,
+            // The two absolute guards. Read with an explicit finite check
+            // rather than ``|| default``: 0 is a MEANINGFUL value here (it
+            // disables the guard), and ``0 || 55`` would silently restore the
+            // default the user just turned off.
+            top_tier_min_score: (function () { var v = parseFloat(getValue('compilation_online_top_tier_min_score', '55')); return isFinite(v) ? v : 55; })(),
+            top_tier_min_listeners: (function () { var v = parseInt(getValue('compilation_online_top_tier_min_listeners', '250000'), 10); return isFinite(v) ? v : 250000; })(),
+            standout_floor_percentile: (function () { var v = parseFloat(getValue('compilation_online_standout_floor_percentile', '0.10')); return isFinite(v) ? v : 0.10; })(),
+            standout_floor_stars: (function () { var v = parseInt(getValue('compilation_online_standout_floor_stars', '4'), 10); return isFinite(v) ? v : 4; })()
           }
         }
       ),

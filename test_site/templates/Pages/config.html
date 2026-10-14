@@ -2229,6 +2229,32 @@
           <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="compilation_online_rank_percentile_2star" placeholder="0.65" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('rank_percentile_2star', 0.65) }}">
           <small class="form-text text-muted">Top 65%. Below this is 1★. Default: <strong>0.65</strong></small>
         </div>
+        {#
+          The two ABSOLUTE guards. The rank percentile above is scale-free, so
+          on a compilation "#1 of 9 songs" reached 5★ at 713 listeners while
+          the album's real hits sat below it — and a heavyweight's deep
+          discography buried their genuine hit. These need an absolute view.
+        #}
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_online_top_tier_min_score">5★ Min Score</label>
+          <input type="number" step="0.1" min="0" max="100" class="form-control form-control-sm" id="compilation_online_top_tier_min_score" placeholder="55" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('top_tier_min_score', 55) }}">
+          <small class="form-text text-muted">A compilation's 5★ must also clear this score (or the listener bar). Stops a tiny catalogue's #1 being promoted. <strong>0</strong> disables. Default: <strong>55</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_online_top_tier_min_listeners">5★ Min Last.fm Listeners</label>
+          <input type="number" step="1000" min="0" class="form-control form-control-sm" id="compilation_online_top_tier_min_listeners" placeholder="250000" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('top_tier_min_listeners', 250000) }}">
+          <small class="form-text text-muted">Either this or the score clears the 5★ gate. <strong>0</strong> disables. Default: <strong>250000</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_online_standout_floor_percentile">Standout Floor Percentile</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="compilation_online_standout_floor_percentile" placeholder="0.10" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('standout_floor_percentile', 0.10) }}">
+          <small class="form-text text-muted">A track in the compilation's own top band (by raw score) floors at the stars below, so a deep artist catalogue cannot bury a real hit. <strong>0</strong> disables. Default: <strong>0.10</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_online_standout_floor_stars">Standout Floor Stars</label>
+          <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="compilation_online_standout_floor_stars" placeholder="4" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('standout_floor_stars', 4) }}">
+          <small class="form-text text-muted">The floor itself. 5 is not recommended — the artist catalogue owns the top tier. Default: <strong>4</strong></small>
+        </div>
       </div>
 
       <hr class="my-3">

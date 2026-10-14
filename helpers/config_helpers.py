@@ -768,6 +768,16 @@ _DEFAULT_COMPILATION_ONLINE_CATALOGUE: dict[str, Any] = {
     "rank_percentile_3star": 0.35,
     "rank_percentile_2star": 0.65,
     "min_catalogue_size": 5,
+    # Absolute bar a compilation's 5★ must ALSO clear. The artist-catalogue
+    # percentile is scale-free, so "#1 of 9 songs" reached 5★ at 713 listeners
+    # while the album's real hits sat below it. Either bar clears the gate.
+    "top_tier_min_score": 55.0,
+    "top_tier_min_listeners": 250000,
+    # The mirror guard: a track in the compilation's own top band (by the
+    # cross-artist raw blend) floors at this many stars, so a heavyweight's
+    # deep discography cannot bury their genuine hit. 0 disables it.
+    "standout_floor_percentile": 0.10,
+    "standout_floor_stars": 4,
 }
 
 
@@ -793,6 +803,10 @@ def get_compilation_online_catalogue_config(config: dict | None = None) -> dict[
         "rank_percentile_3star",
         "rank_percentile_2star",
         "min_catalogue_size",
+        "top_tier_min_score",
+        "top_tier_min_listeners",
+        "standout_floor_percentile",
+        "standout_floor_stars",
     ):
         try:
             out[key] = float(rules.get(key, _DEFAULT_COMPILATION_ONLINE_CATALOGUE[key]))

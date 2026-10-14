@@ -1183,6 +1183,7 @@ def _assign_stars(
     is_live_album: bool = False,
     source_unusable: bool = False,
     cohort_scores: list[float] | None = None,
+    compilation_raw_scores: list[float] | None = None,
 ) -> int:
     """Assign 1-5 star rating to a single track.
 
@@ -1515,6 +1516,92 @@ def _assign_stars(
                 track["_compilation_artist_z"] = None
 
         track["_compilation_catalogue_size"] = len(valid_catalogue_scores)
+
+        # ------------------------------------------------------------------
+        # ⭐ TWO ABSOLUTE GUARDS ON THE COMPILATION TIER.
+        #
+        # The artist-catalogue percentile above is SCALE-FREE by design, and
+        # that is its weakness on a compilation: "#1 of 9 songs" is 5★ whether
+        # the artist has a million listeners or 713. Reported on an 81-track
+        # playlist compilation — "devil may cry" (713 LF, #3/171) and "type
+        # shit" (1.2k LF, #1/9) took 5★ while Deftones (401.2k LF, #58/187)
+        # and Korn (53.6k LF) were buried at 3★/1★. Both guards below need an
+        # ABSOLUTE view, which the percentile alone cannot provide.
+        # ------------------------------------------------------------------
+        try:
+            from helpers.config_helpers import get_compilation_online_catalogue_config
+            _tier_rules = get_compilation_online_catalogue_config()
+        except Exception as exc:
+            logger.debug("Compilation tier config read failed", error=str(exc))
+            _tier_rules = {}
+
+        # (a) THE TOP-TIER GATE: a compilation's 5★ must ALSO clear an absolute
+        # bar, because "most popular song for this artist" on a tiny catalogue
+        # is not the same claim as "a hit". The artist's own catalogue still
+        # decides everything BELOW the top tier, and a strong absolute score
+        # still reaches 5★ — this only stops the scale-free #1-of-9 promotion.
+        try:
+            _min_score = float(_tier_rules.get("top_tier_min_score") or 0.0)
+            _min_listeners = float(_tier_rules.get("top_tier_min_listeners") or 0.0)
+        except (TypeError, ValueError):
+            _min_score, _min_listeners = 0.0, 0.0
+
+        if comp_stars >= 5 and (_min_score > 0 or _min_listeners > 0):
+            _clears_absolute = (
+                (_min_score > 0 and score >= _min_score)
+                or (_min_listeners > 0 and raw_lf >= _min_listeners)
+            )
+            if not _clears_absolute:
+                comp_stars = 4
+                track["_compilation_top_tier_gated"] = True
+                logger.info(
+                    "Compilation 5★ gated — absolute popularity below the bar",
+                    title=track.get("title"),
+                    artist=_compilation_track_artist(track),
+                    score=round(float(score or 0), 1),
+                    lastfm_listeners=int(raw_lf),
+                    min_score=_min_score,
+                    min_listeners=int(_min_listeners),
+                )
+
+        # (b) THE COMPILATION-STANDOUT FLOOR: the mirror image. A heavyweight's
+        # deep discography buries their GENUINE hit — the same track that leads
+        # this compilation by every cross-artist measure sits at #159/190 for
+        # its artist. The compilation's own raw distribution IS cross-artist
+        # comparable (that is what ``raw_score`` is for), so a track in its top
+        # band is a standout HERE and floors at 4★. Never 5★: the artist
+        # catalogue keeps ownership of the top tier, so the floor lifts a
+        # buried hit without flattening the album.
+        try:
+            _floor_pct = float(_tier_rules.get("standout_floor_percentile") or 0.0)
+            _floor_stars = int(_tier_rules.get("standout_floor_stars") or 0)
+        except (TypeError, ValueError):
+            _floor_pct, _floor_stars = 0.0, 0
+
+        if (
+            _floor_pct > 0
+            and 1 <= _floor_stars <= 5
+            and comp_stars < _floor_stars
+            and compilation_raw_scores
+        ):
+            _valid_raw = [float(v) for v in compilation_raw_scores if float(v or 0) > 0]
+            if len(_valid_raw) >= 5:
+                _track_raw = float(track.get("_raw_combined") or 0) or float(score or 0)
+                if _track_raw > 0:
+                    _above = sum(1 for v in _valid_raw if v > _track_raw)
+                    _rank_pct = (_above + 1) / len(_valid_raw)
+                    if _rank_pct <= _floor_pct:
+                        _previous_stars = comp_stars
+                        comp_stars = _floor_stars
+                        track["_compilation_standout_floor"] = _floor_stars
+                        logger.info(
+                            "Compilation standout floored — top of the compilation, buried in the artist catalogue",
+                            title=track.get("title"),
+                            artist=_compilation_track_artist(track),
+                            raw=round(_track_raw, 1),
+                            rank_pct=round(_rank_pct, 4),
+                            stars=f"{_previous_stars}★ → {_floor_stars}★",
+                        )
 
         if is_live:
             comp_stars = max(1, comp_stars - 1)
@@ -3704,8 +3791,20 @@ def post_album_star_ratings(
         # against ITS OWN artist's catalogue, not the compilation's shared
         # pool (which for a "Various Artists" release carries no meaningful
         # per-artist signal at all).
-        compilation_track_artist_scores: dict[str, list[float]] = {}
+        #: The compilation's OWN cross-artist distribution, from the PRE-REMAP
+        #: blend. ``album_scores`` cannot serve this: for a compilation every
+        #: track's ``popularity_score`` has already been remapped onto its own
+        #: artist's catalogue (``_apply_track_artist_relative_normalization``),
+        #: so those values are no longer comparable across artists. The raw
+        #: blend is, and that is what the standout floor ranks against.
+        compilation_raw_scores: list[float] = []
         if is_compilation:
+            compilation_track_artist_scores = _build_compilation_track_artist_scores(album_results)
+            compilation_raw_scores = [
+                float(r.get("_raw_combined") or 0)
+                for r in album_results
+                if float(r.get("_raw_combined") or 0) > 0
+            ]
             compilation_track_artist_scores = _build_compilation_track_artist_scores(album_results)
 
         _stored_stars: dict[str, int] = {}
@@ -3818,6 +3917,7 @@ def post_album_star_ratings(
                         str(track.get("track_id") or "").strip() in _lb_unusable_ids
                     ),
                     cohort_scores=_lb_cohort_scores,
+                    compilation_raw_scores=compilation_raw_scores,
                 )
             except Exception as exc:
                 track_id = str(track.get("track_id") or "").strip()
