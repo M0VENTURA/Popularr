@@ -2789,7 +2789,20 @@ def run_scan(
                             if not _t.get("title"):
                                 continue
                             _key = normalize_for_aggregation(_t["title"])
-                            _entry = _album_lb_by_title.get(_key)
+                            # ⭐ The per-ROW alias FIRST (mirroring
+                            # ``_build_album_recording_batch``): it names THIS
+                            # row's recording. Reading the title key alone gave
+                            # every same-titled row one version's identity —
+                            # measured on "MMXX - Hypa Hypa Edition", where the
+                            # release lists eight "Hypa Hypa" tracks (seven
+                            # sharing the plain title) and every one of them
+                            # read whichever version the loop reached LAST
+                            # (186 listens, one recording).
+                            _alias_key = track_identity_key(
+                                _key, _t.get("disc_number"), _t.get("track_number")
+                            )
+                            _row_entry = _album_lb_by_title.get(_alias_key)
+                            _entry = _row_entry or _album_lb_by_title.get(_key)
                             _cur = prefetched_popularity.setdefault(_key, {})
 
                             # IDENTITY first, and INDEPENDENT of the listen count.
@@ -2806,6 +2819,19 @@ def run_scan(
                             if _entry and _entry.get("recording_mbid"):
                                 _cur["recording_mbid"] = _entry.get("recording_mbid")
                                 _cur["release_track_title"] = _entry.get("release_track_title") or ""
+                                if _row_entry:
+                                    # Mirror the row's identity into its OWN
+                                    # slot as well. A title-keyed slot cannot
+                                    # hold one row's identity without handing
+                                    # it to every same-titled sibling, and the
+                                    # batch builder reads the alias FIRST — so
+                                    # without this the per-row answer the
+                                    # album-tracklist pass just resolved would
+                                    # never reach the track.
+                                    _row = prefetched_popularity.setdefault(_alias_key, {})
+                                    _row["recording_mbid"] = _entry.get("recording_mbid")
+                                    _row["release_track_title"] = _entry.get("release_track_title") or ""
+                                    _row["length_verified"] = bool(_entry.get("length_verified"))
                             elif _cur.get("source") == "album_tracklist":
                                 # ⭐ The fresh pass has NO identity for this row
                                 # (its release no longer corroborates this
@@ -2848,10 +2874,20 @@ def run_scan(
                                     _lb_won = "recording-global"
                                 _cur["_album_tracklist"] = True
                                 _cur["source"] = "album_tracklist"
+                                # Show the ROW's own count when the per-row alias
+                                # answered: the title slot is shared by every
+                                # same-titled row, so printing it made eight
+                                # different versions log the same number.
+                                _shown_listens = (
+                                    int(_row_entry.get("listenbrainz_listens") or 0)
+                                    if _row_entry
+                                    else int(_cur["listenbrainz_listens"] or 0)
+                                )
                                 log_unified(
                                     f"[scan_runner] Album-tracklist LB match for '{_t.get('title')}' "
-                                    f"({artist} - {album}): {_cur['listenbrainz_listens']} listens "
-                                    f"(release={_rel_listens}, kept={_lb_won})"
+                                    f"({artist} - {album}): {_shown_listens} listens "
+                                    f"(release={_rel_listens}, kept={_lb_won}, "
+                                    f"via={'row-alias' if _row_entry else 'title'})"
                                 )
                             if _album_release_mbid:
                                 if _entry and _entry.get("recording_mbid"):

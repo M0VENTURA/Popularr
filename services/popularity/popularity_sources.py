@@ -358,6 +358,87 @@ def album_recording_batch_key(
     return f"{base}::{disc_i}::{track_i}"
 
 
+#: Join words inside an artist credit ("A feat. B", "A & B", "A with B").
+#: They say "another artist is here", not WHO that artist is, so they are
+#: removed before two credits are compared.
+_CREDIT_JOIN_TOKENS = frozenset({
+    "feat", "feats", "featured", "featuring", "ft", "with", "vs", "versus",
+    "and", "the", "x",
+})
+
+#: Separators between the artists of one credit. ``ARTIST_JOIN_RE`` (the
+#: provider-lookup splitter) covers "&/and/x/+/×"; MusicBrainz also joins
+#: credits with commas and the "feat." family, and those spellings must
+#: compare EQUAL ("Electric Callboy feat. Sasha" == "Electric Callboy, Sasha").
+_CREDIT_SPLIT_RE = re.compile(
+    r"\s*(?:,|&|/|\+|×|\band\b|\bwith\b|\bvs\.?\b|\bversus\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b)\s*",
+    re.IGNORECASE,
+)
+
+
+def _resolve_credit_alias(part: str) -> str:
+    """Resolve one credit part through the artist-alias map; NEVER raise.
+
+    A credit under a band's FORMER name ("Eskimo Callboy") and the current
+    one ("Electric Callboy") are the same artist, and the alias map is where
+    the app records that. Failures degrade to the input, so a broken alias
+    map can only cost a match, never break the scan.
+    """
+    if not part:
+        return part
+    try:
+        from services.metadata.artist_alias_service import resolve_artist_alias
+
+        return resolve_artist_alias(part) or part
+    except Exception:
+        return part
+
+
+def _release_credit_text(track: dict[str, Any]) -> str:
+    """The release row's artist credit as ONE display string.
+
+    MusicBrainz/LB spell a multi-artist credit as a list of names plus
+    ``joinphrase`` separators, so joining them reproduces exactly what the
+    release shows: "Electric Callboy, Saltatio Mortis".
+    """
+    parts: list[str] = []
+    for credit in track.get("artist-credit") or []:
+        if not isinstance(credit, dict):
+            continue
+        name = str(credit.get("name") or "").strip()
+        if not name:
+            artist = credit.get("artist")
+            if isinstance(artist, dict):
+                name = str(artist.get("name") or "").strip()
+        if name:
+            parts.append(name + str(credit.get("joinphrase") or ""))
+    return "".join(parts).strip()
+
+
+def _credit_identity_tokens(value: str) -> frozenset[str]:
+    """Identity tokens of an artist credit, alias-resolved.
+
+    Splits a multi-artist credit on its join separators, resolves EVERY part
+    through the artist-alias map (so a credit under a band's former name
+    compares equal to the current one), then drops the join words.
+
+    Two credits name the same artists exactly when their token sets are
+    EQUAL. ``names_match``'s subset logic is deliberately NOT used here:
+    "Electric Callboy" IS a subset of "Electric Callboy, Saltatio Mortis",
+    and treating those as the same artist is precisely the ambiguity the
+    artist pass exists to resolve.
+    """
+    tokens: set[str] = set()
+    for part in _CREDIT_SPLIT_RE.split(str(value or "")):
+        part = _resolve_credit_alias(part.strip())
+        if not part:
+            continue
+        for token in re.split(r"[^0-9a-z]+", part.casefold()):
+            if len(token) > 1 and token not in _CREDIT_JOIN_TOKENS:
+                tokens.add(token)
+    return frozenset(tokens)
+
+
 def _index_release_tracklist(
     media: list[Any],
     titles_to_mbids: dict[str, dict[str, Any]],
@@ -379,6 +460,17 @@ def _index_release_tracklist(
             rec = trk.get("recording") or {}
             rec_mbid = str(rec.get("id") or trk.get("recording_mbid") or "").strip()
             key = normalize_for_aggregation(title)
+            credit = _release_credit_text(trk)
+
+            try:
+                pos = int(trk.get("position") or trk.get("number") or 0)
+            except (TypeError, ValueError):
+                pos = 0
+
+            try:
+                disc_i = int(disc) if disc not in (None, "") else 1
+            except (TypeError, ValueError):
+                disc_i = 1
 
             entry = titles_to_mbids.setdefault(key, {
                 "title": title,
@@ -392,15 +484,21 @@ def _index_release_tracklist(
                 entry["mbids"].append(rec_mbid)
                 recording_mbids.append(rec_mbid)
 
-            try:
-                pos = int(trk.get("position") or trk.get("number") or 0)
-            except (TypeError, ValueError):
-                pos = 0
-
-            try:
-                disc_i = int(disc) if disc not in (None, "") else 1
-            except (TypeError, ValueError):
-                disc_i = 1
+            # Per-ROW detail for a title the release lists more than once.
+            # The artist credit is the release's OWN way of telling those rows
+            # apart — "MMXX - Hypa Hypa Edition" lists eight "Hypa Hypa"
+            # tracks (seven sharing the plain title), separated only by who
+            # performs each one — and the local library carries the
+            # same credit in the track's ``artist`` field, so the two can be
+            # compared directly instead of guessing by position.
+            entry.setdefault("rows", []).append({
+                "title": title,
+                "mbid": rec_mbid,
+                "credit": credit,
+                "length_ms": trk.get("length"),
+                "disc": disc_i,
+                "position": pos,
+            })
 
             if pos > 0:
                 pos_key = (disc_i, pos)
@@ -416,6 +514,8 @@ def _index_release_tracklist(
                 })
                 if rec_mbid:
                     pos_entry["mbids"].append(rec_mbid)
+                if credit:
+                    pos_entry.setdefault("credit", credit)
 
 
 def _position_title_corroborates(local_title: str, release_title: str) -> bool:
@@ -519,7 +619,12 @@ def get_listenbrainz_album_tracklist_with_release(
         try:
             from services.enrichment.musicbrainz_service import get_shared_mb_client
             mb = get_shared_mb_client()
-            release = mb.get_release(release_mbid, inc="recordings")
+            # ``artist-credits`` is REQUIRED, not decoration: the release's own
+            # credit is what separates same-titled rows (eight "Hypa Hypa"
+            # versions on one album), and this MB path is the one that actually
+            # answers — the LB release metadata endpoint 404s, so the fallback
+            # below is the NORMAL path, not the exception.
+            release = mb.get_release(release_mbid, inc="recordings+artist-credits")
             _index_release_tracklist(release.get("media") or [], titles_to_mbids, position_index, recording_mbids)
             _tracklist_source = "musicbrainz"
         except Exception as exc:
@@ -601,6 +706,118 @@ def get_listenbrainz_album_tracklist_with_release(
         if _k:
             _local_title_counts[_k] += 1
 
+    # ------------------------------------------------------------------
+    # Artist disambiguation: WHICH of several same-titled release rows is
+    # this local row?
+    #
+    # A normalised title cannot separate the release's eight "Hypa Hypa"
+    # tracks — seven share the plain title (the original, then Saltatio
+    # Mortis, The BossHoss, 257ers, Sasha, We Butter the Bread With Butter
+    # and Axel One), the eighth carries the Gestört aber GeiL remix title.
+    # The RELEASE tells them apart by artist credit —
+    # and the library carries the same credit in the track's own ``artist``
+    # field — so an unambiguous artist match identifies the row outright,
+    # before position is consulted at all.
+    #
+    # Deliberately conservative, in three ways:
+    #   * fires ONLY for a title the release lists more than once (a unique
+    #     title is already answered, better, by the title pass);
+    #   * requires EXACT credit-token equality — the subset logic
+    #     ``names_match`` uses would call a plain "Electric Callboy" credit a
+    #     match for every featured version;
+    #   * refuses when the local credit is a strict SUBSET of a candidate it
+    #     did NOT match: a plainly tagged "Electric Callboy" is a prefix of
+    #     "Electric Callboy, Saltatio Mortis", so it could be that row's short
+    #     form. That ambiguity is left to position + duration.
+    # ------------------------------------------------------------------
+    _artist_identified: set[str] = set()
+    for t in tracks:
+        local_title = t.get("title")
+        if not local_title:
+            continue
+        local_key = normalize_for_aggregation(local_title)
+        if not local_key:
+            continue
+
+        candidates = (titles_to_mbids.get(local_key) or {}).get("rows") or []
+        if len(candidates) < 2:
+            continue
+
+        local_artist = str(t.get("artist") or "").strip()
+        if not local_artist:
+            continue
+        local_tokens = _credit_identity_tokens(local_artist)
+        if not local_tokens:
+            continue
+
+        matches = [
+            row for row in candidates
+            if _credit_identity_tokens(row.get("credit")) == local_tokens
+        ]
+        if len(matches) != 1:
+            continue
+        if any(
+            local_tokens < _credit_identity_tokens(row.get("credit"))
+            for row in candidates
+            if row is not matches[0]
+        ):
+            continue
+
+        row = matches[0]
+        row_mbid = str(row.get("mbid") or "").strip()
+        if not row_mbid:
+            continue
+
+        try:
+            row_disc = int(str(t.get("disc_number") or 1).split("/")[0].strip() or 1)
+        except (TypeError, ValueError):
+            row_disc = 1
+        try:
+            row_pos = int(str(t.get("track_number") or "").split("/")[0].strip() or 0)
+        except (TypeError, ValueError):
+            row_pos = 0
+        # Without a position the alias IS the plain title key, and writing that
+        # would hand this row's answer to every same-titled sibling.
+        if row_pos <= 0:
+            continue
+
+        row_total, row_users = _sum_counts([row_mbid])
+        row_len_ms = row.get("length_ms")
+        try:
+            local_dur = float(t.get("duration") or 0)
+        except (TypeError, ValueError):
+            local_dur = 0.0
+        # Same MEANING as the position pass's flag: True only when BOTH
+        # lengths were known AND agreed. The credit identified the row, but
+        # the release TITLE it carries may only be auto-applied when the
+        # length corroborates it too.
+        _length_agrees = bool(
+            row_len_ms and local_dur > 0
+            and abs(int(row_len_ms) - local_dur * 1000) <= 5000
+        )
+
+        _alias_key = track_identity_key(local_key, row_disc, row_pos)
+        out[_alias_key] = {
+            "listenbrainz_listens": row_total,
+            "listenbrainz_users": row_users,
+            "recording_mbid": row_mbid,
+            "release_track_title": str(row.get("title") or "").strip(),
+            "local_disc_number": row_disc,
+            "local_track_number": row_pos,
+            "length_verified": _length_agrees,
+            "matched_by": "artist",
+        }
+        _artist_identified.add(_alias_key)
+        logger.info(
+            "Artist-matched track to release row",
+            local_title=local_title,
+            artist=local_artist,
+            release_credit=str(row.get("credit") or ""),
+            disc=row_disc,
+            track=row_pos,
+            listens=row_total,
+        )
+
     for t in tracks:
         local_title = t.get("title")
         if not local_title:
@@ -649,6 +866,10 @@ def get_listenbrainz_album_tracklist_with_release(
         pos_key = (local_disc, local_pos)
         if pos_key in used_pos_keys:
             continue
+        # An artist-identified row is DONE: the release's own credit named it,
+        # which is stronger evidence than a position guess.
+        if track_identity_key(local_key, local_disc, local_pos) in _artist_identified:
+            continue
 
         pos_entry = position_index.get(pos_key)
         if not pos_entry or not pos_entry["mbids"]:
@@ -693,7 +914,7 @@ def get_listenbrainz_album_tracklist_with_release(
         # album's top tracks.
         total, users = _sum_counts(pos_entry["mbids"])
 
-        out[local_key] = {
+        _position_entry = {
             "listenbrainz_listens": total,
             "listenbrainz_users": users,
             "recording_mbid": pos_entry["mbids"][0],
@@ -704,6 +925,16 @@ def get_listenbrainz_album_tracklist_with_release(
             # its release title as confirmed.
             "length_verified": bool(mb_len_ms and local_dur > 0),
         }
+        # ⭐ A SHARED local title cannot hold one row's answer. Eight local
+        # rows called "Hypa Hypa" each overwrote this slot, so the LAST one
+        # processed spoke for all of them — measured as every version
+        # reporting the same 186 listens and the same recording. The
+        # position-qualified alias emitted below answers those rows; the
+        # title key keeps whatever the TITLE pass resolved (the release's
+        # first row with that title), which stays the deterministic answer
+        # for a caller that has no position.
+        if _local_title_counts.get(local_key, 0) <= 1:
+            out[local_key] = _position_entry
         used_pos_keys.add(pos_key)
         logger.info(
             "Position-matched track to release",
@@ -780,6 +1011,12 @@ def get_listenbrainz_album_tracklist_with_release(
             row_disc = int(str(t.get("disc_number") or 1).split("/")[0].strip() or 1)
         except (TypeError, ValueError):
             row_disc = 1
+
+        # An artist-identified row already has its answer (see the artist pass
+        # above) — a position guess must not overwrite the release's own
+        # credit match.
+        if track_identity_key(local_key, row_disc, row_pos) in _artist_identified:
+            continue
 
         row_pos_entry = position_index.get((row_disc, row_pos))
         if not row_pos_entry or not row_pos_entry["mbids"]:
