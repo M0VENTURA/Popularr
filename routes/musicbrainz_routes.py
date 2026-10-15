@@ -1120,11 +1120,24 @@ async def api_musicbrainz_release_picker() -> Any:
     artist = (request.args.get("artist") or "").strip()
     album = (request.args.get("album") or "").strip()
     # Two callers share this slideover and want DIFFERENT actions off the same
-    # list: the queue flow browses an edition to download, and the album page's
-    # Identifiers & Linking block browses an edition to LINK to.  Only the
-    # second one needs a button — the queue path auto-selects (one release, or
-    # every edition sharing a track count) and is driven by the caller.
-    select_mode = (request.args.get("mode") or "").strip().lower() == "select"
+    # list: the queue flow browses an edition to DOWNLOAD, and the album page's
+    # Identifiers & Linking block browses an edition to LINK to.
+    #
+    # ⚠️ BOTH need a button, and the queue one was missing. The comment here used
+    # to claim "the queue path auto-selects (one release, or every edition
+    # sharing a track count) and is driven by the caller" — which was never true
+    # for the general case. The JSON probe only auto-queues a group with exactly
+    # ONE release, so any group with genuinely different editions opened this
+    # flyout with the text "Select the exact version you want to queue:" and
+    # NOTHING to click but Preview Tracks. That is the reported "it comes up with
+    # an option to select a version, but the version can't be selected".
+    #
+    # ``mode=queue`` renders a button that queues THAT release; ``mode=select``
+    # keeps the album page's link button (its handler lives on that page, so the
+    # two actions must stay distinguishable).
+    mode = (request.args.get("mode") or "").strip().lower()
+    select_mode = mode == "select"
+    queue_mode = mode == "queue"
     if not rg_id:
         return "<div class='alert alert-danger m-3'>Missing Release Group ID</div>", 400
 
@@ -1206,6 +1219,17 @@ async def api_musicbrainz_release_picker() -> Any:
                           data-release-id="{{ rel.id }}" data-release-title="{{ rel.title }}">
                     <i class="bi bi-check2-circle"></i> Use this release
                   </button>
+                  {% elif queue_mode %}
+                  {# Server-rendered, so it cannot be bound at load time — main.js
+                     delegates from the document, the same way album_detail.js
+                     handles .js-pick-release. The artist rides along because the
+                     queue POST needs it and the slide-over has no other source. #}
+                  <button type="button" class="btn btn-sm btn-success ms-auto js-queue-release"
+                          data-release-id="{{ rel.id }}"
+                          data-release-title="{{ rel.title }}"
+                          data-release-artist="{{ artist }}">
+                    <i class="bi bi-download"></i> Queue this version
+                  </button>
                   {% endif %}
                       {% if rel.edition_count > 1 %}
                       <span class="badge bg-secondary extra-small flex-shrink-0 me-auto ms-2" title="Editions with this same track count were folded into one choice">
@@ -1224,6 +1248,7 @@ async def api_musicbrainz_release_picker() -> Any:
         album=album,
         artist=artist,
         select_mode=select_mode,
+        queue_mode=queue_mode,
     )
 
 

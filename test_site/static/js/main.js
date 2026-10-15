@@ -475,7 +475,7 @@
 
     releasePickerOnQueued = typeof onQueued === 'function' ? onQueued : null;
 
-    const url = '/api/musicbrainz/release-picker?rg_id=' + encodeURIComponent(releaseGroupId) +
+    const url = '/api/musicbrainz/release-picker?mode=queue&rg_id=' + encodeURIComponent(releaseGroupId) +
       '&artist=' + encodeURIComponent(artist || '') +
       '&album=' + encodeURIComponent(title || '');
 
@@ -582,6 +582,48 @@
         el.innerHTML = '<div class="text-danger small">Failed to load tracklist.</div>';
       });
   }
+
+  // ── Queue a chosen release from the "Select Version" flyout ─────────────
+  //
+  // The flyout is SERVER-RENDERED, so its buttons cannot be bound when the page
+  // loads — delegate from the document, the same way album.js handles
+  // .js-pick-release.
+  //
+  // ⚠️ WHY THIS EXISTS. ``openReleasePicker`` auto-queues only a group whose
+  // editions all share a track count (or a group with exactly one release).
+  // Every group with genuinely different editions opened the flyout with the
+  // text "Select the exact version you want to queue:" and no button at all, so
+  // the version could not be selected — the reported bug. The button is rendered
+  // by ``mode=queue``; this is what makes it do something.
+  //
+  // Delegated from ``document`` rather than the slide-over so it works whichever
+  // page opened the flyout (unified search, downloads monitor, upcoming
+  // releases, artist or album pages) — those do not all load the same scripts.
+  document.addEventListener('click', (event) => {
+    const btn = event.target && event.target.closest
+      ? event.target.closest('.js-queue-release')
+      : null;
+    if (!btn) return;
+
+    const releaseId = btn.getAttribute('data-release-id') || '';
+    if (!releaseId) return;
+
+    // Disable while the POST is in flight: the queue round trip is seconds long
+    // and a second click would queue the release twice.
+    btn.disabled = true;
+    Promise.resolve(
+      queueSpecificRelease(
+        releaseId,
+        btn.getAttribute('data-release-title') || '',
+        btn.getAttribute('data-release-artist') || ''
+      )
+    ).finally(() => {
+      // ``queueSpecificRelease`` hides the slide-over on success, so re-enabling
+      // a detached button is harmless; on FAILURE the flyout stays open and the
+      // button must come back or the user cannot retry.
+      btn.disabled = false;
+    });
+  });
 
   /**
    * Queue a release via Soulseek, for pages that do not load downloads.js

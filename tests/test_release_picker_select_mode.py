@@ -18,8 +18,16 @@ WHAT WAS BUILT (backing into the existing modal)
 * ``GET /api/musicbrainz/release-picker`` gained **``mode=select``**. The same
   slideover the queue already uses, the same ``browse_releases_for_group``
   payload, the same edition-grouping — plus a *Use this release* button on each
-  card. Queue mode is untouched: it auto-selects (one release, or every edition
-  sharing a track count) and is driven by the caller, so it needs no button.
+  card.
+
+  ⚠️ This docstring used to add "Queue mode is untouched: it auto-selects (one
+  release, or every edition sharing a track count) and is driven by the caller,
+  so it needs no button." **That was wrong**, and it is what let the queue flow
+  ship as a dead end: the JSON probe auto-queues only a group with exactly ONE
+  release, so any group with genuinely different editions opened the flyout
+  showing "Select the exact version you want to queue:" with nothing to click.
+  Queue mode now renders its own button (``mode=queue``), covered by
+  ``test_release_picker_queue_mode.py``.
 * ``openAlbumReleaseSelector()`` on the album page (both trees) opens that
   slideover, preferring ``#album_release_group_mbid`` and falling back to
   ``#album_mbid`` — the endpoint resolves a concrete release to its own group
@@ -83,7 +91,7 @@ def _release(**overrides) -> dict:
     return row
 
 
-def _render(select_mode: bool, releases: list[dict] | None = None) -> str:
+def _render(select_mode: bool, releases: list[dict] | None = None, *, queue_mode: bool = False) -> str:
     from jinja2 import Environment
 
     template = Environment().from_string(_inline_picker_template())
@@ -92,6 +100,7 @@ def _render(select_mode: bool, releases: list[dict] | None = None) -> str:
         album="Fingerprints",
         artist="Powderfinger",
         select_mode=select_mode,
+        queue_mode=queue_mode,
     )
 
 
@@ -105,7 +114,7 @@ class TestThePickerHasASelectMode:
         assert 'request.args.get("mode")' in _route_source(), (
             "the route must accept mode=select"
         )
-        assert 'select_mode = (request.args.get("mode")' in _route_source()
+        assert 'select_mode = mode == "select"' in _route_source()
 
     def test_the_select_button_is_rendered_only_in_select_mode(self):
         html = _render(select_mode=True)
@@ -113,11 +122,31 @@ class TestThePickerHasASelectMode:
         assert 'data-release-id="' in html
         assert "Use this release" in html
 
-    def test_queue_mode_is_untouched(self):
-        """CONTROL — the queue flow must not grow a button it never asked for."""
-        html = _render(select_mode=False)
+    def test_the_QUEUE_button_is_not_rendered_in_select_mode(self):
+        """CONTROL — the two modes offer different ACTIONS, so each must render
+        exactly one of them. The link button writes an input; the queue button
+        starts a download, and offering both would be a footgun."""
+        html = _render(select_mode=True)
+        assert "js-queue-release" not in html
+        assert "Queue this version" not in html
+
+    def test_the_LINK_button_is_not_rendered_in_queue_mode(self):
+        """CONTROL — the mirror of the above, and the assertion that replaced a
+        stale premise. This used to be called ``test_queue_mode_is_untouched``
+        and reasoned "the queue path auto-selects, so it needs no button" — but
+        the probe only auto-queues a group with ONE release, so the flyout was a
+        dead end for every group with real editions. Queue mode needs a button;
+        what it must NOT have is the LINK one, whose handler lives on the album
+        page and would do nothing here."""
+        html = _render(select_mode=False, queue_mode=True)
         assert "js-pick-release" not in html
         assert "Use this release" not in html
+
+    def test_a_plain_open_renders_no_action_at_all(self):
+        """CONTROL — a caller that asks for neither mode gets neither button."""
+        html = _render(select_mode=False)
+        assert "js-pick-release" not in html
+        assert "js-queue-release" not in html
 
     def test_the_header_says_which_action_it_is(self):
         assert "Select the version this album should be linked to" in _render(True)
