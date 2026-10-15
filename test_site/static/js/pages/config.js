@@ -774,7 +774,12 @@
               }
             });
             return synonyms;
-          })()
+          })(),
+          // The canonical selection engine. Carried through Object.assign so any
+          // key the page does not render (keep_together / conditional_keep, which
+          // are list-shaped and awkward in a form) survives a save instead of
+          // being dropped.
+          selection: collectGenreSelectionConfig()
         }
       ),
       api_integrations: {
@@ -1810,6 +1815,189 @@
     });
   }
 
+  // ── Genre selection engine ────────────────────────────────────────────
+
+  // The canonical-vocabulary engine's settings. Kept separate from the legacy
+  // "Source Weights" block because the two engines use different models: the
+  // legacy values were tuned for vote counting, these follow provider TRUST.
+  function collectGenreSelectionConfig() {
+    const entityWeights = {
+      track: parseFloat(getValue('genre_entity_track', '1.00')) || 0,
+      album: parseFloat(getValue('genre_entity_album', '0.70')) || 0,
+      artist: parseFloat(getValue('genre_entity_artist', '0.35')) || 0
+    };
+
+    const sourceWeights = {};
+    document.querySelectorAll('[id^="genre_sel_weight_"]').forEach(el => {
+      const key = el.id.replace('genre_sel_weight_', '');
+      const value = parseFloat(el.value);
+      if (key && !Number.isNaN(value)) sourceWeights[key] = value;
+    });
+
+    return {
+      enabled: getChecked('genre_selection_enabled', true),
+      max_genres: parseInt(getValue('genre_selection_max', '3')) || 3,
+      family_slot_limit: parseInt(getValue('genre_selection_family_limit', '3')) || 3,
+      entity_weights: entityWeights,
+      source_weights: sourceWeights,
+      thresholds: {
+        first: parseFloat(getValue('genre_threshold_first', '0.60')) || 0,
+        second: parseFloat(getValue('genre_threshold_second', '0.45')) || 0,
+        third: parseFloat(getValue('genre_threshold_third', '0.35')) || 0
+      },
+      relative_floor: parseFloat(getValue('genre_selection_relative', '0.45')) || 0
+    };
+  }
+
+  // ── Genre vocabulary ──────────────────────────────────────────────────
+
+  // The vocabulary is a JSON DATA FILE in the config volume, not part of
+  // config.yaml, so it has its own load/save/validate/reset endpoints. A save
+  // is refused by the server when the JSON is invalid — a broken vocabulary
+  // would silently produce no genres at all during a scan.
+  function setGenreVocabStatus(message, kind) {
+    const el = document.getElementById('genre_vocab_status');
+    if (!el) return;
+    el.textContent = message || '';
+    el.className = kind === 'error' ? 'text-danger'
+      : kind === 'success' ? 'text-success'
+      : 'text-muted';
+  }
+
+  function renderGenreVocabProblems(data) {
+    const box = document.getElementById('genre_vocab_problems');
+    if (!box) return;
+    const problems = (data && data.problems) || [];
+    if (!problems.length) {
+      box.innerHTML = '';
+      return;
+    }
+    const items = problems.map(p => `<li>${String(p).replace(/</g, '&lt;')}</li>`).join('');
+    const more = (data.problem_count || problems.length) > problems.length
+      ? `<div class="small text-muted">…and ${data.problem_count - problems.length} more</div>`
+      : '';
+    box.innerHTML = `<div class="alert alert-danger py-2 mb-0"><strong>Not saved — the vocabulary is invalid:</strong>`
+      + `<ul class="mb-0 ps-3 mt-1 small">${items}</ul>${more}</div>`;
+  }
+
+  function loadGenreVocabulary() {
+    setGenreVocabStatus('Loading…');
+    renderGenreVocabProblems({ problems: [] });
+    fetch('/api/maintenance/genre-vocabulary')
+      .then(r => {
+        const ct = r.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) throw new Error('Server returned non-JSON response');
+        return r.json();
+      })
+      .then(data => {
+        if (data.error) throw new Error(data.error);
+        const text = document.getElementById('genre_vocab_text');
+        if (text) text.value = data.text || '';
+        const source = document.getElementById('genre_vocab_source');
+        if (source) {
+          source.textContent = `${data.genres} genres, ${data.moods} moods, ${data.countries} countries, `
+            + `${data.regions} regions — from ${data.is_override ? 'your edited copy' : 'the shipped default'} (${data.source_path})`;
+        }
+        setGenreVocabStatus('Loaded', 'success');
+      })
+      .catch(e => setGenreVocabStatus('Load failed: ' + e.message, 'error'));
+  }
+
+  function validateGenreVocabulary() {
+    const text = (document.getElementById('genre_vocab_text') || {}).value || '';
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      renderGenreVocabProblems({ problems: ['invalid JSON: ' + e.message], problem_count: 1 });
+      setGenreVocabStatus('Invalid JSON', 'error');
+      return;
+    }
+    const genres = Array.isArray(parsed.genres) ? parsed.genres : [];
+    const ids = new Set();
+    const problems = [];
+    if (!genres.length) problems.push("'genres' must be a non-empty list");
+    genres.forEach((g, i) => {
+      if (!g || typeof g !== 'object') { problems.push(`genres[${i}] is not an object`); return; }
+      if (!g.id) problems.push(`genres[${i}] has no id`);
+      else if (ids.has(g.id)) problems.push(`duplicate id '${g.id}'`);
+      else ids.add(g.id);
+      if (!g.display) problems.push(`genre '${g.id || i}' has no display`);
+    });
+    // Parent references need a second pass — a parent may be defined later.
+    genres.forEach(g => {
+      if (g && g.parent && !ids.has(g.parent)) {
+        problems.push(`genre '${g.id}' has parent '${g.parent}', which is not a genre id`);
+      }
+    });
+
+    if (problems.length) {
+      renderGenreVocabProblems({ problems, problem_count: problems.length });
+      setGenreVocabStatus(`${problems.length} problem(s)`, 'error');
+    } else {
+      renderGenreVocabProblems({ problems: [] });
+      setGenreVocabStatus(`${genres.length} genres — looks valid`, 'success');
+    }
+  }
+
+  function saveGenreVocabulary() {
+    const text = (document.getElementById('genre_vocab_text') || {}).value || '';
+    const btn = document.getElementById('genre_vocab_save');
+    const original = btn ? btn.innerHTML : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Saving…';
+    }
+    fetch('/api/maintenance/genre-vocabulary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text })
+    })
+    .then(r => r.json().then(body => ({ ok: r.ok, body })))
+    .then(({ ok, body }) => {
+      if (body.error) throw new Error(body.error);
+      renderGenreVocabProblems(body);
+      if (ok && body.success) {
+        setGenreVocabStatus(`Saved — ${body.genres} genres, ${body.moods} moods`, 'success');
+        showToast('Genre Vocabulary', `Saved ${body.genres} genres and ${body.moods} moods.`, 'success');
+        loadGenreVocabulary();
+      } else {
+        setGenreVocabStatus('Not saved — see the problems above', 'error');
+      }
+    })
+    .catch(e => {
+      setGenreVocabStatus('Save failed: ' + e.message, 'error');
+      showToast('Error', 'Could not save the vocabulary: ' + e.message, 'error');
+    })
+    .finally(() => {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = original;
+      }
+    });
+  }
+
+  function resetGenreVocabulary() {
+    if (!confirm(
+      'Reset the genre vocabulary to the shipped default?\n\n'
+      + 'This DELETES your edited copy. The shipped default is restored, and future '
+      + 'updates to it are picked up again.'
+    )) {
+      return;
+    }
+    fetch('/api/maintenance/genre-vocabulary/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) throw new Error(data.error);
+        showToast('Genre Vocabulary', 'Reset to the shipped default.', 'success');
+        loadGenreVocabulary();
+      })
+      .catch(e => showToast('Error', 'Could not reset the vocabulary: ' + e.message, 'error'));
+  }
+
   // ── Init ──────────────────────────────────────────────────────────────
 
   document.addEventListener('DOMContentLoaded', function () {
@@ -1842,6 +2030,17 @@
     if (ssCancel) ssCancel.addEventListener('click', cancelSafeShutdown);
     const ssRefresh = document.getElementById('safe_shutdown_refresh');
     if (ssRefresh) ssRefresh.addEventListener('click', getSafeShutdownStatus);
+    const vocabLoad = document.getElementById('genre_vocab_load');
+    if (vocabLoad) {
+      vocabLoad.addEventListener('click', loadGenreVocabulary);
+      loadGenreVocabulary();
+    }
+    const vocabValidate = document.getElementById('genre_vocab_validate');
+    if (vocabValidate) vocabValidate.addEventListener('click', validateGenreVocabulary);
+    const vocabSave = document.getElementById('genre_vocab_save');
+    if (vocabSave) vocabSave.addEventListener('click', saveGenreVocabulary);
+    const vocabReset = document.getElementById('genre_vocab_reset');
+    if (vocabReset) vocabReset.addEventListener('click', resetGenreVocabulary);
     getRetrySchedulerStatus();
   });
 

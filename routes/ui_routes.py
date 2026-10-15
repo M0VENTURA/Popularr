@@ -3728,6 +3728,12 @@ def _sanitize_config_sections(config: dict) -> dict:
         "maintenance": ("safe_shutdown",),
         # And again: ``album_save.background`` is the album save's disk phase.
         "album_save": ("background",),
+        # ``genres.selection`` holds nested dicts (source_weights,
+        # entity_weights, thresholds) AND lists (keep_together,
+        # conditional_keep). Without this entry the Config page save coerces the
+        # whole block to ``{}`` and the engine silently falls back to its
+        # defaults — the same trap as playlists.genre_exclusions.
+        "genres": ("weights", "synonyms", "selection"),
     }
     
     for parent, children in nested_children.items():

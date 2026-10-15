@@ -156,24 +156,35 @@ class TestLiveAcousticRegexRestored:
 
 
 class TestAlbumBlendNeverSpreadsTrackAffiliation:
+    """⚠️ Membership is checked CASE-INSENSITIVELY.
+
+    The canonical selection engine (2026-10-15) writes the vocabulary's display
+    name ("Rock") where the legacy engine echoed the source's spelling ("rock").
+    Every consumer lowercases before comparing, so the case is cosmetic and
+    pinning it would pin an implementation detail rather than the rule under
+    test — which is about WHICH tags travel, not how they are cased.
+    """
+
     def test_one_tracks_cover_source_does_not_stamp_the_album(self):
         # musicbrainz column carries "cover" on ONE row of the album.
         out = _album_recommendations_from_row(
             [["[]", '["rock", "cover"]', "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]"]]
         )
-        assert "Cover" not in out, (
+        lowered = {g.lower() for g in out}
+        assert "cover" not in lowered, (
             "the album-wide genre write must not spread one track's cover "
             "affiliation to every track"
         )
-        assert "rock" in out
+        assert "rock" in lowered
 
     def test_one_tracks_acoustic_source_does_not_stamp_the_album(self):
         out = _album_recommendations_from_row(
             [["[]", '["rock", "acoustic"]', "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]"]]
         )
-        assert "Acoustic" not in out
-        assert "Live" not in out
-        assert "rock" in out
+        lowered = {g.lower() for g in out}
+        assert "acoustic" not in lowered
+        assert "live" not in lowered
+        assert "rock" in lowered
 
     def test_christmas_is_still_album_valid(self):
         out = _album_recommendations_from_row(
@@ -183,7 +194,7 @@ class TestAlbumBlendNeverSpreadsTrackAffiliation:
             "a Christmas album IS an album property; the genre-playlist "
             "builder detects it from the stored value"
         )
-        assert "rock" in out
+        assert "rock" in {g.lower() for g in out}
 
 
 class TestAlbumTopGenresInheritanceStripsAffiliation:
@@ -207,11 +218,12 @@ class TestAlbumTopGenresInheritanceStripsAffiliation:
             [{"title": "A", "musicbrainz_genres": '["cover", "nu metal"]'}],
             max_genres=3,
         )
-        assert "cover" not in {g.lower() for g in out}, (
+        lowered = {g.lower() for g in out}
+        assert "cover" not in lowered, (
             "the album-genres inheritance list must not hand a cover "
             "affiliation to every sparse track"
         )
-        assert "nu metal" in out
+        assert "nu metal" in lowered
 
     def test_admin_siblings_are_filtered(self, monkeypatch):
         """Pinned contract: 'cover'/'live' never appear in album top genres."""
@@ -220,6 +232,7 @@ class TestAlbumTopGenresInheritanceStripsAffiliation:
             [{"title": "A", "musicbrainz_genres": '["cover", "live", "nu metal"]'}],
             max_genres=3,
         )
-        assert "nu metal" in out
-        assert "cover" not in {g.lower() for g in out}
-        assert "live" not in {g.lower() for g in out}
+        lowered = {g.lower() for g in out}
+        assert "nu metal" in lowered
+        assert "cover" not in lowered
+        assert "live" not in lowered

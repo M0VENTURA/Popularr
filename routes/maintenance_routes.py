@@ -174,3 +174,84 @@ async def api_album_file_sync_drain() -> Any:
         return jsonify({"error": str(exc)}), 500
 
     return jsonify({"drained": drained, **get_album_file_sync_state()})
+
+
+# =============================================================================
+# GENRE VOCABULARY — the config-volume JSON the Config page edits
+# =============================================================================
+
+@maintenance_bp.route("/api/maintenance/genre-vocabulary", methods=["GET"])
+def api_genre_vocabulary() -> Any:
+    """The active vocabulary's raw JSON, plus where it came from.
+
+    ``is_override`` distinguishes the user's edited copy from the shipped
+    default, which is what the Config page needs to offer a reset honestly.
+    """
+    from services.enrichment.genre_vocabulary import (
+        get_vocabulary,
+        read_override_text,
+    )
+
+    try:
+        vocab = get_vocabulary()
+        return jsonify(
+            {
+                "text": read_override_text(),
+                "source_path": vocab.source_path,
+                "is_override": vocab.is_override,
+                "genres": len(vocab.genres),
+                "moods": len(vocab.moods),
+                "countries": len(vocab.countries),
+                "regions": len(vocab.regions),
+                "attributes": len(vocab.attributes),
+                "errors": list(vocab.errors),
+            }
+        )
+    except Exception as exc:
+        logger.error("Genre vocabulary read failed", error=str(exc), exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
+@maintenance_bp.route("/api/maintenance/genre-vocabulary", methods=["POST"])
+async def api_save_genre_vocabulary() -> Any:
+    """Validate and save the vocabulary the Config page submitted.
+
+    Body: ``{"text": "<json>"}``
+
+    ⚠️ An INVALID vocabulary is refused, not written. The file is read during a
+    scan, and a broken one would silently produce no genres at all — which is far
+    worse than a rejected save that says why. The response lists the problems so
+    they can be fixed in place.
+    """
+    from services.enrichment.genre_vocabulary import save_vocabulary_text
+
+    payload = (await request.get_json(silent=True)) or {}
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"error": "text is required"}), 400
+
+    try:
+        result = save_vocabulary_text(text)
+    except Exception as exc:
+        logger.error("Genre vocabulary save failed", error=str(exc), exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify(result), (200 if result.get("success") else 400)
+
+
+@maintenance_bp.route("/api/maintenance/genre-vocabulary/reset", methods=["POST"])
+def api_reset_genre_vocabulary() -> Any:
+    """Discard the user's vocabulary and fall back to the shipped default.
+
+    Deleting the override rather than copying the default over it means a future
+    repo update to the default is picked up again.
+    """
+    from services.enrichment.genre_vocabulary import reset_vocabulary
+
+    try:
+        result = reset_vocabulary()
+    except Exception as exc:
+        logger.error("Genre vocabulary reset failed", error=str(exc), exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify(result), (200 if result.get("success") else 500)

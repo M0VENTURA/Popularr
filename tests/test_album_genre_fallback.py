@@ -40,8 +40,14 @@ class TestAlbumTopGenres:
         # nu metal (mb 0.40 + lf 0.10 + discogs 0.25 = 0.75) ranks above
         # alternative metal (mb 0.40 + mb 0.40 + lf 0.10 = 0.90) — wait:
         # alternative metal appears in TWO mb rows → 0.80 + lf 0.10 = 0.90.
-        assert "alternative metal" in result
-        assert "nu metal" in result
+        #
+        # ⚠️ Compared case-insensitively: the canonical engine writes the
+        # vocabulary's display name ("Alternative Metal") where the legacy engine
+        # echoed the source's spelling. Every consumer lowercases before
+        # comparing, so the case is cosmetic.
+        lowered = {g.casefold() for g in result}
+        assert "alternative metal" in lowered
+        assert "nu metal" in lowered
 
     def test_sparse_sibling_still_contributes(self, monkeypatch):
         from helpers import config_helpers
@@ -75,7 +81,10 @@ class TestAlbumTopGenres:
             {"title": "A", "musicbrainz_genres": '[{"name": "progressive metal", "count": 2}]'},
         ]
         result = self._helper()(album_tracks, max_genres=3)
-        assert result == ["progressive metal"]
+        # Case-insensitive: the canonical engine writes the vocabulary's display
+        # name. What this test is about is that a DICT-shaped tag entry is parsed
+        # at all, not the spelling it resolves to.
+        assert [g.casefold() for g in result] == ["progressive metal"]
 
     def test_essentia_genres_do_not_vote(self, monkeypatch):
         """Essentia is a mood provider — its text tags must NEVER vote in

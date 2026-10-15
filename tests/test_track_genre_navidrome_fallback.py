@@ -54,9 +54,17 @@ class TestTrackGenreAggregationIncludesNavidrome:
         """The track_stage aggregation loop must treat navidrome_genres as a
         source (the exact regression)."""
         import inspect
+        import re
         from services.popularity.stages import track_stage as ts
 
-        # Find the source-key tuple list in the aggregation block.
         src = inspect.getsource(ts)
-        # The aggregation loop must include ("navidrome_genres", "navidrome").
-        assert '"navidrome_genres", "navidrome"' in src
+
+        # ⚠️ The assertion allows an ``@entity`` SUFFIX on the source key. The
+        # canonical selection engine (2026-10-15) weights evidence by entity
+        # level, so the loop now declares ``"navidrome@track"`` rather than a
+        # bare ``"navidrome"``. Pinning the exact literal would make a legitimate
+        # change to the weighting model look like a regression — what this test
+        # is about is that navidrome IS a source, not how it is labelled.
+        assert re.search(
+            r'"navidrome_genres"\s*,\s*"navidrome(?:@\w+)?"', src
+        ), "navidrome_genres is no longer in the track-stage source map"

@@ -196,23 +196,47 @@ class TestWhatIsWritten:
         )
         assert writes == []
 
-    def test_a_single_weak_source_cannot_define_a_track_by_itself(self):
-        """Documented limit, not an accident.
+    def test_a_single_weak_source_cannot_define_a_track_by_itself(self, monkeypatch):
+        """Documented limit of the LEGACY engine, not an accident.
 
-        ``aggregate_genres`` rejects anything below ``genres.min_weight``
-        (0.25), and Last.fm weighs 0.10 / ListenBrainz 0.15 / Spotify 0.05 —
-        so a track whose ONLY online source is one of those keeps its existing
+        ``aggregate_genres`` used to reject anything below ``genres.min_weight``
+        (0.25), and Last.fm weighed 0.10 / ListenBrainz 0.15 / Spotify 0.05 — so
+        a track whose ONLY online source was one of those kept its existing
         genres rather than being rewritten from a single weak signal.
-        MusicBrainz (0.40), Discogs (0.25) and Manual (0.30) each clear it
+        MusicBrainz (0.40), Discogs (0.25) and Manual (0.30) each cleared it
         alone, which is the common case: the scan writes ``musicbrainz_genres``
         for every recording.
+
+        ⚠️ The threshold is a LEGACY mechanism, so the legacy engine is forced
+        here. The canonical engine replaces it with per-position confidence
+        floors AND re-weights Last.fm to 0.70 (the recommended provider trust for
+        broad coverage), so a track's own Last.fm tag now IS accepted — see
+        ``test_a_lone_track_tag_is_accepted_by_the_canonical_engine``.
         """
+        from services.enrichment import genre_aggregation_service as gas_mod
+
+        monkeypatch.setattr(gas_mod, "_selection_engine_v2_enabled", lambda: False)
         assert gas.aggregate_genres(
             {"lastfm": ["rock"]}, max_genres=2, nav_genres=None
         ) == []
         assert gas.aggregate_genres(
             {"musicbrainz": ["rock"]}, max_genres=2, nav_genres=None
         ) == ["rock"]
+
+    def test_a_lone_track_tag_is_accepted_by_the_canonical_engine(self):
+        """CONTROL for the change above, and the reason it is safe.
+
+        The canonical engine weights a track's OWN Last.fm tag at 0.70, so it
+        clears the first-position floor. The protection that mattered is kept by
+        a different route: ARTIST-level evidence is weighted at 0.35 and
+        penalised, so it still cannot define a track on its own.
+        """
+        assert gas.aggregate_genres(
+            {"lastfm": ["rock"]}, max_genres=2, nav_genres=None
+        ) == ["Rock"]
+        assert gas.aggregate_genres(
+            {"lastfm@artist": ["rock"]}, max_genres=2, nav_genres=None
+        ) == []
 
 
 # Every statement the writer executed, so the per-track assertion can read the

@@ -2313,15 +2313,19 @@ def process_track(
         try:
             effective_track = _build_effective_track(track, update_payload)
             source_map = {}
+            # ⚠️ ``source@track``: these are THIS recording's own source columns,
+            # which is the most specific evidence there is. Declaring the level
+            # is what lets the selection engine weigh them above album and
+            # artist evidence instead of treating all three as equal.
             for key, source_name in [
-                ("musicbrainz_genres", "musicbrainz"),
-                ("discogs_genres", "discogs"),
-                ("lastfm_tags", "lastfm"),
-                ("listenbrainz_genres", "listenbrainz"),
-                ("spotify_genres", "spotify"),
-                ("navidrome_genres", "navidrome"),
-                ("audiodb_genres", "audiodb"),
-                ("wikidata_genres", "wikidata"),
+                ("musicbrainz_genres", "musicbrainz@track"),
+                ("discogs_genres", "discogs@track"),
+                ("lastfm_tags", "lastfm@track"),
+                ("listenbrainz_genres", "listenbrainz@track"),
+                ("spotify_genres", "spotify@track"),
+                ("navidrome_genres", "navidrome@track"),
+                ("audiodb_genres", "audiodb@track"),
+                ("wikidata_genres", "wikidata@track"),
             ]:
                 raw = effective_track.get(key) or track.get(key)
                 if raw:

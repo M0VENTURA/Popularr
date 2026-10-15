@@ -1475,6 +1475,111 @@ def get_genre_aggregation_config() -> dict[str, Any]:
     }
 
 
+def get_genre_selection_config() -> dict[str, Any]:
+    """Get the genre SELECTION engine's tuning.
+
+    Config section: ``genres.selection`` in config.yaml
+
+    This drives the canonical-vocabulary engine (``genre_selection``): it
+    classifies every value before scoring, weights evidence by entity level
+    (track / album / artist), condenses the hierarchy, and requires each of the
+    up-to-three positions to earn its place.
+
+    Returns:
+        Dict with ``enabled``, ``max_genres``, ``source_weights``,
+        ``entity_weights``, the bonus/penalty terms, the confidence
+        ``thresholds``, the family-slot limit, and the ``keep_together`` /
+        ``conditional_keep`` pair lists.
+
+    ⚠️ ``source_weights`` here are SEPARATE from the legacy ``genres.weights``
+    block. The legacy values were tuned for the old vote-counting engine (which
+    put Last.fm above ListenBrainz); these are the report's recommended provider
+    trust levels, where MusicBrainz proper genres lead and a manual correction
+    outranks everything. Both blocks coexist so switching engines switches the
+    whole model rather than half of it.
+
+    ``enabled`` defaults to True — the new engine is the intended behaviour — and
+    setting it False restores the previous vote-counting selection exactly.
+    """
+    cfg = get_config() or {}
+    genres = cfg.get("genres") or {}
+    if not isinstance(genres, dict):
+        genres = {}
+    selection = genres.get("selection") or {}
+    if not isinstance(selection, dict):
+        selection = {}
+
+    def _num(key: str, default: float) -> float:
+        try:
+            return float(selection.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(selection.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    thresholds = selection.get("thresholds")
+    if not isinstance(thresholds, dict):
+        thresholds = {}
+
+    def _threshold(key: str, default: float) -> float:
+        try:
+            return float(thresholds.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _weights(key: str) -> dict[str, float]:
+        block = selection.get(key)
+        if not isinstance(block, dict):
+            return {}
+        out: dict[str, float] = {}
+        for name, value in block.items():
+            try:
+                out[str(name)] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def _pairs(key: str) -> list[list[str]]:
+        block = selection.get(key)
+        if not isinstance(block, list):
+            return []
+        out: list[list[str]] = []
+        for item in block:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                out.append([str(item[0]).strip(), str(item[1]).strip()])
+            elif isinstance(item, str) and "|" in item:
+                a, _, b = item.partition("|")
+                out.append([a.strip(), b.strip()])
+        return out
+
+    return {
+        "enabled": bool(selection.get("enabled", True)),
+        "max_genres": max(1, _int("max_genres", 3)),
+        "source_weights": _weights("source_weights"),
+        "entity_weights": _weights("entity_weights"),
+        "agreement_2": _num("agreement_2", 0.30),
+        "agreement_3": _num("agreement_3", 0.20),
+        "specificity_bonus": _num("specificity_bonus", 0.05),
+        "artist_only_penalty": _num("artist_only_penalty", 0.15),
+        "microgenre_single_source_penalty": _num(
+            "microgenre_single_source_penalty", 0.10
+        ),
+        "thresholds": {
+            "first": _threshold("first", 0.60),
+            "second": _threshold("second", 0.45),
+            "third": _threshold("third", 0.35),
+        },
+        "family_slot_limit": max(1, _int("family_slot_limit", 2)),
+        "family_override_sources": max(1, _int("family_override_sources", 2)),
+        "keep_together": _pairs("keep_together"),
+        "conditional_keep": _pairs("conditional_keep"),
+    }
+
+
 # -----------------------------------------------------------------------------
 # Queue Matching Configuration
 # -----------------------------------------------------------------------------
@@ -2295,9 +2400,23 @@ def get_audiodb_config() -> dict[str, Any]:
 # Database & State Directories
 # =============================================================================
 
+def get_config_directory() -> str:
+    """The directory holding ``config.yaml`` — the persistent config volume.
+
+    User-editable DATA that is not itself YAML lives beside the config file, in
+    the ``config_data`` volume, so it survives a container rebuild. The genre
+    vocabulary is the first such file; keeping it here rather than in the repo
+    tree is what lets a user edit it from the Config page without the next
+    ``docker compose build`` overwriting it.
+
+    Returns:
+        Absolute path string. Defaults to ``/config`` (``CONFIG_PATH``'s dirname).
+    """
+    return os.path.dirname(os.environ.get("CONFIG_PATH", "/config/config.yaml"))
+
+
 def get_state_directory() -> str:
     """Get the directory for runtime state/progress files.
-
     Holds non-database JSON state: API rate-limiter counters, scan progress,
     playlist sessions, etc.  This is NOT the application database — the app is
     PostgreSQL-only and the DB connection is configured via PG_* / config.yaml.

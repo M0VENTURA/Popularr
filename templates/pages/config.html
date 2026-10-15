@@ -2646,6 +2646,168 @@
     </div>
   </div>
 
+  <!-- Genre Selection Engine Section -->
+  <div class="card shadow-sm mb-3" id="genre-selection">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-diagram-3"></i> Genre Selection Engine</h5>
+      <small class="text-muted">How the final genres are chosen once every source has been read</small>
+    </div>
+    <div class="card-body">
+      <div class="alert alert-secondary mb-3 py-2">
+        <small class="text-muted">
+          The engine classifies every source value before scoring it, so moods (<em>dark</em>,
+          <em>aggressive</em>), geography (<em>German</em>), performance attributes (<em>live</em>,
+          <em>cover</em>) and chart artefacts no longer compete for a genre slot. It then weights the
+          evidence by <strong>entity level</strong> — a track's own tags outrank its album's, which
+          outrank the artist's — condenses redundant parents (<em>rock</em> beside
+          <em>melodic death metal</em>), and requires each of the up-to-three positions to
+          <strong>earn</strong> its place. Three is a maximum, not a target.
+        </small>
+      </div>
+      <div class="row g-3 mb-4">
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" id="genre_selection_enabled" {% if config.get('genres', {}).get('selection', {}).get('enabled', True) %}checked{% endif %}>
+            <label class="form-check-label" for="genre_selection_enabled"><strong>Use the Canonical Engine</strong></label>
+            <small class="d-block text-muted">Off restores the previous vote-counting selection exactly.</small>
+          </div>
+        </div>
+        <div class="col-6 col-md-4">
+          <label class="form-label form-label-sm" for="genre_selection_max">Maximum Genres</label>
+          <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="genre_selection_max" value="{{ config.get('genres', {}).get('selection', {}).get('max_genres', 3) }}">
+          <small class="form-text text-muted">A ceiling, not a target. Default: <strong>3</strong></small>
+        </div>
+        <div class="col-6 col-md-4">
+          <label class="form-label form-label-sm" for="genre_selection_family_limit">Family Slot Limit</label>
+          <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="genre_selection_family_limit" value="{{ config.get('genres', {}).get('selection', {}).get('family_slot_limit', 3) }}">
+          <small class="form-text text-muted">Max genres from one hierarchy branch (rock, metal, electronic…) unless the extra one has track-level support. Default: <strong>3</strong></small>
+        </div>
+      </div>
+
+      <h6 class="mb-2">Entity Weights</h6>
+      <small class="text-muted d-block mb-3">
+        How much each level of evidence counts. An artist spans styles, so artist-level tags
+        <strong>support</strong> a genre rather than deciding it.
+      </small>
+      <div class="row g-3 mb-4">
+        <div class="col-6 col-md-4">
+          <label class="form-label form-label-sm" for="genre_entity_track">Track</label>
+          <input type="number" step="0.05" min="0" max="2" class="form-control form-control-sm" id="genre_entity_track" value="{{ config.get('genres', {}).get('selection', {}).get('entity_weights', {}).get('track', 1.00) }}">
+          <small class="form-text text-muted">The recording's own tags. Default: <strong>1.00</strong></small>
+        </div>
+        <div class="col-6 col-md-4">
+          <label class="form-label form-label-sm" for="genre_entity_album">Album</label>
+          <input type="number" step="0.05" min="0" max="2" class="form-control form-control-sm" id="genre_entity_album" value="{{ config.get('genres', {}).get('selection', {}).get('entity_weights', {}).get('album', 0.70) }}">
+          <small class="form-text text-muted">The release's tags. Default: <strong>0.70</strong></small>
+        </div>
+        <div class="col-6 col-md-4">
+          <label class="form-label form-label-sm" for="genre_entity_artist">Artist</label>
+          <input type="number" step="0.05" min="0" max="2" class="form-control form-control-sm" id="genre_entity_artist" value="{{ config.get('genres', {}).get('selection', {}).get('entity_weights', {}).get('artist', 0.35) }}">
+          <small class="form-text text-muted">The artist's catalogue. Default: <strong>0.35</strong></small>
+        </div>
+      </div>
+
+      <h6 class="mb-2">Confidence Thresholds</h6>
+      <small class="text-muted d-block mb-3">
+        Each position must clear its floor, and reach a fraction of the position above it. A weak
+        artist-only fallback therefore leaves the slot <strong>empty</strong> rather than filling it.
+      </small>
+      <div class="row g-3 mb-4">
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="genre_threshold_first">1st Genre</label>
+          <input type="number" step="0.05" min="0" max="1" class="form-control form-control-sm" id="genre_threshold_first" value="{{ config.get('genres', {}).get('selection', {}).get('thresholds', {}).get('first', 0.60) }}">
+          <small class="form-text text-muted">Default: <strong>0.60</strong></small>
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="genre_threshold_second">2nd Genre</label>
+          <input type="number" step="0.05" min="0" max="1" class="form-control form-control-sm" id="genre_threshold_second" value="{{ config.get('genres', {}).get('selection', {}).get('thresholds', {}).get('second', 0.45) }}">
+          <small class="form-text text-muted">Default: <strong>0.45</strong></small>
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="genre_threshold_third">3rd Genre</label>
+          <input type="number" step="0.05" min="0" max="1" class="form-control form-control-sm" id="genre_threshold_third" value="{{ config.get('genres', {}).get('selection', {}).get('thresholds', {}).get('third', 0.35) }}">
+          <small class="form-text text-muted">Default: <strong>0.35</strong></small>
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="genre_selection_relative">Relative Floor</label>
+          <input type="number" step="0.05" min="0" max="1" class="form-control form-control-sm" id="genre_selection_relative" value="{{ config.get('genres', {}).get('selection', {}).get('relative_floor', 0.45) }}">
+          <small class="form-text text-muted">Fraction of the genre above it. Default: <strong>0.45</strong></small>
+        </div>
+      </div>
+
+      <h6 class="mb-2">Provider Trust</h6>
+      <small class="text-muted d-block mb-3">
+        The canonical engine's own weights — separate from the legacy <em>Source Weights</em> above,
+        which were tuned for the old vote-counting engine. These follow the recommended provider
+        trust levels, where MusicBrainz proper genres lead and a manual correction outranks everything.
+      </small>
+      <div class="row g-3">
+        {% set sel_weights = config.get('genres', {}).get('selection', {}).get('source_weights', {}) %}
+        {% for key, default, note in [
+          ('musicbrainz', 1.00, 'Proper genres — the strongest controlled signal'),
+          ('listenbrainz', 0.85, 'MB-tagged community data'),
+          ('wikidata', 0.80, 'Structured genre statements'),
+          ('discogs', 0.75, 'Release-level genres'),
+          ('lastfm', 0.70, 'Broad coverage, noisier vocabulary'),
+          ('musicbrainz_tags', 0.65, 'Free-form folksonomy — must pass classification'),
+          ('audiodb', 0.55, 'Artist-level genres'),
+          ('essentia', 0.45, 'Local audio analysis'),
+          ('spotify', 0.40, 'Deprecated source'),
+          ('navidrome', 0.30, 'Local file tags — a tie-breaker'),
+          ('manual', 1.25, 'Explicit user edits — outranks everything')
+        ] %}
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="genre_sel_weight_{{ key }}">{{ key|replace('_', ' ')|title }}</label>
+          <input type="number" step="0.05" min="0" max="2" class="form-control form-control-sm" id="genre_sel_weight_{{ key }}" value="{{ sel_weights.get(key, default) }}">
+          <small class="form-text text-muted">{{ note }}. Default: <strong>{{ default }}</strong></small>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Genre Vocabulary Section -->
+  <div class="card shadow-sm mb-3" id="genre-vocabulary">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-book"></i> Genre Vocabulary</h5>
+      <small class="text-muted">The canonical genre, mood, geography and attribute list every value is matched against</small>
+    </div>
+    <div class="card-body">
+      <div class="alert alert-secondary mb-3 py-2">
+        <small class="text-muted">
+          This is a JSON file, not part of <code>config.yaml</code>: it is data, it is large, and it
+          lives in the config volume so a container rebuild never overwrites your edits.
+          <strong>An invalid vocabulary is refused rather than saved</strong> — a broken file would
+          silently produce no genres at all.
+          <br>
+          Each entry needs <code>id</code> (stable, lower_snake_case), <code>display</code> (what gets
+          written), <code>parent</code> (the broader genre, or <code>null</code> for a family root) and
+          <code>specificity</code> (0 root, 1 broad, 2 established, 3 narrow). The lowercased display
+          name and the id-with-spaces are matched automatically — only list <em>extra</em> spellings in
+          <code>aliases</code>.
+        </small>
+      </div>
+      <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="genre_vocab_load">
+          <i class="bi bi-arrow-clockwise"></i> Load Current
+        </button>
+        <button type="button" class="btn btn-sm btn-outline-primary" id="genre_vocab_validate">
+          <i class="bi bi-check2-circle"></i> Validate
+        </button>
+        <button type="button" class="btn btn-sm btn-outline-primary" id="genre_vocab_save">
+          <i class="bi bi-save"></i> Save Vocabulary
+        </button>
+        <button type="button" class="btn btn-sm btn-outline-danger" id="genre_vocab_reset">
+          <i class="bi bi-arrow-counterclockwise"></i> Reset to Default
+        </button>
+        <small class="text-muted" id="genre_vocab_status"></small>
+      </div>
+      <div class="form-text mb-2" id="genre_vocab_source"></div>
+      <textarea class="form-control form-control-sm font-monospace" id="genre_vocab_text" rows="14" spellcheck="false" placeholder="Loading…"></textarea>
+      <div id="genre_vocab_problems" class="mt-2"></div>
+    </div>
+  </div>
+
   <!-- Album Scaling (Era 5★ Caps) Section -->
   <div class="card shadow-sm mb-3" id="album-scaling">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">

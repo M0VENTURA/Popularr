@@ -550,6 +550,98 @@ def _append_extra_genres(genres: list[str], title: str, album: str, intercepted_
     return genres
 
 
+def _collect_intercepted_filter_tags(source_map: dict[str, Any] | None) -> set[str]:
+    """Every ``_FILTER_TAGS`` token present in the sources, title-cased.
+
+    Extracted from ``_vote_genres`` so the canonical-selection engine can keep
+    appending the SAME filter tags the legacy engine does. Those tags are not
+    genres — they are the playlist/filter markers (Live, Cover, Acoustic,
+    Christmas) that other code depends on, and dropping them just because the
+    genre SLOTS are chosen differently would break live/acoustic filtering.
+
+    ⚠️ Behaviour is intentionally IDENTICAL to the original inline loop, including
+    the ``next(...)`` over a frozenset. That lookup is order-dependent when two
+    filter words match one value (``remixed`` matches both ``remix`` and
+    ``remixed``), so it is a latent nondeterminism — left alone here rather than
+    quietly changed, because the point of this extraction is to share the
+    behaviour, not to revise it.
+    """
+    intercepted: set[str] = set()
+    for raw_genres in (source_map or {}).values():
+        for genre in _parse_genre_input(raw_genres) or []:
+            lower_g = genre.strip().lower()
+            if lower_g in _FILTER_TAGS or _strip_admin_genre_markers(lower_g) in _FILTER_TAGS:
+                matched_filter = next((f for f in _FILTER_TAGS if f in lower_g), None)
+                if matched_filter:
+                    intercepted.add(matched_filter.title())
+    return intercepted
+
+
+def _selection_engine_v2_enabled() -> bool:
+    """Is the canonical-vocabulary selection engine active?
+
+    FAILS OPEN TO THE LEGACY ENGINE on any config problem: a selection engine that
+    cannot read its own switch must not silently stop writing genres.
+    """
+    try:
+        from helpers.config_helpers import get_genre_selection_config
+
+        return bool(get_genre_selection_config().get("enabled", True))
+    except Exception as exc:
+        logger.debug("Genre selection config unreadable — using the legacy engine", error=str(exc))
+        return False
+
+
+def _aggregate_genres_v2(
+    source_map: dict[str, Any],
+    *,
+    max_genres: int,
+    context_title: str,
+    context_album: str,
+) -> list[str] | None:
+    """The canonical-vocabulary path. ``None`` means "fall back to legacy".
+
+    Everything that made the old engine produce a wrong ANSWER is replaced:
+    values are classified before scoring, evidence is weighted by entity level,
+    redundant ancestors are condensed, and each of the up-to-three positions has
+    to earn its place. What is PRESERVED is the filter-tag append — those markers
+    are not genres and their absence would break playlist filtering.
+    """
+    try:
+        from services.enrichment.genre_selection import select_album_or_track_genres
+
+        result = select_album_or_track_genres(source_map, max_genres=max_genres)
+        selected = list(result.get("genres") or [])
+    except Exception as exc:
+        logger.warning(
+            "Canonical genre selection failed — falling back to the legacy engine",
+            error=str(exc),
+            exc_info=True,
+        )
+        return None
+
+    moved = result.get("moved") or {}
+    if moved:
+        # Worth a debug line: "why is my mood/genre missing" is otherwise
+        # unanswerable, and this is where a mis-classified value shows up.
+        logger.debug(
+            "Genre selection set non-genre values aside",
+            moods=len(moved.get("mood") or []),
+            geography=len(moved.get("geography") or []),
+            attributes=len(moved.get("attribute") or []),
+            content=len(moved.get("content") or []),
+            unknown=len(moved.get("unknown") or []),
+            junk=len(moved.get("junk") or []),
+        )
+
+    return _append_extra_genres(
+        selected,
+        context_title,
+        context_album,
+        _collect_intercepted_filter_tags(source_map),
+    )
+
+
 def aggregate_genres(
     source_map: dict[str, Any],
     max_genres: int = 2,
@@ -557,6 +649,36 @@ def aggregate_genres(
     context_album: str = "",
     nav_genres: Any = None,
 ) -> list[str]:
+    """Top genres for one track or album.
+
+    Two engines, one switch (``genres.selection.enabled``):
+
+    * **canonical (v2, default)** — ``services/enrichment/genre_selection.py``.
+      Classifies every value, weights evidence by entity level, condenses the
+      hierarchy, and requires each position to earn its place.
+    * **legacy** — the vote-counting path below, kept intact so the switch is a
+      real way back rather than a promise.
+
+    The filter-tag append is shared: Live/Cover/Acoustic/Christmas markers are
+    not genres and must survive either way.
+
+    ⚠️ Callers SHOULD declare an entity level with the ``source@entity`` key
+    convention (``"lastfm@track"``, ``"musicbrainz@album"``, ``"wikidata@artist"``).
+    A bare source key is treated as ``track``, which is both the previous
+    behaviour and usually the truth — but it means a caller passing pooled
+    artist data under a bare key will have it weighted as the most reliable
+    evidence rather than as support.
+    """
+    if _selection_engine_v2_enabled():
+        v2 = _aggregate_genres_v2(
+            source_map,
+            max_genres=max_genres,
+            context_title=context_title,
+            context_album=context_album,
+        )
+        if v2 is not None:
+            return v2
+
     votes, spellings, source_hits, intercepted_filters = _vote_genres(
         source_map,
         extra_votes=_context_boost_votes(context_title, context_album),
@@ -650,7 +772,10 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
                 continue
             parsed_vals = _parse_genre_input(val)
             if parsed_vals:
-                source_map.setdefault(src_key, []).extend(parsed_vals)
+                # ``@album``: this is a POOLED view across the album's tracks,
+                # not one recording's own tags. Declaring the level stops it
+                # being weighted as the most specific evidence available.
+                source_map.setdefault(f"{src_key}@album", []).extend(parsed_vals)
 
     recommended = aggregate_genres(source_map, max_genres=2)
 
@@ -1064,6 +1189,10 @@ def sync_various_artists_track_genres(
 
         source_map = va_track_source_map(track)
         if source_map:
+            # A VA track's own columns are TRACK-level evidence: on a
+            # compilation each track has a different performer, so pooling them
+            # would describe the compilation rather than the recording.
+            source_map = {f"{k}@track": v for k, v in source_map.items()}
             top_genres = aggregate_genres(
                 source_map,
                 max_genres=2,
