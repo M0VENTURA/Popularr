@@ -1255,11 +1255,27 @@ def get_genre_exclusion_config() -> dict[str, Any]:
     * ``metal_excluded_from`` — a track whose genre set is metal may not enter
       these playlists. This is the "keep Alternative Rock to rock/indie/grunge"
       rule; the metal crossover belongs in the metal playlists.
+    * ``use_family_tiebreak`` — HOW "is this track metal?" is decided. ``False``
+      keeps the original substring test ("metal" anywhere in a token); ``True``
+      asks the genre vocabulary for the track's deciding FAMILY, ranking the
+      tokens by specificity then order.
+
+      Why the family test is the better default: grunge and nu metal are both
+      "not metal" and "metal" respectively by the vocabulary's own hierarchy,
+      where the substring test only ever asked whether the letters m-e-t-a-l
+      appeared. The reported case is Audioslave being kept out of Alternative
+      Rock: its most specific own genre is ``grunge`` (family rock), while a
+      metal tag sits further down the list — the substring test cannot tell that
+      from Tool, whose most specific genre IS metal.
+
+      The substring test is retained as the fallback for a token the vocabulary
+      does not know, so a brand-new subgenre spelling is still caught.
 
     Default Values:
         - enabled: True
         - own_tags_win: True
         - metal_excluded_from: ["alternative rock"]
+        - use_family_tiebreak: True
     """
     cfg = get_config() or {}
     p = cfg.get("playlists") or {}
@@ -1285,6 +1301,7 @@ def get_genre_exclusion_config() -> dict[str, Any]:
         "enabled": bool(block.get("enabled", True)),
         "own_tags_win": bool(block.get("own_tags_win", True)),
         "metal_excluded_from": genres,
+        "use_family_tiebreak": bool(block.get("use_family_tiebreak", True)),
     }
 
 

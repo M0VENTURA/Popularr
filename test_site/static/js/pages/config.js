@@ -397,6 +397,7 @@
       genre_exclusions: {
         enabled: getChecked('playlists_genre_exclusions_enabled', true),
         own_tags_win: getChecked('playlists_genre_own_tags_win', true),
+        use_family_tiebreak: getChecked('playlists_genre_use_family_tiebreak', true),
         // ⚠️ Split on commas and DROP empties: an empty field means "no
         // playlists are protected", which is a real choice, but it must not
         // become a list containing one empty string.

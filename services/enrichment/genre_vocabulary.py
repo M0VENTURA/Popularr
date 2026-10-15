@@ -39,6 +39,12 @@ from typing import Any
 
 import structlog
 
+# The canonical token parser lives with the classification helpers. Imported at
+# module level (not inside the function) because there is no cycle:
+# ``album_classification_service`` imports only json/re/structlog and
+# ``helpers.normalization_service`` — it does NOT import this module.
+from services.catalog.album_classification_service import iter_genre_tokens
+
 logger = structlog.get_logger(__name__)
 
 #: The shipped default, beside this module.
@@ -124,13 +130,28 @@ class GenreEntry:
         return chain
 
     def family_of(self, by_id: dict[str, "GenreEntry"]) -> str:
-        """The nearest DECLARED family among the ancestors, else the root id.
+        """The nearest DECLARED family, starting with this entry's OWN.
 
         Declared rather than derived from the root, because ``metal`` sits under
         ``rock`` (so §9's "Rock + Death Metal -> Death Metal" works) while still
         being its own FAMILY — otherwise the family-slot limit would treat every
         rock and metal genre as one branch and cap them together.
+
+        ⚠️ ``self.family`` is checked FIRST. The ancestor walk alone is not
+        enough: ``metal`` declares family "metal" but its only ancestor is
+        ``rock``, so skipping self returned **"rock"** for metal — the exact
+        opposite of the branch it is meant to name. Production was accidentally
+        safe because the sole call site is ``entry.family or
+        entry.family_of(...)`` and ``metal`` declares its own family, so the
+        ``or`` short-circuited — but the method's own docstring invites a direct
+        call, and that call would have silently answered "rock".
+
+        Ordering note: a genre with its own family ignores its parents', which is
+        what lets ``metalcore`` be metal while still descending (also) from
+        ``hardcore_punk``.
         """
+        if self.family:
+            return self.family
         for ancestor in self.ancestors(by_id):
             entry = by_id.get(ancestor)
             if entry is not None and entry.family:
@@ -218,6 +239,72 @@ class Vocabulary:
             return Classification(KIND_MOOD, entry.id, entry.display, entry.family)
 
         return Classification(KIND_UNKNOWN, "", raw if isinstance(raw, str) else str(raw))
+
+    def deciding_family(self, tokens: Any) -> tuple[str, list[str]]:
+        """The family that DECIDES a mixed genre set, and the tokens it cannot judge.
+
+        Returns ``(family, unknown)`` — ``family`` is "" when nothing in the set
+        is a genre the vocabulary knows, and ``unknown`` lists the tokens it
+        could not classify. Callers need BOTH: the family answers the question
+        for everything recognised, and ``unknown`` is the only part still
+        eligible for a fallback test. Handing the whole set to a fallback after a
+        considered non-metal answer is what re-introduced the bug this method
+        exists to fix — see ``_track_is_metal_by_identity``.
+
+        ⭐ The rule is the requested one: *"use the third or fourth genre as a tie
+        breaker — grunge is usually more aligned to rock than alt metal, where nu
+        metal is closer to metal."*
+
+        Rank the tokens by (specificity DESC, then their given order) and take
+        the FIRST whose family is known. A genre's position is therefore its
+        vote, and specificity means a concrete subgenre outranks the generic
+        ``rock`` / ``metal`` umbrella.
+
+        ⚠️ Why ordering decides, and family membership alone cannot: Audioslave
+        and Slipknot have IDENTICAL family structure — both carry rock-family AND
+        metal-family genres. No set-membership test separates them. The ORDER
+        does:
+
+            Audioslave  alternative_rock(rock/1) hard_rock(rock/1)
+                        grunge(rock/2) alternative_metal(metal/2)
+                        -> most specific tie at 2: grunge (rock) is earlier -> ROCK
+
+            Slipknot    nu_metal(metal/2) alternative_metal(metal/2)
+                        heavy_metal(metal/1) alternative_rock(rock/1)
+                        -> most specific are both metal -> METAL
+        """
+        ranked: list[tuple[int, str, int]] = []
+        unknown: list[str] = []
+        for position, token in enumerate(iter_genre_tokens(tokens)):
+            classified = self.classify(token)
+            if classified.kind != KIND_GENRE:
+                unknown.append(token)
+                continue
+            entry = self.genres.get(classified.canonical)
+            if entry is None:
+                unknown.append(token)
+                continue
+            # ``family`` is resolved at load time (declared, else inherited), so
+            # it is never empty for a real genre — but an override file caught
+            # mid-edit could carry one, and "" must not vote.
+            if entry.family:
+                ranked.append((entry.specificity, entry.family, position))
+            else:
+                unknown.append(token)
+
+        if not ranked:
+            return "", unknown
+        # ⚠️ Position is sorted on EXPLICITLY, not left to the sort being
+        # stable. Relying on stability worked, but it made the tie-break an
+        # emergent property of the implementation rather than a stated rule —
+        # and it left the recorded `position` unread, so removing it changed
+        # nothing and the tie-break was untestable at this level.
+        ranked.sort(key=lambda row: (-row[0], row[2]))
+        return ranked[0][1], unknown
+
+    def family_decider(self, tokens: Any) -> str:
+        """Just the deciding family — ``deciding_family`` without the unknowns."""
+        return self.deciding_family(tokens)[0]
 
 
 def override_vocabulary_path() -> str:

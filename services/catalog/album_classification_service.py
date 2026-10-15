@@ -417,6 +417,15 @@ def iter_genre_tokens(genres: Any) -> list[str]:
 #: returns "groove metal".
 METAL_GENRE_SUBSTRING = "metal"
 
+#: The FAMILY name the genre vocabulary uses for the metal branch.
+#:
+#: Sits beside ``METAL_GENRE_SUBSTRING`` because the two are the two ways of
+#: asking the same question, and a caller choosing between them should see both.
+#: Declared by the ``metal`` entry in ``genre_vocabulary.json`` (family "metal"
+#: on the ``metal`` node, which is what keeps metal out of the rock family
+#: despite descending from it) — so this string must match that file.
+METAL_GENRE_FAMILY = "metal"
+
 
 def genre_tokens_contain(genres: Any, needle: str) -> bool:
     """True when any of ``genres`` carries ``needle`` as part of the word.

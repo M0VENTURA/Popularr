@@ -112,7 +112,9 @@ from services.catalog.album_classification_service import (
     is_instrumental_track_title,
     is_live_or_alternate_track_title,
     # The genre-playlist family tests: one parser for every stored genre form
-    # (``iter_genre_tokens``) and the metal-family question beside it.
+    # (``iter_genre_tokens``), the string test, and the vocabulary-family name
+    # the tie-break compares against.
+    METAL_GENRE_FAMILY,
     is_metal_genre,
     iter_genre_tokens,
 )
@@ -3171,6 +3173,62 @@ def _full_genre_tokens(row: dict[str, Any]) -> list[str]:
     return out
 
 
+def _track_is_metal_by_identity(
+    tokens: list[str],
+    *,
+    use_family_tiebreak: bool,
+) -> bool:
+    """Is this track's genre identity METAL?
+
+    Two tests, and the choice between them is the reported bug:
+
+    * ``use_family_tiebreak`` (the default) asks the genre VOCABULARY for the
+      DECIDING family — see ``Vocabulary.family_decider``. It ranks the tokens
+      by specificity then order, so "grunge" (family rock) outvotes a later
+      "alternative metal", while a track whose most specific genre IS metal
+      stays metal. This is the requested rule: *"grunge is usually more aligned
+      to rock than alt metal, where nu metal is closer to metal."*
+    * ``False`` keeps the original SUBSTRING test, which only asks whether the
+      letters "metal" appear in any token. It cannot tell Audioslave from Tool,
+      because both carry a metal tag — which is why Alternative Rock was losing
+      every crossover act.
+
+    ⚠️ The fallback applies ONLY to tokens the vocabulary does not know, and
+    that distinction is the whole reason this helper exists rather than a
+    one-line call to ``family_decider``. An earlier version handed the FULL token
+    list to the substring test whenever the family was not metal, so a considered
+    "rock" answer fell straight through to the metal tag sitting further down the
+    list — the same exclusion, just with more steps. Ranked and filtered
+    separately, a known "rock" verdict is final for the genres that were judged.
+
+    The unknown-token fallback is also the answer to the original rationale for
+    a substring test ("the subgenre vocabulary is unbounded"): a brand-new
+    subgenre spelling still matches, while every genre the vocabulary knows gets
+    the considered answer.
+
+    An empty identity is never metal, so an untagged track cannot be excluded
+    on a family it does not have.
+    """
+    if not tokens:
+        return False
+
+    if use_family_tiebreak:
+        try:
+            from services.enrichment.genre_vocabulary import get_vocabulary
+
+            family, unknown = get_vocabulary().deciding_family(tokens)
+            if family == METAL_GENRE_FAMILY:
+                return True
+            if family:
+                # The vocabulary judged the genres it recognises and none of
+                # them is metal. Only an unrecognised token may still be.
+                return bool(unknown) and is_metal_genre(unknown)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Genre family tie-break unavailable", error=str(exc))
+
+    return is_metal_genre(tokens)
+
+
 def _playlist_identity_tokens(
     row: dict[str, Any],
     *,
@@ -3320,10 +3378,19 @@ def refresh_genre_playlists_for_album(artist: str, album: str) -> int:
         max_genres = max(1, int(_cfg.get("genre_playlists_max_genres", 3) or 3))
         affected: set[str] = set()
         for row in rows:
-            # The SAME resolver the full builder uses, so a per-album refresh
-            # re-derives exactly the pools the next full pass would.
-            _resolved, _owned = _resolve_playlist_genres(row, max_genres=max_genres)
-            for genre in _resolved:
+            # ⚠️ The POOLING resolver — `_genre_playlist_track_genres`, which
+            # reads ``tracks.genres`` (the album blend) and is what
+            # ``_create_genre_top_track_playlists`` actually pools by.
+            #
+            # This called ``_resolve_playlist_genres`` (own-tags-first) and
+            # claimed in a comment to be "the SAME resolver the full builder
+            # uses". It is not, and the consequence was silent: `affected` could
+            # OMIT a genre the full builder WOULD pool a track into, so this
+            # refresh skipped a playlist that needed updating and it stayed
+            # stale until the next full rebuild. Two different answers to
+            # "which playlists does this album touch", on a path whose entire
+            # job is to keep them in step.
+            for genre in _genre_playlist_track_genres(row, max_genres=max_genres):
                 affected.add(genre)
 
         if not affected:
@@ -3397,6 +3464,7 @@ def _create_genre_top_track_playlists(
 
     _excl_enabled = bool(_excl.get("enabled", True))
     _own_tags_win = bool(_excl.get("own_tags_win", True))
+    _use_family_tiebreak = bool(_excl.get("use_family_tiebreak", True))
     _metal_excluded_from = {
         re.sub(r"[^\w\s-]", "", str(g).strip().lower()).strip()
         for g in (_excl.get("metal_excluded_from") or [])
@@ -3415,7 +3483,9 @@ def _create_genre_top_track_playlists(
         # truncated ``track_genres`` would test only the first N genres — the
         # trap the Christmas check documents next door.
         _identity = _playlist_identity_tokens(row, own_tags_win=_own_tags_win)
-        _track_is_metal = _excl_enabled and is_metal_genre(_identity)
+        _track_is_metal = _excl_enabled and _track_is_metal_by_identity(
+            _identity, use_family_tiebreak=_use_family_tiebreak
+        )
 
         # Christmas detection MUST use the FULL genre list, not the truncated
         # window above.

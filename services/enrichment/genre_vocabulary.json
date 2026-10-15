@@ -90,7 +90,7 @@
     {"id": "melodic_hardcore", "display": "Melodic Hardcore", "parent": "hardcore_punk", "specificity": 3},
     {"id": "post_hardcore", "display": "Post-Hardcore", "parent": "hardcore_punk", "specificity": 2},
     {"id": "screamo", "display": "Screamo", "parent": "post_hardcore", "specificity": 3, "aliases": ["emoviolence"]},
-    {"id": "metalcore", "display": "Metalcore", "parent": "hardcore_punk", "specificity": 2},
+    {"id": "metalcore", "display": "Metalcore", "parents": ["metal", "hardcore_punk"], "specificity": 2},
     {"id": "deathcore", "display": "Deathcore", "parent": "metalcore", "specificity": 3},
     {"id": "mathcore", "display": "Mathcore", "parent": "metalcore", "specificity": 3},
     {"id": "grindcore", "display": "Grindcore", "parent": "hardcore_punk", "specificity": 2, "aliases": ["grind"]},
