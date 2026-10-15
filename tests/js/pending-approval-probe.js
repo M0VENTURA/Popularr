@@ -16,6 +16,7 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
 
 const SRC_PATH = process.argv[2];
 if (!SRC_PATH) {
@@ -24,6 +25,24 @@ if (!SRC_PATH) {
 }
 
 const SRC = fs.readFileSync(SRC_PATH, 'utf8');
+
+// ⭐ THE ROW MARKUP LIVES IN A SHARED MODULE NOW, AND THE PROBE FOLLOWS IT.
+//
+// `renderPendingApproval` kept its name and its tab behaviour, but the rows it
+// emits come from `services/activity-feed.js` — shared with the Activity page
+// so the two surfaces cannot render the same album differently.
+//
+// ⚠️ The feed functions are EXTRACTED, not stubbed. Two of this probe's
+// assertions are about HTML escaping and URL encoding INSIDE the row markup, so
+// stubbing the row builder would leave the probe asserting against its own stub:
+// it would pass whatever the real code did. Resolved relative to the dashboard
+// so it follows the tree under test rather than assuming one.
+const FEED_PATH = path.resolve(path.dirname(SRC_PATH), '..', 'services', 'activity-feed.js');
+if (!fs.existsSync(FEED_PATH)) {
+  console.log(JSON.stringify({ error: 'shared feed module not found at ' + FEED_PATH }));
+  process.exit(0);
+}
+const FEED_SRC = fs.readFileSync(FEED_PATH, 'utf8');
 
 // Shared with the search-focus probe. It skips comments before tracking quotes,
 // because an apostrophe in prose otherwise opens a phantom string literal.
@@ -63,8 +82,13 @@ const document_ = {
 };
 
 // ── Build the harness from the shipped source ─────────────────────────────
-const needed = ['renderPendingApproval'];
-const missing = needed.filter(function (n) { return !extractFn(SRC, n); });
+const NEEDED_DASH = ['renderPendingApproval', 'renderPendingApprovalInto'];
+const NEEDED_FEED = ['approvalRow', 'renderApprovalsInto'];
+
+const missing = NEEDED_DASH.filter(function (n) { return !extractFn(SRC, n); })
+  .map(function (n) { return 'dashboard:' + n; })
+  .concat(NEEDED_FEED.filter(function (n) { return !extractFn(FEED_SRC, n); })
+    .map(function (n) { return 'feed:' + n; }));
 if (missing.length) {
   console.log(JSON.stringify({ error: 'missing functions: ' + missing.join(', ') }));
   process.exit(0);
@@ -72,13 +96,19 @@ if (missing.length) {
 
 const harness = [
   'var document = globalThis.__doc;',
+  // dashboard.js reaches the shared module through `global.ActivityFeed`, so the
+  // harness has to provide that same object rather than let it dangle.
+  'var global = globalThis.__global;',
   'var esc = function (v) { return globalThis.__esc(v); };',
   'var formatScanTimestamp = function (v) { return globalThis.__fmt(v); };',
-  ...needed.map(function (n) { return extractFn(SRC, n); }),
+  ...NEEDED_FEED.map(function (n) { return extractFn(FEED_SRC, n); }),
+  'global.ActivityFeed = { approvalRow: approvalRow, renderApprovalsInto: renderApprovalsInto };',
+  ...NEEDED_DASH.map(function (n) { return extractFn(SRC, n); }),
   'globalThis.__render = renderPendingApproval;',
 ].join('\n');
 
 globalThis.__doc = document_;
+globalThis.__global = { ActivityFeed: {} };
 globalThis.__esc = function (v) {
   return String(v == null ? '' : v)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')

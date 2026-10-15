@@ -46,7 +46,7 @@ from helpers.config_helpers import (
     save_config,
     save_partial_config,
 )
-from helpers.logging_config import resolve_log_dir, set_log_level
+from helpers.logging_config import log_unified, resolve_log_dir, set_log_level
 from helpers.normalization_service import strip_featured_artist
 from helpers.track_ordering import disc_sort_value, sort_album_tracks
 from services.catalog.album_classification_service import (
@@ -456,6 +456,107 @@ def index() -> Any:
     return redirect(url_for("ui.dashboard"))
 
 
+def _fetch_recent_albums(*, days: int = 14, limit: int = 12) -> list[dict[str, Any]]:
+    """Albums with tracks updated in the last ``days``, newest first.
+
+    ⭐ ONE QUERY, TWO SURFACES. The dashboard's Recently Added card and the
+    Activity page show the same list at different lengths; a second copy of this
+    SQL is how the two start disagreeing about what "recently added" means.
+
+    ⚠️ THE CUTOFF IS COMPUTED IN PYTHON, NOT IN SQL. It used to read
+    ``CURRENT_TIMESTAMP - INTERVAL '14 days'``, which is PostgreSQL-only — on
+    SQLite the statement raises, the caller's ``except`` swallows it, and the
+    list comes back EMPTY. That made the query untestable and any bug in it
+    invisible: the failure mode was identical to "you added nothing recently".
+    A ``timedelta`` parameter is portable and uses the same clock as the rest of
+    the app.
+
+    ⚠️ ``limit`` is BOUND, not interpolated. It was a literal ``LIMIT 12`` in the
+    SQL text, so a caller wanting a different length had to edit the string.
+    """
+    from datetime import datetime, timedelta
+
+    cutoff = datetime.utcnow() - timedelta(days=max(1, int(days)))
+    try:
+        with db_session() as session:
+            result = session.execute(
+                text("""
+                    SELECT
+                        COALESCE(NULLIF(album_artist, ''), artist) AS artist,
+                        album,
+                        MAX(updated_at) AS added_at,
+                        COUNT(*) AS track_count,
+                        MAX(COALESCE(NULLIF(musicbrainz_albumtype, ''),
+                                     NULLIF(spotify_album_type, ''),
+                                     NULLIF(releasetype, ''))) AS album_type,
+                        MAX(COALESCE(
+                            NULLIF(SUBSTRING(COALESCE(year, '') FROM '^[0-9]{4}'), ''),
+                            NULLIF(CAST(release_year AS TEXT), '')
+                        )) AS album_year
+                    FROM tracks
+                    WHERE updated_at >= :cutoff
+                      AND album IS NOT NULL AND TRIM(album) <> ''
+                      AND file_path IS NOT NULL AND TRIM(file_path) <> ''
+                    GROUP BY
+                        COALESCE(NULLIF(album_artist, ''), artist),
+                        album,
+                        COALESCE(
+                            NULLIF(SUBSTRING(COALESCE(year, '') FROM '^[0-9]{4}'), ''),
+                            NULLIF(CAST(release_year AS TEXT), '')
+                        )
+                    ORDER BY added_at DESC
+                    LIMIT :limit
+                """),
+                {"cutoff": cutoff, "limit": max(1, int(limit))},
+            )
+            return [dict(r._mapping) for r in result.fetchall()]
+    except Exception as exc:
+        logger.debug("Recent albums query failed", error=str(exc))
+        return []
+
+
+@ui_bp.route("/activity")
+async def activity() -> Any:
+    """The full Activity view — every feed the dashboard card summarises.
+
+    ⭐ WHY THIS EXISTS. The dashboard's activity card holds three feeds in tabs,
+    each capped for a card (12 albums, 25 scans, 50 reviews). The card's own
+    "View all" linked to `/downloads/monitor`, which is a downloads page — a
+    destination that does not show any of the three feeds. This is the page that
+    link should have pointed at all along.
+
+    ⚠️ REBUILT-TREE ONLY, AND IT SAYS SO BY REDIRECTING. The page's template and
+    its script live in `test_site/`; the live tree has no equivalent. Rather than
+    render an empty shell or 500 for a user on the live UI, it redirects to the
+    dashboard — the same content the card already shows them. `status()` is the
+    cutover's own accessor, so this cannot disagree with what is actually served
+    (reading the config key directly would still say "true" if the tree were
+    missing and the cutover had declined).
+    """
+    from helpers.test_site_mode import status as _test_site_status
+
+    if not _test_site_status().get("active"):
+        return redirect(url_for("ui.dashboard"))
+
+    # Wider window and a longer list than the card: this page exists to show what
+    # the card had to cut off, so a matching cap would defeat it.
+    recent_albums = _fetch_recent_albums(days=30, limit=50)
+    recent_scans, nav_users = [], []
+    try:
+        recent_scans = get_recent_album_scans(limit=100)
+    except Exception as exc:
+        logger.debug("Activity scans fetch failed", error=str(exc))
+
+    return await render_template(
+        "pages/activity.html",
+        recent_albums=recent_albums,
+        recent_scans=recent_scans,
+        nav_users=nav_users,
+        scan_running=False,
+        stats={},
+    )
+
+
 @ui_bp.route("/dashboard")
 async def dashboard() -> Any:
     try:
@@ -475,38 +576,7 @@ async def dashboard() -> Any:
         except Exception:
             stats = {"tc": 0, "ac": 0, "artists_c": 0, "avg_stars": None}
 
-        try:
-            with db_session() as session:
-                result = session.execute(text("""
-                    SELECT
-                        COALESCE(NULLIF(album_artist, ''), artist) AS artist,
-                        album,
-                        MAX(updated_at) AS added_at,
-                        COUNT(*) AS track_count,
-                        MAX(COALESCE(NULLIF(musicbrainz_albumtype, ''),
-                                     NULLIF(spotify_album_type, ''),
-                                     NULLIF(releasetype, ''))) AS album_type,
-                        MAX(COALESCE(
-                            NULLIF(SUBSTRING(COALESCE(year, '') FROM '^[0-9]{4}'), ''),
-                            NULLIF(CAST(release_year AS TEXT), '')
-                        )) AS album_year
-                    FROM tracks
-                    WHERE updated_at >= CURRENT_TIMESTAMP - INTERVAL '14 days'
-                      AND album IS NOT NULL AND TRIM(album) <> ''
-                      AND file_path IS NOT NULL AND TRIM(file_path) <> ''
-                    GROUP BY
-                        COALESCE(NULLIF(album_artist, ''), artist),
-                        album,
-                        COALESCE(
-                            NULLIF(SUBSTRING(COALESCE(year, '') FROM '^[0-9]{4}'), ''),
-                            NULLIF(CAST(release_year AS TEXT), '')
-                        )
-                    ORDER BY added_at DESC
-                    LIMIT 12
-                """))
-                recent_albums = [dict(r._mapping) for r in result.fetchall()]
-        except Exception:
-            recent_albums = []
+        recent_albums = _fetch_recent_albums(days=14, limit=12)
 
         return await render_template(
             "pages/dashboard.html",
@@ -1755,7 +1825,9 @@ def _run_album_file_sync_phases(payload: dict[str, Any]) -> dict[str, Any]:
     rescan would have introduced exactly that bug.
     """
     jobs = payload.get("file_jobs") or []
+    _tags_started = time.monotonic()
     results = _write_album_track_files_bounded(jobs)
+    tags_ms = (time.monotonic() - _tags_started) * 1000.0
 
     file_failures = 0
     # Reported per file for BOTH paths. A backgrounded save used to be the case
@@ -1770,6 +1842,7 @@ def _run_album_file_sync_phases(payload: dict[str, Any]) -> dict[str, Any]:
 
     cover_embedded = 0
     cover_bytes = payload.get("cover_bytes")
+    _cover_started = time.monotonic()
     if cover_bytes:
         try:
             from services.enrichment.album_art_service import (
@@ -1784,6 +1857,7 @@ def _run_album_file_sync_phases(payload: dict[str, Any]) -> dict[str, Any]:
             ) or 0
         except Exception as _cover_exc:
             logger.debug("Album save cover embed failed", error=str(_cover_exc))
+    cover_ms = (time.monotonic() - _cover_started) * 1000.0
 
     rescanned = False
     if payload.get("should_rescan"):
@@ -1801,6 +1875,15 @@ def _run_album_file_sync_phases(payload: dict[str, Any]) -> dict[str, Any]:
         "cover_embedded": cover_embedded,
         "rescanned": rescanned,
         "tracks": len(jobs),
+        # ⚠️ PER-STEP timings, and they are the point rather than a nicety.
+        # "file_tags_ms" used to be the WHOLE disk phase, so a report of "the
+        # save is slow" could not say WHICH pass was slow — and the two passes
+        # fail for completely different reasons (tag writes scale with the
+        # track count, the cover embed scales with file SIZE and runs on a
+        # second full rewrite of every file). The two are now separately
+        # bounded and separately measured, so the next report names one.
+        "tags_ms": round(tags_ms, 1),
+        "cover_ms": round(cover_ms, 1),
     }
 
 
@@ -1881,6 +1964,40 @@ _MB_BACKFILL_DEADLINE_SECONDS = 15.0
 #: Four keeps the wall clock near a quarter of the sequential cost while
 #: leaving the disk (and a network mount) enough headroom to stay fast.
 _FILE_WRITE_CONCURRENCY = 4
+
+#: How long the album save may spend FETCHING the cover image.
+#:
+#: The CAA client has a 10s per-request timeout, but a request is not the unit
+#: that matters here: ``follow_redirects=True`` gives EVERY hop its own 10s, and
+#: the resolver tries the release and then (on a miss) the release group, so the
+#: sequence is unbounded in practice. ``_httpx.get(cover_url, timeout=10)`` on the
+#: plain-URL branch has the same shape.
+#:
+#: This is the same defect the MusicBrainz backfill had — an ``await`` off the
+#: event loop is not the same as an ``await`` UNDER A DEADLINE — so it gets the
+#: same treatment, and for the same reason: a cover is additive. Losing it costs
+#: one picture; waiting past the origin timeout costs the whole save.
+_COVER_FETCH_DEADLINE_SECONDS = 12.0
+
+#: How long the INLINE disk phase may run before the save responds without it.
+#:
+#: ⚠️ THE BACKSTOP. The phases above are individually bounded, but the disk phase
+#: is the one whose cost is set by the USER'S STORAGE rather than by this code:
+#: N file rewrites for the tags plus N more for the cover, at ~370ms each on a
+#: local disk and seconds each on a network mount. Two albums of the same track
+#: count can differ by an order of magnitude, which is why a per-phase deadline
+#: cannot be tuned to be both safe and useful.
+#:
+#: So the budget is set against the thing that actually matters — the 100s
+#: origin timeout — with room reserved for everything that runs before it
+#: (backfill 15s + cover 12s + the database loop). Past the budget the response
+#: goes back and the worker thread FINISHES ON ITS OWN: the tags still land, the
+#: user is told they are still being written, and a later save or scan confirms
+#: them. That is the same contract the MB backfill deadline already uses.
+#:
+#: This is a backstop, not the fix — the concurrent pools are what bring a
+#: normal album comfortably inside it.
+_INLINE_DISK_BUDGET_SECONDS = 45.0
 
 # A release-group MBID is the identity of a RELEASE — the same album NAME can
 # belong to several of them (a re-issue, a deluxe edition), and a single
@@ -2611,18 +2728,38 @@ async def album_detail(album_path: str) -> Any:
         _cover_embedded = False
         _cover_bytes: bytes | None = None
         _cover_mime = "image/jpeg"
+        # ⚠️ THE TRIGGER IS UNCHANGED — still only when the form carries a cover
+        # URL. Widening it to "or we have an MBID" would ADD a Cover Art Archive
+        # fetch to every ordinary save that has an MBID, which is the opposite of
+        # what this fix is for. The lookup fills ``#cover_art_url`` (see
+        # ``applyAlbumMatch``), so a lookup-then-save already arrives with one.
         if cover_url:
             try:
                 from services.enrichment.album_art_service import (
                     save_album_art_to_db,
                 )
-                # Blocking (an HTTP fetch, or the Cover Art Archive) — run it
-                # in a thread so a slow image host cannot stall the worker.
-                _cover_bytes, _cover_mime = await asyncio.to_thread(
-                    _resolve_album_cover_bytes, cover_url, album_mbid, album_rg_mbid
+                # Blocking (an HTTP fetch, or the Cover Art Archive) — run it in
+                # a thread so a slow image host cannot stall the worker, AND
+                # under a deadline so it cannot stall the SAVE. Off the event
+                # loop is not the same as bounded: the CAA resolver follows
+                # redirects (a fresh timeout per hop) and falls back from the
+                # release to the release group, so without this the sequence had
+                # no ceiling at all.
+                _cover_bytes, _cover_mime = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _resolve_album_cover_bytes, cover_url, album_mbid, album_rg_mbid
+                    ),
+                    timeout=_COVER_FETCH_DEADLINE_SECONDS,
                 )
                 if _cover_bytes:
                     save_album_art_to_db(artist_name, album_name, _cover_bytes, source="url", mime_type=_cover_mime)
+            except (asyncio.TimeoutError, TimeoutError):
+                logger.warning(
+                    "Album save: cover fetch hit its deadline — saving without new art",
+                    artist=artist_name, album=album_name,
+                    deadline_seconds=_COVER_FETCH_DEADLINE_SECONDS,
+                )
+                _cover_bytes, _cover_mime = None, "image/jpeg"
             except Exception as _cover_exc:
                 logger.debug("Album save cover art fetch failed", artist=artist_name, album=album_name, error=str(_cover_exc))
 
@@ -2656,6 +2793,18 @@ async def album_detail(album_path: str) -> Any:
 
         _file_started = time.monotonic()
         _file_backgrounded = False
+        # Set when the inline disk phase hit its budget. Tracked separately from
+        # ``_file_backgrounded`` because they mean different things: one is a
+        # DECISION (this album is big enough to queue), the other is an
+        # OUTCOME (it was queued inline and ran long). Only the messages care,
+        # but they must not tell the user their files were written when the
+        # response gave up waiting for them.
+        _file_abandoned = False
+        # Split out of ``_file_write_ms`` by the runner, so a slow save names
+        # WHICH pass was slow. Both stay 0 for a backgrounded save, where the
+        # work has not happened yet.
+        _tags_ms = 0.0
+        _cover_ms = 0.0
         try:
             _bg_cfg = get_album_save_background_config()
         except Exception:
@@ -2687,9 +2836,44 @@ async def album_detail(album_path: str) -> Any:
                 _file_backgrounded = False
 
         if not _file_backgrounded:
-            _disk = await asyncio.to_thread(_run_album_file_sync_phases, _file_payload)
+            # ⚠️ THE INLINE PHASE IS BOUNDED TOO, AND THAT IS NOT REDUNDANT.
+            #
+            # The tag writes and the cover embed are each concurrent now, which
+            # brings a normal album well inside the budget. But this phase's cost
+            # is set by the USER'S STORAGE, not by anything this code decides:
+            # the same album is ~370ms a file on a local disk and seconds a file
+            # on a network mount. No per-phase constant can be tuned to be both
+            # safe and useful across that range.
+            #
+            # So the budget is measured against the only deadline that actually
+            # exists — Cloudflare's 100s origin timeout. Expiry abandons the
+            # AWAIT, not the work: the worker thread keeps writing and lands
+            # every tag it was given. The response just stops claiming to have
+            # confirmed them, which is what ``_disk_abandoned`` records below.
+            try:
+                _disk = await asyncio.wait_for(
+                    asyncio.to_thread(_run_album_file_sync_phases, _file_payload),
+                    timeout=_INLINE_DISK_BUDGET_SECONDS,
+                )
+            except (asyncio.TimeoutError, TimeoutError):
+                _disk = {}
+                _file_abandoned = True
+                logger.warning(
+                    "Album save: file tagging exceeded its inline budget — "
+                    "responding now, the writes continue in the background",
+                    artist=artist_name, album=album_name,
+                    tracks=len(_file_jobs),
+                    budget_seconds=_INLINE_DISK_BUDGET_SECONDS,
+                )
+                log_unified(
+                    f"⏱ Album save: {len(_file_jobs)} file(s) still being tagged "
+                    f"after {_INLINE_DISK_BUDGET_SECONDS:.0f}s — the database is "
+                    f"saved and the files are being written in the background"
+                )
             file_sync_failures += int(_disk.get("file_failures") or 0)
             _cover_embedded = bool(_disk.get("cover_embedded"))
+            _tags_ms = float(_disk.get("tags_ms") or 0.0)
+            _cover_ms = float(_disk.get("cover_ms") or 0.0)
         _file_write_ms = (time.monotonic() - _file_started) * 1000.0
 
         # ── Ask Navidrome to re-scan — now the DISK phase's last step ──────
@@ -2715,7 +2899,7 @@ async def album_detail(album_path: str) -> Any:
         # genres are database-only now, so a genres-only save changes no file and
         # there would be nothing for Navidrome to re-read.
 
-        if _file_backgrounded:
+        if _file_backgrounded or _file_abandoned:
             await flash(
                 f"Album metadata saved — {updated_count} track(s) updated. "
                 f"Tagging {len(_file_jobs)} audio file(s) in the background — "
@@ -2813,6 +2997,12 @@ async def album_detail(album_path: str) -> Any:
         # outlived Cloudflare's 100s origin timeout (error 524) — and without
         # numbers the next one is a guess. ``file_tags_ms`` is the concurrent
         # phase's TOTAL wall time, not the sum of its writes.
+        #
+        # ⚠️ ALSO SENT TO ``log_unified``, so it lands in the Logs page rather
+        # than only in the JSON app log. The last two reports of this timeout
+        # arrived without the numbers this line already collected, because the
+        # person reading the UI logs could not see them.
+        _total_ms = (time.monotonic() - _save_started) * 1000.0
         logger.info(
             "Album save phases",
             artist=artist_name,
@@ -2821,10 +3011,23 @@ async def album_detail(album_path: str) -> Any:
             updated=updated_count,
             db_failures=db_failures,
             file_failures=file_sync_failures,
+            backgrounded=_file_backgrounded,
+            abandoned=_file_abandoned,
             mb_backfill_ms=round(_mb_backfill_ms, 1),
             write_loop_ms=round(_write_loop_ms, 1),
             file_tags_ms=round(_file_write_ms, 1),
-            total_ms=round((time.monotonic() - _save_started) * 1000.0, 1),
+            tag_writes_ms=round(_tags_ms, 1),
+            cover_embed_ms=round(_cover_ms, 1),
+            total_ms=round(_total_ms, 1),
+        )
+        log_unified(
+            f"💾 Album save: {album_name} — {len(tracks)} track(s) in "
+            f"{_total_ms / 1000.0:.1f}s "
+            f"| MB backfill {_mb_backfill_ms / 1000.0:.1f}s "
+            f"| DB {_write_loop_ms / 1000.0:.1f}s "
+            f"| tags {_tags_ms / 1000.0:.1f}s "
+            f"| cover {_cover_ms / 1000.0:.1f}s"
+            + (" | TAGGING CONTINUES IN BACKGROUND" if _file_abandoned else "")
         )
 
         redirect_artist = new_artist or artist_name

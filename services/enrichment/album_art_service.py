@@ -10,6 +10,7 @@ import base64 as _b64
 import os
 import re
 import time as _time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional, Tuple
 
 import httpx
@@ -370,6 +371,25 @@ def fetch_album_art_from_audiodb(artist_name: str, album_name: str) -> bytes | N
         return None
 
 
+#: How many album files are rewritten at once when embedding a cover.
+#:
+#: ⚠️ WHY THIS EXISTS. This embed used to be a plain `for row in rows:` loop —
+#: one full rewrite per file, strictly one after another. An album save calls it
+#: AFTER the tag-write pass, so every album paid the disk cost TWICE: once for
+#: tags (already concurrent, see ``_FILE_WRITE_CONCURRENCY`` in
+#: ``routes/ui_routes.py``) and then once more, sequentially, to embed the
+#: picture. Embedding also rewrites the whole file rather than appending to it,
+#: so it is the more expensive of the two passes.
+#:
+#: Measured on a local disk a single 8MB MP3 rewrite is ~370ms; on a network
+#: mount (the reported setup) it is seconds. A 30-track album was therefore
+#: ~90s of nothing but this loop, on top of the tag pass, which is what pushed a
+#: save past Cloudflare's 100s origin timeout. Four at a time keeps the wall
+#: clock near a quarter of that while leaving the mount enough headroom to stay
+#: fast — the same cap and the same reasoning as the tag-write pool.
+_COVER_EMBED_CONCURRENCY = 4
+
+
 def apply_album_art_to_tracks(artist_name: str, album_name: str, image_data: bytes, mime_type: str = "image/jpeg") -> int:
     if not image_data:
         return 0
@@ -391,7 +411,7 @@ def apply_album_art_to_tracks(artist_name: str, album_name: str, image_data: byt
 
     from services.metadata.tag_file_service import resolve_music_file_path, write_tags_to_file
 
-    updated = 0
+    paths: list[str] = []
     for row in rows:
         mapping = getattr(row, "_mapping", None)
         if mapping is not None:
@@ -404,9 +424,33 @@ def apply_album_art_to_tracks(artist_name: str, album_name: str, image_data: byt
         resolved = resolve_music_file_path(file_path) or file_path
         if not os.path.exists(resolved):
             continue
-        if write_tags_to_file(resolved, {"cover_art_data": image_data, "cover_art_mime": mime_type}):
-            updated += 1
-    return updated
+        paths.append(resolved)
+
+    if not paths:
+        return 0
+
+    def _embed_one(resolved: str) -> bool:
+        """One file's embed. Never raises — see the caller's docstring."""
+        try:
+            return bool(write_tags_to_file(
+                resolved, {"cover_art_data": image_data, "cover_art_mime": mime_type}
+            ))
+        except Exception as exc:
+            # ⚠️ CRASH ISOLATION, per file. A corrupt or locked file must cost
+            # itself and nothing else: the old sequential loop did not catch
+            # anything either, so a single failure aborted the whole embed and
+            # every later track kept the OLD picture with no count recorded.
+            logger.warning(
+                "Album art embed failed for one file",
+                file_path=resolved, error=str(exc),
+            )
+            return False
+
+    # ``ThreadPoolExecutor.map`` preserves INPUT order; the count is what the
+    # caller reports, so order matters only for reproducible diagnostics.
+    with ThreadPoolExecutor(max_workers=_COVER_EMBED_CONCURRENCY) as pool:
+        results = list(pool.map(_embed_one, paths))
+    return sum(1 for ok in results if ok)
 
 
 def get_album_art_placeholder_svg(size: int = 300) -> Response:

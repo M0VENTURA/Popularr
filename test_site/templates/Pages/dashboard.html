@@ -3,6 +3,7 @@
 {% block title %}Dashboard · Popularr{% endblock %}
 
 {% block content %}
+{% from "components/_recent_album_row.html" import recent_album_row %}
 <div class="container-fluid mt-4">
     <div id="dashboardFlags"
          data-launch-on-startup="{{ 'true' if launch_on_startup else 'false' }}"
@@ -260,17 +261,18 @@
                   phone they wrap under the title and a combined row would squeeze
                   all four items onto one line.
 
-                  `recentActivityViewAll` has no page of its own yet — it points at
-                  the full recent-scans view, which is the only one of the three
-                  that exists as a destination. The other two panes are lists that
-                  only make sense here.
+                  ⭐ THE LINK NOW GOES TO THE ACTIVITY PAGE. It used to point at
+                  `/downloads/monitor` — a downloads page, which shows NONE of the
+                  three feeds above it. `/activity` was built for this link and
+                  shows all three, stacked and with higher caps, because the card
+                  has to fit in a card.
                 #}
                 <div class="card-header py-2 border-secondary">
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <h6 class="mb-0 d-flex align-items-center gap-1">
                             <i class="bi bi-clock-history text-info" aria-hidden="true"></i> Recent Activity
                         </h6>
-                        <a href="/downloads/monitor" class="small text-info text-decoration-none fw-semibold flex-shrink-0">
+                        <a href="{{ url_for('ui.activity') }}" class="small text-info text-decoration-none fw-semibold flex-shrink-0">
                             View all <i class="bi bi-arrow-right" aria-hidden="true"></i>
                         </a>
                     </div>
@@ -303,83 +305,7 @@
                 {% if recent_albums %}
                 <div class="list-group list-group-flush" style="max-height: 420px; overflow-y: auto; scrollbar-width: thin;">
                     {% for al in recent_albums %}
-                    {#
-                      ⚠️ The row is a DIV, not an <a>. It carries a PLAY button, and
-                      a <button> nested inside an <a> is invalid HTML — the browser
-                      reparses it, and a click fires BOTH the button and the link, so
-                      playing an album would also navigate away from the dashboard.
-                      The link now wraps only the art + text, and the actions sit
-                      beside it, which keeps "tap the row to open" and "tap the
-                      button to play" as separate gestures (the brief's own rule:
-                      "use explicit buttons to play, navigate, queue, scan or edit").
-
-                      TWO LINES, BOTH TRUNCATED, NOTHING CLIPPED. The old markup put
-                      the year and the type badge INSIDE the `text-truncate` title
-                      div, so a long album name ellipsised the metadata away instead
-                      of the title — the reported truncation bug. The title now
-                      truncates on its own line, and the second line holds
-                      artist · year with the badge as a NON-shrinking sibling.
-                    #}
-                    <div class="list-group-item bg-transparent border-secondary p-2 d-flex align-items-center gap-2">
-                      <a href="{{ url_for('ui.album_detail', album_path=al.artist ~ '/' ~ al.album ~ (('/' ~ al.album_year) if al.album_year else '')) }}"
-                         class="d-flex align-items-center gap-2 min-w-0 flex-grow-1 text-decoration-none">
-                        {#
-                          Real artwork when we have it. `album_in_collection` is
-                          implied here — this list IS library albums — so the art
-                          request is expected to succeed; the onerror fallback keeps
-                          the old disc glyph for an album with no embedded image,
-                          rather than a broken-image icon.
-                        #}
-                        <img src="/api/album/{{ al.artist|path_segment }}/{{ al.album|path_segment }}/art?s=80"
-                             alt="" loading="lazy" width="40" height="40"
-                             class="flex-shrink-0 rounded"
-                             style="object-fit: cover; background-color: var(--tertiary-bg); border: 1px solid var(--border-color);"
-                             onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
-                        <span class="flex-shrink-0 align-items-center justify-content-center rounded"
-                              style="display: none; width: 40px; height: 40px; background-color: var(--tertiary-bg); border: 1px solid var(--border-color);">
-                          <i class="bi bi-disc text-muted fs-5"></i>
-                        </span>
-                        <span class="min-w-0">
-                          <span class="d-block fw-bold text-truncate text-light" style="font-size: 0.9rem;">{{ al.album }}</span>
-                          <span class="d-flex align-items-center gap-1" style="font-size: 0.8rem;">
-                            <span class="text-muted text-truncate">{{ al.artist }}</span>
-                            {% if al.album_year %}<span class="text-muted flex-shrink-0">· {{ al.album_year }}</span>{% endif %}
-                            {% if al.album_type %}<span class="badge bg-secondary-subtle text-secondary-emphasis extra-small flex-shrink-0">{{ al.album_type }}</span>{% endif %}
-                          </span>
-                        </span>
-                      </a>
-                      <div class="flex-shrink-0 d-flex align-items-center gap-2">
-                        <span class="badge bg-dark border border-secondary text-muted extra-small fw-normal d-none d-sm-inline">
-                            {% if al.added_at %}{{ al.added_at.strftime('%d %b') }}{% else %}—{% endif %}
-                        </span>
-                        {#
-                          "Open" — the mock-up labels the navigation action rather
-                          than leaving the row as an unlabelled link. It is an <a>
-                          styled as a button, NOT a <button>: it navigates, so it
-                          must work with the keyboard, be middle-clickable and
-                          openable in a new tab, all of which a <button> with an
-                          onclick handler loses.
-
-                          The play button below is the reverse — it acts, so it is
-                          a real <button>. The two neighbours look alike and are
-                          deliberately different elements.
-                        #}
-                        <a href="{{ url_for('ui.album_detail', album_path=al.artist ~ '/' ~ al.album ~ (('/' ~ al.album_year) if al.album_year else '')) }}"
-                           class="btn btn-sm btn-outline-secondary py-0 px-2"
-                           aria-label="Open {{ al.album }} by {{ al.artist }}">Open</a>
-                        {#
-                          The low-profile add. `data-*` rather than an inline
-                          onclick with interpolated strings: album and artist names
-                          routinely contain apostrophes and quotes, which would end
-                          the JS string literal and break the handler.
-                        #}
-                        <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1 js-play-album"
-                                data-artist="{{ al.artist }}" data-album="{{ al.album }}"
-                                title="Play this album" aria-label="Play {{ al.album }} by {{ al.artist }}">
-                          <i class="bi bi-play-fill" aria-hidden="true"></i>
-                        </button>
-                      </div>
-                    </div>
+                    {{ recent_album_row(al) }}
                     {% endfor %}
                 </div>
                 {% else %}
@@ -494,5 +420,8 @@
 <script src="{{ versioned_static('js/services/scan-resume-picker.js') }}"></script>
 <script src="{{ versioned_static('js/services/musicbrainz-queue.js') }}"></script>
 <script src="{{ versioned_static('js/services/upcoming-releases.js') }}"></script>
+{# The activity feed module: grouping, labels, timestamps and the scan/review
+   row markup. Loaded BEFORE dashboard.js, which delegates to it. #}
+<script src="{{ versioned_static('js/services/activity-feed.js') }}"></script>
 <script src="{{ versioned_static('js/pages/dashboard.js') }}"></script>
 {% endblock %}
