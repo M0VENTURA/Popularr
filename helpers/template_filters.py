@@ -73,6 +73,74 @@ def encode_path_segment(value) -> str:
     return quote(quote(_unwrap_markup(value), safe=""), safe="")
 
 
+#: Separators that join a page's own name to its context in ``{% block title %}``.
+#:
+#: ``" - "`` is deliberately NOT here. A hyphen is a legitimate character in a
+#: song or album title, so treating it as a separator truncated real names —
+#: "Love - Hate" reduced to "Love". The dash forms below are unambiguous, and
+#: the pages that used a hyphen as a joiner were normalised to ``·``; the
+#: trailing-brand strip falls back to every separator in this tuple, so a title
+#: that still ends in ``"... - Popularr"`` reduces on the brand rule alone.
+_HEADING_SEPARATORS = ("·", "–", "—", "|")
+
+#: The word that identifies the application rather than the page.
+_BRAND = "popularr"
+
+
+def page_heading(title):
+    """Reduce a page ``<title>`` to a short heading for the mobile app header.
+
+    The top navbar doubles as the mobile app header, where the full document
+    title (``"When Your Heart Stops Beating · +44 · Popularr"``) would fill the
+    row and push the action buttons off screen. Templates already name the page
+    in ``{% block title %}``, so the heading is derived from it instead of
+    asking ~30 templates to declare the same string twice.
+
+    The rule is deliberately narrow, because a wrong heading is worse than a
+    generic one, and runs in three ordered steps:
+
+    1. **Strip the application name** — a leading ``"Popularr ..."``, or a
+       trailing segment that starts with the brand after any separator.
+    2. **Take the first segment** on ``·`` / ``–`` / ``—`` / ``|``. The
+       codebase only uses these to join a page's own name to its context, so
+       ``"Corrections · +44"`` reduces to ``"Corrections"``.
+    3. **Pass anything else through whole**, so ``"Genres & Moods Analytics"``
+       (no brand, no separator) and ``"Love - Hate"`` (a hyphen inside the
+       name) are not truncated.
+
+    Pages needing exact wording use ``{% block mobile_title %}`` instead.
+    """
+    original = _unwrap_markup(title).strip()
+    if not original:
+        return ""
+
+    text = original
+    head, _, tail = text.partition(" ")
+    if head.lower().rstrip(":") == _BRAND and tail.strip():
+        text = tail.strip()
+
+    # Strip a trailing brand segment on ANY of the joiners, including " - ".
+    # Safe where the general rule below is not: the strip only fires when the
+    # tail IS the application name, so "Love - Hate" is untouched while
+    # "Artists - Popularr" still reduces — the brand is the authorisation,
+    # the separator is not.
+    for separator in _HEADING_SEPARATORS + (" - ",):
+        parts = text.rsplit(separator, 1)
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip().lower().startswith(_BRAND):
+            text = parts[0].strip()
+            break
+
+    for separator in _HEADING_SEPARATORS:
+        if separator in text:
+            first = text.split(separator)[0].strip()
+            # A leading separator (or one that leaves nothing) is not a name
+            # boundary — keep the longer text rather than blanking the heading.
+            if first:
+                return first
+
+    return text or original
+
+
 def register_filters(app):
     """Register all Jinja2 template filters and context processors."""
 
@@ -219,6 +287,16 @@ def register_filters(app):
         """
         from helpers.artist_sort import artist_sort_name
         return artist_sort_name(value)
+
+    @app.template_filter('page_heading')
+    def page_heading_filter(value):
+        """Short page name for the mobile app header.
+
+        See ``page_heading`` above for the reduction rule. Registered as a
+        filter so templates can apply it to ``self.title()`` at the call site
+        rather than pre-computing a variable in the route.
+        """
+        return page_heading(value)
 
     # ----------------------------------------------------------------------
     # Tests

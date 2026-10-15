@@ -302,6 +302,7 @@
       line.textContent = 'Idle';
       icon.className = 'scan-status-idle';
       icon.innerHTML = '<i class="bi bi-circle"></i>';
+      setScanBarActive(bar, false, 0);
       return;
     }
 
@@ -312,6 +313,40 @@
       (scan.current_item ? ` · ${scan.current_item}` : '');
     icon.className = 'scan-status-active';
     icon.innerHTML = '<i class="bi bi-activity"></i>';
+    setScanBarActive(bar, true, pct);
+  }
+
+  /**
+   * Switch the status bar between its idle hairline and the active pill.
+   *
+   * The idle and active presentations are the same element in two states, so
+   * the class and the progress width must be written TOGETHER — setting the
+   * class without the width would show the previous scan's progress.
+   *
+   * ⚠️ The accessibility switch is MOBILE-ONLY, because the element is two
+   * different things at the two breakpoints. Above lg it is a normal footer
+   * bar with text on it, and it stays a button while idle — it is the only way
+   * to open the log there, so stripping `role`/`tabindex` on idle would have
+   * silently removed the desktop keyboard path to the log viewer. Below lg the
+   * idle state is a 2px line with `pointer-events: none`, so leaving it
+   * announced as a button would offer a control that cannot be activated.
+   */
+  function setScanBarActive(bar, isActive, percent) {
+    if (!bar) return;
+    bar.classList.toggle('is-active', !!isActive);
+    const fill = document.getElementById('scanBarFill');
+    if (fill) fill.style.width = isActive ? `${Math.max(0, Math.min(percent || 0, 100))}%` : '0';
+
+    const isMobile = !!(global.matchMedia && global.matchMedia('(max-width: 991.98px)').matches);
+    if (isActive || !isMobile) {
+      bar.setAttribute('role', 'button');
+      bar.setAttribute('tabindex', '0');
+      bar.removeAttribute('aria-hidden');
+    } else {
+      bar.removeAttribute('role');
+      bar.removeAttribute('tabindex');
+      bar.setAttribute('aria-hidden', 'true');
+    }
   }
 
   function initScanStream() {
@@ -713,8 +748,55 @@
     global.location.href = '/search?q=' + encodeURIComponent(query);
   }
 
-  // ── Init ────────────────────────────────────────────────────────────────
+  // ── App header (mobile) ─────────────────────────────────────────────────
 
+  /**
+   * The header's back button.
+   *
+   * Browser history FIRST, so a deep link or a search result returns to where
+   * the user actually came from — "back" that jumps to a structural parent
+   * would silently discard the page they were browsing. `history.length > 1`
+   * is the only signal available, and it is not reliable in every engine, so
+   * it is used as a *preference* rather than a gate on correctness: the
+   * fallback below is a real navigation, not an error path.
+   */
+  function navigateBack() {
+    if (global.history && global.history.length > 1) {
+      global.history.back();
+      return;
+    }
+    // Landed directly on this URL (a bookmark, a shared link, a fresh tab):
+    // there is nothing to go back to, so fall back to the structural parent.
+    const fallback = document.getElementById('appHeaderBack');
+    const href = fallback && fallback.getAttribute('data-fallback-href');
+    global.location.href = href || '/dashboard';
+  }
+
+  /**
+   * The header's scan button.
+   *
+   * A page that can scan something listens for `popularr:scan-request` and
+   * calls `preventDefault()`, which is how the header stays a shell concern:
+   * it does not know what is on the page, and the page does not own a button
+   * in the shell.
+   *
+   * With no listener the event returns undefaulted and this opens the scanning
+   * log instead — the same modal the status bar opens. That fallback is the
+   * point: a scan button that does nothing on 25 of 30 pages would train
+   * people to ignore it, and the log is the one scanning view that exists
+   * everywhere.
+   */
+  function requestContextScan() {
+    const event = new CustomEvent('popularr:scan-request', {
+      cancelable: true,
+      bubbles: true,
+      detail: { path: global.location.pathname },
+    });
+    const handled = !document.dispatchEvent(event);
+    if (!handled && typeof openUnifiedLogModal === 'function') openUnifiedLogModal();
+  }
+
+  // ── Init ────────────────────────────────────────────────────────────────
   document.addEventListener('DOMContentLoaded', function () {
     initNavbarHeight();
     initScanStream();
@@ -793,6 +875,9 @@
     queueSpecificRelease,
     markFormDirty,
     updateGlobalScanBar,
+    setScanBarActive,
+    navigateBack,
+    requestContextScan,
   };
 
   // Globals for the inline onclick / onsubmit handlers in base.html.
@@ -805,6 +890,8 @@
   global.addBookmark = addBookmark;
   global.navSearch = navSearch;
   global.openUnifiedLogModal = openUnifiedLogModal;
+  global.navigateBack = navigateBack;
+  global.requestContextScan = requestContextScan;
   // ⚠️ The other log handlers this file used to export (toggleLogPause,
   // toggleLogTimestamps, clearUnifiedLog, switchLogSource,
   // downloadActiveLogLastHour) were bound by inline onclick in the old modal

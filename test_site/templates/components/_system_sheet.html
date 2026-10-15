@@ -1,0 +1,136 @@
+{#
+  SYSTEM SHEET — the mobile home for every destination the bottom nav does not
+  carry.
+
+  WHAT IT REPLACES
+  ----------------
+  The header used to carry a hamburger that expanded `#navbarNav` into a
+  full-screen stack of dropdown menus, sitting next to a five-tab bottom bar.
+  Two competing navigation systems on one screen is the anti-pattern: the same
+  question ("where can I go?") had two different answers in two different
+  shapes, and the collapsed menu was the slow path for everything the bar did
+  not cover.
+
+  The bottom bar keeps the five destinations people reach for constantly. This
+  sheet is for the rest, and it is the ONLY place they live on a phone, so
+  there is one answer rather than two.
+
+  WHY AN OFF-CANVAS BOTTOM SHEET, NOT A COLLAPSE
+  ----------------------------------------------
+  * A bottom sheet comes from the same edge as the bar that opened it, so it
+    reads as an extension of the bar. A collapse from the top would make the
+    user's eye cross the whole screen and back.
+  * It keeps Bootstrap's focus trap, Escape handling and backdrop for free —
+    the mobile nav needs all three, and the previous collapse gave none of
+    them (a full-screen menu with no focus management).
+  * It is NOT a `navbar-collapse`, so `--navbar-height` does not change when
+    it is open. That matters: the flicker guard in main.js measures the navbar
+    and subtracts the open collapse, and a second collapse-shaped overlay
+    would have made that accounting ambiguous.
+
+  PARITY WITH THE DESKTOP NAVBAR
+  ------------------------------
+  The destinations here mirror the navbar's dropdowns. The duplication is
+  deliberate — the two need different markup (flat list vs. nested menus) — so
+  tests/test_mobile_chrome_redesign.py asserts that every `url_for` endpoint in
+  the desktop nav also appears here. Dropping a destination from either place
+  fails the suite instead of silently stranding it.
+#}
+<div class="offcanvas offcanvas-bottom system-sheet" tabindex="-1" id="systemSheet"
+     aria-labelledby="systemSheetLabel">
+  <div class="offcanvas-header border-bottom border-secondary border-opacity-25">
+    <h5 class="offcanvas-title" id="systemSheetLabel">
+      <i class="bi bi-grid-3x3-gap me-1" aria-hidden="true"></i> Menu
+    </h5>
+    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"
+            aria-label="Close"></button>
+  </div>
+  <div class="offcanvas-body p-0">
+    <nav aria-label="All destinations">
+
+      <p class="system-sheet-group">Library</p>
+      <a class="system-sheet-item" href="{{ url_for('ui.dashboard') }}">
+        <i class="bi bi-speedometer2" aria-hidden="true"></i> Dashboard
+      </a>
+      <a class="system-sheet-item" href="{{ url_for('ui.artists') }}">
+        <i class="bi bi-people" aria-hidden="true"></i> All Artists
+      </a>
+      <a class="system-sheet-item" href="{{ url_for('ui.bookmarks') }}?filter=artist">
+        <i class="bi bi-star-fill text-warning" aria-hidden="true"></i> Favourite Artists
+      </a>
+      <a class="system-sheet-item" href="/playlists">
+        <i class="bi bi-collection-play" aria-hidden="true"></i> Playlists
+      </a>
+
+      {# Discover & Upcoming & Missing share one job — "what am I not listening
+         to yet?" — which is why the desktop navbar groups them. #}
+      <p class="system-sheet-group">Discover</p>
+      <a class="system-sheet-item" href="/discover">
+        <i class="bi bi-compass" aria-hidden="true"></i> Discover
+      </a>
+      <a class="system-sheet-item" href="/downloads/discover/upcoming">
+        <i class="bi bi-calendar-event" aria-hidden="true"></i> Upcoming Releases
+      </a>
+      <a class="system-sheet-item" href="/missing">
+        <i class="bi bi-exclamation-circle text-warning" aria-hidden="true"></i> Missing Releases
+      </a>
+
+      {% if custom_bookmark_links and custom_bookmark_links|length > 0 %}
+      <p class="system-sheet-group">Bookmarks</p>
+      {% for link in custom_bookmark_links %}
+      <a class="system-sheet-item" href="{{ link.url }}" target="_blank" rel="noopener noreferrer">
+        <i class="bi bi-link-45deg" aria-hidden="true"></i> {{ link.title }}
+      </a>
+      {% endfor %}
+      {% endif %}
+
+      <p class="system-sheet-group">Downloads</p>
+      <a class="system-sheet-item" href="/downloads/monitor">
+        <i class="bi bi-download" aria-hidden="true"></i> Monitor
+      </a>
+      <a class="system-sheet-item" href="/downloads/monitor#unmatchedFoldersSection">
+        <i class="bi bi-question-circle" aria-hidden="true"></i> Unmatched Folders
+      </a>
+      <a class="system-sheet-item" href="/banned-words">
+        <i class="bi bi-slash-circle" aria-hidden="true"></i> Banned Search Words
+      </a>
+
+      <p class="system-sheet-group">System</p>
+      {#
+        Logs keeps a REAL href on purpose, exactly as its navbar twin does: it
+        is the fallback for a click the handler misses (keyboard activation
+        with JS broken, middle-click, "open in new tab"), and ui.logs redirects
+        to the dashboard with `?logs=1`, which opens this very modal. The
+        onclick only skips that round-trip, because navigating away would
+        defeat the point of a modal that preserves the page you were browsing.
+      #}
+      <a class="system-sheet-item" href="{{ url_for('ui.logs') }}"
+         onclick="event.preventDefault(); openUnifiedLogModal();">
+        <i class="bi bi-file-text" aria-hidden="true"></i> Logs
+      </a>
+      <a class="system-sheet-item" href="{{ url_for('ui.correcting') }}">
+        <i class="bi bi-tools" aria-hidden="true"></i> Tag Corrections
+      </a>
+      <a class="system-sheet-item" href="{{ url_for('ui.help_page') }}">
+        <i class="bi bi-question-circle" aria-hidden="true"></i> Help
+      </a>
+      <a class="system-sheet-item" href="{{ url_for('ui.config_editor') }}">
+        <i class="bi bi-gear" aria-hidden="true"></i> Config
+      </a>
+      <a class="system-sheet-item" href="/test-site">
+        <i class="bi bi-columns-gap" aria-hidden="true"></i> Rebuilt UI Preview
+      </a>
+
+      {% if session.get('username') %}
+      <p class="system-sheet-group">Account</p>
+      <span class="system-sheet-item system-sheet-static">
+        <i class="bi bi-person-circle" aria-hidden="true"></i> {{ session.get('username') }}
+      </span>
+      <a class="system-sheet-item text-danger" href="{{ url_for('ui.logout') }}">
+        <i class="bi bi-box-arrow-right" aria-hidden="true"></i> Logout
+      </a>
+      {% endif %}
+
+    </nav>
+  </div>
+</div>

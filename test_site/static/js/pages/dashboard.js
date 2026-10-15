@@ -377,10 +377,20 @@
     const icon = document.getElementById('scanStatusIcon');
     if (!line || !icon) return;
 
+    // `setScanBarActive` is owned by main.js because the same bar is written
+    // from two places (this poll on the dashboard, the global SSE stream
+    // everywhere else). Both must agree on what "active" looks like, or the
+    // pill and the hairline would depend on which writer ran last.
+    const barApi = global.popularr || {};
+    const setActive = typeof barApi.setScanBarActive === 'function'
+      ? barApi.setScanBarActive
+      : () => {};
+
     if (!active || !active.length) {
       line.textContent = 'Idle — no scan running';
       icon.className = 'scan-status-idle';
       icon.innerHTML = '<i class="bi bi-circle"></i>';
+      setActive(document.getElementById('scanStatusBar'), false, 0);
       return;
     }
 
@@ -391,6 +401,7 @@
       (scan.current_item ? ` · ${scan.current_item}` : '');
     icon.className = 'scan-status-active';
     icon.innerHTML = '<i class="bi bi-activity"></i>';
+    setActive(document.getElementById('scanStatusBar'), true, pct);
   }
 
   /**

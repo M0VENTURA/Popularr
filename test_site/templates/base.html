@@ -48,25 +48,86 @@
 </head>
 <body>
 
+  {#
+    `_nav_path` / `_nav_home` are resolved ONCE, before the navbar, because
+    the app header and the bottom nav both key off them. `/` 302s to
+    `/dashboard`, so the real dashboard path is the latter — an item must
+    light up on BOTH, or it reads as inactive on the page it represents.
+    Resolved server-side (no JS), so the shell is correct on first paint
+    instead of flashing the wrong state while a script catches up.
+  #}
+  {% set _nav_path = request.path %}
+  {% set _nav_home = _nav_path == '/' or _nav_path == '/dashboard' %}
   <nav class="navbar navbar-expand-lg navbar-dark fixed-top shadow-sm" style="background-color: var(--primary-bg);">
     <div class="container-fluid flex-wrap flex-lg-nowrap align-items-center">
 
-      <!-- Brand & Mobile Toggles -->
-      <div class="nav-brand-row d-flex align-items-center justify-content-between">
-        <a class="navbar-brand fw-bold d-flex align-items-center gap-2" href="{{ url_for('ui.dashboard') }}">
-          <i class="bi bi-music-note-beamed text-success"></i> Popularr
-        </a>
-        <div class="d-flex align-items-center gap-3 d-lg-none">
-          <a href="/config" class="text-muted text-decoration-none" aria-label="Settings" title="Settings">
-            <i class="bi bi-gear fs-5"></i>
+      {#
+        THE APP HEADER ROW — the navbar's first line, which is the whole
+        header on a phone and the brand line on desktop.
+
+        On mobile this is: [<-] Page name ......... [scan] [menu]. There is no
+        hamburger and no persistent search field, because both duplicated a
+        control that is already on screen:
+
+        * the search field had a twin in the bottom nav's Search tab, and
+          below lg its row cost ~64px of the navbar (--navbar-height was
+          132px to clear it). Removing it gives that height back to content;
+          the tab opens the same flyout, which has its own input that the
+          arrow-key and Enter handlers already treat as a first-class source
+          (see getQuerySource in search-flyout.js).
+        * the hamburger sat next to a five-tab bottom bar, so there were two
+          competing navigation systems on one screen. Its destinations now
+          live in the system sheet behind [#] — see components/_system_sheet.
+
+        The title comes from {% raw %}{% block title %}{% endraw %} via the
+        `page_heading` filter, so a page names itself once. A page needing
+        different wording overrides {% raw %}{% block mobile_title %}{% endraw %}.
+
+        DESKTOP IS UNCHANGED: brand, hero search pill and the nav links all
+        still render at lg+, and the extra header controls carry `d-lg-none`.
+      #}
+      <div class="nav-brand-row d-flex align-items-center justify-content-between gap-2">
+        <div class="app-header-lead d-flex align-items-center gap-1 gap-lg-2">
+          {#
+            `hidden` is decided SERVER-SIDE on the same condition as the
+            bottom nav: on a root destination there is nowhere to go back to,
+            and a back button that does nothing is worse than none.
+          #}
+          <button type="button" class="app-header-btn d-lg-none" id="appHeaderBack"
+                  onclick="navigateBack()" aria-label="Go back" title="Go back"
+                  {% if _nav_home %}hidden{% endif %}>
+            <i class="bi bi-chevron-left" aria-hidden="true"></i>
+          </button>
+          <a class="navbar-brand fw-bold d-none d-lg-flex align-items-center gap-2" href="{{ url_for('ui.dashboard') }}">
+            <i class="bi bi-music-note-beamed text-success"></i> Popularr
           </a>
-          <button class="navbar-toggler border-0 px-1 shadow-none" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
-            <span class="navbar-toggler-icon"></span>
+          <span class="app-header-title d-lg-none" id="appHeaderTitle">{% block mobile_title %}{{ self.title()|page_heading }}{% endblock %}</span>
+        </div>
+
+        <div class="app-header-actions d-flex align-items-center gap-1 gap-lg-3">
+          {# Context scan: dispatches a request a page can answer; with no
+             handler it opens the scanning log, so it is never a dead control. #}
+          <button type="button" class="app-header-btn d-lg-none" id="appHeaderScan"
+                  onclick="requestContextScan()" aria-label="Scanning" title="Scanning">
+            <i class="bi bi-lightning-charge" aria-hidden="true"></i>
+          </button>
+          <button type="button" class="app-header-btn d-lg-none" id="appHeaderMenu"
+                  data-bs-toggle="offcanvas" data-bs-target="#systemSheet"
+                  aria-controls="systemSheet" aria-label="More" title="More">
+            <i class="bi bi-three-dots-vertical" aria-hidden="true"></i>
           </button>
         </div>
       </div>
 
-      <!-- Persistent Global Search Bar -->
+      {#
+        Persistent Global Search Bar — DESKTOP ONLY (`d-none d-lg-block`).
+
+        Below lg it is hidden rather than deleted: the markup, its
+        `aria-keyshortcuts`, the Ctrl+K binding and the flyout's mirroring all
+        still target this element, and the Ctrl+K shortcut is most useful on a
+        hardware keyboard, which is the desktop case.
+      #}
+      <div class="nav-search-wrapper d-none d-lg-block" id="navSearchForm" title="Search library or MusicBrainz (Ctrl+K)">
       <div class="nav-search-wrapper" id="navSearchForm" title="Search library or MusicBrainz (Ctrl+K)">
         <div class="input-group input-group-lg nav-search-input-group">
           <span class="input-group-text nav-search-icon text-muted"><i class="bi bi-search"></i></span>
@@ -232,19 +293,16 @@
     min-height) still includes the nav height, so that maths is unchanged.
 
     Only the destinations people reach for constantly are exposed; everything
-    else stays in the hamburger menu. The active state is decided SERVER-SIDE
+    else is in the system sheet behind the header's menu button
+    (components/_system_sheet.html). The active state is decided SERVER-SIDE
     from request.path (no JS), so the bar is correct on first paint instead of
-    flashing the wrong tab while a script catches up.
+    flashing the wrong tab while a script catches up. `_nav_path` and
+    `_nav_home` are resolved once at the top of <body> because the app header
+    needs them too.
 
-    Search is kept as one of the five destinations: the promoted search field
-    belongs to the TOP NAVBAR (the "main site" toolbar), not the mobile bar —
-    that bar is pure navigation.
+    Search is one of the five destinations: with the toolbar's search field
+    now desktop-only, this tab is how a phone reaches the flyout.
   #}
-  {% set _nav_path = request.path %}
-  {# `/` 302s to `/dashboard`, so the real dashboard path is the latter — the
-     Home item must light up on BOTH, or it reads as inactive on the page it
-     represents. #}
-  {% set _nav_home = _nav_path == '/' or _nav_path == '/dashboard' %}
   <nav class="bottom-nav" aria-label="Primary">
     <a class="bottom-nav-item{% if _nav_home %} active{% endif %}"
        href="{{ url_for('ui.dashboard') }}"
@@ -397,6 +455,9 @@
   {% endif %}
 
   <div id="scanStatusBar" role="button" tabindex="0" onclick="openUnifiedLogModal()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openUnifiedLogModal();}" title="Open scanning log">
+    {# The progress line that spans the pill's top edge. Width is written by
+       the same poll that writes the text, so the two can never disagree. #}
+    <span class="scan-bar-fill" id="scanBarFill" aria-hidden="true"></span>
     <span id="scanStatusIcon" class="scan-status-idle"><i class="bi bi-circle"></i></span>
     <span id="scanQueueSummary" class="scan-queue-summary d-none"></span>
     <span id="scanStatusLine" class="text-truncate">Idle</span>
@@ -415,6 +476,12 @@
     note beside that script tag.
   #}
   {% include "components/_log_modal.html" %}
+
+  {# The mobile system sheet: every destination the header's menu button can
+     reach. Included once here rather than per page, because the header is the
+     shell. Desktop reads the same destinations from the navbar dropdowns; a
+     test pins the two lists against each other so neither can drift. #}
+  {% include "components/_system_sheet.html" %}
 
   {#
     --navbar-height is kept in sync by syncNavbarHeight() in static/js/main.js,

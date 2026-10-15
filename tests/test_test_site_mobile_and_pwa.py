@@ -571,16 +571,17 @@ class TestBottomNavActiveState:
 
     @staticmethod
     async def _render(app, path: str) -> str:
-        from jinja2 import FileSystemLoader
-        from quart import render_template
+        """Render the rebuilt shell via the SHARED hermetic environment.
 
-        async with app.test_request_context(path):
-            original = app.jinja_loader
-            app.jinja_loader = FileSystemLoader(str(TS / "templates"))
-            try:
-                return await render_template("base.html")
-            finally:
-                app.jinja_loader = original
+        This used to swap ``app.jinja_loader``, which does not take effect once
+        the app's Jinja environment exists — so in a full-suite sweep this
+        rendered the LIVE tree and every test in this class failed. That put the
+        bottom nav's state guard out of action entirely. See
+        ``tests/_test_site_render.py``.
+        """
+        from tests._test_site_render import render_base
+
+        return render_base(path)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("path,expected", sorted(ACTIVE.items()))
@@ -699,13 +700,25 @@ class TestTheMainSiteSearchIsProminent:
             "control"
         )
 
-    def test_the_mobile_navbar_grows_to_fit_it(self) -> None:
+    def test_the_search_field_is_the_toolbars_hero_on_desktop(self) -> None:
+        """The toolbar grows for the hero search — at lg and up, where it lives.
+
+        This used to assert a 132px mobile fallback, because the search row
+        wrapped onto its own line below lg and `--navbar-height` had to clear
+        it at first paint. The field is now desktop-only (`d-none d-lg-block`),
+        so that fallback became ~76px of chrome reserved for a row that is not
+        rendered. The desktop token is unchanged; the mobile one is asserted
+        against the slimmer header in test_mobile_chrome_redesign.
+        """
         css = _read(POPULARR_CSS)
+        assert "--navbar-height: 68px" in css, (
+            "the desktop fallback must still clear the hero search row"
+        )
+        # And the mobile override must no longer claim to clear the search.
         idx = css.index("@media (max-width: 991.98px)")
-        window = css[idx: idx + 160]
-        assert "--navbar-height: 132px" in window, (
-            "the toolbar is allowed to grow taller for the search; the "
-            "fallback must clear the larger field at first paint"
+        assert "--navbar-height: 132px" not in css[idx : idx + 400], (
+            "the search row is not rendered below lg, so reserving height "
+            "for it is dead space on every phone"
         )
 
 

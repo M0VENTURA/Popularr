@@ -94,6 +94,22 @@
     return (global.escapeHtml || ((v) => String(v == null ? '' : v)))(value);
   }
 
+  /**
+   * Is *el* actually rendered?
+   *
+   * The flyout keeps several boxes in sync (#navSearchInput,
+   * #dashboardTopSearchInput, its own input) and has to pick one as the query
+   * source when none of them holds focus. "In the DOM" is not the same as "on
+   * screen": #navSearchInput is `d-none d-lg-block`, so on a phone it exists,
+   * is empty, and cannot be focused or typed into. Measured with
+   * offsetWidth/Height rather than getComputedStyle so the answer is the same
+   * whether the element is hidden by a class, an ancestor, or a stylesheet.
+   */
+  function isVisible(el) {
+    if (!el) return false;
+    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+  }
+
   const getModalEl = () => document.getElementById('unifiedSearchModal');
   const getInputEl = () => document.getElementById('unifiedSearchInput');
   const getResultsEl = () => document.getElementById('unifiedSearchResults');
@@ -1104,7 +1120,17 @@
     if (backdrop) backdrop.classList.remove('d-none');
 
     const navInput = document.getElementById('navSearchInput');
-    if (navInput && navInput !== document.activeElement) navInput.focus();
+    // Only steal focus into the toolbar box when it is actually on screen. It
+    // is `d-none d-lg-block` (the navbar field is desktop-only), and calling
+    // focus() on a display:none element is a silent no-op that would leave the
+    // caret nowhere — the user taps Search, the flyout opens, and typing goes
+    // to the document. When it is hidden the flyout's own input is the right
+    // landing spot, since that is the only box the user can see.
+    if (isVisible(navInput)) {
+      if (navInput !== document.activeElement) navInput.focus();
+    } else if (input !== document.activeElement) {
+      input.focus();
+    }
 
     if (value === _lastQuery && _scope === _lastScope) return;
     runSearch();
@@ -1380,8 +1406,14 @@
         if (boxes[i] && boxes[i] === active) return boxes[i];
       }
       // Nothing focused (e.g. the magnifier button took focus): the banner box
-      // mirrors the flyout, so prefer it.
-      return document.getElementById('navSearchInput') || getInputEl();
+      // mirrors the flyout, so prefer it — but only a VISIBLE one. The navbar
+      // field is the first entry and is hidden below lg, so preferring it
+      // blindly would return an empty, off-screen box and submit a blank
+      // query on every phone.
+      for (let i = 0; i < boxes.length; i += 1) {
+        if (isVisible(boxes[i])) return boxes[i];
+      }
+      return getInputEl();
     }
 
     global.submitUnifiedSearch = function () {

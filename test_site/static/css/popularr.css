@@ -112,18 +112,124 @@
     --radius-pill: 999px;
 }
 
-/* The navbar wraps its search row below the lg breakpoint, making it
-   taller. Without these, main content is pushed too far down on desktop
-   and not far enough on mobile. The search field is `input-group-lg` (the
-   main-site hero search), so the bar is taller than it was as `input-group-
-   sm` — these fallbacks must clear the measured value at first paint (main.js
-   re-measures and overwrites the token immediately anyway). */
+/* The navbar's height below the lg breakpoint.
+
+   This used to be 132px (124px under 576px) because the promoted search row
+   WRAPPED onto its own line below lg, and the fallback had to clear it at
+   first paint. The search field is now desktop-only (`d-none d-lg-block` in
+   base.html), so the mobile navbar is the single app-header row: [<-] page
+   name, then the scan and menu buttons. ~76px of chrome went back to content.
+
+   main.js's syncNavbarHeight() still measures the real element and overwrites
+   this at runtime; the fallback only has to be right for the first paint. */
 @media (max-width: 991.98px) {
-    :root { --navbar-height: 132px; --bottom-nav-height: 3.5rem; }
+    :root {
+        --navbar-height: 56px;
+        --bottom-nav-height: 3.5rem;
+        /* The status bar leaves the flex column on mobile and becomes an
+           overlay pinned above the bottom nav (see #scanStatusBar below), so
+           it must stop reserving space in the footer stack or the shell would
+           keep a 2.4rem gap for a 2px line. */
+        --status-bar-height: 0px;
+    }
 }
-@media (max-width: 575.98px) {
-    :root { --navbar-height: 124px; }
+
+/* ── App header row ──────────────────────────────────────────────────────────
+   The navbar's first line, and the WHOLE header on a phone: back, page name,
+   then scan and menu. Desktop is unaffected — the extra controls all carry
+   `d-lg-none`, and the brand (which they replace) carries `d-none d-lg-flex`.
+   ------------------------------------------------------------------------- */
+.app-header-lead {
+    /* Without min-width:0 the title cannot shrink inside a flex row, so a long
+       album name would push the action buttons off screen instead of
+       ellipsising — the truncation bug this row exists to avoid. */
+    min-width: 0;
+    flex: 1 1 auto;
 }
+
+.app-header-actions { flex: 0 0 auto; }
+
+.app-header-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-header-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    /* 40px is under the 44px ideal, which is the trade for two controls plus
+       a readable title on a 360px screen. The gap between them is 4px, so the
+       combined target for a thumb sweeping the corner is comfortably large. */
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    flex: 0 0 auto;
+    border: 0;
+    border-radius: var(--radius-control);
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 1.15rem;
+    line-height: 1;
+
+    &:hover, &:focus-visible { background: color-mix(in srgb, currentColor 12%, transparent); }
+    /* The back button is hidden on a root destination (decided SERVER-SIDE, so
+       there is no flash of a control that cannot go anywhere). `[hidden]` must
+       beat the `display: inline-flex` above. */
+    &[hidden] { display: none !important; }
+}
+
+/* ── System sheet (mobile) ───────────────────────────────────────────────────
+   Bottom-anchored so it comes from the same edge as the bar that opened it.
+   ------------------------------------------------------------------------- */
+.system-sheet {
+    max-height: 80dvh;
+    border-radius: var(--radius-card) var(--radius-card) 0 0;
+    background: var(--secondary-bg);
+    border-top: 1px solid var(--border-color);
+    /* Clear the iOS home indicator, exactly as the bottom nav does. */
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.system-sheet .offcanvas-body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+
+.system-sheet-group {
+    margin: 0;
+    padding: 0.85rem 1.25rem 0.35rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+}
+
+.system-sheet-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    /* 48px min height: a full-width row is easy to hit, and there is no
+       reason to squeeze the tap targets in a sheet that scrolls. */
+    min-height: 48px;
+    padding: 0.5rem 1.25rem;
+    color: var(--text-primary);
+    text-decoration: none;
+    font-size: 0.95rem;
+
+    &:hover, &:focus-visible {
+        background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+        color: var(--text-primary);
+    }
+    /* Fixed icon column so every label starts on the same x, whatever the
+       glyph's natural width. */
+    & > i { width: 1.25rem; text-align: center; flex: 0 0 auto; }
+}
+
+.system-sheet-static { cursor: default; color: var(--text-secondary); }
 
 /* ── App Shell & Base Rules ──────────────────────────────────────────────── */
 * { color-scheme: dark; }
@@ -774,6 +880,10 @@ form .form-check-input[name="force"] + .form-check-label {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    /* Positioning context for .scan-bar-fill, which spans the bar's top edge.
+       Desktop keeps the bar as a flex footer item; mobile turns the whole
+       element into an overlay (see the media query at the end of this block). */
+    position: relative;
     height: var(--status-bar-height);
     padding: 0.25rem 0.75rem;
     background: color-mix(in srgb, #121212 97%, transparent);
@@ -793,6 +903,11 @@ form .form-check-input[name="force"] + .form-check-label {
     }
 }
 
+/* The progress line is a MOBILE affordance only — on desktop the bar is tall
+   enough to carry the text, and a full-width 2px rule there would just add a
+   second border under the bar's own. */
+.scan-bar-fill { display: none; }
+
 .scan-queue-summary {
     display: inline-flex; align-items: center; gap: 0.25rem; color: var(--text-secondary);
     font-size: 0.8rem; white-space: nowrap; padding-right: 0.75rem; border-right: 1px solid var(--border-color);
@@ -800,6 +915,95 @@ form .form-check-input[name="force"] + .form-check-label {
 }
 
 @keyframes scan-status-pulse { 50% { opacity: 0.45; } }
+
+/* ── Status bar on mobile: hairline -> floating pill ─────────────────────────
+   The bar used to sit in the flex column above the bottom nav at a fixed
+   2.4rem whether or not anything was happening, so an idle app still spent
+   38px of a phone screen on the word "Idle".
+
+   It is now an OVERLAY pinned to the top edge of the bottom nav:
+
+   * IDLE — 2px, transparent, no text. Effectively the nav's own top border,
+     so an idle app costs nothing and the bar cannot be tapped by accident
+     (`pointer-events: none` drops it out of hit-testing entirely).
+   * ACTIVE — expands into a floating pill with the icon, the scan name and
+     progress, and the Log button, where it is genuinely useful.
+
+   Because the element is now `fixed`, `--status-bar-height` is 0 below lg
+   (see the token block near the top of this file), so the footer stack keeps
+   its maths: main's padding, the player bar and the sticky save bar all stop
+   ABOVE the pill rather than reserving a row for it.
+   ------------------------------------------------------------------------- */
+@media (max-width: 991.98px) {
+    #scanStatusBar {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom, 0px));
+        height: 2px;
+        padding: 0;
+        gap: 0;
+        overflow: hidden;
+        font-size: 0;
+        border-top: 0;
+        background: transparent;
+        box-shadow: none;
+        backdrop-filter: none;
+        cursor: default;
+        pointer-events: none;
+        transition: height 0.16s ease, border-radius 0.16s ease;
+
+        &::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: var(--border-color);
+        }
+        /* Text and controls are hidden while idle. `.scan-bar-fill` is
+           excluded by name: it is the hairline, not content. */
+        & > span:not(.scan-bar-fill) { display: none; }
+
+        &.is-active {
+            height: auto;
+            min-height: 2.25rem;
+            padding: 0.3rem 0.75rem;
+            gap: 0.5rem;
+            font-size: 0.8rem;
+            overflow: visible;
+            border-top: 1px solid var(--border-color);
+            border-radius: var(--radius-control) var(--radius-control) 0 0;
+            background: color-mix(in srgb, #121212 97%, transparent);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 -4px 16px color-mix(in srgb, black 40%, transparent);
+            cursor: pointer;
+            pointer-events: auto;
+
+            &::before { display: none; }
+            & > span:not(.scan-bar-fill) { display: inline-flex; }
+            /* Shrinkable and truncating: a long current_item must ellipsise
+               rather than push the Log button off the edge. */
+            & > #scanStatusLine {
+                flex: 1 1 auto;
+                min-width: 0;
+                align-items: center;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+        }
+    }
+
+    #scanStatusBar .scan-bar-fill {
+        display: block;
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 2px;
+        width: 0;
+        background: var(--spotify-green);
+        transition: width 0.3s ease;
+    }
+}
 
 /* The player bar is a FLEX FOOTER ITEM of <body>, not an overlay — that is
    what makes `body.player-visible { --footer-stack-height: ... }` correct

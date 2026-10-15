@@ -183,9 +183,21 @@ class TestTheTemplatesProvideTheContract:
             f"{base_rel}: no #navbarNav — the open-menu guard cannot tell the "
             "menu is open and the loop returns"
         )
-        assert 'data-bs-target="#navbarNav"' in html, (
-            f"{base_rel}: the toggler no longer targets the collapse"
-        )
+        # A toggler is required only where a collapse is how the mobile menu
+        # opens. The rebuilt tree's mobile navigation is a bottom bar plus a
+        # bottom SHEET, neither of which is a navbar-collapse, so it has no
+        # toggler and nothing to subtract — the guard exists for the live tree
+        # and stays in main.js for it. Asserting the toggler unconditionally
+        # would pin the arrangement the redesign removed.
+        #
+        # Detected from the bottom bar's own markup, not the sheet's: the sheet
+        # is `{% include %}`-ed, so its `id` is not in this file's source.
+        has_mobile_shell = 'class="bottom-nav"' in html
+        if not has_mobile_shell:
+            assert 'data-bs-target="#navbarNav"' in html, (
+                f"{base_rel}: the toggler no longer targets the collapse, and "
+                "this tree has no bottom bar to replace it"
+            )
 
     @pytest.mark.parametrize("base_rel", [LIVE_BASE, REBUILT_BASE])
     def test_the_collapse_is_nested_inside_the_navbar(self, base_rel):
