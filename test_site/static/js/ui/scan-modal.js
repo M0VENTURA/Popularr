@@ -214,6 +214,14 @@
    * that pane is now gone. The import pulls rows into Popularr; this asks
    * Navidrome to re-read its own files first, and neither implies the other.
    * The sheet stays OPEN so it can be used before deciding whether to import.
+   *
+   * GATED like every other start. The dashboard function this replaced
+   * (`startNavidromeServerScan`) ran the pre-flight check before its POST, and
+   * a server rescan contends for the same Navidrome instance as an import — so
+   * dropping the gate here would have quietly removed a guard that existed
+   * before the sheet. It asks about THIS action rather than the selected type,
+   * because the button sits beside the type list and may be pressed with
+   * nothing selected.
    */
   async function triggerNavidromeRescan() {
     const status = el('scanSheetStatus');
@@ -221,6 +229,10 @@
     const withBusy = (global.buttonState && global.buttonState.withBusy)
       ? global.buttonState.withBusy
       : ((_b, _l, fn) => fn());
+
+    if (global.ScanPreflight && !await global.ScanPreflight.confirmIfRunning({
+      scanName: 'Navidrome Server Rescan',
+    })) return;
 
     return withBusy(button, 'Triggering…', async () => {
       try {
@@ -289,6 +301,29 @@
           const body = { mode: type.mode || 'all', force, restart };
           if (_context.artist) body.artist = _context.artist;
           if (_context.album) body.album = _context.album;
+
+          // ── Resume prompt ───────────────────────────────────────────────
+          //
+          // ⚠️ This MOVED here from `pages/dashboard.js::runDashboardPopularityScan`
+          // when that function was deleted. It is not optional polish: without
+          // it, every continuation silently starts from the stored checkpoint
+          // with no way to choose, which is the whole reason
+          // `/api/scan/resume-options` exists.
+          //
+          // Only when CONTINUING (`!restart`). Restart means "from the top", so
+          // asking which artist to resume from there would contradict the tick
+          // the user just made.
+          //
+          // `resume_from` is honoured by every popularity mode — the load stage
+          // skips to that artist — so a metadata/popularity/singles run gets the
+          // same choice as a full scan. Null means no checkpoint was ever
+          // written, in which case nothing is added to the body.
+          if (!restart && global.ScanResumePicker) {
+            const choice = await global.ScanResumePicker.chooseResumeArtist();
+            if (!choice) return;   // cancelled — do not start
+            if (choice.resume_from) body.resume_from = choice.resume_from;
+          }
+
           await global.api.postJson('/api/popularity/run', body);
         }
 

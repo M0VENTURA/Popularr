@@ -303,12 +303,19 @@ class TestRouteHonoursChosenResumePoint:
 
 # ---------------------------------------------------------------------------
 # Frontend wiring (both trees)
+#
+# ⚠️ `start_module` NAMES THE FILE THAT ACTUALLY STARTS THE SCAN, which is not
+# the same file in both trees. The LIVE tree still starts from its dashboard;
+# the REBUILT tree starts from the shared scan sheet
+# (`js/ui/scan-modal.js`), because `pages/dashboard.js` no longer owns any scan
+# starter. Pointing the rebuilt entry at dashboard.js is what let the resume
+# prompt be deleted with the dead code around it — the assertions passed
+# against a file that no longer had anything to assert.
 # ---------------------------------------------------------------------------
-
 _TREES = [
     ("test_site/templates/Pages/dashboard.html", "js/services/scan-resume-picker.js",
      "test_site/static/js/services/scan-resume-picker.js",
-     "test_site/static/js/pages/dashboard.js"),
+     "test_site/static/js/ui/scan-modal.js"),
     ("templates/pages/dashboard.html", "js/scan-resume-picker.js",
      "static/js/scan-resume-picker.js", "static/js/dashboard.js"),
 ]
@@ -348,12 +355,28 @@ class TestFrontendWiring:
 
     @pytest.mark.parametrize("template,ref,module,js", _TREES)
     def test_dashboard_prompts_only_when_restart_is_unchecked(self, template, ref, module, js):
-        """Restart means 'from the top' — prompting there would contradict it."""
+        """Restart means 'from the top' — prompting there would contradict it.
+
+        ⚠️ ASSERTED STRUCTURALLY, and the reason is a mutation that ESCAPED.
+        The first version of this test was `assert "!restart" in code`, which
+        passed even with the guard removed: the file contains an unrelated
+        `if (!force || !restart) return;` (a null-check on the two option
+        elements) whose `!restart` satisfied the substring. So the guard is now
+        located RELATIVE TO THE CALL it guards — find the picker call, walk back
+        to the `if (` that encloses it, and require `!restart` in THAT condition.
+        """
         from pathlib import Path
 
         code = _code_only(Path(js).read_text(encoding="utf-8"))
         assert "ScanResumePicker" in code
-        assert "!restart" in code
+
+        call = code.index("chooseResumeArtist()")
+        guard_start = code.rindex("if (", 0, call)
+        guard = code[guard_start:call]
+        assert "!restart" in guard, (
+            "the resume prompt must be guarded by `!restart` in its own "
+            f"condition; found: {guard.strip()[:120]!r}"
+        )
 
     @pytest.mark.parametrize("template,ref,module,js", _TREES)
     def test_dashboard_sends_the_chosen_resume_point(self, template, ref, module, js):

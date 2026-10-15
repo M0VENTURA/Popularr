@@ -210,11 +210,19 @@ class TestArtistFormIsGuarded:
 
 
 class TestJSEntryPointsCallTheGate:
-    @pytest.mark.parametrize("js", [
-        "test_site/static/js/pages/dashboard.js",
-        "static/js/dashboard.js",
-    ])
-    def test_dashboard_start_functions_are_gated(self, js):
+    """Every scan START path must pass the gate before its POST.
+
+    ⚠️ THE REBUILT TREE'S START PATHS MOVED, SO THIS TEST MOVED WITH THEM.
+    `test_site/static/js/pages/dashboard.js` used to define four start helpers
+    and this class asserted each one was gated. They now live in the shared scan
+    sheet (`test_site/static/js/ui/scan-modal.js`), so the dashboard assertions
+    are kept for the LIVE tree only — and inverted for the rebuilt one, because
+    a starter reappearing there is the regression to catch, not the gate.
+    """
+
+    def test_live_dashboard_start_functions_are_gated(self):
+        """The LIVE tree is unchanged: its dashboard still owns the starters."""
+        js = "static/js/dashboard.js"
         code = _code_only((REPO_ROOT / js).read_text(encoding="utf-8"))
         for fn in ("runDashboardPopularityScan", "startNavidromeImport",
                    "startNavidromeServerScan", "startEssentiaScan"):
@@ -222,18 +230,76 @@ class TestJSEntryPointsCallTheGate:
         # One call per start path (popularity is gated via scanGate()).
         assert code.count("confirmIfRunning") + code.count("scanGate(") >= 4
 
+    def test_rebuilt_dashboard_no_longer_owns_any_starter(self):
+        """The rebuilt dashboard delegates to the sheet and keeps nothing.
+
+        Asserted as an ABSENCE. A leftover starter that nothing calls cannot be
+        caught behaviourally, and it reads as if the dashboard still owned the
+        control — which is the whole reason the block was removable in the first
+        place (every `getElementById` in it resolved to null, so it could never
+        throw and never announce itself).
+        """
+        code = _code_only(
+            (REPO_ROOT / "test_site/static/js/pages/dashboard.js").read_text(encoding="utf-8")
+        )
+        for fn in ("runDashboardPopularityScan", "startNavidromeImport",
+                   "startNavidromeServerScan", "startEssentiaScan",
+                   "startPopularityScan", "pollPopularityStatus",
+                   "pollNavidromeStatus", "pollEssentiaStatus",
+                   "checkNavidromeConnectivity"):
+            assert fn not in code, (
+                f"{fn} is back in the rebuilt dashboard — scan starts belong to "
+                f"test_site/static/js/ui/scan-modal.js"
+            )
+
+    def test_rebuilt_dashboard_template_owns_the_shared_sheet(self):
+        """Removing the starters is only safe if the sheet is actually there.
+
+        Checked on the TEMPLATE, not on dashboard.js: the script never names
+        `scan-modal.js`, it just never posts a scan endpoint. Asserting the
+        include AND the script load is what proves the replacement is wired —
+        and each is asserted separately, because an include with no script (or
+        the reverse) leaves the sheet's controls inert.
+        """
+        html = (REPO_ROOT / "test_site/templates/Pages/dashboard.html").read_text(encoding="utf-8")
+        assert "components/_scan_modal.html" in html, "the scan sheet is not included"
+        assert "js/ui/scan-modal.js" in html, "the scan sheet's script is not loaded"
+
+    def test_rebuilt_scan_sheet_gates_every_start(self):
+        """Each start path in the sheet reaches the gate before its POST.
+
+        Scoped to the ENCLOSING FUNCTION rather than a character window: the
+        sheet has two start paths in one file, so a single file-wide
+        "a gate appears somewhere before this endpoint" check would pass with
+        one of them unguarded.
+        """
+        js = "test_site/static/js/ui/scan-modal.js"
+        code = _code_only((REPO_ROOT / js).read_text(encoding="utf-8"))
+
+        def enclosing_function_start(idx: int) -> int:
+            fn = code.rfind("function ", 0, idx)
+            assert fn != -1, "endpoint call is not inside a function"
+            return fn
+
+        for endpoint in ("/api/popularity/run", "/api/navidrome/import",
+                         "/api/navidrome/scan/start", "/api/essentia/run"):
+            idx = code.index(endpoint)
+            start = enclosing_function_start(idx)
+            before = code[start:idx]
+            assert "confirmIfRunning" in before, (
+                f"{endpoint} is reachable without passing the gate "
+                f"(function starting at {start})"
+            )
+
     def test_test_site_dashboard_gates_every_start(self):
-        """Each start helper must reach the gate before its POST."""
+        """Every start helper must reach the gate before its POST."""
         code = _code_only(
             (REPO_ROOT / "test_site/static/js/pages/dashboard.js").read_text(encoding="utf-8")
         )
         for endpoint in ("/api/popularity/run", "/api/navidrome/import",
                          "/api/navidrome/scan/start", "/api/essentia/run"):
-            idx = code.index(endpoint)
-            # Look back for the gate within the same function.
-            before = code[max(0, idx - 700):idx]
-            assert ("scanGate(" in before) or ("confirmIfRunning" in before), (
-                f"{endpoint} is reachable without passing the gate"
+            assert endpoint not in code, (
+                f"{endpoint} is posted from the rebuilt dashboard — the sheet owns it"
             )
 
     @pytest.mark.parametrize("js", [

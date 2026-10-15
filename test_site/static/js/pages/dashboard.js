@@ -25,8 +25,15 @@
      startNavidromeServerScan  same
      addUpcomingReleaseToQueueDashboard  same, on a queue write
 
-   Replaced with api.postJson, which throws. Every call site below now has a
+   Replaced with api.postJson, which throws, so every call site carries a
    try/catch that surfaces the actual error.
+
+   ⚠️ THE THREE SCAN STARTERS NAMED ABOVE NO LONGER EXIST. They moved into the
+   shared scan sheet and were deleted from this file — see "Scan controls"
+   below for why, and for the one function of that family that survived.
+   `addUpcomingReleaseToQueueDashboard` is gone too. The note is kept because
+   it is the reason api.postJson exists at all, and because "it reported
+   success on failure" is the bug class to watch for in anything added here.
 
    ── OTHER FIXES ───────────────────────────────────────────────────────────
    1. `window.onerror` was overridden to console.error. It returned undefined
@@ -81,236 +88,30 @@
     return ` — ${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
   }
 
-  function setStatus(id, text, className) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.textContent = text;
-    el.className = className;
-  }
-
   // ── Scan controls ───────────────────────────────────────────────────────
-
-  /**
-   * Run the gate before every scan start.
-   *
-   * A start while another scan is running is rejected server-side as a
-   * duplicate, so ask first: name the running scan, offer to cancel it, and
-   * wait for it to actually stop before letting the new scan through.
-   */
-  async function scanGate(scanName) {
-    if (!global.ScanPreflight) return true;
-    return global.ScanPreflight.confirmIfRunning({ scanName: scanName || '' });
-  }
-
-  function startPopularityScan(mode, force, restart, resumeFrom) {
-    const body = {
-      mode: mode || 'popularity',
-      force: !!force,
-      restart: !!restart,
-    };
-    // Explicit resume point from the picker. The server treats a missing value
-    // as "use the stored checkpoint", so it is only sent when chosen.
-    if (resumeFrom) body.resume_from = resumeFrom;
-    return global.api.postJson('/api/popularity/run', body);
-  }
-
-  function stopPopularityScan() {
-    return global.api.postJson('/scan/stop-popularity', {});
-  }
-
-  /**
-   * Run the selected popularity scan with the current Force / Restart state.
-   * Restart clears the resume checkpoint so the scan begins from the top.
-   *
-   * With Restart UNCHECKED the user is continuing a previous run, so they are
-   * asked which artist to resume from first. Restart already means "from the
-   * top", so prompting there would be contradictory.
-   */
-  function runDashboardPopularityScan() {
-    const mode = document.getElementById('popScanSelector')?.value || 'popularity';
-    const force = !!document.getElementById('popScanForce')?.checked;
-    const restart = !!document.getElementById('popScanRestart')?.checked;
-    const btn = document.getElementById('popScanRunBtn');
-
-    return global.buttonState.withBusy(btn, 'Starting…', async () => {
-      try {
-        if (!await scanGate(global.ScanPreflight
-          ? global.ScanPreflight.label(mode) : mode)) return;
-
-        // Resume prompt — only when continuing (Restart unchecked). `resume_from`
-        // is honoured by every mode (the load stage skips to that artist), so a
-        // metadata/popularity/singles run gets the same choice as a full scan.
-        // If nothing was ever recorded there is no prompt at all.
-        let resumeFrom = null;
-        if (!restart && global.ScanResumePicker) {
-          const choice = await global.ScanResumePicker.chooseResumeArtist();
-          if (!choice) return;   // cancelled — do not start
-          resumeFrom = choice.resume_from || null;
-        }
-
-        await startPopularityScan(mode, force, restart, resumeFrom);
-        global.toast.success('Popularity scan started');
-      } catch (error) {
-        // Previously this was `catch (e) { console.error(...) }` — the user
-        // saw the spinner stop and nothing else.
-        global.toast.error('Could not start scan: ' + error.message);
-      }
-    });
-  }
-
-  async function pollPopularityStatus() {
-    const el = document.getElementById('pop-status');
-    if (!el) return;
-    try {
-      const data = await global.api.getJson('/api/popularity/status');
-      if (!data.success) return;
-      if (data.running) {
-        setStatus('pop-status',
-          `${data.message || 'Running…'}${formatElapsed(data.elapsed_seconds)}`,
-          'text-primary small');
-      } else {
-        setStatus('pop-status', data.message || 'Idle', 'text-muted small');
-      }
-    } catch (_error) {
-      /* transient — next tick retries */
-    }
-  }
-
-  // ==========================================================================
-  // ⚠️ UNREACHABLE SINCE THE SHARED SCAN SHEET — REMOVE THESE.
   //
-  // Every function below this banner drove the tabbed engine panel that
-  // `Pages/dashboard.html` no longer renders. The dashboard's scan UI is
-  // `components/_scan_modal.html` + `js/ui/scan-modal.js` now, so nothing calls
-  // them and every `getElementById` in them returns null:
+  // The scan STARTERS are not in this file. Every start goes through the shared
+  // scan sheet (`components/_scan_modal.html` + `js/ui/scan-modal.js`), which
+  // owns the mode list, the Force / Restart options, the preflight gate and the
+  // dispatch, and calls the same endpoints this file used to.
   //
-  //   startPopularityScan / runDashboardPopularityScan / pollPopularityStatus
-  //   startNavidromeImport / stopNavidromeSync / pollNavidromeStatus
-  //   startEssentiaScan / stopEssentiaStatus / pollEssentiaStatus
-  //   checkNavidromeConnectivity
+  // A parallel copy of that whole flow used to live here — startPopularityScan,
+  // runDashboardPopularityScan, pollPopularityStatus, startNavidromeImport,
+  // startNavidromeServerScan, stopNavidromeSync, pollNavidromeStatus,
+  // startEssentiaScan, stopEssentiaScan, pollEssentiaStatus and
+  // checkNavidromeConnectivity — driving the tabbed engine panel that
+  // `Pages/dashboard.html` no longer renders. Every `getElementById` in them
+  // resolved to null, so not one of them could run.
   //
-  // They do not THROW — they all guard their lookups — which is exactly why
-  // they are dangerous to leave: a reader sees `runDashboardPopularityScan`
-  // reading `#popScanSelector` and concludes the dashboard still has that
-  // control. That is the "a comment describing a fallback that does not exist"
-  // failure in code form.
+  // They were DELETED rather than left in place precisely BECAUSE they did not
+  // throw. A reader would see `#popScanSelector` being read and conclude the
+  // dashboard still owned that control — a comment-shaped lie with a body. The
+  // survivors are below: `stopAllScans` (the scanner card's Stop button) and
+  // everything from `scanDisplayName` down.
   //
-  // `startNavidromeServerScan` is NOT in that list: the sheet calls
-  // `/api/navidrome/scan/start` itself now, so it is unreachable too — but the
-  // FEATURE is not lost, it moved into the sheet's Navidrome option.
-  //
-  // `stopAllScans` and `updateActiveScans` are LIVE — the scanner card's Stop
-  // and progress both call them.
-  // ==========================================================================
-
-  async function startNavidromeImport() {
-    // "Forced" = mode:force → serial full re-import of every artist, ignoring
-    // the new-items/changed-album skips. Unchecked = mode:all → normal import
-    // that skips unchanged albums.
-    const force = !!document.getElementById('navImportForce')?.checked;
-    const el = document.getElementById('nav-status');
-
-    if (!await scanGate('Navidrome Import')) return;
-
-    try {
-      const data = await global.api.postJson('/api/navidrome/import', {
-        mode: force ? 'force' : 'all',
-      });
-      if (!data.success) {
-        setStatus('nav-status', data.error || 'Failed', 'text-danger small');
-        return;
-      }
-      setStatus('nav-status', data.message || 'Started', 'text-success small');
-      if (el) el.dataset.started = String(Date.now());
-    } catch (error) {
-      // The real reason now reaches the user instead of a bare "Failed".
-      setStatus('nav-status', error.message, 'text-danger small');
-    }
-  }
-
-  async function startNavidromeServerScan() {
-    if (!await scanGate('Navidrome Server Scan')) return;
-    try {
-      const data = await global.api.postJson('/api/navidrome/scan/start', {});
-      setStatus('nav-status',
-        data.success ? 'Server scan triggered' : (data.error || 'Failed'),
-        data.success ? 'text-success small' : 'text-danger small');
-    } catch (error) {
-      setStatus('nav-status', error.message, 'text-danger small');
-    }
-  }
-
-  function stopNavidromeSync() {
-    return global.api.postJson('/scan/stop-navidrome', {});
-  }
-
-  async function pollNavidromeStatus() {
-    const el = document.getElementById('nav-status');
-    if (!el) return;
-
-    try {
-      const progress = await global.api.getJson('/api/scan-progress');
-      const scan = (progress.active_scans || [])
-        .find((s) => s.scan_type === 'navidrome_scan');
-
-      if (scan && scan.is_running) {
-        setStatus('nav-status',
-          `${scan.message || 'Importing…'}${formatElapsed(scan.elapsed_seconds)}`,
-          'text-primary small');
-        delete el.dataset.started;
-        return;
-      }
-
-      const serverStatus = await global.api.getJson('/api/navidrome/scan/status');
-      if (serverStatus.scanning) {
-        setStatus('nav-status', 'Server scanning…', 'text-warning small');
-        delete el.dataset.started;
-        return;
-      }
-
-      // Grace window: the import takes a moment to appear in scan-progress,
-      // so a recent start keeps showing "Importing…" for up to two minutes.
-      if (el.dataset.started) {
-        const elapsed = Date.now() - parseInt(el.dataset.started, 10);
-        if (elapsed < 120000) {
-          setStatus('nav-status', 'Importing…', 'text-primary small');
-          return;
-        }
-        delete el.dataset.started;
-      }
-      setStatus('nav-status', 'Idle', 'text-muted small');
-    } catch (_error) {
-      /* transient */
-    }
-  }
-
-  async function startEssentiaScan() {
-    if (!await scanGate('Essentia Mood Scan')) return;
-    return global.api.postJson('/api/essentia/run', {});
-  }
-
-  function stopEssentiaScan() {
-    return global.api.postJson('/scan/stop-essentia-mood', {});
-  }
-
-  async function pollEssentiaStatus() {
-    const el = document.getElementById('ess-status');
-    if (!el) return;
-    try {
-      const progress = await global.api.getJson('/api/scan-progress');
-      const scan = (progress.active_scans || [])
-        .find((s) => s.scan_type === 'essentia_mood_scan');
-      if (scan && scan.is_running) {
-        setStatus('ess-status',
-          `${scan.message || 'Running…'}${formatElapsed(scan.elapsed_seconds)}`,
-          'text-primary small');
-      } else {
-        setStatus('ess-status', 'Idle', 'text-muted small');
-      }
-    } catch (_error) {
-      /* transient */
-    }
-  }
+  // Both of the helpers those functions shared are gone with them: `setStatus`
+  // (whose only callers were the six pollers) and `scanGate` (whose only
+  // callers were the starters — the sheet runs its own preflight).
 
   async function stopAllScans() {
     const confirmFn = (global.ui && global.ui.confirm)
@@ -330,22 +131,6 @@
       global.toast.success('Stop signal sent to all scans');
     } catch (error) {
       global.toast.error('Error: ' + error.message);
-    }
-  }
-
-  async function checkNavidromeConnectivity() {
-    const el = document.getElementById('nav-connectivity');
-    if (!el) return;
-    try {
-      const data = await global.api.getJson('/api/navidrome/scan/status');
-      const ok = data.success !== false;
-      el.className = 'badge ms-1 ' + (ok ? 'bg-success' : 'bg-danger');
-      el.title = ok ? 'OK' : 'Unreachable';
-      el.textContent = ok ? '\u2713' : '\u2717';
-    } catch (_error) {
-      el.className = 'badge bg-danger ms-1';
-      el.title = 'Unreachable';
-      el.textContent = '\u2717';
     }
   }
 
@@ -526,6 +311,15 @@
         ? `<div class="small text-muted mb-1 text-truncate" style="max-width:600px;">${esc(scan.current_item)}</div>`
         : '';
 
+      // Elapsed time is what the old per-engine pollers showed and this panel
+      // dropped when it replaced them. formatElapsed is the suffix formatter
+      // written for those pollers (" — 3m 20s"), so it is wired back in here
+      // rather than left behind as an export with no caller.
+      //
+      // ⚠️ Keep comments OUT of the template literal below: it contains
+      // backticks of its own, so a stray one in prose half-closes the string.
+      const elapsed = formatElapsed(scan.elapsed_seconds);
+
       return `
         <div class="mb-2">
           ${abandonedBanner(scan)}
@@ -533,6 +327,7 @@
             <span>
               <i class="bi bi-activity me-1"></i>
               <strong>${esc(scanDisplayName(scan.scan_type))}</strong>${stage}${message}
+              <span class="text-muted small">${esc(elapsed)}</span>
             </span>
             <span class="small text-muted">${esc(String(scan.processed_items ?? 0))}/${esc(String(scan.total_items ?? '?'))}</span>
           </div>
@@ -988,9 +783,6 @@
 
   function updateAll() {
     return Promise.all([
-      pollPopularityStatus(),
-      pollNavidromeStatus(),
-      pollEssentiaStatus(),
       updateActiveScans(),
       updateRecentScans(),
       updatePendingApproval(),
@@ -998,7 +790,6 @@
   }
 
   document.addEventListener('DOMContentLoaded', function () {
-    checkNavidromeConnectivity();
     renderRecentScans((global._pd && global._pd.recentScans) || []);
     initRecentHistoryTabs();
     initRecentlyAddedActions();
@@ -1050,14 +841,12 @@
   };
 
   // Globals for the inline onclick handlers in dashboard.html.
-  global.startPopularityScan = startPopularityScan;
-  global.stopPopularityScan = stopPopularityScan;
-  global.runDashboardPopularityScan = runDashboardPopularityScan;
-  global.startNavidromeImport = startNavidromeImport;
-  global.startNavidromeServerScan = startNavidromeServerScan;
-  global.stopNavidromeSync = stopNavidromeSync;
-  global.startEssentiaScan = startEssentiaScan;
-  global.stopEssentiaScan = stopEssentiaScan;
+  //
+  // Only the two survivor families are published now. The eight scan-starer /
+  // poller exports that used to sit here were removed with the functions they
+  // pointed at — exporting a name for a deleted function is worse than not
+  // exporting it, because `dashboard.html`'s `onclick` would then fail at
+  // CLICK time with a bare ReferenceError instead of at load time.
   global.stopAllScans = stopAllScans;
   global.setUpcomingTableFilter = setUpcomingTableFilter;
   global.loadUpcomingReleasesTable = loadUpcomingReleasesTable;
