@@ -918,53 +918,7 @@ async def api_album_update_ids() -> Any:
     """Update MusicBrainz/Discogs release IDs for an album's tracks."""
     payload = (await request.get_json(silent=True)) or {}
     from services.metadata.album_service import update_album_ids
-    result, code = update_album_
-
-
-@album_bp.route("/popularity-report")
-async def api_album_popularity_report() -> Any:
-    """Download one album's tracks as CSV, ordered most popular first.
-
-    The album-scoped twin of ``artist_routes.api_artist_popularity_report``:
-    same columns, same ordering rule, same BOM — one file per album instead of
-    one per artist, so a single release can be inspected (or diffed against a
-    re-scan) without filtering the artist's whole catalogue in a spreadsheet.
-
-    Scoped by artist AND album, because album titles are NOT unique —
-    "Greatest Hits" exists a thousand times over, so an album-only filter would
-    merge every artist's hits album into one report.
-    """
-    artist = str(request.args.get("artist") or "").strip()
-    album = str(request.args.get("album") or "").strip()
-    if not artist:
-        return jsonify({"error": "artist is required"}), 400
-    if not album:
-        return jsonify({"error": "album is required"}), 400
-
-    # Reads every track on the album, so it runs OFF the event loop — the
-    # async ratchet exempts a handler only when it offloads.
-    try:
-        report = await asyncio.to_thread(
-            build_popularity_report, artist=artist, album=album
-        )
-    except Exception as exc:
-        logger.error(
-            "Album popularity report failed",
-            artist=artist, album=album, error=str(exc),
-        )
-        return jsonify({"error": str(exc)}), 500
-
-    filename = popularity_report_filename(artist=artist, album=album)
-    return Response(
-        # ``\ufeff`` (UTF-8 BOM): titles carry accents, and without it Excel
-        # reads the file as the local codepage and mangles them.
-        "\ufeff" + report,
-        mimetype="text/csv",
-        # The name is already stripped of quotes and separators by
-        # ``popularity_report_filename`` — a raw album title would break the
-        # header (and any header-injection attempt with it).
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )ids(payload)
+    result, code = update_album_ids(payload)
     if code == 200 and result.get("success"):
         from helpers.logging_config import log_unified
         log_unified(f"[ALBUM] Updated album IDs ({payload.get('artist') or '?'} - {payload.get('album') or '?'})")

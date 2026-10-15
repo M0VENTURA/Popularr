@@ -227,129 +227,15 @@ class DiscogsHttpClient:
                     if attempt < max_retries:
                         if time.monotonic() + retry_delay > _deadline:
                             logger.warning("Discogs request budget exceeded during backoff", url=url)
-        search_artists(self, artist_name: str, limit: int = 10, timeout: float = 10.0) -> list[dict[str, Any]]:
-        """Artist candidates for a name, in Discogs relevance order.
+                            return {}
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                        continue
+                    return {}
 
-        Returns only entries that carry an id and a name, because every caller
-        compares names — a nameless hit cannot be judged and must not be
-        silently used as "the" artist.
-        """
-        if not artist_name:
-            return []
-        try:
-            per_page = max(1, min(int(limit or 10), 25))
-        except (TypeError, ValueError):
-            per_page = 10
-        results = self.search_database(
-            {"q": artist_name, "type": "artist", "per_page": per_page},
-            timeout=timeout,
-        )
-        candidates: list[dict[str, Any]] = []
-        for item in results or []:
-            if not isinstance(item, dict):
-                continue
-            artist_id = item.get("id")
-            name = str(item.get("title") or "").strip()
-            if not artist_id or not name:
-                continue
-            candidates.append({
-                "id": str(artist_id),
-                "name": name,
-                "resource_url": str(item.get("resource_url") or ""),
-                "thumb": str(item.get("thumb") or ""),
-            })
-        return candidates
-
-    def matched_artist_albums(
-        self,
-        artist_id: str | int,
-        albums: list[str] | None,
-        timeout: float = 10.0,
-    ) -> list[str]:
-        """Which of the LIBRARY's album titles this Discogs artist also has.
-
-        The discriminator the search endpoint needs: several Discogs artists
-        can share a name, and the right one is the artist whose release list
-        contains the albums the library actually holds. One request per
-        candidate (``/artists/{id}/releases``), so callers cap how many
-        candidates they score.
-        """
-        wanted = {_normalize_release_title(a) for a in (albums or []) if str(a or "").strip()}
-        if not artist_id or not wanted:
-            return []
-        try:
-            releases = self.get_artist_releases(artist_id, per_page=100, timeout=timeout)
-        except Exception as exc:
-            logger.debug("Discogs artist releases failed", artist_id=str(artist_id), error=str(exc))
-            return []
-
-        matched: list[str] = []
-        seen: set[str] = set()
-        for release in releases or []:
-            if not isinstance(release, dict):
-                continue
-            title = _normalize_release_title(release.get("title") or "")
-            if title and title in wanted and title not in seen:
-                seen.add(title)
-                matched.append(str(release.get("title") or "").strip())
-        return matched
-
-    def get_artist_id(
-        self,
-        artist_name: str,
-        albums: list[str] | None = None,
-        timeout: float = 10.0,
-    ) -> int | str | None:
-        """Resolve one artist name to a Discogs artist id.
-
-        ⚠️ Taking ``results[0]`` (the old behaviour) is what matched the WRONG
-        artist: Discogs ranks its search by its own relevance, so a name shared
-        by several artists resolved to whichever Discogs listed first — not the
-        one whose release list contains the albums this library holds.
-
-        Resolution order, cheapest evidence first:
-
-        1. a candidate whose name matches EXACTLY (normalised) is preferred
-           over the rest — a tribute band or a different spelling loses here
-           without costing a request;
-        2. with several candidates left AND the caller supplying album titles,
-           each candidate's release list is compared against those albums
-           (capped at ``_MAX_ALBUM_SCORED_CANDIDATES`` requests) and the best
-           overlap wins — this is the "same albums" rule;
-        3. otherwise the first candidate stands, so behaviour is unchanged for
-           a single unambiguous hit.
-        """
-        if not artist_name:
-            return None
-        candidates = self.search_artists(artist_name, limit=10, timeout=timeout)
-        if not candidates:
-            return None
-
-        target = _normalize_artist_name(artist_name)
-        exact = [c for c in candidates if _normalize_artist_name(c["name"]) == target]
-        pool = exact or candidates
-        if len(pool) == 1:
-            return pool[0]["id"]
-
-        if albums:
-            best: dict[str, Any] | None = None
-            best_count = 0
-            for candidate in pool[:_MAX_ALBUM_SCORED_CANDIDATES]:
-                matched = self.matched_artist_albums(candidate["id"], albums, timeout=timeout)
-                if len(matched) > best_count:
-                    best_count = len(matched)
-                    best = candidate
-            if best is not None:
-                logger.debug(
-                    "Discogs artist resolved by album overlap",
-                    artist=artist_name,
-                    discogs_id=best["id"],
-                    discogs_name=best["name"],
-                    matched_albums=best_count,
-                )
-                return best["id"]
-
-        return pool[0]["id"] return {}
+                if response.status_code in {401, 403}:
+                    logger.error("Discogs authentication/permission failure", status=response.status_code)
+                    return {}
 
                 response.raise_for_status()
                 clear_discogs_errors()
