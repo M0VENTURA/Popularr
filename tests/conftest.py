@@ -98,7 +98,16 @@ def _recreate_test_schema():
     # table — so the NEXT test's teardown died with "no such table: tracks".
     # Recreated here for the same reason ``tracks`` itself is.
     with engine.begin() as conn:
-        for _name in ("album_art", "missing_releases", "artist_aliases"):
+        for _name in ("album_art", "missing_releases", "artist_aliases",
+                      # The playlist index (migration 025). In this list rather
+                      # than the ORM because the tables are declared in
+                      # TABLES_TO_ENSURE only. Their absence is SILENT: the
+                      # repository returns [] / {} / 0 whenever the tables are
+                      # missing (so one stray query cannot dispose the shared
+                      # in-memory engine), which means a test for the artist
+                      # page's playlist section would assert an empty result and
+                      # PASS while proving nothing.
+                      "playlists", "playlist_entries"):
             _ddl = TABLES_TO_ENSURE.get(_name)
             if _ddl:
                 conn.execute(_text(_ddl))

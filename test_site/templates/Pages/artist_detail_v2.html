@@ -337,6 +337,91 @@
           </div>
         </div>
       </div>
+
+      {#
+        ── Included in Playlists ──────────────────────────────────────────────
+
+        Which of the user's playlists hold this artist's tracks, and which ones.
+
+        ⭐ RENDERED SERVER-SIDE, unlike the Covers card above it. That card is
+        filled by a fetch because cover detection needs its own request, but this
+        data already arrives in the page payload — a JS fetch here would add a
+        round trip and a spinner to something that is already in hand.
+
+        The data is a plain indexed read of the playlist index the scan's
+        finalise pass maintains (services/playlists/playlist_index_service).
+        Nothing here walks the playlists themselves: doing that live would cost
+        one Subsonic request PER PLAYLIST on every artist page load.
+
+        ⚠️ The two counts are DIFFERENT and both are shown. `pl.tracks` is the
+        tracks in this playlist BY THIS ARTIST (all the page can show);
+        `pl.song_count` is the playlist's total. A section that showed only one
+        of them would either hide that the artist is a single track in a 400-track
+        playlist, or imply the playlist holds nothing else.
+      #}
+      <div class="card mb-3" id="artist-playlists-section">
+        <div class="card-header">
+          <h5 class="card-title mb-0 d-flex align-items-center gap-2 flex-wrap">
+            <i class="bi bi-collection-play"></i> Included in Playlists
+            <span class="badge bg-secondary" id="artistPlaylistsCount">{{ artist_playlists|length }}</span>
+          </h5>
+        </div>
+        {% if artist_playlists %}
+        <div class="card-body p-0">
+          <div class="accordion accordion-flush" id="artistPlaylistsAccordion">
+            {% for pl in artist_playlists %}
+            <div class="accordion-item bg-transparent border-secondary">
+              <h2 class="accordion-header">
+                <button class="accordion-button collapsed bg-transparent" type="button"
+                        data-bs-toggle="collapse"
+                        data-bs-target="#artistPlaylist{{ loop.index }}"
+                        aria-expanded="false"
+                        aria-controls="artistPlaylist{{ loop.index }}">
+                  <span class="d-flex align-items-center gap-2 flex-wrap">
+                    <span class="fw-semibold">{{ pl.name }}</span>
+                    <span class="badge bg-secondary-subtle text-secondary-emphasis extra-small">
+                      {{ pl.tracks|length }} by this artist
+                    </span>
+                    {% if pl.song_count %}
+                    <span class="text-muted extra-small">{{ pl.song_count }} in playlist</span>
+                    {% endif %}
+                    {% if pl.owner %}
+                    <span class="text-muted extra-small">· {{ pl.owner }}</span>
+                    {% endif %}
+                    {% if pl.is_public %}
+                    <i class="bi bi-globe2 text-muted extra-small" title="Public playlist"></i>
+                    {% endif %}
+                  </span>
+                </button>
+              </h2>
+              <div id="artistPlaylist{{ loop.index }}" class="accordion-collapse collapse"
+                   data-bs-parent="#artistPlaylistsAccordion">
+                <div class="accordion-body p-0">
+                  <ul class="list-unstyled mb-0">
+                    {% for t in pl.tracks %}
+                    <li class="d-flex align-items-baseline gap-2 px-3 py-1 border-top border-secondary">
+                      <span class="text-muted extra-small text-end" style="min-width: 2rem;">{{ t.position }}</span>
+                      <span class="text-truncate">{{ t.title }}</span>
+                      {% if t.album %}
+                      <span class="text-muted extra-small text-truncate">· {{ t.album }}</span>
+                      {% endif %}
+                    </li>
+                    {% endfor %}
+                  </ul>
+                </div>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% else %}
+        <div class="card-body text-center text-muted py-4 small">
+          <i class="bi bi-collection-play fs-4 d-block mb-2"></i>
+          <div>None of this artist's tracks are in a playlist yet.</div>
+          <div class="extra-small mt-1">Playlists are indexed when a scan finishes.</div>
+        </div>
+        {% endif %}
+      </div>
     </div>
 
     {# ── TAB 2: TOP TRACKS ───────────────────────────────────────────── #}

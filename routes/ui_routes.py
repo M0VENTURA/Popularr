@@ -1291,6 +1291,24 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
     except Exception as exc:
         logger.debug("Failed to load artist aliases", artist=name, error=str(exc))
 
+    # ── "Included in Playlists" ────────────────────────────────────────────
+    #
+    # A plain indexed read of the playlist index the scan's finalise pass
+    # maintains — NOT a live playlist walk, which would cost one Subsonic
+    # request PER PLAYLIST on every page load, and the artist page is the most
+    # visited page in the app.
+    #
+    # A failure leaves the section empty rather than taking the page down: it is
+    # a convenience view, not the reason the page exists, and this whole payload
+    # is built on a worker thread where an escaping exception is a 500.
+    artist_playlists: list[dict[str, Any]] = []
+    try:
+        from services.playlists.playlist_index_service import playlists_for_artist
+
+        artist_playlists = playlists_for_artist(name)
+    except Exception as exc:
+        logger.debug("Failed to load artist playlists", artist=name, error=str(exc))
+
     return {
         "artist_name": name,
         "albums": albums,
@@ -1311,6 +1329,9 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
         "similar_artists": similar_artists,
         "scan_active": scan_active,
         "slskd_config": cfg.get("slskd", {}),
+        # Playlists containing any of this artist's tracks, grouped by playlist.
+        # Maintained by the scan (services/playlists/playlist_index_service).
+        "artist_playlists": artist_playlists,
     }
 
 

@@ -4854,6 +4854,32 @@ def _run_global_playlist_rebuild(options: dict[str, Any]) -> None:
         except Exception as exc:
             logger.warning("New Music playlist generation failed", error=str(exc))
 
+        # ── Playlist index (artist page's "Included in Playlists") ─────────
+        #
+        # Runs LAST, after every builder above, so the index records what this
+        # pass just created rather than the previous pass's contents. It also
+        # runs ONCE per scan (this function is marker-guarded), not once per
+        # artist — the essential collections are refreshed per artist during the
+        # run, so they are all in place by the time this fires.
+        #
+        # The index sync is cheap when nothing moved: it lists the playlists,
+        # compares each `changed` stamp and fetches only the ones that differ.
+        #
+        # ⚠️ Clients come from `_navidrome_clients()` — the SERVER-scoped
+        # factory — not from a per-account source. Playlists belong to the
+        # server, and using a per-account client list here is what produced the
+        # duplicate-playlist ping-pong this module's docstring describes.
+        try:
+            from services.playlists.playlist_index_service import sync_playlist_index
+
+            _index_stats = sync_playlist_index(_navidrome_clients())
+            if _index_stats.get("changed") or _index_stats.get("pruned"):
+                logger.info("Playlist index synced", **_index_stats)
+        except Exception as exc:
+            # Never fatal: the index only feeds a display section, and a
+            # failure here must not cost the scan its file-tag sync.
+            logger.debug("Playlist index sync failed", error=str(exc))
+
         try:
             options[marker] = True
         except Exception as exc:

@@ -42,6 +42,48 @@ TABLES_TO_ENSURE: dict[str, str] = {
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """,
+    # ── Playlist index ──────────────────────────────────────────────────
+    #
+    # Two tables on purpose. The obvious single denormalized table would
+    # repeat each playlist's name/owner/changed stamp on every one of its rows
+    # — which is where the incremental sync would have had to READ that stamp
+    # from, meaning 500 rows compared to refresh one playlist. Splitting the
+    # playlist row out keeps the "did this playlist move?" answer on exactly
+    # one row, and an unchanged playlist costs zero writes.
+    #
+    # `changed` is Navidrome's own modification stamp for Subsonic playlists,
+    # and a content digest for file-backed (.nsp/.m3u) ones, which have no
+    # such stamp. It is the ONLY thing the sync compares before re-fetching.
+    #
+    # `playlists.playlist_id` mirrors how the rest of the app identifies a
+    # playlist: the Subsonic id, or `file::<file_name>` for a file-backed one
+    # (the same scheme routes/playlists.py already uses).
+    "playlists": """
+        CREATE TABLE IF NOT EXISTS playlists (
+            playlist_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            type TEXT,
+            owner TEXT,
+            is_public BOOLEAN,
+            song_count INTEGER DEFAULT 0,
+            comment TEXT,
+            changed TEXT,
+            synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """,
+    # A playlist may legitimately contain the same track more than once, so
+    # the key is the POSITION, not the track. `track_id` is indexed because
+    # that is the artist-page lookup — and it is the Navidrome song id, which
+    # is what `tracks.id` holds, so the join needs no mapping table.
+    "playlist_entries": """
+        CREATE TABLE IF NOT EXISTS playlist_entries (
+            playlist_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (playlist_id, position)
+        )
+    """,
     "scan_history": """
         CREATE TABLE IF NOT EXISTS scan_history (
             id BIGSERIAL PRIMARY KEY, scan_type TEXT, artist TEXT, album TEXT, 
@@ -507,6 +549,13 @@ INDEXES_TO_ENSURE: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_missing_releases_artist ON missing_releases (artist)",
     "CREATE INDEX IF NOT EXISTS idx_missing_releases_release_id ON missing_releases (release_id)",
     "CREATE INDEX IF NOT EXISTS idx_artist_aliases_artist_key ON artist_aliases (artist_key)",
+    # The playlist index's one hot path: the artist page looks its tracks up by
+    # id, so `playlist_entries.track_id` is the only index that page cannot do
+    # without. Without it the query is a full scan of every playlist entry.
+    "CREATE INDEX IF NOT EXISTS idx_playlist_entries_track_id ON playlist_entries (track_id)",
+    # Kept for the sync side: a playlist's rows are replaced as a unit.
+    "CREATE INDEX IF NOT EXISTS idx_playlist_entries_playlist_id ON playlist_entries (playlist_id)",
+    "CREATE INDEX IF NOT EXISTS idx_playlists_name ON playlists (LOWER(name))",
     "CREATE INDEX IF NOT EXISTS idx_scan_history_scope ON scan_history (scan_type, artist, album, status, started_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_tracks_album_scope ON tracks (LOWER(COALESCE(NULLIF(album_artist, ''), artist)), LOWER(COALESCE(album, '')))",
     "CREATE INDEX IF NOT EXISTS idx_tracks_artist_norm ON tracks (LOWER(COALESCE(NULLIF(album_artist, ''), artist)))",
