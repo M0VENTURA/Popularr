@@ -1,0 +1,95 @@
+#!/bin/sh
+# ─────────────────────────────────────────────────────────────────────────────
+# pre-commit: refuse a commit whose PYTHON does not parse.
+#
+# Install (once per clone):
+#     git config core.hooksPath .githooks
+#
+# Why a parse check is the right gate here
+# ----------------------------------------
+# On 2026-10-15 `origin/develop` became unimportable when the workspace
+# auto-commit spliced a STALE copy of three files back in — each ended up with a
+# duplicate of code that was already present, wedged into the middle of an
+# unrelated expression:
+#
+#     api_clients/discogs_http.py:230                  expected 'except' or 'finally' block
+#     routes/album_routes.py:967                       invalid syntax
+#     services/popularity/stages/finalise_stage.py:3942  unexpected indent
+#
+# The app failed at import and nothing noticed, because the only syntax guard in
+# the repo parses the WORKING TREE and the damage lived on the remote.
+#
+# A stale-copy splice shows up as a syntax error far more often than as a silent
+# logic change, so parsing is a very cheap, very high-value check.
+#
+# ⚠️ This hook does NOT protect against the workspace auto-commit, which writes
+# to origin/develop directly and runs no local hooks. It protects YOUR commits.
+# The post-push ritual is what covers the other direction — see
+# tools/check_remote_syntax.py.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# No `set -e`: every failure below is handled explicitly, and exiting silently on
+# an unexpected non-zero would turn a working commit into a mysterious one.
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+common_dir="$(git rev-parse --git-common-dir 2>/dev/null || echo "$repo_root/.git")"
+
+# `--git-common-dir` points at the SHARED .git, so its parent is the MAIN
+# checkout. That matters for a linked worktree, which has no .venv of its own --
+# the interpreter lives in the main checkout beside the shared object store.
+main_root="$(cd "$common_dir/.." 2>/dev/null && pwd -P || echo "$repo_root")"
+
+find_python() {
+    for candidate in \
+        "$repo_root/.venv/Scripts/python.exe" \
+        "$repo_root/.venv/bin/python" \
+        "$main_root/.venv/Scripts/python.exe" \
+        "$main_root/.venv/bin/python" \
+        "$(command -v python3 2>/dev/null)" \
+        "$(command -v python 2>/dev/null)"
+    do
+        [ -n "$candidate" ] || continue
+        [ -x "$candidate" ] || continue
+
+        # `-x` is NOT enough on Windows: the Microsoft Store ships a `python`
+        # alias that exists, is executable, and is a stub that exits non-zero
+        # printing "Python was not found". Only a real interpreter passes this.
+        if "$candidate" -c 'import ast, sys' >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+checker="$repo_root/tools/check_remote_syntax.py"
+python_exe="$(find_python)" || python_exe=""
+
+if [ -z "$python_exe" ]; then
+    # Never block a commit because a checker is unavailable -- say so and go.
+    echo "pre-commit: no usable python found, skipping the syntax check" >&2
+    exit 0
+fi
+
+# Prefer the project's own checker (it adds the duplicate-signature hint).
+if [ -f "$checker" ]; then
+    if ! "$python_exe" "$checker" --staged; then
+        echo "" >&2
+        echo "pre-commit: BLOCKED - a staged Python file does not parse." >&2
+        echo "  Fix it, then commit again. To bypass once: git commit --no-verify" >&2
+        exit 1
+    fi
+    exit 0
+fi
+
+# Fallback if the tool is missing (an older checkout): inline parse of the
+# staged blobs, so the hook still has teeth.
+staged="$(git diff --cached --name-only --diff-filter=ACMR | grep '\.py$')" || exit 0
+
+for f in $staged; do
+    if ! git show ":$f" | "$python_exe" -c 'import ast, sys; ast.parse(sys.stdin.read())' 2>/dev/null; then
+        echo "pre-commit: BLOCKED - $f does not parse." >&2
+        exit 1
+    fi
+done
+exit 0

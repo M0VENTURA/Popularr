@@ -1,0 +1,60 @@
+name: Syntax Guard
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runs on every push to develop/main and on every PR.
+#
+# WHY THIS EXISTS
+# ---------------
+# On 2026-10-15 `origin/develop` became unimportable. Three source files had a
+# STALE copy of their own older content spliced back in, duplicating code that
+# was already present and wedging it into the middle of an unrelated expression:
+#
+#     api_clients/discogs_http.py:230                     expected 'except' or 'finally' block
+#     routes/album_routes.py:967                          invalid syntax
+#     services/popularity/stages/finalise_stage.py:3942   unexpected indent
+#
+# The app could not be imported at all — yet nothing alerted, because the only
+# syntax check in the repo parses the WORKING TREE and the damage lived on the
+# remote.
+#
+# The commit that did it came from the VS Code GitHub workspace, which commits
+# straight to origin/develop through the GitHub API. That path runs no local
+# hooks and no local tests, so a pre-commit hook CANNOT catch it. A workflow
+# that runs on push does, because it executes on GitHub's side after the damage
+# has landed. That is the whole point of this file.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch:
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔁 Checkout code
+        uses: actions/checkout@v5
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 🔎 Every Python file must parse
+        run: python tools/check_remote_syntax.py --worktree
+
+      - name: 🚪 The app must import  (catches import-time damage a parse can miss)
+        if: always()
+        env:
+          DATABASE_URL: sqlite:///:memory:
+          SECRET_KEY: ci-not-a-real-secret
+        run: |
+          python -m pip install --upgrade pip
+          # Only what `import app` needs to get to route registration.
+          pip install quart quart-schema sqlalchemy alembic structlog \
+                      python-dotenv itsdangerous httpx aiohttp requests \
+                      psycopg2-binary quart-cors pyyaml
+          python -c "import app; print('routes:', len(app.app.url_map._rules))"
