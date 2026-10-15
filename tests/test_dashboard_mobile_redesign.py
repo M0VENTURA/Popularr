@@ -186,60 +186,212 @@ class TestTheLibraryStripIsOneRow:
 
 
 # ---------------------------------------------------------------------------
-# 2. Slim scanner
+# 2. The scanner card and the shared scan sheet
 # ---------------------------------------------------------------------------
+#
+# ⚠️ SUPERSEDES THE "slim scanner" ASSERTIONS. Those pinned a tabbed engine
+# panel (Popularity / Navidrome / Essentia, each with its own controls) with
+# Forced/Restart hoisted into the card header. The mock-up replaces all of it
+# with a state line and ONE action, and the type list moves into a sheet shared
+# with the artist and album pages — so the old assertions describe a UI that no
+# longer exists rather than a behaviour that regressed.
+#
+# What is genuinely pinned now: the card has exactly two states, the single
+# action opens the SHARED sheet, and nothing that was reachable before became
+# unreachable (see the Navidrome rescan test).
 
 
-class TestTheScannerIsSlim:
+class TestTheScannerCard:
 
-    def test_the_run_options_live_in_the_header(self, html: str) -> None:
-        """The brief puts Forced/Restart in the header, not in a pane."""
+    def test_it_has_a_state_line_and_one_action(self, html: str) -> None:
+        """The mock-up's panel 1: heading with the state, a hint, one button."""
         idx = html.index('id="scannerControlsCard"')
-        header_end = html.index("</div>", html.index('id="scannerStatusBadge"', idx))
-        header = html[idx:header_end]
-        assert 'id="popScanForce"' in header, "Forced is not in the header"
-        assert 'id="popScanRestart"' in header, "Restart is not in the header"
+        # Anchor on real MARKUP, not a comment: the Releases card's own comment
+        # is Jinja and would not match an `<!-- -->` slice.
+        card = html[idx: html.index('id="upcomingTableWrap"', idx)]
+        assert 'id="scannerState"' in card, "nothing names what is running"
+        assert 'id="scannerStartBtn"' in card, "the single action is missing"
+        assert "Keep your library up to date." in card
 
-    def test_and_no_longer_in_the_popularity_pane(self, html: str) -> None:
-        """CONTROL on the move: present-in-header alone passes if a copy stayed.
+    def test_the_engines_and_their_controls_are_gone(self, html: str) -> None:
+        """CONTROL on the replacement: the old panel must not linger.
 
-        Two elements sharing one id is invalid HTML and the JS would read
-        whichever came first — so the move has to be complete.
+        A leftover `popScanSelector` or a second Force checkbox would be a
+        control nothing reads — the exact class of dead UI this change removes.
         """
-        assert html.count('id="popScanForce"') == 1
-        assert html.count('id="popScanRestart"') == 1
+        for stale in ('id="scannerTabs"', 'id="popScanSelector"',
+                      'id="popScanForce"', 'id="popScanRestart"',
+                      'id="navImportForce"', 'id="scannerPanePopularity"'):
+            assert stale not in html, f"{stale} survived the replacement"
 
-    def test_the_navidrome_force_stays_with_navidrome(self, html: str) -> None:
-        """It answers a DIFFERENT question, so hoisting it would conflate them.
+    def test_the_action_opens_the_shared_sheet(self, html: str) -> None:
+        """⭐ Must be the SHARED component, not a dashboard-only copy.
 
-        `popScanForce` means "ignore change detection / cache"; `navImportForce`
-        means "re-import every artist in full".
+        The whole point of the mock-up's panel 2 is "same scan options used
+        across the app" — a second inline sheet here would reintroduce the
+        three-answers-to-one-question problem this replaces.
         """
-        idx = html.index('id="navImportForce"')
-        pane = html.index('id="scannerPaneNavidrome"')
-        assert pane < idx, "navImportForce drifted out of the Navidrome pane"
-        assert idx < html.index('id="scannerPaneEssentia"')
+        idx = html.index('id="scannerStartBtn"')
+        button = html[idx: html.index(">", html.index("onclick", idx))]
+        assert "ScanModal.open(" in button, "the button does not open the sheet"
+        assert "scope: 'library'" in button, "the sheet is opened with no scope"
+        assert "components/_scan_modal.html" in html, (
+            "the shared sheet component is not included"
+        )
 
-    def test_the_three_engines_stay_visible_side_by_side(self, html: str) -> None:
-        """"Side by side" means all three switches are on screen at once."""
-        idx = html.index('id="scannerTabs"')
-        tabs = html[idx: html.index("</ul>", idx)]
-        for target in ("#scannerPanePopularity", "#scannerPaneNavidrome",
-                       "#scannerPaneEssentia"):
-            assert f'data-bs-target="{target}"' in tabs, f"{target} lost its switch"
+    def test_the_sheet_controller_is_loaded(self, html: str) -> None:
+        """An included sheet with no controller is an inert panel."""
+        assert "js/ui/scan-modal.js" in html
 
-    def test_the_essentia_engine_is_retained(self, html: str) -> None:
-        """The mock-up dropped Essentia; the brief says keep it."""
-        assert "startEssentiaScan()" in html
-        assert "Essentia" in html
+    def test_the_scanning_state_offers_progress_and_stop(self, html: str) -> None:
+        """The mock-up's panel 3."""
+        idx = html.index('id="scannerActiveState"')
+        active = html[idx: html.index('id="upcomingTableWrap"', idx)]
+        assert 'id="activeScansBody"' in active, "no progress region"
+        assert "stopAllScans()" in active, "no stop control"
+        assert "View details" in active
 
-    def test_the_pane_toolbar_is_one_line(self, html: str) -> None:
-        """`mb-2` on the popularity toolbar added a row of dead space; the
-        Forced/Restart checkboxes that needed it moved out."""
-        idx = html.index('id="scannerPanePopularity"')
-        toolbar = html[idx: html.index("</div>", idx) + 400]
-        lead = toolbar[: toolbar.index("</select>")]
-        assert "mb-2" not in lead, "the control row still reserves a second line"
+    def test_the_two_states_are_one_card(self, html: str) -> None:
+        """Not two cards: two would need the JS to synchronise them and would
+        double the empty-state surface."""
+        idx = html.index('id="scannerControlsCard"')
+        card = html[idx: html.index('id="upcomingTableWrap"', idx)]
+        assert card.count('id="scannerIdleState"') == 1
+        assert card.count('id="scannerActiveState"') == 1
+        assert card.index('id="scannerIdleState"') < card.index('id="scannerActiveState"')
+
+    def test_the_js_toggles_them_and_names_the_scan(self, dash_js: str) -> None:
+        idx = dash_js.index("async function updateActiveScans()")
+        body = dash_js[idx: idx + 2200]
+        assert "scannerIdleState" in body and "scannerActiveState" in body
+        assert "classList.toggle('d-none'" in body
+        assert "scannerState" in body, "nothing writes the heading"
+        assert "scanDisplayName(" in body, (
+            "the heading must name WHAT is running, not just say 'Active'"
+        )
+
+
+class TestTheSharedScanSheet:
+    """The sheet itself — the mock-up's panel 2, shared with the other pages."""
+
+    SHEET = TS / "templates" / "components" / "_scan_modal.html"
+    JS = TS / "static" / "js" / "ui" / "scan-modal.js"
+
+    @pytest.fixture(scope="class")
+    def sheet(self) -> str:
+        return _read(self.SHEET)
+
+    @pytest.fixture(scope="class")
+    def modal_js(self) -> str:
+        return _read(self.JS)
+
+    def test_it_is_a_bottom_sheet(self, sheet: str) -> None:
+        assert "offcanvas-bottom" in sheet
+        assert 'id="scanSheet"' in sheet
+
+    def test_every_scan_type_is_offered(self, modal_js: str) -> None:
+        """All seven from the mock-up. Read from the CONTROLLER, because that
+        is also what the run dispatch iterates — a type present in the markup
+        but absent there would be a button that does nothing."""
+        for type_id in ("full", "navidrome", "popularity", "metadata",
+                        "singles", "finalise", "essentia"):
+            assert f"id: '{type_id}'" in modal_js, f"{type_id} is not offered"
+
+    def test_the_types_are_radios_not_checkboxes(self, modal_js: str) -> None:
+        """A scan type is one choice. Checkboxes could express "Full + Finalise",
+        which the runner cannot do and the user had no way to know."""
+        assert 'type="radio"' in modal_js
+        assert 'type="checkbox" name="scanType"' not in modal_js
+
+    def test_force_and_restart_live_under_advanced_options(self, sheet: str) -> None:
+        assert 'id="scanAdvancedToggle"' in sheet
+        idx = sheet.index('id="scanAdvancedOptions"')
+        options = sheet[idx: sheet.index("</div>\n    </div>", idx)]
+        assert 'id="scanForceOption"' in options
+        assert 'id="scanRestartOption"' in options
+        # Collapsed by default.
+        assert "d-none" in sheet[:idx][-200:], "the block starts expanded"
+
+    def test_the_mode_key_is_available_inside_the_sheet(self, sheet: str) -> None:
+        """The brief: keep "What does each scan do?" accessible in the sheet."""
+        assert "_scan_mode_key.html" in sheet
+
+    def test_a_scope_that_ignores_an_option_disables_it(self, modal_js: str) -> None:
+        """⭐ A disabled control states "this does not apply"; a hidden one says
+        nothing, and hiding would make the list jump as the selection changes."""
+        assert "optionApplies" in modal_js
+        assert "force.disabled = !forceApplies" in modal_js
+        assert "restart.disabled = !restartApplies" in modal_js
+
+    def test_restart_is_dispatchable(self, modal_js: str) -> None:
+        """⭐ The point of routing through /api/popularity/run.
+
+        The Restart checkbox on the old artist/album forms was read by NO route,
+        so it did nothing. This endpoint honours it, so the control is real here.
+        """
+        assert "restart" in modal_js
+        idx = modal_js.index("const body = { mode:")
+        assert "restart" in modal_js[idx: idx + 200], (
+            "restart is collected but never sent"
+        )
+
+    def test_a_failure_keeps_the_sheet_open(self, modal_js: str) -> None:
+        """Closing would hide the reason, and the user would have to reopen and
+        re-choose the type to retry."""
+        idx = modal_js.index("} catch (error) {")
+        catch = modal_js[idx: idx + 500]
+        assert "status.innerHTML" in catch, "the error is not shown in the sheet"
+        assert "close()" not in catch, "the sheet closes on failure"
+
+    def test_the_navidrome_rescan_is_still_reachable(self, sheet: str, modal_js: str) -> None:
+        """⭐ A feature that would otherwise have been lost with the pane.
+
+        The dashboard's Navidrome pane was the ONLY place that could trigger a
+        Navidrome SERVER rescan, and that pane is now gone. It is a different
+        operation from the import (the import pulls rows into Popularr; this
+        asks Navidrome to re-read its own files), so it moved into the sheet
+        rather than disappearing with the markup.
+        """
+        assert 'id="scanNavidromeRescanBtn"' in sheet
+        assert "/api/navidrome/scan/start" in modal_js, (
+            "the rescan endpoint is no longer called from anywhere"
+        )
+        # Shown only for the Navidrome type.
+        assert "scanSecondaryAction" in modal_js
+
+    def test_each_family_posts_to_its_own_endpoint(self, modal_js: str) -> None:
+        """The three families take genuinely different payloads."""
+        assert "/api/popularity/run" in modal_js
+        assert "/api/navidrome/import" in modal_js
+        assert "/api/essentia/run" in modal_js
+
+    def test_the_navidrome_force_maps_to_mode_not_a_boolean(self, modal_js: str) -> None:
+        """⭐ Its "force" is a FULL re-import, not "ignore the skip window".
+
+        Passing it as a boolean would be interpreted as nothing at all.
+        """
+        # ⚠️ Searched AFTER the docstring: the header documents this endpoint, so
+        # a plain `.index()` finds the COMMENT and every window assertion built
+        # on it is satisfied by prose rather than by code.
+        #
+        # And the payload comes AFTER the endpoint in the call, so the window
+        # looks FORWARD — a backward window found only the explanatory comment.
+        code = modal_js[modal_js.index("async function run("):]
+        idx = code.index("/api/navidrome/import")
+        window = code[idx: idx + 260]
+        assert "mode: force ? 'force' : 'all'" in window, (
+            "the Navidrome branch no longer maps Force to `mode`"
+        )
+
+    def test_the_sheet_asks_the_preflight_gate_before_its_post(self, modal_js: str) -> None:
+        """The scan-entry-point contract (see test_scan_preflight_gate): every
+        start path reaches the gate before it POSTs."""
+        # Same reason as above — bound to the run() body, not the docstring.
+        code = modal_js[modal_js.index("async function run("):]
+        idx = code.index("confirmIfRunning")
+        assert idx < code.index("/api/essentia/run")
+        assert idx < code.index("/api/navidrome/import")
+        assert idx < code.index("/api/popularity/run")
 
 
 # ---------------------------------------------------------------------------
@@ -574,9 +726,36 @@ class TestTheLowProfileAddButton:
         assert not re.search(
             r"<a\b[^>]*>(?:(?!</a>).)*js-play-album", recent_row, re.DOTALL
         ), "the play button is nested inside the album link"
-        # And the link still wraps the part that SHOULD navigate.
-        assert re.search(r"<a\b[^>]*>", recent_row)
-        assert recent_row.count("<a ") == 1
+        # And the links that SHOULD navigate are still anchors. There are two
+        # legitimately: the row's own link, and the labelled "Open" action the
+        # mock-up adds — both navigate, so both must be <a>.
+        assert recent_row.count("<a ") == 2, (
+            "expected the row link and the Open action"
+        )
+        assert ">Open<" in recent_row, "the labelled Open action is missing"
+
+
+class TestTheLabelledOpenAction:
+    """"Open" from the mock-up — a NAMED navigation action on each row."""
+
+    def test_open_is_a_link_not_a_button(self, recent_row: str) -> None:
+        """⭐ It navigates, so it must work with the keyboard, be
+        middle-clickable and be openable in a new tab — all of which a
+        `<button>` with an onclick handler loses.
+
+        Its neighbour (play) acts rather than navigates, so that one IS a
+        button. The two look alike and are deliberately different elements.
+        """
+        idx = recent_row.index(">Open<")
+        tag = recent_row[recent_row.rindex("<a", 0, idx): recent_row.index(">", idx)]
+        assert "href=" in tag, "Open has no href, so it cannot be opened in a new tab"
+
+    def test_open_carries_an_accessible_name(self, recent_row: str) -> None:
+        """A bare "Open" repeated twelve times tells a screen-reader user
+        nothing about which album it opens."""
+        idx = recent_row.index(">Open<")
+        tag = recent_row[recent_row.rindex("<a", 0, idx): recent_row.index(">", idx)]
+        assert "aria-label=" in tag
 
     def test_the_names_survive_in_data_attributes(self, recent_row: str) -> None:
         """⭐ Why `data-` rather than an inline onclick.

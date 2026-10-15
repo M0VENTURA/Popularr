@@ -176,6 +176,33 @@
     }
   }
 
+  // ==========================================================================
+  // ⚠️ UNREACHABLE SINCE THE SHARED SCAN SHEET — REMOVE THESE.
+  //
+  // Every function below this banner drove the tabbed engine panel that
+  // `Pages/dashboard.html` no longer renders. The dashboard's scan UI is
+  // `components/_scan_modal.html` + `js/ui/scan-modal.js` now, so nothing calls
+  // them and every `getElementById` in them returns null:
+  //
+  //   startPopularityScan / runDashboardPopularityScan / pollPopularityStatus
+  //   startNavidromeImport / stopNavidromeSync / pollNavidromeStatus
+  //   startEssentiaScan / stopEssentiaStatus / pollEssentiaStatus
+  //   checkNavidromeConnectivity
+  //
+  // They do not THROW — they all guard their lookups — which is exactly why
+  // they are dangerous to leave: a reader sees `runDashboardPopularityScan`
+  // reading `#popScanSelector` and concludes the dashboard still has that
+  // control. That is the "a comment describing a fallback that does not exist"
+  // failure in code form.
+  //
+  // `startNavidromeServerScan` is NOT in that list: the sheet calls
+  // `/api/navidrome/scan/start` itself now, so it is unreachable too — but the
+  // FEATURE is not lost, it moved into the sheet's Navidrome option.
+  //
+  // `stopAllScans` and `updateActiveScans` are LIVE — the scanner card's Stop
+  // and progress both call them.
+  // ==========================================================================
+
   async function startNavidromeImport() {
     // "Forced" = mode:force → serial full re-import of every artist, ignoring
     // the new-items/changed-album skips. Unchecked = mode:all → normal import
@@ -450,11 +477,30 @@
     const active = data.active_scans || [];
     updateScanStatusBar(active);
 
+    // ── The scanner card's two states ──────────────────────────────────
+    //
+    // Idle: a line of reassurance and one action. Scanning: the progress and
+    // the two controls that apply to a running scan. ONE card toggled, not two
+    // — two would need this function to keep them in sync and would double the
+    // empty-state surface.
+    const running = active.find((s) => s && s.is_running) || active[0];
+    const idleState = document.getElementById('scannerIdleState');
+    const activeState = document.getElementById('scannerActiveState');
+    const stateLabel = document.getElementById('scannerState');
+
+    if (idleState) idleState.classList.toggle('d-none', !!running);
+    if (activeState) activeState.classList.toggle('d-none', !running);
+    if (stateLabel) {
+      // "Scanning Library", not just "Active" — the heading names WHAT is
+      // running, which is the fact the old badge could not carry.
+      stateLabel.textContent = running ? `Scanning ${scanDisplayName(running.scan_type)}` : 'Idle';
+    }
+
     const badge = document.getElementById('scannerStatusBadge');
     if (badge) {
       badge.innerHTML = '<i class="bi bi-circle-fill me-1 small"></i> ' +
-        (active.length ? 'Active' : 'Idle');
-      badge.className = 'badge ' + (active.length ? 'bg-success' : 'bg-secondary');
+        (running ? 'Active' : 'Idle');
+      badge.className = 'badge ' + (running ? 'bg-success' : 'bg-secondary');
       badge.style.fontSize = '0.65rem';
     }
 

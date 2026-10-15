@@ -248,8 +248,18 @@ class TestUpcomingRendersOnBothBreakpoints:
 
 class TestDashboardAccessibility:
 
-    LIVE_REGIONS = ("pop-status", "nav-status", "ess-status", "scannerStatusBadge",
-                    "pending-approval-count")
+    # ⚠️ SUPERSEDED the three per-pane status spans (`pop-status` / `nav-status`
+    # / `ess-status`) and the badge. Those belonged to the tabbed engine panel
+    # that the mock-up replaces with ONE state line and one action, so the scan
+    # state now has a single live region — `scannerState`, the word in the card
+    # heading that reads "Idle" or "Scanning Metadata". The contract being
+    # pinned is unchanged (scan state changes must be announced); only the
+    # element carrying it moved.
+    #
+    # `scannerStatusBadge` is deliberately NOT in this list any more: the card
+    # heading already says the state, so the badge is a hidden duplicate kept
+    # only for `updateActiveScans` — and a hidden live region announces nothing.
+    LIVE_REGIONS = ("scannerState", "pending-approval-count")
 
     @pytest.mark.parametrize("field_id", LIVE_REGIONS)
     def test_status_regions_are_live(self, field_id) -> None:
@@ -273,9 +283,14 @@ class TestDashboardAccessibility:
         html = _read(DASHBOARD_HTML)
         # Every stopAllScans() button is icon-only, so `title` alone is not a
         # reliable accessible name.
-        count_stop = html.count("onclick=\"stopAllScans()\"")
+        #
+        # ⚠️ There is ONE now, not three. The past three were one per engine
+        # pane; with one scanner card there is one Stop, and it stops every scan
+        # (which is what `stopAllScans` has always done — the three buttons were
+        # the same action repeated in three panes).
+        count_stop = html.count('onclick="stopAllScans()"')
         count_label = html.count('aria-label="Stop all scans"')
-        assert count_stop >= 3, "expected the three per-pane stop buttons"
+        assert count_stop >= 1, "the scanner card has no stop control"
         assert count_label == count_stop, (
             f"{count_stop} stop buttons but {count_label} accessible names — "
             "every icon-only control needs an aria-label"

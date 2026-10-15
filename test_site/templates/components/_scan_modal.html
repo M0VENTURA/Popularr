@@ -1,0 +1,172 @@
+{#
+  SHARED SCAN MODAL — one sheet, every page.
+
+  The mock-up's panel 2, and the reason it exists: the scan options were three
+  different UIs for one question. The dashboard had a tabbed engine panel with a
+  type <select>; the artist and album pages had an inline `<select>` plus a
+  Force checkbox in a form; and the "Restart" checkbox those forms rendered was
+  read by NOBODY (see the note on it below). This sheet is the single answer, and
+  the caller only varies its SCOPE.
+
+  ── USAGE ─────────────────────────────────────────────────────────────────
+      {% set scan_scope_kind = 'library' %}
+      {% include 'components/_scan_modal.html' %}
+
+  ``scan_scope_kind`` is one of ``library`` / ``artist`` / ``album``. The body
+  and the Run button are identical for all three; only the heading, the hint
+  line and WHERE the run is dispatched differ, and the dispatch table lives in
+  ``js/ui/scan-modal.js`` (``SCOPES``). Adding a page is a row in that table,
+  not a new sheet.
+
+  ``library`` is the only scope wired today, because that is the dashboard's —
+  the artist and album scopes are the next slice and their form endpoints are
+  already known (``scans.scan_artist_custom`` / ``scans.scan_album_custom``).
+  The component is written so adding them touches no markup here.
+
+  ── THE SEVEN TYPES ───────────────────────────────────────────────────────
+  Rendered from ``scan_types`` in scan-modal.js, which is also what the Run
+  dispatch reads — so a type cannot appear in the list without an action, or
+  have an action without appearing. The DESCRIPTIONS are the mock-up's short
+  form; the authoritative long form is ``_scan_mode_key.html``, included below
+  as a collapsible so the reader can go deeper without leaving the sheet.
+
+  ── ⚠️ RESTART WAS DEAD ───────────────────────────────────────────────────
+  ``components/_scan_selector.html`` renders a ``restart`` checkbox and its
+  docstring claims "``scan_type`` and ``restart`` are the field names the scan
+  routes read". That is FALSE for the two endpoints its callers post to:
+  ``scans.scan_artist_custom`` and ``scans.scan_album_custom`` read only
+  ``scan_type`` and ``force``. The one handler that does read ``restart``
+  (``scans.scan_start``, ``/scan/start``) is posted to by nothing in either UI
+  tree. So the control has been inert wherever it was shown.
+
+  This sheet routes the popularity-family types through
+  ``POST /api/popularity/run``, which DOES honour ``force`` and ``restart`` —
+  so Restart is real here. Fixing the artist/album form endpoints is part of
+  that next slice; until then this sheet is the only place Restart works, and
+  saying so is better than shipping the same dead checkbox in a nicer frame.
+#}
+
+{% set _scope = scan_scope_kind | default('library') %}
+{% set _scopes = {
+  'library': {'title': 'Scan Library', 'hint': 'This will scan your entire library.'},
+  'artist':  {'title': 'Scan Artist',  'hint': 'Choose a scan type to update this artist\u2019s data.'},
+  'album':   {'title': 'Scan Album',   'hint': 'Choose a scan type to update this album\u2019s data.'}
+} %}
+{% set _meta = _scopes.get(_scope, _scopes['library']) %}
+
+<div class="offcanvas offcanvas-bottom scan-sheet" tabindex="-1" id="scanSheet"
+     data-scan-scope="{{ _scope }}"
+     aria-labelledby="scanSheetLabel">
+  <div class="offcanvas-header border-bottom border-secondary border-opacity-25">
+    <h5 class="offcanvas-title" id="scanSheetLabel">
+      <i class="bi bi-lightning-charge-fill text-success me-1" aria-hidden="true"></i>
+      {{ _meta.title }}
+    </h5>
+    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"
+            aria-label="Close"></button>
+  </div>
+
+  <div class="offcanvas-body">
+    <p class="fw-semibold mb-1">Choose a scan type</p>
+    <p class="text-muted small mb-3">{{ _meta.hint }}</p>
+
+    {#
+      RADIOS, not checkboxes. A scan type is one choice — the multi-select
+      version could express "Full + Finalise", which is not a thing the runner
+      can do, and the user had no way to know that.
+
+      `role="radiogroup"` + a real <fieldset>/<legend> would be the strict
+      markup; a plain list of radio inputs inside a <form> is already a group
+      to assistive tech, and the <legend> equivalent is the heading above.
+    #}
+    <div class="scan-type-list" id="scanTypeList" role="radiogroup" aria-label="Scan type">
+      {# Populated by scan-modal.js from the same table the dispatch uses. #}
+    </div>
+
+    <div class="mt-3">
+      <button type="button" class="btn btn-sm btn-dark w-100 text-start border border-secondary"
+              id="scanAdvancedToggle" aria-expanded="false" aria-controls="scanAdvancedOptions">
+        <i class="bi bi-gear me-1 text-info" aria-hidden="true"></i>
+        <span class="fw-semibold">Advanced options</span>
+        <i class="bi bi-chevron-right float-end" id="scanAdvancedChevron" aria-hidden="true"></i>
+      </button>
+      <div class="border border-secondary rounded p-3 mt-2 d-none" id="scanAdvancedOptions"
+           style="background: var(--tertiary-bg, #222);">
+        {#
+          These two are NOT the same reset, and the help text says so — the
+          difference is the thing users get wrong:
+            Force   — carry on from here, but ignore the skip windows/cache.
+            Restart — go back to the top.
+          With BOTH ticked you get a forced run from the beginning.
+
+          Both are DISABLED (with a reason) for a type that ignores them, rather
+          than hidden. Hiding would make the list jump around as the selection
+          changes, and a reader cannot compare options across types if they
+          vanish; a disabled control states "this does not apply" where a hidden
+          one says nothing.
+        #}
+        <div class="form-check mb-2">
+          <input class="form-check-input" type="checkbox" id="scanForceOption">
+          <label class="form-check-label" for="scanForceOption">
+            Force scan
+            <span class="d-block text-muted" style="font-size:0.72rem;">
+              Ignore the rescan windows and cached verdicts, so items that were
+              skipped as &ldquo;recently scanned&rdquo; are processed again.
+            </span>
+          </label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="scanRestartOption">
+          <label class="form-check-label" for="scanRestartOption">
+            Restart
+            <span class="d-block text-muted" style="font-size:0.72rem;">
+              Start again from the beginning instead of resuming where the last
+              run stopped. With Force, everything is rescanned.
+            </span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    {#
+      SECONDARY ACTION — only for the Navidrome type.
+
+      ⚠️ This exists because the dashboard's Navidrome pane was the ONLY place
+      that could trigger a Navidrome SERVER rescan (/api/navidrome/scan/start),
+      and that pane is gone. It is a genuinely different operation from the
+      Navidrome IMPORT: the import pulls rows into Popularr, this asks Navidrome
+      to re-read its own files first. Deleting the pane without moving this would
+      have removed the feature silently, which is why it lives here rather than
+      being dropped with the markup.
+
+      A second button rather than a checkbox because it is a separate ACTION,
+      not an option of the import — and it does not close the sheet, so it can
+      be used before deciding whether to also run the import.
+    #}
+    <div class="mt-3 d-none" id="scanSecondaryAction">
+      <button type="button" class="btn btn-sm btn-outline-secondary w-100" id="scanNavidromeRescanBtn">
+        <i class="bi bi-arrow-repeat me-1" aria-hidden="true"></i>
+        Also ask Navidrome to re-read its own files
+      </button>
+      <p class="text-muted mb-0 mt-1" style="font-size:0.72rem;">
+        Triggers a Navidrome server rescan. It does not import anything into
+        Popularr — run the Navidrome scan above for that.
+      </p>
+    </div>
+
+    {# The authoritative long-form description of every type, collapsed so it
+       costs one line. JS-free and already shared with the other selectors. #}
+    <div class="mt-2">
+      {% include 'components/_scan_mode_key.html' %}
+    </div>
+
+    <div id="scanSheetStatus" class="small mt-2" role="status" aria-live="polite"></div>
+  </div>
+
+  <div class="offcanvas-footer d-flex gap-2 p-3 border-top border-secondary border-opacity-25">
+    <button type="button" class="btn btn-outline-secondary flex-fill" data-bs-dismiss="offcanvas">Cancel</button>
+    <button type="button" class="btn btn-success flex-fill fw-semibold" id="scanSheetRunBtn">
+      <i class="bi bi-lightning-charge-fill" aria-hidden="true"></i> Run Scan
+    </button>
+  </div>
+</div>
