@@ -23,6 +23,7 @@ Three things this pins, one per section:
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -110,14 +111,55 @@ class TestTheScanModeKeySaysWhatEachModeDoes:
         )
 
     def test_it_is_reachable_from_every_selector(self):
+        """⭐ The legend must be reachable, not necessarily a DIRECT include.
+
+        The requirement is that a reader who is offered a scan type can find out
+        what it does. The dashboard now satisfies that through the shared sheet:
+        it includes `components/_scan_modal.html`, which includes the legend —
+        so the legend is one level down, not in the page itself. Asserting only
+        the direct include pinned the markup arrangement rather than the
+        requirement, and failed the moment the sheet absorbed the type list.
+        """
         for rel in SELECTOR_SITES:
             path = TEST_SITE / rel
             assert path.is_file(), rel
             source = _read(path)
-            assert "{% include 'components/_scan_mode_key.html' %}" in source, (
-                f"{rel} offers a scan selector without the legend, so the "
-                "reader has no way to know Finalise does not run the other scans"
+
+            if "{% include 'components/_scan_mode_key.html' %}" in source:
+                continue
+
+            # Not a direct include — look one level down, at the components this
+            # template includes. That is where a shared sheet puts it.
+            nested = re.findall(r"\{%\s*include\s+'([^']+\.html)'", source)
+            reachable = False
+            for sub in nested:
+                candidate = TEST_SITE / rel.split("/")[0] / sub
+                if candidate.is_file() and "_scan_mode_key.html" in _read(candidate):
+                    reachable = True
+                    break
+
+            assert reachable, (
+                f"{rel} offers a scan selector with no route to the legend — "
+                "the reader cannot find out that Finalise does not run the "
+                "other scans"
             )
+
+    def test_the_dashboard_reaches_it_through_the_shared_sheet(self):
+        """CONTROL for the chain above, so it cannot pass vacuously.
+
+        A regex that finds nothing would leave `reachable` False and fail loudly,
+        but a page with NO includes at all would also fail — this pins the
+        specific route the dashboard uses, so the reason is legible.
+        """
+        dashboard = _read(TEST_SITE / "templates/Pages/dashboard.html")
+        assert "components/_scan_modal.html" in dashboard, (
+            "the dashboard no longer includes the shared scan sheet"
+        )
+        sheet = _read(TEST_SITE / "templates/components/_scan_modal.html")
+        assert "_scan_mode_key.html" in sheet, (
+            "the shared sheet no longer includes the legend, so the dashboard "
+            "has lost its only route to it"
+        )
 
     def test_it_is_js_free(self):
         """A legend wired through JS can silently do nothing.

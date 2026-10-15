@@ -170,6 +170,23 @@
           </div>
         </div>
       </div>
+      {#
+        ⚠️ SCOPE NOTE. Adding a second account on the SAME server is the natural
+        thing to do for per-user ratings — and it is exactly what used to make a
+        playlist get deleted and recreated on every scan. Playlists are created
+        once per SERVER, by the first account configured for it; ratings and
+        favourites are pushed per ACCOUNT. Saying so here is cheaper than
+        debugging the ping-pong again, because the two lists are configured in
+        one place and look interchangeable.
+      #}
+      <div class="alert alert-info border-info mb-3 py-2" style="font-size:0.85rem;">
+        <i class="bi bi-info-circle me-1"></i>
+        <strong>Ratings and favourites are per account; playlists are per server.</strong>
+        If two accounts below point at the <em>same</em> Navidrome URL, star ratings and
+        favourites still sync to both — but each generated playlist is created once, by the
+        first account listed for that server, and is public. A second account on the same
+        server will <em>not</em> get its own copy.
+      </div>
       <!-- Users Container -->
       <div id="usersContainer">
         {% set navidrome_users = config.get('navidrome_users', []) %}

@@ -229,13 +229,61 @@ class TestEnrichmentStaysOutOfTheFinalisePass:
 # ---------------------------------------------------------------------------
 
 class TestTheDashboardOffersTheMode:
-    @pytest.mark.parametrize(
-        "rel",
-        ["templates/pages/dashboard.html", "test_site/templates/Pages/dashboard.html"],
-    )
-    def test_the_selector_has_the_option(self, rel: str):
-        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        assert '<option value="finalise">Finalise</option>' in source, rel
+    """⚠️ The three sites that offered "Finalise" were the `<select>` elements on
+    the dashboard, the artist page and the album page. The rebuilt tree's are
+    gone: the dashboard's is part of the tabbed engine panel that
+    `components/_scan_modal.html` replaces, and the artist/album pages' inline
+    selectors are the next slice.
+
+    The requirement is unchanged — a Finalise scan must be selectable and must
+    arrive at the dispatch with its own mode key — so these follow the option to
+    its new home rather than pinning the control that used to carry it.
+    """
+
+    def test_the_shared_sheet_offers_the_mode(self):
+        """The type list is JS-POPULATED, so the option lives in the controller.
+
+        `_scan_modal.html` ships an empty `#scanTypeList` and `scan-modal.js`
+        fills it from `TYPES` — which is also what the run dispatch iterates, so
+        a type cannot be listed without an action.
+        """
+        source = (REPO_ROOT / "test_site/static/js/ui/scan-modal.js").read_text(
+            encoding="utf-8"
+        )
+        assert "id: 'finalise'" in source, (
+            "Finalise is not offered in the shared scan sheet"
+        )
+
+    def test_the_sheet_renders_the_placeholder_the_controller_fills(self):
+        """CONTROL on the pair: a JS-populated list needs its container rendered,
+        or the controller writes into nothing."""
+        source = (REPO_ROOT / "test_site/templates/components/_scan_modal.html").read_text(
+            encoding="utf-8"
+        )
+        assert 'id="scanTypeList"' in source, (
+            "the sheet has no container for the type radios"
+        )
+
+    def test_the_sheet_sends_the_documented_mode_key(self):
+        """The key the pipeline dispatches on, not just the label."""
+        source = (REPO_ROOT / "test_site/static/js/ui/scan-modal.js").read_text(
+            encoding="utf-8"
+        )
+        assert "mode: 'finalise'" in source, (
+            "the Finalise entry does not carry the `finalise` mode key, so the "
+            "pipeline would fall through to a different branch"
+        )
+
+    def test_the_LIVE_tree_still_offers_it_through_its_own_selector(self):
+        """CONTROL: the live tree was not touched and must keep working.
+
+        Its artist/album pages still render `_scan_selector.html`, which is the
+        control the rebuilt tree is replacing — not removing.
+        """
+        source = (REPO_ROOT / "templates/pages/dashboard.html").read_text(
+            encoding="utf-8"
+        )
+        assert '<option value="finalise">Finalise</option>' in source
 
     @pytest.mark.parametrize(
         "rel",

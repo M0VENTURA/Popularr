@@ -2858,7 +2858,77 @@ _PLAYLIST_SIGNATURES: "OrderedDict[str, str]" = OrderedDict()
 _PLAYLIST_SIG_MAX = 2000
 
 
+def _navidrome_server_key(base_url: str) -> str:
+    """A comparison key that identifies the SERVER behind a base URL.
+
+    Scheme and host are case-folded — `https://Nav.Example.com` and
+    `https://nav.example.com` are the same server and DNS is insensitive to
+    case — while the PATH is left exactly as written, because a URL path is
+    case-sensitive and a reverse proxy mounted at `/Sub/Navidrome` is not the
+    same endpoint as `/sub/navidrome`.
+
+    Falls back to a plain casefold when the value is not a parseable URL rather
+    than raising: a malformed entry must not take the whole client list down,
+    and two malformed entries that differ only by case are still far more likely
+    to be the same server than not.
+
+    ⚠️ THE OUTER ``rstrip("/")`` IS THE LOAD-BEARING NORMALISATION, and the
+    ``parts.path`` below needs no rstrip of its own. Because every trailing
+    slash has already been removed from ``text``, ``parts.path`` can never end
+    in "/" — ``urlsplit("https://h")`` and ``urlsplit("https://h/")`` both
+    report ``""`` here, and ``"https://h/p/"`` reports ``"/p"``. A
+    ``parts.path.rstrip("/")`` is therefore unreachable, and having one made it
+    read as the line that makes trailing slashes equivalent when it was not:
+    mutating IT changed nothing and escaped the oracle, which is the signal that
+    a line is dead rather than that a test is weak.
+    """
+    text = str(base_url or "").strip().rstrip("/")
+    if not text:
+        return ""
+    try:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(text)
+        if parts.scheme and parts.netloc:
+            return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path}"
+    except Exception:
+        pass
+    return text.casefold()
+
+
 def _navidrome_clients() -> list[Any]:
+    """One client per SERVER — not one per configured user.
+
+    ⭐ WHY THE DEDUPE. `navidrome_users` is a list of ACCOUNTS, and two accounts
+    routinely point at the SAME server (a personal login and an admin one). This
+    function used to build a client for each, and every caller then ran the same
+    playlist sync once per client — against one server, twice.
+
+    That is not merely wasted work, it is actively destructive. A Navidrome
+    playlist belongs to the server and is OWNED BY the user that created it, so:
+
+      * client A creates "Alternative Rock - Top Tracks" owned by A;
+      * client B, which cannot see A's playlist, finds nothing by that name and
+        creates its OWN copy of it;
+      * each client's next sync sees two playlists with the name, keeps the one
+        it can own and DELETES the other — the dedupe pass in
+        ``sync_playlist_by_name``.
+
+    The two then recreate what the other deleted, forever. The observed symptom
+    was exactly that ping-pong: `7fNI…` deleted as a duplicate in one pass and a
+    fresh `1xYY…` created moments later in the same run.
+
+    Playlists are PUBLIC by default, so every account on the server sees the one
+    playlist the first account creates. One sync per server is therefore both
+    sufficient and correct, and the first configured user for that server is the
+    owner it belongs to.
+
+    ⚠️ Deliberately scoped to THIS function. `rating_sync_service` and
+    `favourites_service` call the same config getter and must NOT be deduped —
+    star ratings and favourites are per-USER data, so two accounts on one server
+    legitimately produce different results. Only playlist operations are
+    server-scoped, and this function is used by nothing else.
+    """
     global _CLIENTS_CACHE, _CLIENTS_CACHED_AT
     now = time.monotonic()
     with _CLIENTS_LOCK:
@@ -2869,12 +2939,31 @@ def _navidrome_clients() -> list[Any]:
     try:
         from helpers.config_helpers import get_navidrome_users_normalized
         from api_clients.navidrome import NavidromeClient
+
+        seen_servers: dict[str, str] = {}
         for user in get_navidrome_users_normalized():
             base_url = (user.get("base_url") or "").strip()
             username = (user.get("user") or "").strip()
             password = (user.get("pass") or "").strip()
-            if base_url and username and password:
-                clients.append(NavidromeClient(base_url, username, password))
+            if not (base_url and username and password):
+                continue
+
+            key = _navidrome_server_key(base_url)
+            if key and key in seen_servers:
+                # Logged rather than silent: "my second account is being
+                # ignored" is otherwise indistinguishable from a broken config.
+                logger.info(
+                    "Navidrome user skipped — same server as an earlier entry",
+                    user=username,
+                    base_url=base_url,
+                    using_user=seen_servers[key],
+                    reason="playlists are server-scoped and public",
+                )
+                continue
+            if key:
+                seen_servers[key] = username
+
+            clients.append(NavidromeClient(base_url, username, password))
     except Exception as exc:
         logger.warning("Navidrome client resolution failed", error=str(exc))
 

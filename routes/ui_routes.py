@@ -3868,7 +3868,25 @@ async def config_save_json() -> Any:
             logger.info("Scheduler re-applied after save", stats=_sched_stats)
         except Exception as exc:
             logger.warning("Scheduler re-apply failed", error=str(exc))
-            
+
+        # ⚠️ The Navidrome client list is CACHED for 300s, so without this a
+        # change to `navidrome_users` would not take effect until the TTL
+        # expired — the user edits the config, re-runs a scan, and the old
+        # accounts (and the old playlist ownership) are still in use. Worse, the
+        # "already pushed" signature cache would SKIP a push to a server that
+        # was only just added, because the same playlist name had been pushed
+        # elsewhere moments earlier.
+        #
+        # Both caches are cleared together by the one function, which is why it
+        # is called here rather than reaching into either directly.
+        try:
+            from services.popularity.stages.finalise_stage import reset_playlist_push_cache
+
+            reset_playlist_push_cache()
+            logger.info("Navidrome client and playlist-push caches cleared")
+        except Exception as exc:
+            logger.warning("Playlist cache reset failed", error=str(exc))
+
         return jsonify({"success": True})
     return jsonify({"error": "Failed to save config"}), 500
 
