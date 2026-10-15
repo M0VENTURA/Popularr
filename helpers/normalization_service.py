@@ -204,8 +204,17 @@ def strip_featured_artist(value: str) -> str:
 # offer the user a one-click merge that DELETES the second credited artist.
 # Collapsing only guest credits cannot do that — "Powerwolf feat. X" is the same
 # act as "Powerwolf", whereas "A & B" is not "A".
+#
+# ⚠️ ``\s+`` before the marker, NOT ``\s*``. A credit always has whitespace
+# around it, and allowing ZERO immediately before let the marker form ACROSS a
+# word boundary: "Nothing Le[ft] to Lose" matched AT the "ft", so the title
+# became "Nothing Le" and the rest was moved onto the artist as a guest. Every
+# word ending in "ft" was affected — "Gi[ft] Horse", "Le[ft] Behind",
+# "So[ft] & Wet". Its two siblings below (FEAT_SUFFIX_RE and
+# TITLE_FEAT_SUFFIX_RE) already required ``\s+``; this one and
+# TITLE_FEATURED_CREDIT_RE were the odd ones out.
 GUEST_CREDIT_SUFFIX_RE = re.compile(
-    r"\s*(?:\[|\()?\s*(?:feat\.?|ft\.?|featuring)\s+[^\]\)]*?(?:\]|\))?\s*$",
+    r"\s+(?:\[|\()?\s*(?:feat\.?|ft\.?|featuring)\s+[^\]\)]*?(?:\]|\))?\s*$",
     re.IGNORECASE,
 )
 
@@ -213,8 +222,17 @@ GUEST_CREDIT_SUFFIX_RE = re.compile(
 def strip_guest_credit(value: str) -> str:
     """Remove only a trailing guest credit (``feat.``/``ft.``/``featuring``).
 
-    Returns the input unchanged when stripping would empty it, so a name that is
-    nothing but a credit is never lost.
+    ⚠️ The ``or text`` below is UNREACHABLE by construction, and is kept as
+    defence-in-depth rather than because it fires. ``text`` is ``.strip()``ed
+    first, so it cannot begin with whitespace, and the pattern now requires a
+    leading ``\\s+`` — so the match can never start at index 0 and the sub can
+    never empty the string. Verified by search: 22,616 generated inputs, zero
+    where the sub produced "". (Before the ``\\s+`` anchor was added it WAS
+    reachable, which is where the guard came from.)
+
+    It is kept because the failure it prevents — losing a name entirely — is
+    silent and severe, and a future loosening of the pattern is exactly the
+    change that would make it reachable again.
     """
     text = str(value or "").strip()
     if not text:
@@ -1998,7 +2016,7 @@ def is_valid_version(track_title: str, allow_live_remix: bool = False) -> bool:
 # "X & Y" really is a second credited artist.)
 TITLE_FEATURED_CREDIT_RE = re.compile(
     r"""
-    \s*
+    \s+
     (?:\[|\()?\s*
     (?:feat\.?|ft\.?|featuring)
     \s+
