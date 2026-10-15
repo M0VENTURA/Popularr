@@ -1098,9 +1098,14 @@
 
     let value = prefill;
     if (value === undefined || value === null) {
+      // Banner boxes first — they are the desktop entry point and the ones the
+      // rest of this module mirrors. ⚠️ The flyout's OWN box is the last
+      // fallback, and it is load-bearing below lg: there the navbar field is
+      // `d-none` and always empty, so without this a reopen would assign ''
+      // over whatever the user had typed and silently clear the query.
       const navEl = document.getElementById('navSearchInput');
       const dashEl = document.getElementById('dashboardTopSearchInput');
-      value = (navEl && navEl.value) || (dashEl && dashEl.value) || '';
+      value = (navEl && navEl.value) || (dashEl && dashEl.value) || input.value || '';
     }
 
     selectScope(scope || _scope);

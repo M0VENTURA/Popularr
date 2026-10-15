@@ -28,10 +28,31 @@ data-action attributes, consistent with components/_musicbrainz_search_component
       <button type="button" class="btn-close btn-close-white" aria-label="Close" onclick="closeUnifiedSearch()"></button>
     </div>
 
-    <!-- Hidden input mirroring the navbar search -->
-    <div class="input-group mb-2 d-none" aria-hidden="true">
+    {#
+      THE SEARCH BOX, and which one is on screen depends on the breakpoint.
+
+      At lg+ the TOP NAVBAR's field (`#navSearchInput`) is the entry point —
+      `openUnifiedSearch()` focuses it back, so this box would be a second,
+      redundant field. Below lg that navbar field is `d-none` (the mobile shell
+      has no search row — see base.html), so it cannot be typed into, and this
+      is the only field the user can reach. Hence `d-lg-none`: visible exactly
+      when the navbar's is not.
+
+      ⚠️ It used to be `d-none` unconditionally with `aria-hidden="true"` and
+      `tabindex="-1"` — a pure MIRROR of the navbar field that was never meant to
+      be typed into. That was correct only for as long as the navbar field was on
+      screen at every width. Hiding the navbar field below lg left the flyout
+      with NO usable box at all: the modal opened, and there was nowhere to type.
+
+      `aria-hidden` and `tabindex="-1"` are therefore gone. They were there to
+      keep a permanently-hidden element out of the accessibility tree and the tab
+      order; `display: none` at lg+ already does both, and on a visible element
+      `aria-hidden` would be a violation (it hides a real control from assistive
+      tech).
+    #}
+    <div class="input-group mb-2 d-lg-none">
       <span class="input-group-text" id="unifiedSearchIcon"><i class="bi bi-search"></i></span>
-      <input type="search" id="unifiedSearchInput" class="form-control" placeholder="Search library or MusicBrainz…" autocomplete="off" tabindex="-1"
+      <input type="search" id="unifiedSearchInput" class="form-control" placeholder="Search library or MusicBrainz…" autocomplete="off"
              inputmode="search" enterkeyhint="search" autocapitalize="off" autocorrect="off" spellcheck="false">
     </div>
 

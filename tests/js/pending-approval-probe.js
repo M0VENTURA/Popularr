@@ -25,36 +25,9 @@ if (!SRC_PATH) {
 
 const SRC = fs.readFileSync(SRC_PATH, 'utf8');
 
-/** Brace-match `function <name>(...) { ... }`, including an `async` modifier. */
-function extractFn(source, name) {
-  const start = source.indexOf('function ' + name + '(');
-  if (start < 0) return null;
-  let begin = start;
-  for (const modifier of ['export default ', 'export ', 'async ']) {
-    if (source.startsWith(modifier, start - modifier.length)) {
-      begin = start - modifier.length;
-      break;
-    }
-  }
-  let i = source.indexOf('{', start);
-  let depth = 0;
-  let inStr = null;
-  for (; i < source.length; i++) {
-    const ch = source[i];
-    const prev = source[i - 1];
-    if (inStr) {
-      if (ch === inStr && prev !== '\\') inStr = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === '`') { inStr = ch; continue; }
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) return source.slice(begin, i + 1);
-    }
-  }
-  throw new Error('unbalanced braces extracting ' + name);
-}
+// Shared with the search-focus probe. It skips comments before tracking quotes,
+// because an apostrophe in prose otherwise opens a phantom string literal.
+const { extractFn } = require('./_extract.js');
 
 // ── DOM stub ──────────────────────────────────────────────────────────────
 function makeEl(id) {

@@ -23,7 +23,9 @@ because ``templates/base.html`` is still served when
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -112,6 +114,20 @@ def _function_body(source: str, start: int) -> str:
     return source[start : source.index("\n  }", start)]
 
 
+def _wrapper_classes(html: str) -> set[str]:
+    """The class list of the DIV wrapping the flyout's search input.
+
+    Returned as a SET so an assertion about `d-none` cannot be satisfied by
+    `d-lg-none` (or any other class that merely contains those characters) —
+    a substring test on the raw attribute is exactly the trap that let a
+    `d-lg-none` look like a `d-none` in an earlier review.
+    """
+    start = html.rindex("<div", 0, html.index('id="unifiedSearchIcon"'))
+    tag = html[start : html.index(">", start) + 1]
+    match = re.search(r'class="([^"]*)"', tag)
+    return set((match.group(1) if match else "").split())
+
+
 def _title_text(html: str) -> str:
     """The text INSIDE the mobile header's title element.
 
@@ -180,6 +196,140 @@ class TestTheSearchFieldIsDesktopOnly:
         idx = base.index('class="bottom-nav"')
         nav = base[idx : base.index("</nav>", idx)]
         assert "openUnifiedSearch()" in nav
+
+
+class TestTheFlyoutHasAUsableInputOnAMobile:
+    """⭐ The reported bug: "the Search button brings up the modal, but the
+    search entry isn't there."
+
+    The flyout was designed AROUND the navbar field: it had no input of its own,
+    and ``openUnifiedSearch()`` focused ``#navSearchInput`` back. Its own box was
+    a deliberately hidden MIRROR (``d-none`` + ``aria-hidden`` + ``tabindex=-1``)
+    that was never typed into.
+
+    That contract only holds while the navbar field is on screen at every width.
+    Making it ``d-none d-lg-block`` — so the bottom nav's Search tab could own the
+    mobile entry point — left the flyout with NO usable box below lg: the modal
+    opened and there was nowhere to type. These pin the corrected contract: the
+    flyout's own box is visible exactly when the navbar's is not.
+    """
+
+    MODAL = TS / "templates" / "components" / "_unified_search_modal.html"
+
+    @pytest.fixture(scope="class")
+    def modal(self) -> str:
+        return _read(self.MODAL)
+
+    def test_the_box_is_not_unconditionally_hidden(self, modal: str) -> None:
+        """CONTROL on the old contract, which is what caused the report."""
+        assert "input-group mb-2 d-none" not in modal, (
+            "the flyout's own input is hidden at every width again — a phone "
+            "opens the modal with nowhere to type"
+        )
+
+    def test_the_box_is_visible_below_lg_and_hidden_above(self, modal: str) -> None:
+        """`d-lg-none` mirrors base.html's `d-none d-lg-block` on the navbar box.
+
+        Visible exactly when the navbar's is not, so a phone always has ONE
+        field and a desktop never has two.
+        """
+        classes = _wrapper_classes(modal)
+        assert "d-lg-none" in classes, (
+            f"the wrapper's classes are {sorted(classes)}; below lg the navbar "
+            "field is d-none, so this box must be the visible one"
+        )
+        assert "d-none" not in classes, (
+            "the box is hidden at every width again"
+        )
+
+    def test_it_is_not_hidden_from_assistive_tech(self, modal: str) -> None:
+        """`aria-hidden` on an element the user must interact with is a
+        violation — it removes a real control from the accessibility tree."""
+        start = modal.rindex("<div", 0, modal.index('id="unifiedSearchIcon"'))
+        wrapper = modal[start : modal.index(">", start) + 1]
+        assert "aria-hidden" not in wrapper, (
+            "the input's wrapper is aria-hidden while visible"
+        )
+
+    def test_it_is_focusable(self, modal: str) -> None:
+        """`tabindex="-1"` kept it out of the tab order, which was right while it
+        was permanently hidden and wrong now that it is the only field."""
+        idx = modal.index('id="unifiedSearchInput"')
+        tag = modal[modal.rindex("<input", 0, idx) : modal.index(">", idx)]
+        assert 'tabindex="-1"' not in tag, (
+            "the only search field on a phone cannot be tabbed to"
+        )
+        assert "inputmode=\"search\"" in tag, "the mobile keyboard hint was lost"
+
+    def test_open_focuses_a_box_that_is_actually_on_screen(self) -> None:
+        """The focus call has to follow the same rule as the markup.
+
+        Focusing a `display:none` element is a silent no-op, so a phone would
+        open the modal with the caret nowhere and typing going to the document.
+        """
+        js = _read(FLYOUT_JS)
+        start = js.index("function openUnifiedSearch(")
+        body = js[start : start + 2400]
+        assert "isVisible(navInput)" in body, (
+            "openUnifiedSearch does not check whether the navbar box is on screen"
+        )
+        assert "input.focus()" in body, (
+            "nothing focuses the flyout's own box when the navbar's is hidden"
+        )
+
+    def test_reopening_does_not_wipe_a_query_typed_on_a_phone(self) -> None:
+        """⭐ The subtle half of the same bug.
+
+        The prefill read only the banner boxes. Below lg those are `d-none` and
+        permanently empty, so the assignment would overwrite whatever the user
+        had typed the previous time they opened the flyout — the query would
+        vanish, which reads as "my search disappeared".
+        """
+        js = _read(FLYOUT_JS)
+        start = js.index("function openUnifiedSearch(")
+        body = js[start : start + 1200]
+        prefill = body[body.index("let value = prefill") : body.index("selectScope(")]
+        assert "input.value" in prefill, (
+            "the flyout's own box is not part of the prefill chain, so a reopen "
+            "clears the query below lg where the banner boxes are empty"
+        )
+
+    def test_the_caret_lands_in_a_box_that_is_on_screen(self) -> None:
+        """⭐ The BEHAVIOURAL statement of the reported bug.
+
+        Which element gets the caret is a question about a real DOM at a real
+        width, and no source-text assertion answers it: `input.focus()` is
+        present in both the broken and the fixed version — what changes is
+        whether the element it names is rendered.
+
+        `openUnifiedSearch` is brace-matched out of the shipped source and driven
+        against a DOM stub whose `offsetWidth` models the two responsive classes,
+        so this cannot silently drift from the code it describes.
+        """
+        probe = REPO_ROOT / "tests" / "js" / "search-focus-probe.js"
+        result = subprocess.run(
+            ["node", str(probe), str(FLYOUT_JS)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.stdout.strip(), f"probe produced nothing: {result.stderr[:400]}"
+        data = json.loads(result.stdout)
+        assert "error" not in data, data.get("error")
+
+        # MOBILE — the report. The navbar box is `d-none`, so the caret must go
+        # to the flyout's own box or the user has nowhere to type.
+        assert data["mobile_focuses_flyout"] is True, (
+            "tapping Search on a phone leaves the caret nowhere"
+        )
+        assert data["mobile_does_not_focus_navbar"] is True, (
+            "the caret went to the hidden navbar field"
+        )
+        # DESKTOP — unchanged. The navbar field is the entry point there.
+        assert data["desktop_focuses_navbar"] is True
+        assert data["desktop_does_not_focus_flyout"] is True
+        # And the prefill chain, both ways round.
+        assert data["mobile_reopen_preserves_query"] is True
+        assert data["desktop_navbar_wins_the_prefill"] is True
+        assert data["explicit_prefill_wins"] is True
 
     def test_the_flyout_ignores_a_hidden_box_as_the_query_source(self) -> None:
         """Otherwise every phone search would submit an empty query.
