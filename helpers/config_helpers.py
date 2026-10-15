@@ -1874,6 +1874,40 @@ def get_download_quality_filter() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Queue metadata heal
+# ---------------------------------------------------------------------------
+
+def get_metadata_heal_config() -> dict[str, Any]:
+    """Get the queue-metadata heal settings.
+
+    Config section: ``downloads.metadata_heal`` in config.yaml
+
+    This heal re-aligns tracks that were imported from the download queue with
+    the release their queue row names, for the case where the import wrote a
+    different release's album identity (year, release MBID, release group …).
+
+    Returns:
+        Dict with ``enabled``, ``run_on_startup``, and ``limit``.
+
+    ``limit`` is a CAP ON QUEUE ROWS EXAMINED per run, because each release
+    needs a MusicBrainz lookup and that client is rate-limited at 1 request per
+    second — an unbounded first run would crawl. ``0`` means no cap; the run is
+    idempotent, so successive runs make progress rather than repeating work.
+    """
+    cfg = get_config()
+    mh = cfg.get("downloads", {}).get("metadata_heal", {})
+    try:
+        limit = int(mh.get("limit", 200) or 0)
+    except (TypeError, ValueError):
+        limit = 200
+    return {
+        "enabled": bool(mh.get("enabled", False)),
+        "run_on_startup": bool(mh.get("run_on_startup", True)),
+        "limit": max(0, limit),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Download conversion settings
 # ---------------------------------------------------------------------------
 

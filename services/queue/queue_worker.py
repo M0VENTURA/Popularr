@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import signal
 import sys
+import threading
 import time
 from typing import Any
 
@@ -133,6 +134,47 @@ def run(interval: int | None = None, batch_size: int | None = None) -> None:
         reset_abandoned_items()
     except Exception as exc:
         logger.warning("Worker startup recovery failed", error=str(exc))
+
+    # ── Queue metadata heal ───────────────────────────────────────────────
+    # Re-aligns tracks imported from the queue with the release their queue row
+    # names — see ``services/downloads/download_metadata_heal_service.py``.
+    #
+    # Runs in a DAEMON THREAD so a large first pass cannot delay this worker's
+    # first cycle. That is safe because the pass is idempotent and only touches
+    # the rows it is correcting, so it does not have to finish before processing
+    # resumes. Only the LEADER reaches this point (the lock above decided that),
+    # so two workers cannot heal concurrently.
+    try:
+        from helpers.config_helpers import get_metadata_heal_config
+
+        _heal_cfg = get_metadata_heal_config()
+        if _heal_cfg.get("enabled") and _heal_cfg.get("run_on_startup", True):
+
+            def _startup_heal() -> None:
+                try:
+                    from services.downloads.download_metadata_heal_service import (
+                        heal_queue_metadata,
+                    )
+
+                    _heal_summary = heal_queue_metadata(
+                        limit=_heal_cfg.get("limit") or None
+                    )
+                    logger.info(
+                        "[HEAL] Startup metadata heal finished",
+                        examined=_heal_summary.get("examined"),
+                        healed=_heal_summary.get("healed"),
+                        tracks=_heal_summary.get("tracks_updated"),
+                    )
+                except Exception as exc:
+                    logger.warning("[HEAL] Startup metadata heal failed", error=str(exc))
+
+            threading.Thread(
+                target=_startup_heal,
+                name="queue-metadata-heal",
+                daemon=True,
+            ).start()
+    except Exception as exc:
+        logger.debug("Startup metadata heal not started", error=str(exc))
 
     loop_count = 0
 

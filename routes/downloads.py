@@ -827,3 +827,66 @@ def process_retry_queue() -> Any:
 
 def process_albums() -> Any:
     return _process_albums_impl()
+
+
+# =============================================================================
+# ✅ QUEUE METADATA HEAL
+# =============================================================================
+
+@downloads_bp.route("/api/downloads/metadata-heal", methods=["POST"])
+async def api_metadata_heal() -> Any:
+    """Re-align imported downloads with the release their queue entry names.
+
+    Body (all optional)::
+
+        {"dry_run": true, "limit": 200, "queue_ids": [12, 13]}
+
+    ``dry_run`` DEFAULTS TO TRUE so a stray call cannot rewrite files or rows:
+    the destructive form has to be asked for explicitly. Reports the albums and
+    fields that differ, plus what was written when it was not a dry run.
+
+    Only entries that name a release are considered, and only the tracks those
+    entries produced are corrected — a same-named album from a different
+    release in the library is left alone.
+    """
+    payload = (await request.get_json(silent=True)) or {}
+
+    dry_run = payload.get("dry_run", True)
+    # A JSON ``false`` must mean apply, so normalise rather than truth-test the
+    # raw value — ``"false"`` from a form post would otherwise read as True.
+    if isinstance(dry_run, str):
+        dry_run = dry_run.strip().lower() not in ("false", "0", "no", "")
+
+    raw_limit = payload.get("limit")
+    limit: int | None = None
+    if raw_limit not in (None, ""):
+        try:
+            _parsed = int(raw_limit)
+            # 0 means "no cap" (the Config page's documented contract).
+            limit = _parsed if _parsed > 0 else None
+        except (TypeError, ValueError):
+            return jsonify({"error": "limit must be an integer"}), 400
+
+    queue_ids: list[int] | None = None
+    raw_ids = payload.get("queue_ids")
+    if raw_ids:
+        if not isinstance(raw_ids, list):
+            return jsonify({"error": "queue_ids must be a list"}), 400
+        try:
+            queue_ids = [int(i) for i in raw_ids]
+        except (TypeError, ValueError):
+            return jsonify({"error": "queue_ids must be integers"}), 400
+
+    from services.downloads.download_metadata_heal_service import (
+        heal_queue_metadata,
+    )
+
+    try:
+        result = heal_queue_metadata(
+            dry_run=bool(dry_run), limit=limit, queue_ids=queue_ids
+        )
+    except Exception as exc:
+        logger.error("Metadata heal failed", error=str(exc), exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify(result)

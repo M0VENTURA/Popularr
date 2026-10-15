@@ -3573,7 +3573,7 @@ def _sanitize_config_sections(config: dict) -> dict:
     nested_children = {
         "slskd": ("timeouts",),
         "features": ("downloads_duplicate_cleanup", "retry_scheduler", "download_queue_cleanup_scheduler"),
-        "downloads": ("quality_filter", "conversion"),
+        "downloads": ("quality_filter", "conversion", "metadata_heal"),
         "queue": ("matching",),
         "popularity": ("weights",),
         "genres": ("weights", "synonyms"),

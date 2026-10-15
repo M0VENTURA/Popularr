@@ -428,6 +428,15 @@
             priorities: priorities
           };
         })(),
+        // Re-align imported downloads with the release their queue row names.
+        // The `limit` is a cap on QUEUE ROWS examined per run: each release needs
+        // a MusicBrainz lookup and that client is rate-limited, so an unbounded
+        // first run would crawl. 0 = no cap.
+        metadata_heal: {
+          enabled: getChecked('downloads_heal_enabled'),
+          run_on_startup: getChecked('downloads_heal_on_startup', true),
+          limit: parseInt(getValue('downloads_heal_limit', '200')) || 0
+        },
         // Soulseek search quality: bitrate floor for the first pass + optional
         // low-quality fallback tier (rare releases only exist as 128kbps MP3s).
         quality: Object.assign(
@@ -1555,6 +1564,95 @@
     setTimeout(getRetrySchedulerStatus, 500);
   }
 
+  // ── Queue metadata heal ───────────────────────────────────────────────
+
+  // Re-aligns imported downloads with the release their queue entry names.
+  // Preview is a dry run and writes nothing, so it is always safe to press.
+  function runMetadataHeal(dryRun) {
+    const out = document.getElementById('downloads_heal_result');
+    const btn = document.getElementById(dryRun ? 'downloads_heal_preview' : 'downloads_heal_run');
+    const original = btn ? btn.innerHTML : '';
+
+    if (dryRun && !confirm(
+      'Preview checks each queue entry that names a release against the tracks it '
+      + 'produced. Nothing is written and this can take a while on a large library '
+      + '(one MusicBrainz lookup per release). Continue?'
+    )) {
+      return;
+    }
+    if (!dryRun && !confirm(
+      'Heal now will REWRITE the database rows AND the file tags of any track whose '
+      + 'album identity does not match the release its queue entry names. Continue?'
+    )) {
+      return;
+    }
+
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Working...';
+    }
+    if (out) out.textContent = dryRun ? 'Checking...' : 'Healing...';
+
+    const limitField = document.getElementById('downloads_heal_limit');
+    const limit = limitField ? parseInt(limitField.value || '0', 10) || 0 : 0;
+
+    fetch('/api/downloads/metadata-heal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dry_run: dryRun, limit: limit })
+    })
+    .then(r => {
+      const contentType = r.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error('Server returned non-JSON response (HTML or plain text)');
+      }
+      return r.json();
+    })
+    .then(data => {
+      if (data.error) throw new Error(data.error);
+
+      const found = (data.albums || []).length;
+      const verb = dryRun ? 'would be corrected' : 'corrected';
+      let text = `${data.examined} queue entry(s) checked across ${data.releases} release(s); `
+        + `${found} album(s) ${verb}`;
+      if (!dryRun) {
+        text += ` — ${data.tracks_updated} track row(s), ${data.files_written} file(s) written`;
+        if (data.files_failed) text += `, ${data.files_failed} FAILED`;
+      }
+      if (out) out.textContent = text;
+
+      if (found) {
+        // Name what changed: "3 albums corrected" is not actionable on its own.
+        const detail = (data.albums || []).slice(0, 10).map(a =>
+          `${a.artist || '?'} - ${a.album || '?'} (${(a.fields || []).join(', ')})`
+        );
+        if (found > detail.length) detail.push(`... and ${found - detail.length} more`);
+        console.log('[metadata-heal]', data);
+        showToast(
+          dryRun ? 'Heal Preview' : 'Metadata Heal',
+          `${found} album(s) ${verb}:\n` + detail.join('\n'),
+          dryRun ? 'info' : 'success'
+        );
+      } else {
+        showToast(
+          dryRun ? 'Heal Preview' : 'Metadata Heal',
+          'Nothing to correct — every checked track already matches the release its queue entry names.',
+          'success'
+        );
+      }
+    })
+    .catch(e => {
+      if (out) out.textContent = 'Failed: ' + e.message;
+      showToast('Error', 'Metadata heal failed: ' + e.message, 'error');
+    })
+    .finally(() => {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = original;
+      }
+    });
+  }
+
   // ── Init ──────────────────────────────────────────────────────────────
 
   document.addEventListener('DOMContentLoaded', function () {
@@ -1572,6 +1670,10 @@
       // when models are already present).
       pollEssentiaDownloadStatus();
     }
+    const healPreview = document.getElementById('downloads_heal_preview');
+    if (healPreview) healPreview.addEventListener('click', () => runMetadataHeal(true));
+    const healRun = document.getElementById('downloads_heal_run');
+    if (healRun) healRun.addEventListener('click', () => runMetadataHeal(false));
     getRetrySchedulerStatus();
   });
 
@@ -1590,6 +1692,7 @@
   global.removeKeywordBadge = removeKeywordBadge;
   global.resetStripKeywords = resetStripKeywords;
   global.updateFileNameFormatPreview = updateFileNameFormatPreview;
+  global.runMetadataHeal = runMetadataHeal;
   global.syncRatingsNow = syncRatingsNow;
   global.toggleSyncRatingsToAllUsers = toggleSyncRatingsToAllUsers;
   global.addNewUser = addNewUser;

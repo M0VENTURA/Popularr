@@ -611,6 +611,49 @@
         <div class="col-12">
           <small class="text-muted">The two format toggles above replace the stored priority list when you save — priorities for other formats (e.g. MP3 256 kbps) are not preserved.</small>
         </div>
+
+        <div class="col-12"><hr class="my-2"></div>
+        <div class="col-12">
+          <h6 class="mb-2"><i class="bi bi-wrench-adjustable"></i> Downloaded Track Metadata Heal</h6>
+          <small class="text-muted d-block mb-2">
+            Re-aligns tracks imported from the download queue with the release their queue entry names.
+            Use this when an imported album shows a different year or release MBID than the release you queued —
+            the import could inherit album details from a same-named album already in the library.
+            A track is only ever corrected when its queue entry names a release, and only the tracks that
+            queue entry produced are touched.
+          </small>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" id="downloads_heal_enabled" {% if config.get('downloads', {}).get('metadata_heal', {}).get('enabled', False) %}checked{% endif %}>
+            <label class="form-check-label" for="downloads_heal_enabled"><strong>Enable Metadata Heal</strong></label>
+            <small class="d-block text-muted">Corrects the database row and the file's tags together, so the two never disagree.</small>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" id="downloads_heal_on_startup" {% if config.get('downloads', {}).get('metadata_heal', {}).get('run_on_startup', True) %}checked{% endif %}>
+            <label class="form-check-label" for="downloads_heal_on_startup"><strong>Run When the Queue Starts</strong></label>
+            <small class="d-block text-muted">Runs a healing pass after the queue processor boots. The pass is idempotent, so repeat runs are wasted work rather than damage.</small>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <label class="form-label" for="downloads_heal_limit">Queue Rows Per Run</label>
+          <input type="number" class="form-control" id="downloads_heal_limit" min="0" step="50" value="{{ config.get('downloads', {}).get('metadata_heal', {}).get('limit', 200) }}">
+          <div class="form-text">Cap on entries examined per pass — each release needs a rate-limited MusicBrainz lookup. Use 0 for no cap.</div>
+        </div>
+        <div class="col-12">
+          <div class="d-flex flex-wrap gap-2 align-items-center">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="downloads_heal_preview">
+              <i class="bi bi-search"></i> Preview What Would Change
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-primary" id="downloads_heal_run">
+              <i class="bi bi-wrench-adjustable"></i> Heal Now
+            </button>
+            <small class="text-muted" id="downloads_heal_result"></small>
+          </div>
+          <div class="form-text">Preview reports the albums and fields that differ, and writes nothing.</div>
+        </div>
       </div>
     </div>
   </div>
