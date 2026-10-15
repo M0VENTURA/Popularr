@@ -71,6 +71,27 @@ def _configure_logging() -> None:
         )
 
 
+def _safe_shutdown_requested() -> bool:
+    """Has the operator asked the application to quiesce?
+
+    ⚠️ FAILS OPEN. A missing or unreadable flag means "keep working". The
+    alternative — treating an unreadable file as "quiesced" — would silently stop
+    all download processing because of a permissions problem or a bad state
+    directory, and the queue would look broken with nothing in the log to explain
+    it. A missed quiesce is recoverable; a queue that stops for no visible reason
+    is not.
+    """
+    try:
+        from services.maintenance.safe_shutdown_service import (
+            is_safe_shutdown_requested,
+        )
+
+        return bool(is_safe_shutdown_requested())
+    except Exception as exc:
+        logger.debug("Safe shutdown flag unreadable — continuing to process", error=str(exc))
+        return False
+
+
 # =============================================================================
 # WORKER LOOP
 # =============================================================================
@@ -177,10 +198,42 @@ def run(interval: int | None = None, batch_size: int | None = None) -> None:
         logger.debug("Startup metadata heal not started", error=str(exc))
 
     loop_count = 0
+    _safe_shutdown_logged = False
 
     try:
         while not _SHOULD_STOP:
             loop_count += 1
+
+            # ── Safe shutdown: idle instead of processing ─────────────────
+            # A quiesced application must not start new queue work, because the
+            # operator is about to stop PostgreSQL. The worker IDLES rather than
+            # exiting: exiting would leave no worker until the container was
+            # restarted, so cancelling a safe shutdown could not resume anything.
+            #
+            # The heartbeat is still stamped. It is this worker's only proof of
+            # life to the WebUI, and a quiesced worker is alive and idle — not
+            # dead — so suppressing it would make the status card lie about the
+            # difference between "idle" and "crashed".
+            if _safe_shutdown_requested():
+                if not _safe_shutdown_logged:
+                    logger.info(
+                        "Safe shutdown requested — queue worker idling",
+                        loop=loop_count,
+                    )
+                    _safe_shutdown_logged = True
+                try:
+                    record_queue_processor_cycle("standalone-worker-idle")
+                except Exception:
+                    pass
+
+                from services.queue.queue_signal import wait_for_item
+
+                wait_for_item(timeout=float(effective_interval))
+                continue
+
+            if _safe_shutdown_logged:
+                logger.info("Safe shutdown cancelled — queue worker resuming")
+                _safe_shutdown_logged = False
 
             # Keep the DB connection alive so the lock doesn't drop
             try:

@@ -314,6 +314,82 @@
         </div>
       </div>
     </div>
+
+    <!-- ===== Safe Shutdown ===== -->
+    <div class="card shadow-sm mb-3" id="safe_shutdown">
+      <div class="card-header">
+        <h5 class="mb-0"><i class="bi bi-database-slash"></i> Safe Shutdown for Database Maintenance</h5>
+      </div>
+      <div class="card-body">
+        <p class="text-muted small mb-3">
+          Use this before stopping or updating the PostgreSQL server. It pauses the scheduler, asks running
+          scans to stop, puts the queue worker to idle, and closes the connection pool.
+          <strong>Closing the pool is the part that matters:</strong> <code>docker stop</code> sends SIGTERM,
+          which PostgreSQL treats as a <em>smart shutdown</em> — it waits for every client to disconnect, so an
+          idle pooled connection keeps it waiting until Docker gives up and force-kills the container.
+        </p>
+        <div class="row g-3">
+          <div class="col-12 col-md-4">
+            <div class="form-check form-switch mb-2">
+              <input class="form-check-input" type="checkbox" id="safe_shutdown_enabled" {% if config.get('maintenance', {}).get('safe_shutdown', {}).get('enabled', True) %}checked{% endif %}>
+              <label class="form-check-label" for="safe_shutdown_enabled"><strong>Enable Safe Shutdown</strong></label>
+              <small class="d-block text-muted">When off, the buttons below are unavailable.</small>
+            </div>
+          </div>
+          <div class="col-12 col-md-4">
+            <label class="form-label" for="safe_shutdown_drain_timeout">Drain Timeout (seconds)</label>
+            <input type="number" class="form-control" id="safe_shutdown_drain_timeout" min="0" step="10" value="{{ config.get('maintenance', {}).get('safe_shutdown', {}).get('drain_timeout_seconds', 60) }}">
+            <div class="form-text">How long to wait for in-flight scans and queue items. A timeout is reported, not forced — a download mid-move is not abandoned.</div>
+          </div>
+          <div class="col-12 col-md-4">
+            <label class="form-label" for="safe_shutdown_auto_cancel">Auto-Resume After (minutes)</label>
+            <input type="number" class="form-control" id="safe_shutdown_auto_cancel" min="0" step="30" value="{{ config.get('maintenance', {}).get('safe_shutdown', {}).get('auto_cancel_after_minutes', 120) }}">
+            <div class="form-text">The quiesced state expires after this long, so a forgotten shutdown cannot leave the app dormant. 0 disables the expiry.</div>
+          </div>
+          <div class="col-12 col-md-4">
+            <div class="form-check form-switch mb-2">
+              <input class="form-check-input" type="checkbox" id="safe_shutdown_release_connections" {% if config.get('maintenance', {}).get('safe_shutdown', {}).get('release_connections', True) %}checked{% endif %}>
+              <label class="form-check-label" for="safe_shutdown_release_connections"><strong>Close the Connection Pool</strong></label>
+              <small class="d-block text-muted">Without this the database still gets killed rather than stopped cleanly. The engine is kept, so the app reconnects on its own.</small>
+            </div>
+          </div>
+        </div>
+
+        <hr class="my-3">
+
+        <div class="row g-3 align-items-start">
+          <div class="col-12 col-lg-7">
+            <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+              <button type="button" class="btn btn-sm btn-outline-primary" id="safe_shutdown_prepare">
+                <i class="bi bi-database-slash"></i> Prepare for Database Stop
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" id="safe_shutdown_cancel">
+                <i class="bi bi-arrow-counterclockwise"></i> Resume Normal Operation
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" id="safe_shutdown_refresh">
+                <i class="bi bi-arrow-clockwise"></i> Refresh Status
+              </button>
+            </div>
+            <div class="form-text mb-2">
+              When the status reads <strong>SAFE TO STOP</strong>, run on the host:
+              <code>docker compose stop db</code> — update it — then <code>docker compose start db</code>.
+              Nothing else is needed; the app reconnects by itself.
+            </div>
+            <div id="safe_shutdown_status" class="border rounded p-2 small bg-body-tertiary" style="white-space: pre-wrap;">Status not checked yet.</div>
+          </div>
+          <div class="col-12 col-lg-5">
+            <div class="alert alert-warning py-2 px-3 small mb-0">
+              <strong>Why not just <code>docker compose stop db</code>?</strong>
+              <ul class="mb-0 ps-3 mt-1">
+                <li>PostgreSQL's SIGTERM shutdown <em>waits for clients</em>, and the app's pooled connections count.</li>
+                <li>Docker's stop timeout then expires and the container is <strong>force-killed</strong>, so the next start does crash recovery.</li>
+                <li>Stopping the database under a running scan or queue cycle makes the app write into a server that is going away.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
         </div><!-- /tab-system -->

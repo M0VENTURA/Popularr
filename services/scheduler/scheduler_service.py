@@ -154,12 +154,25 @@ class ResilientSQLAlchemyJobStore(SQLAlchemyJobStore):
 _SCHEDULER: BackgroundScheduler | None = None
 
 
+def peek_scheduler() -> BackgroundScheduler | None:
+    """The existing scheduler, or ``None`` — WITHOUT creating one.
+
+    ``get_scheduler()`` builds the instance on demand, which also builds its
+    SQLAlchemy job store and therefore opens a database connection. That makes it
+    the wrong call for a read-only status check: asking "is the scheduler paused"
+    would create a scheduler (and a connection) as a side effect, and would report
+    a freshly-built, never-started instance as the current state.
+
+    Used by the safe-shutdown status, which must observe and never cause.
+    """
+    return _SCHEDULER
+
+
 def get_scheduler() -> BackgroundScheduler:
     """Return the singleton scheduler instance, creating it if necessary."""
     global _SCHEDULER
     if _SCHEDULER is not None:
         return _SCHEDULER
-
     from helpers.config_helpers import get_config
     cfg = get_config() or {}
     scheduler_cfg = cfg.get("scheduler", {})

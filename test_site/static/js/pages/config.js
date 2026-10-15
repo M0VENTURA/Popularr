@@ -413,6 +413,16 @@
         auto_public_playlists: getChecked('api_navidrome_auto_public_playlists', false),
         playlist_cover_art: getChecked('api_navidrome_playlist_cover_art', false)
       },
+      // Safe shutdown for database maintenance. The auto-resume value exists so a
+      // forgotten shutdown cannot leave the app dormant forever.
+      maintenance: {
+        safe_shutdown: {
+          enabled: getChecked('safe_shutdown_enabled', true),
+          drain_timeout_seconds: parseInt(getValue('safe_shutdown_drain_timeout', '60')) || 0,
+          auto_cancel_after_minutes: parseInt(getValue('safe_shutdown_auto_cancel', '120')) || 0,
+          release_connections: getChecked('safe_shutdown_release_connections', true)
+        }
+      },
       downloads: {
         folder: getValue('downloads_folder'),
         external_export_path: getValue('external_export_path'),
@@ -1653,6 +1663,144 @@
     });
   }
 
+  // ── Safe shutdown ─────────────────────────────────────────────────────
+
+  // Quiesces the app so PostgreSQL can be stopped cleanly. Closing the pool is
+  // the part that makes `docker compose stop db` a clean stop instead of a
+  // force-kill: PostgreSQL's SIGTERM shutdown waits for clients, and pooled
+  // connections count.
+  function renderSafeShutdownStatus(data) {
+    const box = document.getElementById('safe_shutdown_status');
+    if (!box) return;
+
+    if (data.error) {
+      box.textContent = 'Error: ' + data.error;
+      return;
+    }
+
+    const lines = [];
+    if (!data.requested) {
+      lines.push('● NORMAL OPERATION — not quiesced.');
+      lines.push('  Run "Prepare for Database Stop" before stopping PostgreSQL.');
+    } else if (data.safe_to_stop) {
+      lines.push('✔ SAFE TO STOP — no scans running, queue idle, connections released.');
+      lines.push('  On the host:  docker compose stop db');
+      lines.push('  Then update PostgreSQL and:  docker compose start db');
+    } else {
+      lines.push('● STILL BUSY — do not stop the database yet.');
+      lines.push('  Scans running:  ' + ((data.active_scans || []).join(', ') || 'none'));
+      lines.push('  Queue items:    ' + (data.queue_items || 0));
+    }
+    lines.push('');
+    lines.push('  Scheduler:      ' + (data.scheduler || 'unknown') + (data.scheduler_paused ? ' (paused)' : ''));
+    lines.push('  Quiesced since: ' + (data.requested_at || '—'));
+    if (data.seconds_until_expiry !== undefined && data.seconds_until_expiry !== null) {
+      const mins = Math.floor(data.seconds_until_expiry / 60);
+      lines.push('  Auto-resume in: ' + mins + ' min');
+    }
+    box.textContent = lines.join('\n');
+    box.className = data.safe_to_stop
+      ? 'border rounded p-2 small bg-body-tertiary border-success'
+      : 'border rounded p-2 small bg-body-tertiary';
+  }
+
+  function getSafeShutdownStatus() {
+    fetch('/api/maintenance/safe-shutdown')
+      .then(r => {
+        const ct = r.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) {
+          throw new Error('Server returned non-JSON response');
+        }
+        return r.json();
+      })
+      .then(renderSafeShutdownStatus)
+      .catch(e => renderSafeShutdownStatus({ error: e.message }));
+  }
+
+  function prepareSafeShutdown() {
+    const btn = document.getElementById('safe_shutdown_prepare');
+    const original = btn ? btn.innerHTML : '';
+    if (!confirm(
+      'Prepare for a database stop?\n\n'
+      + 'This pauses the scheduler, stops running scans, idles the queue worker and '
+      + 'closes the connection pool. It is reversible — use "Resume Normal Operation" '
+      + 'afterwards, and it also resumes by itself after the configured timeout.'
+    )) {
+      return;
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Draining...';
+    }
+
+    fetch('/api/maintenance/safe-shutdown', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ drain: true, reason: 'config page' })
+    })
+    .then(r => {
+      const ct = r.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) {
+        throw new Error('Server returned non-JSON response');
+      }
+      return r.json();
+    })
+    .then(data => {
+      if (data.error) throw new Error(data.error);
+      renderSafeShutdownStatus(data);
+      if (data.safe_to_stop) {
+        showToast('Safe Shutdown', 'Ready. You can now stop the database.', 'success');
+      } else {
+        showToast(
+          'Safe Shutdown',
+          'Quiesced, but work is still finishing: '
+          + ((data.active_scans || []).join(', ') || 'none')
+          + ' scan(s), ' + (data.queue_items || 0) + ' queue item(s). Re-check before stopping.',
+          'warning'
+        );
+      }
+    })
+    .catch(e => showToast('Error', 'Safe shutdown failed: ' + e.message, 'error'))
+    .finally(() => {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = original;
+      }
+    });
+  }
+
+  function cancelSafeShutdown() {
+    const btn = document.getElementById('safe_shutdown_cancel');
+    const original = btn ? btn.innerHTML : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Resuming...';
+    }
+    fetch('/api/maintenance/safe-shutdown/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    .then(r => {
+      const ct = r.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) {
+        throw new Error('Server returned non-JSON response');
+      }
+      return r.json();
+    })
+    .then(data => {
+      if (data.error) throw new Error(data.error);
+      renderSafeShutdownStatus(data);
+      showToast('Safe Shutdown', 'Normal operation resumed.', 'success');
+    })
+    .catch(e => showToast('Error', 'Could not resume: ' + e.message, 'error'))
+    .finally(() => {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = original;
+      }
+    });
+  }
+
   // ── Init ──────────────────────────────────────────────────────────────
 
   document.addEventListener('DOMContentLoaded', function () {
@@ -1674,6 +1822,17 @@
     if (healPreview) healPreview.addEventListener('click', () => runMetadataHeal(true));
     const healRun = document.getElementById('downloads_heal_run');
     if (healRun) healRun.addEventListener('click', () => runMetadataHeal(false));
+    const ssPrepare = document.getElementById('safe_shutdown_prepare');
+    if (ssPrepare) {
+      ssPrepare.addEventListener('click', prepareSafeShutdown);
+      // Reflect the CURRENT quiesced state on load — landing on the page and
+      // seeing a stale "not checked" box would hide that the app is dormant.
+      getSafeShutdownStatus();
+    }
+    const ssCancel = document.getElementById('safe_shutdown_cancel');
+    if (ssCancel) ssCancel.addEventListener('click', cancelSafeShutdown);
+    const ssRefresh = document.getElementById('safe_shutdown_refresh');
+    if (ssRefresh) ssRefresh.addEventListener('click', getSafeShutdownStatus);
     getRetrySchedulerStatus();
   });
 

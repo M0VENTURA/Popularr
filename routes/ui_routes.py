@@ -3582,6 +3582,10 @@ def _sanitize_config_sections(config: dict) -> dict:
         # must be kept as a dict — without this entry the Config page save
         # coerced it to ``{}`` and the rules silently stopped applying.
         "playlists": ("genre_exclusions",),
+        # Same shape, same trap: a nested block absent from this map is coerced
+        # to ``{}`` on save, so the safe-shutdown settings would appear to save
+        # and then read back as defaults.
+        "maintenance": ("safe_shutdown",),
     }
     
     for parent, children in nested_children.items():

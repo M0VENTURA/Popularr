@@ -1908,6 +1908,52 @@ def get_metadata_heal_config() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Safe shutdown
+# ---------------------------------------------------------------------------
+
+def get_safe_shutdown_config() -> dict[str, Any]:
+    """Get the safe-shutdown settings.
+
+    Config section: ``maintenance.safe_shutdown`` in config.yaml
+
+    This quiesces the application so PostgreSQL can be stopped cleanly for an
+    update: the scheduler is paused, running scans are asked to stop, the queue
+    worker goes idle, and the connection pool is released. Releasing the pool is
+    what lets the postmaster's SIGTERM "smart shutdown" finish promptly instead
+    of waiting on an idle client until Docker SIGKILLs it.
+
+    Returns:
+        Dict with ``enabled``, ``drain_timeout_seconds``,
+        ``auto_cancel_after_minutes``, and ``release_connections``.
+
+    ``drain_timeout_seconds`` bounds the wait for in-flight work. A queue item can
+    legitimately be mid-move of a large file, and abandoning that is worse than
+    reporting it, so a timeout reports what is still running rather than forcing
+    the shutdown.
+
+    ``auto_cancel_after_minutes`` bounds how long the quiesced state may persist.
+    ``0`` disables the expiry. It defaults to a real value on purpose: a flag that
+    never expires would leave the app permanently dormant after a forgotten
+    shutdown, which would look like a hang with no visible cause.
+    """
+    cfg = get_config()
+    ss = cfg.get("maintenance", {}).get("safe_shutdown", {})
+
+    def _positive_int(key: str, default: int) -> int:
+        try:
+            return max(0, int(ss.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "enabled": bool(ss.get("enabled", True)),
+        "drain_timeout_seconds": _positive_int("drain_timeout_seconds", 60),
+        "auto_cancel_after_minutes": _positive_int("auto_cancel_after_minutes", 120),
+        "release_connections": bool(ss.get("release_connections", True)),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Download conversion settings
 # ---------------------------------------------------------------------------
 

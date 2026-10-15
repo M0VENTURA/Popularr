@@ -278,6 +278,44 @@ def get_async_session_factory() -> async_sessionmaker[AsyncSession]:
     return _ASYNC_SESSION_FACTORY
 
 
+def dispose_engine() -> dict[str, Any]:
+    """Close every pooled connection WITHOUT discarding the engine.
+
+    This exists for a clean PostgreSQL shutdown, and the distinction from
+    ``_ENGINE = None`` matters.
+
+    ``docker stop`` sends SIGTERM to the postmaster, and PostgreSQL treats
+    SIGTERM as a **smart shutdown**: it stops accepting new work and then WAITS
+    FOR EVERY CLIENT TO DISCONNECT. An idle pooled connection is still a client,
+    so an app holding one keeps the database waiting until Docker's stop timeout
+    expires and the container is SIGKILLed — which is exactly the unclean stop
+    that leaves the next start doing crash recovery.
+
+    Disposing the pool closes those connections, so the postmaster finds nothing
+    left to wait for and completes its shutdown immediately.
+
+    The engine OBJECT is deliberately kept: SQLAlchemy opens a fresh connection
+    on the next checkout, so the app recovers by itself when the database comes
+    back and no restart is required. Re-creating the engine instead would drop
+    the memoised session factory and any session bound to the old engine.
+
+    Returns a small report, because "did the connections actually close" is the
+    one thing an operator needs to know before stopping the database.
+    """
+    report: dict[str, Any] = {"disposed": False, "errors": []}
+
+    for name, engine in (("sync", _ENGINE), ("async", _ASYNC_ENGINE)):
+        if engine is None:
+            continue
+        try:
+            engine.dispose()
+            report["disposed"] = True
+        except Exception as exc:
+            report["errors"].append(f"{name}: {exc}")
+
+    return report
+
+
 # ---------------------------------------------------------------------------
 # Session Context Managers
 # ---------------------------------------------------------------------------

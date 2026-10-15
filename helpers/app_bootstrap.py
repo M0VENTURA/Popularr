@@ -29,6 +29,7 @@ from routes.musicbrainz_routes import mb_bp
 from routes.social_routes import listenbrainz_bp, lastfm_bp, weekly_bp
 from routes.upcoming_releases_routes import upcoming_bp
 from routes.misc_routes import misc_api_bp
+from routes.maintenance_routes import maintenance_bp
 from routes.api_v1 import api_v1_bp
 from routes.navidrome import navidrome_bp
 from routes.scan_routes import scans_bp
@@ -65,6 +66,7 @@ def register_all_blueprints(app: Any) -> None:
         (weekly_bp, None),
         (upcoming_bp, None),
         (misc_api_bp, None),
+        (maintenance_bp, None),
         (api_v1_bp, None),
         (ui_bp, None),
         # /new — preview of the rebuilt templates under New/. Registered last of
