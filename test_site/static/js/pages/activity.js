@@ -57,7 +57,10 @@
     if (!body) return;
 
     try {
-      const data = await global.api.getJson(`/api/scans/recent?limit=${SCAN_LIMIT}`);
+      // ⚠️ `/api/recent-scans` — the order is reversed from the obvious guess.
+      // See the note in pages/dashboard.js: this path was wrong in the rebuilt
+      // tree from the start and 404'd silently behind a bare catch.
+      const data = await global.api.getJson(`/api/recent-scans?limit=${SCAN_LIMIT}`);
       const scans = data.scans || [];
       const payload = JSON.stringify(scans);
       if (payload === scansPayload) return;   // see the header note on re-rendering

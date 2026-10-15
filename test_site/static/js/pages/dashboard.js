@@ -500,7 +500,19 @@
 
   async function updateRecentScans() {
     try {
-      const data = await global.api.getJson('/api/scans/recent?limit=25');
+      // ⚠️ `/api/recent-scans`, NOT `/api/scans/recent`.
+      //
+      // The order is reversed, which reads like a typo but is the path the
+      // route has always had (``routes/scan_routes/api.py``) and the one the
+      // LIVE tree's dashboard also calls. The rebuilt tree asked for the other
+      // spelling for its whole life, so this poll 404'd every 5 seconds.
+      //
+      // ⚠️ It was invisible because the catch below is bare: the 404 was
+      // swallowed, the poller kept running, and the server-rendered initial
+      // list stayed on screen — so the panel looked like it worked while never
+      // updating. ``test_api_paths_are_served`` now compares every path the
+      // scripts call against the route table so this cannot recur silently.
+      const data = await global.api.getJson('/api/recent-scans?limit=25');
       const payload = JSON.stringify(data.scans || []);
       // Skip the re-render when nothing changed — this runs every 5s and the
       // list is usually static.
