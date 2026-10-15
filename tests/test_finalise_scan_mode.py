@@ -291,7 +291,21 @@ class TestTheDashboardOffersTheMode:
             "static/js/scan-preflight.js",
             "test_site/static/js/services/scan-preflight.js",
             "static/js/dashboard.js",
-            "test_site/static/js/pages/dashboard.js",
+            # ⚠️ The rebuilt dashboard was REPLACED here by the shared
+            # activity-feed module, and by the scan preflight module above.
+            #
+            # `ScanPreflight.label()` is what the gate calls to name a scan, and
+            # its label map is OWNED by `services/scan-preflight.js` on purpose
+            # ("Deliberately OWNED here rather than read from the dashboard").
+            # The dashboard previously carried a SECOND copy of the scan-type
+            # labels, and the map was removed when the activity feed took over
+            # the rendering — so the dashboard no longer answers this question at
+            # all. Asserting on it would pin a map that deliberately has one
+            # home.
+            #
+            # The requirement is unchanged: the preflight confirm must not name a
+            # bare mode key. It is now checked where the label actually lives.
+            "test_site/static/js/services/activity-feed.js",
         ],
     )
     def test_the_label_maps_name_it(self, rel: str):

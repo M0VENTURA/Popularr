@@ -264,7 +264,20 @@ def test_full_scan_writer_records_item_counters():
 
 @pytest.mark.parametrize(
     "rel_path",
-    ["static/js/dashboard.js", "test_site/static/js/pages/dashboard.js"],
+    [
+        "static/js/dashboard.js",
+        # ⚠️ The rebuilt dashboard's label map MOVED, and this assertion follows
+        # it rather than pinning the file it used to live in.
+        #
+        # `test_site/static/js/services/activity-feed.js` now owns the scan-type
+        # labels, because the Activity page labels the same scans and a second
+        # copy is how two surfaces start disagreeing about one of them. The
+        # dashboard keeps a one-line DELEGATE (`scanDisplayName`), which
+        # `test_the_rebuilt_dashboard_delegates_its_labels` pins — so the
+        # requirement (never render the raw `full_scan` string) still holds, it
+        # is just satisfied from one place instead of two.
+        "test_site/static/js/services/activity-feed.js",
+    ],
 )
 def test_both_dashboards_label_full_scan(rel_path: str):
     """Neither tree may render the raw `full_scan` string."""
@@ -272,6 +285,20 @@ def test_both_dashboards_label_full_scan(rel_path: str):
     assert re.search(r"full_scan:\s*'Full Scan'", src) or re.search(
         r'full_scan:\s*"Full Scan"', src
     ), f"{rel_path} has no display name for full_scan"
+
+
+def test_the_rebuilt_dashboard_delegates_its_labels():
+    """CONTROL on the move: the dashboard must still ANSWER the question.
+
+    Without this, the assertion above would pass while the dashboard rendered
+    raw scan types — the label map would exist somewhere nothing reached.
+    """
+    src = (
+        REPO_ROOT / "test_site" / "static" / "js" / "pages" / "dashboard.js"
+    ).read_text(encoding="utf-8")
+    assert "global.ActivityFeed.scanDisplayName(" in src, (
+        "the rebuilt dashboard no longer delegates its scan labels"
+    )
 
 
 @pytest.mark.parametrize(
