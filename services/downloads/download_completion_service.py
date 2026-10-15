@@ -940,12 +940,48 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
     # downloaded for: the reported "they don't have the same mbid data … so are
     # coming in as separate albums". LOCAL, so it spends nothing from the
     # MusicBrainz budget.
+    #
+    # ⚠️⚠️ RELEASE-SCOPED — this is the reported "the album year or the release
+    # mbid is different from the release that was added to the queue".
+    #
+    # The match used to be artist+album NAME only, with no release constraint,
+    # and it deliberately PREFERRED a sibling that carried a release group:
+    #
+    #     WHERE LOWER(...artist...) = LOWER(:artist)
+    #       AND LOWER(...album...)  = LOWER(:album)
+    #     ORDER BY CASE WHEN COALESCE(musicbrainz_releasegroupid,'') <> ''
+    #                   THEN 0 ELSE 1 END, id
+    #
+    # A library that already holds a same-named album from a DIFFERENT release
+    # — the common case: an original and a remaster/reissue, or the album
+    # imported earlier from another edition — therefore donated ITS release
+    # group, barcode, catalogue number, original year and release date to the
+    # incoming row. Because inheritance runs BEFORE MusicBrainz and fills every
+    # column it can, the release the row was actually queued against was then
+    # consulted only for the leftovers, so the wrong identity was locked in and
+    # the right one could never win. Measured on the 1997 vs 1994 editions of
+    # one album: the row was queued against the 1994 release and inherited
+    # ``originalyear=1997``, ``releasedate=1997-08-25`` and the other edition's
+    # release group, barcode and catalogue number.
+    #
+    # The scoping below keeps the optimisation the comment above exists for
+    # (local, zero MusicBrainz budget for rows that carry NO identity) while
+    # refusing to invent an identity for rows that DO name their release: a
+    # sibling may only be inherited from when it is the SAME release, or shares
+    # the SAME release group. A row with no release identity at all keeps the
+    # original name-only behaviour — that is the case this fallback is FOR, and
+    # the only case where a name match is the best evidence available.
+    _inherit_release = str(
+        item.get("release_mbid") or item.get("release_id") or ""
+    ).strip()
+    _inherit_group = str(item.get("musicbrainz_releasegroupid") or "").strip()
     _missing_album_cols = [c for c in _ALBUM_LEVEL_COLUMNS if not resolved.get(c)]
     if _missing_album_cols:
         try:
             with db_session() as session:
-                # Prefer a sibling that CARRIES the release group — that is the
-                # field the grouping hangs on — then the oldest row.
+                # Prefer the EXACT release, then a sibling in the same release
+                # group (which is what the album grouping hangs on), then the
+                # oldest row — and never a sibling from an unrelated release.
                 sibling = session.execute(
                     text(
                         f"""
@@ -954,9 +990,20 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
                         WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
                           AND LOWER(COALESCE(album, '')) = LOWER(:album)
                           AND COALESCE(file_path, '') NOT LIKE '__queued_for_download__%%'
+                          AND (
+                                (:inherit_release = '' AND :inherit_group = '')
+                             OR LOWER(COALESCE(musicbrainz_album_mbid, '')) = LOWER(:inherit_release)
+                             OR (
+                                    :inherit_group <> ''
+                                AND LOWER(COALESCE(musicbrainz_releasegroupid, '')) = LOWER(:inherit_group)
+                                )
+                          )
                         ORDER BY CASE
-                            WHEN COALESCE(musicbrainz_releasegroupid, '') <> '' THEN 0
-                            ELSE 1
+                            WHEN :inherit_release <> ''
+                             AND LOWER(COALESCE(musicbrainz_album_mbid, '')) = LOWER(:inherit_release)
+                                THEN 0
+                            WHEN COALESCE(musicbrainz_releasegroupid, '') <> '' THEN 1
+                            ELSE 2
                         END, id
                         LIMIT 1
                         """
@@ -964,6 +1011,8 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
                     {
                         "artist": item.get("album_artist") or item.get("artist"),
                         "album": item.get("album"),
+                        "inherit_release": _inherit_release,
+                        "inherit_group": _inherit_group,
                     },
                 ).fetchone()
             if sibling is not None:
@@ -975,13 +1024,29 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
                     if value is not None and str(value).strip() != "":
                         resolved[column] = value
                         sources[column] = "sibling"
+            elif _inherit_release or _inherit_group:
+                # The library holds a same-named album from a DIFFERENT release
+                # and the row names its own. Saying so is the difference between
+                # "inherited nothing because there was nothing" and "refused a
+                # sibling that would have been the wrong release" — the latter
+                # explains an import that had to fall through to MusicBrainz.
+                logger.debug(
+                    "No same-release sibling for album metadata — not inheriting "
+                    "from a different release of the same name",
+                    album=item.get("album"),
+                    release_mbid=_inherit_release or None,
+                    release_group_mbid=_inherit_group or None,
+                )
         except Exception as exc:
             logger.debug(
                 "Album MBID inheritance from library rows failed",
                 album=item.get("album"), error=str(exc),
             )
-    
+
     # ── 3. refresh from MusicBrainz for anything still missing ───────────
+    # Runs for whatever inheritance left empty — including the fields it just
+    # refused to take from a different release, so a row that names its release
+    # is now resolved from THAT release rather than from a same-named one.
     release_mbid = str(
         item.get("release_mbid") or item.get("release_id") or ""
     ).strip()

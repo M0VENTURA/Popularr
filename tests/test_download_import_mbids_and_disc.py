@@ -308,9 +308,35 @@ class TestAlbumMbidsComeFromTheLibrary:
         assert "__queued_for_download__" in source, (
             "queue placeholders must be excluded from the sibling lookup"
         )
-        assert "WHEN COALESCE(musicbrainz_releasegroupid, '') <> '' THEN 0" in source, (
-            "the lookup must prefer a sibling that carries the release group "
-            "— that is the field the artist page groups on"
+        # ⚠️ The ordering this pins was TIGHTENED on 2026-10-15. It used to be a
+        # two-branch CASE whose first branch was the release-group preference:
+        #
+        #     WHEN COALESCE(musicbrainz_releasegroupid, '') <> '' THEN 0
+        #
+        # That made an unrelated same-named album — an original vs a remaster —
+        # the PREFERRED donor, so a queued release's own identity lost to a
+        # different edition's. The CASE is now three-branch and an EXACT release
+        # match outranks the group preference. The intent asserted here is
+        # unchanged and in fact now holds more strongly: a sibling carrying the
+        # release group is still preferred over one that carries none.
+        assert "AND LOWER(COALESCE(musicbrainz_album_mbid, '')) = LOWER(:inherit_release)" in source, (
+            "an exact release match must be the highest-priority sibling"
+        )
+        assert "WHEN COALESCE(musicbrainz_releasegroupid, '') <> '' THEN 1" in source, (
+            "a sibling that carries the release group must outrank one that "
+            "does not — that is the field the artist page groups on"
+        )
+
+    def test_the_sibling_lookup_is_scoped_to_the_queued_release(self):
+        """Inheritance must not cross to a same-named album from another release."""
+        import inspect
+
+        source = inspect.getsource(dcs._resolve_album_level_metadata)
+        assert ":inherit_release" in source and ":inherit_group" in source, (
+            "the sibling lookup must carry the row's own release identity"
+        )
+        assert "(:inherit_release = '' AND :inherit_group = '')" in source, (
+            "a row naming NO release must still get the name-only fallback"
         )
 
     def test_the_refresh_now_runs_as_the_last_step(self):
