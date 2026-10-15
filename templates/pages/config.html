@@ -1532,7 +1532,7 @@
         <div class="col-12 col-md-4">
           <label class="form-label form-label-sm" for="queue_tolerance_duration">Tolerance Duration (sec)</label>
           <input type="number" min="0" max="60" class="form-control form-control-sm" id="queue_tolerance_duration" placeholder="5" value="{{ config.get('queue', {}).get('matching', {}).get('tolerance_duration_sec', 5) }}">
-          <small class="form-text text-muted">Relaxed duration tolerance. Default: <strong>5s</strong></small>
+          <small class="form-text text-muted">How close two lengths must be to count as the SAME recording. Governs the queue's download check, whether a library file stands in for a download, and the album page's "Length differs" notice — one number, so they cannot disagree. Default: <strong>5s</strong></small>
         </div>
         <div class="col-12">
           <div class="form-check form-switch mb-2">

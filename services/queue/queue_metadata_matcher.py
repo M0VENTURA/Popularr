@@ -37,6 +37,22 @@ STRICT_DURATION_SEC = _config["strict_duration_sec"]
 TOLERANCE_DURATION_SEC = _config["tolerance_duration_sec"]
 
 
+def _length_tolerance_seconds() -> float:
+    """The shared configured length tolerance (see ``get_length_tolerance_seconds``).
+
+    ⚠️ A FUNCTION, not a module constant like the three above. Those are captured
+    at import, so a Config-page edit needs a restart; this one is read per
+    comparison. A failure falls back to 5s — a broken config must not make the
+    matcher reject every download.
+    """
+    try:
+        from helpers.config_helpers import get_length_tolerance_seconds
+
+        return float(get_length_tolerance_seconds())
+    except Exception:
+        return 5.0
+
+
 # =============================================================================
 # ✅ SIMILARITY
 # =============================================================================
@@ -200,7 +216,14 @@ def _metadata_matches_queue_item(file_path: str, queue_item: QueueItem, threshol
     if queue_duration and file_duration:
         diff = abs(file_duration - queue_duration)
 
-        if diff > 30:
+        # ⚠️ THE STRONG-REJECT USES THE SHARED CONFIGURED TOLERANCE.
+        #
+        # It was a hardcoded 30 seconds, which made this the most permissive of
+        # the app's five length checks — the album page called a 19s difference
+        # "a different version of the recording" while this accepted up to 30s.
+        # Read per call rather than captured at import so a Config-page edit
+        # takes effect without a restart.
+        if diff > _length_tolerance_seconds():
             return False  # strong reject
 
         if diff <= STRICT_DURATION_SEC:

@@ -46,12 +46,26 @@ import structlog
 from sqlalchemy import text
 
 from db.engine import db_session
-from helpers.config_helpers import _SLSKD_MIN_ACCEPT_SCORE
+from helpers.config_helpers import _SLSKD_MIN_ACCEPT_SCORE, get_length_tolerance_seconds
 from helpers.normalization_service import normalize_string, queue_duration_seconds
 
 logger = structlog.get_logger(__name__)
 
 _MUSIC_ROOT = os.environ.get("MUSIC_ROOT", "/music")
+
+
+def _length_tolerance_seconds() -> float:
+    """The shared length tolerance, safe to call inside a verification loop.
+
+    Deliberately a thin wrapper rather than an import-time constant: the value
+    is configurable and a Config-page edit must take effect without a restart
+    (``get_config`` is cached, not snapshotted). A failure falls back to the
+    default so a broken config cannot make the verifier reject everything.
+    """
+    try:
+        return float(get_length_tolerance_seconds())
+    except Exception:
+        return 5.0
 
 
 def _log_queue_event(event_type: str, message: str, queue_id: int | None) -> None:
@@ -2641,7 +2655,12 @@ def check_completed_downloads() -> dict[str, Any]:
                     expected_dur = queue_duration_seconds(expected_dur)
                 if expected_dur:
                     actual_dur = _extract_duration_seconds(abs_path)
-                    if actual_dur and abs(expected_dur - actual_dur) > 20:
+                    # ⚠️ THE TOLERANCE IS THE SHARED CONFIGURED ONE, not a
+                    # local 20. It used to be 20s here while the album page
+                    # reported a mismatch at 5s, so a file 19s off passed this
+                    # gate and was flagged by the review — two verdicts for one
+                    # file, and the user had no way to tell which to believe.
+                    if actual_dur and abs(expected_dur - actual_dur) > _length_tolerance_seconds():
                         logger.warning("Duration mismatch — deleting and retrying", queue_id=queue_id, expected=expected_dur, actual=actual_dur)
                         _delete_mismatched_download(abs_path, queue_id, f"duration mismatch: expected {expected_dur}s, got {actual_dur}s")
                         _block_peer_for_queue_item(queue_id, found_fn)

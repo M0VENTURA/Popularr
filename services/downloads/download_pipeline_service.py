@@ -33,6 +33,7 @@ from db.repositories.queue import (
     mark_processing,
     update_queue_item,
 )
+from helpers.config_helpers import get_length_tolerance_seconds
 from helpers.logging_config import log_queue, log_search, log_unified
 from helpers.normalization_service import queue_duration_seconds
 from services.downloads.slskd_service import SlskdService
@@ -101,6 +102,18 @@ def _normalise(text_val: str) -> str:
 def _similarity(a: str, b: str) -> float:
     """Return a 0–1 similarity score between two strings."""
     return SequenceMatcher(None, _normalise(a), _normalise(b)).ratio()
+
+
+def _length_tolerance_seconds() -> float:
+    """The shared length tolerance (``matching.duration_tolerance_seconds``).
+
+    Thin wrapper so the call sites read in this module's vocabulary, with a
+    fallback: a broken config must never make the matcher reject everything.
+    """
+    try:
+        return float(get_length_tolerance_seconds())
+    except Exception:
+        return 5.0
 
 
 # Track-number prefix used when the basename carries no " - " separator:
@@ -928,9 +941,43 @@ def _score_result(
             score += 10
 
     if expected_duration and result.get("length_seconds"):
-        dur_ratio = min(expected_duration, result["length_seconds"]) / max(expected_duration, result["length_seconds"])
-        if dur_ratio >= 0.9:
-            score += 15 * dur_ratio
+        try:
+            _cand_seconds = float(result["length_seconds"])
+            _want_seconds = float(expected_duration)
+        except (TypeError, ValueError):
+            _cand_seconds = _want_seconds = 0.0
+
+        if _cand_seconds > 0 and _want_seconds > 0:
+            _length_tol = _length_tolerance_seconds()
+            _length_diff = abs(_want_seconds - _cand_seconds)
+
+            # ⚠️ A HARD GATE, ADDED ALONGSIDE THE BONUS BELOW.
+            #
+            # The length was previously only a SCORING BONUS, so a candidate
+            # tens of seconds off could still win the search — and the
+            # completion verifier then deleted it (at the same tolerance) and
+            # retried. Downloading a file in order to delete it costs the
+            # bandwidth twice, blocks a peer who sent exactly what was asked
+            # for, and hides the real problem: nothing in the pool matched.
+            #
+            # Rejecting here instead makes the failure happen BEFORE the
+            # transfer, and records the reason so the queue can say so.
+            if _length_diff > _length_tol:
+                logger.debug(
+                    "Rejected candidate — length mismatch",
+                    filename=filename[:180],
+                    expected_seconds=round(_want_seconds, 1),
+                    found_seconds=round(_cand_seconds, 1),
+                    tolerance=_length_tol,
+                )
+                _note_reject(rejects, "length_mismatch")
+                return 0.0
+
+            # Still a graded signal WITHIN the accepted range: a candidate that
+            # matches to the second is a better bet than one at the boundary.
+            dur_ratio = min(_want_seconds, _cand_seconds) / max(_want_seconds, _cand_seconds)
+            if dur_ratio >= 0.9:
+                score += 15 * dur_ratio
 
     bitrate = int(result.get("bitrate", 0) or 0)
     ext = (result.get("extension") or parts.get("format") or "").lower()
@@ -1241,7 +1288,14 @@ def _library_reuse_source(item: dict[str, Any]) -> str | None:
             continue
         if cand_seconds > 10_000:  # stored as milliseconds (MusicBrainz length)
             cand_seconds /= 1000.0
-        if min(cand_seconds, expected_duration) / max(cand_seconds, expected_duration) < 0.98:
+        # ⚠️ The SHARED configured tolerance, not a local 2% ratio.
+        #
+        # A ratio and an absolute tolerance are not interchangeable at the ends
+        # of the range: 2% of a 10-minute track is 12 seconds, so the same rule
+        # allowed four times the difference on a long track that it allowed on a
+        # 4-minute one. The tolerance is what the album page and the queue's
+        # pre-copy verify both use, so all three now agree.
+        if abs(cand_seconds - expected_duration) > _length_tolerance_seconds():
             continue
 
         resolved = resolve_music_file_path(cand_path)

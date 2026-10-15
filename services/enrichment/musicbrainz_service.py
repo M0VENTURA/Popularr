@@ -98,16 +98,36 @@ Logger = structlog.get_logger(__name__)
 
 T = TypeVar("T")
 
-#: Seconds of difference tolerated when comparing a library track's duration
-#: against MusicBrainz. Small enough to catch a genuinely different recording
-#: (a radio edit runs tens of seconds shorter), large enough to absorb the
-#: encoder/tag rounding that makes an exact match read as 0:59 vs 1:00.
+#: DEFAULT seconds of difference tolerated when comparing a library track's
+#: duration against MusicBrainz. Small enough to catch a genuinely different
+#: recording (a radio edit runs tens of seconds shorter), large enough to absorb
+#: the encoder/tag rounding that makes an exact match read as 0:59 vs 1:00.
 #:
-#: Module-level rather than config-driven on purpose: this is a CORRECTNESS
-#: comparison, and the value matches the old system's
-#: ``_DURATION_TOLERANCE_SEC = 5`` so a library that behaved correctly before
-#: keeps behaving the same.
+#: ⚠️ THIS IS THE FALLBACK, NOT THE ANSWER. The effective value comes from
+#: ``get_length_tolerance_seconds()`` (``matching.duration_tolerance_seconds``),
+#: because the SAME question is asked by the download queue — and the queue used
+#: to answer it with 20 seconds while this file answered 5. A file 19s off a
+#: 4-minute track therefore passed the queue's acceptance gate and was reported
+#: by the album page as a different version of the recording. One number now
+#: answers both.
+#:
+#: Kept as a module constant because tests and callers reference it, and because
+#: it documents the intended magnitude.
 DURATION_TOLERANCE_SECONDS = 5
+
+
+def length_tolerance_seconds() -> float:
+    """The configured length tolerance, falling back to the default above.
+
+    A thin wrapper so this module's call sites read in its own vocabulary and a
+    config failure can never break a comparison (see the getter).
+    """
+    try:
+        from helpers.config_helpers import get_length_tolerance_seconds
+
+        return float(get_length_tolerance_seconds())
+    except Exception:
+        return float(DURATION_TOLERANCE_SECONDS)
 
 __all__ = [
     "MusicBrainzService",
@@ -2653,7 +2673,7 @@ def _lengths_agree_for_pairing(library_duration: Any, mb_duration: Any) -> bool 
     musicbrainz = Track_duration_seconds(mb_duration)
     if library is None or musicbrainz is None:
         return None
-    return abs(library - musicbrainz) <= DURATION_TOLERANCE_SECONDS
+    return abs(library - musicbrainz) <= length_tolerance_seconds()
 
 
 def _track_number_pairing_allowed(
@@ -2917,7 +2937,7 @@ def _match_mb_tracks_to_library(
             Entry["mb_duration_display"] = Format_duration_mmss(Entry["mb_duration"])
 
             if Library_duration_seconds is not None and Mb_duration_seconds is not None:
-                if abs(Library_duration_seconds - Mb_duration_seconds) > DURATION_TOLERANCE_SECONDS:
+                if abs(Library_duration_seconds - Mb_duration_seconds) > length_tolerance_seconds():
                     Diff_fields.append("duration")
 
             Diff_fields = [field for field in Diff_fields if field not in Ignored]

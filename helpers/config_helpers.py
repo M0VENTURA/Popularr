@@ -21,7 +21,73 @@ _CONFIG_CACHE = None
 # Core loader
 # -----------------------------------------------------------------------------
 
+#: How close two lengths must be to count as the SAME recording, in seconds.
+#: The default every duration check used to hardcode for itself.
+_LENGTH_TOLERANCE_DEFAULT_SECONDS = 5.0
+
+#: Bounds for a configured tolerance. Zero is allowed and means "exact match
+#: only" — a legitimate choice for a library of untouched rips. A negative
+#: tolerance is meaningless, and an enormous one would disable the check
+#: entirely while still LOOKING configured, so both ends are clamped.
+_LENGTH_TOLERANCE_MAX_SECONDS = 120.0
+
+
+def get_length_tolerance_seconds() -> float:
+    """How close two durations must be to count as the same recording.
+
+    Config section: ``queue.matching.tolerance_duration_sec`` in config.yaml
+
+    ⭐ ONE NUMBER, ONE PLACE. This tolerance is asked in FIVE places that each
+    used to answer it differently, and the disagreements were user-visible:
+
+    * the album page's "Length differs" notice (5s)
+    * the download queue's pre-copy verify (20s)
+    * whether an existing library file may stand in for a download (a 2% ratio)
+    * the candidate scorer's length bonus (a 10% ratio, still a bonus)
+    * the queue metadata matcher's strong-reject (a hardcoded 30s)
+
+    A file 19 seconds off a 4-minute track therefore PASSED the queue's own
+    acceptance gate while the album page reported it as a different version of
+    the recording. Two verdicts, one file.
+
+    ⚠️ THE SECTION IS ``queue.matching`` BECAUSE THAT KEY ALREADY HAD A UI. Two
+    other sections (``matching.duration_tolerance_seconds`` and
+    ``downloads.matching.duration_tolerance_seconds``) carry the same name and
+    are read by NOBODY — they were configurable on paper only. Rather than add a
+    fourth, this reads the one a user can actually see and set on the Config
+    page, and the dead pair is documented as superseded.
+
+    NOTE: ``queue.matching.strict_duration_sec`` (2s) is a DIFFERENT thing and is
+    deliberately not touched — it is the high-confidence ACCEPT band ("exact
+    title + this close == very strong evidence"), not a tolerance for rejecting.
+
+    Returns seconds as a float. An unreadable config, a bad value or a missing
+    key all fall back to 5.0 rather than raising: a matching check must never
+    fail the operation it is checking.
+    """
+    try:
+        raw = (
+            (get_config() or {})
+            .get("queue", {})
+            .get("matching", {})
+            .get("tolerance_duration_sec", _LENGTH_TOLERANCE_DEFAULT_SECONDS)
+        )
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _LENGTH_TOLERANCE_DEFAULT_SECONDS
+    except Exception:
+        return _LENGTH_TOLERANCE_DEFAULT_SECONDS
+    if value < 0:
+        return 0.0
+    return min(value, _LENGTH_TOLERANCE_MAX_SECONDS)
+
+
 def get_matching_config() -> dict[str, Any]:
+    """Legacy shim over ``get_length_tolerance_seconds`` — see the note there.
+
+    Kept because the key set is referenced in the docs; it no longer reads
+    ``matching.*`` itself, so the two getters cannot drift apart.
+    """
     cfg = get_config()
 
     matching = cfg.get("matching", {})
@@ -31,10 +97,7 @@ def get_matching_config() -> dict[str, Any]:
             "min_accept_score",
             0.45,
         ),
-        "duration_tolerance_seconds": matching.get(
-            "duration_tolerance_seconds",
-            5,
-        ),
+        "duration_tolerance_seconds": get_length_tolerance_seconds(),
         "early_accept_length_tolerance": matching.get(
             "early_accept_length_tolerance",
             2,
@@ -1787,13 +1850,21 @@ def get_download_matching_config() -> dict[str, Any]:
     Note:
         These settings control how downloaded files are matched to existing
         library tracks and releases.
+
+    ⚠️ ``duration_tolerance_seconds`` DELEGATES to
+    ``get_length_tolerance_seconds`` rather than reading ``downloads.matching``
+    itself. There used to be TWO sections claiming this key (``matching`` and
+    ``downloads.matching``) and two getters reading them — and NOTHING called
+    either, so the option was inert while looking configurable. One reader means
+    one answer, and the album page's duration notice now agrees with the queue's
+    acceptance gate.
     """
     cfg = get_config()
     download_config = cfg.get("downloads", {}).get("matching", {})
 
     return {
         "min_accept_score": float(download_config.get("min_accept_score", 0.45)),
-        "duration_tolerance_seconds": int(download_config.get("duration_tolerance_seconds", 5)),
+        "duration_tolerance_seconds": get_length_tolerance_seconds(),
         "early_accept_length_tolerance": int(download_config.get("early_accept_length_tolerance", 2)),
         "top_n_candidates": int(download_config.get("top_n_candidates", 50)),
     }
