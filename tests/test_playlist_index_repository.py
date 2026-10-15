@@ -51,6 +51,17 @@ def _clean_index():
     yield
 
 
+def _rows_for(artist: str) -> list[dict]:
+    """The artist page's query — the ONLY production reader of the index.
+
+    Every test below goes through this rather than a track-id list: an earlier
+    version of the repository had a second query taking ids, and testing THAT
+    meant the artist expression the real page uses was never exercised. One
+    query, one place for the join to be wrong.
+    """
+    return repo.artist_playlist_tracks_by_artist(artist)
+
+
 def _seed_tracks(rows: list[dict]) -> None:
     """Insert library rows for the JOIN to find."""
     with db_session() as session:
@@ -105,7 +116,7 @@ class TestReplacePlaylist:
         result = _add("pl1", name="Road Trip", track_ids=["t1", "t2"], changed="111")
 
         assert result == {"entries": 2}
-        rows = repo.artist_playlist_tracks(["t1", "t2"])
+        rows = _rows_for("A")
         assert {r["name"] for r in rows} == {"Road Trip"}
         assert len(rows) == 2
 
@@ -117,7 +128,7 @@ class TestReplacePlaylist:
         ])
         _add("pl2", track_ids=["p1", "p2", "p3"])
 
-        rows = repo.artist_playlist_tracks(["p1", "p2", "p3"])
+        rows = _rows_for("A")
         # Ordered by position, and the first position is 1 — not 0, because the
         # position is what the artist page reports and a 0-based display would
         # read as "track 0".
@@ -137,7 +148,7 @@ class TestReplacePlaylist:
         result = _add("pl3", track_ids=["dup", "dup", "dup"])
 
         assert result == {"entries": 3}
-        rows = repo.artist_playlist_tracks(["dup"])
+        rows = _rows_for("A")
         assert [r["position"] for r in rows] == [1, 2, 3]
 
     def test_replacing_a_playlist_replaces_its_entries(self):
@@ -151,7 +162,7 @@ class TestReplacePlaylist:
         _add("pl4", track_ids=["r1"])
 
         assert repo.index_sizes()["entries"] == 1
-        assert [r["track_id"] for r in repo.artist_playlist_tracks(["r1", "r2", "r3"])] == ["r1"]
+        assert [r["track_id"] for r in _rows_for("A")] == ["r1"]
 
     def test_replacing_updates_the_stamp_and_metadata(self):
         _add("pl5", name="Old", changed="100")
@@ -205,7 +216,7 @@ class TestArtistPlaylistTracks:
         ])
         _add("pj", name="Grunge", track_ids=["j1"])
 
-        rows = repo.artist_playlist_tracks(["j1"])
+        rows = _rows_for("Nirvana")
         assert len(rows) == 1
         assert rows[0]["title"] == "Come As You Are"
         assert rows[0]["album"] == "Nevermind"
@@ -218,7 +229,7 @@ class TestArtistPlaylistTracks:
         ])
         _add("pk", track_ids=["k1", "k-ghost"])
 
-        rows = repo.artist_playlist_tracks(["k1", "k-ghost"])
+        rows = _rows_for("A")
         assert [r["track_id"] for r in rows] == ["k1"]
 
     def test_order_is_by_playlist_name_then_position(self):
@@ -230,7 +241,7 @@ class TestArtistPlaylistTracks:
         _add("pz", name="Zebra", track_ids=["o1"])
         _add("pa", name="Alpha", track_ids=["o2", "o1"])
 
-        rows = repo.artist_playlist_tracks(["o1", "o2"])
+        rows = _rows_for("A")
         assert [(r["name"], r["position"]) for r in rows] == [
             ("Alpha", 1),
             ("Alpha", 2),
@@ -246,16 +257,21 @@ class TestArtistPlaylistTracks:
         _add("pz2", name="Zebra", track_ids=["z1"])
         _add("pa2", name="apple", track_ids=["z2"])
 
-        rows = repo.artist_playlist_tracks(["z1", "z2"])
+        rows = _rows_for("A")
         assert [r["name"] for r in rows] == ["apple", "Zebra"]
 
-    def test_no_track_ids_is_empty_without_querying(self):
-        """An empty IN list is invalid SQL on every dialect, so it short-circuits."""
-        assert repo.artist_playlist_tracks([]) == []
-        assert repo.artist_playlist_tracks([None, "", "  "]) == []  # type: ignore[list-item]
+    def test_a_blank_artist_is_empty_without_querying(self):
+        """A blank artist can never match a stored credit, so it short-circuits."""
+        assert repo.artist_playlist_tracks_by_artist("") == []
+        assert repo.artist_playlist_tracks_by_artist("   ") == []
 
-    def test_unknown_ids_return_no_rows(self):
-        assert repo.artist_playlist_tracks(["nothing-indexed-here"]) == []
+    def test_an_artist_with_no_playlists_returns_nothing(self):
+        """The control: the join must not match everyone."""
+        _seed_tracks([
+            {"id": "n9", "artist": "A", "album": "Al", "title": "One", "stars": 5},
+        ])
+        _add("pnone", track_ids=["n9"])
+        assert _rows_for("Nobody Here") == []
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +299,7 @@ class TestDeletePlaylistsNotIn:
 
         repo.delete_playlists_not_in(["keep"])
 
-        rows = repo.artist_playlist_tracks(["d1", "d2"])
+        rows = _rows_for("A")
         assert {r["playlist_id"] for r in rows} == {"keep"}
         assert repo.index_sizes()["entries"] == 1
 

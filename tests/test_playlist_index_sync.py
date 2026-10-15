@@ -364,21 +364,27 @@ class TestUnresolvedReporting:
 # ---------------------------------------------------------------------------
 
 class TestPlaylistsForArtist:
-    def _index(self, monkeypatch, *, name: str, track_ids: list[str], playlist_id: str = "p1"):
-        monkeypatch.setattr(svc, "_artist_track_ids", lambda artist, max_tracks: track_ids)
+    """The artist page's query, driven through the REAL join.
+
+    No monkeypatching: the service asks the repository for rows joined on the
+    artist expression, so seeding library rows and a playlist exercises the
+    actual SQL. An earlier version stubbed the track-id lookup, which meant the
+    artist match itself was never tested through this class.
+    """
+
+    def _index(self, *, name: str, track_ids: list[str], playlist_id: str = "p1"):
         entry, detail = _remote(playlist_id, name, song_count=len(track_ids),
                                 tracks=track_ids)
         svc.sync_playlist_index([FakeClient(playlists=[entry], details={playlist_id: detail})])
 
-    def test_it_groups_tracks_under_their_playlist(self, monkeypatch):
+    def test_it_groups_tracks_under_their_playlist(self):
         _seed_tracks([
             {"id": "n1", "artist": "Nirvana", "album_artist": "Nirvana",
              "album": "Nevermind", "title": "Come As You Are", "stars": 5},
             {"id": "n2", "artist": "Nirvana", "album_artist": "Nirvana",
              "album": "Nevermind", "title": "Lithium", "stars": 5},
         ])
-        self._index(monkeypatch, name="Grunge - Top Tracks", track_ids=["n1", "n2"],
-                    playlist_id="g1")
+        self._index(name="Grunge - Top Tracks", track_ids=["n1", "n2"], playlist_id="g1")
 
         result = svc.playlists_for_artist("Nirvana")
 
@@ -386,55 +392,99 @@ class TestPlaylistsForArtist:
         assert result[0]["name"] == "Grunge - Top Tracks"
         assert [t["title"] for t in result[0]["tracks"]] == ["Come As You Are", "Lithium"]
 
-    def test_positions_are_kept_in_playlist_order(self, monkeypatch):
+    def test_positions_are_kept_in_playlist_order(self):
         _seed_tracks([
             {"id": "m1", "artist": "A", "album_artist": "A", "album": "Al",
              "title": "First", "stars": 5},
             {"id": "m2", "artist": "A", "album_artist": "A", "album": "Al",
              "title": "Second", "stars": 4},
         ])
-        self._index(monkeypatch, name="Ordered", track_ids=["m1", "m2"], playlist_id="o1")
+        self._index(name="Ordered", track_ids=["m1", "m2"], playlist_id="o1")
 
         result = svc.playlists_for_artist("A")
         assert [t["position"] for t in result[0]["tracks"]] == [1, 2]
 
-    def test_an_artist_with_no_indexed_playlists_is_empty(self, monkeypatch):
-        self._index(monkeypatch, name="Other", track_ids=[], playlist_id="z1")
+    def test_an_artist_with_no_indexed_playlists_is_empty(self):
+        self._index(name="Other", track_ids=[], playlist_id="z1")
         assert svc.playlists_for_artist("Nobody") == []
 
     def test_a_blank_artist_is_empty_without_querying(self):
         assert svc.playlists_for_artist("") == []
         assert svc.playlists_for_artist("   ") == []
 
+    def test_the_row_cap_does_not_hide_playlists(self):
+        """⚠️ The defect this class exists to prevent.
+
+        The first version fetched the artist's track ids with a LIMIT and passed
+        them back in an IN list, so an artist with more tracks than that cap
+        reported only the playlists its FIRST N tracks appeared in — a partial
+        answer that looked complete, because nothing in the payload said so.
+
+        Here the artist has 300 tracks spread over 3 playlists, comfortably more
+        than the 200 the old cap allowed. All three must be reported.
+        """
+        _seed_tracks([
+            {"id": f"big{i}", "artist": "Prolific", "album_artist": "Prolific",
+             "album": "Al", "title": f"Track {i}", "stars": 4}
+            for i in range(300)
+        ])
+        # ONE sync listing both playlists. Two consecutive syncs would prune the
+        # first (a source that returns only "Playlist B" is a genuine removal),
+        # which is correct behaviour — just not what this test is about.
+        entry_a, detail_a = _remote("pa", "Playlist A", song_count=1, tracks=["big250"])
+        entry_b, detail_b = _remote("pb", "Playlist B", song_count=1, tracks=["big299"])
+        svc.sync_playlist_index([FakeClient(
+            playlists=[entry_a, entry_b],
+            details={"pa": detail_a, "pb": detail_b},
+        )])
+
+        # "big250" and "big299" sort well past any 200-row window.
+        result = svc.playlists_for_artist("Prolific")
+        assert {p["name"] for p in result} == {"Playlist A", "Playlist B"}
+
 
 class TestArtistMatchUsesTheAlbumArtistExpression:
-    def test_a_track_whose_album_artist_differs_is_still_found(self):
-        """The same expression the artist page uses to find its albums.
+    """The join must use the artist page's own album-artist expression."""
 
-        A guest-credited track ("Nirvana feat. X") has its own `artist` but an
-        `album_artist` of the host. Matching the bare `artist` column would put
-        that track's playlists on the GUEST's page and lose them from the host's.
+    def _one_playlist_for(self, artist: str, track_id: str) -> list[str]:
+        entry, detail = _remote("px", "P", song_count=1, tracks=[track_id])
+        svc.sync_playlist_index([FakeClient(playlists=[entry], details={"px": detail})])
+        return [p["name"] for p in svc.playlists_for_artist(artist)]
+
+    def test_a_track_whose_album_artist_differs_is_still_found(self):
+        """A guest-credited track belongs to the HOST artist's page.
+
+        "Nirvana feat. X" has its own `artist` but an `album_artist` of the host.
+        Matching the bare `artist` column would put that track's playlists on the
+        GUEST's page and lose them from the host's.
         """
         _seed_tracks([
             {"id": "v1", "artist": "Nirvana feat. Someone", "album_artist": "Nirvana",
              "album": "Nevermind", "title": "Territorial Pissings", "stars": 5},
         ])
-        ids = svc._artist_track_ids("Nirvana", max_tracks=50)
-        assert ids == ["v1"]
+        assert self._one_playlist_for("Nirvana", "v1") == ["P"]
 
     def test_the_match_is_case_insensitive(self):
         _seed_tracks([
             {"id": "v2", "artist": "acdc", "album_artist": "Acdc",
              "album": "Back in Black", "title": "Hells Bells", "stars": 5},
         ])
-        assert svc._artist_track_ids("ACDC", max_tracks=50) == ["v2"]
+        assert self._one_playlist_for("ACDC", "v2") == ["P"]
 
     def test_it_falls_back_to_the_artist_column_when_album_artist_is_blank(self):
         _seed_tracks([
             {"id": "v3", "artist": "Solo", "album_artist": "",
              "album": "Al", "title": "One", "stars": 5},
         ])
-        assert svc._artist_track_ids("Solo", max_tracks=50) == ["v3"]
+        assert self._one_playlist_for("Solo", "v3") == ["P"]
+
+    def test_a_track_by_a_different_artist_is_not_listed(self):
+        """The control: the join must not match everyone."""
+        _seed_tracks([
+            {"id": "v4", "artist": "Someone Else", "album_artist": "Someone Else",
+             "album": "Al", "title": "Other", "stars": 4},
+        ])
+        assert self._one_playlist_for("Nirvana", "v4") == []
 
 
 # ---------------------------------------------------------------------------

@@ -199,24 +199,40 @@ def delete_playlists_not_in(playlist_ids: list[str]) -> int:
         return int(deleted_playlists or 0)
 
 
-def artist_playlist_tracks(track_ids: list[str]) -> list[dict[str, Any]]:
-    """Every indexed playlist row belonging to any of ``track_ids``.
+def artist_playlist_tracks_by_artist(
+    artist: str,
+    *,
+    max_rows: int = 5000,
+) -> list[dict[str, Any]]:
+    """Every indexed playlist row for tracks credited to ``artist``.
 
-    The artist page's only query. Ordered by playlist name then position, so
-    the caller can group without re-sorting — a Python-side sort of the whole
-    result would be wasted work on a popular artist in many playlists.
+    The artist page's only query, and it joins on the artist expression
+    DIRECTLY rather than taking a list of track ids.
 
-    The join to ``tracks`` supplies the display fields from THIS library's own
-    row (title/album/artist) rather than from whatever Navidrome reported at
-    sync time, so a track renamed since the last sync still displays correctly
-    — and a track deleted from the library disappears from the section without
-    waiting for a re-sync.
+    ⚠️ WHY NOT ids. The first version asked for the artist's track ids first
+    and passed them back in an IN list, which needed a LIMIT — and any LIMIT
+    silently truncates the answer for a large discography. An artist with more
+    tracks than the cap would report only the playlists its FIRST N tracks
+    appear in, and nothing would say so: a partial answer that looks complete.
+    The join cannot have that failure mode, because there is no intermediate
+    list to truncate, and it is one query instead of two.
 
-    Empty when the tables are absent or ``track_ids`` is empty (an empty IN
-    list is a syntax error on some engines, and it can never match anyway).
+    ``max_rows`` bounds only the RESULT (it protects the page render from a
+    pathological index), never the INPUT, so hitting it can only trim rows from
+    the tail — never hide a playlist that a different cap would have included.
+
+    ⚠️ The artist expression is ``COALESCE(NULLIF(album_artist, ''), artist)``,
+    the SAME one the artist page uses to find its albums: a guest-credited track
+    ("Nirvana feat. X") has its own `artist` but an `album_artist` of the host, so
+    matching the bare column would file that track under the guest.
+
+    Display fields come from ``tracks`` (this library's own row) rather than
+    from whatever Navidrome reported at sync time, so a track renamed since the
+    last sync still displays correctly — and a track deleted from the library
+    disappears from the section without waiting for a re-sync.
     """
-    ids = [str(v or "").strip() for v in (track_ids or []) if str(v or "").strip()]
-    if not ids:
+    name = str(artist or "").strip()
+    if not name:
         return []
 
     with db_session() as session:
@@ -227,14 +243,16 @@ def artist_playlist_tracks(track_ids: list[str]) -> list[dict[str, Any]]:
                 "SELECT p.playlist_id, p.name, p.type, p.owner, p.is_public, "
                 "       p.song_count, p.comment, p.source, "
                 "       e.position, e.track_id, "
-                "       t.title, t.album, t.artist, t.stars "
-                "FROM playlist_entries e "
+                "       t.title, t.album, t.artist "
+                "FROM tracks t "
+                "JOIN playlist_entries e ON e.track_id = t.id "
                 "JOIN playlists p ON p.playlist_id = e.playlist_id "
-                "JOIN tracks t ON t.id = e.track_id "
-                "WHERE e.track_id IN :ids "
-                "ORDER BY LOWER(COALESCE(p.name, '')), e.position"
-            ).bindparams(bindparam("ids", expanding=True)),
-            {"ids": ids},
+                "WHERE LOWER(COALESCE(NULLIF(t.album_artist, ''), t.artist)) "
+                "      = LOWER(:artist) "
+                "ORDER BY LOWER(COALESCE(p.name, '')), e.position "
+                "LIMIT :max_rows"
+            ),
+            {"artist": name, "max_rows": int(max_rows)},
         ).mappings().all()
         return [dict(r) for r in rows]
 

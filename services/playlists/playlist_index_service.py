@@ -396,7 +396,7 @@ def sync_playlist_index(clients: list[Any] | None = None) -> dict[str, int]:
 def playlists_for_artist(
     artist: str,
     *,
-    max_tracks: int = 200,
+    max_rows: int = 5000,
 ) -> list[dict[str, Any]]:
     """Playlists containing any of ``artist``'s tracks, grouped by playlist.
 
@@ -404,26 +404,25 @@ def playlists_for_artist(
     source, comment, tracks: [{title, album, artist, position}]}]``, ordered by
     playlist name then position.
 
-    ⚠️ The artist match is ``COALESCE(NULLIF(album_artist, ''), artist)``,
+    The artist match is ``COALESCE(NULLIF(album_artist, ''), artist)``,
     case-insensitively — the SAME expression the artist page uses to find the
     artist's albums. Matching on the bare ``artist`` column instead would list
     the playlists a guest credit sits in under the HOST artist's page, and miss
-    them on the artist's own.
+    them on the artist's own. The join lives in the repository, so the
+    expression is written once.
+
+    ⚠️ ``max_rows`` bounds the RESULT, never the input. The first version of this
+    function fetched the artist's track ids with a LIMIT and queried them back,
+    which meant an artist with more tracks than that cap reported only the
+    playlists its first N tracks appeared in — a partial answer indistinguishable
+    from a complete one. See ``artist_playlist_tracks_by_artist``.
     """
     name = str(artist or "").strip()
     if not name:
         return []
 
     try:
-        ids = _artist_track_ids(name, max_tracks=max_tracks)
-    except Exception as exc:
-        _logger().debug("Playlist membership: track id lookup failed: %s", exc)
-        return []
-    if not ids:
-        return []
-
-    try:
-        rows = _repo.artist_playlist_tracks(ids)
+        rows = _repo.artist_playlist_tracks_by_artist(name, max_rows=max_rows)
     except Exception as exc:
         _logger().warning("Playlist membership: index query failed: %s", exc)
         return []
@@ -453,21 +452,3 @@ def playlists_for_artist(
         })
 
     return list(grouped.values())
-
-
-def _artist_track_ids(artist: str, *, max_tracks: int) -> list[str]:
-    """The library track ids credited to ``artist`` (album-artist keyed)."""
-    from sqlalchemy import text
-
-    from db.engine import db_session
-
-    with db_session() as session:
-        rows = session.execute(
-            text(
-                "SELECT id FROM tracks "
-                "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
-                "LIMIT :limit"
-            ),
-            {"artist": artist, "limit": int(max_tracks)},
-        ).fetchall() or []
-    return [str(r[0]) for r in rows if r and r[0]]
