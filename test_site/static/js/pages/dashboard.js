@@ -653,22 +653,32 @@
    * and no "approved" bookkeeping to keep in sync here.
    */
   function renderPendingApproval(albums) {
-    const card = document.getElementById('pendingApprovalCard');
+    const tabItem = document.getElementById('pendingApprovalTabItem');
+    const tabBtn = document.getElementById('pendingApprovalTab');
     const body = document.getElementById('pending-approval-body');
     const countEl = document.getElementById('pending-approval-count');
-    if (!card || !body) return;
+    if (!body) return;
 
-    if (!albums || !albums.length) {
-      // Hide rather than empty: an up-to-date library should not show a panel
-      // that says nothing needs doing.
-      card.classList.add('d-none');
+    const n = (albums || []).length;
+    if (countEl) countEl.textContent = String(n);
+
+    if (!n) {
+      // Hide the TAB, not a card: an always-visible "Needs Review 0" is a
+      // permanent nag on a library that has nothing to review.
+      if (tabItem) tabItem.classList.add('d-none');
       body.innerHTML = '';
-      if (countEl) countEl.textContent = '0';
+      // If the user was sitting on this tab when the last item was cleared
+      // (saving an album does exactly that), leaving them on a now-hidden pane
+      // shows a blank card with no way back. Move them to the first tab.
+      if (tabBtn && tabBtn.classList.contains('active')) {
+        const first = document.querySelector('#recentHistoryTabs .nav-link');
+        const Tab = global.bootstrap && global.bootstrap.Tab;
+        if (first && Tab) Tab.getOrCreateInstance(first).show();
+      }
       return;
     }
 
-    card.classList.remove('d-none');
-    if (countEl) countEl.textContent = String(albums.length);
+    if (tabItem) tabItem.classList.remove('d-none');
 
     body.innerHTML = albums.map((album) => {
       // Each row links to the album page, where the existing review UI shows
@@ -759,7 +769,7 @@
 
   async function loadUpcomingReleasesTable() {
     const desktop = document.getElementById('upcomingTableWrap');
-    const mobile = document.getElementById('upcoming-releases-cards');
+    const mobile = document.getElementById('upcoming-releases-carousel');
     if (!desktop && !mobile) return;
 
     // Loading state. Without it the card is blank until the fetch resolves,
@@ -781,16 +791,15 @@
         page: 1,
       });
       const opts = { emptyMessage: 'No upcoming releases found.' };
-      // The service renders an ACCORDION (responsive by nature), so the same
-      // markup goes to whichever container the current breakpoint shows.
-      // Rendering only into #upcomingTableWrap — which is `d-none d-lg-block`
-      // — left #upcoming-releases-cards (`d-lg-none`) permanently empty, so on
-      // a phone the card showed its header and footer around a blank body.
+      // TWO presentations of ONE fetch: a sortable table at lg+, and a
+      // horizontal ribbon below it. They used to share the animated
+      // accordion renderer, which is why the phone got an accordion inside a
+      // vertically-scrolling page — the swipe moved the page, not the list.
       if (desktop) {
         global.UpcomingReleasesService.renderTable('upcomingTableWrap', data.releases || [], opts);
       }
       if (mobile) {
-        global.UpcomingReleasesService.renderTable('upcoming-releases-cards', data.releases || [], opts);
+        global.UpcomingReleasesService.renderCarousel('upcoming-releases-carousel', data.releases || [], opts);
       }
     } catch (error) {
       const msg =
@@ -813,6 +822,7 @@
   const RECENT_TAB_HINTS = {
     recentAddedPane: 'Last 14 days',
     recentScansPane: 'Latest first',
+    pendingApprovalPane: 'Not yet applied',
   };
 
   function initRecentHistoryTabs() {

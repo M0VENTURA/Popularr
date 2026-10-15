@@ -73,7 +73,8 @@ function makeEl(id) {
 }
 
 const els = {
-  pendingApprovalCard: makeEl('pendingApprovalCard'),
+  pendingApprovalTabItem: makeEl('pendingApprovalTabItem'),
+  pendingApprovalTab: makeEl('pendingApprovalTab'),
   'pending-approval-body': makeEl('pending-approval-body'),
   'pending-approval-count': makeEl('pending-approval-count'),
 };
@@ -81,6 +82,11 @@ Object.values(els).forEach(function (el) { el.classList._owner = el; });
 
 const document_ = {
   getElementById: function (id) { return els[id] || null; },
+  // renderPendingApproval calls this only when an emptied tab was the ACTIVE
+  // one (to move the user off a pane that is about to be hidden). The probe
+  // never marks the tab active, so it correctly never fires — but the lookup
+  // has to exist or the harness throws on the reference.
+  querySelector: function () { return null; },
 };
 
 // ── Build the harness from the shipped source ─────────────────────────────
@@ -118,21 +124,23 @@ try {
 // ── Scenarios ─────────────────────────────────────────────────────────────
 function snapshot() {
   return {
-    hidden: els.pendingApprovalCard._classes.has('d-none'),
+    // The TAB item carries the d-none now — Needs Review is the activity
+    // feed's third tab, so "is this list available" is the tab's visibility.
+    hidden: els.pendingApprovalTabItem._classes.has('d-none'),
     count: els['pending-approval-count'].textContent,
     html: els['pending-approval-body'].innerHTML,
   };
 }
 
 function reset() {
-  els.pendingApprovalCard._classes = new Set(['d-none']);
+  els.pendingApprovalTabItem._classes = new Set(['d-none']);
   els['pending-approval-body'].innerHTML = '';
   els['pending-approval-count'].textContent = '';
 }
 
 const results = {};
 
-// 1. Empty list -> card HIDDEN, count zero.
+// 1. Empty list -> tab HIDDEN, count zero.
 reset();
 render([]);
 results.empty_hidden = snapshot().hidden;

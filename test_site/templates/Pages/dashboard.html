@@ -17,30 +17,41 @@
     </div>
     {% endif %}
 
-    <!-- 1. Full-Width Library Stats (Matches Artist/Album Page hero styling) -->
+    <!-- 1. Library Overview — ONE horizontal strip (see .library-bento) -->
     {% set st = stats | default({}) %}
-    <div class="card mb-4 shadow-sm" id="libraryStatsCard">
+    <div class="card mb-3 shadow-sm" id="libraryStatsCard">
         <div class="card-header bg-transparent py-2 d-flex justify-content-between align-items-center border-secondary">
             <h6 class="mb-0 fw-bold"><i class="bi bi-collection-fill text-info me-1"></i> Library Overview</h6>
             <a href="/artists" class="btn btn-sm btn-outline-secondary py-0 px-2 small">Manage <i class="bi bi-arrow-right"></i></a>
         </div>
         <div class="card-body p-2 p-md-3">
-            <div class="row g-2 text-center rounded py-2" style="background: var(--tertiary-bg, #282828); border: 1px solid var(--border-color);">
-                <div class="col-6 col-md-3 border-md-end border-secondary pb-2 pb-md-0 mb-2 mb-md-0">
-                    <div class="extra-small text-muted text-uppercase fw-semibold mb-1">Artists</div>
-                    <div class="h4 fw-bold mb-0 text-white">{{ st.get('artists_c', 0) }}</div>
+            {#
+              `library-bento` is a single flex row of four equal cells, not the
+              `row`/`col-6 col-md-3` grid this replaced. That grid wrapped to
+              2x2 below md, so a phone spent two rows (~120px) on four numbers;
+              the strip is one row (~54px) and reads as one datum.
+
+              The cells are not links: each number is a summary, and the card's
+              own "Manage" button is the single destination. Making a cell
+              clickable would imply four different destinations that do not
+              exist (there is no "tracks" page, only the artist list).
+            #}
+            <div class="library-bento">
+                <div class="library-bento-item">
+                    <span class="library-bento-value">{{ st.get('artists_c', 0) }}</span>
+                    <span class="library-bento-label">Artists</span>
                 </div>
-                <div class="col-6 col-md-3 border-md-end border-secondary pb-2 pb-md-0 mb-2 mb-md-0">
-                    <div class="extra-small text-muted text-uppercase fw-semibold mb-1">Albums</div>
-                    <div class="h4 fw-bold mb-0 text-white">{{ st.get('ac', 0) }}</div>
+                <div class="library-bento-item">
+                    <span class="library-bento-value">{{ st.get('ac', 0) }}</span>
+                    <span class="library-bento-label">Albums</span>
                 </div>
-                <div class="col-6 col-md-3 border-md-end border-secondary">
-                    <div class="extra-small text-muted text-uppercase fw-semibold mb-1">Tracks</div>
-                    <div class="h4 fw-bold mb-0 text-white">{{ st.get('tc', 0) }}</div>
+                <div class="library-bento-item">
+                    <span class="library-bento-value">{{ st.get('tc', 0) }}</span>
+                    <span class="library-bento-label">Tracks</span>
                 </div>
-                <div class="col-6 col-md-3">
-                    <div class="extra-small text-muted text-uppercase fw-semibold mb-1">Avg ★</div>
-                    <div class="h4 fw-bold mb-0 text-success">{{ st.get('avg_stars') if st.get('avg_stars') is not none else '—' }}</div>
+                <div class="library-bento-item">
+                    <span class="library-bento-value text-success">{{ st.get('avg_stars') if st.get('avg_stars') is not none else '—' }}</span>
+                    <span class="library-bento-label">Avg ★</span>
                 </div>
             </div>
         </div>
@@ -54,11 +65,34 @@
             
             <!-- Scanner Engine -->
             <div class="card shadow-sm" id="scannerControlsCard">
-                <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                {#
+                  Forced / Restart live in the HEADER, as the brief asks. They
+                  are the POPULARITY engine's options and they keep their
+                  existing ids (`popScanForce` / `popScanRestart`) because
+                  runDashboardPopularityScan() reads them by id — moving the
+                  elements in the DOM is safe, renaming them would not be.
+
+                  `navImportForce` deliberately stays inside the Navidrome pane.
+                  The two are NOT the same question: this pair means "ignore
+                  change detection / caching", while the Navidrome one means
+                  "re-import every artist in full". Hoisting it here would
+                  conflate two different resets under one label.
+                #}
+                <div class="card-header py-2 d-flex justify-content-between align-items-center flex-wrap gap-2">
                     <h6 class="mb-0 fw-semibold"><i class="bi bi-lightning-charge-fill text-success me-1"></i> Scanner Engine</h6>
-                    <span id="scannerStatusBadge" class="badge bg-secondary" style="font-size:0.65rem;" role="status" aria-live="polite"><i class="bi bi-circle-fill me-1 small" aria-hidden="true"></i> Idle</span>
+                    <div class="d-flex align-items-center gap-2 gap-sm-3 flex-wrap">
+                        <div class="form-check form-check-inline m-0" title="Force rescan (ignore album-skip / cache)">
+                            <input class="form-check-input" type="checkbox" id="popScanForce" name="force" value="1">
+                            <label class="form-check-label small" for="popScanForce">Forced</label>
+                        </div>
+                        <div class="form-check form-check-inline m-0" title="Restart from the beginning (re-scans everything if Forced)">
+                            <input class="form-check-input" type="checkbox" id="popScanRestart" name="restart" value="1">
+                            <label class="form-check-label small" for="popScanRestart">Restart</label>
+                        </div>
+                        <span id="scannerStatusBadge" class="badge bg-secondary" style="font-size:0.65rem;" role="status" aria-live="polite"><i class="bi bi-circle-fill me-1 small" aria-hidden="true"></i> Idle</span>
+                    </div>
                 </div>
-                <div class="card-body py-3">
+                <div class="card-body py-2">
                     {#
                       `nav-segmented` (popularr.css) replaces the old
                       `bg-secondary p-1 rounded` combination — the same fix
@@ -90,7 +124,7 @@
                     <div class="tab-content">
                         <!-- Popularity Pane -->
                         <div class="tab-pane fade show active" id="scannerPanePopularity" role="tabpanel">
-                            <div class="d-flex align-items-center gap-2 flex-wrap mb-2 scan-toolbar">
+                            <div class="d-flex align-items-center gap-2 flex-wrap scan-toolbar">
                                 <select id="popScanSelector" class="form-select form-select-sm" style="min-width: 140px; width: auto;" title="Select popularity scan type">
                                     <option value="all">All Modes</option>
                                     <option value="popularity">Popularity Only</option>
@@ -98,15 +132,7 @@
                                     <option value="metadata">Metadata Only</option>
                                     <option value="finalise">Finalise</option>
                                 </select>
-                                <div class="form-check form-check-inline mb-0" title="Force rescan (ignore album-skip/cache)">
-                                    <input class="form-check-input" type="checkbox" id="popScanForce" name="force" value="1">
-                                    <label class="form-check-label small" for="popScanForce">Forced</label>
-                                </div>
-                                <div class="form-check form-check-inline mb-0" title="Restart from the beginning (re-scans everything if Forced)">
-                                    <input class="form-check-input" type="checkbox" id="popScanRestart" name="restart" value="1">
-                                    <label class="form-check-label small" for="popScanRestart">Restart</label>
-                                </div>
-                                <button id="popScanRunBtn" onclick="runDashboardPopularityScan()" class="btn btn-primary btn-sm px-3 ms-auto ms-sm-0"><i class="bi bi-play-fill" aria-hidden="true"></i> Run</button>
+                                <button id="popScanRunBtn" onclick="runDashboardPopularityScan()" class="btn btn-primary btn-sm px-3"><i class="bi bi-play-fill" aria-hidden="true"></i> Run</button>
                                 <button class="btn btn-outline-danger btn-sm flex-shrink-0" onclick="stopAllScans()" title="Stop all scans" aria-label="Stop all scans"><i class="bi bi-stop-fill" aria-hidden="true"></i></button>
                             </div>
                             {% include 'components/_scan_mode_key.html' %}
@@ -174,9 +200,18 @@
                         </tbody>
                     </table>
                 </div>
-                <!-- Mobile Card View -->
-                <div id="upcoming-releases-cards" class="d-lg-none p-1" style="max-height: 400px; overflow-y: auto; scrollbar-width: thin;"></div>
-                
+                {#
+                  MOBILE: a swipeable ribbon of release cards, rendered by
+                  UpcomingReleasesService.renderCarousel. Only below lg — the
+                  table above is the desktop presentation of the same data.
+
+                  A carousel rather than the stacked card list it replaced: that
+                  list was a vertical scroll nested inside a vertical page, so a
+                  thumb swipe moved the outer page and the releases read as a
+                  wall. Something browsed casually wants one axis.
+                #}
+                <div id="upcoming-releases-carousel" class="d-lg-none"></div>
+
                 <!-- Empty State -->
                 <div id="upcomingEmptyState" class="d-none p-4 text-center text-muted small">
                     <i class="bi bi-check-circle-fill text-success fs-3 d-block mb-2"></i>
@@ -196,53 +231,28 @@
 
         </div>
 
-        <!-- RIGHT COLUMN: Historical (Recently Added + Recent Scans) -->
+        <!-- RIGHT COLUMN: the activity feed (three tabs, one card) -->
         <div class="col-12 col-lg-5 col-xl-4 d-flex flex-column gap-3">
 
             {#
-              Needs Metadata Approval.
+              ONE card holds all three historical/work-queue lists.
 
-              ⭐ Lists albums whose SCAN produced MusicBrainz recommendations the
-              user has not yet accepted, newest first. The data already existed:
-              the scan stashes what a metadata import WOULD write onto
-              `tracks.pending_mb_updates` (with a `stashed_at` timestamp) whenever
-              the Config page's metadata updating is recommend-only.
+              Recently Added, Recent Scans and Needs Review are all "things that
+              happened", and they are rarely wanted at the same time — so they
+              share a tab strip instead of stacking three long scrolling lists
+              in the rail. Needs Review used to be a SEPARATE card that appeared
+              above this one, which meant the rail could show two panels that
+              both claimed to be the interesting thing.
 
-              An album disappears from this list on its own once its review is
-              saved or discarded, because BOTH paths clear the stash — nothing
-              has to be re-scanned. So the list is a work queue, not a log.
+              Real Bootstrap tabs (not the data-mobile-tabs engine) so each pane
+              keeps its own scroll container at every breakpoint; the chosen tab
+              is remembered in sessionStorage (pages/dashboard.js).
 
-              Populated by pages/dashboard.js from
-              GET /api/metadata/pending-recommendations. The card starts HIDDEN
-              and is revealed only when there is something to approve, so an
-              up-to-date library does not show an empty panel.
+              ⚠️ The Needs Review TAB is hidden while the count is zero
+              (pages/dashboard.js::renderPendingApproval), because an always-
+              visible tab that reads "0" is a permanent nag. The pane still
+              exists in the DOM so the tab can be revealed without a re-render.
             #}
-            <div class="card shadow-sm d-none" id="pendingApprovalCard">
-                <div class="card-header py-2 d-flex justify-content-between align-items-center border-secondary">
-                    <h6 class="mb-0">
-                        <i class="bi bi-clipboard-check text-info me-1"></i> Needs Metadata Approval
-                    </h6>
-                    <span class="badge bg-info text-dark" id="pending-approval-count" role="status" aria-live="polite">0</span>
-                </div>
-                <div class="card-body p-0 overflow-y-auto" style="max-height: 420px; scrollbar-width: thin;">
-                    <div class="list-group list-group-flush" id="pending-approval-body">
-                        <!-- Populated by javascript -->
-                    </div>
-                </div>
-                <div class="card-footer py-2 text-muted extra-small border-secondary">
-                    Recommendations from the last scan, newest first. Saving or discarding
-                    an album's changes removes it from this list.
-                </div>
-            </div>
-
-            <!--
-              Recently Added + Recent Scans are BOTH historical logs and are
-              rarely wanted at the same time, so they share ONE card with a tab
-              strip instead of stacking two long scrolling lists in the rail.
-              Real Bootstrap tabs (not the data-mobile-tabs engine) so each
-              pane keeps its own scroll container at every breakpoint; the
-              chosen tab is remembered in sessionStorage (pages/dashboard.js).
-            -->
             <div class="card shadow-sm" id="recentHistoryCard">
                 <div class="card-header py-2 border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
                     <ul class="nav nav-pills nav-segmented mb-0" id="recentHistoryTabs" role="tablist">
@@ -254,6 +264,12 @@
                         <li class="nav-item" role="presentation">
                             <button type="button" class="nav-link py-0 px-2" id="recentScansTab" data-bs-toggle="pill" data-bs-target="#recentScansPane" role="tab" aria-controls="recentScansPane" aria-selected="false">
                                 <i class="bi bi-clock-history text-warning me-1"></i> Recent Scans
+                            </button>
+                        </li>
+                        <li class="nav-item d-none" role="presentation" id="pendingApprovalTabItem">
+                            <button type="button" class="nav-link py-0 px-2" id="pendingApprovalTab" data-bs-toggle="pill" data-bs-target="#pendingApprovalPane" role="tab" aria-controls="pendingApprovalPane" aria-selected="false">
+                                <i class="bi bi-clipboard-check text-info me-1"></i> Needs Review
+                                <span class="badge bg-info text-dark ms-1" id="pending-approval-count" role="status" aria-live="polite">0</span>
                             </button>
                         </li>
                     </ul>
@@ -304,6 +320,37 @@
                         <div class="list-group list-group-flush" id="recent-scans-body">
                             <!-- Populated via javascript -->
                         </div>
+                    </div>
+                </div>
+
+                {#
+                  Needs Review pane — the work queue.
+
+                  ⭐ Lists albums whose SCAN produced MusicBrainz recommendations
+                  the user has not yet accepted, newest first. The data already
+                  existed: the scan stashes what a metadata import WOULD write
+                  onto `tracks.pending_mb_updates` (with a `stashed_at`
+                  timestamp) whenever the Config page's metadata updating is
+                  recommend-only.
+
+                  An album disappears from this list on its own once its review
+                  is saved or discarded, because BOTH paths clear the stash —
+                  nothing has to be re-scanned. So this is a work queue, not a
+                  log, which is why its tab is hidden at zero rather than shown
+                  as an empty list.
+
+                  Populated by pages/dashboard.js from
+                  GET /api/metadata/pending-recommendations.
+                #}
+                <div class="tab-pane fade" id="pendingApprovalPane" role="tabpanel" aria-labelledby="pendingApprovalTab">
+                    <div class="card-body p-0 overflow-y-auto" style="max-height: 420px; scrollbar-width: thin;">
+                        <div class="list-group list-group-flush" id="pending-approval-body">
+                            <!-- Populated via javascript -->
+                        </div>
+                    </div>
+                    <div class="card-footer py-2 text-muted extra-small border-secondary">
+                        Recommendations from the last scan, newest first. Saving or discarding
+                        an album's changes removes it from this list.
                     </div>
                 </div>
 

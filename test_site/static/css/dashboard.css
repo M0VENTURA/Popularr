@@ -162,3 +162,248 @@
         }
     }
 }
+
+/* ==========================================================================
+   MOBILE REDESIGN — Library bento, slim scanner, releases carousel
+   ==========================================================================
+   Everything below is driven by the redesign brief: the library strip is ONE
+   horizontal row, the scanner is a slim control surface rather than a tabbed
+   panel, and the upcoming releases are a swipeable ribbon. All three are the
+   MOBILE presentation; the desktop layout in the media query above is
+   unchanged.
+   ========================================================================== */
+
+/* ── Library overview: one horizontal strip ────────────────────────────────
+   Was a 4-cell grid (`col-6 col-md-3`) that wrapped to 2x2 below md, so a
+   phone spent ~120px on four numbers. It is now a single flex row of four
+   equal cells with hairline dividers — ~54px, and it reads as one datum
+   rather than a stack of cards.
+
+   `flex: 1 1 0` + `min-width: 0` on every cell: without the basis of 0 the
+   cells size to their content and a large library's "1,234" widens its own
+   column and misaligns the row. The label truncates rather than wrapping, so
+   the strip can never become two lines. */
+.library-bento {
+    display: flex;
+    align-items: stretch;
+    background: var(--tertiary-bg, #282828);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-control);
+    overflow: hidden;
+}
+
+.library-bento-item {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.05rem;
+    padding: 0.4rem 0.25rem;
+    text-align: center;
+    /* Hairline between cells only — a border on every cell would double up
+       against the container's own edge. */
+    border-left: 1px solid var(--border-color);
+
+    &:first-child { border-left: 0; }
+}
+
+.library-bento-value {
+    font-size: 1.1rem;
+    font-weight: 700;
+    line-height: 1.15;
+    color: var(--text-primary);
+}
+
+.library-bento-label {
+    font-size: 0.6rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+/* The card header is one line at every width; below sm it loses its padding
+   and shrinks so the whole card is the height of the strip plus a title. */
+@media (max-width: 575.98px) {
+    #libraryStatsCard > .card-header {
+        padding-top: 0.3rem;
+        padding-bottom: 0.3rem;
+
+        h6 { font-size: 0.78rem; }
+    }
+
+    #libraryStatsCard > .card-body { padding: 0.4rem !important; }
+    .library-bento-value { font-size: 1rem; }
+}
+
+/* ── Slim scanner ──────────────────────────────────────────────────────────
+   The engine switch is a compact segmented control (all three engines visible
+   at once — that is the "side by side" in the brief) and each pane's controls
+   sit on ONE line. The run options live in the card header, so the body has
+   no duplicated checkboxes to space out. */
+.scanner-mode-tabs {
+    margin-bottom: 0.5rem !important;
+
+    .nav-link {
+        padding-top: 0.2rem;
+        padding-bottom: 0.2rem;
+        font-size: 0.82rem;
+    }
+}
+
+#scannerControlsCard .card-body { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+
+/* One row, wrapping only if a label genuinely cannot fit. `gap` is small
+   because these are dense operator controls, not marketing buttons. */
+.scan-toolbar { row-gap: 0.4rem; }
+
+/* The collapsed "What does each scan do?" legend is ONE summary line; it must
+   not add a full row of its own height to a slim pane. */
+#scannerControlsCard .scan-mode-key { margin-top: 0.35rem !important; }
+#scannerControlsCard .scan-mode-key > summary { font-size: 0.72rem; }
+
+/* ── Upcoming releases: swipeable ribbon ───────────────────────────────────
+   `overflow-x: auto` + `scroll-snap-type: x mandatory` is the whole carousel.
+   No JS, no library: each card snaps, the row scrolls with a thumb swipe, and
+   it degrades to a plain scrollable row if snapping is unsupported.
+
+   ⚠️ `-webkit-overflow-scrolling: touch` is deliberately NOT set. On iOS it
+   promotes the scroller to its own compositing layer, which is what makes a
+   horizontally-scrolled row inside a vertically-scrolled page judder. Modern
+   iOS scrolls a plain `overflow: auto` container smoothly already.
+
+   `scrollbar-width: none` hides the bar: on a touch device an overlay
+   scrollbar sits over the bottom card edge, and the row's own peeking next
+   card is the affordance that says "there is more this way". The bar is kept
+   on desktop (the same markup serves both, see the media query). */
+.ur-carousel {
+    display: flex;
+    gap: 0.6rem;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    padding: 0.15rem 0.15rem 0.5rem;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar { display: none; }
+}
+
+.ur-card {
+    flex: 0 0 auto;
+    /* ~62% of the viewport: wide enough for the title, narrow enough that the
+       next card visibly peeks, which is the whole "swipe me" signal. */
+    width: 62%;
+    max-width: 230px;
+    scroll-snap-align: start;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.5rem;
+    background: var(--secondary-bg);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-card);
+}
+
+.ur-card-art {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    border-radius: var(--radius-control);
+    overflow: hidden;
+    background: var(--tertiary-bg, #282828);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    img { width: 100%; height: 100%; object-fit: cover; }
+    /* The status pill sits ON the art (top-left), so it is legible regardless
+       of the artwork behind it — the pill carries its own dark backing. */
+    .ur-card-flag {
+        position: absolute;
+        top: 0.3rem;
+        left: 0.3rem;
+        font-size: 0.62rem;
+        backdrop-filter: blur(4px);
+    }
+}
+
+.ur-card-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    line-height: 1.25;
+    color: var(--text-primary);
+    /* Two lines then ellipsis. A one-line clamp truncates most album titles at
+       this card width, and a three-line clamp makes every card a different
+       height, which breaks the snap row's alignment. */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.ur-card-artist {
+    font-size: 0.75rem;
+    line-height: 1.2;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ur-card-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex-wrap: nowrap;
+    min-width: 0;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+
+    > .ur-card-date { flex-shrink: 0; }
+}
+
+/* The queue action is pinned to the bottom so every card's button lines up
+   whether its title took one line or two. */
+.ur-card-actions {
+    margin-top: auto;
+    display: flex;
+    gap: 0.3rem;
+
+    .btn { flex: 1 1 auto; font-size: 0.75rem; padding: 0.25rem 0.4rem; }
+}
+
+@media (min-width: 992px) {
+    /* Desktop keeps the table (d-none d-lg-block in the template) — this is
+       only here so a stray carousel on a wide screen is not 62%-wide cards. */
+    .ur-card { width: 180px; }
+}
+
+/* ── Activity feed ─────────────────────────────────────────────────────────
+   Three tabs share one card, so the tab strip has to survive narrow widths
+   without wrapping into the hint line. */
+#recentHistoryTabs {
+    .nav-link {
+        padding: 0.15rem 0.5rem;
+        font-size: 0.8rem;
+        white-space: nowrap;
+    }
+}
+
+@media (max-width: 575.98px) {
+    #recentHistoryTabs .nav-link {
+        padding: 0.15rem 0.4rem;
+        font-size: 0.74rem;
+
+        /* Icons only crowd a 360px strip with three tabs — the label carries
+           the meaning and the icon is decoration. */
+        i { display: none; }
+    }
+
+    #recentHistoryHint { font-size: 0.68rem; }
+}
+

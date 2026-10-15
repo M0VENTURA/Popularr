@@ -434,6 +434,87 @@
     });
   }
 
+  /**
+   * Render the mobile CAROUSEL — one horizontally scrollable row of cards.
+   *
+   * The dashboard shows a table at lg+ and this below lg (they share one data
+   * fetch). It replaced a vertical stack of cards, which was a scroller nested
+   * inside the page scroller: a thumb swipe moved the outer page, so the
+   * releases felt like a wall you had to scroll past rather than a row you
+   * browsed.
+   *
+   * ⭐ ARTWORK IS CONDITIONAL. `album_in_collection` is set server-side by the
+   * upcoming-releases query, and it is the ONLY case where an art request can
+   * succeed — /api/album/<artist>/<album>/art resolves against tracks we own,
+   * so for an unowned release it is a guaranteed 404. Requesting it anyway
+   * would fire one failing request per card (50 of them on a full list) to
+   * show the same placeholder we can render without asking. When the album IS
+   * in the collection the art is real, so it is fetched and falls back to the
+   * placeholder on error.
+   */
+  function renderCarousel(containerId, items, options) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    const opts = options || {};
+    const releases = items || [];
+
+    if (!releases.length) {
+      container.innerHTML = opts.emptyHtml ||
+        '<div class="text-center py-4"><p class="text-muted mb-0">' +
+        esc(opts.emptyMessage || 'No upcoming releases found.') + '</p></div>';
+      renderedReleases = [];
+      return;
+    }
+
+    const cards = releases.map((release, index) => {
+      const released = isReleased(release);
+      const statusClass = released ? 'bg-primary' : 'bg-success';
+      const statusText = released ? 'Out now' : 'Upcoming';
+
+      const art = release.album_in_collection
+        ? '<img src="/api/album/' +
+            encodeURIComponent(release.artist_name || '') + '/' +
+            encodeURIComponent(release.album_name || '') +
+            '/art?s=200" alt="" loading="lazy" ' +
+            'onerror="this.replaceWith(Object.assign(document.createElement(\'i\'),' +
+            '{className:\'bi bi-disc text-muted fs-2\'}))">'
+        : '<i class="bi bi-disc text-muted fs-2" aria-hidden="true"></i>';
+
+      // "Out now" is the pill the brief asks for, and it sits on the artwork
+      // so the eye can scan the row by status without reading any text.
+      const flag = release.in_queue
+        ? '<span class="badge bg-info text-dark ur-card-flag">In Queue</span>'
+        : `<span class="badge ${statusClass} ur-card-flag">${statusText}</span>`;
+
+      // `in_queue` renders as a DISABLED tick rather than a second Queue
+      // button, so a re-render cannot offer an action that has already
+      // happened (the reported "Queued" feedback, in its settled state).
+      const action = release.in_queue
+        ? '<button type="button" class="btn btn-success" disabled>' +
+          '<i class="bi bi-check-lg"></i> Queued</button>'
+        : '<button type="button" class="btn btn-outline-success ur-queue-btn" ' +
+          `data-release-index="${index}"><i class="bi bi-plus-lg"></i> Queue</button>`;
+
+      return (
+        '<article class="ur-card" role="listitem">' +
+          `<div class="ur-card-art">${art}${flag}</div>` +
+          `<div class="ur-card-title" title="${esc(release.album_name || '')}">${esc(release.album_name || '')}${typeBadge(release)}</div>` +
+          `<div class="ur-card-artist" title="${esc(release.artist_name || '')}">${esc(release.artist_name || '')}</div>` +
+          '<div class="ur-card-meta">' +
+            `<span class="ur-card-date">${esc(release.release_date || 'TBA')}</span>` +
+            linkedBadge(release) +
+          '</div>' +
+          `<div class="ur-card-actions">${action}</div>` +
+        '</article>'
+      );
+    }).join('');
+
+    container.innerHTML = `<div class="ur-carousel" role="list">${cards}</div>`;
+    renderedReleases = releases;
+    attachRowHandlers(container);
+  }
+
   async function queueById(releaseId, button, title) {
     if (!releaseId) return;
     return global.buttonState.withBusy(button, '', async () => {
@@ -442,6 +523,12 @@
         if (result.already_queued) {
           global.toast.warning(`Already in queue${title ? ` — "${title}"` : ''}`);
         } else {
+          // The tick is shown BEFORE the refresh below, which re-renders the
+          // list and would otherwise replace this button mid-transition — the
+          // brief's "immediate feedback after an action".
+          if (global.buttonState.setDone) {
+            global.buttonState.setDone(button, { label: 'Queued', icon: 'check-lg' });
+          }
           global.toast.queued(title || 'Release');
         }
         if (onRefresh) onRefresh();
@@ -482,6 +569,7 @@
     matchRelease,
     queueDownload,
     renderTable,
+    renderCarousel,
     renderProgressBadge,
     search,
     autoMatch,

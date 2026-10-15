@@ -274,15 +274,32 @@ class TestTheEndpoint:
 class TestTheCardIsWiredIntoTheDashboard:
     def test_the_card_markup_exists_and_starts_hidden(self):
         html = DASHBOARD_HTML.read_text(encoding="utf-8")
-        assert 'id="pendingApprovalCard"' in html
+        # Needs Review is the THIRD TAB of the activity feed, not a card of its
+        # own — three lists that all mean "things that happened" share one card.
+        assert 'id="pendingApprovalTabItem"' in html
+        assert 'id="pendingApprovalTab"' in html
         assert 'id="pending-approval-body"' in html
         assert 'id="pending-approval-count"' in html
-        # Starts hidden: an up-to-date library must not show an empty panel.
-        card_idx = html.index('id="pendingApprovalCard"')
-        assert "d-none" in html[max(0, card_idx - 120): card_idx + 120], (
-            "the card must start hidden and be revealed only when there is "
+        # The TAB starts hidden: an always-visible "Needs Review 0" is a
+        # permanent nag on a library with nothing to review.
+        item_idx = html.index('id="pendingApprovalTabItem"')
+        assert "d-none" in html[max(0, item_idx - 120): item_idx + 120], (
+            "the tab must start hidden and be revealed only when there is "
             "something to approve"
         )
+
+    def test_the_tab_is_revealed_and_hidden_by_the_poller(self):
+        """CONTROL: starts hidden is only half of it — something must show it.
+
+        Previously the CARD was toggled, so the assertion above could pass on
+        markup nothing ever un-hid.
+        """
+        js = DASHBOARD_JS.read_text(encoding="utf-8")
+        idx = js.index("function renderPendingApproval(")
+        body = js[idx: idx + 1400]
+        assert "pendingApprovalTabItem" in body
+        assert "classList.remove('d-none')" in body, "nothing reveals the tab"
+        assert "classList.add('d-none')" in body, "nothing hides it again"
 
     def test_the_list_is_scrollable(self):
         html = DASHBOARD_HTML.read_text(encoding="utf-8")

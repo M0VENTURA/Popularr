@@ -201,7 +201,7 @@ class TestUpcomingRendersOnBothBreakpoints:
     def test_both_containers_exist_in_the_template(self) -> None:
         html = _read(DASHBOARD_HTML)
         assert 'id="upcomingTableWrap"' in html
-        assert 'id="upcoming-releases-cards"' in html
+        assert 'id="upcoming-releases-carousel"' in html
         # The desktop wrapper is hidden below lg and the mobile one above it,
         # so BOTH must be populated for either breakpoint to show anything.
         assert "d-none d-lg-block" in html
@@ -210,14 +210,16 @@ class TestUpcomingRendersOnBothBreakpoints:
     def test_the_loader_renders_into_both(self) -> None:
         js = _read(DASHBOARD_JS)
         idx = js.index("async function loadUpcomingReleasesTable()")
-        window = js[idx: idx + 2200]
+        window = js[idx: idx + 2400]
         assert "getElementById('upcomingTableWrap')" in window
-        assert "getElementById('upcoming-releases-cards')" in window, (
+        assert "getElementById('upcoming-releases-carousel')" in window, (
             "the mobile container must be fetched, or it stays empty"
         )
-        # And rendered into each — the mobile one is the regression.
+        # And rendered into each — the mobile one is the regression. The two
+        # call DIFFERENT renderers on purpose: a table at lg+, a swipeable
+        # ribbon below it (see renderCarousel).
         assert "renderTable('upcomingTableWrap'" in window
-        assert "renderTable('upcoming-releases-cards'" in window, (
+        assert "renderCarousel('upcoming-releases-carousel'" in window, (
             "rendering only into the desktop wrapper left the mobile card blank"
         )
 
