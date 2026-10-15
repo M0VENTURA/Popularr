@@ -282,28 +282,68 @@
                 {% if recent_albums %}
                 <div class="list-group list-group-flush" style="max-height: 420px; overflow-y: auto; scrollbar-width: thin;">
                     {% for al in recent_albums %}
-                    <a href="{{ url_for('ui.album_detail', album_path=al.artist ~ '/' ~ al.album ~ (('/' ~ al.album_year) if al.album_year else '')) }}" 
-                       class="list-group-item list-group-item-action bg-transparent border-secondary d-flex justify-content-between align-items-center gap-2 p-2 hover-bg-dark">
-                        <div class="d-flex align-items-center gap-3 min-w-0">
-                            <!-- Circular placeholder icon to match UI -->
-                            <div class="flex-shrink-0 d-flex align-items-center justify-content-center rounded-circle" style="width: 40px; height: 40px; background-color: var(--tertiary-bg); border: 1px solid var(--border-color);">
-                                <i class="bi bi-disc text-muted fs-5"></i>
-                            </div>
-                            <div class="min-w-0">
-                                <div class="fw-bold text-truncate text-light" style="font-size: 0.9rem;">
-                                    {{ al.album }}
-                                    {% if al.album_year %}<span class="text-muted fw-normal ms-1" style="font-size: 0.75rem;">({{ al.album_year }})</span>{% endif %}
-                                    {% if al.album_type %}<span class="badge bg-secondary-subtle text-secondary-emphasis ms-1 extra-small">{{ al.album_type }}</span>{% endif %}
-                                </div>
-                                <div class="text-muted text-truncate" style="font-size: 0.8rem;">{{ al.artist }}</div>
-                            </div>
-                        </div>
-                        <div class="flex-shrink-0 text-end">
-                            <span class="badge bg-dark border border-secondary text-muted extra-small fw-normal">
-                                {% if al.added_at %}{{ al.added_at.strftime('%d %b') }}{% else %}—{% endif %}
-                            </span>
-                        </div>
-                    </a>
+                    {#
+                      ⚠️ The row is a DIV, not an <a>. It carries a PLAY button, and
+                      a <button> nested inside an <a> is invalid HTML — the browser
+                      reparses it, and a click fires BOTH the button and the link, so
+                      playing an album would also navigate away from the dashboard.
+                      The link now wraps only the art + text, and the actions sit
+                      beside it, which keeps "tap the row to open" and "tap the
+                      button to play" as separate gestures (the brief's own rule:
+                      "use explicit buttons to play, navigate, queue, scan or edit").
+
+                      TWO LINES, BOTH TRUNCATED, NOTHING CLIPPED. The old markup put
+                      the year and the type badge INSIDE the `text-truncate` title
+                      div, so a long album name ellipsised the metadata away instead
+                      of the title — the reported truncation bug. The title now
+                      truncates on its own line, and the second line holds
+                      artist · year with the badge as a NON-shrinking sibling.
+                    #}
+                    <div class="list-group-item bg-transparent border-secondary p-2 d-flex align-items-center gap-2">
+                      <a href="{{ url_for('ui.album_detail', album_path=al.artist ~ '/' ~ al.album ~ (('/' ~ al.album_year) if al.album_year else '')) }}"
+                         class="d-flex align-items-center gap-2 min-w-0 flex-grow-1 text-decoration-none">
+                        {#
+                          Real artwork when we have it. `album_in_collection` is
+                          implied here — this list IS library albums — so the art
+                          request is expected to succeed; the onerror fallback keeps
+                          the old disc glyph for an album with no embedded image,
+                          rather than a broken-image icon.
+                        #}
+                        <img src="/api/album/{{ al.artist|path_segment }}/{{ al.album|path_segment }}/art?s=80"
+                             alt="" loading="lazy" width="40" height="40"
+                             class="flex-shrink-0 rounded"
+                             style="object-fit: cover; background-color: var(--tertiary-bg); border: 1px solid var(--border-color);"
+                             onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                        <span class="flex-shrink-0 align-items-center justify-content-center rounded"
+                              style="display: none; width: 40px; height: 40px; background-color: var(--tertiary-bg); border: 1px solid var(--border-color);">
+                          <i class="bi bi-disc text-muted fs-5"></i>
+                        </span>
+                        <span class="min-w-0">
+                          <span class="d-block fw-bold text-truncate text-light" style="font-size: 0.9rem;">{{ al.album }}</span>
+                          <span class="d-flex align-items-center gap-1" style="font-size: 0.8rem;">
+                            <span class="text-muted text-truncate">{{ al.artist }}</span>
+                            {% if al.album_year %}<span class="text-muted flex-shrink-0">· {{ al.album_year }}</span>{% endif %}
+                            {% if al.album_type %}<span class="badge bg-secondary-subtle text-secondary-emphasis extra-small flex-shrink-0">{{ al.album_type }}</span>{% endif %}
+                          </span>
+                        </span>
+                      </a>
+                      <div class="flex-shrink-0 d-flex align-items-center gap-2">
+                        <span class="badge bg-dark border border-secondary text-muted extra-small fw-normal d-none d-sm-inline">
+                            {% if al.added_at %}{{ al.added_at.strftime('%d %b') }}{% else %}—{% endif %}
+                        </span>
+                        {#
+                          The low-profile add. `data-*` rather than an inline
+                          onclick with interpolated strings: album and artist names
+                          routinely contain apostrophes and quotes, which would end
+                          the JS string literal and break the handler.
+                        #}
+                        <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1 js-play-album"
+                                data-artist="{{ al.artist }}" data-album="{{ al.album }}"
+                                title="Play this album" aria-label="Play {{ al.album }} by {{ al.artist }}">
+                          <i class="bi bi-play-fill" aria-hidden="true"></i>
+                        </button>
+                      </div>
+                    </div>
                     {% endfor %}
                 </div>
                 {% else %}

@@ -27,7 +27,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-from helpers.template_filters import page_heading
+from helpers.template_filters import encode_path_segment, page_heading
 
 #: Repo root (tests/…).
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -64,9 +64,16 @@ def build_env(path: str = "/") -> Environment:
     # has to add the ones the shell actually uses. Unknown filters raise at
     # render time rather than silently rendering nothing, which is the behaviour
     # we want — a missing filter should be loud.
+    #
+    # ⚠️ `path_segment` uses the REAL implementation, not a pass-through. It
+    # percent-encodes a name TWICE (see its docstring: the ASGI server decodes
+    # `%2F` before routing, so a single encoding splits a path). A pass-through
+    # stub therefore renders a URL with raw spaces and `&` in it, and a probe
+    # reading that cannot tell a correct URL from a broken one. Tests that stub
+    # the thing under test prove nothing about it.
     env.filters["page_heading"] = page_heading
     env.filters["title_case"] = _passthrough
-    env.filters["path_segment"] = lambda value: str(value)
+    env.filters["path_segment"] = encode_path_segment
     env.filters["artist_sort_name"] = _passthrough
     env.filters["format_duration"] = lambda value: str(value)
     env.globals.update(

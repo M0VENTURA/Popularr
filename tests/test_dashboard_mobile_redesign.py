@@ -425,3 +425,247 @@ class TestQueueFeedback:
         assert data["empty_hidden"] is True
         assert data["one_visible"] is True
         assert data["escapes_html"] is True
+
+
+# ---------------------------------------------------------------------------
+# 6. The activity feed's own rows — art, truncation, the add button
+# ---------------------------------------------------------------------------
+
+
+#: An album name carrying BOTH characters that break naive interpolation: an
+#: apostrophe ends a single-quoted JS literal, a double quote ends an HTML
+#: attribute. Real library names contain both.
+TRICKY_ALBUM = '"Heroes" & Other Rarities'
+TRICKY_ARTIST = "O'Brien & Sons"
+
+
+@pytest.fixture(scope="module")
+def recent_row() -> str:
+    """Render the REAL dashboard and return one Recently Added row.
+
+    ⭐ A source-text assertion cannot answer the questions this section asks —
+    whether the year survives a long title, whether the button ended up outside
+    the anchor, whether a name with a quote in it encodes safely. So the shipped
+    template is rendered and the markup read back.
+    """
+    import sys
+    from datetime import datetime
+
+    sys.path.insert(0, str(REPO_ROOT))
+    from tests._test_site_render import build_env
+
+    env = build_env("/dashboard")
+    html = env.get_template("Pages/dashboard.html").render(
+        recent_albums=[{
+            "artist": TRICKY_ARTIST,
+            "album": TRICKY_ALBUM,
+            "album_year": "1977",
+            "album_type": "Album",
+            "track_count": 10,
+            "added_at": datetime(2026, 10, 14),
+        }],
+        recent_scans=[],
+        stats={"artists_c": 1, "ac": 2, "tc": 3, "avg_stars": 4.5},
+        album_categories=[],
+        albums_by_category={},
+        top_tracks=[],
+        error=None,
+        scan_active=False,
+        launch_on_startup=False,
+        first_full_scan_done=True,
+        perpetual=False,
+        forced=False,
+        nav_users=[],
+    )
+
+    marker = html.index("js-play-album")
+    start = html.rindex('<div class="list-group-item', 0, marker)
+    end = html.index("</button>", marker) + len("</button>")
+    return html[start:end]
+
+
+class TestTheActivityRowShowsArtwork:
+
+    def test_real_art_is_requested(self, recent_row: str) -> None:
+        assert "/art?s=80" in recent_row, (
+            "the row still shows a placeholder instead of the album's artwork"
+        )
+
+    def test_the_request_is_lazy(self, recent_row: str) -> None:
+        """Twelve albums x one request each is a slow first paint otherwise."""
+        assert 'loading="lazy"' in recent_row
+
+    def test_there_is_a_fallback_for_an_album_with_no_image(self, recent_row: str) -> None:
+        """The endpoint returns a placeholder SVG rather than 404-ing, but an
+        album with no art at all should still fall back to the disc glyph rather
+        than showing a broken image."""
+        assert "onerror=" in recent_row
+        assert "bi-disc" in recent_row, "the fallback glyph was removed"
+
+    def test_the_name_is_percent_encoded_for_the_url(self, recent_row: str) -> None:
+        """⭐ `path_segment` double-encodes so the ASGI server's `%2F` decoding
+        cannot split the path. Asserted through a name containing an apostrophe,
+        a quote, an ampersand and spaces — a raw `O'Brien & Sons` in a URL is a
+        different request from the encoded one."""
+        assert "O%2527Brien" in recent_row, (
+            "the artist segment is not percent-encoded — a name with a quote or "
+            "an ampersand in it produces a broken art URL"
+        )
+        assert "O'Brien &" not in recent_row.split('src="')[1].split('"')[0], (
+            "raw characters reached the URL"
+        )
+
+
+class TestTheRowDoesNotClipItsMetadata:
+
+    def test_the_year_is_outside_the_truncating_title(self, recent_row: str) -> None:
+        """⭐ The reported truncation bug.
+
+        The title div is `text-truncate` (nowrap + ellipsis + hidden). With the
+        year and the type badge INSIDE it, a long album name ellipsised the
+        METADATA away instead of the title — the user lost the year rather than
+        seeing a shortened name.
+        """
+        title_start = recent_row.index("text-truncate text-light")
+        title_span = recent_row[title_start: recent_row.index("</span>", title_start)]
+        assert "1977" not in title_span, (
+            "the year is inside the truncating element, so a long title clips it"
+        )
+        # ⚠️ Asserted on the BADGE MARKUP, not on the label text. A mutation that
+        # re-nested `<span class="badge">{{ al.album_type }}</span>` put "Album"
+        # inside the title span but WITHOUT a `</span>` after it, so a check for
+        # `"Album</span>" not in title_span` passed and the mutation escaped —
+        # the assertion was reading the wrong thing. The markup is what nests.
+        assert 'class="badge' not in title_span, (
+            "the type badge is inside the truncating element"
+        )
+        assert "text-muted" not in title_span, (
+            "another metadata span is inside the truncating element"
+        )
+
+    def test_the_metadata_is_still_present(self, recent_row: str) -> None:
+        """CONTROL: moving it must not drop it."""
+        assert "1977" in recent_row
+        assert ">Album<" in recent_row
+
+    def test_the_art_cannot_be_squeezed_by_a_long_title(self, recent_row: str) -> None:
+        """`flex-shrink-0` on the art: without it a long title compresses the
+        thumbnail instead of ellipsising."""
+        img = recent_row[recent_row.index("<img"): recent_row.index(">", recent_row.index("<img"))]
+        assert "flex-shrink-0" in img
+
+
+class TestTheLowProfileAddButton:
+
+    def test_the_button_exists_and_says_what_it_does(self, recent_row: str) -> None:
+        assert "js-play-album" in recent_row
+        assert 'aria-label="Play' in recent_row, (
+            "an icon-only button needs an accessible name"
+        )
+        assert 'title="Play this album"' in recent_row
+
+    def test_it_is_outside_the_album_link(self, recent_row: str) -> None:
+        """⭐ A `<button>` inside an `<a>` is INVALID HTML.
+
+        The browser reparses it, and a click fires both the button and the link
+        — so playing an album would also navigate away from the dashboard. The
+        row had to become a div with the link restricted to the art + text.
+        """
+        assert not re.search(
+            r"<a\b[^>]*>(?:(?!</a>).)*js-play-album", recent_row, re.DOTALL
+        ), "the play button is nested inside the album link"
+        # And the link still wraps the part that SHOULD navigate.
+        assert re.search(r"<a\b[^>]*>", recent_row)
+        assert recent_row.count("<a ") == 1
+
+    def test_the_names_survive_in_data_attributes(self, recent_row: str) -> None:
+        """⭐ Why `data-` rather than an inline onclick.
+
+        An apostrophe in the album name would terminate a JS string literal in
+        the attribute and produce a syntax error on the page. Jinja escapes the
+        quotes to entities, which the browser decodes when reading `dataset`.
+        """
+        artist_attr = re.search(r'data-artist="([^"]*)"', recent_row).group(1)
+        album_attr = re.search(r'data-album="([^"]*)"', recent_row).group(1)
+
+        # No RAW quote/`<`/`>` — the attribute value must be entity-escaped.
+        for value in (artist_attr, album_attr):
+            assert '"' not in value
+            assert "<" not in value and ">" not in value
+        assert "&#34;" in album_attr or "&quot;" in album_attr, (
+            "the album's own double quotes were not escaped"
+        )
+        assert "&#39;" in artist_attr or "&apos;" in artist_attr, (
+            "the apostrophe in the artist name was not escaped"
+        )
+        assert "onclick" not in recent_row, (
+            "an inline onclick would break on a name containing a quote"
+        )
+
+
+class TestThePlayHandler:
+
+    def test_it_uses_the_endpoint_the_album_page_already_uses(self, dash_js: str) -> None:
+        """No new API, so this cannot drift from what the album page shows."""
+        assert "/api/album/tracklist?" in dash_js
+
+    def test_it_renames_the_track_id_for_the_player(self, dash_js: str) -> None:
+        """`/api/album/tracklist` returns `track_id`; `Player.playQueue` wants
+        `id`. Mapping it explicitly is what stops the queue receiving undefined
+        ids."""
+        idx = dash_js.index("function playRecentAlbum(")
+        body = dash_js[idx: idx + 2200]
+        assert "t.track_id" in body
+        assert "id:" in body
+
+    def test_an_empty_album_says_so(self, dash_js: str) -> None:
+        """Playing nothing reads as a broken button."""
+        idx = dash_js.index("function playRecentAlbum(")
+        body = dash_js[idx: idx + 2200]
+        assert "tracks.length" in body
+        assert "toast.warning" in body
+
+    def test_a_failure_is_reported_and_the_button_recovers(self, dash_js: str) -> None:
+        """⭐ Bounded to the CATCH BLOCK, not a character window.
+
+        `playRecentAlbum` contains TWO `toast.error` calls — the player-missing
+        guard and the failure report. A window assertion of `"toast.error" in
+        body` was therefore satisfied by the guard, so deleting the failure
+        report still passed. The slice now starts at the `catch`.
+        """
+        idx = dash_js.index("function playRecentAlbum(")
+        body = dash_js[idx: idx + 2200]
+        catch = body[body.index("} catch (error)"):]
+        assert "toast.error" in catch, (
+            "a failed play reports nothing — the button looks like it did nothing"
+        )
+        assert "error.message" in catch, "the reason is swallowed"
+        assert "finally" in body and "restore()" in body, (
+            "the button is left in its busy state after a failure"
+        )
+
+    def test_the_handler_is_delegated(self, dash_js: str) -> None:
+        """⭐ The pane is SERVER-RENDERED, so its buttons exist before this
+        module runs — but a re-render would drop per-button listeners. One
+        listener on the ancestor survives any innerHTML replacement."""
+        idx = dash_js.index("function initRecentlyAddedActions(")
+        body = dash_js[idx: idx + 900]
+        assert "addEventListener('click'" in body
+        assert "closest('.js-play-album')" in body, (
+            "the listener must resolve the button by class from the event target"
+        )
+
+    def test_the_handler_is_wired_at_init(self, dash_js: str) -> None:
+        """An unbound handler is a dead button."""
+        assert "initRecentlyAddedActions();" in dash_js
+        # And inside the DOMContentLoaded block, not merely defined.
+        idx = dash_js.index("document.addEventListener('DOMContentLoaded'")
+        assert "initRecentlyAddedActions()" in dash_js[idx:], (
+            "the bind never runs"
+        )
+
+    def test_it_does_not_navigate_as_well_as_playing(self, dash_js: str) -> None:
+        idx = dash_js.index("function initRecentlyAddedActions(")
+        body = dash_js[idx: idx + 900]
+        assert "preventDefault()" in body
+

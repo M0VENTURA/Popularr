@@ -640,6 +640,82 @@
     }).join('');
   }
 
+  // ── Recently Added: play an album ───────────────────────────────────────
+
+  /**
+   * Play an album from the Recently Added feed.
+   *
+   * The tracklist comes from GET /api/album/tracklist, which is the endpoint
+   * the album page already uses — so this needs no new API and cannot drift
+   * from what the album page shows. Its rows are
+   * ``{track_id, position, title, artist}``; Player.playQueue wants
+   * ``{id, title, artist, albumArtUrl}``, so the id is renamed here.
+   *
+   * ⭐ DELEGATED from the list container rather than bound per button. The
+   * Recently Added pane is SERVER-RENDERED, so its buttons exist before this
+   * module runs — but the tab can be re-rendered by a navigation and a
+   * per-button listener would then be lost. One listener on the ancestor
+   * survives any innerHTML replacement.
+   *
+   * The album is passed through ``data-`` attributes, not an inline onclick:
+   * album names routinely contain apostrophes, which would terminate a JS
+   * string literal in the attribute and produce a syntax error on the page.
+   */
+  async function playRecentAlbum(button) {
+    const artist = button.dataset.artist || '';
+    const album = button.dataset.album || '';
+    if (!artist || !album) return;
+
+    if (!global.Player || typeof global.Player.playQueue !== 'function') {
+      global.toast.error('The player is unavailable on this page.');
+      return;
+    }
+
+    const restore = global.buttonState
+      ? global.buttonState.setBusy(button, '')
+      : function () {};
+
+    try {
+      const params = new URLSearchParams({ artist, album });
+      const data = await global.api.getJson(`/api/album/tracklist?${params}`);
+      const tracks = (data && data.tracklist) || [];
+
+      if (!tracks.length) {
+        // An empty album is a real state (every track failed to import), and
+        // silently playing nothing reads as a broken button.
+        global.toast.warning(`No playable tracks on "${album}".`);
+        return;
+      }
+
+      global.Player.playQueue(tracks.map((t) => ({
+        id: t.track_id,
+        title: t.title || '',
+        artist: t.artist || artist,
+        // The same art URL the row already loaded, so the player reuses the
+        // browser cache instead of requesting it a second time.
+        albumArtUrl: `/api/album/${encodeURIComponent(artist)}/${encodeURIComponent(album)}/art?s=160`,
+      })));
+    } catch (error) {
+      global.toast.error(`Could not play "${album}": ${error.message}`);
+    } finally {
+      restore();
+    }
+  }
+
+  function initRecentlyAddedActions() {
+    const pane = document.getElementById('recentAddedPane');
+    if (!pane) return;
+    pane.addEventListener('click', (event) => {
+      const button = event.target.closest('.js-play-album');
+      if (!button || !pane.contains(button)) return;
+      // The button sits BESIDE the album link, not inside it (a <button> in an
+      // <a> is invalid HTML), but stop the event anyway so a future markup
+      // change that nests them cannot start navigating as well as playing.
+      event.preventDefault();
+      playRecentAlbum(button);
+    });
+  }
+
   // ── Needs Metadata Approval ─────────────────────────────────────────────
 
   let lastPendingApprovalPayload = null;
@@ -879,6 +955,7 @@
     checkNavidromeConnectivity();
     renderRecentScans((global._pd && global._pd.recentScans) || []);
     initRecentHistoryTabs();
+    initRecentlyAddedActions();
 
     try {
       const stored = sessionStorage.getItem('dashboardTableFilter');
