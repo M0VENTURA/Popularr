@@ -70,11 +70,12 @@ class TestThePhasesRunInAnOrderThatPreservesTheReview:
         genres = ROUTE_SOURCE.index("_apply_album_track_genres(")
         persist = ROUTE_SOURCE.index("_persist_album_track_payload(track_id, payload)")
         # The FILE phase no longer sits inside the per-track loop: it became
-        # ONE concurrent phase after it (Cloudflare 524 — N sequential disk
-        # passes outlived the origin timeout), so the route's own call site is
-        # the gather and the helper below is what touches the file. What must
-        # not change is the ORDER of the phases relative to the database.
-        file_phase = ROUTE_SOURCE.index("_write_album_track_files_concurrently(")
+        # ONE phase after it (Cloudflare 524 — N sequential disk passes
+        # outlived the origin timeout), and since 2026-10-15 that one phase is
+        # reached through the disk runner so a LARGE album can also be handed
+        # to the background service. What must not change is the ORDER of the
+        # phases relative to the database.
+        file_phase = ROUTE_SOURCE.index("_run_album_file_sync_phases")
 
         assert genres < persist < file_phase, (
             "the loop's write order changed (genres → persist → file tags)"
@@ -83,18 +84,26 @@ class TestThePhasesRunInAnOrderThatPreservesTheReview:
     def test_the_file_phase_still_writes_through_the_phase_helper(self):
         """Concurrency must not invent a second writer.
 
-        The gather runs the SAME phase the loop used to call, off the event
-        loop in a worker thread — if it ever opened the file itself, the
+        The bounded pool runs the SAME phase the loop used to call, off the
+        event loop in worker threads — if it ever opened the file itself, the
         tag-write policy gates (``write_tags_to_file``, ``ratings_only``,
         ``fill_missing_only``) would be bypassed for album saves.
+
+        This is now load-bearing for TWO paths: the inline save and the
+        background service both reach the files through
+        ``_run_album_file_sync_phases`` → ``_write_album_track_files_bounded``.
         """
         # Compared whitespace-insensitively: the call wraps across lines, and a
         # reformat must not turn a passing check into a false failure.
         flat = " ".join(UI_SOURCE.split())
-        assert "asyncio.to_thread( _write_album_track_file_tags," in flat, (
-            "the concurrent file phase does not go through "
+        assert "return _write_album_track_file_tags(" in flat, (
+            "the bounded file phase does not go through "
             "_write_album_track_file_tags — the album save would write tags "
             "outside the tagging policy"
+        )
+        assert "ThreadPoolExecutor(max_workers=_FILE_WRITE_CONCURRENCY)" in flat, (
+            "the file writes are not bounded — one album could put every track "
+            "on the disk (or the network mount) at once"
         )
 
     def test_the_route_does_no_writing_inline(self):
@@ -398,7 +407,7 @@ class TestTheSaveCannotOutliveTheOriginTimeout:
         """Phase 3 is queued in the loop and run once, after it."""
         queue_at = ROUTE_SOURCE.index("_file_jobs.append(")
         persist_at = ROUTE_SOURCE.index("_persist_album_track_payload(track_id, payload)")
-        run_at = ROUTE_SOURCE.index("_write_album_track_files_concurrently(")
+        run_at = ROUTE_SOURCE.index("_run_album_file_sync_phases")
 
         assert persist_at < queue_at < run_at, (
             "the file phase must stay AFTER the database writes and be "
@@ -428,7 +437,7 @@ class TestTheFilePhaseRunsConcurrentlyButBounded:
         return [(f"t{i}", {"id": f"t{i}"}, {"id": f"t{i}"}, False, False)
                 for i in range(count)]
 
-    async def test_writes_overlap_and_stay_within_the_cap(self, monkeypatch):
+    def test_writes_overlap_and_stay_within_the_cap(self, monkeypatch):
         import threading
         import time as _time
 
@@ -447,7 +456,7 @@ class TestTheFilePhaseRunsConcurrentlyButBounded:
         monkeypatch.setattr(ui, "_write_album_track_file_tags", _slow)
 
         started = _time.monotonic()
-        results = await ui._write_album_track_files_concurrently(self._jobs(8))
+        results = ui._write_album_track_files_bounded(self._jobs(8))
         elapsed = _time.monotonic() - started
 
         assert state["peak"] >= 2, (
@@ -455,28 +464,29 @@ class TestTheFilePhaseRunsConcurrentlyButBounded:
             "clock the 524 was caused by"
         )
         assert state["peak"] <= ui._FILE_WRITE_CONCURRENCY, (
-            "the semaphore is not bounding the writes: one album could put "
-            "every track on the disk (or the network mount) at once"
+            "the pool is not bounding the writes: one album could put every "
+            "track on the disk (or the network mount) at once"
         )
         # Sequential would be 8 × 0.2s = 1.6s; four at a time is ~0.4s.
         assert elapsed < 1.0, (
             f"8 writes took {elapsed:.2f}s — the phase is not overlapping"
         )
+        assert len(results) == 8
 
-    async def test_results_stay_in_job_order(self, monkeypatch):
+    def test_results_stay_in_job_order(self, monkeypatch):
         """The caller attributes a failure to ITS file by position."""
         def _echo(track_id, track, payload, *, strip_disc_numbers, disc_staged):
             return (True, f"/music/{track_id}.mp3")
 
         monkeypatch.setattr(ui, "_write_album_track_file_tags", _echo)
 
-        results = await ui._write_album_track_files_concurrently(self._jobs(5))
+        results = ui._write_album_track_files_bounded(self._jobs(5))
 
         assert [path for _ok, path in results] == [
             f"/music/t{i}.mp3" for i in range(5)
         ]
 
-    async def test_one_crashing_track_does_not_lose_the_rest(self, monkeypatch):
+    def test_one_crashing_track_does_not_lose_the_rest(self, monkeypatch):
         """A single bad file must not cost the album its other tags."""
         def _sometimes(track_id, track, payload, *, strip_disc_numbers, disc_staged):
             if track_id == "t2":
@@ -485,7 +495,7 @@ class TestTheFilePhaseRunsConcurrentlyButBounded:
 
         monkeypatch.setattr(ui, "_write_album_track_file_tags", _sometimes)
 
-        results = await ui._write_album_track_files_concurrently(self._jobs(4))
+        results = ui._write_album_track_files_bounded(self._jobs(4))
 
         assert results[2] == (False, ""), (
             "the crashing track must report a failure the counter can see"
@@ -494,5 +504,5 @@ class TestTheFilePhaseRunsConcurrentlyButBounded:
             "the other tracks must still be written"
         )
 
-    async def test_an_empty_album_writes_nothing(self):
-        assert await ui._write_album_track_files_concurrently([]) == []
+    def test_an_empty_album_writes_nothing(self):
+        assert ui._write_album_track_files_bounded([]) == []

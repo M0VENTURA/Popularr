@@ -110,3 +110,67 @@ def api_release_connections() -> Any:
     except Exception as exc:
         logger.error("Releasing database connections failed", error=str(exc), exc_info=True)
         return jsonify({"error": str(exc)}), 500
+
+
+# =============================================================================
+# ALBUM SAVE — background file tagging
+# =============================================================================
+
+@maintenance_bp.route("/api/maintenance/album-file-sync", methods=["GET"])
+def api_album_file_sync_status() -> Any:
+    """What album tagging is running in the background, and what just finished.
+
+    A large album save returns as soon as its DATABASE half is committed, and the
+    file tagging continues on a background thread. The user has already navigated
+    away by then, so this is the only way to see whether that work succeeded —
+    without it a failed tag write would be silent.
+
+    ``recent`` is a bounded tail (newest first) so a failure stays visible after
+    the job has left the running list.
+    """
+    from services.metadata.album_file_sync_service import (
+        get_album_file_sync_state,
+    )
+
+    try:
+        return jsonify(get_album_file_sync_state())
+    except Exception as exc:
+        logger.error("Album file sync status failed", error=str(exc), exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
+@maintenance_bp.route("/api/maintenance/album-file-sync/drain", methods=["POST"])
+async def api_album_file_sync_drain() -> Any:
+    """Wait for one album's background tagging to finish.
+
+    Body: ``{"artist": "...", "album": "...", "timeout": 30}``
+
+    For a script or an operator who wants to be sure the files are written before
+    doing something else — for example before a database stop, which is why this
+    lives beside the safe-shutdown routes rather than on the album page.
+    """
+    from services.metadata.album_file_sync_service import (
+        get_album_file_sync_state,
+        wait_for_album_file_sync,
+    )
+
+    # ⚠️ ``request.get_json()`` is a COROUTINE in Quart — a plain ``def`` handler
+    # gets the coroutine object and every ``.get`` on it raises AttributeError.
+    payload = (await request.get_json(silent=True)) or {}
+    artist = str(payload.get("artist") or "").strip()
+    album = str(payload.get("album") or "").strip()
+    if not artist or not album:
+        return jsonify({"error": "artist and album are required"}), 400
+
+    try:
+        timeout = float(payload.get("timeout") or 30)
+    except (TypeError, ValueError):
+        return jsonify({"error": "timeout must be a number"}), 400
+
+    try:
+        drained = wait_for_album_file_sync(artist, album, timeout=max(0.0, timeout))
+    except Exception as exc:
+        logger.error("Album file sync drain failed", error=str(exc), exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify({"drained": drained, **get_album_file_sync_state()})

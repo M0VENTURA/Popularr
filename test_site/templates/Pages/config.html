@@ -315,6 +315,46 @@
       </div>
     </div>
 
+    <!-- ===== Album Save ===== -->
+    <div class="card shadow-sm mb-3" id="album_save">
+      <div class="card-header">
+        <h5 class="mb-0"><i class="bi bi-hourglass-split"></i> Album Save — Large Album Handling</h5>
+      </div>
+      <div class="card-body">
+        <p class="text-muted small mb-3">
+          Saving an album rewrites every track's audio file. On a large album that can outlive the
+          <strong>100-second origin timeout</strong> imposed by Cloudflare (error <code>524</code>), so past a
+          configured size the file-tagging half is handed to a background service and the page returns as soon as
+          the <strong>database</strong> has been saved. Your edits are committed before you are redirected; the
+          background service then writes the file tags, embeds the cover art, and asks Navidrome to re-scan.
+        </p>
+        <div class="row g-3">
+          <div class="col-12 col-md-6">
+            <div class="form-check form-switch mb-2">
+              <input class="form-check-input" type="checkbox" id="album_save_background_enabled" {% if config.get('album_save', {}).get('background', {}).get('enabled', True) %}checked{% endif %}>
+              <label class="form-check-label" for="album_save_background_enabled"><strong>Background Large Album Saves</strong></label>
+              <small class="d-block text-muted">When off, every save tags its files inline — the pre-change behaviour, and the right fallback if the background service ever misbehaves.</small>
+            </div>
+          </div>
+          <div class="col-12 col-md-6">
+            <label class="form-label" for="album_save_background_threshold">Track Count Threshold</label>
+            <input type="number" class="form-control" id="album_save_background_threshold" min="0" step="10" value="{{ config.get('album_save', {}).get('background', {}).get('track_threshold', 40) }}">
+            <div class="form-text">Albums with at least this many tracks are tagged in the background. Smaller albums stay fully synchronous, so the response confirms the file tags. Use 0 to background every save.</div>
+          </div>
+          <div class="col-12">
+            <div class="alert alert-secondary py-2 px-3 small mb-0">
+              <strong>What moves and what does not.</strong>
+              The <em>database</em> half of the save always stays in the request — that is what makes the edit
+              visible immediately and means a later failure costs the file tags, not the edit. Only the
+              <em>disk</em> half (rewriting N audio files, embedding art) is backgrounded, together with the
+              Navidrome re-scan, which must run <em>after</em> the tags are on disk or the next import would
+              restore the pre-save values.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- ===== Safe Shutdown ===== -->
     <div class="card shadow-sm mb-3" id="safe_shutdown">
       <div class="card-header">

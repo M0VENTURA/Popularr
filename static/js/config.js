@@ -340,6 +340,15 @@ function buildConfigObject() {
         release_connections: getChecked('safe_shutdown_release_connections', true)
       }
     },
+    // Large album saves: past this track count the file-tagging half runs in a
+    // background service, so the response is not held past Cloudflare's 100s
+    // origin timeout (the reported 524).
+    album_save: {
+      background: {
+        enabled: getChecked('album_save_background_enabled', true),
+        track_threshold: parseInt(getValue('album_save_background_threshold', '40')) || 0
+      }
+    },
     downloads: {
       folder: getValue('downloads_folder'),
       external_export_path: getValue('external_export_path'),

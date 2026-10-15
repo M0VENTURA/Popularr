@@ -137,8 +137,10 @@ class TestTheStripStaysInTheSavePath:
         source = (REPO_ROOT / "routes" / "ui_routes.py").read_text(encoding="utf-8")
         assert "_FILE_GENRE_TAG_FIELDS" in source
         # Inside the file-phase helper, between build_tag_updates and the write.
+        # The slice ends at the NEXT top-level def, which is the bounded pool
+        # that runs this phase (it was the async wrapper before 2026-10-15).
         fn = source[source.index("def _write_album_track_file_tags"):]
-        fn = fn[: fn.index("def _write_album_track_files_concurrently")]
+        fn = fn[: fn.index("def _write_album_track_files_bounded")]
         assert "for _genre_field in _FILE_GENRE_TAG_FIELDS:" in fn
         assert "file_tags.pop(_genre_field, None)" in fn
         assert fn.index("file_tags.pop(_genre_field, None)") < fn.index("update_file_tags(resolved, file_tags)"), (

@@ -1954,6 +1954,43 @@ def get_safe_shutdown_config() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Album save: background disk phase
+# ---------------------------------------------------------------------------
+
+def get_album_save_background_config() -> dict[str, Any]:
+    """Get the album-save background-tagging settings.
+
+    Config section: ``album_save.background`` in config.yaml
+
+    An album save rewrites every track's audio file. Past a certain track count
+    that outlives Cloudflare's 100s origin timeout (the reported **524**), so the
+    disk phase is handed to a background service and the response returns as soon
+    as the DATABASE half is committed.
+
+    Returns:
+        Dict with ``enabled`` and ``track_threshold``.
+
+    ``track_threshold`` is the number of files at which the disk phase moves off
+    the request. Below it the save is exactly what it always was — small albums
+    finish well inside the window, and keeping them synchronous means the user
+    sees the file tags confirmed in the response they already have.
+
+    ``0`` (or ``enabled: false``) keeps EVERY save inline, which is the pre-change
+    behaviour and the right fallback if the background service ever misbehaves.
+    """
+    cfg = get_config()
+    block = cfg.get("album_save", {}).get("background", {})
+    try:
+        threshold = int(block.get("track_threshold", 40))
+    except (TypeError, ValueError):
+        threshold = 40
+    return {
+        "enabled": bool(block.get("enabled", True)),
+        "track_threshold": max(0, threshold),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Download conversion settings
 # ---------------------------------------------------------------------------
 

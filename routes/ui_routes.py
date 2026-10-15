@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -38,6 +39,7 @@ from services.catalog.release_categories import (
 )
 from helpers.config_helpers import (
     clear_config_cache,
+    get_album_save_background_config,
     get_config,
     needs_setup,
     read_config_from_disk,
@@ -1654,22 +1656,29 @@ def _write_album_track_file_tags(
     return False, resolved
 
 
-async def _write_album_track_files_concurrently(
+def _write_album_track_files_bounded(
     jobs: list[tuple[Any, dict, dict, bool, bool]],
 ) -> list[tuple[bool, str]]:
-    """Run one album save's per-track FILE writes concurrently. AWAITABLE.
+    """Run one album save's per-track FILE writes, bounded. SYNC.
 
     Each job is ``(track_id, track, payload, strip_disc_numbers, disc_staged)``
-    — the exact arguments of :func:`_write_album_track_file_tags`, which does
-    the work in a worker thread so the event loop stays free.
+    — the exact arguments of :func:`_write_album_track_file_tags`, which does the
+    actual write.
 
     ⚠️ WHY THIS EXISTS. The save used to write each file inside its per-track
     loop, so an album cost N SEQUENTIAL disk passes (each one reads the file
-    twice to honour ``preserve_file_timestamps`` and then rewrites it). The
-    loop was the wall clock behind the reported **Cloudflare 524** — an album
-    save that took longer than Cloudflare's 100s origin timeout. Tracks are
-    independent files and every write is an atomic temp+replace, so they can
-    run together; the semaphore bounds how many hit one disk at once.
+    twice to honour ``preserve_file_timestamps`` and then rewrites it). The loop
+    was the wall clock behind the reported **Cloudflare 524** — an album save
+    that took longer than Cloudflare's 100s origin timeout. Tracks are
+    independent files and every write is an atomic temp+replace, so they can run
+    together; the pool bounds how many hit one disk at once.
+
+    ⚠️ SYNC ON PURPOSE, and it is the ONE implementation of this phase. It is
+    called from a worker thread inline (``asyncio.to_thread``) and directly from
+    the background service's own thread, so a small album and a large one go
+    through exactly the same code — same cap, same ordering, same crash
+    isolation. An ``async`` version would have forced the background path to spin
+    up a nested event loop to reach it.
 
     Returns one ``(ok, file_path)`` per job, IN ORDER, so the caller's failure
     counter still attributes the right file to the right track. One track
@@ -1678,28 +1687,100 @@ async def _write_album_track_files_concurrently(
     if not jobs:
         return []
 
-    semaphore = asyncio.Semaphore(_FILE_WRITE_CONCURRENCY)
+    def _one(job: tuple[Any, dict, dict, bool, bool]) -> tuple[bool, str]:
+        track_id, track, payload, strip_disc_numbers, disc_staged = job
+        try:
+            # ``strip_disc_numbers``/``disc_staged`` are KEYWORD-ONLY on the
+            # phase, so they cannot ride along in an ``*job`` splat.
+            return _write_album_track_file_tags(
+                track_id, track, payload,
+                strip_disc_numbers=strip_disc_numbers,
+                disc_staged=disc_staged,
+            )
+        except Exception as exc:  # defensive: keep the other tracks going
+            logger.warning(
+                "File tag write CRASHED",
+                track_id=track_id, error=str(exc),
+            )
+            return (False, "")
 
-    async def _one(job: tuple[Any, dict, dict, bool, bool]) -> tuple[bool, str]:
-        async with semaphore:
-            track_id, track, payload, strip_disc_numbers, disc_staged = job
-            try:
-                # ``strip_disc_numbers``/``disc_staged`` are KEYWORD-ONLY on
-                # the phase, so they cannot ride along in an ``*job`` splat.
-                return await asyncio.to_thread(
-                    _write_album_track_file_tags,
-                    track_id, track, payload,
-                    strip_disc_numbers=strip_disc_numbers,
-                    disc_staged=disc_staged,
-                )
-            except Exception as exc:  # defensive: keep the other tracks going
-                logger.warning(
-                    "File tag write CRASHED",
-                    track_id=track_id, error=str(exc),
-                )
-                return (False, "")
+    # ``ThreadPoolExecutor.map`` preserves INPUT order, which the caller depends
+    # on to attribute a failure to its own file.
+    with ThreadPoolExecutor(max_workers=_FILE_WRITE_CONCURRENCY) as pool:
+        return list(pool.map(_one, jobs))
 
-    return list(await asyncio.gather(*(_one(job) for job in jobs)))
+
+def _run_album_file_sync_phases(payload: dict[str, Any]) -> dict[str, Any]:
+    """The album save's DISK phase: file tags → cover art → Navidrome rescan.
+
+    SYNC, and the ONE implementation of this phase. It is reached two ways:
+
+    * **inline**, through ``asyncio.to_thread``, for an album small enough that
+      the request comfortably fits inside Cloudflare's 100s origin window;
+    * **in the background**, on the album-file-sync service's own thread, for an
+      album large enough that it does not (the reported 524).
+
+    Keeping one implementation is what makes the background path trustworthy: the
+    tag-write policy gates, the concurrency cap and the crash isolation are the
+    same code the inline path has always run.
+
+    ``payload`` carries plain data only — the job outlives the request that
+    created it, so it can hold no request or session objects.
+
+    ⚠️ THE RESCAN IS THE LAST STEP, AFTER THE TAGS AND THE COVER. Navidrome serves
+    its own database and only refreshes when it re-scans; a rescan that ran before
+    the files were written would import the PRE-save values and the next import
+    would put the old metadata back. Backgrounding the writes without moving the
+    rescan would have introduced exactly that bug.
+    """
+    jobs = payload.get("file_jobs") or []
+    results = _write_album_track_files_bounded(jobs)
+
+    file_failures = 0
+    # Reported per file for BOTH paths. A backgrounded save used to be the case
+    # where this diagnostic disappeared, because the response had already gone.
+    for job, (ok, resolved_file) in zip(jobs, results):
+        if not ok:
+            file_failures += 1
+            logger.warning(
+                "File tag write SKIPPED - DB updated only",
+                track_id=job[0], file_path=resolved_file,
+            )
+
+    cover_embedded = 0
+    cover_bytes = payload.get("cover_bytes")
+    if cover_bytes:
+        try:
+            from services.enrichment.album_art_service import (
+                apply_album_art_to_tracks,
+            )
+
+            cover_embedded = apply_album_art_to_tracks(
+                str(payload.get("album_artist") or ""),
+                str(payload.get("album") or ""),
+                cover_bytes,
+                str(payload.get("cover_mime") or "image/jpeg"),
+            ) or 0
+        except Exception as _cover_exc:
+            logger.debug("Album save cover embed failed", error=str(_cover_exc))
+
+    rescanned = False
+    if payload.get("should_rescan"):
+        try:
+            from services.scanning.navidrome_rescan_service import request_rescan
+
+            rescanned = bool(request_rescan("album metadata save"))
+        except Exception as _rescan_exc:
+            logger.debug(
+                "Post-save Navidrome rescan request failed", error=str(_rescan_exc)
+            )
+
+    return {
+        "file_failures": file_failures,
+        "cover_embedded": cover_embedded,
+        "rescanned": rescanned,
+        "tracks": len(jobs),
+    }
 
 
 def _resolve_album_cover_bytes(
@@ -2496,32 +2577,22 @@ async def album_detail(album_path: str) -> Any:
         except Exception as _skip_lookup_err:
             logger.debug("Album lookup-skip flag write failed", error=str(_skip_lookup_err))
 
-        # ── Phase 3: every track's file tags, concurrently ────────────────
-        # The database half of the save is already durable at this point, so
-        # the files are the only thing left holding the response open.
+        # The database half is done — recorded here so the phase log can still
+        # separate the DB loop from everything that touches the disk.
         _write_loop_ms = (time.monotonic() - _write_loop_started) * 1000.0
-        _file_started = time.monotonic()
-        _file_results = await _write_album_track_files_concurrently(_file_jobs)
-        _file_write_ms = (time.monotonic() - _file_started) * 1000.0
-        # Results come back IN ORDER, so the failure still names its own file.
-        for _job, (_file_write_ok, _resolved_file) in zip(_file_jobs, _file_results):
-            if not _file_write_ok:
-                file_sync_failures += 1
-                logger.warning(
-                    "File tag write SKIPPED - DB updated only",
-                    track_id=_job[0], file_path=_resolved_file,
-                )
 
-        # ── Album-level cover art: download + embed ──────────────────────
-        # The MB lookup fills ``cover_art_url`` (a CAA URL string).  Saving
-        # the album must actually DOWNLOAD the image and embed it into the
-        # track files (and store it in album_art) so Navidrome picks it up on
-        # the next scan — previously only the URL string was stored.
+        # ── Phase 3: cover art — fetch and STORE (both paths) ─────────────
+        # The download + the ``album_art`` row stay in the request even when the
+        # disk phase is backgrounded. They are what makes the new art VISIBLE on
+        # the album page, and one HTTP fetch plus one small insert is nothing
+        # next to the N file writes that follow. Only the EMBED (a pass over
+        # every audio file) moves with the rest of the disk phase.
         _cover_embedded = False
+        _cover_bytes: bytes | None = None
+        _cover_mime = "image/jpeg"
         if cover_url:
             try:
                 from services.enrichment.album_art_service import (
-                    apply_album_art_to_tracks,
                     save_album_art_to_db,
                 )
                 # Blocking (an HTTP fetch, or the Cover Art Archive) — run it
@@ -2531,37 +2602,106 @@ async def album_detail(album_path: str) -> Any:
                 )
                 if _cover_bytes:
                     save_album_art_to_db(artist_name, album_name, _cover_bytes, source="url", mime_type=_cover_mime)
-                    _cover_embedded = apply_album_art_to_tracks(
-                        new_artist or artist_name,
-                        new_title or album_name,
-                        _cover_bytes,
-                        _cover_mime,
-                    ) > 0
             except Exception as _cover_exc:
-                logger.debug("Album save cover embed failed", artist=artist_name, album=album_name, error=str(_cover_exc))
+                logger.debug("Album save cover art fetch failed", artist=artist_name, album=album_name, error=str(_cover_exc))
 
-        # ── Ask Navidrome to re-scan (ONE coalesced background request) ────
-        # The save wrote the corrected tags into the AUDIO FILES, but
-        # Navidrome serves its OWN database — without a rescan the next
-        # Popularr import reads Navidrome's PRE-save rows and the upsert
-        # overwrites the metadata just saved ("the import puts the old data
-        # back").  Per-tag-write triggers were removed on 2026-08-30 for
-        # hammering the server; this is ONE fire-and-forget request per
-        # user-initiated save, coalesced so bursts collapse into one scan.
-        # It never blocks the response and is a no-op when Navidrome is
-        # unconfigured.
-        #
-        # ⚠️ ``genre_only_writes`` is deliberately NOT here: genres are
-        # database-only now, so a genres-only save changes no file and there
-        # would be nothing for Navidrome to re-read.
-        if updated_count > 0 or _cover_embedded or reverted_live_count > 0:
+        # ── Phase 4: the DISK phase — inline, or in the background ─────────
+        # One payload, one runner, two ways to reach it (see
+        # ``_run_album_file_sync_phases``). A large album's N file writes plus
+        # the cover embed are what outlive Cloudflare's 100s origin timeout, so
+        # past a configured track count they are handed to the background
+        # service and the response goes back immediately.
+        _file_payload: dict[str, Any] = {
+            "runner": _run_album_file_sync_phases,
+            "file_jobs": _file_jobs,
+            # The TARGET names — the album may be being renamed, and the cover
+            # embed looks its rows up by name.
+            "album_artist": new_artist or artist_name,
+            "album": new_title or album_name,
+            "cover_bytes": _cover_bytes,
+            "cover_mime": _cover_mime,
+            # ⚠️ Decided HERE, from values only the database half knows, and
+            # carried in the payload. The background path has no access to
+            # ``updated_count`` / ``reverted_live_count`` / whether art was
+            # fetched, so it could not work this out for itself.
+            #
+            # ⚠️ ``genre_only_writes`` is deliberately NOT part of this: genres
+            # are database-only now, so a genres-only save changes no file and
+            # there would be nothing for Navidrome to re-read.
+            "should_rescan": bool(
+                updated_count > 0 or reverted_live_count > 0 or _cover_bytes
+            ),
+        }
+
+        _file_started = time.monotonic()
+        _file_backgrounded = False
+        try:
+            _bg_cfg = get_album_save_background_config()
+        except Exception:
+            _bg_cfg = {"enabled": False, "track_threshold": 0}
+
+        if _bg_cfg.get("enabled") and len(_file_jobs) >= int(
+            _bg_cfg.get("track_threshold") or 0
+        ):
             try:
-                from services.scanning.navidrome_rescan_service import request_rescan
-                request_rescan("album metadata save")
-            except Exception as _rescan_exc:
-                logger.debug("Post-save Navidrome rescan request failed", error=str(_rescan_exc))
+                from services.metadata.album_file_sync_service import (
+                    enqueue_album_file_sync,
+                )
 
-        if updated_count > 0:
+                enqueue_album_file_sync(
+                    artist=new_artist or artist_name,
+                    album=new_title or album_name,
+                    payload=_file_payload,
+                    reason=f"album save ({len(_file_jobs)} tracks)",
+                )
+                _file_backgrounded = True
+            except Exception as _bg_exc:
+                # Falling back to INLINE is the safe direction: the database half
+                # is already durable, and doing the disk work here is exactly what
+                # the user asked for — it just risks the timeout it always did.
+                logger.warning(
+                    "Album file sync could not be queued — running it inline",
+                    artist=artist_name, album=album_name, error=str(_bg_exc),
+                )
+                _file_backgrounded = False
+
+        if not _file_backgrounded:
+            _disk = await asyncio.to_thread(_run_album_file_sync_phases, _file_payload)
+            file_sync_failures += int(_disk.get("file_failures") or 0)
+            _cover_embedded = bool(_disk.get("cover_embedded"))
+        _file_write_ms = (time.monotonic() - _file_started) * 1000.0
+
+        # ── Ask Navidrome to re-scan — now the DISK phase's last step ──────
+        # ⚠️ THE RESCAN MOVED, IT WAS NOT DELETED. It used to sit here, after the
+        # file writes, for the good reason in the comment that lived here: the
+        # save writes corrected tags into the AUDIO FILES, but Navidrome serves
+        # its OWN database, so without a rescan the next Popularr import reads
+        # Navidrome's PRE-save rows and the upsert overwrites the metadata just
+        # saved ("the import puts the old data back").
+        #
+        # That ordering is now enforced inside ``_run_album_file_sync_phases``,
+        # because for a BACKGROUNDED save this point in the handler is reached
+        # before the files have been written — rescanning here would have scanned
+        # the old tags and reintroduced that exact bug. The decision of WHETHER to
+        # rescan is still made here (``should_rescan`` in the payload), from the
+        # database half's counters, which the background thread cannot see.
+        #
+        # Per-tag-write triggers were removed on 2026-08-30 for hammering the
+        # server; this remains ONE fire-and-forget request per user-initiated
+        # save, coalesced so bursts collapse into one scan.
+        #
+        # ⚠️ ``genre_only_writes`` is deliberately NOT part of ``should_rescan``:
+        # genres are database-only now, so a genres-only save changes no file and
+        # there would be nothing for Navidrome to re-read.
+
+        if _file_backgrounded:
+            await flash(
+                f"Album metadata saved — {updated_count} track(s) updated. "
+                f"Tagging {len(_file_jobs)} audio file(s) in the background — "
+                "this page does not need to stay open.",
+                "success",
+            )
+        elif updated_count > 0:
             await flash(f"Album metadata saved — {updated_count} track(s) updated.", "success")
         # A REFUSED write is reported as a failure, and never allowed to fall
         # through to the "No changes were made." branch below — that message
@@ -3586,6 +3726,8 @@ def _sanitize_config_sections(config: dict) -> dict:
         # to ``{}`` on save, so the safe-shutdown settings would appear to save
         # and then read back as defaults.
         "maintenance": ("safe_shutdown",),
+        # And again: ``album_save.background`` is the album save's disk phase.
+        "album_save": ("background",),
     }
     
     for parent, children in nested_children.items():
