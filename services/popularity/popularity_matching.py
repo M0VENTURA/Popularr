@@ -75,6 +75,78 @@ def title_variants_compatible(title_a: str, title_b: str) -> bool:
     return bool(va & vb)
 
 
+#: Gimmick re-recording suffixes.  These are the markers that name a DIFFERENT
+#: PERFORMANCE without using any version keyword at all, so neither
+#: ``_HARD_VARIANT_TOKENS`` nor ``normalize_for_aggregation``'s bracket sweep
+#: sees them.  Matched as a phrase on a normalised key, and written with both
+#: spellings because ``normalize_for_aggregation`` folds diacritics ("für hunde"
+#: becomes "fur hunde") while other callers pass raw text.
+_NOVELTY_PHRASE_RE = re.compile(r"\b(?:for dogs|f[üu]r hunde)\b", re.IGNORECASE)
+
+
+def aggregation_keys_compatible(key_a: str, key_b: str, *, min_similarity: float = 0.90) -> bool:
+    """True when two ``normalize_for_aggregation`` keys denote the same RECORDING.
+
+    ⭐ This is the gate that stops a base track being summed into a novelty
+    re-recording of it.  It exists because the obvious gate does not work:
+    aggregation compared keys with ``fuzzy_match_score``, which is
+    ``rapidfuzz.token_set_ratio`` — and that metric returns **1.0 whenever one
+    token set is a SUBSET of the other**, by design, since "all the important
+    words are present" is exactly what it measures.  A ``>= 0.90`` threshold
+    therefore ACCEPTED every strict subset, so
+
+        "fucked with an anchor"  vs  "fucked with an anchor for dogs"
+
+    scored a perfect 1.0 and the original studio track's 84,200 listeners were
+    summed into its novelty re-recording (and vice versa — the metric is
+    symmetric).  The threshold could never reject the case it was written to
+    catch.
+
+    ⚠️ "The candidate has extra tokens" is NOT itself the discriminator.  A
+    ``token_set_ratio`` subset match is also how the aggregator legitimately
+    collects a track's session/provenance-annotated spellings — Last.fm files
+    "100 Words (from Sing the Sorrow sessions 2003)" as a separate row from
+    "100 Words", and those two ARE the same recording, so they must still sum.
+
+    ⚠️ Nor is this the place to enforce version-marker agreement.  That is
+    already done upstream by ``title_variants_compatible`` and
+    ``_alt_status_matches_ctx``, which are CONTEXT-AWARE — they fold in the
+    release-level liveness and the caller's ``target_is_alt_rendition``, so a
+    plainly titled track on an unplugged release still matches its unplugged
+    counterpart.  An equivalent check here would be a context-free duplicate of
+    that logic, and it rejected exactly that case (an alternate rendition whose
+    own title carries no marker) when it was tried.
+
+    So this checks the ONE thing nothing upstream can see: a novelty phrase,
+    which names a different performance without using any version keyword at
+    all, so neither the marker sets nor the bracket sweep in
+    ``normalize_for_aggregation`` will ever spot it.
+
+    The phrase list is a blocklist, not a general solution: an unlisted gimmick
+    suffix will still aggregate.  That is stated rather than hidden — every
+    entry is a real, observed case, and widening it speculatively risks
+    misclassifying real album tracks, which is the worse error.
+    """
+    if not key_a or not key_b:
+        return False
+    if key_a == key_b:
+        return True
+
+    tokens_a = set(key_a.split())
+    tokens_b = set(key_b.split())
+    if tokens_a == tokens_b:
+        return True
+
+    # A novelty phrase on ONE side only: one of the two is a gimmick
+    # re-recording, so the pair is not the same recording.
+    if bool(_NOVELTY_PHRASE_RE.search(key_a)) != bool(_NOVELTY_PHRASE_RE.search(key_b)):
+        return False
+
+    from services.popularity.popularity_math import fuzzy_match_score
+
+    return fuzzy_match_score(key_a, key_b) >= min_similarity
+
+
 def build_artist_variants(artist: str) -> list[str]:
     """Generate artist name variants (main artist, featured artists, combinations)."""
     variants: set[str] = set()

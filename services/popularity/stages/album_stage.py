@@ -64,6 +64,7 @@ from db.utils import row_get
 from services.catalog.album_classification_service import (
     classify_compilation_category,
     detect_live_album_type,
+    is_alternate_or_bonus_title,
     is_live_or_alternate_album,
     is_live_or_unplugged_track_title,
     normalize_primary_release_type,
@@ -2783,11 +2784,36 @@ def _persist_alternate_takes(album_context: dict[str, Any]) -> None:
                 if not isinstance(variants, list) or len(variants) < 2:
                     continue
                 groups_seen += 1
-                base_track = variants[0]
+                # ⭐ Pick the base EXPLICITLY: the variant whose title carries
+                # no version/novelty marker. It used to be ``variants[0]``,
+                # which was correct only because ``detect_alternate_takes``
+                # happens to sort the canonical take first. That is an implicit
+                # cross-module contract, and getting it wrong inverts the
+                # damage: the NOVELTY take becomes the base and the real studio
+                # recording is stamped ``alternate_take = 1``, so the wrong
+                # track is excluded from the album's stats baseline and inherits
+                # the novelty take's (inflated) popularity.
+                base_track = next(
+                    (
+                        v for v in variants
+                        if isinstance(v, dict)
+                        and not is_alternate_or_bonus_title(str(v.get("title") or ""))
+                    ),
+                    variants[0],
+                )
                 base_id = base_track.get("id") if isinstance(base_track, dict) else None
                 if not base_id:
                     continue
-                for variant in variants[1:]:
+                # ⚠️ Iterate EVERY variant and skip the base by identity. This
+                # used to be ``variants[1:]``, which silently assumed the base
+                # was variants[0]: when it was not, the take that happened to be
+                # first was never stamped as an alternate at all, and it was
+                # excluded from the tail of the loop too. Selecting the base
+                # explicitly above is only half the fix — the loop has to stop
+                # depending on the position as well.
+                for variant in variants:
+                    if variant is base_track:
+                        continue
                     alternate_id = variant.get("id") if isinstance(variant, dict) else None
                     if not alternate_id or str(alternate_id) == str(base_id):
                         continue

@@ -36,6 +36,7 @@ from helpers.normalization_service import (
 )
 from services.popularity.popularity_matching import (
     ARTIST_JOIN_RE,
+    aggregation_keys_compatible,
     choose_best_provider_counts,
     get_artist_lookup_candidates,
     get_primary_artist_preserve_case,
@@ -1635,7 +1636,13 @@ def get_search_aggregated_lastfm_popularity(
                 continue
 
             _item_key = normalize_for_aggregation(item_title)
-            if _item_key != target and _token_similarity(_item_key, target) < 0.90:
+            # ⭐ NOT a bare fuzzy threshold. ``_token_similarity`` is
+            # token_set_ratio, which scores 1.0 for any strict SUBSET — so the
+            # old ``< 0.90`` test accepted "Fucked With an Anchor" as a version
+            # of "Fucked With an Anchor for Dogs" and summed the studio track's
+            # listeners into its novelty re-recording. See
+            # ``aggregation_keys_compatible`` for the rule that replaced it.
+            if not aggregation_keys_compatible(_item_key, target):
                 continue
 
             url = str(item.get("url") or "").strip()

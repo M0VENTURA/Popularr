@@ -54,6 +54,26 @@ ALT_TRACK_PATTERNS = [
     r"\balternate\b",
     r"\balt\.\b",
     r"\b(?:single|radio|album)\s+edit\b",
+    # ── Novelty re-recordings ────────────────────────────────────────────
+    # ⭐ A whole bonus disc of re-recorded takes under a GIMMICK suffix rather
+    # than a version marker.  Alestorm's "No Grave but the Sea" deluxe edition
+    # ships a second disc in which Christopher Bowes replaced every vocal with
+    # dog barks, and retitled each track "<original title> for Dogs" (the
+    # German-language track became "Bar ünd Imbiss für Hunde").  None of those
+    # titles carries a marker this list recognised, so the ten novelty takes
+    # were treated as ordinary studio tracks: they were never linked as
+    # alternate takes, never capped, and — with the version aggregator summing
+    # the original's listeners into them (see
+    # ``popularity_matching.aggregation_keys_compatible``) — scored 4-5★ and
+    # took a GLOBAL 5★ slot from the real recordings.
+    #
+    # ⚠️ Deliberately NOT generalised to "<preposition> <noun>".  "for the
+    # Dead", "for Sinners" and "to the End of the World" are ordinary song
+    # titles, and widening this to a bare ``\bfor\b`` would misclassify real
+    # album tracks as novelty takes — a much worse error than the one being
+    # fixed.  Only the observed, unambiguous gimmick suffixes are listed.
+    r"\bfor dogs\b",
+    r"\bfür hunde\b",
 ]
 
 
@@ -249,14 +269,91 @@ def should_exclude_track_from_stats(
 # Advanced helpers
 # --------------------------------------------------------------------
 
+#: Unbracketed version/novelty suffixes that must fold into their base title so
+#: a re-recording groups with the track it re-records.
+#:
+#: ⚠️ Phrase-level and ANCHORED AT THE END, deliberately. A bare ``\blive\b``
+#: sweep would strip the marker out of "Live Forever" and group it with an
+#: unrelated "Forever" — turning a grouping helper into a source of false
+#: links. Every pattern here only matches in trailing position, where a
+#: version marker actually lives.
+_TRAILING_ALTERNATE_PHRASES = (
+    r"\s*[-–—]\s*(?:live|acoustic|unplugged|demo|instrumental|orchestral|remix|karaoke|alternate)\s*$",
+    r"\s+(?:live|acoustic|unplugged|demo|instrumental|orchestral|karaoke)\s*$",
+    r"\s+for\s+dogs\s*$",
+    r"\s+für\s+hunde\s*$",
+)
+
+
+def alternate_take_group_key(title: str) -> str:
+    """Group key that folds a trailing version/novelty suffix into its base.
+
+    "Mexico", "Mexico (Live)" and "Mexico for Dogs" all key to ``mexico``.
+
+    Falls back to the plain normalisation when stripping would empty the title.
+    An empty key is SHARED, so every track that stripped to nothing would land
+    in one group and then be linked as alternate takes of each other. The
+    emptying shape is a title that is nothing but a marker plus its separator
+    (" - Live", " - Acoustic") — a BARE "Live" is not stripped at all, since
+    every trailing pattern requires a leading space or dash.
+    """
+    stripped = str(title or "")
+    for pattern in _TRAILING_ALTERNATE_PHRASES:
+        stripped = re.sub(pattern, "", stripped, flags=re.IGNORECASE)
+    key = normalize_title_for_lookup(stripped)
+    return key or normalize_title_for_lookup(title)
+
+
+def is_alternate_or_bonus_title(title: str) -> bool:
+    """True when a title flags ANY non-canonical take of a song.
+
+    The union of the three title-level classifiers, so "is this the original
+    recording?" has one answer rather than three that can disagree.
+    """
+    return bool(
+        is_bonus_track_title(title)
+        or is_live_or_alternate_track_title(title)
+        or is_instrumental_track_title(title)
+    )
+
+
 def detect_alternate_takes(tracks: list[Any]) -> dict[str, list[Any]]:
+    """Group each track with the alternate/novelty re-recordings of it.
+
+    ⚠️ The group key used to be ``normalize_title_for_lookup(title)`` on its
+    own, and that normaliser strips BRACKETED annotations but not unbracketed
+    ones.  So "Mexico (Live)" correctly folded into "Mexico" while "Mexico for
+    Dogs" did NOT: Alestorm's deluxe second disc — ten novelty takes, each
+    retitled "<original> for Dogs" — produced ``groups_seen=0`` and none of
+    them was ever linked to the track it re-records.  A bracketed suffix
+    grouped; the same suffix written without brackets did not, which is an
+    accident of punctuation rather than a rule.
+
+    ``alternate_take_group_key`` closes that by folding the recognised
+    trailing version/novelty phrases before normalising.
+
+    CONTRACT: the canonical (unmarked) take sorts FIRST, so ``variants[0]`` is
+    the original recording.  Callers must still not rely on that silently —
+    ``_persist_alternate_takes`` selects the base explicitly, because choosing
+    the wrong one would mark the real studio track as the alternate.
+    """
     groups: dict[str, list[Any]] = defaultdict(list)
 
     for track in tracks or []:
         title = track.get("title") if isinstance(track, dict) else str(track)
-        groups[normalize_title_for_lookup(title)].append(track)
+        groups[alternate_take_group_key(title)].append(track)
 
-    return {k: v for k, v in groups.items() if len(v) > 1}
+    grouped: dict[str, list[Any]] = {}
+    for key, variants in groups.items():
+        if len(variants) < 2:
+            continue
+        # Stable sort, so tracks that are equally canonical keep tracklist
+        # order (disc 1 before disc 2 for a deluxe edition).
+        variants.sort(key=lambda t: is_alternate_or_bonus_title(
+            t.get("title") if isinstance(t, dict) else str(t)
+        ))
+        grouped[key] = variants
+    return grouped
 
 
 _VA_ALBUM_ARTIST_NAMES = frozenset(
