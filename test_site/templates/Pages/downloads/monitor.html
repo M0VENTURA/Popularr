@@ -1,11 +1,18 @@
 {% extends "base.html" %}
 
+{# ⚠️ A PLAIN `&` HERE, and a literal entity in the block below.
+
+   `{% block title %}` is not autoescaped the way body text is, so an entity is
+   correct there. A `{% set %}` value is DATA, though — the partial that renders
+   it (`{{ title }}`) escapes it AGAIN, so `'Downloads &amp; Monitor'` came out
+   as "Downloads &amp;amp; Monitor" on the page. Put the character itself in a
+   `set`; let whoever renders it do the escaping. #}
 {% block title %}Downloads &amp; Monitor · Popularr{% endblock %}
 
 {% block content %}
 <div class="container-fluid mt-4">
   <div class="mb-4 d-flex align-items-center justify-content-between gap-2 flex-wrap">
-    {% set title = 'Downloads &amp; Monitor' %}
+    {% set title = 'Downloads & Monitor' %}
     {% set subtitle = 'Monitor, match and queue music downloads.' %}
     {% include 'components/_downloads_header.html' %}
     <div class="d-flex gap-2 flex-shrink-0 ms-auto">

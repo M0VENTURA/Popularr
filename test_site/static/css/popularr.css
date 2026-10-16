@@ -1069,8 +1069,17 @@ form .form-check-input[name="force"] + .form-check-label {
       `.release-actions-overflow > .btn { min-width: 44px; min-height: 44px; }`,
       which outranks this rule (0,2,0 vs 0,1,0) and is what the ⋮ release
       overflow menu relies on (tests/test_mobile_layout_density.py pins it).
+
+      ⚠️ AND NOT FOR A `btn-group-sm`'s CHILDREN — they never wear `btn-sm`.
+      Bootstrap sizes a small group through `.btn-group-sm > .btn` and the
+      markup writes the plain variant inside it, so the exemption above missed
+      every button in one and the 44px floor caught the whole group: the
+      reported "stretched" icons in the queue card's filter/Refresh-Clear
+      groups and the Downloads header's green [?].
     */
     .btn-sm { min-height: 0; }
+    .btn-group-sm > .btn,
+    .btn-group-sm .btn { min-height: 0; }
 }
 
 @media (max-width: 991.98px) {

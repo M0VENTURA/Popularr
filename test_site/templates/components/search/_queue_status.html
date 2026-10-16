@@ -305,11 +305,24 @@
       <i class="bi bi-bell fs-3 d-block mb-2"></i>
       No queue events yet. Events will appear as you interact with the download queue.
     </div>
+    {#
+      ⚠️ The widths live in the STYLESHEET, not in `style=` attributes.
+
+      An inline `width: 160px` cannot be narrowed by a media query, and 160px +
+      120px of a 360px screen left the Message column — the only one carrying
+      information — with about a third of the row. `.qe-ts-col` / `.qe-type-col`
+      shrink below 768px so the message gets the space.
+
+      The cell renders TWO spans and CSS picks one (the app's standard
+      `d-none d-md-inline` pattern). A media query cannot rewrite text, so a JS
+      `toLocaleString()` — "10/10/2026, 12:00:00 pm" — would otherwise stay that
+      long whatever the column did.
+    #}
     <table id="queueEventsTable" class="table table-sm table-hover m-0" style="display:none;">
       <thead class="table-dark sticky-top">
         <tr>
-          <th style="width: 160px;">Timestamp</th>
-          <th style="width: 120px;">Type</th>
+          <th class="qe-ts-col">Timestamp</th>
+          <th class="qe-type-col">Type</th>
           <th>Message</th>
         </tr>
       </thead>

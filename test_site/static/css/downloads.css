@@ -159,3 +159,79 @@
         .btn { padding: 0.2rem 0.45rem; font-size: 0.78rem; }
     }
 }
+
+/* ── Download Queue Events Log: the timestamp and type columns ─────────────
+   These widths used to be INLINE (`style="width: 160px"`), which no media query
+   can override. 160px + 120px of a 360px screen left Message — the only column
+   carrying information — roughly a third of the row, so the row read as two
+   columns of chrome and a footnote.
+
+   The cell renders a full timestamp beside a compact one and the phone block
+   below picks between them (`d-none d-md-inline` / `d-md-none`). A media query
+   cannot rewrite text, so the full `toLocaleString()` stayed as long as it is
+   however narrow the column got — which is why the timestamp overflowed rather
+   than the message.
+   ------------------------------------------------------------------------- */
+#queueEventsTable .qe-ts-col { width: 160px; }
+#queueEventsTable .qe-type-col { width: 120px; }
+
+@media (max-width: 767.98px) {
+    /* The compact form must not wrap mid-date; it is short enough not to. */
+    #queueEventsTable .qe-ts-col {
+        width: 5.5rem;
+        white-space: nowrap;
+    }
+    /* `width: 1%` lets a table column shrink to its content, so the badge keeps
+       the width it needs instead of a fixed 120px it usually does not. */
+    #queueEventsTable .qe-type-col { width: 1%; }
+}
+
+/* ── Matched & Unmatched Folders: the folder name gets two lines ────────────
+   The row is `[title column][actions]` and the action cluster is
+   `flex-shrink-0` with long labels ("Change Match" / "Confirm Match"), so it
+   takes a large share of the row before the title column is measured. With
+   `text-truncate` the name was therefore cut after a dozen characters with the
+   rest of the row empty.
+
+   Two lines, then an ellipsis. `overflow-wrap: anywhere` is load-bearing: a
+   folder name like `Some.Very.Long.Name` is one unbroken token, so without it
+   the line would OVERFLOW instead of wrapping and the clamp would never engage.
+   ------------------------------------------------------------------------- */
+.folder-row-title {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+}
+
+/* ── Monitor page's Upcoming Releases table ───────────────────────────────
+   Four columns do not fit a phone: the Album name — the only cell carrying
+   information — got about a third of the row, and the Date column wrapped
+   mid-value ("2026-" / "09-18"). `.upcoming-inline-meta` repeats the artist
+   and date under the album instead, and the two standalone columns are hidden.
+   ------------------------------------------------------------------------- */
+.upcoming-inline-meta { display: none; }
+
+@media (max-width: 767.98px) {
+    .upcoming-monitor-table .col-ur-artist,
+    .upcoming-monitor-table .col-ur-date { display: none; }
+
+    .upcoming-inline-meta {
+        display: block;
+        margin-top: 0.15rem;
+        color: var(--text-muted, #9aa0a6);
+        font-size: 0.78rem;
+        overflow-wrap: anywhere;
+    }
+
+    /* The Search label is already `d-none d-md-inline`; this keeps the icon-only
+       button a square touch target rather than a narrow pill. */
+    .upcoming-monitor-table .col-ur-action .btn {
+        min-width: 2.25rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+}

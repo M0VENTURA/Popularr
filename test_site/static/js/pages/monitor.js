@@ -435,8 +435,17 @@
       // The action cluster wraps on this page because the labels are long
       // ("Change Match" / "Confirm Match") — hence the explicit class.
       actionsClass: 'd-flex flex-shrink-0 gap-1 flex-wrap justify-content-end',
+      // ⚠️ `.folder-row-title`, NOT `text-truncate`.
+      //
+      // The cluster above is `flex-shrink-0` and the labels are long, so it
+      // takes a large share of the row before the title column is measured —
+      // and `text-truncate` forces ONE line, so a folder name was cut after a
+      // dozen characters with the rest of the row empty. Two lines is enough to
+      // show a realistic folder name in full. (The shared `rowShell` already
+      // refuses to truncate a non-collapsible row for this reason; this page
+      // was adding the class itself.)
       titleHtml:
-        '<div class="text-truncate">' +
+        '<div class="folder-row-title">' +
         '<i class="bi bi-folder2 me-1 text-muted"></i>' +
         `<strong>${esc(folder.display_name || folder.name)}</strong>` +
         `<span class="ms-2">${badge}</span>` +
@@ -690,27 +699,49 @@
       // data-* rather than an onclick carrying encodeURIComponent output —
       // URI encoding does not escape a single quote, so an artist name
       // containing one broke the generated attribute.
-      container.innerHTML = `
-        <div class="table-responsive">
-          <table class="table table-sm table-dark table-hover mb-0">
-            <thead>
-              <tr><th>Artist</th><th>Album</th><th>Date</th><th style="width:120px;">Action</th></tr>
-            </thead>
-            <tbody>
-              ${releases.map((r) => `
+      //
+      // ⚠️ THE TABLE IS FOUR COLUMNS ON DESKTOP AND TWO ON A PHONE.
+      //
+      // On a 360px screen the four columns left the Album name — the only cell
+      // carrying information — about a third of the row, and the Date column
+      // wrapped mid-value ("2026-" / "09-18"). Artist and Date therefore have
+      // their own `col-ur-*` classes that the phone block hides, and the Artist
+      // cell is repeated INSIDE the Album cell as `.upcoming-inline-meta`
+      // ("Artist • Date"), which is the app's established pattern for this —
+      // see `.track-inline-duration` in popularr.css. The values are rendered
+      // ONCE per layout, not shown/hidden with `d-none`, because duplicating the
+      // text would also duplicate it for a screen reader.
+      const row = (r) => `
                 <tr>
-                  <td>${esc(r.artist_name)}</td>
-                  <td>${esc(r.album_name)}</td>
-                  <td><small>${esc(r.release_date || 'TBA')}</small></td>
+                  <td class="col-ur-artist">${esc(r.artist_name)}</td>
                   <td>
+                    <strong>${esc(r.album_name)}</strong>
+                    <span class="upcoming-inline-meta">${esc(r.artist_name)} • ${esc(r.release_date || 'TBA')}</span>
+                  </td>
+                  <td class="col-ur-date"><small>${esc(r.release_date || 'TBA')}</small></td>
+                  <td class="col-ur-action">
                     <button class="btn btn-sm btn-outline-primary upcoming-search-btn"
                             data-artist="${esc(r.artist_name)}"
-                            data-album="${esc(r.album_name)}">
-                      <i class="bi bi-search"></i> Search
+                            data-album="${esc(r.album_name)}"
+                            title="Search / Download on MusicBrainz"
+                            aria-label="Search / Download on MusicBrainz">
+                      <i class="bi bi-search"></i><span class="d-none d-md-inline"> Search</span>
                     </button>
                   </td>
-                </tr>`).join('')}
-            </tbody>
+                </tr>`;
+
+      container.innerHTML = `
+        <div class="table-responsive">
+          <table class="table table-sm table-dark table-hover mb-0 upcoming-monitor-table">
+            <thead>
+              <tr>
+                <th class="col-ur-artist">Artist</th>
+                <th>Album</th>
+                <th class="col-ur-date">Date</th>
+                <th class="col-ur-action">Action</th>
+              </tr>
+            </thead>
+            <tbody>${releases.map(row).join('')}</tbody>
           </table>
         </div>`;
 

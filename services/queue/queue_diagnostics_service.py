@@ -63,6 +63,47 @@ _queue_events: list[dict[str, Any]] = []
 #: is exactly how one viewer shows dates and another shows 1970.
 _LOG_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
 
+#: The `.123` of `%(asctime)s.%(msecs)03d` (the file formatter's format), which
+#: `_LOG_TS_RE` deliberately does not capture. Optional: a line rendered with
+#: structlog's `TimeStamper(fmt="%Y-%m-%d %H:%M:%S")` has no milliseconds.
+_LOG_MSEC_RE = re.compile(r"\.\d{1,3}")
+
+#: `[INFO]` (the stdlib formatter's `%(levelname)s`) or `[info     ]` (structlog's
+#: ConsoleRenderer, which pads the level into a fixed-width column).
+_LOG_LEVEL_RE = re.compile(
+    r"\[\s*(DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)\s*\]",
+    re.IGNORECASE,
+)
+
+
+def strip_log_line_prefix(line: str) -> str:
+    """The MESSAGE of *line*, without the timestamp and level it begins with.
+
+    Every line in ``queue.log`` starts with them — ``_plain_renderer`` renders
+    ``f"{ts} [{level}]"`` — and the monitor's events table already has a
+    Timestamp column and a Type column carrying the level. Leaving the prefix on
+    the message therefore printed both TWICE per row, and the ``.log`` EXPORT
+    printed a THIRD copy, because ``_generate_queue_log`` writes
+    ``[{timestamp}] {message}``.
+
+    Stripping at the PRODUCER is what fixes the viewer and the export together.
+    A trailing ``[logger.name]`` tag is deliberately KEPT: nothing else in the
+    row carries it, so it is information rather than duplication.
+
+    Tolerant by design. A line whose shape this does not recognise comes back
+    UNCHANGED — the viewer's job is to show what the log holds, so a missed strip
+    is a cosmetic annoyance while a wrong one loses the message.
+    """
+    text = line.lstrip()
+    match = _LOG_TS_RE.match(text)
+    if not match:
+        return line
+
+    # Order matters: the milliseconds sit between the timestamp and the level,
+    # so they have to go before the level bracket can be anchored to the front.
+    rest = _LOG_MSEC_RE.sub("", text[match.end():], count=1).lstrip()
+    return _LOG_LEVEL_RE.sub("", rest, count=1).lstrip()
+
 
 # =============================================================================
 # EVENT STORE
@@ -453,7 +494,13 @@ def _tail_queue_log(limit: int = 100) -> list[dict[str, Any]]:
                             collected.append({
                                 "created_at": created_at,
                                 "event_type": "info",
-                                "message": line,
+                                # ⚠️ STRIPPED. The viewer's table has a Timestamp
+                                # column and a Type column, so the raw line's own
+                                # `YYYY-MM-DD HH:MM:SS [LEVEL]` prefix printed both
+                                # twice — and the .log export prepends the
+                                # timestamp again, so it appeared there three
+                                # times. See `strip_log_line_prefix`.
+                                "message": strip_log_line_prefix(line),
                                 "item_id": None,
                                 "details": {},
                             })
@@ -612,14 +659,18 @@ def _tail_search_log(limit: int = 100) -> list[dict[str, Any]]:
                     created_at = None
                     if ts_match:
                         created_at = ts_match.group(1).replace(" ", "T")
+                    # Same strip as the queue viewer above, for the same reason:
+                    # the Soulseek search log renders a timestamp column of its
+                    # own, and the raw line carries one too.
+                    message = strip_log_line_prefix(line)
                     events.append({
                         "created_at": created_at,
                         "timestamp": created_at,
                         "search_type": "unknown",
-                        "query": line,
+                        "query": message,
                         "result_count": 0,
                         "event_type": "search",
-                        "message": line,
+                        "message": message,
                     })
                     file_events += 1
                     if len(events) >= limit:

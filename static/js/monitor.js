@@ -275,7 +275,7 @@ async function renderUnmatchedFolders(options) {
             <div class="list-group-item">
                 <div class="d-flex justify-content-between align-items-start gap-2">
                     <div class="flex-grow-1" style="min-width:0;">
-                        <div class="text-truncate"><i class="bi bi-folder2 me-1 text-muted"></i><strong>${escapeHtml(f.display_name || f.name)}</strong>${statusBadge}</div>
+                            <div class="folder-row-title"><i class="bi bi-folder2 me-1 text-muted"></i><strong>${escapeHtml(f.display_name || f.name)}</strong>${statusBadge}</div>
                         ${f.artist && f.album ? `<div class="text-muted small mt-1">${escapeHtml(f.artist)} — ${escapeHtml(f.album)}</div>` : ''}
                         ${matchedReleaseHtml(f)}
                     </div>
@@ -438,15 +438,25 @@ async function refreshUpcomingReleasesMonitor() {
     
     const html = `
       <div class="table-responsive">
-        <table class="table table-sm table-dark table-hover mb-0">
-          <thead><tr><th>Artist</th><th>Album</th><th>Date</th><th style="width: 120px;">Action</th></tr></thead>
+        <table class="table table-sm table-dark table-hover mb-0 upcoming-monitor-table">
+          <thead>
+            <tr>
+              <th class="col-ur-artist">Artist</th>
+              <th>Album</th>
+              <th class="col-ur-date">Date</th>
+              <th class="col-ur-action">Action</th>
+            </tr>
+          </thead>
           <tbody>
             ${releases.map(r => `
               <tr>
-                <td>${escapeHtml(r.artist_name)}</td>
-                <td>${escapeHtml(r.album_name)}</td>
-                <td><small>${r.release_date || 'TBA'}</small></td>
-                <td><button class="btn btn-sm btn-outline-primary" onclick="searchUpcomingReleaseFromEncoded('${encodeURIComponent(r.artist_name)}', '${encodeURIComponent(r.album_name)}')"><i class="bi bi-search"></i> Search</button></td>
+                <td class="col-ur-artist">${escapeHtml(r.artist_name)}</td>
+                <td>
+                  <strong>${escapeHtml(r.album_name)}</strong>
+                  <span class="upcoming-inline-meta">${escapeHtml(r.artist_name)} • ${escapeHtml(String(r.release_date || 'TBA'))}</span>
+                </td>
+                <td class="col-ur-date"><small>${escapeHtml(String(r.release_date || 'TBA'))}</small></td>
+                <td class="col-ur-action"><button class="btn btn-sm btn-outline-primary" onclick="searchUpcomingReleaseFromEncoded('${encodeURIComponent(r.artist_name)}', '${encodeURIComponent(r.album_name)}')" title="Search / Download on MusicBrainz" aria-label="Search / Download on MusicBrainz"><i class="bi bi-search"></i><span class="d-none d-md-inline"> Search</span></button></td>
               </tr>`).join('')}
           </tbody>
         </table>

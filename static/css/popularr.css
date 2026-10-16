@@ -643,6 +643,27 @@ form .form-check-input[name="force"] + .form-check-label {
       what the ⋮ release overflow menu relies on.
     */
     .btn-sm { min-height: 0; }
+    /*
+      ⚠️ AND NOT FOR A `btn-group-sm`'s CHILDREN EITHER — they never wear
+      `btn-sm`.
+
+      Bootstrap sizes a small group through `.btn-group-sm > .btn`, and the
+      markup writes the plain variant inside it:
+
+          <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-primary">…</button>
+
+      So the exemption above misses every one of them and the 44px floor caught
+      the WHOLE group — the reported "stretched" icon buttons: the queue card's
+      status/source filters, its Refresh + Clear pair, and the Downloads
+      header's green [?]. Same class of mistake as exempting `.btn-sm` without
+      checking what the compact VARIANT actually is.
+
+      Scoped to the group rather than given a blanket `min-height: 0` on `.btn`
+      so a standalone button keeps its touch target.
+    */
+    .btn-group-sm > .btn,
+    .btn-group-sm .btn { min-height: 0; }
 }
 
 @media (max-width: 991.98px) {

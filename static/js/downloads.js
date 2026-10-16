@@ -2346,9 +2346,18 @@ async function loadQueueEvents() {
       // the backend could not parse rendered as 01/01/1970, which reads as a
       // real (and very wrong) date. Fall back to a dash instead.
       const ts = e.created_at ? new Date(e.created_at) : null;
-      const tsText = ts && !isNaN(ts.getTime()) ? ts.toLocaleString() : '—';
+      const tsValid = ts && !isNaN(ts.getTime());
+      // ⚠️ TWO renderings of the same instant; CSS shows one (see
+      // `.qe-ts-col` in downloads.css). A media query cannot rewrite text, so
+      // the full `toLocaleString()` — "10/10/2026, 12:00:00 pm" — stayed that
+      // long however narrow the column got, which is what made THIS column the
+      // one that overflowed on a phone rather than the message.
+      const tsText = tsValid ? ts.toLocaleString() : '—';
+      const tsShort = tsValid ? ts.toLocaleString(undefined, {
+        day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+      }) : '—';
       const badgeClass = e.event_type === 'file_found' ? 'bg-info' : e.event_type === 'status_change' ? 'bg-primary' : e.event_type === 'error' ? 'bg-danger' : 'bg-success';
-      return `<tr><td class="small text-muted">${escapeHtml(tsText)}</td><td><span class="badge ${badgeClass}">${escapeHtml((e.event_type || '').replace(/_/g, ' ').toUpperCase())}</span></td><td>${escapeHtml(e.message || '')}</td></tr>`;
+      return `<tr><td class="small text-muted qe-ts-col"><span class="d-none d-md-inline">${escapeHtml(tsText)}</span><span class="d-md-none">${escapeHtml(tsShort)}</span></td><td class="qe-type-col"><span class="badge ${badgeClass}">${escapeHtml((e.event_type || '').replace(/_/g, ' ').toUpperCase())}</span></td><td>${escapeHtml(e.message || '')}</td></tr>`;
     }).join('');
   } catch (error) { console.error('Error loading queue events:', error); }
 }
