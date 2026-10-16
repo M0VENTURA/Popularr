@@ -1005,35 +1005,22 @@ def _resolve_compilation_flags(
        (``test_a_plain_album_stays_plain`` pins that for a real best-of).
     """
     row = album_results[0] if album_results else {}
-    # ⭐⭐ JOIN every type column — never ``or``-chain them.
+    # ⭐⭐ ONE key list for the whole app — see ``joined_album_type``.
     #
-    # The chain used to read ``spotify_album_type`` FIRST and stop there, so an
-    # album whose sources DISAGREE lost its compilation marking: measured, with
-    # ``spotify_album_type="album"`` and
-    # ``musicbrainz_album_type="album+compilation"`` this returned
-    # ``(False, False)``, and the end-of-run ``finalise_scan`` then re-rated the
-    # album as a STUDIO album — the reported "marked as album+compilation but
-    # stuck with the star ratings". Every other consumer puts MusicBrainz first
-    # (``ui_routes.first_value`` for the album page,
-    # ``release_categories.category_for_album_row``), so the page displayed
-    # "Album (Compilation)" while the rating path disagreed.
+    # A JOIN, never an ``or``-chain: a chain reads the FIRST non-empty column
+    # and stops, so an album whose sources DISAGREE lost its compilation
+    # marking — measured, ``spotify_album_type="album"`` together with
+    # ``musicbrainz_album_type="album+compilation"`` returned ``(False, False)``
+    # and the end-of-run ``finalise_scan`` re-rated the album as a STUDIO
+    # release ("marked as album+compilation but stuck with the star ratings").
     #
-    # ``classify_compilation_category`` itself JOINS spotify + MusicBrainz, so
-    # joining here cannot invent a classification the shared helper would
-    # reject: any source that reports "compilation" wins, whichever column
-    # carries it. Both key spellings are read because the DB column is
-    # ``musicbrainz_albumtype`` while the in-memory album row built by
-    # ``load_stage`` uses ``musicbrainz_album_type``.
-    type_text = " ".join(
-        str(value or "").strip()
-        for value in (
-            row.get("musicbrainz_album_type"),
-            row.get("musicbrainz_albumtype"),
-            row.get("spotify_album_type"),
-            row.get("album_type"),
-            row.get("detected_album_type"),
-        )
-    ).strip()
+    # This is the SAME helper the live rating path (``prepare_album_context``)
+    # now uses, so the scan and a later re-finalise can no longer reach opposite
+    # verdicts for one album. ``releasetype`` is in the list because it is the
+    # file-tag column a Navidrome import writes.
+    from services.catalog.album_classification_service import joined_album_type
+
+    type_text = joined_album_type(row)
     album_artist = str(row.get("album_artist") or artist or "").strip()
     generic_artist = album_artist.casefold() in _VA_ALBUM_ARTIST_NAMES
 
@@ -1047,7 +1034,7 @@ def _resolve_compilation_flags(
             album=album,
             tracks=album_results,
             album_artist=album_artist,
-            musicbrainz_album_type=type_text,
+            type_text=type_text,
         ) or ""
     except Exception as exc:
         # A classification failure must not silently claim "studio album":

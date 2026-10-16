@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import Any
 
 import structlog
@@ -19,6 +20,71 @@ logger = structlog.get_logger(__name__)
 # --------------------------------------------------------------------
 
 COMPILATION_TYPES = {"compilation", "soundtrack", "various artists"}
+
+#: Every key that can carry an album's release TYPE, in a stable read order.
+#:
+#: ⭐ ONE list, because two readers disagreeing about the same album is what
+#: produced the reported "marked as album+compilation but stuck with the star
+#: ratings". The live rating path read exactly two keys with an ``or``-chain
+#: while ``_resolve_compilation_flags`` (the end-of-run fallback) joined five, so
+#: the scan and a later re-finalise could reach opposite verdicts.
+#:
+#: Both spellings of the MusicBrainz key are present on purpose: the DB column is
+#: ``musicbrainz_albumtype`` while the in-memory album row built by ``load_stage``
+#: uses ``musicbrainz_album_type``. ``releasetype`` is the file-tag column a
+#: Navidrome import fills, so it is real evidence too.
+ALBUM_TYPE_KEYS: tuple[str, ...] = (
+    "musicbrainz_album_type",
+    "musicbrainz_albumtype",
+    "spotify_album_type",
+    "album_type",
+    "detected_album_type",
+    "releasetype",
+)
+
+
+def joined_album_type(row: Any) -> str:
+    """Every type column on *row*, joined with spaces.
+
+    ⚠️ A JOIN, never an ``or``-chain. The chain stops at the first non-empty
+    value, so an album whose sources DISAGREE silently loses whichever marking
+    comes second. Measured: ``{"spotify_album_type": "album",
+    "musicbrainz_album_type": "album+compilation"}`` chained to plain ``album``
+    and the album was then rated as a studio release.
+
+    Returns ``""`` for a row that carries no type at all, so a caller can
+    distinguish "nothing declares a type" from "a type was supplied".
+    """
+    if not isinstance(row, Mapping):
+        return ""
+    return " ".join(
+        str(row.get(key) or "").strip() for key in ALBUM_TYPE_KEYS
+    ).strip()
+
+
+def joined_album_type_from_rows(rows: Any) -> str:
+    """Union of every :data:`ALBUM_TYPE_KEYS` value found on any row in *rows*.
+
+    A SCAN holds the album's type as TRACK rows, not one album row:
+    ``musicbrainz_albumtype`` / ``spotify_album_type`` / ``releasetype`` are
+    per-track columns. Reducing them here lets the LIVE rating path
+    (``prepare_album_context``) read the same evidence set the end-of-run
+    fallback reads, instead of only the two keys the scan happened to pass on.
+
+    Values are deduped in first-seen order, so the joined string is stable and
+    short. Substring matching does not care about repetition, but the value is
+    handed to a classifier and can be logged, so duplicates are noise.
+    """
+    seen: dict[str, None] = {}
+    for row in rows or ():
+        if not isinstance(row, Mapping):
+            continue
+        for key in ALBUM_TYPE_KEYS:
+            value = str(row.get(key) or "").strip()
+            if value:
+                seen.setdefault(value, None)
+    return " ".join(seen)
+
 
 LIVE_ALBUM_PATTERNS = [
     r"\(live\)\s*$",
@@ -371,12 +437,26 @@ def classify_compilation_category(
     album_artist: str | None = None,
     spotify_album_type: str | None = None,
     musicbrainz_album_type: str | None = None,
+    type_text: str | None = None,
 ) -> str:
-    """Classify a compilation candidate as ``"va"``, ``"single_artist"`` or ``""``."""
-    type_text = " ".join(
-        filter(None, (spotify_album_type or "", musicbrainz_album_type or ""))
-    ).lower()
-    is_compilation_type_tag = any(token in type_text for token in COMPILATION_TYPES)
+    """Classify a compilation candidate as ``"va"``, ``"single_artist"`` or ``""``.
+
+    ``type_text`` is a PRE-JOINED type string for a caller that already holds
+    every column -- see :func:`joined_album_type`. When given it REPLACES
+    ``spotify_album_type``/``musicbrainz_album_type`` rather than adding to them,
+    so a caller cannot pass both and produce a doubled join.
+    """
+    joined = (
+        type_text
+        if type_text is not None
+        else " ".join(
+            filter(None, (spotify_album_type or "", musicbrainz_album_type or ""))
+        )
+    )
+    type_text_lower = joined.lower()
+    is_compilation_type_tag = any(
+        token in type_text_lower for token in COMPILATION_TYPES
+    )
 
     if (album_artist or "").strip().lower() in _VA_ALBUM_ARTIST_NAMES:
         return "va"
@@ -415,13 +495,48 @@ def detect_compilation_album(
     )
 
 
+#: Substring tokens that mean "this is a best-of". Loose on purpose: they read
+#: an album TITLE, where "Best of Feuerschwanz" and "The Collection" are the
+#: ordinary spellings.
+_GREATEST_HITS_TOKENS = (
+    "greatest hits", "best of", "anthology", "collection", "singles",
+)
+
+#: A BARE "Hits" title -- Billy Talent's compilation is called exactly that.
+#:
+#: ⭐ Why this needed its own pattern rather than one more substring token:
+#: ``"singles" in "the singles"`` is why Ash's "'94 - '04: The Singles" routed to
+#: the artist-catalogue branch, and NOTHING in the token list above matches the
+#: word "hits" alone ("greatest hits" needs both words). Billy Talent's "Hits"
+#: therefore rated as a studio album -- its own median band, the album-rank gate
+#: and the 5★ slot cap -- which is what stripped eleven GLOBAL 5★ locks to 4★.
+#:
+#: ⚠️ ANCHORED TO THE WHOLE TITLE, and deliberately NOT a substring.
+#: ``"hits" in text`` would also match "Hitsville UK" and "Hits and Misses", and
+#: this function is ALSO called with a TRACK title (``release_categories``
+#: classifies a title to decide a release category), where "Hits Different" is an
+#: ordinary song. The word has to BE the title, optionally with an edition
+#: suffix:
+#:
+#:     "Hits"           -> True      "Hits Different"  -> False
+#:     "The Hits"       -> True      "Hitsville UK"    -> False
+#:     "Hits (Deluxe)"  -> True      "Hits and Misses" -> False
+#:
+#: NOTE: a qualifier BEFORE the word ("Big Hits of the 80s", "Dance Hits") is NOT
+#: matched. Each is a real compilation shape, but widening to a bare
+#: ``\bhits\b`` would also catch "Hits Different" on the track-title path, and a
+#: false positive there re-files an ordinary song's album. Missing a compilation
+#: leaves the album rated exactly as it was before this change, which is the
+#: smaller error and the one to prefer.
+_GREATEST_HITS_TITLE_RE = re.compile(r"^\s*(?:the\s+)?hits\s*(?:[([].*)?$")
+
+
 def detect_greatest_hits_album(album: str, artist: str) -> bool:
     text = (album or "").lower()
 
-    return any(
-        token in text
-        for token in ["greatest hits", "best of", "anthology", "collection", "singles"]
-    )
+    if any(token in text for token in _GREATEST_HITS_TOKENS):
+        return True
+    return bool(_GREATEST_HITS_TITLE_RE.match(text))
 
 
 # --------------------------------------------------------------------

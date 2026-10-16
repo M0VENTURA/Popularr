@@ -56,6 +56,14 @@ GREATEST_HITS_TITLES = [
     "The Collection",
     "Anthology",
     "Singles",
+    # ⭐ The BARE word, matched by its own anchored pattern rather than a
+    # substring token. Billy Talent's compilation is titled exactly "Hits" and
+    # rated as a studio album because "greatest hits" needs both words — while
+    # Ash's "'94 - '04: The Singles" matched "singles" and took the
+    # artist-catalogue branch.
+    "Hits",
+    "The Hits",
+    "Hits (Deluxe)",
 ]
 
 

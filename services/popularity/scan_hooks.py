@@ -22,6 +22,8 @@ from services.catalog.album_classification_service import (
     detect_greatest_hits_album,
     detect_live_album_type,
     is_live_or_alternate_album,
+    joined_album_type,
+    joined_album_type_from_rows,
     normalize_primary_release_type,
     should_exclude_track_from_stats,
 )
@@ -54,13 +56,51 @@ def prepare_album_context(
     album_artist: str | None = None,
     spotify_album_type: str | None = None,
     musicbrainz_album_type: str | None = None,
+    type_text: str | None = None,
 ) -> dict[str, Any]:
+
+    # ⭐ EVERY type column this album carries, JOINED — never an ``or``-chain.
+    #
+    # This is the LIVE rating path; ``_resolve_compilation_flags`` is the
+    # end-of-run fallback. When the two disagreed about the same album the scan
+    # and a later re-finalise reached OPPOSITE verdicts, so the album page could
+    # read "Album (Compilation)" while the rating scored a studio release.
+    # Measured: ``spotify_album_type="album"`` together with
+    # ``musicbrainz_album_type="album+compilation"`` chained to plain "album"
+    # here, because ``spotify_album_type or musicbrainz_album_type`` stops at the
+    # first non-empty value.
+    #
+    # The TRACK rows carry type columns the scan never passed on —
+    # ``releasetype`` above all, which is what a Navidrome import writes into a
+    # blank row — so they are unioned in here rather than threading a new
+    # argument through ``load_stage`` and the scan runner's call site.
+    #
+    # An explicitly supplied ``type_text`` wins outright, so a caller that
+    # already holds the joined value does not pay for this twice.
+    if type_text is None:
+        type_text = " ".join(
+            filter(
+                None,
+                (
+                    joined_album_type(
+                        {
+                            "spotify_album_type": spotify_album_type,
+                            "musicbrainz_album_type": musicbrainz_album_type,
+                        }
+                    ),
+                    joined_album_type_from_rows(tracks),
+                ),
+            )
+        )
 
     primary_release_type = normalize_primary_release_type(
         spotify_album_type or musicbrainz_album_type or ""
     )
 
-    album_type_from_field = spotify_album_type or musicbrainz_album_type or ""
+    # The JOIN, not the chain: ``detect_live_album_type`` and the greatest-hits
+    # guard below both ask "did any source declare a type?", and a source that
+    # said "album" must silence the title rescue exactly as the fallback does.
+    album_type_from_field = type_text
 
     live_album_type = detect_live_album_type(
         album,
@@ -84,8 +124,7 @@ def prepare_album_context(
         album=album,
         tracks=tracks,
         album_artist=album_artist,
-        spotify_album_type=spotify_album_type,
-        musicbrainz_album_type=musicbrainz_album_type,
+        type_text=type_text,
     )
     is_compilation = comp_category != ""
     is_va_compilation = comp_category == "va"
@@ -323,6 +362,7 @@ def prepare_tracks_for_album(
     album_artist: str | None = None,
     spotify_album_type: str | None = None,
     musicbrainz_album_type: str | None = None,
+    type_text: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
 
     album_context = prepare_album_context(
@@ -332,6 +372,7 @@ def prepare_tracks_for_album(
         album_artist=album_artist,
         spotify_album_type=spotify_album_type,
         musicbrainz_album_type=musicbrainz_album_type,
+        type_text=type_text,
     )
 
     track_contexts = [
