@@ -543,6 +543,14 @@ INDEXES_TO_ENSURE: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_tracks_album_artist ON tracks (album_artist)",
     "CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks (album)",
     "CREATE INDEX IF NOT EXISTS idx_tracks_final_score ON tracks (final_score DESC)",
+    # The recording-identity popularity reuse joins on these two
+    # (``popularity_cache_service.get_recording_identity_popularity``), so a
+    # duplicate ISRC on a second album is answered from the first one's stored
+    # counts instead of a second Last.fm + ListenBrainz round trip. Without an
+    # index the join is a sequential scan of ``tracks`` per album — trading a
+    # network call for the worse deal of the two.
+    "CREATE INDEX IF NOT EXISTS idx_tracks_isrc ON tracks (isrc)",
+    "CREATE INDEX IF NOT EXISTS idx_tracks_recording_mbid ON tracks (recording_mbid)",
     "CREATE INDEX IF NOT EXISTS idx_download_queue_status ON download_queue (status)",
     "CREATE INDEX IF NOT EXISTS idx_download_queue_release_id ON download_queue (release_id)",
     "CREATE INDEX IF NOT EXISTS idx_slskd_search_logs_created_at ON slskd_search_logs (created_at DESC)",

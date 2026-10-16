@@ -51,6 +51,64 @@ class TestNormalizeIsrcListHandling:
         assert normalize_isrc("nla321292284") == "NLA321292284"
 
 
+class TestNormalizeIsrcWrappedStrings:
+    """The STRING form of a list, which the list-value tests above do not cover.
+
+    ⚠️ ``str()``-ing a tag list was the original defect, and the fix unpacked a
+    real Python list BEFORE that happened — but a value that is ALREADY the
+    string ``'["NLA320119564"]'`` slips past every branch of the list handling.
+    That is not a synthetic input: it is exactly what a ``tracks.isrc`` TEXT
+    column holds for a row no scan has touched yet, and the scan then matches on
+    it (``popularity_cache_service.get_recording_identity_popularity`` indexes
+    siblings by this helper, and the track stage normalises through it before
+    storing), so an unnormalised value is a key that matches nothing.
+
+    The hyphenated form is the same class of input: an ISRC written the way a
+    human writes it, which the old token split broke into four pieces and none of
+    them was 12 characters.
+    """
+
+    def test_json_array_string(self):
+        assert normalize_isrc('["NLA320119564"]') == "NLA320119564"
+
+    def test_single_quoted_array_string(self):
+        assert normalize_isrc("['NLA320119564']") == "NLA320119564"
+
+    def test_array_string_with_two_codes_returns_the_first(self):
+        assert normalize_isrc('["USRC17607839", "USRC17607840"]') == "USRC17607839"
+
+    def test_brace_wrapped_string_still_works(self):
+        """CONTROL: the form the old implementation DID handle."""
+        assert normalize_isrc("{NLA320119564}") == "NLA320119564"
+
+    def test_hyphenated_human_form(self):
+        assert normalize_isrc("US-RC1-76-07839") == "USRC17607839"
+
+    def test_bracketed_hyphenated_form(self):
+        assert normalize_isrc('["US-RC1-76-07839"]') == "USRC17607839"
+
+    def test_whitespace_padded_form(self):
+        assert normalize_isrc("  NLA320119564  ") == "NLA320119564"
+
+    def test_a_real_list_still_unpacks(self):
+        """CONTROL: the list path must survive the string-form fix."""
+        assert normalize_isrc(["NLA321400382/NLA321400448"]) == "NLA321400382"
+
+    def test_unrecognised_junk_is_returned_compacted(self):
+        """No 12-char code present -> the uppercase compacted form, minus wrappers.
+
+        The old fallback returned the wrappers too, so ``'["NOPE"]'`` became
+        ``'["NOPE"]'`` — which the bracketed-guard in ``resolve_isrc_recording``
+        would then refuse. A compacted value is a better key than a decorated one.
+        """
+        assert normalize_isrc('["NOPE"]') == "NOPE"
+
+    def test_empty_and_whitespace(self):
+        assert normalize_isrc("") == ""
+        assert normalize_isrc("   ") == ""
+        assert normalize_isrc("[]") == ""
+
+
 class TestResolveIsrcBracketedGuard:
     def test_bracketed_string_never_reaches_api(self, monkeypatch):
         """A bracketed tag-list string is normalised before the API call."""

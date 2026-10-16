@@ -2689,6 +2689,20 @@ def run_scan(
                 # Per-artist prefetch: popularity cache, Discogs artist id,
                 # release cache, and missing-release tracklists.
                 # -------------------------------------------------------------
+                # ⚠️ Reset on ARTIST change, BEFORE the guard below can skip it.
+                #
+                # The block underneath is skipped for a compilation artist (there
+                # is no "Various Artists" catalogue to prefetch), and the reset
+                # used to live INSIDE it — so moving from a normal artist to a
+                # compilation left the PREVIOUS artist's entries in place. Those
+                # entries are keyed by normalised title, so any compilation track
+                # whose title collided with one of them was answered from another
+                # artist's numbers and never looked up. A compilation is exactly
+                # where that collision is most likely: it carries the well-known
+                # titles.
+                if artist and artist != last_prefetch_artist:
+                    prefetched_popularity = {}
+
                 if artist and artist != last_prefetch_artist and not _is_compilation_artist:
                     last_prefetch_artist = artist
                     prefetched_popularity = {}
@@ -3132,6 +3146,61 @@ def run_scan(
                         )
 
                 _track_jobs: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]] = []
+                # -------------------------------------------------------------
+                # Answer this album's tracks from OTHER rows of the SAME recording.
+                #
+                # ⭐ An ISRC (and a recording MBID) identifies a PERFORMANCE, so
+                # the same recording on two albums has the same ListenBrainz
+                # listeners — that count is held against the recording MBID — and
+                # the same Last.fm listeners, which are held against one
+                # artist+title track page. Two copies therefore do not need two
+                # lookups.
+                #
+                # They get two today, because every cache in
+                # ``popularity_cache_service`` is keyed by ``(artist, title)``: a
+                # different title spelling on the two albums keys two rows, and a
+                # compilation credits "Various Artists" while the artist's own
+                # album credits the band — and the prefetch above is skipped for
+                # a compilation artist entirely.
+                #
+                # ⚠️ Merged into an ALBUM-SCOPED copy, never into
+                # ``prefetched_popularity`` itself. That dict lives for the whole
+                # ARTIST pass, and these entries are keyed by normalised title: a
+                # seed taken from this album's "Song" (ISRC X) would answer the
+                # NEXT album's unrelated track also called "Song" (ISRC Y).
+                # ``setdefault`` so the artist-level prefetch, which is fresher
+                # and artist-scoped, always wins where it has an answer.
+                # -------------------------------------------------------------
+                _album_prefetched = prefetched_popularity
+                try:
+                    from services.popularity.popularity_cache_service import (
+                        get_recording_identity_popularity,
+                    )
+
+                    _sibling_entries = get_recording_identity_popularity(track_dicts)
+                    if _sibling_entries:
+                        _album_prefetched = dict(prefetched_popularity or {})
+                        _seeded = 0
+                        for _key, _entry in _sibling_entries.items():
+                            if _key not in _album_prefetched:
+                                _album_prefetched[_key] = _entry
+                                _seeded += 1
+                        if _seeded:
+                            logger.debug(
+                                "Seeded popularity from the same recording on other rows",
+                                artist=artist,
+                                album=album,
+                                seeded=_seeded,
+                            )
+                except Exception as exc:
+                    # An optimisation must never break a scan: fall back to the
+                    # per-track lookup, which is what ran before this existed.
+                    logger.debug(
+                        "Recording-identity seeding skipped",
+                        artist=artist, album=album, error=str(exc),
+                    )
+                    _album_prefetched = prefetched_popularity
+
                 for track_context in track_contexts:
                     prepared_track = apply_context_fields_to_track(track_context)
                     _frozen = False
@@ -3164,7 +3233,11 @@ def run_scan(
                     _track_options["mb_cached_singles"] = mb_cached_singles
                     _track_options["discogs_cached_singles"] = discogs_cached_singles
                     _track_options["discogs_cached_promos"] = discogs_cached_promos
-                    _track_options["prefetched_popularity"] = prefetched_popularity
+                    # ⚠️ The ALBUM-SCOPED dict (see the seeding block above the
+                    # loop), not the artist-level one: it carries this album's
+                    # recording-identity seeds, and using the artist dict here
+                    # would silently discard them.
+                    _track_options["prefetched_popularity"] = _album_prefetched
 
                     if force_metadata_for_this_album:
                         _track_options["force_metadata"] = True

@@ -237,6 +237,262 @@ def get_artist_top_tracks_map(lastfm_client: Any, artist: str) -> dict[str, dict
     return _lf_top_tracks_map(lastfm_client, artist)
 
 
+#: Stored form of ``isrc`` that this lookup does NOT need to handle: the track
+#: stage normalises a bracketed list to a bare code and writes it back, so a
+#: scanned row already holds ``USRC17607839``. A row that has never been
+#: scanned may still hold ``["USRC17607839"]``, and the LIKE arm below is what
+#: catches those.
+def get_recording_identity_popularity(
+    tracks: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Popularity for these tracks, COPIED from other rows of the same recording.
+
+    ⭐ WHY THE COPY IS SOUND. An ISRC identifies a specific performance, and
+    ``recording_mbid`` is the same identity under another name. So for a given
+    recording:
+
+    * **ListenBrainz** counts are held against the RECORDING MBID — the same
+      number for every album that carries it. Not a heuristic: it is the same
+      key.
+    * **Last.fm** counts are held against one artist+title track page, so the
+      same recording yields the same page and the same listeners.
+
+    Reported: *"if another copy of the same track is found, can it copy the data
+    from the other track on the database rather than doing a new lookup"*. Two
+    copies reach this point as two INDEPENDENT lookups today, because every
+    cache in this module is keyed by ``(artist, title)``:
+
+    * the same recording with a different title spelling on the two albums
+      ("Song" vs "Song (feat. X)") keys two rows;
+    * a compilation credits "Various Artists" while the artist's own album
+      credits the band, and the track stage's prefetch is skipped for a
+      compilation artist ENTIRELY.
+
+    ⚠️ WHAT IS **NOT** COPIED, deliberately:
+
+    * ``is_single`` and any score. A single verdict is a fact about a RELEASE,
+      not a recording — a track can be a single off one album and a deep cut on
+      a compilation. ``finalise_stage._sync_isrc_popularity`` already handles
+      the score/is_single side with its own rules; copying them here would
+      duplicate (and pre-empt) that decision.
+    * a zero count. The caller's branches treat a falsy count as "no data" and
+      fall through to the lookup, so returning zeros would change nothing —
+      except that the entry would exist. Only rows with a real count are
+      offered, so the entry's presence means "this is answered".
+
+    The LENGTH is not consulted either: the identity already established that
+    this is the same performance, and the length guard exists to decide identity,
+    not to re-litigate it.
+
+    Returns entries keyed by the normalised title of each REQUESTED track, shaped
+    like ``prefetched_popularity`` so the per-track paths use them without a
+    branch of their own.
+    """
+    if not tracks:
+        return {}
+
+    # Collect the identities this album can be answered FROM. Normalised the same
+    # way the track stage normalises before storing, so the two agree.
+    codes: list[str] = []
+    mbids: list[str] = []
+    for track in tracks:
+        code = _normalize_isrc_code(track.get("isrc"))
+        if code:
+            codes.append(code)
+        mbid = str(track.get("recording_mbid") or track.get("mbid") or "").strip()
+        if mbid:
+            mbids.append(mbid)
+    codes = sorted(set(codes))
+    mbids = sorted(set(mbids))
+    if not codes and not mbids:
+        return {}
+
+    rows: list[dict[str, Any]] = []
+    try:
+        from sqlalchemy import bindparam, text as _text
+
+        from db.engine import db_session
+
+        # ⚠️ `IN` with an EXPANDING bindparam, not `= ANY(...)`: ANY is
+        # PostgreSQL-only and the test suite runs on SQLite (same house pattern
+        # the playlist and track queries use).
+        #
+        # The LIKE arm catches a row whose ``isrc`` still holds the bracketed
+        # list form (``["USRC17607839"]``) because it has never been through a
+        # scan. It is a substring match, so it cannot use an index — it is here
+        # for correctness, and the equality arm plus the new
+        # ``idx_tracks_isrc`` carry the common case.
+        #
+        # ⚠️ Each arm is added ONLY when it has values. An empty expanding
+        # bindparam renders ``IN (NULL)`` and is harmless, but an empty
+        # ``(" OR ".join([]))`` leaves a bare ``()`` in the WHERE clause, which
+        # is a SYNTAX ERROR — reached whenever a track has a recording MBID and
+        # no ISRC, which is common.
+        conditions: list[str] = []
+        params: dict[str, Any] = {}
+        if mbids:
+            conditions.append("recording_mbid IN :mbids")
+            params["mbids"] = mbids
+        if codes:
+            conditions.append("isrc IN :codes")
+            params["codes"] = codes
+            like_arm = " OR ".join(f"isrc LIKE :like{i}" for i in range(len(codes)))
+            conditions.append(
+                f"(isrc IS NOT NULL AND isrc <> '' AND ({like_arm}))"
+            )
+            for index, code in enumerate(codes):
+                params[f"like{index}"] = f"%{code}%"
+
+        statement = f"""
+            SELECT CAST(id AS TEXT) AS id, title, artist, album, isrc, recording_mbid,
+                   lastfm_listeners, lastfm_playcount,
+                   listenbrainz_listens, listenbrainz_users,
+                   lastfm_tags, COALESCE(is_live, 0) AS is_live
+            FROM tracks
+            WHERE {" OR ".join(conditions)}
+        """
+
+        bindings = []
+        if mbids:
+            bindings.append(bindparam("mbids", expanding=True))
+        if codes:
+            bindings.append(bindparam("codes", expanding=True))
+        bound = _text(statement).bindparams(*bindings)
+        with db_session() as session:
+            rows = [dict(r._mapping) for r in (session.execute(bound, params).fetchall() or [])]
+    except Exception as exc:
+        # Never fatal: this is an optimisation. A failure means the normal
+        # per-track lookup runs, which is what happened before this existed.
+        logger.debug("Recording-identity popularity lookup failed", error=str(exc))
+        return {}
+
+    if not rows:
+        return {}
+
+    # Index the siblings by BOTH identities, keeping the strongest row per key.
+    # "Strongest" = most Last.fm listeners, then most ListenBrainz listens, which
+    # matches how the cache read above already breaks ties between variant rows.
+    by_code: dict[str, dict[str, Any]] = {}
+    by_mbid: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        # ⚠️ EVERY code on the row, not just the first. A row may legitimately
+        # list several ISRCs for one recording (a re-release keeps the original
+        # and adds its own), and ``normalize_isrc`` returns only the first in
+        # that case — which would leave the row unreachable by the others.
+        for code in _isrc_codes_in(row.get("isrc")):
+            existing = by_code.get(code)
+            if existing is None or _count_strength(row) > _count_strength(existing):
+                by_code[code] = row
+        mbid = str(row.get("recording_mbid") or "").strip()
+        if mbid:
+            existing = by_mbid.get(mbid)
+            if existing is None or _count_strength(row) > _count_strength(existing):
+                by_mbid[mbid] = row
+
+    out: dict[str, dict[str, Any]] = {}
+    for track in tracks:
+        title = track.get("title")
+        if not title:
+            continue
+        key = normalize_for_aggregation(str(title))
+        if not key or key in out:
+            continue
+
+        sibling = None
+        code = _normalize_isrc_code(track.get("isrc"))
+        if code:
+            sibling = by_code.get(code)
+        if sibling is None:
+            mbid = str(track.get("recording_mbid") or track.get("mbid") or "").strip()
+            if mbid:
+                sibling = by_mbid.get(mbid)
+        if sibling is None:
+            continue
+
+        # A track must not answer from ITSELF — that is a re-read of the row's own
+        # stored counts, which the caller already has.
+        if str(sibling.get("id") or "") == str(track.get("id") or ""):
+            continue
+
+        entry = _sibling_entry(sibling)
+        if entry:
+            out[key] = entry
+
+    return out
+
+
+def _normalize_isrc_code(value: Any) -> str:
+    """Bare 12-character ISRC code, or ``""``.
+
+    Delegates to ``normalize_isrc`` so the code this file matches on is spelled
+    exactly the way the track stage stores it.
+    """
+    if not value:
+        return ""
+    try:
+        from helpers.normalization_service import normalize_isrc
+
+        return normalize_isrc(value)
+    except Exception:
+        return ""
+
+
+def _isrc_codes_in(value: Any) -> list[str]:
+    """EVERY 12-character ISRC code present in a stored value.
+
+    Used for the SIBLING side of the lookup, where a row listing several codes
+    must be reachable by each of them. ``normalize_isrc`` deliberately returns
+    only the first code, which is the right contract for the track stage (one
+    code to store) and the wrong one for an index.
+    """
+    if not value:
+        return []
+    try:
+        import re
+
+        if isinstance(value, (list, tuple, set)):
+            value = " ".join(str(v) for v in value)
+        compact = re.sub(r"[^0-9A-Za-z]+", "", str(value)).upper()
+        return sorted({m.group(0) for m in re.finditer(r"[A-Z]{2}[0-9A-Z]{3}[0-9]{7}", compact)})
+    except Exception:
+        return []
+
+
+def _count_strength(row: dict[str, Any]) -> tuple[int, int]:
+    return (
+        int(row.get("lastfm_listeners") or 0),
+        int(row.get("listenbrainz_listens") or 0),
+    )
+
+
+def _sibling_entry(row: dict[str, Any]) -> dict[str, Any]:
+    """A prefetch-shaped entry from a sibling row, or ``{}`` when it holds nothing.
+
+    Only NON-ZERO counts are offered: the caller's branches fall through to the
+    lookup on a falsy count, so an entry carrying zeros would be pure overhead —
+    and, worse, would look like an answer to anything that only checks presence.
+    """
+    lf = int(row.get("lastfm_listeners") or 0)
+    lb = int(row.get("listenbrainz_listens") or 0)
+    if not lf and not lb:
+        return {}
+
+    entry: dict[str, Any] = {
+        "lastfm_listeners": lf,
+        "lastfm_playcount": int(row.get("lastfm_playcount") or 0),
+        "listenbrainz_listens": lb,
+        "listenbrainz_users": int(row.get("listenbrainz_users") or 0),
+        "source": "isrc_sibling",
+        # The identity, so the track stage can SKIP resolving ISRC -> recording
+        # over the network (a shared 1 req/s MusicBrainz budget).
+        "recording_mbid": str(row.get("recording_mbid") or "").strip() or None,
+    }
+    tags = row.get("lastfm_tags")
+    if tags:
+        entry["lastfm_tags"] = tags
+    return entry
+
+
 def prefetch_artist_popularity(
     artist: str,
     tracks: list[dict[str, Any]],

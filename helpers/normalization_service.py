@@ -70,7 +70,31 @@ def clean_title(
 
 
 def normalize_isrc(value: Any) -> str:
-    """Normalize an ISRC / ISRC-list to a bare 12-char code (uppercased)."""
+    """Normalize an ISRC / ISRC-list to a bare 12-char code (uppercased).
+
+    Handles every wrapper a tag source or a TEXT column can put round a code:
+
+    * a bare code — ``USRC17607839``;
+    * the hyphenated human form — ``US-RC1-76-07839``;
+    * a slash/comma/space separated list — ``A/B``, ``A, B``;
+    * a wrapper — ``{A}``, ``["A"]``, ``['A']``, ``["A", "B"]``.
+
+    ⚠️ THE BRACKETED-STRING FORM WAS BROKEN. The list/tuple/set branch below
+    unpacks a real Python list, but a value that is already the STRING
+    ``'["USRC17607840"]'`` fell through every delimiter in the split (there is no
+    comma, slash or space in it), failed the 12-char match on the quotes and
+    brackets, and was returned UNCHANGED by the final fallback. That is not a
+    hypothetical input: it is exactly what a ``tracks.isrc`` TEXT column holds for
+    a row that has never been through a scan, and it is what
+    ``str()``-ing a tag list produced in the first place.
+
+    So the string is compacted to alphanumerics BEFORE the code is searched for.
+    That removes every wrapper at once — brackets, quotes, braces, slashes,
+    spaces and the hyphens of the human form — which is why the hyphenated form
+    now normalises too, rather than surviving as junk.
+
+    The first valid code wins, which is the documented contract for a list.
+    """
     if value is None:
         return ""
 
@@ -82,12 +106,17 @@ def normalize_isrc(value: Any) -> str:
         return ""
 
     raw = str(value)
-    cleaned = re.sub(r"[{}]", " ", raw)
-    for code in re.split(r"[/,;|\s]+", cleaned):
-        code = code.strip().upper()
-        if re.fullmatch(r"[A-Z]{2}[0-9A-Z]{3}[0-9]{7}", code):
-            return code
-    return re.sub(r"[{}]", "", raw).strip().upper()
+    # Compact to alphanumerics: strips brackets, quotes, braces, slashes, spaces
+    # and hyphens in one pass, so the 12-char search below sees only the code(s).
+    compact = re.sub(r"[^0-9A-Za-z]+", "", raw).upper()
+    if not compact:
+        return ""
+    match = re.search(r"[A-Z]{2}[0-9A-Z]{3}[0-9]{7}", compact)
+    if match:
+        return match.group(0)
+    # Nothing that looks like an ISRC: return the compacted uppercase form, which
+    # is what an unrecognised value used to become (minus its wrappers).
+    return compact
 
 
 def strip_diacritics(value: str) -> str:
