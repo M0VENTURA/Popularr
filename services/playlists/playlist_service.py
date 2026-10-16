@@ -22,7 +22,7 @@ import logging
 import os
 import re
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from db.engine import db_session
 from helpers.normalization_service import normalize_the_prefix
@@ -330,13 +330,27 @@ def create_or_update_loved_tracks_playlist() -> dict:
             return {"success": True, "track_count": 0, "note": "no hearted tracks"}
 
         with db_session() as session:
+            # ⚠️ NOT `SELECT value FROM json_each(:ids)`.
+            #
+            # `json_each` is SQLite's array deconstructor. PostgreSQL HAS a
+            # function of that name, but it is documented to "expand the
+            # top-level JSON OBJECT into a set of key/value pairs" and its
+            # `value` column is typed json — the docs' own example prints
+            # `"foo"`, quotes included. So against the array this passes it can
+            # neither yield the bare ids nor compare to a TEXT column:
+            # `text = json` has no operator. SQLite's json_each returns the
+            # unquoted scalar, so the idiom passed every test here and failed
+            # in production, where it disabled the whole feature.
+            #
+            # The house pattern is an expanding bindparam (see
+            # db/repositories/playlists.py, which documents this same trap).
             rows = session.execute(
                 text("""
                     SELECT id, title, artist FROM tracks
-                    WHERE CAST(id AS TEXT) IN (SELECT value FROM json_each(:ids))
+                    WHERE CAST(id AS TEXT) IN :ids
                     ORDER BY title
-                """),
-                {"ids": json.dumps(hearted)},
+                """).bindparams(bindparam("ids", expanding=True)),
+                {"ids": [str(t) for t in hearted]},
             ).fetchall() or []
 
         tracks = [
