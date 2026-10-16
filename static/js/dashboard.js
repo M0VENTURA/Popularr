@@ -588,6 +588,24 @@ function renderUpcomingReleasesTable(releases) {
   if (cardsEl) cardsEl.innerHTML = rows.map(x => x.card).join("");
 }
 
+// ── Upcoming-release artwork ──────────────────────────────────────────────
+// The RULE lives in UpcomingReleasesService (js/upcoming_releases.js), which
+// this page already loads. It is deliberately not duplicated here: the
+// dashboard, the dedicated page and the downloads monitor render the same rows
+// from the same API payload, so a second copy is a second place for the
+// priority order to drift.
+//
+// ⚠️ The fallback is NO ART, never a guessed URL. If the service is missing, an
+// unguarded call would throw inside the row builder and take the whole table
+// with it — so this returns '' and the row renders as it did before. Falling
+// back to a URL instead would defeat the point of the rule, since an unowned,
+// unmatched release has nothing to ask for.
+function _upcomingArtThumb(r, size, cls) {
+    const svc = window.UpcomingReleasesService;
+    if (!svc || typeof svc.upcomingArtThumb !== "function") return "";
+    return svc.upcomingArtThumb(r, size, cls);
+}
+
 function _buildUpcomingReleaseRow(r) {
     const releaseDate = r.release_date || "TBA";
     // The Wikipedia scraper stores the configured source display names (e.g.
@@ -641,10 +659,15 @@ function _buildUpcomingReleaseRow(r) {
       ? queueBtn
       : (isCandidate ? matchBtn : searchBtn);
 
+    // Thumb sits inside the existing Album cell / card body — no new column,
+    // so no <th>, data-label or colspan has to be kept in step.
+    const rowThumb = _upcomingArtThumb(r, 250, "upcoming-thumb");
+    const cardThumb = _upcomingArtThumb(r, 250, "upcoming-thumb upcoming-thumb-card");
+
     return {
       html: `<tr>
         <td>${escapeHtml(r.artist_name)}${colBadge}</td>
-        <td>${escapeHtml(r.album_name)}${linkedBadge}</td>
+        <td>${rowThumb}${escapeHtml(r.album_name)}${linkedBadge}</td>
         <td>${escapeHtml(releaseDate)} ${dateBadge}</td>
         <td>${sourceBadge}</td>
         <td class="text-center"><div class="d-flex gap-1 justify-content-center">${actionBtn}</div></td>
@@ -654,7 +677,8 @@ function _buildUpcomingReleaseRow(r) {
       // stay) and exactly one action button.
       card: `<div class="upcoming-card rounded border">
         <div class="d-flex justify-content-between align-items-center gap-2">
-          <div class="min-w-0">
+          ${cardThumb}
+          <div class="min-w-0 flex-grow-1">
             <div class="upcoming-card-title fw-semibold text-truncate">${escapeHtml(r.artist_name)}${colBadge}</div>
             <div class="upcoming-card-album text-muted text-truncate">${escapeHtml(r.album_name)}${linkedBadge}</div>
           </div>

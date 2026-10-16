@@ -27,6 +27,20 @@
     document.head.appendChild(style);
   })();
 
+  // NOTE: the thumbnail's size is NOT injected here.
+  //
+  // ⚠️ This service renders rows on THREE pages (dashboard, dedicated upcoming
+  // page, downloads monitor) but `css/dashboard.css` is linked by the DASHBOARD
+  // ONLY, so a rule declared there left the other two emitting an <img> with no
+  // rule to size it — a full-size Cover Art Archive image in a table cell.
+  // The fix is to declare `.upcoming-thumb` in `css/popularr.css`, which
+  // `base.html` loads on every page, rather than to inject it from JavaScript.
+  //
+  // (The `injectSourceBadgeStyles` IIFE above is itself a second definition of
+  // `.source-key-badge`, which `css/popularr.css` already declares. That
+  // duplication is pre-existing and not touched here — it is a styling change
+  // to the badge, not to artwork.)
+
   var state = {
     items: [],
     filters: { source: 'all', page: 1, limit: 50 },
@@ -165,6 +179,66 @@
     return dateText <= new Date().toISOString().slice(0, 10);
   }
 
+  // ── Artwork ─────────────────────────────────────────────────────────────
+  // The ONLY place the archive host is named. Every artwork URL has to come
+  // through here, so the two sources below stay in one priority order.
+  var CAA_ART_BASE = 'https://coverartarchive.org/release-group';
+
+  /**
+   * The artwork URL for a release, or '' when there is nothing to ask for.
+   *
+   * PRIORITY, and the first two rungs are different KINDS of request:
+   *
+   *   1. Owned (album_in_collection) -> our own /api/album art endpoint, which
+   *      prefers Navidrome. Same-origin, already cached, and the picture the
+   *      rest of the app shows for that album.
+   *   2. Matched (release_group_mbid) -> the Cover Art Archive, addressed by
+   *      RELEASE GROUP. This is what makes art appear at all: an upcoming
+   *      release is by definition one you do not own yet, so rung 1 is a
+   *      guaranteed 404 for it and every row fell back to a placeholder.
+   *   3. Otherwise '' — the caller draws its placeholder WITHOUT a request.
+   *      That is why this is a function rather than an inline expression: a
+   *      request that can only fail costs a 404 per row (fifty on a full page)
+   *      to draw something that could have been drawn for free.
+   *
+   * A CANDIDATE match is deliberately NOT used. mbid_match_status 'candidate'
+   * means the scorer found a plausible release group and is waiting for a human
+   * to confirm it; showing its cover would present a GUESS as this album's
+   * artwork, and art is the most believable thing on the row. Only
+   * release_group_mbid is a confirmed identity — same reasoning as the blue
+   * hexagon badge, which is also only drawn for a confirmed match.
+   */
+  function upcomingArtUrl(release, size) {
+    var rel = release || {};
+    var px = Number(size) > 0 ? Number(size) : 250;
+    if (rel.album_in_collection) {
+      var artist = encodeURIComponent(rel.artist_name || '');
+      var album = encodeURIComponent(rel.album_name || '');
+      if (artist && album) {
+        return '/api/album/' + artist + '/' + album + '/art?s=' + px;
+      }
+    }
+    if (rel.release_group_mbid) {
+      return CAA_ART_BASE + '/' + encodeURIComponent(String(rel.release_group_mbid)) + '/front-' + px;
+    }
+    return '';
+  }
+
+  /**
+   * A small inline thumbnail, or '' when there is no art to ask for.
+   *
+   * loading="lazy" so a full page of covers does not block the first paint, and
+   * onerror REMOVES the element rather than leaving a broken-image glyph: a
+   * release group the archive has no art for answers 404, and a torn icon is
+   * worse than a cell showing only the album name.
+   */
+  function upcomingArtThumb(release, size, cls) {
+    var url = upcomingArtUrl(release, size);
+    if (!url) return '';
+    return '<img src="' + escapeHtml(url) + '" alt="" loading="lazy" ' +
+      'class="' + (cls || 'upcoming-thumb') + '" onerror="this.remove()">';
+  }
+
   function renderReleaseRow(release) {
     var releaseDate = release.release_date || 'TBA';
     var dateBadge = isReleased(release)
@@ -236,9 +310,12 @@
           : '<span class="text-muted small">unmatched</span>');
 
     // FIXED: Added data-label so mobile cards know what to name the fields
+    // The thumbnail goes inside the existing Album cell — a new <td> would need
+    // a matching <th>, a data-label and every colspan kept in step.
     return '<tr>' +
       '<td data-label="Artist">' + escapeHtml(release.artist_name || '') + '</td>' +
-      '<td data-label="Album">' + escapeHtml(release.album_name || '') + typeBadge + linkedBadge + '</td>' +
+      '<td data-label="Album">' + upcomingArtThumb(release, 250, 'upcoming-thumb') +
+        escapeHtml(release.album_name || '') + typeBadge + linkedBadge + '</td>' +
       '<td data-label="Date"><small>' + escapeHtml(releaseDate) + ' ' + dateBadge + '</small></td>' +
       '<td data-label="Source">' + sourceBadge(release) + '</td>' +
       '<td data-label="MBID">' + mbidCell + '</td>' +
@@ -432,6 +509,11 @@
     queueById: queueById,
     queueFromRow: queueFromRow,
     isReleased: isReleased,
+    // Exposed so the artwork rule has ONE implementation a caller (and a test)
+    // can use directly, rather than three pages each building their own URL.
+    // The live dashboard delegates here rather than keeping a second copy.
+    upcomingArtUrl: upcomingArtUrl,
+    upcomingArtThumb: upcomingArtThumb,
     escapeHtml: escapeHtml,
     encodeInlineArg: encodeInlineArg,
     decodeInlineArg: decodeInlineArg,

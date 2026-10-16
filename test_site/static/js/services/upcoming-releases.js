@@ -88,6 +88,77 @@
     return (global.escapeHtml || ((v) => String(v == null ? '' : v)))(value);
   }
 
+  // ── Artwork ─────────────────────────────────────────────────────────────
+
+  /** Cover Art Archive's release-group front cover, by size. */
+  function caaReleaseGroupUrl(mbid, size) {
+    return 'https://coverartarchive.org/release-group/' +
+      encodeURIComponent(String(mbid || '')) + '/front-' + (size || 250);
+  }
+
+  /**
+   * The artwork URL for an upcoming release, or '' when there is none to ask for.
+   *
+   * ⭐ PRIORITY, and the first two rungs are different KINDS of request:
+   *
+   *   1. **Owned** (``album_in_collection``): the app's own art endpoint, which
+   *      prefers Navidrome and serves from the database. Same-origin, already
+   *      cached, and the picture the rest of the app shows for that album.
+   *   2. **Matched** (``release_group_mbid``): the Cover Art Archive, addressed
+   *      by RELEASE GROUP. This is what makes art appear at all for an upcoming
+   *      release — by definition you do not own it yet, so the local endpoint is
+   *      a guaranteed 404 and was the reason every row showed a placeholder.
+   *   3. Otherwise ``''`` — the caller renders its placeholder WITHOUT making a
+   *      request. That rule is the reason this is a function rather than an
+   *      inline expression: a request that can only fail costs a 404 per card
+   *      (fifty on a full list) to draw something we could draw for free.
+   *
+   * ⚠️ A CANDIDATE match is deliberately NOT used. ``mbid_match_status`` of
+   * 'candidate' means the scoring pipeline found a plausible release group and
+   * is waiting for a human to confirm it. Showing that release's cover would
+   * present a GUESS as the artwork of this album — and art is the most
+   * believable thing on the card. Same reasoning as ``linkedBadge``: only
+   * ``release_group_mbid`` is a confirmed identity.
+   *
+   * ⚠️ The CAA URL is built HERE and used by the browser directly. That is the
+   * established pattern in this codebase — ``ui/search-flyout.js`` and the live
+   * ``unified_search.js`` both point at
+   * ``coverartarchive.org/release-group/<id>/front-250`` for search results, and
+   * the app sets no Content-Security-Policy that would block it. A missing cover
+   * answers 404 and the caller's ``onerror`` swaps the placeholder in, so a
+   * release with no artwork costs one failed request and no visible damage.
+   */
+  function releaseArtUrl(release, size) {
+    const rel = release || {};
+    if (rel.album_in_collection) {
+      return '/api/album/' +
+        encodeURIComponent(rel.artist_name || '') + '/' +
+        encodeURIComponent(rel.album_name || '') +
+        '/art?s=' + (size || 200);
+    }
+    if (rel.release_group_mbid) {
+      return caaReleaseGroupUrl(rel.release_group_mbid, size || 250);
+    }
+    return '';
+  }
+
+  /**
+   * A small inline thumbnail for a table cell, or '' when there is no art.
+   *
+   * ⚠️ ``onerror`` REPLACES the image with nothing rather than leaving a
+   * broken-image glyph: a table cell that shows a torn-icon for a cover the
+   * archive does not have is worse than a cell with only the album name. The
+   * element is REMOVED (not hidden) so the name keeps its alignment and no
+   * empty box remains where the art would have been.
+   */
+  function artThumb(release, size) {
+    const url = releaseArtUrl(release, size || 250);
+    if (!url) return '';
+    return '<img src="' + esc(url) + '" alt="" loading="lazy" ' +
+      'class="ur-thumb flex-shrink-0" ' +
+      "onerror=\"this.remove()\">";
+  }
+
   function notifyError(message) {
     if (global.toast) global.toast.error(message);
     else global.alert(message);
@@ -260,7 +331,12 @@
 
     return '<tr>' +
       `<td data-label="Artist">${esc(release.artist_name || '')}</td>` +
-      `<td data-label="Album">${esc(release.album_name || '')}${typeBadge(release)}${linkedBadge(release)}</td>` +
+      // ⚠️ The thumbnail goes INSIDE the Album cell rather than in a column of
+      // its own. A new <td> would need a matching <th>, a `data-label` for the
+      // mobile card layout, and every `colspan` in this table kept in step —
+      // four coupled edits to show a 28px picture. Inside the cell it costs
+      // nothing and reads as part of the album.
+      `<td data-label="Album">${artThumb(release)}${esc(release.album_name || '')}${typeBadge(release)}${linkedBadge(release)}</td>` +
       `<td data-label="Date"><small>${esc(release.release_date || 'TBA')} ${dateBadge}</small></td>` +
       `<td data-label="Source">${sourceBadge(release)}</td>` +
       `<td data-label="MBID">${mbidCell(release, isCandidate)}</td>` +
@@ -472,11 +548,19 @@
       const statusClass = released ? 'bg-primary' : 'bg-success';
       const statusText = released ? 'Out now' : 'Upcoming';
 
-      const art = release.album_in_collection
-        ? '<img src="/api/album/' +
-            encodeURIComponent(release.artist_name || '') + '/' +
-            encodeURIComponent(release.album_name || '') +
-            '/art?s=200" alt="" loading="lazy" ' +
+      // ⭐ THE ART COMES FROM `releaseArtUrl`, which knows the two places a
+      // picture can legitimately come from: the app's own endpoint for an album
+      // we own, and the Cover Art Archive for a release we have MATCHED. Only
+      // when it returns '' is the placeholder drawn — and then no request is
+      // made at all.
+      //
+      // ⚠️ This used to be `album_in_collection ? <img> : <placeholder>`, so
+      // every unowned release — which is what an "upcoming" list mostly is —
+      // showed a placeholder disc even when the row was matched to MusicBrainz
+      // and its cover was one request away.
+      const artUrl = releaseArtUrl(release, 250);
+      const art = artUrl
+        ? '<img src="' + esc(artUrl) + '" alt="" loading="lazy" ' +
             'onerror="this.replaceWith(Object.assign(document.createElement(\'i\'),' +
             '{className:\'bi bi-disc text-muted fs-2\'}))">'
         : '<i class="bi bi-disc text-muted fs-2" aria-hidden="true"></i>';
@@ -577,6 +661,12 @@
     queueById,
     queueFromRow,
     isReleased,
+    // Exposed so the artwork rule has ONE implementation a test can call
+    // directly, rather than being pinned by pattern-matching the markup it
+    // happens to produce. `artThumb` rides along for the same reason: it is
+    // the half of the rule that decides whether a request happens at all.
+    releaseArtUrl,
+    artThumb,
   };
 
   // NOTE: escapeHtml / encodeInlineArg / decodeInlineArg were exported from

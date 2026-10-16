@@ -779,3 +779,27 @@ form .form-check-input[name="force"] + .form-check-label {
 .sticky-save-bar { position: fixed; bottom: var(--footer-stack-height, 2.4rem); left: 0; right: 0; z-index: 2020; background: rgba(18, 18, 18, 0.98); border-top: 1px solid rgba(34, 197, 94, 0.5); box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5); padding: 0.6rem 1rem; }
 .sticky-save-bar.d-none { display: none; }
 .config-save-bar { position: sticky; bottom: 0; z-index: 2010; background: rgba(18, 18, 18, 0.96); border-top: 1px solid rgba(34, 197, 94, 0.4); box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5); padding: 0.6rem 1rem; border-radius: 0.5rem 0.5rem 0 0; }
+
+/* ── Upcoming-releases artwork ───────────────────────────────────────────── */
+/* Cover thumbnail for an upcoming release: the local /api/album art when the
+   album is owned, the Cover Art Archive when the release is MusicBrainz-matched.
+
+   ⚠️ Declared HERE, in the stylesheet base.html loads on every page, and not in
+   dashboard.css. js/upcoming_releases.js renders these rows on three pages —
+   the dashboard, the dedicated upcoming page and the downloads monitor — so a
+   rule living in the dashboard's own stylesheet left the other two sizing
+   nothing, and a full-size 250px cover landed in a table cell.
+
+   Sized in em so it tracks the row's font scale, and object-fit: cover so a
+   non-square cover is cropped rather than squashed. The element removes itself
+   on error, so a release group the archive has no art for degrades to plain
+   text instead of a broken-image glyph. */
+.upcoming-thumb {
+    width: 1.9em;
+    height: 1.9em;
+    object-fit: cover;
+    border-radius: 3px;
+    vertical-align: middle;
+    margin-right: 0.4em;
+    background: var(--secondary-bg, #282828);
+}

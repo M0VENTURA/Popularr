@@ -427,21 +427,32 @@ class TestTheReleasesCarousel:
             "the card must be narrower than the viewport so the next one shows"
         )
 
-    def test_artwork_is_only_requested_for_an_owned_album(self, releases_js: str) -> None:
+    def test_artwork_is_only_requested_when_there_is_somewhere_to_ask(
+        self, releases_js: str
+    ) -> None:
         """⭐ An unowned release's art endpoint is a guaranteed 404.
 
         Requesting it anyway fires one failing request per card — fifty on a
         full list — to render the placeholder we could have shown for free.
+
+        The DECISION no longer lives here: a MusicBrainz-matched release gained
+        the Cover Art Archive as a second source, so "owned" stopped being the
+        only answer and the resolver moved into ``releaseArtUrl``. What must stay
+        true in the carousel is that it DELEGATES — an inline URL would bypass the
+        rule, which is exactly how the twenty-odd checks that used to duplicate
+        the length tolerance drifted apart. The rule's behaviour (owned → local,
+        matched → archive, candidate/unmatched → no request) is driven for real in
+        ``test_upcoming_release_artwork.py``.
         """
         idx = releases_js.index("function renderCarousel(")
         body = releases_js[idx: releases_js.index("\n  async function queueById", idx)]
-        assert "album_in_collection" in body, (
-            "the carousel must branch on ownership before requesting art"
+        assert "releaseArtUrl(" in body, (
+            "the carousel must ask the shared resolver rather than building an "
+            "art URL itself"
         )
-        assert "/art?s=200" in body
-        # The branch must GUARD the request, so the URL only appears inside it.
-        guard = body.index("album_in_collection")
-        assert guard < body.index("/art?s=200")
+        assert "/art?s=" not in body, (
+            "an inline art URL in the carousel bypasses the ownership/match rule"
+        )
 
     def test_the_status_pill_is_rendered(self, releases_js: str) -> None:
         idx = releases_js.index("function renderCarousel(")

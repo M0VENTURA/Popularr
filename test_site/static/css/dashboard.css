@@ -331,6 +331,18 @@
     }
 }
 
+/*
+  The small thumbnail inside the upcoming-releases TABLE's Album cell is NOT
+  declared here.
+
+  ⚠️ It is declared in `css/popularr.css`, which `base.html` loads on every
+  page. This stylesheet is linked by the DASHBOARD ONLY, while
+  `js/services/upcoming-releases.js` renders these rows on three pages — the
+  dashboard, the dedicated upcoming page and the downloads monitor — so a rule
+  living here left the other two sizing nothing and dropped a full-size 250px
+  Cover Art Archive image into a table cell.
+*/
+
 .ur-card-title {
     font-size: 0.85rem;
     font-weight: 600;

@@ -1337,3 +1337,31 @@ form .form-check-input[name="force"] + .form-check-label {
     }
     .tracklist-table .track-checkbox { width: 1.25rem; height: 1.25rem; }
 }
+/* ── Upcoming-releases artwork ───────────────────────────────────────────── */
+/*
+  The small thumbnail inside the upcoming-releases table's Album cell and on
+  the carousel card.
+
+  ⚠️ Declared HERE, in the stylesheet `base.html` loads on every page, and NOT
+  in `dashboard.css`. `js/services/upcoming-releases.js` renders these rows on
+  three pages — the dashboard, the dedicated upcoming page and the downloads
+  monitor — so a rule living in the dashboard's own stylesheet left the other
+  two sizing nothing, and a full-size 250px Cover Art Archive image landed in a
+  table cell.
+
+  Sized in `em` against the row's own font so it stays proportional at another
+  density, and `vertical-align: middle` aligns it to the text block, which is
+  what stops the row growing when a thumbnail appears. `object-fit: cover`
+  crops a non-square cover rather than squashing it. The element removes itself
+  on error, so a release group the archive has no art for degrades to plain
+  text instead of a broken-image glyph.
+*/
+.ur-thumb {
+    width: 1.9em;
+    height: 1.9em;
+    object-fit: cover;
+    border-radius: 3px;
+    vertical-align: middle;
+    margin-right: 0.4em;
+    background: var(--tertiary-bg, #282828);
+}

@@ -136,6 +136,20 @@
     min-height: 32px;
 }
 
+/* Cover-art thumbnail (local /api/album art when owned, Cover Art Archive when
+   MusicBrainz-matched).  The BASE rule is injected by js/upcoming_releases.js,
+   not declared here: this stylesheet is linked by the dashboard only, while the
+   service renders rows on three pages, and the other two were left emitting an
+   unsized full-size image.  Only the dashboard's own card variant lives here.
+   The element removes itself on error, so a release group with no art in the
+   archive degrades to plain text instead of a broken-image glyph. */
+.upcoming-thumb-card {
+    width: 2.4em;
+    height: 2.4em;
+    margin-right: 0;
+    flex-shrink: 0;
+}
+
 /* ── Mobile Layout Fixes ─────────────────────────────────────────────────── */
 @media (max-width: 575.98px) {
     /* 44px+ touch targets for the scanning-log toolbar */
