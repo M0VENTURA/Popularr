@@ -158,6 +158,115 @@
   .mobile-tab-group { display: block !important; }
 }
 
+/* ── About sheet ─────────────────────────────────────────────────────────────
+   The page's About TAB is gone; its contents live in
+   components/modals/_artist_about_modal.html, reached from the hero's
+   "Read more". These rules style the parts that did not exist before the move
+   (member ROWS rather than a badge cloud, and the External Links list).
+
+   ⚠️ The bio clamp is taller here than the 3-line page one: inside a sheet the
+   reader has already asked for the biography, so clamping to three lines and
+   then offering "Read more" a second time would make them press it twice.
+   ------------------------------------------------------------------------ */
+.about-bio {
+  -webkit-line-clamp: 6;
+  line-height: 1.5;
+}
+
+/* Member list */
+.artist-members-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.artist-member-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background-color: var(--primary-bg, #1a1a1a);
+}
+
+/* The row is `display:flex` with a `min-width: 0` body so a long name
+   ellipsises instead of pushing the Former badge off the row. */
+.artist-member-row > span.min-w-0 {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.artist-member-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border-radius: 50%;
+  background-color: var(--secondary-bg, #2a2a2a);
+  color: var(--text-secondary, #adb5bd);
+}
+
+.artist-member-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artist-member-role {
+  font-size: 0.75rem;
+  line-height: 1.2;
+  color: var(--text-secondary, #adb5bd);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artist-member-row .artist-member-former {
+  flex: 0 0 auto;
+}
+
+/* External links */
+.artist-external-links {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.artist-external-link {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-primary, #e9ecef);
+  text-decoration: none;
+}
+
+.artist-external-link:hover {
+  border-color: var(--accent-color, #0dcaf0);
+  color: var(--accent-color, #0dcaf0);
+}
+
+/* Pushed to the far end so the label column lines up across rows — the icons
+   differ in width (MusicBrainz vs Discogs), so `ms-auto` alone left the
+   arrows ragged. */
+.artist-external-out {
+  margin-left: auto;
+  opacity: 0.6;
+  font-size: 0.8em;
+}
+
+.artist-external-link:hover .artist-external-out { opacity: 1; }
+
 /* ── Sticky queue toast ──────────────────────────────────────────────────── */
 .queue-toast {
   position: fixed;

@@ -38,6 +38,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_SITE_ARTIST_PAGE = (
     REPO_ROOT / "test_site" / "templates" / "Pages" / "artist_detail_v2.html"
 )
+LIVE_ARTIST_PAGE = REPO_ROOT / "templates" / "pages" / "artist_detail_v2.html"
+
+#: The About SHEET, in both trees. The Alternate Names card used to live in the
+#: page's About tab; the tab is gone and the card moved here, so these tests
+#: follow the markup rather than asserting on a tab that no longer exists.
+ABOUT_SHEETS = (
+    REPO_ROOT / "templates" / "components" / "modals" / "_artist_about_modal.html",
+    REPO_ROOT / "test_site" / "templates" / "components" / "modals" / "_artist_about_modal.html",
+)
 ARTIST_EXTRAS_JS = (
     REPO_ROOT / "test_site" / "static" / "js" / "pages" / "artist-detail-extras.js"
 )
@@ -494,39 +503,75 @@ class TestTheEndpoints:
 
 
 class TestTheAboutSection:
-    def test_the_card_sits_inside_the_about_tab(self):
-        source = TEST_SITE_ARTIST_PAGE.read_text(encoding="utf-8")
+    def test_the_card_sits_inside_the_about_sheet(self):
+        """The card is in the About SHEET, before the Similar Artists card.
 
-        about_start = source.index('id="tab-about"')
-        section = source.index('id="artist-aliases-section"')
-        similar_card = source.index('id="artist-similar-section"')
+        ⚠️ These used to assert the card sat inside ``id="tab-about"``. That
+        tab no longer exists — the About content moved into the sheet reached
+        from the hero's "Read more" — so the assertion follows the markup
+        instead of pinning a container that was deliberately removed.
+        """
+        for sheet in ABOUT_SHEETS:
+            source = sheet.read_text(encoding="utf-8")
+            sheet_id = source.index('id="artistAboutModal"')
+            section = source.index('id="artist-aliases-section"')
+            similar_card = source.index('id="artist-similar-section"')
 
-        assert about_start < section < similar_card, (
-            "the Alternate Names card must render inside the About tab, "
-            "before the Similar Artists card that closes it"
-        )
+            assert sheet_id < section < similar_card, (
+                f"{sheet.name}: the Alternate Names card must render inside the "
+                "About sheet, before the Similar Artists card that closes it"
+            )
+
+    def test_both_pages_include_the_about_sheet(self):
+        """CONTROL: the card is only reachable if the page includes the sheet."""
+        for page in (LIVE_ARTIST_PAGE, TEST_SITE_ARTIST_PAGE):
+            source = page.read_text(encoding="utf-8")
+            assert "_artist_about_modal.html" in source, (
+                f"{page.name} does not include the About sheet, so the alias "
+                "card cannot render at all"
+            )
 
     def test_the_card_has_an_input_and_an_add_button(self):
-        source = TEST_SITE_ARTIST_PAGE.read_text(encoding="utf-8")
+        for sheet in ABOUT_SHEETS:
+            source = sheet.read_text(encoding="utf-8")
 
-        assert 'id="artistAliasInput"' in source
-        assert 'id="artistAliasesList"' in source
-        assert "addArtistAlias()" in source, "the Add button must call the handler"
+            assert 'id="artistAliasInput"' in source, sheet.name
+            assert 'id="artistAliasesList"' in source, sheet.name
+            assert "addArtistAlias()" in source, (
+                f"{sheet.name}: the Add button must call the handler"
+            )
 
     def test_the_initial_list_is_server_rendered(self):
         """Both the badges and the empty state come from the payload, so the
         section is correct before any JS runs."""
-        source = TEST_SITE_ARTIST_PAGE.read_text(encoding="utf-8")
+        for sheet in ABOUT_SHEETS:
+            source = sheet.read_text(encoding="utf-8")
 
-        assert "artist_aliases" in source
-        assert 'data-action="remove-artist-alias"' in source
-        assert "No alternate names." in source
+            assert "artist_aliases" in source, sheet.name
+            assert 'data-action="remove-artist-alias"' in source, sheet.name
+            assert "No alternate names." in source, sheet.name
 
     def test_the_merge_hint_renders_for_an_alias_page(self):
-        source = TEST_SITE_ARTIST_PAGE.read_text(encoding="utf-8")
+        for sheet in ABOUT_SHEETS:
+            source = sheet.read_text(encoding="utf-8")
 
-        assert "artist_alias_canonical" in source
-        assert "merged as" in source
+            assert "artist_alias_canonical" in source, sheet.name
+            assert "merged as" in source, sheet.name
+
+    def test_the_live_tree_also_defines_the_handlers(self):
+        """⚠️ The sheet is shared, so BOTH trees' modules must implement it.
+
+        The card renders in the live tree too; when its handlers existed only in
+        the rebuilt module the Add and × buttons were inert there, which is the
+        same "rendered but never wired" failure the modals partial records.
+        """
+        live = (REPO_ROOT / "static" / "js" / "artist-page.js").read_text(encoding="utf-8")
+
+        assert "global.addArtistAlias = addArtistAlias" in live
+        assert "removeArtistAlias" in live
+        assert 'data-action="remove-artist-alias"' in live, (
+            "the live module must bind the same delegated selector the sheet emits"
+        )
 
     def test_the_js_defines_the_handlers(self):
         source = ARTIST_EXTRAS_JS.read_text(encoding="utf-8")

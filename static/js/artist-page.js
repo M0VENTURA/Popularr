@@ -466,12 +466,142 @@
     }
   }
 
-  /** Hero bio "[more]" link: reveal the clamped biography. */
+  /** Hero bio "[more]" link: open the About sheet. */
   function goToArtistAbout() {
-    var clamp = doc.getElementById('artistBioClamp');
-    var target = doc.getElementById('artist-bio-section') || clamp;
-    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    if (clamp && !clamp.classList.contains('expanded')) toggleArtistBio();
+    openArtistAboutModal();
+  }
+
+  // ── About sheet ─────────────────────────────────────────────────────────
+
+  /*
+    The page's third TAB is gone; its contents live here, reached from
+    "Read more" under the hero biography. Everything on the sheet is served by
+    ids this module already drove (`artistBioClamp`, `artistCountryDisplay`,
+    `musicbrainzArtistId`, …) so moving the markup changed nothing about how it
+    works — a rename would have.
+  */
+  function openArtistAboutModal() {
+    showModal('artistAboutModal');
+    loadArtistPendingUpdates();
+  }
+
+  /*
+    Per-album counts of updates the scan STASHED instead of applying, which is
+    the "Recommend only" metadata mode. Cached after the first fetch per page
+    load: the sheet can be opened repeatedly and the answer only changes when a
+    scan writes, so a second request would be pure latency.
+  */
+  var _pendingLoaded = false;
+
+  function loadArtistPendingUpdates() {
+    if (_pendingLoaded) return;
+    var panel = doc.getElementById('artistPendingUpdates');
+    var body = doc.getElementById('artistPendingUpdatesBody');
+    if (!panel || !body) return;
+    _pendingLoaded = true;
+
+    getJson('/api/artist/metadata-recommendations?artist=' + encodeURIComponent(artistName()))
+      .then(function (data) {
+        var albums = (data && data.albums) || [];
+        if (!albums.length) return;   // stays hidden — nothing pending
+
+        var html = '<div class="d-flex align-items-center gap-2 mb-2">'
+          + '<span class="badge bg-warning text-dark">' + esc(String((data && data.total) || 0)) + ' updates</span>'
+          + '<span class="text-muted small">across ' + esc(String(albums.length))
+          + ' album' + (albums.length === 1 ? '' : 's') + '</span></div>';
+        html += '<div class="list-group">';
+        albums.forEach(function (row) {
+          var album = row.album || '';
+          var count = row.track_count || 0;
+          html += '<a class="list-group-item list-group-item-action bg-transparent border-secondary text-light d-flex justify-content-between align-items-center gap-2"'
+            + ' href="/album/' + encodeURIComponent(artistName()) + '/' + encodeURIComponent(album) + '">'
+            + '<span class="text-truncate">' + esc(album) + '</span>'
+            + '<span class="badge bg-secondary flex-shrink-0">' + esc(String(count)) + ' track' + (count === 1 ? '' : 's') + '</span>'
+            + '</a>';
+        });
+        body.innerHTML = html + '</div>';
+        panel.hidden = false;
+      })
+      .catch(function () {
+        // Best-effort: the sheet is still useful without this panel, and an
+        // error toast for a side panel would be noise.
+        _pendingLoaded = false;
+      });
+  }
+
+  // ── Alternate names ─────────────────────────────────────────────────────
+
+  /*
+    Ported from the rebuilt tree's artist-detail-extras.js when the About sheet
+    became shared: the sheet renders the alias card in BOTH trees, and this
+    module did not have the handlers, so the card would have been inert in the
+    live tree — the same trap the modals partial docstring describes.
+  */
+
+  /** Re-render the group list from an API reply ({aliases: [...]}). */
+  function renderArtistAliases(group) {
+    var list = doc.getElementById('artistAliasesList');
+    if (!list) return;
+    var aliases = (group && group.aliases) || [];
+    if (!aliases.length) {
+      list.innerHTML = '<span class="text-muted small" id="artistAliasesEmpty">No alternate names.</span>';
+      return;
+    }
+    var html = '';
+    aliases.forEach(function (alias) {
+      // data-action + data-alias, never an inline onclick: an alias can contain
+      // quotes, so the value is read back HTML-escaped from the attribute.
+      html += '<span class="badge bg-secondary artist-alias-badge d-inline-flex align-items-center gap-1">'
+        + esc(alias)
+        + '<button type="button" class="btn btn-link p-0 lh-1 text-decoration-none text-white-50"'
+        + ' title="Remove this name" aria-label="Remove ' + esc(alias) + '"'
+        + ' data-action="remove-artist-alias" data-alias="' + esc(alias) + '">&times;</button>'
+        + '</span>';
+    });
+    list.innerHTML = html;
+  }
+
+  /*
+    Errors arrive IN the JSON body (409 for a name another artist already owns),
+    so they are surfaced from the reply rather than replaced by a generic
+    message — the user needs to know the name belongs elsewhere.
+  */
+  function addArtistAlias() {
+    var input = doc.getElementById('artistAliasInput');
+    var value = input ? String(input.value || '').trim() : '';
+    if (!value) { toast('Alternate names', 'Enter an alternate name first.', 'warning'); return; }
+
+    postJson('/api/artist/aliases', { artist: artistName(), alias: value })
+      .then(function (data) {
+        if (data && data.success) {
+          if (input) input.value = '';
+          renderArtistAliases(data);
+          toast('Alternate names', data.already ? 'That name is already linked.' : 'Alternate name added.', 'success');
+        } else {
+          toast('Alternate names', (data && (data.error || data.message)) || 'Could not add the name.', 'error');
+        }
+      })
+      .catch(function (err) {
+        toast('Alternate names', (err && (err.error || err.message)) || 'Could not add the name.', 'error');
+      });
+  }
+
+  /** Unlink one name; the reply carries the refreshed group. */
+  function removeArtistAlias(alias) {
+    if (!alias) return;
+
+    postJson('/api/artist/aliases/remove', { artist: artistName(), alias: alias })
+      .then(function (data) {
+        if (data && data.success) {
+          renderArtistAliases(data);
+          toast('Alternate names', 'Alternate name removed.', 'success');
+        } else {
+          toast('Alternate names', (data && (data.error || data.message)) || 'Could not remove the name.', 'error');
+        }
+      })
+      .catch(function (err) {
+        toast('Alternate names', (err && (err.error || err.message)) || 'Could not remove the name.', 'error');
+      });
   }
 
   // ── Init ────────────────────────────────────────────────────────────────
@@ -504,6 +634,14 @@
       var btn = e.target.closest && e.target.closest('[data-action="use-discogs-artist"]');
       if (!btn) return;
       useDiscogsArtist(btn.getAttribute('data-id'));
+    });
+
+    // Alias badges are re-rendered after every add/remove, and an alias can
+    // contain quotes, so the value travels in a data attribute too.
+    doc.addEventListener('click', function (e) {
+      var btn = e.target.closest && e.target.closest('[data-action="remove-artist-alias"]');
+      if (!btn) return;
+      removeArtistAlias(btn.getAttribute('data-alias') || '');
     });
   }
 
@@ -542,6 +680,8 @@
   global.forceArtistMetadataRefresh = forceArtistMetadataRefresh;
   global.toggleArtistBio = toggleArtistBio;
   global.goToArtistAbout = goToArtistAbout;
+  global.openArtistAboutModal = openArtistAboutModal;
+  global.addArtistAlias = addArtistAlias;
   global.loadArtistCoveredBy = loadArtistCoveredBy;
 
   global.artistPage = global.artistPage || {};

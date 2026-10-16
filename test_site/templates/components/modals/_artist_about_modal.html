@@ -1,0 +1,258 @@
+{#
+  ==========================================================================
+  ABOUT MODAL — where the artist page's third TAB went.
+
+  The page used to carry Albums / Top Tracks / About as three tabs. The About
+  tab is now this sheet, reached from "Read more" under the hero biography, so
+  the page keeps two tabs (Albums, Top Tracks) and the reference material is
+  one tap away instead of a tab nobody opens.
+
+  REQUIRED CONTEXT (all already in the artist route's payload):
+    artist_name, artist_bio, artist_country, artist_members, stats
+
+  ── ⚠️ THE IDS ARE LOAD-BEARING ──────────────────────────────────────────
+  ``static/js/artist-page.js`` drives these by id, so they are kept EXACTLY as
+  the old About tab had them:
+
+    artistBioClamp / artistBioToggle  → toggleArtistBio()
+    artistCountryDisplay              → fetchArtistCountry(), editArtistCountry()
+    fetchArtistCountryBtn             → fetchArtistCountry()
+    musicbrainzArtistId / discogsArtistId
+                                      → openEditArtistIdsModal() seeds the
+                                        edit form from these read-only fields
+    artistMembersDisplay              → re-rendered after a metadata refresh
+
+  Moving any of this markup without the id silently disables the button that
+  reads it. Renaming is a two-file change, not a template tidy-up.
+  ==========================================================================
+#}
+
+{#-
+  External links are BUILT FROM IDS WE ACTUALLY HOLD, never guessed. A URL
+  invented from the artist's name ("maybe this Wikipedia page exists") would
+  ship dead links, so only the three providers whose identifiers are stored are
+  offered: MusicBrainz and ListenBrainz need the MBID, Discogs needs its own
+  artist id, and Last.fm resolves by name.
+
+  Wikipedia / YouTube / official-site links are deliberately ABSENT: nothing in
+  the database holds them. Adding them needs a url-rel fetch stored by the scan,
+  which is a data change rather than a template one.
+-#}
+{% set _mbid = (stats.musicbrainz_artist_id or stats.lastfm_artist_mbid or '')|string|trim %}
+{% set _discogs_id = (stats.discogs_artist_id or '')|string|trim %}
+
+<div class="modal fade" id="artistAboutModal" tabindex="-1" aria-labelledby="artistAboutModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="artistAboutModalLabel">
+          <i class="bi bi-info-circle me-1" aria-hidden="true"></i>About {{ artist_name }}
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+
+      <div class="modal-body">
+        {# ── Biography ────────────────────────────────────────────────── #}
+        <div class="mb-4">
+          <h6 class="fw-bold mb-2">Biography</h6>
+          <div id="artistBioClamp" class="bio-clamp about-bio">
+            {% if artist_bio %}
+              <p class="text-secondary small mb-0">
+                {{ artist_bio|e|replace('&lt;br /&gt;', '<br>')|replace('&lt;br/&gt;', '<br>')|replace('&lt;br&gt;', '<br>')|replace('\n', '<br>')|safe }}
+              </p>
+            {% else %}
+              <p class="text-muted small mb-0"><em>No biography available yet. Run a metadata scan for this artist.</em></p>
+            {% endif %}
+          </div>
+          {% if artist_bio %}
+          <button id="artistBioToggle" type="button" class="btn btn-link btn-sm p-0 mt-1 text-decoration-none" onclick="toggleArtistBio()">
+            <i class="bi bi-chevron-down me-1" aria-hidden="true"></i>Read more
+          </button>
+          {% endif %}
+        </div>
+
+        {# ── Country ──────────────────────────────────────────────────── #}
+        <div class="mb-4">
+          <h6 class="fw-bold mb-2">Country</h6>
+          {#-
+            ⚠️ #artistCountryDisplay was MISSING from the old markup — the badge
+            was an anonymous span — so fetchArtistCountry() and
+            editArtistCountry() both wrote into a missing element and the badge
+            only ever changed after a full page reload.
+          -#}
+          <div class="d-flex align-items-center gap-2 flex-wrap">
+            <span id="artistCountryDisplay"><span class="badge bg-info">{{ artist_country or 'Unknown' }}</span></span>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="editArtistCountry()">Edit</button>
+            <button type="button" class="btn btn-sm btn-outline-primary" id="fetchArtistCountryBtn" onclick="fetchArtistCountry()">
+              <i class="bi bi-cloud-download" aria-hidden="true"></i> Get from MusicBrainz
+            </button>
+          </div>
+        </div>
+
+        {# ── Band members ─────────────────────────────────────────────── #}
+        <div class="mb-4">
+          <h6 class="fw-bold mb-2">Band Members</h6>
+          <div id="artistMembersDisplay" class="artist-members-list">
+            {% for member in (artist_members or []) %}
+              {#-
+                ⚠️ The role line comes from ``attributes``, NOT from
+                ``relation_type``. MusicBrainz records the instrument under
+                attributes (["bass", "vocals"]) and gives relation_type the
+                category ("member of band"), so rendering relation_type listed
+                every musician as "member of band" — the same string, N times.
+              -#}
+              <div class="artist-member-row">
+                <span class="artist-member-avatar" aria-hidden="true"><i class="bi bi-person-fill"></i></span>
+                <span class="min-w-0">
+                  <span class="artist-member-name">{{ member.name }}</span>
+                  {% set _roles = (member.attributes or [])|join(', ') %}
+                  <span class="artist-member-role">{{ _roles or member.relation_type or 'Member' }}</span>
+                </span>
+                {% if member.ended %}
+                  <span class="badge artist-member-former" title="No longer in the band{% if member.end %} (until {{ member.end }}){% endif %}">Former</span>
+                {% endif %}
+              </div>
+            {% else %}
+              <div class="text-muted small">No member details available. A metadata scan records the line-up from MusicBrainz.</div>
+            {% endfor %}
+          </div>
+        </div>
+
+        {# ── External links ───────────────────────────────────────────── #}
+        <div class="mb-4">
+          <h6 class="fw-bold mb-2">External Links</h6>
+          <div class="artist-external-links">
+            {% if _mbid %}
+              <a class="artist-external-link" href="https://musicbrainz.org/artist/{{ _mbid }}" target="_blank" rel="noopener">
+                <i class="bi bi-music-note-list" aria-hidden="true"></i> MusicBrainz
+                <i class="bi bi-box-arrow-up-right artist-external-out" aria-hidden="true"></i>
+              </a>
+            {% endif %}
+            {% if _discogs_id %}
+              <a class="artist-external-link" href="https://www.discogs.com/artist/{{ _discogs_id }}" target="_blank" rel="noopener">
+                <i class="bi bi-vinyl" aria-hidden="true"></i> Discogs
+                <i class="bi bi-box-arrow-up-right artist-external-out" aria-hidden="true"></i>
+              </a>
+            {% endif %}
+            <a class="artist-external-link" href="https://www.last.fm/music/{{ artist_name|urlencode }}" target="_blank" rel="noopener">
+              <i class="bi bi-bar-chart" aria-hidden="true"></i> Last.fm
+              <i class="bi bi-box-arrow-up-right artist-external-out" aria-hidden="true"></i>
+            </a>
+            {% if _mbid %}
+              <a class="artist-external-link" href="https://listenbrainz.org/artist/{{ _mbid }}" target="_blank" rel="noopener">
+                <i class="bi bi-headphones" aria-hidden="true"></i> ListenBrainz
+                <i class="bi bi-box-arrow-up-right artist-external-out" aria-hidden="true"></i>
+              </a>
+            {% endif %}
+          </div>
+        </div>
+
+        {# ── External IDs ─────────────────────────────────────────────── #}
+        <div class="mb-4">
+          <h6 class="fw-bold mb-2">External IDs</h6>
+          <div class="small text-muted">
+            <div class="mb-1"><strong>MusicBrainz:</strong> <code id="musicbrainzArtistId">{{ _mbid or 'Not linked' }}</code></div>
+            <div><strong>Discogs:</strong> <code id="discogsArtistId">{{ _discogs_id or 'Not linked' }}</code></div>
+          </div>
+          <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="openEditArtistIdsModal()">Edit IDs</button>
+        </div>
+
+        {# ── Alternate names ──────────────────────────────────────────── #}
+        {#-
+          ⚠️ Remove buttons carry data-action, NOT an inline onclick: an alias
+          can contain quotes, and embedding it in JS would break the handler
+          (the module reads it back HTML-escaped from the attribute instead).
+        -#}
+        <div class="mb-4" id="artist-aliases-section">
+          <h6 class="fw-bold mb-2">Alternate Names</h6>
+          <div id="artistAliasesList" class="d-flex flex-wrap gap-1 mb-2">
+            {% for alias in (artist_aliases or []) %}
+              <span class="badge bg-secondary artist-alias-badge d-inline-flex align-items-center gap-1">
+                {{ alias }}
+                <button type="button" class="btn btn-link p-0 lh-1 text-decoration-none text-white-50"
+                        title="Remove this name" aria-label="Remove {{ alias }}"
+                        data-action="remove-artist-alias" data-alias="{{ alias }}">&times;</button>
+              </span>
+            {% else %}
+              <span class="text-muted small" id="artistAliasesEmpty">No alternate names.</span>
+            {% endfor %}
+          </div>
+          <div class="input-group input-group-sm">
+            <input type="text" class="form-control" id="artistAliasInput"
+                   placeholder="Another name this artist is filed under"
+                   aria-label="Alternate name">
+            <button class="btn btn-outline-primary" type="button" onclick="addArtistAlias()">
+              <i class="bi bi-plus-lg me-1" aria-hidden="true"></i>Add
+            </button>
+          </div>
+          {% if artist_alias_canonical and (artist_alias_canonical | lower) != (artist_name | lower) %}
+            <div class="small text-info mt-2">
+              <i class="bi bi-signpost-split me-1" aria-hidden="true"></i>This artist is merged as <strong>{{ artist_alias_canonical }}</strong>.
+            </div>
+          {% endif %}
+        </div>
+
+        {# ── Similar artists ──────────────────────────────────────────── #}
+        {#-
+          ⚠️ #artistSimilarArtistsContainer is what ``loadSimilarArtists()``
+          writes into, so the id has to survive the move from the tab.
+        -#}
+        <div class="mb-4" id="artist-similar-section">
+          <h6 class="fw-bold mb-2">Similar Artists</h6>
+          <div id="artistSimilarArtistsContainer">
+            {% set similar_list = (similar_artists.display if similar_artists else []) or [] %}
+            {% if similar_list %}
+              <div class="d-flex flex-wrap gap-2">
+                {% for sa in similar_list %}
+                  <a href="/artist/{{ sa.name|path_segment }}" class="badge artist-similar-card text-decoration-none">{{ sa.name }}</a>
+                {% endfor %}
+              </div>
+            {% else %}
+              <div class="text-muted small">
+                <span>No similar artists available yet.</span>
+                <br><small>Similar artists are collected during popularity scans from Last.fm and ListenBrainz.</small>
+              </div>
+            {% endif %}
+          </div>
+        </div>
+
+        {# ── Pending metadata updates ─────────────────────────────────── #}
+        {#-
+          Filled by /api/artist/metadata-recommendations. Only ever populated
+          when metadata updating is set to "Recommend only" — the scan stashes
+          its proposals on each track instead of applying them.
+
+          ⚠️ Each row LINKS TO ITS ALBUM, because that is where a stashed
+          recommendation is actually reviewed and applied (the album page's
+          save handler calls discard_album_recommendations when it writes them).
+          There is no artist-wide "apply all" endpoint, so offering one here
+          would be a button that cannot do what it says.
+
+          Hidden until a count arrives, so an artist with nothing pending does
+          not grow a panel summarising nothing.
+        -#}
+        <div id="artistPendingUpdates" class="mb-4" hidden>
+          <h6 class="fw-bold mb-2">Pending Metadata Updates</h6>
+          <div id="artistPendingUpdatesBody"></div>
+        </div>
+      </div>
+
+      <div class="modal-footer justify-content-between flex-wrap gap-2">
+        <a class="btn btn-outline-info btn-sm" href="{{ url_for('ui.artist_genre_management', name=artist_name) }}">
+          <i class="bi bi-tags me-1" aria-hidden="true"></i> Genre Management
+        </a>
+        <div class="d-flex gap-2">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+          {#-
+            The artist's Corrections page is the metadata workbench: duplicate
+            artists, album merges and the per-album fixes that the pending
+            updates above eventually feed into.
+          -#}
+          <a class="btn btn-primary" href="{{ url_for('ui.artist_corrections', name=artist_name) }}">
+            <i class="bi bi-sliders me-1" aria-hidden="true"></i> Manage Metadata
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

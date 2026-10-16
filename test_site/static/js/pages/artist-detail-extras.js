@@ -261,14 +261,69 @@
     }
   }
 
-  /** Hero "[more]" link: scroll to the bio and expand it. */
+  /** Hero "Read more" link: open the About sheet. */
   function goToArtistAbout() {
-    var clamp = doc.getElementById('artistBioClamp');
-    var target = doc.getElementById('artist-bio-section') || clamp;
-    if (target && typeof target.scrollIntoView === 'function') {
-      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-    if (clamp && !clamp.classList.contains('expanded')) toggleArtistBio();
+    openArtistAboutModal();
+  }
+
+  // ── About sheet ─────────────────────────────────────────────────────────
+
+  /*
+    The page's third TAB is gone; its contents live on this sheet, reached from
+    "Read more" under the hero biography. Everything on it is served by ids this
+    module already drove (`artistBioClamp`, `artistCountryDisplay`,
+    `musicbrainzArtistId`, …), so moving the markup changed nothing about how it
+    works — a rename would have.
+  */
+  function openArtistAboutModal() {
+    if (!showModal('artistAboutModal')) return;
+    loadArtistPendingUpdates();
+  }
+
+  /*
+    Per-album counts of updates the scan STASHED instead of applying — the
+    "Recommend only" metadata mode. Cached after the first fetch per page load:
+    the sheet can be opened repeatedly and the answer only changes when a scan
+    writes, so a second request would be pure latency.
+  */
+  var _pendingLoaded = false;
+
+  function loadArtistPendingUpdates() {
+    if (_pendingLoaded) return;
+    var panel = doc.getElementById('artistPendingUpdates');
+    var body = doc.getElementById('artistPendingUpdatesBody');
+    if (!panel || !body) return;
+    var artist = artistName();
+    if (!artist) return;
+    _pendingLoaded = true;
+
+    getJson('/api/artist/metadata-recommendations?artist=' + encodeURIComponent(artist))
+      .then(function (data) {
+        var albums = (data && data.albums) || [];
+        if (!albums.length) return;   // stays hidden — nothing pending
+
+        var html = '<div class="d-flex align-items-center gap-2 mb-2">'
+          + '<span class="badge bg-warning text-dark">' + esc(String((data && data.total) || 0)) + ' updates</span>'
+          + '<span class="text-muted small">across ' + esc(String(albums.length))
+          + ' album' + (albums.length === 1 ? '' : 's') + '</span></div>';
+        html += '<div class="list-group">';
+        albums.forEach(function (row) {
+          var album = row.album || '';
+          var count = row.track_count || 0;
+          html += '<a class="list-group-item list-group-item-action bg-transparent border-secondary text-light d-flex justify-content-between align-items-center gap-2"'
+            + ' href="/album/' + encodeURIComponent(artist) + '/' + encodeURIComponent(album) + '">'
+            + '<span class="text-truncate">' + esc(album) + '</span>'
+            + '<span class="badge bg-secondary flex-shrink-0">' + esc(String(count)) + ' track' + (count === 1 ? '' : 's') + '</span>'
+            + '</a>';
+        });
+        body.innerHTML = html + '</div>';
+        panel.hidden = false;
+      })
+      .catch(function () {
+        // Best-effort: the sheet is still useful without this panel, and an
+        // error toast for a side panel would be noise.
+        _pendingLoaded = false;
+      });
   }
 
   // ── Missing releases ────────────────────────────────────────────────────
@@ -483,6 +538,7 @@
   global.forceArtistMetadataRefresh = forceArtistMetadataRefresh;
   global.toggleArtistBio = toggleArtistBio;
   global.goToArtistAbout = goToArtistAbout;
+  global.openArtistAboutModal = openArtistAboutModal;
   global.checkMissingReleases = checkMissingReleases;
   global.addArtistAlias = addArtistAlias;
 

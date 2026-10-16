@@ -1,5 +1,17 @@
 <!-- Search Downloads Modal -->
-{% if qbit_config.enabled or slskd_config.enabled %}
+{#-
+  ⚠️ `qbit_config` IS UNDEFINED EVERYWHERE. No route, context processor or
+  config key supplies it — `slskd_config` comes from `cfg.get("slskd", {})` in
+  every caller, and there is no `qbit` sibling. Reading `qbit_config.enabled`
+  directly therefore raised UndefinedError and took the WHOLE PAGE down, not
+  just this modal: that is why `pages/artist_detail_v2.html` never included this
+  partial while `pages/artist_detail.html` (unused) did.
+
+  The rebuilt tree's copy guards with `is defined` and works; this copy now does
+  the same. Removing the guard needs a caller that actually supplies the key.
+-#}
+{% if qbit_config is defined and slskd_config is defined %}
+  {% if qbit_config.enabled or slskd_config.enabled %}
 <div class="modal fade" id="downloadModal" tabindex="-1">
   <div class="modal-dialog modal-xl">
     <div class="modal-content">
@@ -43,6 +55,7 @@
     </div>
   </div>
 </div>
+  {% endif %}
 {% endif %}
 
 <!-- MusicBrainz Release Search Modal (Scoping IDs to artistMb to avoid base.html collision) -->
