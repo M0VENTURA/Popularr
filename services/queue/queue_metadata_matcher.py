@@ -91,8 +91,31 @@ def _variant_conflict(queue_v: set[str], file_v: set[str]) -> bool:
 # ✅ MATCHER
 # =============================================================================
 
-def _metadata_matches_queue_item(file_path: str, queue_item: QueueItem, threshold: float = THRESHOLD):
+def _metadata_matches_queue_item(
+    file_path: str,
+    queue_item: QueueItem,
+    threshold: float = THRESHOLD,
+    detail: dict[str, Any] | None = None,
+):
+    """Does this file's metadata match the queue item?
 
+    ``detail`` is an optional out-parameter. When supplied it is filled with WHY
+    the verdict came out as it did — the file's own artist and duration, the
+    queue item's expected duration, and a reason code for a rejection.
+
+    ⭐ WHY IT EXISTS. Every rejection below returns a bare ``False``, so the
+    caller could only ever say "downloaded file did not match queue item" and
+    the downloaded file was DELETED on that basis. Reported: *"a section at the
+    top for errors that list queue items discarded and the reasons for being
+    discarded. Such as wrong artist (noting found artist name), wrong length
+    (noting the length)"* — and the artist name and the length were both already
+    computed here, then discarded one line later. Nothing needed to be looked up
+    again; it needed to be handed back.
+
+    ⚠️ Filling the detail can never change the VERDICT: the value is written
+    alongside each return, never in place of it. A caller that ignores ``detail``
+    sees exactly the behaviour it saw before.
+    """
     try:
         metadata = read_mp3_metadata(file_path) or {}
     except Exception:
@@ -113,6 +136,33 @@ def _metadata_matches_queue_item(file_path: str, queue_item: QueueItem, threshol
     queue_album_artist = (queue_item.get("album_artist") or "").strip()
     queue_title = (queue_item.get("title") or "").strip()
     queue_duration = queue_duration_seconds(queue_item.get("duration"))
+
+    # Everything a rejection message needs, recorded up front so each `return`
+    # below only has to name its REASON.
+    if detail is not None:
+        detail.clear()
+        detail.update(
+            {
+                "found_artist": file_artist or file_album_artist,
+                "found_album_artist": file_album_artist,
+                "found_title": file_title,
+                "found_length_seconds": round(file_duration, 1) if file_duration else None,
+                "expected_length_seconds": round(queue_duration, 1) if queue_duration else None,
+                "expected_artist": queue_artist or queue_album_artist,
+                "expected_title": queue_title,
+            }
+        )
+
+        def _reject(code: str, **extra: Any) -> None:
+            """Name the reason for the verdict about to be returned."""
+            detail["reason"] = code
+            if extra:
+                detail.update(extra)
+
+    else:
+
+        def _reject(code: str, **extra: Any) -> None:  # noqa: ARG001
+            return None
 
     # ------------------------------------------------------------------
     # Missing data → defer
@@ -145,6 +195,7 @@ def _metadata_matches_queue_item(file_path: str, queue_item: QueueItem, threshol
     # ------------------------------------------------------------------
 
     if not edition_annotations_compatible(file_title, queue_title):
+        _reject("edition_mismatch")
         return False
 
     # ------------------------------------------------------------------
@@ -202,11 +253,13 @@ def _metadata_matches_queue_item(file_path: str, queue_item: QueueItem, threshol
     # ------------------------------------------------------------------
 
     if title_score == 0.0:
+        _reject("title_mismatch")
         return False
 
     if artist_score == 0.0 and title_score < 1.0:
         if file_artist_generic or queue_is_compilation:
             return None
+        _reject("wrong_artist")
         return False
 
     # ------------------------------------------------------------------
@@ -224,6 +277,13 @@ def _metadata_matches_queue_item(file_path: str, queue_item: QueueItem, threshol
         # Read per call rather than captured at import so a Config-page edit
         # takes effect without a restart.
         if diff > _length_tolerance_seconds():
+            # The numbers the report asks for: what the file actually is, and
+            # what the queue item expected.
+            _reject(
+                "wrong_length",
+                length_difference_seconds=round(float(diff), 1),
+                length_tolerance_seconds=_length_tolerance_seconds(),
+            )
             return False  # strong reject
 
         if diff <= STRICT_DURATION_SEC:
@@ -248,6 +308,7 @@ def _metadata_matches_queue_item(file_path: str, queue_item: QueueItem, threshol
             if file_artist_generic or queue_is_compilation:
                 # Artist unknown / compilation → defer to filename matching.
                 return None
+            _reject("wrong_artist", length_matched=True)
             return False  # concrete artist mismatch → reject
 
     # ------------------------------------------------------------------
@@ -266,7 +327,11 @@ def _metadata_matches_queue_item(file_path: str, queue_item: QueueItem, threshol
     if artist_score == 0.0:
         if file_artist_generic or queue_is_compilation:
             return None
+        _reject("wrong_artist", scores={"artist": round(artist_score, 3), "title": round(title_score, 3)})
         return False
 
     # unclear → let filename/scoring decide
+    # ⚠️ NO `_reject` HERE. This is a DEFERRAL, not a rejection: the caller falls
+    # through to filename matching and the file may still be accepted. Recording
+    # a reason against it would report a discard that never happened.
     return None

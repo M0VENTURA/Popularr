@@ -16,6 +16,10 @@
     </div>
   </div>
 
+  {# Discarded downloads — above the tabs, so it is visible whichever tab is
+     open. Hidden until it has something to report. #}
+  {% include 'components/_discarded_downloads.html' %}
+
   <!-- Segmented Pill Navigation -->
   <ul class="nav nav-pills nav-fill bg-secondary p-1 rounded mb-4 shadow-sm" id="searchTabs" role="tablist">
     <li class="nav-item" role="presentation">
@@ -65,5 +69,6 @@
 </script>
 <link rel="stylesheet" href="{{ versioned_static('css/downloads.css') }}">
 <script src="{{ versioned_static('js/downloads.js') }}"></script>
+<script src="{{ versioned_static('js/discarded-downloads.js') }}"></script>
 <script src="{{ versioned_static('js/genre-utils.js') }}"></script>
 {% endblock %}

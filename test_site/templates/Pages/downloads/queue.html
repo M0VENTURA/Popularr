@@ -30,6 +30,10 @@
     </div>
   </div>
 
+  {# Discarded downloads — ABOVE the tab strip, so it shows whichever tab is
+     open. Hidden until it has something to report. #}
+  {% include 'components/_discarded_downloads.html' %}
+
   {#
     `nav-segmented` (popularr.css) replaces the old `bg-secondary p-1
     rounded` combination — same fix as monitor.html's identical tab strip.
@@ -143,4 +147,5 @@
 <script src="{{ versioned_static('js/services/slskd.js') }}"></script>
 <script src="{{ versioned_static('js/pages/soulseek-search.js') }}"></script>
 <script src="{{ versioned_static('js/pages/download-queue.js') }}"></script>
+<script src="{{ versioned_static('js/pages/discarded-downloads.js') }}"></script>
 {% endblock %}

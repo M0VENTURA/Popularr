@@ -176,6 +176,29 @@ TABLES_TO_ENSURE: dict[str, str] = {
             CONSTRAINT uq_user_favourites_entity UNIQUE (username, entity_type, entity_id)
         )
     """,
+    # Keeps WHY a downloaded file was discarded. A table rather than a column on
+    # ``download_queue`` because ``mark_failed`` returns the row to ``queued``
+    # and the next attempt overwrites ``failure_reason`` — the discard exists
+    # nowhere else, so the queue page cannot show it from the live row.
+    # Denormalized (artist/title/album copied, no FK) so the record stays
+    # readable after the queue row is deleted or re-pointed.
+    "queue_rejections": """
+        CREATE TABLE IF NOT EXISTS queue_rejections (
+            id BIGSERIAL PRIMARY KEY,
+            queue_id INTEGER,
+            artist TEXT,
+            title TEXT,
+            album TEXT,
+            reason TEXT NOT NULL,
+            detail TEXT,
+            found_artist TEXT,
+            found_length_seconds REAL,
+            expected_length_seconds REAL,
+            found_title TEXT,
+            filename TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """,
     "musicbrainz_releases": """
         CREATE TABLE IF NOT EXISTS musicbrainz_releases (
             id BIGSERIAL PRIMARY KEY, release_id TEXT NOT NULL UNIQUE, 

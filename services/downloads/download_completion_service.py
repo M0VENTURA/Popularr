@@ -520,7 +520,16 @@ def _file_matches_queue_item(
     file_path: str,
     queue_item: dict[str, Any],
     relative_name: str | None = None,
+    detail: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
+    """Does this file belong to this queue item?
+
+    ``detail`` is an optional out-parameter carrying WHY when the answer is no —
+    see ``queue_metadata_matcher._metadata_matches_queue_item``. It exists so a
+    discarded download can be reported with the artist and length it actually
+    had, instead of the bare "did not match queue item" that sends the operator
+    hunting for a matching bug that is not there.
+    """
     from services.downloads.match_engine import filename_matches_queue_item
     from services.queue.queue_metadata_matcher import _metadata_matches_queue_item
 
@@ -539,11 +548,16 @@ def _file_matches_queue_item(
     if _allowed:
         _ext = os.path.splitext(str(file_path or ""))[1].lower().lstrip(".")
         if _ext not in _allowed:
+            if detail is not None:
+                detail.clear()
+                detail["reason"] = "unsupported_format"
+                detail["found_format"] = _ext
+                detail["allowed_formats"] = sorted(_allowed)
             return False, "unsupported_format"
 
     meta_state = None
     try:
-        meta_state = _metadata_matches_queue_item(file_path, queue_item)
+        meta_state = _metadata_matches_queue_item(file_path, queue_item, detail=detail)
     except Exception as exc:
         logger.debug("Metadata check failed", file_path=file_path, error=str(exc))
 
@@ -552,11 +566,21 @@ def _file_matches_queue_item(
     if meta_state is False:
         return False, "metadata"
 
+    # Metadata was INCONCLUSIVE, so the FILENAME decides — and a filename
+    # decision carries none of the tag detail. Clear what the metadata pass
+    # recorded on its way to deferring: leaving it would attribute the rejection
+    # to a tag that was never the reason (the length almost always "disagrees"
+    # with a queue item whose duration is 0).
+    if detail is not None:
+        detail.clear()
+
     try:
         is_match = filename_matches_queue_item(file_path, queue_item)
     except Exception as exc:
         logger.debug("Filename match failed", file_path=file_path, error=str(exc))
         is_match = False
+    if not is_match and detail is not None:
+        detail["reason"] = "filename_mismatch"
     return bool(is_match), "filename"
 
 
@@ -737,6 +761,133 @@ def _queue_reject_failure_reason(match_source: str) -> str:
     if match_source == "unsupported_format":
         return "Downloaded file type is not an allowed format; deleted and rescheduled"
     return "Downloaded file did not match queue item; deleted and rescheduled"
+
+
+#: Reason code -> the short label the queue page shows. Kept next to the
+#: sentence builder so a new code cannot be added with only one of the two.
+DISCARD_REASON_LABELS: dict[str, str] = {
+    "wrong_artist": "Wrong artist",
+    "wrong_length": "Wrong length",
+    "title_mismatch": "Different song",
+    "edition_mismatch": "Different edition",
+    "filename_mismatch": "Filename does not match",
+    "unsupported_format": "File type not allowed",
+}
+
+
+def _discard_reason(detail: dict[str, Any], match_source: str) -> str:
+    """The reason CODE for this rejection, from the matcher or a fallback.
+
+    ⚠️ ONE function, used by both the sentence builder and the recorder. Deriving
+    it in each place separately let them disagree: the recorder fell back to
+    ``filename_mismatch`` while the sentence builder, seeing no reason in the
+    raw detail, printed the generic "did not match queue item" — so the queue
+    page showed a label and a sentence that described different things.
+    """
+    reason = str((detail or {}).get("reason") or "").strip()
+    if reason:
+        return reason
+    # No reason from the matcher: the fallback still beats nothing, and the
+    # source at least says WHICH check rejected it.
+    return "unsupported_format" if match_source == "unsupported_format" else "filename_mismatch"
+
+
+def _discard_detail_sentence(detail: dict[str, Any], match_source: str) -> str:
+    """A sentence naming WHAT was discarded and WHY.
+
+    ⭐ This is the point of the whole exercise. The old message was "Downloaded
+    file did not match queue item" for every cause, so a wrong-artist discard and
+    a wrong-length discard were indistinguishable — and the file had already been
+    DELETED by then. The facts were computed, then thrown away one line later.
+
+    Written from the data the matcher already had, so nothing is re-derived and
+    nothing can disagree with the decision that was actually taken.
+    """
+    reason = _discard_reason(detail, match_source)
+    found_artist = str(detail.get("found_artist") or "").strip()
+    found_len = detail.get("found_length_seconds")
+    want_len = detail.get("expected_length_seconds")
+
+    def _mmss(seconds: Any) -> str:
+        try:
+            total = int(round(float(seconds)))
+        except (TypeError, ValueError):
+            return ""
+        return f"{total // 60}:{total % 60:02d}"
+
+    if reason == "wrong_artist":
+        if found_artist:
+            return f"Wrong artist — the file is credited to '{found_artist}'"
+        return "Wrong artist — the file has no usable artist tag"
+
+    if reason == "wrong_length":
+        got, want = _mmss(found_len), _mmss(want_len)
+        if got and want:
+            return f"Wrong length — the file is {got} but the queue item is {want}"
+        if got:
+            return f"Wrong length — the file is {got}"
+        return "Wrong length — did not match the queue item"
+
+    if reason == "title_mismatch":
+        found_title = str(detail.get("found_title") or "").strip()
+        if found_title:
+            return f"Different song — the file is titled '{found_title}'"
+        return "Different song — the file's title does not match"
+
+    if reason == "edition_mismatch":
+        return "Different edition — the file's edition annotation does not match"
+
+    if reason == "unsupported_format":
+        ext = str(detail.get("found_format") or "").lstrip(".")
+        allowed = ", ".join(detail.get("allowed_formats") or [])
+        if ext:
+            return f"File type not allowed — '.{ext}'" + (f" (allowed: {allowed})" if allowed else "")
+        return "File type not allowed"
+
+    if reason == "filename_mismatch":
+        return "Filename does not match the queue item"
+
+    return "Downloaded file did not match queue item"
+
+
+def _record_discarded_download(
+    *,
+    item: dict[str, Any],
+    queue_id: int | None,
+    detail: dict[str, Any] | None,
+    match_source: str,
+    filename: str = "",
+) -> None:
+    """Persist WHY this download was discarded, for the queue page.
+
+    ⚠️ Best-effort by construction: the file has ALREADY been deleted and the
+    item rescheduled by the time this runs, so a logging failure must never
+    propagate. The repository swallows its own errors for the same reason.
+    """
+    try:
+        from db.repositories.queue_rejections import record_rejection
+
+        _detail = dict(detail or {})
+        # ⚠️ The SAME derivation the sentence uses, so the stored code and the
+        # stored sentence always describe the same rejection.
+        reason = _discard_reason(_detail, match_source)
+        sentence = _discard_detail_sentence(_detail, match_source)
+
+        record_rejection(
+            reason=reason,
+            queue_id=queue_id,
+            artist=str(item.get("artist") or ""),
+            title=str(item.get("title") or ""),
+            album=str(item.get("album") or ""),
+            detail=sentence,
+            found_artist=str(_detail.get("found_artist") or ""),
+            found_title=str(_detail.get("found_title") or ""),
+            found_length_seconds=_detail.get("found_length_seconds"),
+            expected_length_seconds=_detail.get("expected_length_seconds"),
+            filename=filename,
+        )
+    except Exception as exc:
+        logger.debug("Could not record discarded download", queue_id=queue_id, error=str(exc))
 
 
 def _block_peer_for_queue_item(queue_id: int, found_filename: str | None = None) -> None:
@@ -2385,16 +2536,30 @@ def check_completed_downloads() -> dict[str, Any]:
                             if _artist_ok is False:
                                 abs_path = None
                             else:
-                                is_match, match_source = _file_matches_queue_item(abs_path, item)
+                                _discard_detail: dict[str, Any] = {}
+                                is_match, match_source = _file_matches_queue_item(
+                                    abs_path, item, detail=_discard_detail
+                                )
                                 if is_match:
                                     match_found = os.path.relpath(abs_path, downloads_dir)
                                     _claim_file(abs_path, claimed_files, downloads_dir)
                                 else:
                                     _delete_mismatched_download(abs_path, queue_id, f"rejected ({match_source})")
                                     _block_peer_for_queue_item(queue_id, found_fn)
+                                    # ⚠️ RECORD BEFORE mark_failed. ``mark_failed``
+                                    # returns the row to 'queued' and the next
+                                    # attempt overwrites ``failure_reason``, so
+                                    # the row cannot be the record of this.
+                                    _record_discarded_download(
+                                        item=item,
+                                        queue_id=queue_id,
+                                        detail=_discard_detail,
+                                        match_source=match_source,
+                                        filename=found_fn,
+                                    )
                                     mark_failed(queue_id, _queue_reject_failure_reason(match_source))
                                     stats["failed"] += 1
-                                    log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → failed: downloaded file did not match queue item (deleted + rescheduled)")
+                                    log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → failed: {_discard_detail_sentence(_discard_detail, match_source)} (deleted + rescheduled)")
                                     _log_queue_event("failed", f"{item.get('artist') or ''} - {item.get('title') or ''} → failed: downloaded file did not match queue item (deleted + rescheduled)", queue_id)
                                     continue
 
@@ -2437,10 +2602,20 @@ def check_completed_downloads() -> dict[str, Any]:
                             _artist_ok = None
                         if _artist_ok is False:
                             continue
-                        is_match, match_source = _file_matches_queue_item(candidate, item, rel)
+                        _discard_detail2: dict[str, Any] = {}
+                        is_match, match_source = _file_matches_queue_item(
+                            candidate, item, rel, detail=_discard_detail2
+                        )
                         if not is_match:
                             _delete_mismatched_download(candidate, queue_id, f"rejected for exact filename match ({match_source})")
                             _block_peer_for_queue_item(queue_id, found_fn)
+                            _record_discarded_download(
+                                item=item,
+                                queue_id=queue_id,
+                                detail=_discard_detail2,
+                                match_source=match_source,
+                                filename=rel,
+                            )
                             mark_failed(queue_id, _queue_reject_failure_reason(match_source))
                             stats["failed"] += 1
                             match_found = "__rejected__"
