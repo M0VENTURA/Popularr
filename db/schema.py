@@ -576,6 +576,18 @@ INDEXES_TO_ENSURE: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_tracks_recording_mbid ON tracks (recording_mbid)",
     "CREATE INDEX IF NOT EXISTS idx_download_queue_status ON download_queue (status)",
     "CREATE INDEX IF NOT EXISTS idx_download_queue_release_id ON download_queue (release_id)",
+    # The queue page's "discarded downloads" list reads straight off this and is
+    # ordered newest-first, so without these two the section is a full scan of a
+    # table that only ever grows. Registered here as well as in migration 027
+    # because a fresh install takes the BOOTSTRAP path, not alembic — the table
+    # would exist with no indexes on it.
+    "CREATE INDEX IF NOT EXISTS idx_queue_rejections_created_at ON queue_rejections (created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_queue_rejections_reason ON queue_rejections (reason)",
+    # The queue page's "discarded downloads" list reads straight off this and is
+    # ordered newest-first, so without these two the section is a full scan of a
+    # table that only ever grows. Registered here as well as in migration 027
+    # because a fresh install takes the BOOTSTRAP path, not alembic — the table
+    # would exist with no indexes on it.
     "CREATE INDEX IF NOT EXISTS idx_slskd_search_logs_created_at ON slskd_search_logs (created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_missing_releases_artist ON missing_releases (artist)",
     "CREATE INDEX IF NOT EXISTS idx_missing_releases_release_id ON missing_releases (release_id)",

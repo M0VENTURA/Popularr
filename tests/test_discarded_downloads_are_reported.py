@@ -305,6 +305,30 @@ class TestTheDiscardSentence:
 # ---------------------------------------------------------------------------
 
 
+def test_the_migrations_indexes_are_also_bootstrapped():
+    """A fresh install takes the BOOTSTRAP path, not alembic.
+
+    ``db/bootstrap.py`` and the idempotent repair path build every table from
+    ``db.schema.TABLES_TO_ENSURE`` and every index from ``INDEXES_TO_ENSURE``.
+    Registering the table but not its indexes leaves a fresh install with an
+    unindexed append-only table that the queue page scans newest-first — the
+    table exists, so nothing fails, it is just permanently slow. Both indexes
+    migration 027 creates must therefore appear in the bootstrap list too.
+    """
+    migration = (REPO_ROOT / "migrations" / "versions" / "027_queue_rejections.py").read_text(
+        encoding="utf-8"
+    )
+    created = set(re.findall(r"CREATE INDEX IF NOT EXISTS (\w+)", migration, re.IGNORECASE))
+    assert created, "migration 027 no longer creates any index — update this test"
+
+    from db.schema import INDEXES_TO_ENSURE, TABLES_TO_ENSURE
+
+    assert "queue_rejections" in TABLES_TO_ENSURE
+    registered = " ".join(INDEXES_TO_ENSURE)
+    missing = sorted(name for name in created if name not in registered)
+    assert not missing, f"indexes only alembic installs would get: {missing}"
+
+
 class TestTheRejectionStore:
     DDL = """
     CREATE TABLE queue_rejections (
