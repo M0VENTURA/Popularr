@@ -451,46 +451,85 @@ class TestPagesCallIt:
     def _read(rel: str) -> str:
         return (REPO_ROOT / rel).read_text(encoding="utf-8")
 
-    def test_album_page_shows_a_lookup_popup(self):
-        source = self._read("test_site/static/js/pages/album.js")
-        assert "busyPopup" in source
-        assert "Looking up MusicBrainz match" in source
+    def test_the_rebuilt_popup_is_acquired_inside_the_confirm_callback(self):
+        """⭐ The reported bug: the popup spanned the WHOLE modal session.
 
-    def test_album_page_releases_the_lookup_popup_on_dismissal(self):
-        """Cancelling the picker must release it, or it stays up forever.
+        It was opened when the modal OPENED and released only when the match was
+        applied, so "Looking up MusicBrainz match…" spun on top of the results
+        for as long as the user browsed them — a lookup that had already
+        finished, still advertised as in-flight. Reported as "gets stuck even
+        after it's populated".
 
-        ⚠️ The picker fires its callback ONLY on a CONFIRMED match
-        (confirmReleaseSelection). Closing the modal any other way — backdrop
-        tap on mobile, Escape, the X button — fires NO callback, so the
-        release must be bound to the modal's `hidden.bs.modal` event, not
-        only to the callback's dismissal branch (which the picker never hits).
+        So the contract is about WHERE it is acquired: inside the picker's
+        confirm callback, never before the modal opens.
         """
-        source = self._read("test_site/static/js/pages/album.js")
-        assert "endLookupBusy" in source
-        # The dismissal branch (no selection) must call the release — defence
-        # in depth for a picker that grows a dismissal signal later.
-        assert re.search(r"else\s*\{[^}]*endLookupBusy\(\)", source), (
-            "the 'dismissed without a pick' branch does not release the popup"
+        source = _strip_js_comments(self._read("test_site/static/js/pages/album.js"))
+        opener = _js_function(source, "openAlbumLookupModal")
+        acquisitions = _popup_acquisitions(opener)
+        assert acquisitions, "the lookup acquired no popup at all"
+        assert "openGlobalMbSearch(" in opener
+        assert opener.index("openGlobalMbSearch(") < min(acquisitions), (
+            "the popup is acquired BEFORE the picker opens, so it covers the "
+            "whole browsing session again — that is the reported bug"
         )
-        # The REAL mechanism: every modal close must release the popup. The
-        # picker never calls the callback on dismissal, so binding the popup
-        # release to the modal's close event is what actually fixes the
-        # strand — and `hidden.bs.modal` also fires after a confirmed match
-        # (double-release is a no-op: busyPopup.hide is idempotent).
-        assert "musicBrainzModal" in source, (
-            "the release must bind to the MB modal element"
-        )
-        assert "hidden.bs.modal" in source, (
-            "the popup must be released on `hidden.bs.modal` — dismissal "
-            "(backdrop/Escape/X) fires no picker callback"
-        )
-        # The binder must reference the release function.
-        assert re.search(r"addEventListener\('hidden\.bs\.modal',\s*endLookupBusy\)", source), (
-            "the modal-close listener must call the popup release"
-        )
-        # And it must be called when the lookup opens.
-        assert re.search(r"bindLookupModalDismissal\(\)", source), (
-            "the dismissal binder must be wired into the lookup flow"
+
+    def test_no_modal_close_release_can_kill_the_apply_popup(self):
+        """⚠️ A DELIBERATE ABSENCE, so it needs its reason on the record.
+
+        This page used to release the popup on the modal's `hidden.bs.modal`,
+        because the popup was opened with the modal and a dismissal (backdrop /
+        Escape / X) fires no picker callback. That release is now REMOVED: the
+        popup is not opened until the user confirms, so the dismissal strand it
+        fixed is gone by construction.
+
+        Keeping it would be worse than redundant. `confirmReleaseSelection()`
+        hides the modal and THEN fires the callback, so `hidden.bs.modal` lands
+        one Bootstrap transition into the apply phase and would release a popup
+        whose work is still running — silently killing the indicator for the
+        slowest part it exists to cover, and reducing the later
+        `update(lookupBusy, …)` phase labels to no-ops.
+        """
+        releases = ("endLookupBusy", "_endAlbumLookupBusy")
+        for rel in ("test_site/static/js/pages/album.js", "static/js/album_detail.js"):
+            source = _strip_js_comments(self._read(rel))
+            for name in releases:
+                # ⚠️ Scoped to THIS release function, not to the event name. Both
+                # pages legitimately listen for `hidden.bs.modal` elsewhere (a
+                # wrap element removing itself), so a blanket "the event must
+                # not appear" check fails on code that has nothing to do with
+                # the popup.
+                assert not re.search(
+                    rf"addEventListener\(\s*['\"]hidden\.bs\.modal['\"]\s*,\s*{name}\b", source
+                ), (
+                    f"{rel}: {name} is registered on hidden.bs.modal — that fires "
+                    "one Bootstrap transition INTO the apply phase (confirmRelease-"
+                    "Selection hides the modal before firing the callback), so it "
+                    "kills the popup while its work is still running"
+                )
+            for binder in (
+                "bindLookupModalDismissal",
+                "_bindAlbumLookupModalDismissal",
+                "_lookupModalHideBound",
+                "_albumLookupModalHideBound",
+            ):
+                assert binder not in source, (
+                    f"{rel}: {binder!r} is back — a modal-close release races the "
+                    "apply phase and kills the popup mid-work"
+                )
+
+    def test_the_dismissal_path_leaves_nothing_outstanding(self):
+        """A dismissal must not need a release, because nothing was acquired.
+
+        The callback now returns early when no release was picked, and the only
+        acquire happens after that guard — so the case that used to strand the
+        popup cannot reach it at all.
+        """
+        source = _strip_js_comments(self._read("test_site/static/js/pages/album.js"))
+        opener = _js_function(source, "openAlbumLookupModal")
+        guard = opener.index("if (!selected) return;")
+        assert guard < opener.index("startLookupBusy("), (
+            "the 'no pick' guard must precede the acquire, or a dismissal "
+            "acquires a popup nobody releases"
         )
 
     def test_album_page_releases_the_popup_even_if_applying_throws(self):
@@ -501,23 +540,31 @@ class TestPagesCallIt:
         )
 
     def test_live_album_page_does_the_same(self):
-        source = self._read("static/js/album_detail.js")
-        assert "busyPopup" in source
-        assert "Looking up MusicBrainz match" in source
-        assert "_endAlbumLookupBusy" in source
-        assert ".finally(_endAlbumLookupBusy)" in source
-        # Same modal-close binding as rebuilt (see the rebuilt test above):
-        # dismissal fires no picker callback, so the popup must release on
-        # `hidden.bs.modal`.
-        assert "hidden.bs.modal" in source, (
-            "the live album page must also release the popup on modal close "
-            "— dismissal (backdrop/Escape/X) fires no picker callback"
+        source = _strip_js_comments(self._read("static/js/album_detail.js"))
+        opener = _js_function(source, "openAlbumLookupModal")
+        acquisitions = _popup_acquisitions(opener)
+        assert acquisitions, "the live lookup acquired no popup at all"
+        assert opener.index("openGlobalMbSearch(") < min(acquisitions), (
+            "the live popup is acquired before the picker opens — reported bug"
         )
-        assert re.search(
-            r"addEventListener\('hidden\.bs\.modal',\s*_endAlbumLookupBusy\)", source
-        ), "the live modal-close listener must call the popup release"
-        assert "_bindAlbumLookupModalDismissal()" in source, (
-            "the live dismissal binder must be wired into the lookup flow"
+        assert ".finally(_endAlbumLookupBusy)" in source
+
+    def test_the_live_apply_returns_its_work_so_the_popup_covers_it(self):
+        """⚠️ Without this the popup only FLASHES.
+
+        The caller wraps the apply in `.finally(_endAlbumLookupBusy)`, which
+        releases when the promise settles. A discarded promise settles as soon
+        as the function returns, so the release would happen BEFORE the metadata
+        preview finished — a one-frame spinner, and the several-second network
+        wait it was added for left silent. It must be returned.
+        """
+        source = _strip_js_comments(self._read("static/js/album_detail.js"))
+        fn = _js_function(source, "applyAlbumMbid")
+        # Assigned as a function expression, so slice to the closing of the
+        # whole `window.applyAlbumMbid = function (...) { ... };` statement.
+        assert "return review.applyProposal(" in fn, (
+            "applyAlbumMbid discards the preview promise, so the caller's "
+            ".finally releases the popup before the work is done"
         )
 
     def test_batch_queue_shows_a_popup(self):
@@ -534,6 +581,105 @@ class TestPagesCallIt:
     def test_live_album_queue_button_shows_a_popup(self):
         source = self._read("static/js/album_detail.js")
         assert "Adding to download queue" in source
+
+
+# ---------------------------------------------------------------------------
+# 3b. The lookup popup's lifecycle, driven for real
+# ---------------------------------------------------------------------------
+
+
+class TestTheLookupLifecycleDoesNotStrand:
+    """Run the page's REAL helpers against the REAL popup module.
+
+    Source matching can prove WHERE the popup is acquired; it cannot prove that
+    ``startLookupBusy`` actually releases a previous claim, or that a double
+    release leaves nothing behind. Both are the difference between a popup that
+    closes and one that stays up after every piece of work has finished, so
+    they are exercised rather than pattern-matched.
+
+    ⚠️ The helpers are EXTRACTED from the page and evaluated, because the page
+    script itself cannot be loaded outside a browser. What runs is the shipped
+    code, not a re-typed copy of it.
+    """
+
+    #: (label, page, acquire fn, release fn, handle variable)
+    TREES = (
+        ("rebuilt", "test_site/static/js/pages/album.js", "startLookupBusy", "endLookupBusy", "lookupBusy"),
+        ("live", "static/js/album_detail.js", "_startAlbumLookupBusy", "_endAlbumLookupBusy", "_albumLookupBusy"),
+    )
+
+    _PROBE = """
+const pageSource = %s;
+const helpers = new Function(
+  'global',
+  pageSource + '\\nreturn { start: %s, end: %s };'
+)(global);
+
+const before = global.busyPopup.active;
+const handle = helpers.start('Applying the MusicBrainz match…');
+const afterStart = global.busyPopup.active;
+const shownLabel = label();
+
+// ⭐ The reopen case: the user can open the picker again while an apply is
+// still resolving. A second acquire must not leave the first claim behind,
+// or the popup outlives all the work and never closes.
+helpers.start('Applying the MusicBrainz match…');
+const afterSecondStart = global.busyPopup.active;
+
+helpers.end();
+const afterEnd = global.busyPopup.active;
+
+// The callback's `.finally` races applyAlbumMatch's own endLookupBusy(), so a
+// second release must be a no-op rather than driving the count negative.
+helpers.end();
+const afterDoubleEnd = global.busyPopup.active;
+const visibleAfter = visible();
+
+out({
+  handleKind: handle === null ? 'null' : typeof handle,
+  before, afterStart, shownLabel,
+  afterSecondStart, afterEnd, afterDoubleEnd, visibleAfter,
+});
+"""
+
+    @staticmethod
+    def _helper_source(page: str, start: str, end: str, counter: str) -> str:
+        source = (REPO_ROOT / page).read_text(encoding="utf-8")
+        decl = re.search(rf"^\s*let {counter} = null;[^\n]*", source, re.M)
+        assert decl, f"{page}: the {counter!r} declaration was renamed or moved"
+        return "\n".join(
+            [decl.group(0).strip(), _js_function(source, start), _js_function(source, end)]
+        )
+
+    @pytest.mark.parametrize("label,page,start,end,counter", TREES, ids=[t[0] for t in TREES])
+    def test_the_claim_is_balanced(self, label, page, start, end, counter):
+        script = self._PROBE % (
+            json.dumps(self._helper_source(page, start, end, counter)),
+            start,
+            end,
+        )
+        result = _run_module(script)
+
+        assert result["before"] == 0, "something was already showing before the lookup"
+        assert result["afterStart"] == 1, "acquiring the lookup popup did not show it"
+        assert "Applying the MusicBrainz match" in (result["shownLabel"] or ""), (
+            f"the popup shows the wrong label: {result['shownLabel']!r}"
+        )
+
+        assert result["afterSecondStart"] == 1, (
+            f"a second acquire left {result['afterSecondStart']} claims outstanding — "
+            "the first handle was dropped instead of released, so the popup would "
+            "stay up after every piece of work had finished"
+        )
+        assert result["afterEnd"] == 0, "releasing the lookup popup left it showing"
+        assert result["afterDoubleEnd"] == 0, (
+            "releasing twice drove the claim count wrong — the callback's .finally "
+            "races applyAlbumMatch's own release"
+        )
+        assert result["visibleAfter"] is False, "the popup is still visible with no claims"
+        assert result["handleKind"] == "object", (
+            "startLookupBusy returned no handle, so nothing can ever release it"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -784,6 +930,66 @@ def _strip_js_comments(source: str) -> str:
 
 
 _SCRIPT_BLOCK_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", re.S | re.I)
+
+#: A popup acquisition, in either form: the page's own helper, or a raw
+#: ``busyPopup.show(`` that bypasses it.
+_LOOKUP_CALL_RE = re.compile(r"\b(_?\w*LookupBusy)\s*\(|busyPopup\.show\s*\(")
+
+
+def _popup_acquisitions(source: str) -> list[int]:
+    """Offsets of every popup ACQUISITION in a lookup opener.
+
+    ⚠️ Both forms are counted deliberately. A test that looked only for the
+    page's helper (``startLookupBusy(``) passes when the same regression is
+    re-introduced as a raw ``busyPopup.show(`` before the picker opens — which
+    is exactly how the bug was first written, so that is not a hypothetical.
+    Proven by mutation.
+
+    The RELEASE helpers (``endLookupBusy`` / ``_endAlbumLookupBusy``) are
+    excluded: they are expected to appear, and they do not show anything.
+    """
+    offsets: list[int] = []
+    for match in _LOOKUP_CALL_RE.finditer(source):
+        name = match.group(1)
+        if name and re.fullmatch(r"_?end\w*", name):
+            continue
+        offsets.append(match.start())
+    return offsets
+
+
+def _js_function(source: str, name: str) -> str:
+    """Slice one function body out of a script, in EITHER declaration form.
+
+    ⚠️ Both real forms appear in this codebase: ``function foo(`` in the
+    rebuilt tree and ``window.foo = function (`` in the live album page, whose
+    handlers are all globals. Looking only for the declaration form fails with
+    a bare ``ValueError: substring not found``, which reads like a missing
+    function rather than a missing pattern.
+
+    Brace-counted. The bodies this is used on are balanced — no template
+    literals and no braces inside string literals — so the count lands on the
+    right closing brace. A slice that is off by one would silently return the
+    WRONG fragment and every assertion below would then be about the wrong
+    text, so the balance is asserted rather than assumed.
+    """
+    escaped = re.escape(name)
+    for pattern in (
+        rf"function\s+{escaped}\s*\(",           # function foo(
+        rf"\b{escaped}\s*=\s*function\s*\(",     # window.foo = function (
+    ):
+        match = re.search(pattern, source)
+        if not match:
+            continue
+        depth = 0
+        for i in range(source.index("{", match.end() - 1), len(source)):
+            if source[i] == "{":
+                depth += 1
+            elif source[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[match.start() : i + 1]
+        raise AssertionError(f"unbalanced braces while slicing {name}()")
+    raise AssertionError(f"{name}() is not defined anywhere in this script")
 
 
 def _tree_js_sources(tree_root: Path) -> list[str]:

@@ -316,9 +316,24 @@ document.addEventListener('change', function (e) {
 // FIRST match) wrote its results into base.html's hidden global modal while
 // the visible one sat on its placeholder.
 
-/** In-flight lookup popup. Module-scoped: opened by the picker, released by
- *  the match callback, which is a separate function. */
+/** In-flight lookup popup. Module-scoped: acquired in the picker's confirm
+ *  callback, released by the apply wrapper, which is a separate function. */
 let _albumLookupBusy = null;
+
+/**
+ * Acquire the lookup popup for the apply phase.
+ *
+ * ⭐ Any outstanding claim is released FIRST. Reopening the picker while an
+ * apply is still resolving is possible, and a bare assignment would drop the
+ * previous handle — leaving its claim counted, so the popup would stay up after
+ * every piece of work had finished. That is the failure this refactor exists to
+ * remove, so it must not be reintroduced by the refactor.
+ */
+function _startAlbumLookupBusy(label) {
+    _endAlbumLookupBusy();
+    _albumLookupBusy = window.busyPopup ? window.busyPopup.show(label) : null;
+    return _albumLookupBusy;
+}
 
 /** Release the lookup popup. Safe to call repeatedly / with no popup. */
 function _endAlbumLookupBusy() {
@@ -326,22 +341,20 @@ function _endAlbumLookupBusy() {
     _albumLookupBusy = null;
 }
 
-// The MB picker fires its callback ONLY on a CONFIRMED match
-// (confirmReleaseSelection). Dismissing the modal — backdrop tap on mobile,
-// Escape, or the X button — closes it with no signal, so the popup stayed up
-// forever. The popup is this page's payload, so it is released whenever the
-// modal closes for any reason: `hidden.bs.modal` fires on EVERY close
-// (including the confirm path, where `.finally(_endAlbumLookupBusy)` already
-// released it — the double-release is a no-op, since the release is
-// idempotent). Bound once; a missing modal at first open must not mark it
-// bound, so a later open retries.
-let _albumLookupModalHideBound = false;
-function _bindAlbumLookupModalDismissal() {
-    const modalEl = document.getElementById('musicBrainzModal');
-    if (!modalEl || _albumLookupModalHideBound) return;
-    _albumLookupModalHideBound = true;
-    modalEl.addEventListener('hidden.bs.modal', _endAlbumLookupBusy);
-}
+// NOTE: the `hidden.bs.modal` -> _endAlbumLookupBusy release that used to live
+// here is REMOVED, not merely unused.
+//
+// It existed for one reason: the popup was opened when the modal OPENED, the
+// picker fires its callback only on a CONFIRMED match, and dismissing the modal
+// (backdrop tap / Escape / X) fires nothing — so a dismissal stranded it.
+// Nothing is opened now until the user confirms, so that strand is gone by
+// construction and the binder is dead weight.
+//
+// ⚠️ And keeping it would be actively harmful. confirmReleaseSelection() hides
+// the modal and THEN fires the callback, so `hidden.bs.modal` lands one
+// Bootstrap transition (~300ms) INTO the apply phase and would release a popup
+// whose work is still running — killing the indicator for exactly the slow part
+// it was added for.
 
 window.openAlbumLookupModal = function () {
     const artist = window._pageData ? window._pageData.artistName : '';
@@ -353,32 +366,33 @@ window.openAlbumLookupModal = function () {
         return;
     }
 
-    // The lookup is a network round trip that continues after the user picks
-    // a release (applyAlbumMbid resolves the edition), so the popup is opened
-    // here and released in applyAlbumMbid rather than wrapped. "Looking up
-    // a match" was previously entirely silent.
-    _albumLookupBusy = window.busyPopup
-        ? window.busyPopup.show('Looking up MusicBrainz match…')
-        : null;
-
-    // The picker only fires its callback on a CONFIRMED match; dismissing the
-    // modal (backdrop tap / Escape / X) closes it silently. Release the popup
-    // on the modal's close event so a dismissal cannot strand it.
-    _bindAlbumLookupModalDismissal();
-
+    // ⚠️ NO busy popup is opened here, deliberately.
+    //
+    // It used to be, and released only when the match was applied — so a
+    // centre-screen spinner labelled "Looking up MusicBrainz match…" stayed up
+    // for the ENTIRE modal session, spinning on top of the results while the
+    // user browsed them. That is the reported "gets stuck even after it's
+    // populated": the lookup had finished, but the popup outlived it by
+    // however long the user took to choose.
+    //
+    // Nothing here needs it. The modal reports its own progress inline
+    // ("Searching MusicBrainz…" in #mbSearchResults) and the click's other
+    // feedback is the modal opening. A busy indicator must cover only work that
+    // has NO other indicator, so the popup is acquired in the confirm callback
+    // below instead — for the apply phase, the one part with nothing to watch.
     window.openGlobalMbSearch(artist, album, function (selected) {
-        if (selected && selected.id) {
-            // Release even if the apply throws, so the popup cannot strand.
-            Promise.resolve()
-                .then(() => window.applyAlbumMbid(selected.id))
-                .catch(function (error) {
-                    console.error('Applying the MusicBrainz match failed', error);
-                    alert('Could not apply the MusicBrainz match.');
-                })
-                .finally(_endAlbumLookupBusy);
-        } else {
-            _endAlbumLookupBusy();
-        }
+        // Dismissed without a pick: nothing is outstanding, so nothing to release.
+        if (!selected || !selected.id) return;
+
+        _startAlbumLookupBusy('Applying the MusicBrainz match…');
+        // Release even if the apply throws, so the popup cannot strand.
+        Promise.resolve()
+            .then(() => window.applyAlbumMbid(selected.id))
+            .catch(function (error) {
+                console.error('Applying the MusicBrainz match failed', error);
+                alert('Could not apply the MusicBrainz match.');
+            })
+            .finally(_endAlbumLookupBusy);
     });
 };
 
@@ -493,7 +507,14 @@ window.applyAlbumMbid = function (mbid) {
         return;
     }
 
-    review.applyProposal(mbid).then(function (staged) {
+    // ⚠️ ⭐ RETURNED, not fired and forgotten. The caller wraps this call in
+    // `.finally(_endAlbumLookupBusy)`, which releases the busy popup — but a
+    // discarded promise resolves to `undefined` the moment this function
+    // returns, so the popup was released BEFORE the preview had finished:
+    // the spinner flashed for a frame and the several-second network wait it
+    // exists to cover stayed silent. Returning the chain makes the release
+    // happen when the work actually ends.
+    return review.applyProposal(mbid).then(function (staged) {
         if (!staged) {
             // The preview could not be built — the id is still applied, so the
             // user can save it and run Compare with MusicBrainz manually.

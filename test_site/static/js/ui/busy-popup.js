@@ -21,9 +21,18 @@
       (lookup → metadata review → save). There is no single element that can
       carry a busy state for the whole window.
 
-   3. THE WINDOW IS OFTEN NOT ONE AWAITABLE CALL. The lookup hands off to a
-      modal and only completes when the user picks a match, so the popup has
-      to be opened and closed in different places rather than wrapped.
+   3. THE WINDOW IS OFTEN NOT ONE AWAITABLE CALL. A lookup can hand off to a
+      modal and finish only when the user picks a match, so the popup has to
+      be opened and closed in different places rather than wrapped.
+
+   ⚠️ POINT 3 IS A CONSTRAINT ON THE CODE, NOT A LICENCE TO SPAN A USER
+   DECISION. A popup must cover only work that has no other indicator. Holding
+   one for the whole time a modal is open means a centre-screen spinner labelled
+   "looking up…" keeps turning while the user reads results that arrived
+   seconds ago — reported as "gets stuck even after it's populated". Acquire it
+   when the work actually starts (which may be mid-flow, after a confirm) and
+   release it the moment that work ends, even if the popup and the modal are
+   then open in different places.
 
    So this is deliberately NOT an overlay: the user must still be able to read
    the page and interact with the modal underneath. It is:
