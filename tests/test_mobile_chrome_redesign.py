@@ -544,15 +544,47 @@ class TestTheSystemSheet:
         )
         assert 'id="systemSheet"' in sheet
 
-    def test_every_displaced_destination_is_reachable(self, sheet: str) -> None:
-        """The hamburger held these; removing it must not strand them."""
+    def test_every_displaced_destination_is_reachable(self, sheet: str, base: str) -> None:
+        """The hamburger held these; removing it must not strand them.
+
+        ⚠️ REACHABLE, not "listed here". `Dashboard` and `All Artists` were
+        deliberately removed from this sheet because the bottom bar already
+        carries them as `Home` and `Artists` — so the property to assert is that
+        a phone can still GET to each destination, from either surface. Pinning
+        the sheet alone would freeze a duplicate the design brief asked to drop.
+        """
+        # The bar is in the shell, next to the sheet include.
+        bottom_bar = base[base.index('class="bottom-nav"'): base.index('</nav>', base.index('class="bottom-nav"'))]
+        reachable = sheet + bottom_bar
+
         for endpoint in (
             "ui.dashboard", "ui.artists", "ui.bookmarks", "ui.logs",
             "ui.correcting", "ui.help_page", "ui.config_editor", "ui.logout",
         ):
-            assert f"url_for('{endpoint}')" in sheet, f"{endpoint} lost with the hamburger"
+            assert f"url_for('{endpoint}')" in reachable, (
+                f"{endpoint} is now unreachable from a phone"
+            )
         for literal in ("/discover", "/downloads/discover/upcoming", "/missing"):
             assert f'href="{literal}"' in sheet, f"{literal} lost with the hamburger"
+
+    def test_the_duplicates_the_brief_names_are_gone(self, sheet: str, base: str) -> None:
+        """⭐ `Dashboard` / `All Artists` must NOT be in the sheet, and MUST be
+        in the bottom bar — the other half of the deduplication.
+
+        Asserted as a PAIR on purpose: removing them from the sheet without
+        them being in the bar is the failure that would actually stranding a
+        user, and asserting only one half would pass in that case.
+        """
+        bottom_bar = base[base.index('class="bottom-nav"'): base.index('</nav>', base.index('class="bottom-nav"'))]
+
+        assert "url_for('ui.dashboard')" not in sheet, (
+            "Dashboard is a duplicate — the bottom bar's Home tab already goes there"
+        )
+        assert "url_for('ui.artists')" not in sheet, (
+            "All Artists is a duplicate — the bottom bar's Artists tab already goes there"
+        )
+        assert "url_for('ui.dashboard')" in bottom_bar, "Home must remain the way to Dashboard"
+        assert "url_for('ui.artists')" in bottom_bar, "Artists must remain the way to All Artists"
 
     @pytest.mark.asyncio
     async def test_the_sheet_renders_with_the_menu_button_pointing_at_it(self, app) -> None:
@@ -565,17 +597,27 @@ class TestTheSystemSheet:
 
         Both lists name the same destinations in different shapes, so a new
         page added to one and not the other is the realistic failure. This
-        asserts desktop -> sheet; the reverse is deliberately *not* asserted,
-        because the sheet groups a few secondary download destinations that the
-        navbar does not list.
+        asserts desktop -> (bottom bar + sheet); the reverse is deliberately
+        *not* asserted, because the sheet groups a few secondary download
+        destinations that the navbar does not list.
+
+        ⚠️ The bottom bar is part of the target set. `Dashboard` and `All
+        Artists` live there as Home/Artists and are no longer repeated in the
+        sheet, so checking the sheet alone would report two false failures.
         """
         nav_start = base.index('class="navbar-nav')
         nav = base[nav_start : base.index("</ul>", base.index("bookmarksDropdown", nav_start))]
         desktop = set(re.findall(r"url_for\('(ui\.\w+)'\)", nav))
         assert desktop, "the navbar scan found nothing — the slice is wrong"
-        missing = sorted(e for e in desktop if f"url_for('{e}')" not in sheet)
+
+        bar_start = base.index('class="bottom-nav"')
+        bottom_bar = base[bar_start : base.index("</nav>", bar_start)]
+        reachable = bottom_bar + sheet
+
+        missing = sorted(e for e in desktop if f"url_for('{e}')" not in reachable)
         assert not missing, (
-            f"{missing} are in the desktop navbar but unreachable on a phone"
+            f"{missing} are in the desktop navbar but unreachable on a phone "
+            "(neither the bottom bar nor the system sheet leads there)"
         )
 
 

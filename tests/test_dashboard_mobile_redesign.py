@@ -203,15 +203,43 @@ class TestTheLibraryStripIsOneRow:
 
 class TestTheScannerCard:
 
-    def test_it_has_a_state_line_and_one_action(self, html: str) -> None:
-        """The mock-up's panel 1: heading with the state, a hint, one button."""
+    def test_it_is_a_single_row_holding_the_state_and_one_action(self, html: str) -> None:
+        """The mock-up's panel 1: the state on the left, one action on the right.
+
+        ⚠️ THE HINT LINE IS GONE ON PURPOSE. This used to assert "Keep your
+        library up to date." — a line of reassurance that cost a whole row
+        beneath the heading to say nothing the heading did not already say. The
+        card is one ~52px row now, so the assertion follows the markup rather
+        than pinning prose the brief removed.
+
+        What is still genuinely pinned: the state is named, there is exactly one
+        action, and the two live in the SAME row element.
+        """
         idx = html.index('id="scannerControlsCard"')
         # Anchor on real MARKUP, not a comment: the Releases card's own comment
         # is Jinja and would not match an `<!-- -->` slice.
         card = html[idx: html.index('id="upcomingTableWrap"', idx)]
-        assert 'id="scannerState"' in card, "nothing names what is running"
-        assert 'id="scannerStartBtn"' in card, "the single action is missing"
-        assert "Keep your library up to date." in card
+        row = card[card.index('class="scanner-bar"') : card.index("</div>", card.index("scannerStartBtn"))]
+        assert 'id="scannerState"' in row, "the state is not in the row"
+        assert 'id="scannerStartBtn"' in row, "the single action is not in the row"
+        assert "Keep your library up to date." not in card, (
+            "the removed hint line is back — it was the row the brief compressed"
+        )
+
+    def test_the_idle_row_offers_exactly_one_action(self, html: str) -> None:
+        """CONTROL: 'one action' means one button in the idle state.
+
+        The old card carried a full-width button AND a scroll-into-view button
+        AND a stop button. Only the active state should have more than one.
+        """
+        idx = html.index('id="scannerControlsCard"')
+        card = html[idx: html.index('id="upcomingTableWrap"', idx)]
+        idle = card[card.index('id="scannerIdleState"') : card.index('id="scannerActiveState"')]
+
+        assert idle.count("<button") == 1, (
+            f"the idle row has {idle.count('<button')} buttons; the brief asks for one"
+        )
+        assert 'id="scannerStartBtn"' in idle
 
     def test_the_engines_and_their_controls_are_gone(self, html: str) -> None:
         """CONTROL on the replacement: the old panel must not linger.
@@ -642,13 +670,61 @@ class TestTheReleasesCarousel:
             "the pill the brief asks for, from isReleased()"
         )
 
-    def test_a_queued_release_shows_a_disabled_tick(self, releases_js: str) -> None:
-        """A settled state, not a second live Queue button."""
+    def test_the_queue_action_floats_on_the_artwork(self, releases_js: str) -> None:
+        """⭐ The brief's floating `+`, ON the cover rather than in a button row.
+
+        ⚠️ THIS SUPERSEDES the old "a queued release shows a disabled tick"
+        assertion. That pinned a full-width `Queued` button in an
+        `.ur-card-actions` row under the meta line — a whole row of height, per
+        card, for one action, and it made every card taller. The brief moves the
+        action onto the artwork as a `+`; the settled state is now the "In
+        Queue" PILL, which was already there.
+
+        What must stay true, and is asserted here:
+          * the button keeps `ur-queue-btn` — `attachRowHandlers` binds that
+            class, so a new one would silently disconnect the handler;
+          * it carries `data-release-index`, which is how the release is
+            resolved (nothing is serialised into an attribute — that is the
+            failure mode the module header records);
+          * a QUEUED release renders NO action, so there is exactly one signal
+            for "already queued" rather than a flag and a dead button saying it.
+        """
         idx = releases_js.index("function renderCarousel(")
         body = releases_js[idx: releases_js.index("\n  async function queueById", idx)]
-        assert "disabled" in body
-        assert "Queued" in body
+
+        assert "ur-card-quick" in body, "the floating quick-queue button is gone"
+        assert "${quickAction}" in body, "the floating button is not placed on the art"
+        assert "ur-queue-btn" in body, "the class attachRowHandlers binds is missing"
+        assert "data-release-index" in body
         assert "In Queue" in body
+
+        # The queued branch must yield an EMPTY action, not a disabled button.
+        quick = body[body.index("const quickAction"): body.index("return (", body.index("const quickAction"))]
+        assert "release.in_queue\n        ? ''" in quick or "? ''" in quick, (
+            "a queued release must render no action at all"
+        )
+        assert "disabled" not in quick, (
+            "the disabled Queued button is back — the In Queue pill already says it"
+        )
+
+    def test_the_floating_button_is_sized_for_a_cover_not_a_toolbar(self, css: str) -> None:
+        """34px, against the app's 44px touch minimum — deliberate, and scoped.
+
+        The button sits on a ~110px cover inside a 62%-wide card; a 44px circle
+        would cover most of the artwork and read as the card's subject. This is
+        only possible because `popularr.css` exempts `btn-sm` from the app-wide
+        minimum, so the block must also pin `min-height: 0` explicitly — without
+        it the mobile rule wins again and the button jumps back to 44px.
+        """
+        block = _block(css, ".ur-card-quick")
+        assert "position: absolute" in block
+        assert "border-radius: 50%" in block
+        assert re.search(r"width:\s*34px", block)
+        assert re.search(r"height:\s*34px", block)
+        assert "min-height: 0" in block, (
+            "without this the mobile `.btn { min-height: 44px }` wins and the "
+            "circle stretches into a pill over the cover"
+        )
 
     def test_an_empty_list_renders_a_message(self, releases_js: str) -> None:
         idx = releases_js.index("function renderCarousel(")

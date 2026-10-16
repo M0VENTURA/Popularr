@@ -77,7 +77,22 @@
 
   const LEVEL_RE = /(?:\[(DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)\]|\b(DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)\b)/i;
   const TAG_RE = /\[([A-Za-z0-9_.\-]+)\]/;
-  const TS_RE = /^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})/;
+  /*
+    ⚠️ THE FRACTIONAL SECONDS ARE PART OF THE MATCH, not left behind.
+
+    structlog writes an ISO timestamp — `2026-10-13T11:18:55.200965 [INFO] …` —
+    and this pattern used to stop at the seconds. So `renderLineHtml` stripped
+    `2026-10-13T11:18:55` and left `.200965` at the head of the message, which is
+    the reported `.313367` fragment appearing on every line with the Timestamps
+    switch OFF (with it ON, the fragment still showed, just after the timestamp).
+
+    The group stays the seconds-only form on purpose: microseconds are noise in
+    a log viewer and the design board's "MICROSECONDS FIXED" means gone, not
+    merely repositioned. `[.,]` accepts both the ISO dot and the comma some
+    European loggers emit, and `\d+` is unbounded so a millisecond timestamp
+    (3 digits) and a microsecond one (6) are both consumed.
+  */
+  const TS_RE = /^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})(?:[.,]\d+)?/;
 
   let rawLines = [];
   let levelFilter = 'all';

@@ -48,13 +48,21 @@
   <div class="offcanvas-body p-0">
     <nav aria-label="All destinations">
 
+      {#
+        ⚠️ NO `Dashboard` / `All Artists` HERE.
+
+        Both were listed, and both are already a tab in the bottom bar that
+        opens this sheet — `Home` → `ui.dashboard` and `Artists` → `ui.artists`.
+        A destination reachable twice from the same screen makes the user
+        choose between two names for one place, and it made this list look
+        longer than the number of places it actually leads to.
+
+        Reachability is unchanged, and that is asserted rather than assumed:
+        `tests/test_mobile_chrome_redesign.py` checks every desktop-navbar
+        destination is reachable on a phone from the bottom bar OR this sheet,
+        so a future removal here cannot strand a page.
+      #}
       <p class="system-sheet-group">Library</p>
-      <a class="system-sheet-item" href="{{ url_for('ui.dashboard') }}">
-        <i class="bi bi-speedometer2" aria-hidden="true"></i> Dashboard
-      </a>
-      <a class="system-sheet-item" href="{{ url_for('ui.artists') }}">
-        <i class="bi bi-people" aria-hidden="true"></i> All Artists
-      </a>
       <a class="system-sheet-item" href="{{ url_for('ui.bookmarks') }}?filter=artist">
         <i class="bi bi-star-fill text-warning" aria-hidden="true"></i> Favourite Artists
       </a>

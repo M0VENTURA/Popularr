@@ -105,11 +105,25 @@
         </div>
 
         <div class="app-header-actions d-flex align-items-center gap-1 gap-lg-3">
-          {# Context scan: dispatches a request a page can answer; with no
-             handler it opens the scanning log, so it is never a dead control. #}
+          {#
+            Context scan: dispatches a request a page can answer; with no
+            handler it opens the scanning log, so it is never a dead control.
+
+            ⚠️ THE ICON IS A TERMINAL, NOT A BOLT, because what the button
+            actually does on most pages is open the LOG — only a page that
+            listens for `popularr:scan-request` turns it into a scan trigger.
+            A bolt advertised "scan" for a control that mostly opens a log.
+
+            The dot is a REAL state indicator, not decoration: `is-active` is
+            written from the same scan-activity feed the status bar reads
+            (main.js's SSE stream, or dashboard.js's own poll there), so it
+            says "something is running" rather than "this button exists".
+            Hidden until a scan is running — an always-on dot would say nothing.
+          #}
           <button type="button" class="app-header-btn d-lg-none" id="appHeaderScan"
                   onclick="requestContextScan()" aria-label="Scanning" title="Scanning">
-            <i class="bi bi-lightning-charge" aria-hidden="true"></i>
+            <i class="bi bi-terminal" aria-hidden="true"></i>
+            <span class="app-header-dot" id="appHeaderScanDot" hidden aria-hidden="true"></span>
           </button>
           <button type="button" class="app-header-btn d-lg-none" id="appHeaderMenu"
                   data-bs-toggle="offcanvas" data-bs-target="#systemSheet"

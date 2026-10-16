@@ -180,6 +180,14 @@
       ? barApi.setScanBarActive
       : () => {};
 
+    // ⚠️ The HEADER DOT is a second surface for the same fact, so it is written
+    // here too. main.js's own writer bails out on the dashboard (it checks for
+    // `#dashboardFlags`) because THIS poll owns the bar, so without this call
+    // the dot would simply never light on the page the user starts from.
+    if (typeof barApi.setHeaderScanDot === 'function') {
+      barApi.setHeaderScanDot(!!(active && active.length));
+    }
+
     if (!active || !active.length) {
       line.textContent = 'Idle — no scan running';
       icon.className = 'scan-status-idle';

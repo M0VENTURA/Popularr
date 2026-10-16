@@ -50,10 +50,30 @@ data-action attributes, consistent with components/_musicbrainz_search_component
       `aria-hidden` would be a violation (it hides a real control from assistive
       tech).
     #}
-    <div class="input-group mb-2 d-lg-none">
-      <span class="input-group-text" id="unifiedSearchIcon"><i class="bi bi-search"></i></span>
-      <input type="search" id="unifiedSearchInput" class="form-control" placeholder="Search library or MusicBrainz…" autocomplete="off"
-             inputmode="search" enterkeyhint="search" autocapitalize="off" autocorrect="off" spellcheck="false">
+    {#
+      ⭐ THE FIELD AND THE FILTER ICON SHARE ONE ROW.
+
+      They were two rows: the field, then the scope chips with the ▽ funnel
+      pushed to their right. On a phone that spent a whole extra row's height on
+      a control strip before any result appeared, and the funnel read as
+      belonging to the CHIPS rather than to the query — which is what it filters.
+
+      ⚠️ The ▽ keeps NO `d-lg-none`. At lg+ the navbar field is the entry point
+      and this whole row would vanish with it, taking the only release-type
+      filter with it — so the button stays visible at every width and `ms-auto`
+      parks it at the panel's right edge on its own line there. A hidden control
+      is a lost feature; a lone icon on a line is a layout, and this is the
+      layout that keeps it reachable.
+    #}
+    <div class="d-flex align-items-center gap-2 mb-2">
+      <div class="input-group d-lg-none flex-grow-1">
+        <span class="input-group-text" id="unifiedSearchIcon"><i class="bi bi-search"></i></span>
+        <input type="search" id="unifiedSearchInput" class="form-control" placeholder="Search library or MusicBrainz…" autocomplete="off"
+               inputmode="search" enterkeyhint="search" autocapitalize="off" autocorrect="off" spellcheck="false">
+      </div>
+      <button type="button" class="btn btn-sm btn-dark border-secondary us-filter-btn flex-shrink-0 ms-auto" id="unifiedFilterBtn" title="Release type filter" aria-label="Release type filter">
+        <i class="bi bi-funnel-fill"></i><span class="badge bg-info d-none ms-1" id="unifiedFilterBadge"></span>
+      </button>
     </div>
 
     <!-- Advanced filters — collapsible -->
@@ -102,8 +122,9 @@ data-action attributes, consistent with components/_musicbrainz_search_component
          any surface token in this theme, so the strip read as a pale band
          rather than a recessed track behind the active pill.
 
-         The wrapper is kept (it also holds the filter button) but now only
-         lays out; the segment styling belongs on the list itself. -->
+         ⚠️ The wrapper no longer holds the filter button — that moved up to the
+         search row, where it filters the query. The chips now own the full
+         width, which is what makes them tappable at a thumb's reach. -->
     <div class="d-flex align-items-center gap-2 mb-3">
       <ul class="nav nav-pills nav-segmented gap-1 us-scope-chips flex-grow-1" id="unifiedScopeTabs" role="tablist">
         <li class="nav-item flex-grow-1 text-center" role="presentation">
@@ -122,9 +143,6 @@ data-action attributes, consistent with components/_musicbrainz_search_component
           </button>
         </li>
       </ul>
-      <button type="button" class="btn btn-sm btn-dark border-secondary us-filter-btn flex-shrink-0" id="unifiedFilterBtn" title="Release type filter" aria-label="Release type filter">
-        <i class="bi bi-funnel-fill"></i><span class="badge bg-info d-none ms-1" id="unifiedFilterBadge"></span>
-      </button>
     </div>
 
     <!-- Hidden type select -->

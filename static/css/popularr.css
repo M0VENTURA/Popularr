@@ -572,7 +572,26 @@ form .form-check-input[name="force"] + .form-check-label {
 @media (max-width: 576px) {
     main.container-fluid { padding-left: 0.75rem; padding-right: 0.75rem; padding-bottom: 0.75rem; }
     .card { margin-bottom: 0.75rem; }
+    /* App-wide touch target for a STANDARD button. */
     .btn { min-height: 44px; }
+    /*
+      ⚠️ BUT NOT FOR `btn-sm`.
+
+      `btn-sm` is Bootstrap's deliberately-compact variant, and it is used
+      exactly where a row must stay short: a card header's "Manage →", the
+      dashboard's row action, the log viewer's ⋮ beside a 28px `<select>`, a
+      log line's action. Giving all of them a 44px minimum made each one a tall
+      slab in a short row — the reported "stretched" buttons, four separate
+      places, one rule.
+
+      This is a SCOPE fix, not a reversal: a normal `.btn` keeps its 44px, and
+      any dense context that genuinely wants the full target still sets it
+      explicitly on a more specific selector —
+      e.g. artist.css's `.release-actions-overflow > .btn { min-width: 44px;
+      min-height: 44px; }`, which outranks this rule (0,2,0 vs 0,1,0) and is
+      what the ⋮ release overflow menu relies on.
+    */
+    .btn-sm { min-height: 0; }
 }
 
 @media (max-width: 991.98px) {

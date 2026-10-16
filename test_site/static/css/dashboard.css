@@ -258,6 +258,46 @@
 
 #scannerControlsCard .card-body { padding-top: 0.5rem; padding-bottom: 0.5rem; }
 
+/* ── The scanner's single row ──────────────────────────────────────────────
+   52px is the target the mock-up names, and it is the right number rather
+   than a round one: it clears the app's 44px touch minimum for the Start
+   button inside it (44 + 2x4px padding), so the row is the SHORTEST it can be
+   while still holding a compliant button.
+
+   `padding-bottom: 0` when idle matters: this element was a `card-header`
+   plus a `card-body` before, and the body's `padding-top/bottom` would leave
+   a stray strip under an idle row. `scanner-progress` re-adds the spacing
+   when a scan actually reveals the panel below. */
+.scanner-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 52px;
+    padding: 0.25rem 0.75rem;
+    /* Only the bottom corners need to follow the card when the progress panel
+       is open — with it closed the row IS the card. */
+    border-radius: calc(var(--radius-card, 8px) - 1px);
+}
+
+.scanner-bar-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-weight: 600;
+    min-width: 0;
+    /* The state text is the thing that must not be pushed out when a long scan
+       name arrives; it ellipsises instead of forcing the row taller. */
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.scanner-progress {
+    padding: 0 0.75rem 0.75rem;
+    border-top: 1px solid var(--border-color);
+    padding-top: 0.75rem;
+}
+
 /* One row, wrapping only if a label genuinely cannot fit. `gap` is small
    because these are dense operator controls, not marketing buttons. */
 .scan-toolbar { row-gap: 0.4rem; }
@@ -380,13 +420,54 @@
 }
 
 /* The queue action is pinned to the bottom so every card's button lines up
-   whether its title took one line or two. */
+   whether its title took one line or two.
+
+   ⚠️ NOW ONLY A FALLBACK. The carousel draws its queue action as
+   `.ur-card-quick` floating on the artwork, so nothing renders this row
+   today — it is kept because it is the positioning context the old markup
+   used and removing it would silently break any card that still emits one.
+   If no card emits one after the next release, delete both rules. */
 .ur-card-actions {
     margin-top: auto;
     display: flex;
     gap: 0.3rem;
 
     .btn { flex: 1 1 auto; font-size: 0.75rem; padding: 0.25rem 0.4rem; }
+}
+
+/* ── Floating quick-queue button ───────────────────────────────────────────
+   Bottom-right ON the artwork. `position: absolute` against `.ur-card-art`
+   (which is already `position: relative` for the status flag).
+
+   ⚠️ min-height is deliberately NOT the global 44px touch minimum here. The
+   button sits on a ~110px cover inside a 62%-wide card; a 44px circle covers
+   most of it and reads as the card's subject rather than its action. 34px is
+   the compromise the mock-up draws, and it is why `popularr.css` exempts
+   `btn-sm` from the app-wide minimum — this button is a `btn-sm`, so that
+   exemption is what makes this size possible at all. */
+.ur-card-quick {
+    position: absolute;
+    right: 0.35rem;
+    bottom: 0.35rem;
+    width: 34px;
+    height: 34px;
+    min-height: 0;              /* beat the mobile `btn` minimum explicitly */
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    font-size: 1rem;
+    /* A ring in the surface colour, so the circle has an edge whatever the
+       artwork behind it happens to be. */
+    box-shadow: 0 0 0 2px var(--secondary-bg), 0 2px 6px rgba(0, 0, 0, 0.45);
+}
+
+.ur-card-quick:hover,
+.ur-card-quick:focus-visible {
+    /* Same colour, brighter ring — the artwork can be any colour, so a hue
+       change would not reliably read as "active". */
+    box-shadow: 0 0 0 2px var(--spotify-green, #1ed760), 0 2px 8px rgba(0, 0, 0, 0.55);
 }
 
 @media (min-width: 992px) {

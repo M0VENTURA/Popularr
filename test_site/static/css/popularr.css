@@ -184,6 +184,48 @@
     &[hidden] { display: none !important; }
 }
 
+/*
+  Scan-activity dot on the header's terminal button.
+
+  ⚠️ `position: relative` has to be ON THE BUTTON for this to be placed against
+  the icon's corner. The button is `inline-flex` with no positioning context of
+  its own, so without this the dot would anchor to the nearest positioned
+  ancestor — which is the app header, putting it in the wrong corner entirely.
+*/
+#appHeaderScan {
+    position: relative;
+}
+
+.app-header-dot {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--spotify-green, #1ed760);
+    /* A ring in the header's own colour, so the dot reads as sitting ON the
+       icon rather than as a speck floating next to it. */
+    box-shadow: 0 0 0 2px var(--secondary-bg, #121212);
+    pointer-events: none;      /* the whole button stays the target */
+}
+
+/* `[hidden]` must beat the sizing above, or the dot shows while idle. */
+.app-header-dot[hidden] { display: none; }
+
+/* A slow pulse, so a running scan is noticeable in peripheral vision without
+   the motion of a spinner. `prefers-reduced-motion` opts out. */
+.app-header-dot.is-active { animation: app-header-dot-pulse 2s ease-in-out infinite; }
+
+@keyframes app-header-dot-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .app-header-dot.is-active { animation: none; }
+}
+
 /* ── System sheet (mobile) ───────────────────────────────────────────────────
    Bottom-anchored so it comes from the same edge as the bar that opened it.
    ------------------------------------------------------------------------- */
@@ -958,10 +1000,26 @@ form .form-check-input[name="force"] + .form-check-label {
 @media (max-width: 576px) {
     main.container-fluid { padding-bottom: 0.75rem; }
     .card { margin-bottom: 0.75rem; }
-    /* App-wide touch target. artist.css's mobile btn-group sizing and the
-       artist page's action-button row both assume this is set globally —
-       do not re-fork it into a page stylesheet. */
+    /* App-wide touch target for a STANDARD button. */
     .btn { min-height: 44px; }
+    /*
+      ⚠️ BUT NOT FOR `btn-sm`.
+
+      `btn-sm` is Bootstrap's deliberately-compact variant, and it is used
+      exactly where a row must stay short: the dashboard's "Manage →" and row
+      action, the upcoming-release carousel's controls, the log viewer's ⋮
+      beside a 28px `<select>`. Giving all of them a 44px minimum made each one
+      a tall slab in a short row — the reported "stretched" buttons, four
+      separate places, one rule.
+
+      This is a SCOPE fix, not a reversal: a normal `.btn` keeps its 44px, and
+      any dense context that genuinely wants the full target still sets it
+      explicitly on a more specific selector — e.g. artist.css's
+      `.release-actions-overflow > .btn { min-width: 44px; min-height: 44px; }`,
+      which outranks this rule (0,2,0 vs 0,1,0) and is what the ⋮ release
+      overflow menu relies on (tests/test_mobile_layout_density.py pins it).
+    */
+    .btn-sm { min-height: 0; }
 }
 
 @media (max-width: 991.98px) {

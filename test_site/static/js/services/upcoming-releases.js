@@ -571,25 +571,42 @@
         ? '<span class="badge bg-info text-dark ur-card-flag">In Queue</span>'
         : `<span class="badge ${statusClass} ur-card-flag">${statusText}</span>`;
 
-      // `in_queue` renders as a DISABLED tick rather than a second Queue
-      // button, so a re-render cannot offer an action that has already
-      // happened (the reported "Queued" feedback, in its settled state).
-      const action = release.in_queue
-        ? '<button type="button" class="btn btn-success" disabled>' +
-          '<i class="bi bi-check-lg"></i> Queued</button>'
-        : '<button type="button" class="btn btn-outline-success ur-queue-btn" ' +
-          `data-release-index="${index}"><i class="bi bi-plus-lg"></i> Queue</button>`;
+      /*
+        ⭐ THE QUEUE ACTION FLOATS ON THE ARTWORK (bottom-right), instead of
+        taking a full-width row under the meta line.
+
+        The card's job is to show a cover and a name; a button strip beneath it
+        pushed the artwork up and made every card taller for one action. On the
+        art it costs no layout at all and lands under the thumb that is already
+        on the picture.
+
+        ⚠️ `ur-queue-btn` and `data-release-index` are KEPT on the floating
+        button. `attachRowHandlers` binds `.ur-queue-btn` and resolves the
+        release through `renderedReleases[data-release-index]`, so a new class
+        or a serialised argument would have disconnected the handler — the same
+        class of failure that once broke this button with a syntax error (see
+        the module header).
+
+        A queued release gets NO floating button: the "In Queue" flag above it
+        already states the outcome, and a disabled + beside a flag saying the
+        same thing is the redundant second signal the rest of this sheet drops.
+      */
+      const quickAction = release.in_queue
+        ? ''
+        : '<button type="button" class="btn btn-sm btn-success ur-card-quick ur-queue-btn" ' +
+          `data-release-index="${index}" title="Queue this release for download" ` +
+          `aria-label="Queue ${esc(release.album_name || 'release')} for download">` +
+          '<i class="bi bi-plus-lg" aria-hidden="true"></i></button>';
 
       return (
         '<article class="ur-card" role="listitem">' +
-          `<div class="ur-card-art">${art}${flag}</div>` +
+          `<div class="ur-card-art">${art}${flag}${quickAction}</div>` +
           `<div class="ur-card-title" title="${esc(release.album_name || '')}">${esc(release.album_name || '')}${typeBadge(release)}</div>` +
           `<div class="ur-card-artist" title="${esc(release.artist_name || '')}">${esc(release.artist_name || '')}</div>` +
           '<div class="ur-card-meta">' +
             `<span class="ur-card-date">${esc(release.release_date || 'TBA')}</span>` +
             linkedBadge(release) +
           '</div>' +
-          `<div class="ur-card-actions">${action}</div>` +
         '</article>'
       );
     }).join('');

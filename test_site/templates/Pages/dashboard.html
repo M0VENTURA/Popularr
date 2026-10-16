@@ -95,61 +95,81 @@
               read from those controls, so their removal is the point.
             #}
             <div class="card shadow-sm" id="scannerControlsCard">
-                <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <h6 class="mb-0 fw-semibold">
-                        <i class="bi bi-lightning-charge-fill text-success me-1" aria-hidden="true"></i>
+                {#
+                  ONE ROW, not a header plus a body.
+
+                  The card used to be a header ("Scanner · Idle") with a body
+                  holding a line of reassurance and a full-width button — about
+                  150px of vertical space on a phone to say "nothing is running"
+                  and offer one action. It is now a single ~52px row: the state
+                  on the left, the action on the right, which is all the idle
+                  case ever needed.
+
+                  ⚠️ THE PROGRESS AREA STAYS OUTSIDE THE ROW. When a scan runs,
+                  `scannerActiveState` is revealed with the progress panel and
+                  the two controls that apply to a running scan; putting that
+                  inside the flex row would lay a multi-line panel out
+                  horizontally beside the state label.
+
+                  Every id here is written by dashboard.js's updateActiveScans()
+                  (`scannerState`, `scannerStatusBadge`, `scannerIdleState`,
+                  `scannerActiveState`, `activeScansPanel`, `activeScansBody`)
+                  and must survive a layout change — a renamed id is a control
+                  that silently stops updating.
+                #}
+                <div class="scanner-bar">
+                    <span class="scanner-bar-state">
+                        <i class="bi bi-lightning-charge-fill text-success" aria-hidden="true"></i>
                         Scanner <span class="text-muted fw-normal">·</span>
                         <span id="scannerState" class="fw-normal" role="status" aria-live="polite">Idle</span>
-                    </h6>
+                    </span>
+
                     {# Kept for `updateActiveScans`, which writes it. Hidden: the
-                       state is already spelled out in the heading, and a badge
+                       state is already spelled out in the row, and a badge
                        repeating it was the redundant second signal the mock-up
                        drops. #}
-                    <span id="scannerStatusBadge" class="badge bg-secondary" style="font-size:0.65rem;" hidden>
+                    <span id="scannerStatusBadge" class="badge bg-secondary ms-2" style="font-size:0.65rem;" hidden>
                         <i class="bi bi-circle-fill me-1 small" aria-hidden="true"></i> Idle
                     </span>
-                </div>
 
-                <div class="card-body py-2">
-                    {# ── IDLE ───────────────────────────────────────────────── #}
-                    <div id="scannerIdleState">
-                        <p class="text-muted small mb-2">Keep your library up to date.</p>
-                        <button type="button" class="btn btn-success w-100 fw-semibold"
+                    {# ── IDLE action ───────────────────────────────────────── #}
+                    <div id="scannerIdleState" class="ms-auto d-flex align-items-center">
+                        <button type="button" class="btn btn-success btn-sm fw-semibold"
                                 id="scannerStartBtn"
                                 onclick="ScanModal.open({ scope: 'library' })">
-                            <i class="bi bi-lightning-charge-fill me-1" aria-hidden="true"></i> Start scan…
+                            <i class="bi bi-lightning-charge-fill me-1" aria-hidden="true"></i> Start Scan
                         </button>
                     </div>
+                </div>
 
-                    {# ── SCANNING ───────────────────────────────────────────── #}
-                    <div id="scannerActiveState" class="d-none">
-                        {# Filled by updateActiveScans() from /api/scan-progress:
-                           stage, count, bar, elapsed/estimate. #}
-                        <div id="activeScansPanel">
-                            <div class="small fw-semibold text-muted text-uppercase mb-2">
-                                <i class="bi bi-activity" aria-hidden="true"></i> Active Progress
-                            </div>
-                            <div id="activeScansBody"></div>
+                {# ── SCANNING ─────────────────────────────────────────────── #}
+                <div id="scannerActiveState" class="scanner-progress d-none">
+                    {# Filled by updateActiveScans() from /api/scan-progress:
+                       stage, count, bar, elapsed/estimate. #}
+                    <div id="activeScansPanel">
+                        <div class="small fw-semibold text-muted text-uppercase mb-2">
+                            <i class="bi bi-activity" aria-hidden="true"></i> Active Progress
                         </div>
-                        <div class="d-flex gap-2 mt-2">
-                            {#
-                              "View details" scrolls to the progress it names
-                              rather than opening a second surface. A separate
-                              detail modal would duplicate what the card already
-                              shows on a phone; the button earns its place by
-                              scrolling the card back into view when the user has
-                              scrolled away from it.
-                            #}
-                            <button type="button" class="btn btn-sm btn-outline-secondary flex-fill"
-                                    id="scannerDetailsBtn"
-                                    onclick="document.getElementById('scannerControlsCard').scrollIntoView({ block: 'nearest', behavior: 'smooth' })">
-                                <i class="bi bi-list-ul me-1" aria-hidden="true"></i> View details
-                            </button>
-                            <button type="button" class="btn btn-sm btn-outline-danger flex-fill"
-                                    onclick="stopAllScans()" aria-label="Stop all scans">
-                                <i class="bi bi-stop-fill me-1" aria-hidden="true"></i> Stop
-                            </button>
-                        </div>
+                        <div id="activeScansBody"></div>
+                    </div>
+                    <div class="d-flex gap-2 mt-2">
+                        {#
+                          "View details" scrolls to the progress it names
+                          rather than opening a second surface. A separate
+                          detail modal would duplicate what the card already
+                          shows on a phone; the button earns its place by
+                          scrolling the card back into view when the user has
+                          scrolled away from it.
+                        #}
+                        <button type="button" class="btn btn-sm btn-outline-secondary flex-fill"
+                                id="scannerDetailsBtn"
+                                onclick="document.getElementById('scannerControlsCard').scrollIntoView({ block: 'nearest', behavior: 'smooth' })">
+                            <i class="bi bi-list-ul me-1" aria-hidden="true"></i> View details
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-danger flex-fill"
+                                onclick="stopAllScans()" aria-label="Stop all scans">
+                            <i class="bi bi-stop-fill me-1" aria-hidden="true"></i> Stop
+                        </button>
                     </div>
                 </div>
             </div>

@@ -282,6 +282,34 @@
     return `${Math.round(value)}%`;
   }
 
+  /**
+   * The header terminal button's activity dot.
+   *
+   * ⚠️ Written from BOTH scan-state writers, because neither covers every page:
+   * this file's SSE stream returns early on the dashboard (`#dashboardFlags`),
+   * and dashboard.js polls for itself there. Each writer calls this, so the dot
+   * means the same thing on every page instead of depending on which poll
+   * happened to run last.
+   *
+   * Exposed through `global.popularr` for the same reason `setScanBarActive` is:
+   * dashboard.js has its own copy of the status-bar logic and must not fork a
+   * second notion of "a scan is running".
+   */
+  function setHeaderScanDot(isActive) {
+    const dot = document.getElementById('appHeaderScanDot');
+    if (!dot) return;
+    dot.hidden = !isActive;
+    dot.classList.toggle('is-active', !!isActive);
+
+    // The button's accessible name carries the state too: the dot is decorative
+    // (`aria-hidden`), so a screen reader would otherwise hear "Scanning" for
+    // both a running and an idle scan.
+    const button = document.getElementById('appHeaderScan');
+    if (button) {
+      button.title = isActive ? 'Scanning — open log' : 'Scanning';
+    }
+  }
+
   /** The dashboard's own polling (dashboard.js) owns the bar there. */
   function updateGlobalScanBar(data) {
     if (document.getElementById('dashboardFlags')) return;
@@ -293,6 +321,7 @@
 
     const active = (data && (data.active_scans || [])) || [];
     const scan = active.find((s) => s && s.is_running);
+    setHeaderScanDot(!!scan);
     // NOTE: this used to call setLogTabDot('scanner', …), which lit a dot on
     // the modal's Scanner tab. The tabs are folded into the file picker now,
     // so there is nothing left to light — and the scan state the dot
@@ -876,6 +905,7 @@
     markFormDirty,
     updateGlobalScanBar,
     setScanBarActive,
+    setHeaderScanDot,
     navigateBack,
     requestContextScan,
   };
