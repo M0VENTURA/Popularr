@@ -474,3 +474,36 @@
   .release-jump-bar { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 0.25rem; }
   .release-section-controls { width: 100%; }
 }
+
+/* ── Release jump bar: a fade so a clipped chip is discoverable ────────────
+   On a phone the bar is a horizontal scroller (`overflow-x: auto`), and the
+   last chip sits flush against the card edge. Nothing told the reader there
+   was more — the reported "pills get slightly clipped on the right edge".
+
+   ⚠️ `mask-image` rather than an overlay gradient pseudo-element: the bar is
+   also the horizontal scroll container, so an absolutely-positioned child
+   would scroll WITH the chips and only ever cover the first one. A mask is
+   applied to the element's own box, so it stays pinned to the right edge
+   however far the row is scrolled.
+
+   `--fade` is the width of the fade. It is deliberately small: the affordance
+   is "there is more this way", not a veil over the last chip.
+   ------------------------------------------------------------------------- */
+@media (max-width: 767.98px) {
+  .release-jump-bar {
+    --fade: 1.5rem;
+    mask-image: linear-gradient(to right, #000 calc(100% - var(--fade)), transparent);
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - var(--fade)), transparent);
+  }
+
+  /*
+    Once the reader has reached the end, the clipped chip is the one under the
+    thumb — so the fade is removed and the last chip is fully readable. Purely
+    progressive: a browser without `mask-image` simply shows no fade, which is
+    what it did before.
+  */
+  .release-jump-bar.at-end {
+    mask-image: none;
+    -webkit-mask-image: none;
+  }
+}

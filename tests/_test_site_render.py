@@ -93,6 +93,70 @@ def render_base(path: str = "/") -> str:
     return build_env(path).get_template("base.html").render()
 
 
+class _CapturingApp:
+    """A Flask-shaped shim that records what ``register_filters`` installs.
+
+    Only the three hooks that module actually uses are implemented — add one
+    when it starts using another, so the failure is a missing attribute here
+    rather than a silently unregistered filter.
+    """
+
+    def __init__(self) -> None:
+        self.filters: dict = {}
+        self.tests: dict = {}
+        self.processors: list = []
+
+    def template_filter(self, name):
+        def decorator(fn):
+            self.filters[name] = fn
+            return fn
+
+        return decorator
+
+    def template_test(self, name):
+        def decorator(fn):
+            self.tests[name] = fn
+            return fn
+
+        return decorator
+
+    def context_processor(self, fn):
+        self.processors.append(fn)
+        return fn
+
+
+def install_real_filters(env: Environment, *names: str) -> Environment:
+    """Install the application's REAL filters called *names* into *env*.
+
+    ``build_env`` registers only the handful of filters the app shell needs, but
+    a PAGE can use more — ``album_detail.html`` calls ``|escapejs`` for the
+    arguments it embeds in ``onclick`` handlers. An unregistered filter is a
+    template *compile* error, so the whole page raised
+    ``No filter named 'escapejs'`` and rendered nothing at all, which is what a
+    test trying to render a real page runs into first.
+
+    The implementations come from ``register_filters`` rather than being
+    redefined here, for the reason in this module's docstring: a hand-written
+    stand-in quietly stops agreeing with the real filter, and then the test
+    proves things about the stand-in.
+    """
+    from helpers.template_filters import register_filters
+
+    app = _CapturingApp()
+    register_filters(app)
+
+    unknown = [name for name in names if name not in app.filters]
+    if unknown:
+        raise AssertionError(
+            f"register_filters no longer provides {unknown}; it has "
+            f"{sorted(app.filters)}"
+        )
+
+    for name in names:
+        env.filters[name] = app.filters[name]
+    return env
+
+
 def render_child(child_source: str, path: str = "/") -> str:
     """Render a child template that extends the rebuilt ``base.html``."""
     return build_env(path).from_string(child_source).render()

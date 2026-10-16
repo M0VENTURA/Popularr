@@ -692,6 +692,45 @@
    * collapsing a section whose body is ALREADY shut fires no event at all —
    * leaving the header stale.
    */
+  /**
+   * Mark the category jump bar when it is scrolled to its end.
+   *
+   * The bar is a horizontal scroller on a phone and its last chip sits flush
+   * against the card edge, so `artist.css` fades the right edge to say "there is
+   * more this way". That fade must come OFF once the reader HAS arrived: the
+   * clipped chip is then the one under their thumb, and fading it would hide the
+   * thing they scrolled to reach.
+   *
+   * ⚠️ The class is set here rather than by CSS alone because neither
+   * `:has()`-free CSS nor a media query can know the scroll POSITION. Without
+   * this the `.at-end` rule would be dead CSS — and this stylesheet's own guard
+   * (`test_artist_page_contract.py`) fails on a rule no markup or script reaches.
+   *
+   * Degrades to no-op: a browser without `mask-image` never applied the fade, so
+   * the class is harmless there.
+   */
+  function wireJumpBarFade() {
+    var bars = doc.querySelectorAll('.release-jump-bar');
+    Array.prototype.forEach.call(bars, function (bar) {
+      // A couple of pixels of slack: sub-pixel scroll positions mean the exact
+      // equality never fires on a scaled display, and the fade would stay on
+      // after the reader had clearly reached the end.
+      var SLACK = 4;
+
+      var update = function () {
+        var scrollable = bar.scrollWidth > bar.clientWidth + SLACK;
+        var atEnd = bar.scrollLeft + bar.clientWidth >= bar.scrollWidth - SLACK;
+        bar.classList.toggle('at-end', !scrollable || atEnd);
+      };
+
+      bar.addEventListener('scroll', update, { passive: true });
+      // The bar's width changes with the viewport and with the section list, so
+      // a one-shot measurement on load would be stale after a rotation.
+      if (global.addEventListener) global.addEventListener('resize', update);
+      update();
+    });
+  }
+
   function setSectionExpanded(section, expand) {
     var body = section.querySelector('.release-section-body');
     var toggle = section.querySelector('.release-section-toggle');
@@ -750,6 +789,7 @@
     wireFilters();
     wireRowActions();
     wireSectionControls();
+    wireJumpBarFade();
     applyAllSectionFilters();
     fetchMissingTrackCounts();
     fetchQueuedImports();

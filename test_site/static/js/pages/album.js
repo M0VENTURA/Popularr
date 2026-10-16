@@ -117,6 +117,33 @@
   }
 
   /**
+   * Open the shared scan sheet for THIS album.
+   *
+   * The hero's Scan button and the release rows' "Scan release" action are the
+   * same sheet the dashboard uses with `scope: 'library'` — one surface for one
+   * question. In the album scope the Run dispatches a FORM to
+   * `/scan/album-custom`, so every type runs against this album.
+   *
+   * ⚠️ Feature-detected rather than called directly: the sheet is a shared
+   * component and the legacy `pages/artist_detail.html` renders release rows
+   * without it, so a bare call would throw and take this file's wiring with it.
+   */
+  function openAlbumScanSheet() {
+    if (!global.ScanModal || typeof global.ScanModal.open !== 'function') {
+      notifyError('The scan sheet is not available on this page.');
+      return;
+    }
+    // `_pageData` is the page's own JSON context block, so the values are read
+    // where they already are rather than published again as globals.
+    const pd = global._pageData || {};
+    global.ScanModal.open({
+      scope: 'album',
+      artist: pd.artistName || '',
+      album: pd.albumName || '',
+    });
+  }
+
+  /**
    * Play one track from a row button.
    * Player.playTrack takes a single object — see the note in player.js about
    * the old positional signature.
@@ -3428,6 +3455,7 @@
 
   // Legacy globals for the inline onclick="" handlers in album_detail.html.
   global.playAlbum = playAlbum;
+  global.openAlbumScanSheet = openAlbumScanSheet;
   global.playTrackFromAlbum = playTrackFromAlbum;
   global.openEditTrackFromAlbum = openEditTrackFromAlbum;
   global.deleteTrack = deleteTrack;

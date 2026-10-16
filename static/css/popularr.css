@@ -74,6 +74,57 @@
     :root { --navbar-height: 104px; }
 }
 
+/* ── Album hero ──────────────────────────────────────────────────────────────
+   `.album-hero-title`, `.album-art-change-btn` and `.hero-metrics-box` had NO
+   rules anywhere in the project before this: the title relied on Bootstrap's
+   `text-truncate`, which is `white-space: nowrap` + ellipsis, so a long album
+   name was cut on the FIRST line. These are additions, not moves.
+   ------------------------------------------------------------------------- */
+
+/*
+  Two lines, then ellipsis.
+
+  ⚠️ `text-truncate` is still on the element in the markup, and it WINS unless
+  it is overridden: it sets `overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap` at Bootstrap's specificity. `white-space: normal` is
+  therefore the line that actually makes this work — without it the clamp has
+  nothing to wrap and every line stays a single truncated one.
+*/
+.album-hero-title {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    /* Slightly tighter than the default so two lines fit where one did plus a
+       little, rather than pushing the badges into the metrics box. */
+    line-height: 1.25;
+}
+
+/*
+  The art's edit overlay: a small badge in the corner, not a slab across the
+  middle of the picture.
+
+  It was `bottom-0 start-50 translate-middle-x` — CENTRED on the bottom edge of
+  an 80px thumbnail, which covered the middle of the artwork. The album page has
+  a dedicated "Edit Album" tab directly below the hero, so this is a shortcut,
+  not the primary route; it should not obscure the thing it sits on.
+*/
+@media (max-width: 767.98px) {
+    .album-art-change-btn {
+        left: auto !important;          /* undo `start-50` */
+        right: 0.2rem;
+        transform: none !important;     /* undo `translate-middle-x` */
+        padding: 0.1rem 0.25rem;
+        font-size: 0.7rem;
+        line-height: 1;
+    }
+    /* The icon-only glyph is what fits at 80px; the label, if a tree adds one,
+       would wrap the badge across the art. */
+    .album-art-change-btn .btn-label { display: none; }
+}
+
 /* ── App Shell & Base Rules ──────────────────────────────────────────────── */
 * { color-scheme: dark; }
 

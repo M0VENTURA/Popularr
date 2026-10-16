@@ -40,6 +40,9 @@ ARTIST_PAGE = TS / "templates" / "Pages" / "artist_detail_v2.html"
 RELEASE_COMPONENT = TS / "templates" / "components" / "_release_section.html"
 
 ARTIST_CSS = TS / "static" / "css" / "artist.css"
+#: Both trees are SERVED — the live one is the default — so a fade applied to
+#: only one of them is missing for whoever is on the other.
+ARTIST_CSS_COPIES = [ARTIST_CSS, LIVE / "static" / "css" / "artist.css"]
 EXTRAS_JS = TS / "static" / "js" / "pages" / "artist-detail-extras.js"
 #: The SHARED release module. It is served by BOTH trees and pinned
 #: byte-identical by test_shared_module_copies_do_not_drift, so this change
@@ -89,57 +92,102 @@ def _phone_block(css: str, marker: str) -> str:
 
 
 # ===========================================================================
-# 1. Album: the scan controls collapse behind one button
+# ===========================================================================
+# 1. Album: the scan controls are the SHARED SHEET, not an inline toolbar
 # ===========================================================================
 
 
-class TestTheScanControlsCollapseOnPhones:
-    def test_the_toggle_button_exists(self):
+class TestTheAlbumScanControls:
+    """⚠️ THIS REPLACES the "scan controls collapse behind one button" design.
+
+    The album page used to render a `scan-toolbar` form (scan-type <select> +
+    Run + Force + an Actions dropdown), wrapped on phones in a collapsible
+    "Scan Options" panel. The artist page rendered the same form RAW — the
+    inconsistency between the two pages, plus the wrapping and the squeezed
+    helper text, is what the review flagged.
+
+    Both pages now open the SHARED SCAN SHEET instead: seven types with
+    descriptions, Force and Restart with explanations, the mode key, and a
+    header that costs one row. The collapsible wrapper is therefore gone, along
+    with the button and handler it needed.
+
+    ⚠️ `popularr.css` KEEPS the `.scan-toolbar` / `.scan-toolbar-controls`
+    rules for the same reason `archive()` keeps a `deprecated=` note: the
+    LIVE tree's `album_detail.html` is the only file that still needs them
+    while the two trees coexist, and deleting a rule a served template uses
+    would collapse that page's layout. What must be true for the REBUILT page
+    is asserted below.
+    """
+
+    def test_the_inline_toolbar_is_gone(self):
         html = _read(ALBUM_PAGE)
 
-        assert 'class="btn btn-sm btn-outline-secondary w-100 d-md-none scan-toolbar-toggle"' in html, (
-            "the phone-only Scan Options button is missing"
+        assert "albumScanForm" not in html, (
+            "the inline scan form is back — it is a second scan UI for a "
+            "question the shared sheet answers"
         )
-        assert 'onclick="toggleScanToolbar(this)"' in html
-        assert 'aria-expanded="false"' in html, "the toggle must start closed"
+        assert "albumForceScan" not in html, "the old Force checkbox is back"
+        assert "scan-toolbar-toggle" not in html, (
+            "the collapsible wrapper is back; the sheet replaced it"
+        )
 
-    def test_the_controls_are_wrapped_in_the_collapsible_div(self):
+    def test_the_hero_offers_play_scan_and_the_overflow(self):
         html = _read(ALBUM_PAGE)
 
-        wrapper_start = html.index('class="scan-toolbar-controls')
-        form_end = html.index("</form>", wrapper_start)
-        wrapper = html[wrapper_start:form_end]
+        assert "playAlbum()" in html, "no Play control"
+        assert "openAlbumScanSheet()" in html, "no Scan control"
+        assert 'aria-label="More album actions"' in html, "no ⋮ menu"
 
-        assert wrapper.count("</div><!-- /.scan-toolbar-controls -->") == 1, (
-            "the wrapper must be closed explicitly — an unclosed div would "
-            "swallow the Play Album CTA into the form"
+    def test_the_actions_menu_kept_its_entries(self):
+        """CONTROL: trimming the toolbar must not trim the menu."""
+        html = _read(ALBUM_PAGE)
+        for label in ("Lookup on MusicBrainz", "Download Missing Tracks",
+                      "Rename Files", "Auto-Link MBIDs", "Change Album Art",
+                      "Download Popularity Report"):
+            assert label in html, f"{label} was lost from the ⋮ menu"
+
+    def test_the_page_includes_the_sheet_with_the_album_scope(self):
+        """⚠️ Asserts the INCLUDE, not the sheet's contents.
+
+        This test reads the page's SOURCE, and `id="scanSheet"` lives in the
+        included component — so asserting it here would fail however correct the
+        page is. (A test that RENDERS the page can assert the id; see
+        `tests/test_artist_layout_completion.py`.) What must be true in the
+        source is that the include is present and carries the right scope.
+        """
+        html = _read(ALBUM_PAGE)
+
+        assert "components/_scan_modal.html" in html, (
+            "the Scan button opens a sheet the page never included"
         )
-        # Everything that was in the toolbar must now be INSIDE the wrapper.
-        assert "_scan_selector.html" in wrapper, "the scan type select moved out"
-        assert 'title="Run Scan"' in wrapper, "the Run button moved out"
-        assert "dropdown-menu" in wrapper, "the Actions dropdown moved out"
-        assert "</form>" not in wrapper
+        assert "scan_scope_kind = 'album'" in html, (
+            "the sheet is included without the album scope, so Run would scan "
+            "the whole library"
+        )
+        assert "js/ui/scan-modal.js" in html, "the sheet's controller is not loaded"
 
-    def test_the_toggle_is_exported_as_a_global(self):
-        """Inline onclick handlers resolve by GLOBAL name."""
+    def test_the_module_opens_the_sheet_in_the_album_scope(self):
         js = _read(ALBUM_JS)
 
-        assert "function toggleScanToolbar(btn)" in js
-        assert "global.toggleScanToolbar = toggleScanToolbar" in js, (
-            "templates have no compiler — an unexported handler is a dead button"
+        assert "function openAlbumScanSheet(" in js
+        assert "global.openAlbumScanSheet = openAlbumScanSheet" in js, (
+            "inline onclick handlers resolve by GLOBAL name"
         )
+        assert "scope: 'album'" in js, (
+            "without the scope, Run would scan the whole library"
+        )
+        # The context comes from the page's own JSON block, not a new global.
+        assert "_pageData" in js
 
-    def test_the_toggle_reads_the_class_off_the_form(self):
-        """The button sits OUTSIDE the controls it reveals, so the class must
-        be found through closest('.scan-toolbar')."""
-        js = _read(ALBUM_JS)
+    def test_the_scoped_dispatch_belongs_to_the_sheet(self):
+        """CONTROL — the page must not post to the *-custom route itself.
 
-        body = js[js.index("function toggleScanToolbar"):]
-        body = body[: body.index("\n  }")]
+        That route reads `request.form`, and the sheet is what builds the form.
+        A second poster here would be the duplicate scan UI this removes.
+        """
+        html = _read(ALBUM_PAGE)
+        assert "scan/album-custom" not in html
 
-        assert "closest('.scan-toolbar')" in body
-        assert "classList.toggle('is-open')" in body
-        assert "aria-expanded" in body
 
 
 # ===========================================================================
@@ -510,4 +558,189 @@ class TestTheOverflowMenuNeedsNoForwarding:
             "the two copies of artist-releases.js have drifted; both trees serve "
             "this module, so a difference appears in only one mode"
         )
+
+
+# ===========================================================================
+# The clipped chip row says so
+# ===========================================================================
+
+def _rule(block: str, selector: str) -> str:
+    """The declarations of *selector*'s rule inside a media block."""
+    match = re.search(rf"^\s*{re.escape(selector)}\s*\{{", block, re.M)
+    assert match, f"no rule for `{selector}` in the block"
+    body = block[match.end():]
+    return body[: body.index("}")]
+
+
+def _declares(rule: str, prop: str) -> bool:
+    """Is CSS property *prop* declared in *rule*?
+
+    ⚠️ A plain `prop in rule` answers a different question. ``-webkit-mask-image``
+    CONTAINS ``mask-image``, so ``"mask-image" in rule`` is true when only the
+    prefixed property is present, and ``"-webkit-mask-image" in rule`` is true
+    when only the ``.at-end`` SIBLING declares ``-webkit-mask-image: none``. Both
+    directions let a deleted declaration escape, so this splits on the colon and
+    compares the property name exactly.
+    """
+    return any(
+        line.split(":", 1)[0].strip() == prop
+        for line in rule.splitlines()
+        if ":" in line and not line.strip().startswith(("/*", "*", "//"))
+    )
+
+
+def _value(rule: str, prop: str) -> str:
+    """The declared value of *prop* in *rule*."""
+    for line in rule.splitlines():
+        if ":" in line and line.split(":", 1)[0].strip() == prop:
+            return line.split(":", 1)[1].strip().rstrip(";").strip()
+    raise AssertionError(f"`{prop}` is not declared in:\n{rule}")
+
+
+class TestTheJumpBarAdmitsItClips:
+    """The chip row scrolls, so its last chip is cut at the card edge.
+
+    Reported as "pills get slightly clipped on the right edge" — with nothing to
+    say the row continued, a clipped chip reads as a broken one.
+
+    The affordance is a fade at the right edge that comes OFF once the reader has
+    scrolled to the end (there the clipped chip is the one under their thumb, and
+    fading it would hide what they scrolled to reach). Two halves must agree: the
+    stylesheet declares the fade, and the script — which is the only thing that
+    can know the scroll POSITION — marks the end. A fade with no script is dead
+    CSS; a script with no rule is a no-op.
+    """
+
+    def test_the_phone_stylesheet_fades_the_row(self):
+        for css_path in ARTIST_CSS_COPIES:
+            tree = css_path.parent.parent.name
+            rule = _rule(_phone_block(_read(css_path), "mask-image"), ".release-jump-bar")
+
+            assert _declares(rule, "mask-image"), (
+                f"{tree}: the row is not masked, so nothing fades"
+            )
+            assert "linear-gradient" in _value(rule, "mask-image")
+            assert "transparent" in _value(rule, "mask-image"), (
+                f"{tree}: the fade does not reach transparent, so it ends on a "
+                "hard edge"
+            )
+            assert _declares(rule, "--fade"), (
+                f"{tree}: the fade has no width token, so its size is not adjustable"
+            )
+            assert _declares(rule, "-webkit-mask-image"), (
+                f"{tree}: Safari (and every iOS browser) needs the -webkit- "
+                "prefix; without it the fade exists only on Android and desktop"
+            )
+
+    def test_the_fade_is_a_mask_on_the_row_not_a_scrolling_child(self):
+        """⚠️ The bar IS the scroll container.
+
+        An absolutely positioned overlay child scrolls WITH the chips, so it
+        covers the first chip (and never the clipped one) as soon as the reader
+        moves — the exact opposite of the intent. A mask applies to the
+        element's own box, so it stays pinned to the visible right edge.
+        """
+        for css_path in ARTIST_CSS_COPIES:
+            block = _phone_block(_read(css_path), "mask-image")
+
+            assert "position: absolute" not in block, (
+                f"{css_path.parent.parent.name}: an overlay would scroll with "
+                "the chips; use the mask"
+            )
+
+    def test_arriving_at_the_end_removes_the_fade(self):
+        for css_path in ARTIST_CSS_COPIES:
+            tree = css_path.parent.parent.name
+            block = _phone_block(_read(css_path), "mask-image")
+
+            assert ".release-jump-bar.at-end" in block, (
+                f"{tree}: nothing lifts the fade at the end of the row"
+            )
+            rule = _rule(block, ".release-jump-bar.at-end")
+            assert _value(rule, "mask-image") == "none", tree
+            assert _value(rule, "-webkit-mask-image") == "none", (
+                f"{tree}: the prefixed mask is still applied on iOS, so the "
+                "fade stays over the last chip there"
+            )
+
+    def test_the_script_marks_the_end(self):
+        """The other half of the contract: `.at-end` must be reachable."""
+        for path in SHARED_RELEASE_JS_COPIES:
+            body = _read(path)
+            assert "at-end" in body, (
+                f"{path.name}: the stylesheet's `.at-end` rule is dead — no "
+                "script ever sets it"
+            )
+            assert "classList.toggle('at-end'" in body, path.name
+
+    def _fade_source(self, path) -> str:
+        body = _read(path)
+        fade = body[body.index("function wireJumpBarFade"):]
+        return fade[: fade.index("\n  }")]
+
+    def test_the_end_is_measured_with_slack(self):
+        """⚠️ Exact equality never fires on a scaled display.
+
+        `scrollLeft` and `clientWidth` are integers after rounding, so on a
+        fractional device-pixel ratio the sum lands a fraction short of
+        `scrollWidth` at the true end and the fade stays on over a fully
+        scrolled row.
+        """
+        # ⚠️ Asserted as the whole COMPARISON. `"SLACK" in fade` is true even
+        # when the end test stops using it — the token also appears in the
+        # `scrollable` line and in its own declaration, so that check survived
+        # replacing `>=` with `===`.
+        expected = re.compile(
+            r"atEnd\s*=\s*bar\.scrollLeft\s*\+\s*bar\.clientWidth\s*>=\s*"
+            r"bar\.scrollWidth\s*-\s*SLACK\s*;"
+        )
+        for path in SHARED_RELEASE_JS_COPIES:
+            fade = self._fade_source(path)
+
+            assert "var SLACK" in fade, f"{path.name}: no slack constant"
+            assert expected.search(fade), (
+                f"{path.name}: the end test does not allow for a sub-pixel "
+                "scroll position, so the fade stays on at the true end"
+            )
+
+    def test_a_row_that_does_not_scroll_gets_no_fade(self):
+        """A wide screen shows every chip, so there is nothing to advertise.
+
+        The rule is phone-only, but the script runs at every width and the bar
+        can also be short enough on a phone — so it has to check, not assume.
+        """
+        for path in SHARED_RELEASE_JS_COPIES:
+            fade = self._fade_source(path)
+
+            assert "scrollWidth > bar.clientWidth" in fade, (
+                f"{path.name}: a non-scrolling row is marked `at-end` by "
+                "default; assert the check"
+            )
+
+    def test_the_marker_is_recomputed_on_scroll_and_on_resize(self):
+        """Scroll is the obvious one; resize is not optional.
+
+        A rotation or a window drag changes how much of the row fits, so a
+        one-shot measurement on load leaves the fade wrong afterwards.
+        """
+        for path in SHARED_RELEASE_JS_COPIES:
+            fade = self._fade_source(path)
+
+            assert "'scroll'" in fade, (
+                f"{path.name}: the fade is never updated as the row scrolls"
+            )
+            assert "resize" in fade, f"{path.name}: the fade is stale after a rotation"
+
+    def test_it_is_wired_into_init(self):
+        """CONTROL: an unwired function is the failure mode this whole class guards."""
+        for path in SHARED_RELEASE_JS_COPIES:
+            body = _read(path)
+            # `.index` raises if the function is gone, which is the first half of
+            # the control; the call site is the half that is easy to forget.
+            assert body.index("function wireJumpBarFade") < body.index("function init"), (
+                f"{path.name}: wireJumpBarFade is defined after init()"
+            )
+            assert "wireJumpBarFade();" in body[body.index("function init"):], (
+                f"{path.name}: init() never calls it, so the fade never updates"
+            )
 

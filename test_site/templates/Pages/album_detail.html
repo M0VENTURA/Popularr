@@ -111,26 +111,34 @@
       </div>
 
       <!-- Inset Metrics Grid -->
+      {#
+        ⭐ ONE ROW OF FOUR, matching the artist page.
+
+        This was `col-6 col-md-3` — a 2x2 grid on phones — which cost twice the
+        height of the artist page's stats box AND produced an ORPHANED DIVIDER:
+        `border-end` sits on the first three columns, so in a 2x2 the second
+        column of row 1 (RATING) drew a vertical rule at the right edge of the
+        row with nothing after it.
+
+        Order is YEAR | TRACKS | DURATION | RATING so the two pages read the
+        same way left to right: facts first, verdict last.
+      #}
       <div class="hero-metrics-box rounded p-3 mb-3" style="background-color: var(--tertiary-bg, #282828); border: 1px solid var(--border-color);">
         <div class="row text-center g-2">
-          <div class="col-6 col-md-3 border-end border-secondary">
+          <div class="col-3 border-end border-secondary">
             <div class="extra-small text-muted text-uppercase fw-semibold">Year</div>
             <div class="h6 fw-bold mb-0 text-white">{{ album_data.album_year or (album_data.spotify_release_date[:4] if album_data and album_data.spotify_release_date else '—') }}</div>
             {# The ORIGINAL year is the headline; the edition's own year is
                secondary context, shown only when it differs. #}
             {% if _show_rel_year %}
-              <div class="extra-small text-muted" title="This edition's release year">{{ _rel_year }} edition</div>
+              <div class="extra-small text-muted" title="This edition's release year">{{ _rel_year }} ed.</div>
             {% endif %}
           </div>
-          <div class="col-6 col-md-3 border-end border-secondary">
-            <div class="extra-small text-muted text-uppercase fw-semibold">Rating</div>
-            <div class="h6 fw-bold mb-0 text-success">{{ ((album_data.avg_stars|float)|round(2) ~ '★') if album_data and album_data.avg_stars else '—' }}</div>
-          </div>
-          <div class="col-6 col-md-3 border-end border-secondary">
+          <div class="col-3 border-end border-secondary">
             <div class="extra-small text-muted text-uppercase fw-semibold">Tracks</div>
             <div class="h6 fw-bold mb-0 text-white">{{ album_data.track_count or tracks|length }}</div>
           </div>
-          <div class="col-6 col-md-3">
+          <div class="col-3 border-end border-secondary">
             <div class="extra-small text-muted text-uppercase fw-semibold">Duration</div>
             <div class="h6 fw-bold mb-0 text-white">
               {% if album_data.total_duration %}
@@ -140,91 +148,67 @@
               {% else %}—{% endif %}
             </div>
           </div>
+          <div class="col-3">
+            <div class="extra-small text-muted text-uppercase fw-semibold">Rating</div>
+            <div class="h6 fw-bold mb-0 text-success">{{ ((album_data.avg_stars|float)|round(2) ~ '★') if album_data and album_data.avg_stars else '—' }}</div>
+          </div>
         </div>
       </div>
 
-      <!-- Scan & Actions Toolbar Row -->
-      <form id="albumScanForm" action="{{ url_for('scans.scan_album_custom') }}" method="post" class="d-flex align-items-center justify-content-between gap-2 mb-3 flex-wrap p-2 rounded border border-secondary scan-toolbar" style="background: var(--tertiary-bg, #282828);">
-        <input type="hidden" name="artist" value="{{ artist_name }}">
-        <input type="hidden" name="album" value="{{ album_name }}">
+      {#
+        ⭐ THE ACTION ROW: [▶ PLAY ALBUM] [⚡ Scan] [⋮] — identical in shape to
+        the artist page's.
 
-        {#
-          Phones only (d-md-none): the Full / Restart / Run / Force / Actions
-          block used to sit above the tracklist at full width, pushing the songs
-          below the fold. It collapses behind this ONE button; the controls move
-          into .scan-toolbar-controls, which the mobile CSS reveals only while
-          the form carries .is-open. On desktop the button is hidden and the
-          wrapper is a full-width flex row, so the layout is what it was.
-        #}
-        <button type="button" class="btn btn-sm btn-outline-secondary w-100 d-md-none scan-toolbar-toggle"
-                onclick="toggleScanToolbar(this)" aria-expanded="false">
-          <i class="bi bi-sliders me-1"></i> Scan Options
+        This replaced an inline `scan-toolbar` (a scan-type <select> + Run +
+        Force + an Actions dropdown) that sat ABOVE the Play button. It was a
+        second scan UI for a question the shared scan sheet already answers, and
+        it behaved differently on the two pages: the rebuilt tree wrapped it in a
+        phone-only "Scan Options" collapsible while the artist page rendered it
+        raw. Both pages now open the SAME sheet.
+
+        The sheet is in the ALBUM scope, so every type runs against this album.
+      #}
+      <div class="d-flex align-items-stretch gap-2 flex-wrap">
+        <button type="button" class="btn btn-success btn-lg fw-bold flex-grow-1 d-flex align-items-center justify-content-center gap-2 shadow-sm"
+                onclick="playAlbum()">
+          <i class="bi bi-play-circle-fill fs-4" aria-hidden="true"></i>
+          <span>PLAY ALBUM{% if tracks|length %} ({{ tracks|length }} TRACKS){% endif %}</span>
         </button>
 
-        <div class="scan-toolbar-controls d-flex align-items-center justify-content-between gap-2 flex-wrap w-100">
-        <div class="d-flex align-items-center gap-2 flex-wrap">
-          {#
-            No fixed width on this wrapper. The partial emits BOTH the
-            scan-type <select> AND the "Restart" checkbox, so pinning the
-            wrapper to 140px squashed Restart into a narrow column and wrapped
-            it onto its own line — the misalignment against Run and Force.
-            The select already sets its own min-width.
-          #}
-          <div class="d-flex align-items-center gap-2">
-            {% include 'components/_scan_selector.html' ignore missing %}
-          </div>
-          <button type="submit" class="btn btn-warning btn-sm fw-bold text-nowrap" title="Run Scan">
-            <i class="bi bi-lightning-fill"></i> Run
+        <button type="button" class="btn btn-success btn-lg flex-shrink-0"
+                onclick="openAlbumScanSheet()"
+                title="Scan this album">
+          <i class="bi bi-lightning-charge-fill" aria-hidden="true"></i> <span class="d-none d-sm-inline">Scan</span>
+        </button>
+
+        <div class="dropdown flex-shrink-0">
+          <button class="btn btn-outline-secondary btn-lg dropdown-toggle" type="button"
+                  data-bs-toggle="dropdown" aria-expanded="false" aria-label="More album actions" title="More actions">
+            <i class="bi bi-three-dots-vertical" aria-hidden="true"></i>
           </button>
-          {#
-            Matches the artist page's plain inline Force checkbox. The old
-            px-2 py-1 + border + bg-dark box was taller than every sibling in
-            the row, which is a second reason the controls did not line up.
-          #}
-          <div class="form-check form-check-inline m-0 text-nowrap" title="Force full rescan">
-            <input class="form-check-input" type="checkbox" id="albumForceScan" name="force" value="1">
-            <label class="form-check-label" for="albumForceScan">Force</label>
-          </div>
+          <ul class="dropdown-menu dropdown-menu-end shadow">
+            <li><a class="dropdown-item" href="javascript:void(0)" onclick="openAlbumLookupModal()"><i class="bi bi-search me-2"></i> Lookup on MusicBrainz</a></li>
+            <li><a class="dropdown-item" href="javascript:void(0)" onclick="downloadMissingTracks()"><i class="bi bi-download me-2"></i> Download Missing Tracks</a></li>
+            <li><a class="dropdown-item" href="javascript:void(0)" onclick="renameAlbumFiles('{{ artist_name|escapejs }}', '{{ album_name|escapejs }}')"><i class="bi bi-files me-2"></i> Rename Files</a></li>
+            <li><a class="dropdown-item" href="javascript:void(0)" onclick="autoLinkAllMbids()"><i class="bi bi-link-45deg me-2"></i> Auto-Link MBIDs</a></li>
+            <li><a class="dropdown-item" href="javascript:void(0)" onclick="openAlbumArtModal()"><i class="bi bi-image me-2"></i> Change Album Art</a></li>
+            {#-
+              A plain <a> download, not an onclick handler: the browser's own
+              download flow handles it, so there is no busy state to manage and
+              the file lands in the downloads folder — the same way the artist
+              page's copy of this report behaves.
+            -#}
+            <li><a class="dropdown-item" href="{{ url_for('album_routes.api_album_popularity_report', artist=artist_name, album=album_name) }}" title="CSV of this album's tracks: Last.fm + ListenBrainz listens, source scores, combined score and stars — most popular first"><i class="bi bi-bar-chart-line me-2"></i> Download Popularity Report</a></li>
+            {% if slskd_config is defined and slskd_config.enabled %}
+              <li><hr class="dropdown-divider"></li>
+              <li><a class="dropdown-item" href="javascript:void(0)" onclick="openSlskdSearchAlbum('{{ artist_name|escapejs }}', '{{ album_name|escapejs }}')"><i class="bi bi-music-note-beamed me-2"></i> Search Soulseek</a></li>
+            {% endif %}
+          </ul>
         </div>
-
-        <div>
-          <div class="dropdown">
-            <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="More actions">
-              <i class="bi bi-three-dots-vertical"></i> Actions
-            </button>
-            <ul class="dropdown-menu dropdown-menu-end shadow">
-              <li><a class="dropdown-item" href="javascript:void(0)" onclick="openAlbumLookupModal()"><i class="bi bi-search me-2"></i> Lookup on MusicBrainz</a></li>
-              <li><a class="dropdown-item" href="javascript:void(0)" onclick="downloadMissingTracks()"><i class="bi bi-download me-2"></i> Download Missing Tracks</a></li>
-              <li><a class="dropdown-item" href="javascript:void(0)" onclick="renameAlbumFiles('{{ artist_name|escapejs }}', '{{ album_name|escapejs }}')"><i class="bi bi-files me-2"></i> Rename Files</a></li>
-              <li><a class="dropdown-item" href="javascript:void(0)" onclick="autoLinkAllMbids()"><i class="bi bi-link-45deg me-2"></i> Auto-Link MBIDs</a></li>
-              <li><a class="dropdown-item" href="javascript:void(0)" onclick="openAlbumArtModal()"><i class="bi bi-image me-2"></i> Change Album Art</a></li>
-              {#
-                A plain <a> download, not an onclick handler: the browser's own
-                download flow handles it, so there is no busy state to manage
-                and the file lands in the downloads folder — the same way the
-                artist page's copy of this report behaves.
-              #}
-              <li><a class="dropdown-item" href="{{ url_for('album_routes.api_album_popularity_report', artist=artist_name, album=album_name) }}" title="CSV of this album's tracks: Last.fm + ListenBrainz listens, source scores, combined score and stars — most popular first"><i class="bi bi-bar-chart-line me-2"></i> Download Popularity Report</a></li>
-              {% if slskd_config is defined and slskd_config.enabled %}
-                <li><hr class="dropdown-divider"></li>
-                <li><a class="dropdown-item" href="javascript:void(0)" onclick="openSlskdSearchAlbum('{{ artist_name|escapejs }}', '{{ album_name|escapejs }}')"><i class="bi bi-music-note-beamed me-2"></i> Search Soulseek</a></li>
-              {% endif %}
-            </ul>
-          </div>
-        </div>
-        </div><!-- /.scan-toolbar-controls -->
-      </form>
-
-      <!-- Play Album CTA -->
-      <button type="button" class="btn btn-success btn-lg w-100 fw-bold d-flex align-items-center justify-content-center gap-2 shadow-sm"
-              onclick="playAlbum()">
-        <i class="bi bi-play-circle-fill fs-4"></i>
-        <span>PLAY ALBUM{% if tracks|length %} ({{ tracks|length }} TRACKS){% endif %}</span>
-      </button>
+      </div>
     </div>
   </div>
-
-  <!-- Standard Bootstrap Nav Pills -->
+<!-- Standard Bootstrap Nav Pills -->
   {#
     `nav-segmented` (popularr.css) replaces the old `bg-secondary p-1
     rounded` combination. Bootstrap's bg-secondary (#6c757d) is LIGHTER
@@ -881,8 +865,13 @@
 #}
 {% endblock %}
 
+{# The shared scan sheet, in the ALBUM scope: the hero's Scan button opens it. #}
+{% set scan_scope_kind = 'album' %}
+{% include 'components/_scan_modal.html' %}
+
 {% block scripts %}
 <script id="page-data" type="application/json">
+<script src="{{ versioned_static('js/ui/scan-modal.js') }}"></script>
 {{ {
     "artistName": artist_name, 
     "albumName": album_name

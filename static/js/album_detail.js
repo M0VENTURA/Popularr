@@ -81,6 +81,43 @@ window.playTrackFromAlbum = function (btn) {
 };
 
 // ---------------------------------------------------------------------------
+// Scanning
+// ---------------------------------------------------------------------------
+
+/**
+ * Open the shared scan sheet for THIS album.
+ *
+ * The hero's Scan button and the release rows' "Scan release" action are the
+ * same sheet the dashboard uses with `scope: 'library'` — one surface for one
+ * question. In the album scope the Run dispatches a FORM to
+ * `/scan/album-custom`, so every type runs against this album.
+ *
+ * ⚠️ Feature-detected rather than called directly: the sheet is a shared
+ * component, and the legacy `pages/artist_detail.html` renders release rows
+ * without it. A bare call there would throw and take the rest of this file's
+ * wiring down with it.
+ */
+window.openAlbumScanSheet = function () {
+    if (typeof ScanModal === 'undefined' || !ScanModal || typeof ScanModal.open !== 'function') {
+        if (typeof toast !== 'undefined' && typeof toast.warning === 'function') {
+            toast.warning('The scan sheet is not available on this page.');
+        } else {
+            alert('The scan sheet is not available on this page.');
+        }
+        return;
+    }
+    // `_pageData` is the page's own JSON context block (see the template's
+    // `block scripts`), so the values are read where they already are rather
+    // than published again as globals.
+    const pd = window._pageData || {};
+    ScanModal.open({
+        scope: 'album',
+        artist: pd.artistName || '',
+        album: pd.albumName || '',
+    });
+};
+
+// ---------------------------------------------------------------------------
 // Track row actions
 // ---------------------------------------------------------------------------
 window.openEditTrackFromAlbum = function (trackId) {
