@@ -375,10 +375,16 @@ class TestTheSharedScanSheet:
         """⭐ A feature that would otherwise have been lost with the pane.
 
         The dashboard's Navidrome pane was the ONLY place that could trigger a
-        Navidrome SERVER rescan, and that pane is now gone. It is a different
-        operation from the import (the import pulls rows into Popularr; this
-        asks Navidrome to re-read its own files), so it moved into the sheet
-        rather than disappearing with the markup.
+        Navidrome SERVER rescan, and that pane is now gone, so the action moved
+        into the sheet rather than disappearing with the markup.
+
+        ⚠️ It is the rescan WITHOUT the import. This docstring used to claim the
+        import did not touch Navidrome at all ("the import pulls rows into
+        Popularr; this asks Navidrome to re-read its own files") — which was
+        wrong. `run_navidrome_import_scan` calls
+        `sync_remote_navidrome_before_import()` before it reads a single row, so
+        the import already rescans; this button is for wanting the rescan and
+        NOT the import.
         """
         assert 'id="scanNavidromeRescanBtn"' in sheet
         assert "/api/navidrome/scan/start" in modal_js, (

@@ -139,7 +139,7 @@
                                     <input class="form-check-input" type="checkbox" id="navImportForce" name="force" value="1">
                                     <label class="form-check-label small" for="navImportForce">Forced</label>
                                 </div>
-                                <button onclick="startNavidromeImport()" class="btn btn-secondary btn-sm px-3"><i class="bi bi-cloud-download"></i> Import</button>
+                                <button onclick="startNavidromeImport()" class="btn btn-secondary btn-sm px-3" title="Import Navidrome's rows into Popularr. Rescans the Navidrome library first and waits for that scan to finish, so recently edited files are not imported stale — a large library can sit here for several minutes before the import starts."><i class="bi bi-cloud-download"></i> Import</button>
                                 <button onclick="startNavidromeServerScan()" class="btn btn-outline-secondary btn-sm px-3" title="Trigger a Navidrome server rescan"><i class="bi bi-arrow-repeat"></i> Sync Changes</button>
                                 <button class="btn btn-outline-danger btn-sm flex-shrink-0 ms-auto ms-sm-0" onclick="stopAllScans()" title="Stop all scans"><i class="bi bi-stop-fill"></i></button>
                             </div>

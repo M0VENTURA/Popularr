@@ -131,26 +131,32 @@
     {#
       SECONDARY ACTION — only for the Navidrome type.
 
-      ⚠️ This exists because the dashboard's Navidrome pane was the ONLY place
-      that could trigger a Navidrome SERVER rescan (/api/navidrome/scan/start),
-      and that pane is gone. It is a genuinely different operation from the
-      Navidrome IMPORT: the import pulls rows into Popularr, this asks Navidrome
-      to re-read its own files first. Deleting the pane without moving this would
-      have removed the feature silently, which is why it lives here rather than
-      being dropped with the markup.
+      ⚠️ THIS IS *NOT* WHAT THE IMPORT DOES, and the wording here said it was.
 
-      A second button rather than a checkbox because it is a separate ACTION,
-      not an option of the import — and it does not close the sheet, so it can
-      be used before deciding whether to also run the import.
+      The Navidrome IMPORT below already triggers a Navidrome library rescan and
+      waits for it — deliberately, because importing before Navidrome has
+      re-read its files returns STALE rows whose upsert overwrites metadata just
+      saved (see api_clients/navidrome.py::trigger_and_wait_for_scan).
+
+      What this button adds is the RESCAN WITHOUT THE IMPORT: make Navidrome
+      re-read its own files and change nothing in Popularr. The dashboard's
+      Navidrome pane used to be the only place that could do that, and that pane
+      is gone — so deleting the action with the markup would have removed the
+      feature silently.
+
+      It previously read "Also ask Navidrome to re-read its own files", which
+      implied the import did NOT — the opposite of the truth. "Also" is gone and
+      the difference is now stated.
     #}
     <div class="mt-3 d-none" id="scanSecondaryAction">
       <button type="button" class="btn btn-sm btn-outline-secondary w-100" id="scanNavidromeRescanBtn">
         <i class="bi bi-arrow-repeat me-1" aria-hidden="true"></i>
-        Also ask Navidrome to re-read its own files
+        Rescan Navidrome only — no import
       </button>
       <p class="text-muted mb-0 mt-1" style="font-size:0.72rem;">
-        Triggers a Navidrome server rescan. It does not import anything into
-        Popularr — run the Navidrome scan above for that.
+        Asks Navidrome to re-read its own files and changes nothing in Popularr.
+        The Navidrome scan above already does this as its first step — use this
+        when you want the rescan <em>without</em> the import.
       </p>
     </div>
 

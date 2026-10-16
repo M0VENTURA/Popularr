@@ -44,7 +44,15 @@
           </tr>
           <tr>
             <td><strong>Navidrome</strong></td>
-            <td>Re-imports rows from Navidrome only — no external API calls, no scoring.</td>
+            {#-
+              ⚠️ This read "Re-imports rows from Navidrome only — no external
+              API calls, no scoring." The import DOES make an external call:
+              it triggers a Navidrome library rescan and waits for it, so
+              recently edited files are not read back stale (see
+              api_clients/navidrome.py::trigger_and_wait_for_scan). The wait is
+              also why the type can look idle on a large library.
+            -#}
+            <td>Imports Navidrome's rows into Popularr. It rescans the Navidrome library first and waits for that scan — no scoring, no MusicBrainz or Discogs.</td>
             <td>Full window</td>
           </tr>
           <tr>

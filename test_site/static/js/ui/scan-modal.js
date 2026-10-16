@@ -66,7 +66,21 @@
     },
     {
       id: 'navidrome', label: 'Navidrome', family: 'navidrome',
-      desc: 'Re-import rows from Navidrome only — no external API calls and no scoring.',
+      /*
+        ⚠️ THIS DESCRIPTION USED TO PROMISE THE OPPOSITE.
+
+        It read "Re-import rows from Navidrome only — no external API calls and
+        no scoring." The import makes NO such promise: it triggers a Navidrome
+        LIBRARY RESCAN and waits for it (up to 30 min) before reading a single
+        row, because importing before Navidrome has re-read its files returns
+        stale rows whose upsert overwrites metadata just saved. The wording is
+        now the truth rather than the intent.
+
+        That wait is why this type can appear to "do nothing" on a large
+        library: it is waiting for Navidrome, not idling. Said plainly here so
+        the user is not left watching a spinner with no explanation.
+      */
+      desc: 'Import Navidrome\u2019s rows into Popularr. Rescans the Navidrome library first and waits for that scan to finish, so recently edited files are not imported stale.',
     },
     {
       id: 'popularity', label: 'Popularity', family: 'popularity', mode: 'popularity',
@@ -199,21 +213,27 @@
     restart.title = restartApplies ? '' : `${type ? type.label : 'This scan'} does not use this option`;
 
     // The Navidrome server rescan belongs to the Navidrome type only — it is a
-    // different action from the import, and offering it beside Essentia would
-    // imply Essentia talks to Navidrome.
+    // different action from the import (rescan WITHOUT importing), and offering
+    // it beside Essentia would imply Essentia talks to Navidrome.
     if (secondary) {
       secondary.classList.toggle('d-none', !(type && type.family === 'navidrome'));
     }
   }
 
   /**
-   * Ask Navidrome to re-read its own files.
+   * Ask Navidrome to re-read its own files, WITHOUT importing anything.
    *
    * ⚠️ Different endpoint from the Navidrome scan type, and deliberately kept:
    * the dashboard's Navidrome pane was the only place that could reach it, and
-   * that pane is now gone. The import pulls rows into Popularr; this asks
-   * Navidrome to re-read its own files first, and neither implies the other.
-   * The sheet stays OPEN so it can be used before deciding whether to import.
+   * that pane is now gone. The sheet stays OPEN so it can be used before
+   * deciding whether to import.
+   *
+   * ⚠️ It is NOT true that "neither implies the other". The IMPORT already
+   * triggers a Navidrome rescan as its first step and waits for it (see
+   * ``run_navidrome_import_scan`` → ``sync_remote_navidrome_before_import``),
+   * so this button is the rescan WITHOUT the import — not the only way to get
+   * a rescan. Saying otherwise sent the user looking for a rescan that had
+   * already happened.
    *
    * GATED like every other start. The dashboard function this replaced
    * (`startNavidromeServerScan`) ran the pre-flight check before its POST, and

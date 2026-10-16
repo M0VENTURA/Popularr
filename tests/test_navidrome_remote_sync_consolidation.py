@@ -30,6 +30,11 @@ wiring lives in ``tests/test_navidrome_rescan_after_save.py``.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+#: Repo root (tests/…).
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 # ---------------------------------------------------------------------------
 # Scripted client: canned getScanStatus replies + an event log so a test can
@@ -261,3 +266,162 @@ class TestTriggerHelpersDelegateToRescanService:
         from routes.misc_routes import _trigger_scan_after_tag_write
 
         assert _trigger_scan_after_tag_write() is False
+
+
+# ---------------------------------------------------------------------------
+# The IMPORT makes an external call, and the UI has to say so
+# ---------------------------------------------------------------------------
+
+
+class TestTheWordingMatchesWhatTheImportActuallyDoes:
+    """═══════════════════════════════════════════════════════════════════════
+
+    Reported:
+
+        "The Navidrome import on the dashboard is currently triggering a remote
+        scan, not an import"
+
+    ⭐ THE REPORT IS ACCURATE, and the behaviour is deliberate — so the fix was
+    the WORDING, not the scan.
+
+    ``run_navidrome_import_scan`` calls
+    ``sync_remote_navidrome_before_import()`` BEFORE it reads a single row: it
+    triggers a Navidrome library rescan and waits for ``lastScan`` to advance
+    (up to 30 minutes) so the import cannot read rows Navidrome has not yet
+    re-read. Doing otherwise is the 2026-10-03 failure recorded at the top of
+    this file — the import puts pre-save metadata back.
+
+    But the scan sheet described that type as
+
+        "Re-import rows from Navidrome only — no external API calls and no
+         scoring"
+
+    and offered a separate button labelled "Also ask Navidrome to re-read its
+    own files", which together read as "the import does not touch Navidrome".
+    It does. On a large library the import therefore sits waiting on Navidrome
+    for minutes with the UI insisting no external call happens — exactly the
+    "it's scanning, not importing" the user saw.
+
+    ⚠️ THIS IS A TWO-WAY CONTRACT. These tests fail if the wording stops
+    matching the code in EITHER direction: if someone removes the remote sync
+    from the import (the description would then over-promise a rescan), or if
+    the wording reverts to claiming no external calls (it would under-state
+    what the import does). The description is the user's only warning that a
+    click here can wait on another server.
+
+    ═══════════════════════════════════════════════════════════════════════
+    """
+
+    PIPELINE = REPO_ROOT / "services" / "scanning" / "pipelines" / "navidrome_pipeline.py"
+    SCAN_MODAL = REPO_ROOT / "test_site" / "static" / "js" / "ui" / "scan-modal.js"
+    MODE_KEY = REPO_ROOT / "test_site" / "templates" / "components" / "_scan_mode_key.html"
+    SCAN_SHEET = REPO_ROOT / "test_site" / "templates" / "components" / "_scan_modal.html"
+    LIVE_DASHBOARD = REPO_ROOT / "templates" / "pages" / "dashboard.html"
+
+    def test_the_import_really_does_trigger_a_remote_scan(self) -> None:
+        """The premise. If this stops being true, every description below is wrong."""
+        source = self.PIPELINE.read_text(encoding="utf-8")
+        body = source[source.index("def run_navidrome_import_scan("):]
+
+        assert "sync_remote_navidrome_before_import(" in body, (
+            "the import no longer triggers a remote Navidrome scan — the scan "
+            "sheet's description (which now promises one) is now wrong and must "
+            "be reverted to 'no external API calls'"
+        )
+
+    def test_the_sync_happens_before_the_marker_check(self) -> None:
+        """Order matters: it is a PRE-step, not a follow-up.
+
+        Asserted because the description says "rescans the library FIRST and
+        waits", and a future refactor that moved the sync after the marker check
+        would make that misleading — the import would decide there was nothing
+        to do before Navidrome had re-read anything.
+        """
+        source = self.PIPELINE.read_text(encoding="utf-8")
+        body = source[source.index("def run_navidrome_import_scan("):]
+
+        sync_at = body.index("sync_remote_navidrome_before_import(")
+        marker_at = body.index("get_scan_status()")
+        assert sync_at < marker_at, (
+            "the remote sync now runs AFTER the unchanged-marker check, so the "
+            "description's 'first' is wrong"
+        )
+
+    def test_no_surface_claims_the_import_makes_no_external_calls(self) -> None:
+        """The exact sentence that was wrong, banned across every surface."""
+        for path in (self.SCAN_MODAL, self.MODE_KEY):
+            text = path.read_text(encoding="utf-8")
+            # The scan-modal keeps the old sentence INSIDE a comment explaining
+            # what it used to say, so comments are stripped before checking.
+            code = _strip_js_or_html_comments(text)
+            assert "no external API calls" not in code, (
+                f"{path.name} again claims the Navidrome import makes no "
+                "external calls; it triggers and waits on a Navidrome rescan"
+            )
+
+    def test_every_navidrome_description_mentions_the_rescan(self) -> None:
+        """The positive half: the warning must actually be present.
+
+        Asserted per surface rather than by one regex, because the three places
+        are edited independently and a single check would let two of them
+        silently revert.
+
+        ⚠️ COMMENTS ARE STRIPPED FIRST. The mode-key row contains a Jinja
+        comment that explains the rescan, so a slice of the raw row is satisfied
+        by that prose alone — verified by mutation, which escaped until this
+        changed. Same trap as the `ur-queue-btn` check in
+        tests/test_mobile_chrome_layout_fixes.py.
+        """
+        modal = self.SCAN_MODAL.read_text(encoding="utf-8")
+        desc_line = next(
+            line for line in modal.splitlines() if line.strip().startswith("desc:")
+            and "Navidrome" in modal[: modal.index(line)][-400:]
+        )
+        assert "rescan" in desc_line.lower(), (
+            f"the scan sheet's Navidrome description does not mention the rescan: {desc_line.strip()}"
+        )
+
+        key = _strip_js_or_html_comments(self.MODE_KEY.read_text(encoding="utf-8"))
+        navidrome_row = key[key.index("<strong>Navidrome</strong>"):]
+        navidrome_row = navidrome_row[: navidrome_row.index("</tr>")]
+        assert "rescan" in navidrome_row.lower(), (
+            "the long-form mode key does not mention the rescan"
+        )
+
+        sheet = self.SCAN_SHEET.read_text(encoding="utf-8")
+        secondary = sheet[sheet.index('id="scanSecondaryAction"'):]
+        secondary = secondary[: secondary.index("</div>")]
+        assert "no import" in secondary.lower(), (
+            "the separate rescan button must say it does NOT import — otherwise "
+            "it reads as the only way to rescan, which is what was wrong"
+        )
+
+    def test_the_live_dashboard_import_button_warns_that_it_waits(self) -> None:
+        """The live tree's Navidrome pane has the same Import button.
+
+        It carried no title at all, so the button gave the user no hint that it
+        can sit waiting on Navidrome before anything imports.
+        """
+        html = self.LIVE_DASHBOARD.read_text(encoding="utf-8")
+        idx = html.index("startNavidromeImport()")
+        button = html[html.rindex("<button", 0, idx): html.index("</button>", idx)]
+
+        assert "title=" in button, "the Import button has no tooltip"
+        assert "rescan" in button.lower(), (
+            "the Import tooltip does not mention the Navidrome rescan it triggers"
+        )
+
+
+def _strip_js_or_html_comments(text: str) -> str:
+    """Drop `//`, `/* */`, `{#…#}`, and `<!-- -->` comments.
+
+    ⚠️ Needed, not tidiness: several of these files EXPLAIN the old wording in a
+    comment ("It read 'no external API calls'"), so a bare substring check is
+    satisfied by the prose that documents the removal.
+    """
+    import re
+
+    out = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    out = re.sub(r"\{#.*?#\}", "", out, flags=re.S)
+    out = re.sub(r"<!--.*?-->", "", out, flags=re.S)
+    return re.sub(r"//[^\n]*", "", out)
