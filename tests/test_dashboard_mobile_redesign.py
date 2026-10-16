@@ -395,7 +395,187 @@ class TestTheSharedScanSheet:
 
 
 # ---------------------------------------------------------------------------
-# 3. Upcoming releases carousel
+# 3. The bottom sheets can actually grow
+# ---------------------------------------------------------------------------
+
+#: Comment syntax in the stylesheet.
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _top_level_rules(css: str) -> list[tuple[str, str]]:
+    """Every top-level ``(selector, body)`` in a stylesheet, comments removed.
+
+    Brace-counted, for the same reason ``_block`` is: the stylesheet uses
+    nesting, so slicing "up to the next }" would return a body that stops inside
+    a child rule and an assertion could pass on a fragment that proves nothing.
+    ``@media`` bodies are returned as one entry under their at-rule selector —
+    a sheet rule nested in a media query is therefore NOT reported here, which
+    is why the failure messages below say where to look.
+    """
+    src = _CSS_COMMENT.sub("", css)
+    rules: list[tuple[str, str]] = []
+    i, n = 0, len(src)
+    while i < n:
+        brace = src.find("{", i)
+        if brace == -1:
+            break
+        depth, j = 1, brace + 1
+        while j < n and depth:
+            if src[j] == "{":
+                depth += 1
+            elif src[j] == "}":
+                depth -= 1
+            j += 1
+        rules.append((src[i:brace].strip(), src[brace + 1: j - 1]))
+        i = j
+    return rules
+
+
+def _specificity(selector: str) -> tuple[int, int, int]:
+    """(ids, classes+attrs+pseudo-classes, elements) for one selector part.
+
+    Only what this suite's selectors need — every one of them is class-only, so
+    the class count is the number that decides. Not a general-purpose
+    implementation, and it does not need to be: it exists to compare
+    ``.scan-sheet`` against ``.offcanvas.offcanvas-bottom`` and say which wins.
+    """
+    ids = len(re.findall(r"#[\w-]+", selector))
+    classes = len(re.findall(r"\.[\w-]+", selector))
+    classes += len(re.findall(r"\[[^\]]*\]", selector))
+    classes += len(re.findall(r"(?<!:):[\w-]+", selector))
+    bare = re.sub(r"[#.][\w-]+|\[[^\]]*\]|::?[\w-]+(?:\([^)]*\))?", " ", selector)
+    elements = len(re.findall(r"[a-zA-Z][\w-]*", bare))
+    return (ids, classes, elements)
+
+
+class TestTheBottomSheetsCanGrowPastBootstrapsPin:
+    """The sheet used to be stuck at 30vh however much content it held.
+
+    ⚠️ This is a SPECIFICITY test, not a string test, and deliberately so.
+
+    Bootstrap declares ``height: var(--bs-offcanvas-height)`` — 30vh — on
+    ``.offcanvas.offcanvas-bottom``, which is specificity (0, 2, 0). The sheets'
+    own ``max-height`` rules were plain single-class selectors, (0, 1, 0), so
+    they lost the cascade and never applied at all. Worse, ``max-height`` could
+    not have rescued them even if it had applied: it caps a height, it cannot
+    make a box taller.
+
+    So "is there a rule with max-height on it?" is the WRONG question — the
+    broken stylesheet answered yes to that. The question that actually failed is
+    "does the height override outrank Bootstrap, and does it release the pin?".
+    Both halves are asserted below.
+    """
+
+    SITE_CSS = TS / "static" / "css" / "popularr.css"
+
+    #: Bootstrap's own selector on `.offcanvas-bottom`, which any override must
+    #: match or beat. Kept as a constant so the reason is legible.
+    BOOTSTRAP_PIN = ".offcanvas.offcanvas-bottom"
+
+    @pytest.fixture(scope="class")
+    def site_css(self) -> str:
+        return _read(self.SITE_CSS)
+
+    @pytest.mark.parametrize("sheet", ["scan-sheet", "system-sheet"])
+    def test_an_override_outranks_bootstraps_pin(self, site_css: str, sheet: str) -> None:
+        pin = _specificity(self.BOOTSTRAP_PIN)
+        contenders = [
+            (sel, body)
+            for sel, body in _top_level_rules(site_css)
+            if f".{sheet}" in sel and "height" in body
+        ]
+        assert contenders, (
+            f"no top-level rule sets a height for .{sheet}. If it moved inside a "
+            f"@media block, this scan cannot see it — check {self.SITE_CSS.name}."
+        )
+        winning = [
+            sel
+            for sel, _ in contenders
+            if any(_specificity(part) >= pin for part in sel.split(","))
+        ]
+        assert winning, (
+            f"every height rule for .{sheet} loses the cascade to Bootstrap's "
+            f"{self.BOOTSTRAP_PIN} {pin}. Bootstrap sets `height: 30vh` there, so "
+            f"the sheet is pinned to 30vh whatever its content — the max-height "
+            f"never applies. Selectors found: {[s for s, _ in contenders]}"
+        )
+
+    @pytest.mark.parametrize("sheet", ["scan-sheet", "system-sheet"])
+    def test_the_override_releases_the_pin_rather_than_capping_it(
+        self, site_css: str, sheet: str
+    ) -> None:
+        """`height: auto` is the part that matters.
+
+        A rule that only raises the max-height cannot help — Bootstrap's
+        `height` still wins as the used value. Anything that frees the height
+        qualifies: an explicit `auto`, or `--bs-offcanvas-height: auto`, which
+        is the custom property Bootstrap itself reads.
+        """
+        pin = _specificity(self.BOOTSTRAP_PIN)
+        bodies = [
+            body
+            for sel, body in _top_level_rules(site_css)
+            if f".{sheet}" in sel
+            and "height" in body
+            and any(_specificity(part) >= pin for part in sel.split(","))
+        ]
+        assert bodies, f"no cascade-winning height rule for .{sheet}"
+        released = any(
+            re.search(r"height\s*:\s*auto", body)
+            or (
+                "--bs-offcanvas-height" in body
+                and re.search(r"--bs-offcanvas-height\s*:\s*auto", body)
+            )
+            for body in bodies
+        )
+        assert released, (
+            f".{sheet} never sets its height to auto, so Bootstrap's `height: "
+            f"30vh` is still the used value and a max-height cannot make the "
+            f"sheet taller than a third of the screen."
+        )
+
+    @pytest.mark.parametrize("sheet", ["scan-sheet", "system-sheet"])
+    def test_the_ceiling_reaches_the_top_of_the_screen(self, site_css: str, sheet: str) -> None:
+        """The reported complaint: the sheet could not be seen past.
+
+        The ceiling is measured from the full viewport less the navbar — the
+        same `calc(100dvh - var(--navbar-height) …)` idiom `.search-flyout`
+        uses — so the sheet can rise to just under the fixed navbar rather than
+        stopping in the middle of the page.
+        """
+        ceilings = [
+            body
+            for sel, body in _top_level_rules(site_css)
+            if f".{sheet}" in sel and "max-height" in body
+        ]
+        assert ceilings, f"no max-height ceiling for .{sheet}"
+        assert any("100dvh" in body and "--navbar-height" in body for body in ceilings), (
+            f".{sheet} has no ceiling reaching the top of the viewport; it will "
+            f"still stop short of it. Ceilings found: "
+            f"{[re.findall(r'max-height[^;]*', b) for b in ceilings]}"
+        )
+
+    def test_both_sheets_agree_on_the_ceiling(self, site_css: str) -> None:
+        """The shared sheet CSS is one block; these two must not drift apart.
+
+        They are the same surface (a bottom sheet under the fixed navbar), so a
+        ceiling that differs between them is a divergence nobody intended.
+        """
+        ceilings: dict[str, set[str]] = {}
+        for sheet in ("scan-sheet", "system-sheet"):
+            ceilings[sheet] = {
+                m.strip()
+                for sel, body in _top_level_rules(site_css)
+                if f".{sheet}" in sel
+                for m in re.findall(r"max-height\s*:[^;]*", body)
+            }
+        assert ceilings["scan-sheet"] == ceilings["system-sheet"], (
+            f"the two bottom sheets set different ceilings: {ceilings}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 4. Upcoming releases carousel
 # ---------------------------------------------------------------------------
 
 
@@ -484,7 +664,7 @@ class TestTheReleasesCarousel:
 
 
 # ---------------------------------------------------------------------------
-# 4. One activity feed, three tabs
+# 5. One activity feed, three tabs
 # ---------------------------------------------------------------------------
 
 
@@ -544,7 +724,7 @@ class TestTheActivityFeed:
 
 
 # ---------------------------------------------------------------------------
-# 5. Queue feedback
+# 6. Queue feedback
 # ---------------------------------------------------------------------------
 
 
@@ -591,7 +771,7 @@ class TestQueueFeedback:
 
 
 # ---------------------------------------------------------------------------
-# 6. The activity feed's own rows — art, truncation, the add button
+# 7. The activity feed's own rows — art, truncation, the add button
 # ---------------------------------------------------------------------------
 
 

@@ -188,12 +188,25 @@
    Bottom-anchored so it comes from the same edge as the bar that opened it.
    ------------------------------------------------------------------------- */
 .system-sheet {
-    max-height: 80dvh;
     border-radius: var(--radius-card) var(--radius-card) 0 0;
     background: var(--secondary-bg);
     border-top: 1px solid var(--border-color);
     /* Clear the iOS home indicator, exactly as the bottom nav does. */
     padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Same Bootstrap pin as the scan sheet — see the long note on `.scan-sheet`
+   below. Bootstrap's `.offcanvas.offcanvas-bottom` sets `height: 30vh` at
+   specificity 0,2,0, so the `max-height: 80dvh` that used to sit in the block
+   above never applied and this sheet too was stuck at 30vh of body. It matters
+   more here than anywhere else: this sheet is the ONLY home for the destinations
+   the bottom bar does not carry, and at 30vh it showed roughly five of them.
+
+   Measured at 412x880 before the fix: body viewport 200px against 1224px of
+   content. Content-sized up to just under the navbar, as the scan sheet is. */
+.offcanvas-bottom.system-sheet {
+    height: auto;
+    max-height: calc(100dvh - var(--navbar-height) - 8px);
 }
 
 .system-sheet .offcanvas-body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
@@ -238,11 +251,34 @@
    plus the advanced block and the mode key.
    ------------------------------------------------------------------------- */
 .scan-sheet {
-    max-height: 90dvh;
     border-radius: var(--radius-card) var(--radius-card) 0 0;
     background: var(--secondary-bg);
     border-top: 1px solid var(--border-color);
     padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ⚠️ COMPOUND selector, and the compound is the whole point.
+
+   Bootstrap declares `height: var(--bs-offcanvas-height)` (30vh) and
+   `max-height: 100%` on `.offcanvas.offcanvas-bottom` — specificity 0,2,0. A
+   plain `.scan-sheet` rule is 0,1,0, so it lost the cascade outright: the
+   `max-height: 90dvh` that used to live in the block above never applied once,
+   and the sheet was pinned to 30vh of BODY whatever its content. Reported as
+   "hard to see what's below it". Raising that max-height could not have helped
+   in any case — `max-height` caps a height, it cannot make an element taller.
+
+   `height: auto` is therefore load-bearing: it releases the pin so the sheet
+   sizes to its content, and the max-height sets the ceiling — just under the
+   navbar, the same `calc(100dvh - var(--navbar-height) …)` idiom .search-flyout
+   uses. A short list stays a short sheet; a long one grows until the seven scan
+   types are readable instead of hiding them behind a scrollbar. The body keeps
+   its own overflow-y, so an over-long list still scrolls and the sticky footer
+   stays reachable.
+
+   Same override shape as `.navbar.fixed-top` above. */
+.offcanvas-bottom.scan-sheet {
+    height: auto;
+    max-height: calc(100dvh - var(--navbar-height) - 8px);
 }
 
 .scan-sheet .offcanvas-body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
