@@ -347,10 +347,40 @@ class TestTheArtistAndAlbumPagesOfferTheMode:
             "test_site/templates/Pages/album_detail.html",
         ],
     )
-    def test_the_pages_include_the_shared_selector(self, rel: str):
+    def test_the_pages_can_offer_finalise(self, rel: str):
+        """The property is that the PAGE can offer Finalise, not how.
+
+        ⚠️ THIS REPLACES a direct "includes components/_scan_selector.html"
+        assertion. The artist page no longer renders a scan-type <select>: its
+        inline scan toolbar became the action row (Play / Scan / ⋮) and every
+        type is chosen in the SHARED SCAN SHEET, whose TYPES list the album and
+        artist scopes both dispatch from. Pinning the direct include therefore
+        pinned an arrangement rather than the requirement — and would have kept
+        passing only for as long as the page kept a second, redundant scan UI.
+
+        Both routes are accepted, so this holds whichever arrangement a page
+        uses, and it still FAILS if neither offers Finalise.
+        """
         source = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        assert "components/_scan_selector.html" in source, (
-            f"{rel} does not include the selector, so it cannot offer Finalise"
+
+        if "components/_scan_selector.html" in source:
+            selector = REPO_ROOT / "test_site/templates/components/_scan_selector.html"
+            assert '<option value="finalise">Finalise</option>' in selector.read_text(
+                encoding="utf-8"
+            )
+            return
+
+        assert "components/_scan_modal.html" in source, (
+            f"{rel} offers no route to Finalise: it includes neither the shared "
+            "scan selector nor the shared scan sheet"
+        )
+        # The sheet is only a route if its controller actually offers the type —
+        # the markup renders an EMPTY #scanTypeList, so the list is the code.
+        controller = (
+            REPO_ROOT / "test_site/static/js/ui/scan-modal.js"
+        ).read_text(encoding="utf-8")
+        assert "id: 'finalise'" in controller, (
+            "the page opens the shared sheet, but the sheet does not offer Finalise"
         )
 
     def test_the_route_dispatches_finalise_for_artist_and_album(self):

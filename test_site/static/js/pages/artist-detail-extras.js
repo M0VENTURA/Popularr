@@ -218,33 +218,42 @@
   // ── Metadata refresh ────────────────────────────────────────────────────
 
   /**
-   * Re-run the artist pipeline in metadata mode.
+   * Open the shared scan sheet for THIS artist.
    *
-   * No dedicated endpoint exists for "refresh this artist", so this submits the
-   * scan form the page already renders — one code path for scans, not two.
+   * The hero's Scan button, and the workbook behind it, is the same sheet the
+   * dashboard uses with `scope: 'library'` — one surface for one question.
+   * In the artist scope the Run dispatches a FORM to `/scan/artist-custom`,
+   * so every type runs against this artist rather than the whole library.
    */
-  function forceArtistMetadataRefresh() {
-    var form = doc.getElementById('artistScanForm');
-    if (!form) { notifyError('Scan form unavailable on this page.'); return; }
-    var select = form.querySelector('select[name="scan_type"]');
-    if (select) select.value = 'metadata';
-
-    // `form.submit()` does NOT fire submit listeners, so the declarative
-    // `data-scan-preflight` guard on this form cannot see this path — ask here
-    // as well. (No "cleared" flag: nothing consumes one, and a stale flag would
-    // silently skip the gate later.)
-    if (global.ScanPreflight) {
-      global.ScanPreflight.confirmIfRunning({ scanName: 'Metadata Scan' })
-        .then(function (proceed) {
-          if (!proceed) return;
-          notifySuccess('Starting metadata scan…');
-          form.submit();
-        });
+  function openArtistScanSheet(opts) {
+    var config = opts || {};
+    if (!global.ScanModal || typeof global.ScanModal.open !== 'function') {
+      notifyError('The scan sheet is not available on this page.');
       return;
     }
+    global.ScanModal.open({
+      scope: 'artist',
+      artist: artistName(),
+      preselect: config.preselect || '',
+      force: !!config.force,
+    });
+  }
 
-    notifySuccess('Starting metadata scan…');
-    form.submit();
+  /**
+   * Re-run the artist pipeline in metadata mode.
+   *
+   * ⚠️ This used to find `#artistScanForm` and submit it. That form is GONE:
+   * the inline `scan-toolbar` it lived on was replaced by the action row (Play /
+   * Scan /⋮), because the sheet answers the same question better. It now opens
+   * the sheet with Metadata preselected and Force ticked, which is the same job.
+   *
+   * The pre-flight guard is still made — the sheet runs it before every start.
+   * The `confirmIfRunning` call that used to live here is gone rather than
+   * duplicated: two prompts for one action is the failure mode the gate's own
+   * docstring warns about.
+   */
+  function forceArtistMetadataRefresh() {
+    openArtistScanSheet({ preselect: 'metadata', force: true });
   }
 
   // ── Bio clamp ───────────────────────────────────────────────────────────
@@ -453,46 +462,17 @@
       removeArtistAlias(btn.getAttribute('data-alias') || '');
     });
 
-    // ── Phone ⋮ menu: forward to the already-wired inline button ─────────
+    // ── The release row's ⋮ menu needs NO forwarding ────────────────
     //
-    // On phones the release row's actions collapse into one ⋮ dropdown (see
-    // components/_release_section.html). Its items carry the SAME class as
-    // their inline twins — Open album / Edit release / Import / Search
-    // MusicBrainz / Show tracklist — and this handler FORWARDS the click to
-    // that twin, which artist-releases.js has already bound.
-    //
-    // WHY FORWARD instead of calling the handlers directly: they live inside
-    // the shared artist-releases.js module and are not exported. Forwarding
-    // keeps this file test_site-only, so the shared module stays byte-
-    // identical to the live tree's copy (test_shared_module_copies_do_not_drift)
-    // and the mobile menu cannot make the two trees behave differently.
-    //
-    // `.click()` works on the inline button even though it is display:none on
-    // phones — visibility does not gate a programmatic click.
-    doc.addEventListener('click', function (e) {
-      var action = e.target.closest && e.target.closest('.release-actions-overflow .dropdown-item');
-      if (!action) return;
-      var item = action.closest('.release-item');
-      if (!item) return;
-
-      // The ⋮ items reuse the inline classes, so the twin is the inline one.
-      var inlineClass = null;
-      var classes = ['release-open-btn', 'release-edit-btn', 'release-import-btn',
-                     'release-mb-search-btn', 'release-toggle-btn'];
-      for (var i = 0; i < classes.length; i += 1) {
-        if (action.classList.contains(classes[i])) { inlineClass = classes[i]; break; }
-      }
-      if (!inlineClass) return;
-
-      var twin = item.querySelector('.release-inline-only.' + inlineClass);
-      if (!twin) return;
-
-      // An <a> twin (Open album) is a navigation, not a bound button — click
-      // it so the browser follows the href; the rest are buttons with their
-      // own listeners.
-      e.preventDefault();
-      twin.click();
-    });
+    // This file used to forward a ⋮ click to an INLINE twin, because the menu
+    // was a phone-only addition and the shared module bound the inline copies.
+    // Both halves of that reason are gone: the ⋮ is now the row's design at
+    // every width, and each action class appears exactly ONCE (in the menu), so
+    // `artist-releases.js` binds the menu item itself. The forwarder was left
+    // here as a no-op for a while — its `.release-inline-only` lookup could
+    // never match, so it always returned early. Removed rather than kept: a
+    // handler that silently does nothing reads as working wiring, and if a row
+    // ever rendered an inline twin again it would double-fire the action.
 
     // Enter submits the alternate-name field — the button's onclick does not
     // fire on a keypress, and a form wrapper here would submit the page.
@@ -539,6 +519,7 @@
   global.toggleArtistBio = toggleArtistBio;
   global.goToArtistAbout = goToArtistAbout;
   global.openArtistAboutModal = openArtistAboutModal;
+  global.openArtistScanSheet = openArtistScanSheet;
   global.checkMissingReleases = checkMissingReleases;
   global.addArtistAlias = addArtistAlias;
 

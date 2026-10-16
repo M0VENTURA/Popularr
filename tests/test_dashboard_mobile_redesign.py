@@ -311,7 +311,20 @@ class TestTheSharedScanSheet:
 
     @pytest.fixture(scope="class")
     def modal_js(self) -> str:
-        return _read(self.JS)
+        """The sheet's controller, COMMENTS REMOVED.
+
+        ⚠️ The strip is load-bearing, not tidiness. Several tests below locate an
+        endpoint and then assert something about the code around it —
+        `mode: force ? 'force' : 'all'`, or that the pre-flight gate precedes the
+        POST. This module documents those endpoints by NAME in prose, and the
+        prose sits INSIDE `run()` where the searches look, so a raw read finds
+        the comment and the assertions are satisfied by text rather than by code.
+
+        They already dodged the module docstring by slicing from `async function
+        run(`; a comment inside that function defeated that. Stripping is the
+        general fix, and it is the same one `_strip_js_comments` exists for.
+        """
+        return _strip_js_comments(_read(self.JS))
 
     def test_it_is_a_bottom_sheet(self, sheet: str) -> None:
         assert "offcanvas-bottom" in sheet

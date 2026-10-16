@@ -822,3 +822,97 @@ form .form-check-input[name="force"] + .form-check-label {
     margin-right: 0.4em;
     background: var(--secondary-bg, #282828);
 }
+
+/* ── Scan sheet (components/_scan_modal.html) ────────────────────────────────
+   Bottom-anchored like the system sheet — it is opened from a card in the page
+   and dismissed with Cancel, so it comes from the same edge as the controls it
+   replaces. Taller than the system sheet because the type list is seven rows
+   plus the advanced block and the mode key.
+   ------------------------------------------------------------------------- */
+.scan-sheet {
+    border-radius: var(--radius-card) var(--radius-card) 0 0;
+    background: var(--secondary-bg);
+    border-top: 1px solid var(--border-color);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ⚠️ COMPOUND selector, and the compound is the whole point.
+
+   Bootstrap declares `height: var(--bs-offcanvas-height)` (30vh) and
+   `max-height: 100%` on `.offcanvas.offcanvas-bottom` — specificity 0,2,0. A
+   plain `.scan-sheet` rule is 0,1,0, so it lost the cascade outright: the
+   `max-height: 90dvh` that used to live in the block above never applied once,
+   and the sheet was pinned to 30vh of BODY whatever its content. Reported as
+   "hard to see what's below it". Raising that max-height could not have helped
+   in any case — `max-height` caps a height, it cannot make an element taller.
+
+   `height: auto` is therefore load-bearing: it releases the pin so the sheet
+   sizes to its content, and the max-height sets the ceiling — just under the
+   navbar, the same `calc(100dvh - var(--navbar-height) …)` idiom .search-flyout
+   uses. A short list stays a short sheet; a long one grows until the seven scan
+   types are readable instead of hiding them behind a scrollbar. The body keeps
+   its own overflow-y, so an over-long list still scrolls and the sticky footer
+   stays reachable.
+
+   Same override shape as `.navbar.fixed-top` above. */
+.offcanvas-bottom.scan-sheet {
+    height: auto;
+    max-height: calc(100dvh - var(--navbar-height) - 8px);
+}
+
+.scan-sheet .offcanvas-body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+
+/* The action row is sticky: the list can scroll past the fold on a short
+   screen, and Cancel / Run must stay reachable without scrolling to the end. */
+.scan-sheet .offcanvas-footer {
+    position: sticky;
+    bottom: 0;
+    background: var(--secondary-bg);
+}
+
+.scan-type-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    /* 48px minimum: this is the sheet's primary control and a full-width row
+       is the easiest thing on the screen to hit. */
+    min-height: 48px;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-control);
+    margin-bottom: 0.35rem;
+    cursor: pointer;
+
+    &:hover { background: color-mix(in srgb, var(--text-primary) 6%, transparent); }
+
+    /* The SELECTED row is outlined, not just ticked. On a dark theme a lone
+       radio dot at the left edge is easy to miss, and which type is about to
+       run is the single most important fact in the sheet. */
+    &:has(input:checked) {
+        border-color: color-mix(in srgb, var(--spotify-green) 60%, transparent);
+        background: color-mix(in srgb, var(--spotify-green) 8%, transparent);
+    }
+
+    .form-check-input { flex: 0 0 auto; }
+}
+
+.scan-type-label {
+    display: block;
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--text-primary);
+}
+
+.scan-type-rec {
+    margin-left: 0.4rem;
+    font-size: 0.65rem;
+    font-weight: 500;
+    color: var(--spotify-green);
+}
+
+.scan-type-desc {
+    display: block;
+    font-size: 0.75rem;
+    line-height: 1.3;
+    color: var(--text-muted);
+}

@@ -343,6 +343,34 @@
           searchMusicBrainzForAlbum(artist, album);
         });
       }
+
+      /*
+        ⚠️ SCAN RELEASE IS FEATURE-DETECTED, and not for tidiness.
+
+        The action opens the shared scan sheet (`js/ui/scan-modal.js`) in the
+        ALBUM scope. This module is shared, but the sheet is NOT included by
+        every page that renders these rows: `pages/artist_detail_v2.html`
+        (both trees) includes it, while the legacy `pages/artist_detail.html`
+        imports this macro and does not. A bare call would throw
+        `ScanModal is not defined` there and take the whole row's wiring with it.
+
+        When the sheet is absent the item is REMOVED rather than left dead: a
+        menu entry that silently does nothing is the exact failure this row's
+        redesign exists to remove. The album page's own scan toolbar is still
+        reachable from the album the Open button leads to.
+      */
+      var scanBtn = item.querySelector('.release-scan-btn');
+      if (scanBtn) {
+        if (global.ScanModal && typeof global.ScanModal.open === 'function') {
+          scanBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            global.ScanModal.open({ scope: 'album', artist: artist, album: album });
+          });
+        } else {
+          var scanItem = scanBtn.closest('li');
+          (scanItem || scanBtn).remove();
+        }
+      }
     });
   }
 

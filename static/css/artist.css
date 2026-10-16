@@ -393,6 +393,27 @@
 .release-title { font-weight: 600; }
 .release-actions { display: flex; gap: 0.35rem; flex-shrink: 0; }
 
+/*
+  ⚠️ THE ROW'S CONTROLS NEED EXPLICIT SIZE ON PHONES.
+
+  `popularr.css` sets `.btn { min-height: 44px }` below 576px but exempts
+  `btn-sm` — and every control in this row is a `btn-sm`, so without this the
+  primary / expand / ⋮ buttons sit at Bootstrap's ~24px on the surface where a
+  miss is most likely. The exemption is deliberate (it is what stops small
+  buttons being stretched in compact rows elsewhere); THIS row is precisely the
+  case that has to opt back in, and a more specific selector is how.
+
+  Scoped to phones only: at desktop widths the row is a mouse target and a
+  44px button would dominate the compact album list.
+*/
+@media (max-width: 767.98px) {
+  .release-actions > .btn,
+  .release-actions-overflow > .btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
 .release-tracklist {
   padding: 0 1rem 1rem 1rem;
   background-color: var(--secondary-bg);

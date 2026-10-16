@@ -366,34 +366,43 @@
 
   // ── Metadata refresh ────────────────────────────────────────────────────
 
-  /*
-    Re-runs the artist pipeline in metadata mode. There is no dedicated
-    endpoint for "refresh everything", so this posts the scan form the page
-    already renders — one code path for scans instead of two.
-  */
-  function forceArtistMetadataRefresh() {
-    var form = doc.getElementById('artistScanForm');
-    if (!form) { toast('Refresh', 'Scan form unavailable.', 'error'); return; }
-    var select = form.querySelector('select[name="scan_type"]');
-    if (select) select.value = 'metadata';
-
-    // The form carries `data-scan-preflight`, and the gate's own submit
-    // listener intercepts both this programmatic path and a plain click on Run
-    // — but form.submit() bypasses listeners, so ask here too when a scan is
-    // already running. Everything else goes through the listener.
-    // (No "cleared" flag: nothing consumes one, and a stale flag would
-    // silently skip the gate later.)
-    if (window.ScanPreflight) {
-      window.ScanPreflight.confirmIfRunning({ scanName: 'Metadata Scan' }).then(function (proceed) {
-        if (!proceed) return;
-        toast('Metadata refresh', 'Starting metadata scan…', 'info');
-        form.submit();
-      });
+  /**
+   * Open the shared scan sheet for THIS artist.
+   *
+   * The hero's Scan button, and the workbook behind it, is the same sheet the
+   * dashboard uses with `scope: 'library'` — one surface for one question.
+   * In the artist scope the Run dispatches a FORM to `/scan/artist-custom`,
+   * so every type runs against this artist rather than the whole library.
+   */
+  function openArtistScanSheet(opts) {
+    var config = opts || {};
+    if (!global.ScanModal || typeof global.ScanModal.open !== 'function') {
+      toast('Scan', 'The scan sheet is not available on this page.', 'error');
       return;
     }
+    global.ScanModal.open({
+      scope: 'artist',
+      artist: artistName(),
+      preselect: config.preselect || '',
+      force: !!config.force,
+    });
+  }
 
-    toast('Metadata refresh', 'Starting metadata scan…', 'info');
-    form.submit();
+  /*
+    Re-runs the artist pipeline in metadata mode.
+
+    ⚠️ This used to find `#artistScanForm` and submit it. That form is GONE:
+    the inline `scan-toolbar` it lived on was replaced by the action row (Play /
+    Scan /⋮), because the sheet answers the same question better. It now opens
+    the sheet with Metadata preselected and Force ticked, which is the same job.
+
+    The pre-flight guard this function used to make is still made — the sheet
+    runs it before every start. The extra `confirmIfRunning` call here is gone
+    rather than duplicated: two prompts for one action is the failure mode the
+    gate's own docstring warns about.
+  */
+  function forceArtistMetadataRefresh() {
+    openArtistScanSheet({ preselect: 'metadata', force: true });
   }
 
   // ── Covers and similar artists ──────────────────────────────────────────
@@ -681,6 +690,7 @@
   global.toggleArtistBio = toggleArtistBio;
   global.goToArtistAbout = goToArtistAbout;
   global.openArtistAboutModal = openArtistAboutModal;
+  global.openArtistScanSheet = openArtistScanSheet;
   global.addArtistAlias = addArtistAlias;
   global.loadArtistCoveredBy = loadArtistCoveredBy;
 

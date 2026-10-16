@@ -82,6 +82,22 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def _strip_css_comments(body: str) -> str:
+    """Remove ``/* … */`` comments from a stylesheet.
+
+    The counterpart of ``_strip_jinja_comments``, and needed for the same
+    reason: these stylesheets explain their own rules in prose, and prose that
+    NAMES a class (".release-inline-only was removed because …") is not a rule
+    for it. Scanning it as one made the dead-CSS check report false positives
+    and, worse, would let a deleted rule pass the "has a rule" half on the
+    strength of a comment alone.
+
+    Not a general CSS parser — it only removes comments, which is all the
+    class-name scan needs.
+    """
+    return re.sub(r"/\*.*?\*/", "", body, flags=re.DOTALL)
+
+
 def _strip_jinja_comments(body: str) -> str:
     """Remove every INERT region: ``{# … #}`` comments and ``{% raw %}`` blocks.
 
@@ -393,7 +409,15 @@ def test_release_markup_and_release_css_agree_in_both_trees() -> None:
 
     for css in (LIVE_STATIC / "css" / "artist.css", REBUILT_STATIC / "css" / "artist.css"):
         assert css.is_file(), f"missing {css.relative_to(REPO_ROOT)}"
-        body = _read(css)
+        # ⚠️ COMMENTS ARE STRIPPED FIRST, and both directions need it.
+        #
+        # The scan used to read the raw file, so a comment NAMING a class counted
+        # as a rule for it. That made `dead` report false positives — a comment
+        # explaining that `.release-inline-only` was removed flagged the
+        # stylesheet as styling it — and it made `unstyled` unable to fail at
+        # all, because prose alone could satisfy the "has a rule" half. Only the
+        # CSS itself may count.
+        body = _strip_css_comments(_read(css))
         styled = {m.group(1) for m in re.finditer(r"\.(release-[a-z0-9-]+)", body)}
 
         unstyled = sorted(LAYOUT_CLASSES - styled)

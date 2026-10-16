@@ -106,14 +106,40 @@
 
   const DEFAULT_TYPE = 'full';
 
-  /** Scope → the label, and which families it supports. */
+  /**
+   * Scope → the label, the families it supports, and HOW it dispatches.
+   *
+   * `submit` is the important field:
+   *
+   *   'json' (library)  POST a JSON body to the /api/... endpoints. The page
+   *                     stays put and the sheet reports the result in place.
+   *   'form' (artist/album) POST a real FORM to /scan/<scope>-custom. Those two
+   *                     routes read `request.form`, and they REDIRECT back to
+   *                     the page with a flash message — so the navigation IS
+   *                     the confirmation, and it lands the user on the page that
+   *                     then shows the scan running. Exactly what the pages'
+   *                     own scan toolbars already do.
+   *
+   * ⚠️ `families` is the SAME three for every scope, and that is not laziness:
+   * `/scan/artist-custom` and `/scan/album-custom` both accept the whole
+   * `scan_type` set (full / navidrome / popularity / metadata / singles /
+   * finalise / essentia). The LIBRARY endpoints are the ones that cannot be
+   * scoped, so the form path is checked before the family branches in `run()`.
+   */
   const SCOPES = {
-    library: { label: 'Library', families: ['popularity', 'navidrome', 'essentia'] },
-    // Declared, not wired. Both endpoints exist and take the same body shape the
-    // popularity family does, so wiring them is a `run` function each rather
-    // than a redesign — see the note in _scan_modal.html.
-    artist: { label: 'Artist', families: [], pending: true },
-    album: { label: 'Album', families: [], pending: true },
+    library: { label: 'Library', families: ['popularity', 'navidrome', 'essentia'], submit: 'json' },
+    artist: {
+      label: 'Artist',
+      families: ['popularity', 'navidrome', 'essentia'],
+      submit: 'form',
+      action: '/scan/artist-custom',
+    },
+    album: {
+      label: 'Album',
+      families: ['popularity', 'navidrome', 'essentia'],
+      submit: 'form',
+      action: '/scan/album-custom',
+    },
   };
 
   function esc(value) {
@@ -144,9 +170,38 @@
    */
   function optionApplies(type, option) {
     if (!type) return false;
+
+    // ⚠️ RESTART CANNOT FLOW THROUGH THE TARGETED ENDPOINTS.
+    //
+    // `/scan/artist-custom` and `/scan/album-custom` read `scan_type` and
+    // `force` only. The runner they call takes no restart parameter at all
+    // (`_build_targeted_popularity_kwargs` has none), so posting it would be
+    // read by nobody — the inert control this sheet exists to replace. It is
+    // DISABLED with a reason instead, which is what `syncOptionState` renders.
+    if (_scope === 'artist' || _scope === 'album') {
+      if (option === 'restart') return false;
+    }
+
     if (type.family === 'popularity') return true;   // honours force AND restart
     if (option === 'force' && type.family === 'navidrome') return true;
     return false;
+  }
+
+  /**
+   * WHY an option is disabled, in the control's own title.
+   *
+   * "This scan does not use this option" is true but unhelpful for the one case
+   * a user will actually question: Restart on an artist or album scan, where it
+   * looks like a missing feature rather than a meaningless one.
+   */
+  function optionReason(type, option) {
+    if (!type) return 'Choose a scan type first';
+    if (option === 'restart' && (_scope === 'artist' || _scope === 'album')) {
+      return 'A scan for one artist or album always starts at that target, so '
+        + 'there is nothing to restart from. Use a Library scan to restart a '
+        + 'whole run.';
+    }
+    return `${type.label} does not use this option`;
   }
 
   function renderTypes() {
@@ -209,8 +264,8 @@
     // otherwise it reads as a bug.
     force.closest('.form-check').classList.toggle('opacity-50', !forceApplies);
     restart.closest('.form-check').classList.toggle('opacity-50', !restartApplies);
-    force.title = forceApplies ? '' : `${type ? type.label : 'This scan'} does not use this option`;
-    restart.title = restartApplies ? '' : `${type ? type.label : 'This scan'} does not use this option`;
+    force.title = forceApplies ? '' : optionReason(type, 'force');
+    restart.title = restartApplies ? '' : optionReason(type, 'restart');
 
     // The Navidrome server rescan belongs to the Navidrome type only — it is a
     // different action from the import (rescan WITHOUT importing), and offering
@@ -270,6 +325,47 @@
     });
   }
 
+  /**
+   * Submit a scan for ONE artist or album.
+   *
+   * ⚠️ A real form submit, not a fetch. `/scan/artist-custom` and
+   * `/scan/album-custom` read `request.form` and then REDIRECT back to the page
+   * with a flash message, so the navigation is the confirmation — and it lands
+   * on the page that shows the scan's progress. A fetch would return an opaque
+   * redirect and lose the flash.
+   *
+   * `scan_type` values are the route's own vocabulary (full / navidrome /
+   * popularity / metadata / singles / finalise / essentia), which is why the
+   * type ids above are spelled to match. `restart` is deliberately NOT sent:
+   * the route does not read it (see `optionApplies`).
+   */
+  function submitTargetedScan(type, force) {
+    const scopeMeta = SCOPES[_scope] || {};
+    const action = scopeMeta.action;
+    if (!action) return;
+
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = action;
+    form.style.display = 'none';
+
+    const add = (name, value) => {
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = name;
+      input.value = value;
+      form.appendChild(input);
+    };
+
+    add('scan_type', type.id);
+    add('artist', _context.artist || '');
+    if (_scope === 'album') add('album', _context.album || '');
+    if (force) add('force', '1');
+
+    document.body.appendChild(form);
+    form.submit();
+  }
+
   /** Build and send the run request for the selected type. */
   async function run() {
     const type = selectedType();
@@ -289,8 +385,34 @@
       return;
     }
 
+    // ⚠️ READ THE OPTIONS FIRST. These used to be declared BELOW the targeted
+    // branch, which put them in the temporal dead zone: `submitTargetedScan(type,
+    // force)` threw `ReferenceError: Cannot access 'force' before
+    // initialization` on every artist/album run — before it could submit
+    // anything. Declared above because both branches need them.
     const force = !!(el('scanForceOption') || {}).checked;
     const restart = !!(el('scanRestartOption') || {}).checked;
+
+    // ── Targeted scans dispatch as a FORM, before any family branch ──
+    //
+    // ⚠️ ORDER MATTERS. The family branches below post to the LIBRARY
+    // endpoints (`/api/navidrome/import`, `/api/essentia/run`,
+    // `/api/popularity/run`) and `/api/popularity/run` IGNORES `artist`/`album`
+    // outright — it calls `run_popularity_mode(mode, force, resume_from)` and
+    // never reads the scope. So a targeted scan routed through them would
+    // silently scan the WHOLE LIBRARY. The form endpoints are the only ones
+    // that honour the scope, so they are checked first.
+    if (scopeMeta.submit === 'form') {
+      // The pre-flight gate has to run HERE, not in the busy wrapper below: the
+      // form submit NAVIGATES, so a gate placed after it could never ask — the
+      // page would already be gone.
+      if (global.ScanPreflight && !await global.ScanPreflight.confirmIfRunning({
+        scanName: type.label,
+      })) return;
+
+      submitTargetedScan(type, force);
+      return;   // the page navigates away; nothing below can run
+    }
 
     const withBusy = (global.buttonState && global.buttonState.withBusy)
       ? global.buttonState.withBusy
@@ -386,10 +508,29 @@
 
     renderTypes();
     if (el('scanSheetStatus')) el('scanSheetStatus').textContent = '';
-    // Options start clear: a Force ticked on a previous open would silently
-    // re-scan the world.
-    if (el('scanForceOption')) el('scanForceOption').checked = false;
+
+    // ── `preselect` / `force`: opening the sheet ON a specific job ──
+    //
+    // The hero's "Force Metadata Refresh" opens the sheet already set to
+    // Metadata with Force ticked, because that is a metadata-only action and
+    // making the user re-choose it is the sort of double-entry the sheet exists
+    // to remove.
+    //
+    // ⚠️ ORDER IS LOAD-BEARING: after `renderTypes()` (which writes the checked
+    // attribute) and before `syncOptionState()` (which CLEARS any option the
+    // selected type ignores). Setting these earlier would be overwritten by the
+    // render; setting them last would leave a disabled control ticked, which is
+    // the "implies an option took effect when it did not" failure this sheet
+    // guards against.
+    if (config.preselect && el('scanType-' + config.preselect)) {
+      el('scanType-' + config.preselect).checked = true;
+    }
+
+    // Options start clear unless asked for: a Force ticked on a previous open
+    // would silently re-scan the world.
+    if (el('scanForceOption')) el('scanForceOption').checked = !!config.force;
     if (el('scanRestartOption')) el('scanRestartOption').checked = false;
+    syncOptionState();
 
     if (!sheet && global.bootstrap && global.bootstrap.Offcanvas) {
       sheet = global.bootstrap.Offcanvas.getOrCreateInstance(node);

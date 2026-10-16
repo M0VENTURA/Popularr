@@ -189,10 +189,16 @@
    2. the green "In Library" badge hides — in a library app that is the
       default state; "Missing"/"Upcoming" keep theirs, because they are the
       exceptions;
-   3. the per-row action buttons collapse into the one ⋮ dropdown
-      (.release-inline-only hides — the ⋮ itself is `d-md-none` in
-      components/_release_section.html) and that ⋮ is a 44x44 target.
-   ─────────────────────────────────────────────────────────────────────────── */
+   3. the row's three controls (primary / expand / ⋮) are all 44x44 targets.
+
+   ⚠️ (3) IS NOW LOAD-BEARING FOR A DIFFERENT REASON. The row used to be
+   [inline buttons][⋮] with the inline copies hidden here; it is now
+   [primary][expand][⋮] at every width, so there is no `.release-inline-only`
+   to hide — that rule is gone. What remains necessary is the SIZE: popularr.css
+   exempts `btn-sm` from its app-wide 44px floor, so without this block the
+   three controls would sit at Bootstrap's ~24px on the surface where a miss is
+   most likely.
+   ───────────────────────────────────────────────────────────────────────── */
 @media (max-width: 767.98px) {
   .release-jump-bar {
     flex-wrap: nowrap;
@@ -205,8 +211,11 @@
 
   .release-badge-library { display: none; }
 
-  .release-inline-only { display: none; }
-  .release-actions-overflow > .btn { min-width: 44px; min-height: 44px; }
+  .release-actions > .btn,
+  .release-actions-overflow > .btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
 }
 
 /* ── About sheet ─────────────────────────────────────────────────────────────

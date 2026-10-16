@@ -41,11 +41,25 @@ MODE_KEY = TEST_SITE / "templates" / "components" / "_scan_mode_key.html"
 #: Every place a scan type can be chosen.  A legend that reaches only one of
 #: them is worse than none — the reader learns the rule exists somewhere and
 #: cannot find it where they are.
+#:
+#: ⚠️ `components/_release_section.html` WAS LISTED HERE AND IS NOT ANY MORE.
+#: It rendered a scan-type <select> once; it now renders one "Scan release" menu
+#: item that opens the shared scan sheet, so it offers no type choice of its own
+#: and has no legend to reach. Its only "route" to the legend was a `{% raw %}`
+#: dead-snapshot of the file's old body — inert markup that could not render, so
+#: the check was passing on text that was not part of the page. That snapshot has
+#: been deleted, which is what surfaced this.
+#:
+#: The replacement entry is the ARTIST PAGE, which is where those rows live now:
+#: it includes the sheet, which includes the legend, so the reader who taps
+#: "Scan release" can still find out what Finalise does. Dropping the old entry
+#: without adding this one would have reduced the test's coverage to nothing on
+#: the artist page.
 SELECTOR_SITES = (
     "templates/components/_scan_selector.html",
     "templates/Pages/dashboard.html",
     "templates/Pages/artist_detail.html",
-    "templates/components/_release_section.html",
+    "templates/Pages/artist_detail_v2.html",
 )
 
 
@@ -53,9 +67,21 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-# ---------------------------------------------------------------------------
-# 1. The scan-mode key
-# ---------------------------------------------------------------------------
+#: An actual Jinja include DIRECTIVE, capturing the target path.
+#:
+#: ⚠️ Required, because the reachability check below used to look for the bare
+#: filename. `_scan_modal.html` NAMES `_scan_mode_key.html` in its docstring
+#: ("the authoritative long form is ``_scan_mode_key.html``, included below"),
+#: so a check for the plain filename was satisfied by that PROSE — removing the
+#: real include left the guard passing. Verified by mutation, which escaped.
+#: Matching the directive cannot be satisfied by prose, and matching on the
+#: BASENAME tolerates the path being written differently.
+_INCLUDE_RE = re.compile(r"\{%\s*include\s+['\"]([^'\"]+\.html)['\"]")
+
+
+def _included_basenames(source: str) -> set[str]:
+    """The basenames of every template this source INCLUDES (not mentions)."""
+    return {Path(name).name for name in _INCLUDE_RE.findall(source)}
 
 
 def _strip_js_comments(source: str) -> str:
@@ -125,16 +151,24 @@ class TestTheScanModeKeySaysWhatEachModeDoes:
             assert path.is_file(), rel
             source = _read(path)
 
-            if "{% include 'components/_scan_mode_key.html' %}" in source:
+            # A DIRECT include, matched as a directive.
+            if "_scan_mode_key.html" in _included_basenames(source):
                 continue
 
             # Not a direct include — look one level down, at the components this
             # template includes. That is where a shared sheet puts it.
-            nested = re.findall(r"\{%\s*include\s+'([^']+\.html)'", source)
+            #
+            # ⚠️ Matched as an INCLUDE too, not as a bare filename: the sheet's
+            # docstring names the mode key, so `"_scan_mode_key.html" in source`
+            # passed with the include removed — the guard was reading prose.
+            # Verified by mutation.
+            nested = _INCLUDE_RE.findall(source)
             reachable = False
             for sub in nested:
                 candidate = TEST_SITE / rel.split("/")[0] / sub
-                if candidate.is_file() and "_scan_mode_key.html" in _read(candidate):
+                if candidate.is_file() and "_scan_mode_key.html" in _included_basenames(
+                    _read(candidate)
+                ):
                     reachable = True
                     break
 

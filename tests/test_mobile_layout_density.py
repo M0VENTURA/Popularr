@@ -309,7 +309,23 @@ class TestTheBiographyIsClamped:
 
 
 class TestTheReleaseRowsShedChromeOnPhones:
-    def test_the_phone_block_covers_the_chips_badge_and_actions(self):
+    """The row is [primary][expand][⋮] at EVERY width, sized for a thumb on a phone.
+
+    ⚠️ THIS SUPERSEDES the phone-only ⋮. The row used to render its secondary
+    actions inline and hide them behind a `d-md-none` dropdown on phones, with
+    the inline copies marked `.release-inline-only`. The documented design is
+    now one primary action plus a ⋮ menu on every screen, so there is nothing
+    to hide and no inline variant to mark.
+
+    What still matters, and is asserted here:
+      * the ⋮ carries the actions the shared module binds, by CLASS;
+      * each of those classes appears exactly ONCE, so `querySelector` finds
+        the menu item and no forwarding layer is needed;
+      * the row's controls are 44px targets on a phone, which is NOT automatic —
+        popularr.css exempts `btn-sm` from its app-wide minimum.
+    """
+
+    def test_the_phone_block_covers_the_chips_badge_and_targets(self):
         block = _phone_block(_read(ARTIST_CSS), ".release-badge-library")
 
         # 1. One swipeable chip row (the old rule only started below 576px).
@@ -317,9 +333,14 @@ class TestTheReleaseRowsShedChromeOnPhones:
         assert "scroll-snap-type" in block
         # 2. The green badge hides; only the library variant is targeted.
         assert ".release-badge-library { display: none; }" in block
-        # 3. Inline buttons hide, the ⋮ grows to the touch minimum.
-        assert ".release-inline-only { display: none; }" in block
-        assert ".release-actions-overflow > .btn" in block and "min-width: 44px" in block
+        # 3. ⭐ The row's controls grow to the touch minimum. This is the rule the
+        #    `btn-sm` exemption in popularr.css makes NECESSARY: without it the
+        #    three controls sit at Bootstrap's ~24px.
+        assert ".release-actions > .btn" in block, (
+            "the primary action is not sized for a thumb"
+        )
+        assert ".release-actions-overflow > .btn" in block
+        assert block.count("min-width: 44px") >= 1 and "min-height: 44px" in block
 
     def test_the_component_marks_the_library_badge(self):
         html = _read(RELEASE_COMPONENT)
@@ -333,42 +354,72 @@ class TestTheReleaseRowsShedChromeOnPhones:
             "the one badge that carries information"
         )
 
-    def test_the_component_has_both_action_variants(self):
+    def test_the_menu_is_not_phone_only(self):
+        """⭐ The ⋮ is the design, not a phone fallback.
+
+        `d-md-none` would hide it on desktop and leave the secondary actions
+        unreachable there — they no longer have inline copies.
+        """
         html = _read(RELEASE_COMPONENT)
 
         assert "release-actions-overflow" in html
-        assert 'class="dropdown release-actions-overflow d-md-none"' in html, (
-            "the ⋮ menu must be phone-only (d-md-none) so desktop keeps its "
-            "inline buttons"
+        assert 'class="dropdown release-actions-overflow"' in html, (
+            "the ⋮ must be rendered at every width"
         )
-        assert html.count("release-inline-only") >= 3, (
-            "every inline action is marked, or one button would show twice"
+        assert "d-md-none" not in html, (
+            "a breakpoint class on the menu would strand the secondary actions "
+            "at the widths it hides"
         )
 
-    @pytest.mark.parametrize("variant,label", [
-        ("release-open-btn", "Open album"),
+    def test_the_inline_variant_is_gone(self):
+        """CONTROL: the old mechanism must not linger, or it would double-render.
+
+        `.release-inline-only` was how the inline copies were hidden on phones.
+        With the actions now living ONLY in the menu, an inline copy would show
+        twice and the forwarder would recurse.
+        """
+        html = _read(RELEASE_COMPONENT)
+        assert "release-inline-only" not in html
+
+    @pytest.mark.parametrize("action,label", [
         ("release-edit-btn", "Edit release"),
-        ("release-toggle-btn", "Show tracklist"),
+        ("release-scan-btn", "Scan release"),
+        ("release-mb-search-btn", "Search for a release"),
     ])
-    def test_the_dropdown_carries_the_owned_row_actions(self, variant, label):
-        """Same CLASSES and data attributes as the inline copies — that is
-        what lets one set of bindings serve both."""
+    def test_the_menu_actions_are_present_and_unique(self, action, label):
+        """ONE element per class — that is what removes the forwarding layer.
+
+        The old markup had two of each (inline + menu item) and a handler that
+        forwarded a menu click to the inline twin. `querySelector` returns the
+        FIRST match, so with one element the menu item IS the bound node.
+        """
         html = _read(RELEASE_COMPONENT)
         dropdown = html[html.index("release-actions-overflow"):]
 
-        assert variant in dropdown, f"{variant} missing from the ⋮ menu"
-        assert label in dropdown
+        assert action in dropdown, f"{action} missing from the ⋮ menu"
+        assert label in dropdown, f"the menu item for {action} has no label"
+        assert html.count(action) == 1, (
+            f"{action} appears {html.count(action)} times; a second copy would "
+            "leave the first bound and the second dead"
+        )
 
-    @pytest.mark.parametrize("variant,label", [
-        ("release-import-btn", "Import release"),
-        ("release-mb-search-btn", "Search MusicBrainz"),
-    ])
-    def test_the_dropdown_carries_the_missing_row_actions(self, variant, label):
+    @pytest.mark.parametrize("primary", ["release-open-btn", "release-import-btn"])
+    def test_the_primary_action_is_outside_the_menu(self, primary):
+        """⭐ The one button the brief asks for, and it must be the VISIBLE one.
+
+        Asserted by POSITION: it has to appear BEFORE the ⋮ menu in the row, or
+        "a button to open" would be buried in the overflow.
+        """
         html = _read(RELEASE_COMPONENT)
-        dropdown = html[html.index("release-actions-overflow"):]
+        row = html[html.index('class="release-actions"'):]
+        row = row[: row.index("release-tracklist")]
 
-        assert variant in dropdown
-        assert label in dropdown
+        assert primary in row
+        assert row.index(primary) < row.index("release-actions-overflow"), (
+            f"{primary} is rendered after the ⋮ menu — it is the primary action "
+            "and must sit beside it, not inside it"
+        )
+        assert html.count(primary) == 1
 
     def test_the_dropdown_button_is_a_target(self):
         html = _read(RELEASE_COMPONENT)
@@ -378,93 +429,85 @@ class TestTheReleaseRowsShedChromeOnPhones:
 
 
 # ===========================================================================
-# 5. The ⋮ menu is wired from a test_site-only file, by FORWARDING
+# ===========================================================================
+# 5. The ⋮ menu needs NO forwarding layer
 # ===========================================================================
 
 
-class TestTheOverflowMenuIsForwarded:
-    """The shared release module must stay untouched.
+class TestTheOverflowMenuNeedsNoForwarding:
+    """The row renders each action ONCE, so the shared module binds it directly.
 
-    ``artist-releases.js`` is served by BOTH trees and pinned byte-identical
-    by ``test_shared_module_copies_do_not_drift``, so wiring the new phone
-    menu from inside it would either drift the trees apart or force a live-tree
-    edit — and this change is scoped to ``test_site``.
+    ⚠️ THIS REPLACES the old "forward a ⋮ click to an inline twin" design.
 
-    Instead ``artist-detail-extras.js`` (test_site-only, already loaded on the
-    artist page) FORWARDS a dropdown click to the matching INLINE button, which
-    the shared module has already bound. Same classes, same data attributes,
-    one set of bindings.
+    That indirection existed for two reasons, and BOTH are gone:
+
+      * the ⋮ was a PHONE-ONLY addition, so desktop kept inline buttons that
+        the shared module had already bound — it now renders at every width;
+      * there were TWO elements per action (inline + menu item), and
+        `querySelector` returns the FIRST, so the menu item could not be bound
+        without stealing the inline copy's listener — there is now one each.
+
+    The forwarder was left in place as a no-op for a while (its
+    `.release-inline-only` lookup could never match, so it returned early every
+    time), which is worse than absent: a handler that silently does nothing reads
+    as working wiring. These tests pin its REMOVAL, because re-introducing it
+    alongside the new markup would double-fire every menu action.
     """
 
-    def test_the_shared_module_is_untouched(self):
-        """CONTROL — the reason for the forwarding indirection. Both copies
-        must remain identical, and neither may carry the mobile wiring."""
+    def test_the_extras_module_has_no_forwarder(self):
+        js = _read(EXTRAS_JS)
+
+        assert ".release-actions-overflow .dropdown-item" not in js, (
+            "the forwarder is back; with one element per action it would "
+            "double-fire (the menu item is already bound)"
+        )
+        assert "twin.click()" not in js
+        assert "'.release-inline-only.' + inlineClass" not in js
+
+    def test_the_shared_module_binds_the_menu_items(self):
+        """The binding lives where the buttons are, in BOTH trees."""
+        for path in SHARED_RELEASE_JS_COPIES:
+            body = _read(path)
+            assert "release-edit-btn" in body, path.name
+            assert "release-scan-btn" in body, (
+                f"{path.name}: the Scan action is not bound"
+            )
+            assert "release-mb-search-btn" in body, path.name
+
+    def test_the_shared_module_feature_detects_the_scan_sheet(self):
+        """⚠️ `ScanModal` is not loaded by every page that renders these rows.
+
+        `pages/artist_detail_v2.html` includes the sheet in both trees, but the
+        legacy `pages/artist_detail.html` imports the release macro and does not.
+        A bare call would throw there and take the whole row's wiring with it —
+        so the module checks, and REMOVES the item when the sheet is absent
+        rather than leaving a menu entry that does nothing.
+        """
+        for path in SHARED_RELEASE_JS_COPIES:
+            body = _read(path)
+            assert "global.ScanModal" in body, f"{path.name} calls the sheet unguarded"
+            assert "scanItem || scanBtn).remove()" in body, (
+                f"{path.name}: an unopenable Scan item is left in the menu"
+            )
+
+    def test_the_shared_copies_stay_identical(self):
+        """CONTROL — the change above had to be applied to BOTH copies.
+
+        ⚠️ Compared from the first `(function`, i.e. the module BODY. The two
+        files carry different header comments naming their own path, so a whole
+        -file compare fails on that alone — which is exactly why the canonical
+        guard (`test_artist_page_contract.py::test_shared_module_copies_do_not_drift`)
+        strips the header before comparing. This mirrors it rather than
+        duplicating its helper, and it is the header-INSENSITIVE half that
+        matters here: both trees must run the same code.
+        """
         bodies = []
         for path in SHARED_RELEASE_JS_COPIES:
-            assert path.is_file(), f"{path.relative_to(REPO_ROOT)} is missing"
             body = _read(path)
-            assert "release-actions-overflow" not in body, (
-                f"{path.relative_to(REPO_ROOT)} was changed for the phone menu; "
-                "the shared module must stay byte-identical across trees"
-            )
-            bodies.append(body)
+            bodies.append(body[body.index("(function"):])
 
-    def test_the_extras_module_forwards_dropdown_clicks(self):
-        js = _read(EXTRAS_JS)
-
-        assert ".release-actions-overflow .dropdown-item" in js, (
-            "the delegated handler must target the ⋮ menu's items"
-        )
-        assert "closest('.release-item')" in js, (
-            "the twin lives inside the SAME release row"
+        assert bodies[0] == bodies[1], (
+            "the two copies of artist-releases.js have drifted; both trees serve "
+            "this module, so a difference appears in only one mode"
         )
 
-    def test_it_looks_up_the_inline_twin_by_class(self):
-        """Each ⋮ item carries the same class as its inline twin — that is the
-        contract that makes the lookup possible."""
-        js = _read(EXTRAS_JS)
-
-        for cls in (
-            "release-open-btn",
-            "release-edit-btn",
-            "release-import-btn",
-            "release-mb-search-btn",
-            "release-toggle-btn",
-        ):
-            assert cls in js, f"the forwarding list omits {cls}"
-
-        assert "'.release-inline-only.' + inlineClass" in js, (
-            "the twin is the INLINE copy — without .release-inline-only the "
-            "lookup would match the dropdown item itself and recurse"
-        )
-
-    def test_it_clicks_the_twin(self):
-        js = _read(EXTRAS_JS)
-
-        assert "twin.click()" in js, (
-            "forwarding is the whole point: the shared module's bindings do "
-            "the work"
-        )
-        assert "e.preventDefault()" in js, (
-            "the <a> twin would otherwise navigate AND let the dropdown's own "
-            "href through"
-        )
-
-    def test_the_forwarding_is_explained(self):
-        """A reader must not 'simplify' this into a direct call — the handlers
-        are module-private, and importing them would touch the shared file."""
-        js = _read(EXTRAS_JS)
-
-        assert "artist-releases.js" in js
-        assert "byte-identical" in js or "test_shared_module_copies_do_not_drift" in js, (
-            "the comment must name the constraint that forces the indirection"
-        )
-
-    def test_the_forwarding_survives_a_missing_twin(self):
-        """CONTROL — a row without the inline copy must not throw; the handler
-        returns quietly."""
-        js = _read(EXTRAS_JS)
-        handler = js[js.index(".release-actions-overflow .dropdown-item"):]
-        handler = handler[: handler.index("});")]
-
-        assert "if (!twin) return;" in handler

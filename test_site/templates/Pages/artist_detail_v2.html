@@ -165,48 +165,46 @@
         </div>
       </div>
 
-      <form id="artistScanForm"
-            action="{{ url_for('scans.scan_artist_custom') }}"
-            method="post"
-            data-scan-preflight
-            data-scan-preflight-name="Artist Scan"
-            class="d-flex align-items-center gap-2 mb-3 flex-wrap scan-toolbar">
-        <input type="hidden" name="artist" value="{{ artist_name }}">
+      {#
+        ⭐ THE ACTION ROW: [▶ PLAY TOP TRACKS] [⚡ Scan] [⋮]
 
-        {# The partial emits the scan-type <select> AND the Restart checkbox.
-           `ignore missing` keeps the page rendering in a tree without it. #}
-        <div class="d-flex align-items-center gap-2">
-          {% include 'components/_scan_selector.html' ignore missing %}
-        </div>
+        This replaced an inline `scan-toolbar` form (a scan-type <select> + Run +
+        Force + Actions ⋮) stacked ABOVE the Play button. That toolbar was a
+        second scan UI for a question the shared scan sheet already answers —
+        seven types with descriptions, Force and Restart with explanations, and
+        the mode key — and it cost a full row of hero height to show one
+        dropdown.
 
-        <button type="submit" class="btn btn-warning btn-sm" title="Run Scan">
-          <i class="bi bi-lightning-fill"></i> <span class="d-none d-sm-inline">Run</span>
+        The sheet opens in the ARTIST scope, so every type here runs against
+        this artist instead of the whole library.
+      #}
+      <div class="d-flex align-items-stretch gap-2 flex-wrap">
+        <button type="button"
+                class="btn btn-success btn-lg fw-bold flex-grow-1 d-flex align-items-center justify-content-center gap-2"
+                onclick="playArtistTopTracks()">
+          <i class="bi bi-play-fill fs-4" aria-hidden="true"></i> PLAY TOP TRACKS
         </button>
 
-        <div class="form-check form-check-inline m-0" title="Force full rescan (ignore change detection)">
-          <input class="form-check-input" type="checkbox" id="artistForceScan" name="force" value="1">
-          <label class="form-check-label" for="artistForceScan">Force</label>
-        </div>
+        <button type="button" class="btn btn-success btn-lg flex-shrink-0"
+                onclick="openArtistScanSheet()"
+                title="Scan this artist">
+          <i class="bi bi-lightning-charge-fill" aria-hidden="true"></i> <span class="d-none d-sm-inline">Scan</span>
+        </button>
 
-        <div class="dropdown ms-auto">
-          <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button"
-                  data-bs-toggle="dropdown" aria-expanded="false" title="More actions">
-            <i class="bi bi-three-dots-vertical"></i> <span class="d-none d-sm-inline">Actions</span>
+        <div class="dropdown flex-shrink-0">
+          <button class="btn btn-outline-secondary btn-lg dropdown-toggle" type="button"
+                  data-bs-toggle="dropdown" aria-expanded="false" aria-label="More artist actions" title="More actions">
+            <i class="bi bi-three-dots-vertical" aria-hidden="true"></i>
           </button>
           <ul class="dropdown-menu dropdown-menu-end">
             <li><a class="dropdown-item" href="{{ url_for('ui.artist_corrections', name=artist_name) }}"><i class="bi bi-wrench me-2"></i> Corrections</a></li>
             <li><a class="dropdown-item" href="{{ url_for('ui.artist_genre_management', name=artist_name) }}"><i class="bi bi-tags me-2"></i> Genre Management</a></li>
-            <li><a class="dropdown-item" href="javascript:void(0)" onclick="openEditArtistIdsModal()"><i class="bi bi-pencil me-2"></i> Edit External IDs</a></li>            <li><a class="dropdown-item" href="{{ url_for('artist.api_artist_popularity_report', artist=artist_name) }}" title="CSV of every track: Last.fm + ListenBrainz listens, source scores, combined score and stars — most popular first"><i class="bi bi-bar-chart-line me-2"></i> Download Popularity Report</a></li>            <li><hr class="dropdown-divider"></li>
+            <li><a class="dropdown-item" href="javascript:void(0)" onclick="openEditArtistIdsModal()"><i class="bi bi-pencil me-2"></i> Edit External IDs</a></li>
+            <li><a class="dropdown-item" href="{{ url_for('artist.api_artist_popularity_report', artist=artist_name) }}" title="CSV of every track: Last.fm + ListenBrainz listens, source scores, combined score and stars — most popular first"><i class="bi bi-bar-chart-line me-2"></i> Download Popularity Report</a></li>
+            <li><hr class="dropdown-divider"></li>
             <li><button class="dropdown-item" type="button" onclick="forceArtistMetadataRefresh()"><i class="bi bi-arrow-repeat me-2"></i> Force Metadata Refresh</button></li>
           </ul>
         </div>
-      </form>
-
-      <button type="button"
-              class="btn btn-success btn-lg w-100 fw-bold d-flex align-items-center justify-content-center gap-2"
-              onclick="playArtistTopTracks()">
-        <i class="bi bi-play-fill fs-4"></i> PLAY TOP TRACKS
-      </button>
     </div>
   </div>
 
@@ -504,6 +502,11 @@
    more" under the hero biography. Included AFTER the artist modals so its
    `openEditArtistIdsModal()` button targets a modal that already exists. #}
 {% include "components/modals/_artist_about_modal.html" %}
+{# The shared scan sheet, in the ARTIST scope: the hero's Scan button and every
+   release row's "Scan release" action open this one sheet with a different
+   `_context`, so there is one scan UI rather than a toolbar plus two menus. #}
+{% set scan_scope_kind = 'artist' %}
+{% include 'components/_scan_modal.html' %}
 {% endblock %}
 
 {% block scripts %}
@@ -516,6 +519,7 @@
 
 <script src="{{ versioned_static('js/services/genres.js') }}"></script>
 <script src="{{ versioned_static('js/services/scan-preflight.js') }}"></script>
+<script src="{{ versioned_static('js/ui/scan-modal.js') }}"></script>
 <script src="{{ versioned_static('js/pages/artist.js') }}"></script>
 <script src="{{ versioned_static('js/pages/artist-detail-extras.js') }}"></script>
 <script src="{{ versioned_static('js/pages/artist-releases.js') }}"></script>

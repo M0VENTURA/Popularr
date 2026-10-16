@@ -179,19 +179,96 @@ class TestModuleIsLoaded:
         assert "/api/scan-progress" in code
 
 
-class TestArtistFormIsGuarded:
-    """The artist form is server-rendered, so it opts in declaratively."""
+class TestArtistPageScansThroughTheSheet:
+    """⚠️ THE ARTIST PAGE'S SCAN ENTRY POINT MOVED, so this test moved with it.
 
-    @pytest.mark.parametrize("template", [
+    It used to be a server-rendered `<form id="artistScanForm"
+    data-scan-preflight>` — a scan-type <select> plus Run and Force in the hero.
+    That toolbar was replaced by the action row (Play / Scan / ⋮), whose Scan
+    button opens the SHARED scan sheet, so there is no per-page form to opt in
+    and no `artistScanForm` to find.
+
+    **The property is unchanged: a scan started from the artist page still passes
+    the pre-flight gate before it starts.** Only the mechanism moved — from a
+    declarative attribute on a form to the sheet's own `run()`, which calls
+    `confirmIfRunning` before either dispatch (the JSON path and the targeted
+    FORM path). Asserting the old attribute would now pass on prose alone, so it
+    is asserted as "the button reaches the sheet, and the sheet gates".
+    """
+
+    ARTIST_TEMPLATES = [
         "test_site/templates/Pages/artist_detail_v2.html",
         "templates/pages/artist_detail_v2.html",
-    ])
-    def test_scan_form_carries_the_attribute(self, template):
+    ]
+    ARTIST_MODULES = [
+        "test_site/static/js/pages/artist-detail-extras.js",
+        "static/js/artist-page.js",
+    ]
+
+    @pytest.mark.parametrize("template", ARTIST_TEMPLATES)
+    def test_the_hero_scan_button_opens_the_sheet(self, template):
         text = (REPO_ROOT / template).read_text(encoding="utf-8")
-        # The attribute must be ON the scan form, not merely present somewhere.
-        start = text.index("artistScanForm")
-        window = text[start:start + 400]
-        assert "data-scan-preflight" in window, f"attribute missing on the form in {template}"
+
+        assert "openArtistScanSheet()" in text, (
+            f"{template} has no Scan control, so the artist page cannot start a scan"
+        )
+        assert "_scan_modal.html" in text, (
+            f"{template} does not include the scan sheet the button opens"
+        )
+
+    @pytest.mark.parametrize("template", ARTIST_TEMPLATES)
+    def test_the_old_inline_toolbar_is_gone(self, template):
+        """CONTROL: two scan UIs on one page is the problem the sheet removes."""
+        text = (REPO_ROOT / template).read_text(encoding="utf-8")
+
+        assert "artistScanForm" not in text
+        assert "artistForceScan" not in text, (
+            "the old Force checkbox is back — its force flag belongs in the "
+            "sheet's Advanced options now"
+        )
+
+    @pytest.mark.parametrize("module", ARTIST_MODULES)
+    def test_the_module_delegates_to_the_sheet(self, module):
+        code = _code_only((REPO_ROOT / module).read_text(encoding="utf-8"))
+
+        assert "ScanModal.open" in code, f"{module} does not open the sheet"
+        assert "scope: 'artist'" in code, (
+            f"{module} opens the sheet without the artist scope, so Run would "
+            "scan the whole library"
+        )
+
+    @pytest.mark.parametrize("sheet_js", [
+        "test_site/static/js/ui/scan-modal.js",
+        "static/js/ui/scan-modal.js",
+    ])
+    def test_the_sheet_gates_both_dispatch_paths(self, sheet_js):
+        """⭐ The inherited guard. The sheet must gate the FORM path as well as
+        the JSON one — the targeted branch returns early, so a gate placed only
+        in the busy wrapper would never run for an artist scan.
+
+        ⚠️ BOTH COPIES. The sheet is served by both trees, and this check used to
+        read only the rebuilt one — so a change to the LIVE copy's dispatch order
+        went unnoticed. Verified by mutation, which escaped before this was
+        parametrised.
+        """
+        code = _code_only((REPO_ROOT / sheet_js).read_text(encoding="utf-8"))
+
+        submit = code[code.index("function submitTargetedScan"):]
+        submit = submit[: submit.index("function run(")]
+        assert "confirmIfRunning" not in submit, (
+            "the gate belongs in run(), before the branch — not inside the "
+            "helper that builds the form"
+        )
+
+        run = code[code.index("async function run("):]
+        run = run[: run.index("withBusy")]
+        assert "confirmIfRunning" in run, (
+            "the targeted dispatch returns before the busy wrapper, so the gate "
+            "must be in the branch itself"
+        )
+        assert run.index("confirmIfRunning") < run.index("submitTargetedScan"), (
+            "the gate must run BEFORE the form is submitted"
+        )
 
     @pytest.mark.parametrize("module", MODULES)
     def test_module_auto_attaches_declared_forms(self, module):
@@ -316,10 +393,30 @@ class TestJSEntryPointsCallTheGate:
         "test_site/static/js/pages/artist-detail-extras.js",
         "static/js/artist-page.js",
     ])
-    def test_metadata_refresh_is_gated(self, js):
-        """`form.submit()` bypasses listeners, so this path needs its own call."""
+    def test_metadata_refresh_delegates_to_the_sheet(self, js):
+        """⚠️ This replaces the direct-call assertion, because the PATH changed.
+
+        `forceArtistMetadataRefresh` used to find `#artistScanForm`, set the
+        select to metadata and `form.submit()` — bypassing submit listeners, so
+        it had to call the gate itself. That form is gone; the function now opens
+        the sheet with Metadata preselected, and the SHEET calls the gate. So the
+        guard is still made, one layer down, once rather than twice.
+        """
         code = _code_only((REPO_ROOT / js).read_text(encoding="utf-8"))
-        assert "confirmIfRunning" in code, f"{js} does not gate the metadata refresh"
+
+        assert "preselect: 'metadata'" in code, (
+            f"{js} does not open the sheet in metadata mode — the refresh would "
+            "ask the user to choose a type they already chose"
+        )
+        assert "force: true" in code, (
+            f"{js}: a Force Metadata Refresh must arrive with Force ticked"
+        )
+        assert "artistScanForm" not in code, (
+            f"{js} still targets the removed form"
+        )
+        assert "confirmIfRunning" not in code, (
+            f"{js} gates as well as the sheet, so the user would be prompted twice"
+        )
 
 
 class TestLabels:

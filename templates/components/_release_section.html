@@ -139,17 +139,64 @@
       {%- endif %}
       <div class="release-sub text-muted small">{{ year or '—' }}</div>
     </div>
+    {#
+      ⭐ ONE PRIMARY ACTION PLUS A ⋮ MENU.
+
+      The row used to carry 2–3 icon buttons in a cluster, which on a phone were
+      three 24px targets side by side — constant mis-taps — and which said
+      nothing about which was the primary action. Now:
+
+        Library  → [Open]      then ⋮ → Edit release, Scan release
+        Upcoming → (no action) then ⋮ → (none — nothing to download yet)
+        Missing  → [Download]  then ⋮ → Search for a release
+
+      Everything the ⋮ holds carries the SAME class it had as an inline button,
+      because `artist-releases.js` binds those class names. There is exactly ONE
+      element per class now (the inline copies are gone), so `querySelector`
+      finds the menu item itself and NO forwarding layer is needed.
+
+      ⚠️ `event.stopPropagation()` on the wrapper is load-bearing: without it a
+      click on any button would ALSO toggle the tracklist, because the whole
+      summary is the expand control.
+    #}
     <div class="release-actions" onclick="event.stopPropagation();">
       {% if not is_missing %}
         <a class="btn btn-sm btn-outline-secondary release-open-btn"
            href="/album/{{ artist_name|path_segment }}/{{ title|path_segment }}{% if year %}/{{ year }}{% endif %}"
-           title="Open album"><i class="bi bi-box-arrow-up-right"></i></a>
-        <button type="button" class="btn btn-sm btn-outline-secondary release-edit-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-rgid="{{ rgid|e }}" data-year="{{ year|e }}" title="Edit release"><i class="bi bi-pencil"></i></button>
-      {% else %}
-        <button type="button" class="btn btn-sm btn-outline-success release-import-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-release-id="{{ album.release_id|e }}" title="Import release"><i class="bi bi-download"></i></button>
-        <button type="button" class="btn btn-sm btn-outline-info release-mb-search-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" title="Search MusicBrainz"><i class="bi bi-search"></i></button>
+           title="Open album"><i class="bi bi-box-arrow-up-right" aria-hidden="true"></i><span class="d-none d-sm-inline ms-1">Open</span></a>
+      {% elif not is_upcoming %}
+        <button type="button" class="btn btn-sm btn-outline-success release-import-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-release-id="{{ album.release_id|e }}" title="Download this release"><i class="bi bi-download" aria-hidden="true"></i><span class="d-none d-sm-inline ms-1">Download</span></button>
       {% endif %}
-      <button type="button" class="btn btn-sm btn-outline-info release-toggle-btn" aria-expanded="false" title="Show tracklist"><i class="bi bi-chevron-down"></i></button>
+
+      {#-
+        The expand control stays a real button: the row summary is also a
+        toggle (and is keyboard-reachable), but a chevron is the affordance that
+        says the row expands at all. An unreleased album has no tracklist, so it
+        gets no expander.
+      -#}
+      {% if not (is_missing and is_upcoming) %}
+      <button type="button" class="btn btn-sm btn-outline-info release-toggle-btn" aria-expanded="false" title="Show tracklist"><i class="bi bi-chevron-down" aria-hidden="true"></i><span class="visually-hidden">Show tracklist</span></button>
+      {% endif %}
+
+      {#-
+        The ⋮ menu. Rendered for library and missing rows alike, at EVERY
+        width — it is the design, not a phone fallback — but omitted for an
+        unreleased album, which has neither a tracklist to expand nor anything
+        to edit or download.
+      -#}
+      {% if not (is_missing and is_upcoming) %}
+      <div class="dropdown release-actions-overflow">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="dropdown" aria-expanded="false" aria-label="More release actions" title="More actions"><i class="bi bi-three-dots-vertical" aria-hidden="true"></i></button>
+        <ul class="dropdown-menu dropdown-menu-end">
+          {% if not is_missing %}
+          <li><button type="button" class="dropdown-item release-edit-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-rgid="{{ rgid|e }}" data-year="{{ year|e }}"><i class="bi bi-pencil me-2" aria-hidden="true"></i> Edit release</button></li>
+          <li><button type="button" class="dropdown-item release-scan-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}"><i class="bi bi-lightning-charge me-2" aria-hidden="true"></i> Scan release</button></li>
+          {% else %}
+          <li><button type="button" class="dropdown-item release-mb-search-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}"><i class="bi bi-search me-2" aria-hidden="true"></i> Search for a release</button></li>
+          {% endif %}
+        </ul>
+      </div>
+      {% endif %}
     </div>
   </div>
   <div class="release-tracklist" style="display:none;"><div class="release-tracklist-content pt-2"></div></div>
