@@ -210,10 +210,15 @@ class TestCompilationIsRatedOnTheTrackArtist:
         """Each track is compared against ITS OWN artist, not the album pool."""
         from services.popularity.stages import finalise_stage as fs
 
-        calls: list[str] = []
+        calls: list[tuple[str, str | None]] = []
 
-        def _fake_scores(track_artist, scan_results):
-            calls.append(track_artist)
+        # ⚠️ ``exclude_album`` is keyword-ONLY on the real function. A fake with
+        # the old two-argument signature raised TypeError inside the album's
+        # try/except, so the album finalisation silently FAILED and this test
+        # asserted on an empty call list — it was passing its own failure off as
+        # a missing catalogue.
+        def _fake_scores(track_artist, scan_results, *, exclude_album=None):
+            calls.append((track_artist, exclude_album))
             return [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
 
         monkeypatch.setattr(fs, "compute_track_artist_scores", _fake_scores)
@@ -232,13 +237,19 @@ class TestCompilationIsRatedOnTheTrackArtist:
             is_va_compilation=True,
         )
 
+        credited = {artist for artist, _album in calls}
+
         # One lookup per DISTINCT credited artist.
         assert calls, "no per-track-artist catalogue was built"
-        assert "Various Artists" not in calls, (
+        assert "Various Artists" not in credited, (
             "the compilation's shared album artist must not be used as the "
             f"rating catalogue (got {calls})"
         )
-        assert "P.O.D." in calls and "Muse" in calls
+        assert "P.O.D." in credited and "Muse" in credited
+
+        # ⭐ And the album UNDER RATING is kept out of its own reference: a
+        # best-of must not set the distribution it is then measured against.
+        assert {album for _artist, album in calls} == {"Little Nicky"}, calls
 
     def test_the_scan_header_declares_the_compilation_basis(self):
         """The log suffix the user showed as missing."""

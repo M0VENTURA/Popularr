@@ -43,22 +43,75 @@ class _FakeTags(dict):
                 del self[k]
 
 
+class _RecordingTags(dict):
+    """A tag object that records every frame the writer adds.
+
+    ⚠️ ``add`` must cope with BOTH kinds of frame the writer uses: ``TXXX``
+    frames carry ``desc`` (the name these tests assert on), while text frames
+    like ``TIT2`` carry only ``FrameID``. Keying on ``desc`` alone raised
+    AttributeError — and these tests never noticed, because a NameError on the
+    line above killed the writer's primary path, so ``add`` was never reached
+    with a text frame. Fixing that bug exposed this one.
+    """
+
+    def __init__(self, sink: dict):
+        super().__init__()
+        self._sink = sink
+
+    def add(self, frame):
+        key = getattr(frame, "desc", None) or getattr(frame, "FrameID", None)
+        self._sink[key] = frame.text
+
+    def delall(self, key):
+        target = str(key).lower().replace(" ", "").replace("_", "")
+        for existing in list(self._sink.keys()):
+            if existing and existing.lower().replace(" ", "").replace("_", "") == target:
+                self._sink.pop(existing, None)
+
+
+class TestTypeAliasesExistAtRuntime:
+    """⚠️ A name imported only under TYPE_CHECKING is a NameError at runtime.
+
+    ``typing.cast`` is a real CALL, so its first argument is evaluated — and
+    ``from __future__ import annotations`` does not defer it, because it is not
+    an annotation. ``MP3Type`` was imported only under TYPE_CHECKING and omitted
+    from the runtime ``else`` branch, so every ``write_id3_tags`` call raised
+    NameError on its first line. A bare ``except Exception`` swallowed it and the
+    fallback masked it by working, so the intended MP3 path was dead and nothing
+    anywhere said so. This walks the source and asserts every such name resolves.
+    """
+
+    def test_every_name_used_in_a_cast_exists_at_runtime(self):
+        import re
+        from pathlib import Path
+
+        from services.metadata import tag_file_service as tfs
+
+        source = Path(tfs.__file__).read_text(encoding="utf-8")
+        # Only simple identifiers: `cast(dict[str, Any], x)` cannot be checked
+        # this way and is not the failure mode.
+        names = set(re.findall(r"\bcast\(\s*([A-Za-z_]\w*)\s*,", source))
+        assert names, "no cast() calls found — has the extraction broken?"
+
+        missing = sorted(name for name in names if not hasattr(tfs, name))
+        assert not missing, (
+            "these are used in a runtime cast() but do not exist at runtime "
+            f"(TYPE_CHECKING-only imports?): {missing}"
+        )
+
+    def test_the_mp3_type_alias_is_the_specific_regression(self):
+        """Names the regression directly so its return is unmistakable."""
+        from services.metadata import tag_file_service as tfs
+
+        assert hasattr(tfs, "MP3Type")
+
+
 class TestId3WritesAlbumMbFieldsAsTxxx:
     def test_musicbrainz_albumtype_written_as_txxx(self, monkeypatch):
         from services.metadata import tag_file_service as tfs
 
         frames = {}
-
-        class _FakeTagObj(dict):
-            def add(self, frame):
-                frames[frame.desc] = frame.text
-
-            def delall(self, key):
-                for k in list(frames.keys()):
-                    if k.lower().replace(" ", "").replace("_", "") == str(key).lower().replace(" ", "").replace("_", ""):
-                        frames.pop(k, None)
-
-        audio = _FakeAudio("/fake/song.mp3", _FakeTagObj())
+        audio = _FakeAudio("/fake/song.mp3", _RecordingTags(frames))
         monkeypatch.setattr(tfs, "MP3", lambda path, ID3=None: audio)
         monkeypatch.setattr(tfs, "ID3", object)
         monkeypatch.setattr(tfs, "TXXX", _FakeTXXX)
@@ -75,17 +128,7 @@ class TestId3WritesAlbumMbFieldsAsTxxx:
         from services.metadata import tag_file_service as tfs
 
         frames = {}
-
-        class _FakeTagObj(dict):
-            def add(self, frame):
-                frames[frame.desc] = frame.text
-
-            def delall(self, key):
-                for k in list(frames.keys()):
-                    if k.lower().replace(" ", "").replace("_", "") == str(key).lower().replace(" ", "").replace("_", ""):
-                        frames.pop(k, None)
-
-        audio = _FakeAudio("/fake/song.mp3", _FakeTagObj())
+        audio = _FakeAudio("/fake/song.mp3", _RecordingTags(frames))
         monkeypatch.setattr(tfs, "MP3", lambda path, ID3=None: audio)
         monkeypatch.setattr(tfs, "ID3", object)
         monkeypatch.setattr(tfs, "TXXX", _FakeTXXX)
@@ -168,14 +211,42 @@ class TestApplyMbidToAlbumFansOutToFiles:
 class TestCoverConvention:
     """A cover detected via the release picker must be renamed to
     'Title (Original Artist Cover)' and tagged with the 'Cover' genre —
-    the SAME convention as the standalone cover-detection area."""
+    the SAME convention as the standalone cover-detection area.
+
+    ⚠️ The builder lives in ``db.repositories.cover_detection_repository``.
+    This test used to call ``CoverDetector._build_cover_title``, which has never
+    existed, so the convention was pinned by NOTHING while three places emit it:
+    that helper, plus two inline copies in ``routes/ui_routes.py``.
+
+    ⚠️ The two route copies use a LOOSER guard than this helper: they skip the
+    rename when the title CONTAINS ``"cover)"``, whereas the helper skips only
+    when it ENDS with ``"(… Cover)"``. So ``"Song (Band Cover) [Remaster]"`` is
+    left alone by the routes and would be re-annotated by the helper. The
+    difference is deliberate-not-yet-reconciled: unifying them changes behaviour
+    on that shape, so pin this helper and leave the copies visible rather than
+    silently editing them.
+    """
 
     def test_cover_title_build_convention(self):
         """'{title} ({original_artist} Cover)' is the canonical rename."""
-        from services.enrichment.cover_detector_impl import CoverDetector
+        from db.repositories.cover_detection_repository import _build_cover_title
 
-        title = CoverDetector._build_cover_title("Valhalla Calling", "Miracle of Sound")
-        assert title == "Valhalla Calling (Miracle of Sound Cover)"
+        assert _build_cover_title("Valhalla Calling", "Miracle of Sound") == (
+            "Valhalla Calling (Miracle of Sound Cover)"
+        )
+
+    def test_an_already_annotated_title_is_left_alone(self):
+        """Re-running must not stack suffixes into '(X Cover) (Y Cover)'."""
+        from db.repositories.cover_detection_repository import _build_cover_title
+
+        once = _build_cover_title("Valhalla Calling", "Miracle of Sound")
+        assert _build_cover_title(once, "Somebody Else") == once
+
+    def test_without_an_original_artist_the_title_is_unchanged(self):
+        from db.repositories.cover_detection_repository import _build_cover_title
+
+        assert _build_cover_title("Valhalla Calling", None) == "Valhalla Calling"
+        assert _build_cover_title("Valhalla Calling", "") == "Valhalla Calling"
 
     def test_update_file_metadata_writes_cover_and_writer(self, monkeypatch):
         """update_file_metadata must write writer / is_cover /

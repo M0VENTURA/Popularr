@@ -32,6 +32,14 @@ else:
     ID3Type = Any
     FLACType = Any
     FLACPictureType = Any
+    # ⚠️ ``MP3Type`` BELONGS HERE. `cast()` is a runtime CALL, so its first
+    # argument is evaluated, and `from __future__ import annotations` does not
+    # defer it. With the name imported only under TYPE_CHECKING, every call to
+    # ``write_id3_tags`` raised NameError on its first line, the bare
+    # ``except Exception`` swallowed it, and the intended MP3 path NEVER RAN —
+    # every write silently took the fallback instead. Nothing failed loudly
+    # because the fallback also writes tags, so this stayed invisible.
+    MP3Type = Any
 
 
 # =============================================================================
@@ -401,7 +409,14 @@ def write_id3_tags(file_path: str, tags: Dict[str, Any]) -> bool:
             tag_obj = cast(ID3Type, audio.tags)
             save = lambda: audio.save(v2_version=3)
 
-        except Exception:
+        except Exception as exc:
+            # Say WHY the primary path was abandoned. A silent switch here hid
+            # a NameError on the line above for as long as it existed (see the
+            # MP3Type note in the type layer) — the fallback masked it by
+            # working, so nothing anywhere reported that this branch was dead.
+            logger.debug(
+                "MP3 primary tag path unusable, falling back to ID3(file_path): %s", exc
+            )
             try:
                 tag_obj = cast(ID3Type, ID3(file_path))
             except Exception:

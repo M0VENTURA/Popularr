@@ -198,10 +198,19 @@ class TestAttachPlaylistCover:
         from services.playlists import playlist_service as svc
 
         monkeypatch.setattr(svc, "_fetch_artist_image_bytes", lambda artist: b"artist-art")
+        # ⚠️ `user`/`pass` are REQUIRED. This config used to carry only a
+        # base_url, so the per-user loop skipped every candidate and both tests
+        # below asserted a success (or a server reason) that the function could
+        # not reach — they failed from the day they were committed.
         monkeypatch.setattr(
             "helpers.config_helpers.get_config",
             lambda: {
-                "navidrome": {"playlist_cover_art": True, "base_url": "http://nav"},
+                "navidrome": {
+                    "playlist_cover_art": True,
+                    "base_url": "http://nav",
+                    "user": "navuser",
+                    "pass": "navpass",
+                },
             },
         )
 
@@ -232,7 +241,12 @@ class TestAttachPlaylistCover:
         monkeypatch.setattr(
             "helpers.config_helpers.get_config",
             lambda: {
-                "navidrome": {"playlist_cover_art": True, "base_url": "http://nav"},
+                "navidrome": {
+                    "playlist_cover_art": True,
+                    "base_url": "http://nav",
+                    "user": "navuser",
+                    "pass": "navpass",
+                },
             },
         )
 
@@ -264,3 +278,33 @@ class TestAttachPlaylistCover:
             lambda artist: pytest.fail("must not fetch an image when disabled"),
         )
         assert svc.attach_playlist_cover("P", "A")["reason"] == "disabled"
+
+    def test_a_server_with_no_credentials_says_so(self, monkeypatch):
+        """⚠️ The reason must not blame matching when nothing was ever asked.
+
+        The single-server fallback puts the whole `navidrome` block into the
+        candidate list, so `playlist_cover_art: true` plus a base_url and no
+        `user`/`pass` skipped every candidate and reported "no navidrome match" —
+        which reads as "your playlist name is wrong" and sends the operator to
+        check names that were never looked up.
+
+        This is also the shape the two tests above passed for months while
+        failing: they supplied a base_url and no credentials.
+        """
+        from services.playlists import playlist_service as svc
+
+        monkeypatch.setattr(svc, "_fetch_artist_image_bytes", lambda artist: b"artist-art")
+        monkeypatch.setattr(
+            "helpers.config_helpers.get_config",
+            lambda: {"navidrome": {"playlist_cover_art": True, "base_url": "http://nav"}},
+        )
+        monkeypatch.setattr(
+            "api_clients.navidrome.NavidromeClient",
+            lambda *a, **k: pytest.fail("must not build a client without credentials"),
+        )
+
+        result = svc.attach_playlist_cover("Artist - Essential Collection", "Artist")
+
+        assert result["ok"] is False
+        assert "credential" in result["reason"], result
+        assert result["method"] == "none", "nothing was attempted, so name no method"

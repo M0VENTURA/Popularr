@@ -437,12 +437,19 @@ def attach_playlist_cover(playlist_name: str, artist_name: str) -> dict:
 
         from api_clients.navidrome import NavidromeClient
         last_reason = "no navidrome match"
+        # ⚠️ Distinguishes "a server was asked and did not match" from "no server
+        # was ever asked". Without it both outcomes reported "no navidrome
+        # match", so a config with a base_url but no `user`/`pass` skipped every
+        # candidate silently and the log blamed playlist-name matching — sending
+        # the operator to inspect names that were never looked up.
+        contacted = False
         for user in nav_users:
             base_url = user.get("base_url")
             username = user.get("user")
             password = user.get("pass")
             if not (base_url and username and password):
                 continue
+            contacted = True
             try:
                 client = NavidromeClient(base_url, username, password)
                 playlist = client.find_playlist_by_name(playlist_name)
@@ -468,6 +475,13 @@ def attach_playlist_cover(playlist_name: str, artist_name: str) -> dict:
             except Exception as exc:
                 last_reason = str(exc)
                 logger.warning("[PLAYLISTS] Cover upload failed for %s: %s", playlist_name, exc)
+        if not contacted:
+            # Nothing was attempted, so "navidrome_native" would overstate it and
+            # "no navidrome match" would be a lie. The single-server fallback
+            # puts the `navidrome` block straight into this list, so this is the
+            # path a config with `playlist_cover_art: true` and a base_url but no
+            # credentials takes.
+            return {"ok": False, "method": "none", "reason": "no navidrome credentials configured"}
         return {"ok": False, "method": "navidrome_native", "reason": last_reason}
     except Exception as exc:
         logger.warning("[PLAYLISTS] Cover attach aborted: %s", exc)
