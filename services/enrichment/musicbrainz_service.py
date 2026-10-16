@@ -2658,7 +2658,89 @@ def _titles_agree_for_pairing(library_title: Any, mb_title: Any) -> bool:
         return True
     if library == musicbrainz:
         return True
+    # ⭐ A title that is the other's words PLUS a word naming something else is
+    # a different recording, and the fuzzy arm below cannot see that — see
+    # ``_title_adds_a_second_song``.
+    if _title_adds_a_second_song(library, musicbrainz):
+        return False
     return _similarity(library, musicbrainz) >= _TRACKLIST_TITLE_FLOOR
+
+
+#: Words that may EXTEND a title without naming a SECOND song: performance and
+#: edition markers, featured-artist credits, and the glue words that join them.
+#:
+#: Deliberately explicit rather than a general rule. ``Normalize_title_for_lookup``
+#: has already removed BRACKETED annotations ("Song (Live)" -> "song"), so the
+#: words left over here are the unbracketed ones — "Song - Live", "Song feat.
+#: Guest" — and they are the ONLY thing that separates "same song, written
+#: differently" from "different song whose title starts with this one".
+_TITLE_EXTENSION_TOKENS = frozenset({
+    # performance / edition markers
+    "live", "acoustic", "unplugged", "remix", "remixed", "remaster",
+    "remastered", "demo", "instrumental", "orchestral", "karaoke",
+    "version", "edit", "mix", "radio", "extended", "deluxe", "bonus",
+    "mono", "stereo", "single", "album", "reissue", "anniversary", "edition",
+    # glue between a title and a trailing marker
+    "and", "the", "of", "a", "de", "la",
+})
+
+#: Words that BEGIN a featured-artist credit. Everything AFTER one of these is
+#: the guest's name, not a second song title, so the whole tail is allowed:
+#: "Song" vs "Song feat. Guest and Other" is one song with one credit.
+#:
+#: ⚠️ Only the unambiguous credit markers. "with" is deliberately NOT here — it
+#: reads as a credit in "A with B" but as part of the TITLE in "Dancing with
+#: Myself", so allowing it would pair "Dancing" with a different song.
+_CREDIT_LEAD_TOKENS = frozenset({"feat", "featuring", "ft"})
+
+
+def _title_adds_a_second_song(norm_a: str, norm_b: str) -> bool:
+    """True when one normalised title is the other PLUS words naming another song.
+
+    ⭐ WHY THIS EXISTS. ``_similarity`` is ``fuzzy_match_score``, which is
+    RapidFuzz's ``token_set_ratio`` — a metric that returns **1.0 whenever one
+    token set is a strict SUBSET of the other**, by design, since "all the
+    important words are present" is exactly what it measures. So:
+
+        "the power of love"  vs  "the power of love love shack"  ->  1.0
+
+    and a ``>= 0.55`` floor cannot reject it. Reported: *"Something keeps trying
+    to move tracks where the file name is nothing like the song it's trying to
+    move it to."* A local row (3:57) was paired with the 4:54 mashup
+    "The Power of Love - Love Shack" because the NUMBER step's only veto is
+    ``_titles_agree_for_pairing``, that predicate saw score 1.0 and said the
+    names agreed — so the 57-second length difference, which exists precisely to
+    catch this, was never consulted.
+
+    The distinction the metric cannot make:
+
+    * the other title's words PLUS a new word = a DIFFERENT song (a medley, a
+      mashup, "X - Y", a sequel) — the extra word names something;
+    * the other title's words PLUS only markers and credits = the SAME song
+      written differently, which is what the fuzzy arm is for.
+
+    Erring toward "different song" is the safe direction: an unmatched
+    MusicBrainz entry comes back with ``matched=False`` and the row is left
+    alone, whereas a wrong pairing writes a stranger's recording MBID and title
+    into the file's tags and then renames the file to match.
+    """
+    tokens_a = set(norm_a.split())
+    tokens_b = set(norm_b.split())
+    if not tokens_a or not tokens_b or tokens_a == tokens_b:
+        return False
+    if tokens_a < tokens_b:
+        extra = tokens_b - tokens_a
+    elif tokens_b < tokens_a:
+        extra = tokens_a - tokens_b
+    else:
+        # Neither is a subset — ordinary spelling/typo variance, which the
+        # fuzzy arm is entitled to judge.
+        return False
+    if extra & _CREDIT_LEAD_TOKENS:
+        # The extra words are a featured-artist credit, so the title's own
+        # identity is unchanged.
+        return False
+    return bool(extra - _TITLE_EXTENSION_TOKENS)
 
 
 def _lengths_agree_for_pairing(library_duration: Any, mb_duration: Any) -> bool | None:
@@ -2827,15 +2909,23 @@ def _match_mb_tracks_to_library(
                 break
 
         # 3) Fuzzy title, but only while the track numbers cannot disagree.
+        #
+        #    ⚠️ And only while the titles are not a strict SUPERSET of one
+        #    another. ``_similarity`` is ``token_set_ratio``, which scores any
+        #    subset at a perfect 1.0, so without the veto below this arm pairs
+        #    "The Power of Love" with the song "The Power of Love - Love Shack"
+        #    on a score of 1.0 — there is no length check here at all, so the
+        #    mismatch would be adopted outright and the review would then offer
+        #    to rewrite the title (and rename the file) to match.
         if Match is None:
             Same_disc = [row for row in Remaining if _disc_of(row) == Mb_disc] or Remaining
             Best_row: dict[str, Any] | None = None
             Best_score = 0.0
             for row in Same_disc:
-                Score = _similarity(
-                    Normalize_title_for_lookup(str(row.get("title") or "")),
-                    Mb_norm,
-                )
+                Row_norm = Normalize_title_for_lookup(str(row.get("title") or ""))
+                if _title_adds_a_second_song(Row_norm, Mb_norm):
+                    continue
+                Score = _similarity(Row_norm, Mb_norm)
                 if Score > Best_score:
                     Best_row, Best_score = row, Score
             if Best_row is not None and Best_score >= 0.55:
