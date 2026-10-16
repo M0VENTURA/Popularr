@@ -370,7 +370,34 @@ class CoverDetector:
         tracks: list[dict[str, Any]],
         force: bool = False,
     ) -> list[dict[str, Any]]:
-        """Detect cover songs in an album."""
+        """Detect cover songs in an album.
+
+        ⚠️ THIS PASS EMITS ITS OWN PROGRESS, deliberately.
+
+        It was reported as a static wait: *"add more output for the Cover
+        Detection in the logs so we can see what's being checked rather than a
+        static wait while it's happening."* The pass is the longest single
+        operation in an album — six detection techniques, each capable of a
+        MusicBrainz round trip, per track — and it emitted NOTHING to
+        ``unified_scan.log`` (the Scanner tab's file) until it finished. Its
+        structlog lines went to ``info.log``/``debug.log``, which the scan view
+        does not tail, so a healthy run and a hung one looked identical for
+        minutes.
+
+        Three levels, so progress is visible without flooding the log:
+
+        * ``log_unified`` — the START line (with the split between tracks that
+          need checking and tracks whose verdict is already settled, which is
+          what makes the duration predictable), one line per CONFIRMED cover
+          (rare and actionable), a heartbeat while work is outstanding, and the
+          SUMMARY;
+        * ``log_scan_detail`` — per-track detail at debug level, following the
+          same convention ``track_stage`` records (one line per track per stage
+          flooded a 13-track album with output before any result was visible);
+        * structlog, unchanged, for the existing file logs.
+        """
+        from helpers.logging_config import log_scan_detail, log_unified
+
         logger.info(
             "Starting cover detection",
             album=album,
@@ -430,6 +457,28 @@ class CoverDetector:
                     _confirmed_skipped.add(tid)
                     seen_track_ids.add(tid)
 
+        # ⭐ The START line, emitted AFTER the skip scan above so the number of
+        # tracks that actually need work is known. That number — not the album's
+        # track count — is what makes the wait predictable: a re-scanned album
+        # usually settles every verdict immediately and finishes in seconds,
+        # while a first pass pays MusicBrainz round trips per track. Without this
+        # split the two look identical from the outside.
+        _to_check = [
+            str(t.get("id")) for t in tracks
+            if t.get("id") and str(t.get("id")) not in seen_track_ids
+        ]
+        _settled = len(seen_track_ids)
+        if _to_check:
+            log_unified(
+                f"[COVER_DETECT] Checking {len(_to_check)} track(s) for "
+                f"'{artist} - {album}' ({_settled} already settled)"
+            )
+        else:
+            log_unified(
+                f"[COVER_DETECT] All {len(tracks)} track(s) already settled for "
+                f"'{artist} - {album}' — nothing to check"
+            )
+
         track_writers = self._collect_track_writers(tracks, artist, seen_track_ids)
 
         def _record(result: dict[str, Any], track: dict[str, Any]) -> None:
@@ -477,6 +526,66 @@ class CoverDetector:
             seen_track_ids.add(result["track_id"])
             pending_updates.append(self._build_update(result, track))
 
+            # ⭐ The ACTIONABLE event, so it goes to the scan log the operator
+            # watches rather than only to ``info.log``. Covers are rare, so one
+            # line per finding is cheap — and it is the line that explains why a
+            # title is about to gain a "(X Cover)" suffix and a "Cover" genre.
+            _conf = str(result.get("confidence") or "low")
+            log_unified(
+                f"[COVER_DETECT] cover: '{track.get('title')}' "
+                f"-> originally by {_orig or 'unknown'} ({_conf})"
+            )
+            # Per-track detail at debug level, the same convention track_stage
+            # records: one line per track per stage flooded the log before any
+            # result was visible.
+            log_scan_detail(
+                f"[COVER_DETECT] \u2713 '{track.get('title')}' is a cover "
+                f"(original={_orig or 'unknown'}, confidence={_conf})"
+            )
+
+        def _step_done(step: str, index: int) -> None:
+            """Report movement after one detection technique has finished.
+
+            ⭐ WITHOUT THIS, AN ALBUM WITH NO COVERS IS INDISTINGUISHABLE FROM A
+            HUNG ONE. The per-cover line above only fires when something is
+            found, and the START line only says how much work is queued — so a
+            clean 14-track album produced two lines and then a long silence,
+            which is the reported "static wait".
+
+            One line per TECHNIQUE, not per track. There are six techniques, so
+            the cost is bounded no matter how long the album is, whereas a line
+            per track per technique could be 84 lines for one album.
+
+            ⚠️ ``index``/``_TOTAL_STEPS`` is the part that actually shows
+            movement, because it advances on EVERY technique. ``still queued``
+            alone does not: a track with no work id, no ISRC and no logged
+            identity is skipped by all six techniques in turn, so the count sits
+            at its starting value the whole way through and reads as "stuck"
+            when the pass is in fact flying — it just has nothing to ask
+            MusicBrainz. The pass is also FAST in exactly that case, which is
+            why the numbers alone are misleading.
+
+            Emitted at ``log_unified`` (the scan log the operator watches), not
+            ``log_scan_detail``: this IS the progress signal, and a debug-gated
+            one would leave the reported wait exactly as it was.
+            """
+            if not _to_check:
+                # Every verdict was already settled, so the six techniques all
+                # returned immediately and there is no wait to narrate.
+                return
+            _remaining = sum(
+                1 for t in tracks
+                if t.get("id") and str(t.get("id")) not in seen_track_ids
+            )
+            log_unified(
+                f"[COVER_DETECT] step {index}/{_TOTAL_STEPS} ({step}) done — "
+                f"{len(seen_track_ids)}/{len(tracks)} settled, {_remaining} queued"
+            )
+
+        #: Number of detection techniques below, so the progress line can say
+        #: "step 3/6". Kept next to the calls it counts — see ``_step_done``.
+        _TOTAL_STEPS = 6
+
         # Step 1: work-first detection — the metadata scan ALREADY resolved
         # each track's work (persisted as ``musicbrainz_workid`` / published
         # in-memory as ``work_mbid``). A cover and its original are BOTH
@@ -515,6 +624,15 @@ class CoverDetector:
                     work_mbid=work_mbid,
                 )
                 seen_track_ids.add(tid)
+                # A conclusive NEGATIVE is a verdict: the work's recordings are
+                # all the performer's own, so this track is provably not a
+                # cover and no further technique will be run on it. Worth a
+                # debug line, because "settled without an online lookup" is the
+                # fast path and its absence is why a first pass is slow.
+                log_scan_detail(
+                    f"[COVER_DETECT] \u2717 '{track.get('title')}' not a cover "
+                    "(work recordings are all the performer's own)"
+                )
                 continue
             logger.debug(
                 "Cover detected via the logged work",
@@ -523,6 +641,8 @@ class CoverDetector:
                 original_artist=original.get("artist"),
             )
             _record(self._result(tid, track.get("title", ""), original), track)
+
+        _step_done("work lookup", 1)
 
         # Step 2: ISRC-based matching
         for track in tracks:
@@ -541,6 +661,8 @@ class CoverDetector:
             if core:
                 logger.debug("Cover detected via ISRC", track=track.get("title"), isrc=isrc)
                 _record(self._result(tid, track.get("title", ""), core), track)
+
+        _step_done("ISRC lookup", 2)
 
         # Step 3: MusicBrainz recording-relation detection
         for track in tracks:
@@ -567,6 +689,8 @@ class CoverDetector:
             if core:
                 logger.debug("Cover detected via recording relation", track=track.get("title"), mbid=mbid)
                 _record(self._result(tid, track.get("title", ""), core), track)
+
+        _step_done("recording relations", 3)
 
         # Step 4: writer-based detection
         is_compilation = artist.lower() in _COMPILATION_ARTIST_NAMES
@@ -624,6 +748,8 @@ class CoverDetector:
                 )
                 break
 
+        _step_done("writer matching", 4)
+
         # Step 5: heuristic title-based detection
         for track in tracks:
             tid = track.get("id")
@@ -660,6 +786,8 @@ class CoverDetector:
 
             logger.debug("Cover detected via title hint", track=title, original_artist=resolved.get("artist"))
             _record(self._result(tid, title, resolved, writer=resolved_writer), track)
+
+        _step_done("title hints", 5)
 
         # Step 6: work-based fallback
         for track in tracks:
@@ -701,6 +829,17 @@ class CoverDetector:
             logger.debug("Cover detected via work fallback", track=track.get("title"))
             _record(self._result(tid, track.get("title", ""), original), track)
 
+        _step_done("work fallback", 6)
+
+        # ⭐ Announced BEFORE the database write and the per-file tag rewrite
+        # below, because those are the remaining slow part (one mutagen write per
+        # confirmed cover) and the operator would otherwise see the detection
+        # finish and then wait again with no explanation.
+        if pending_updates:
+            log_unified(
+                f"[COVER_DETECT] writing tags for {len(pending_updates)} cover(s)…"
+            )
+
         if pending_updates:
             successful = set(apply_cover_metadata_batch(self.db_conn, pending_updates))
             for update in pending_updates:
@@ -737,6 +876,19 @@ class CoverDetector:
         )
 
         self._persist_checked(tracks, _fresh_skipped)
+
+        # ⭐ THE SUMMARY — the breakdown, not just the cover count. The old line
+        # reported only how many covers were found, so an album where nothing
+        # was checked (every verdict already settled inside the recheck window)
+        # read exactly like an album where everything was checked and came back
+        # negative. Those are very different amounts of work, and the operator
+        # has just waited through one of them.
+        _checked = len(_to_check)
+        log_unified(
+            f"[COVER_DETECT] {artist} - {album}: {len(cover_results)} cover(s) | "
+            f"checked={_checked}, settled-in-window={len(_fresh_skipped)}, "
+            f"already-confirmed={len(_confirmed_skipped)}"
+        )
 
         logger.info("Cover detection complete", album=album, found_count=len(cover_results))
         return cover_results

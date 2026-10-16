@@ -1353,17 +1353,26 @@ def _run_album_cover_detection(artist: str, album: str, tracks: list[dict[str, A
         tracks = _overlaid_mbids
 
     try:
-        _cover_results = detect_covers_for_album(
+        # NOTE: no summary is logged here. ``detect_covers_for_album`` reports
+        # its own START line, per-technique progress and a full breakdown
+        # (checked / settled-in-window / already-confirmed), because it is the
+        # only place that knows those counts — this caller sees just the album
+        # and a track list. The single count this function used to log said only
+        # "N cover(s) found", so an album where nothing needed checking and one
+        # where every track was checked both produced one identical line.
+        detect_covers_for_album(
             album=album,
             artist=artist,
             tracks=tracks,
             conn=None,
             force=bool(options.get("force")),
         )
-        if _cover_results:
-            log_unified(f"[COVER_DETECT] {artist} - {album}: {len(_cover_results)} cover(s) found")
     except Exception as exc:
         logger.debug("Cover detection failed", artist=artist, album=album, error=str(exc))
+        # ⚠️ Also surfaced on the scan log: the failure used to reach only
+        # ``debug.log``, so a pass that silently did nothing looked exactly like
+        # a pass that found no covers.
+        log_unified(f"[COVER_DETECT] {artist} - {album}: failed ({exc})")
 
 
 def _artist_top_marked_cutoffs(scan_scores: list[float], db_scores: list[float], top_percentile: float = 0.10, medium_percentile: float = 0.20, large_catalog_percentile: float | None = None, large_catalog_threshold: int = 30) -> tuple[float | None, float | None, int, int]:
