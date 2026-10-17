@@ -870,8 +870,8 @@
 {% include 'components/_scan_modal.html' %}
 
 {% block scripts %}
-<script id="page-data" type="application/json">
 <script src="{{ versioned_static('js/ui/scan-modal.js') }}"></script>
+<script id="page-data" type="application/json">
 {{ {
     "artistName": artist_name, 
     "albumName": album_name
