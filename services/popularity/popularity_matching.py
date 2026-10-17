@@ -251,7 +251,17 @@ def normalize_for_aggregation(title: str) -> str:
     # both variants must collapse to the same key.  Space-delimited dashes
     # ("Foo - Bar") stay separators.
     value = re.sub(r"(?<=\S)[\u2010\u2011\u2012\u2013\u2014\u2015\u2212-](?=\S)", "", value)
-    value = re.sub(r"[^a-z0-9]+", " ", value)
+    # ⭐ Keep NON-ASCII letters and digits. ``[^a-z0-9]`` deleted every
+    # non-Latin character, so a Cyrillic or CJK title normalised to the EMPTY
+    # string — and every such title on one album then collided on that single
+    # key. Measured: Arkona's 14 Cyrillic tracks all keyed to "" and shared ONE
+    # prefetched ListenBrainz slot, so the same count (109,751) was read on
+    # every row and the album's whole distribution flattened. ``\w`` is
+    # Unicode-aware (letters/digits/underscore), so distinct scripts now keep
+    # distinct keys. ``_`` is folded to a separator first so its handling is
+    # unchanged.
+    value = value.replace("_", " ")
+    value = re.sub(r"[^\w]+", " ", value)
     return re.sub(r"\s+", " ", value).strip()
 
 
