@@ -55,13 +55,6 @@ _MUSIC_ROOT = os.environ.get("MUSIC_ROOT", "/music")
 
 
 def _length_tolerance_seconds() -> float:
-    """The shared length tolerance, safe to call inside a verification loop.
-
-    Deliberately a thin wrapper rather than an import-time constant: the value
-    is configurable and a Config-page edit must take effect without a restart
-    (``get_config`` is cached, not snapshotted). A failure falls back to the
-    default so a broken config cannot make the verifier reject everything.
-    """
     try:
         return float(get_length_tolerance_seconds())
     except Exception:
@@ -69,7 +62,6 @@ def _length_tolerance_seconds() -> float:
 
 
 def _log_queue_event(event_type: str, message: str, queue_id: int | None) -> None:
-    """Record a queue event to the in-memory store and ``queue.log``."""
     try:
         from services.queue.queue_diagnostics_service import log_queue_event
         log_queue_event(event_type, message, queue_id=queue_id)
@@ -80,39 +72,12 @@ def _log_queue_event(event_type: str, message: str, queue_id: int | None) -> Non
 _STALE_DOWNLOADING_MINUTES = 60
 _SLSKD_ACTIVE_STATE_TIMEOUT_MINUTES = 60
 _SLSKD_REMOTELY_QUEUED_TIMEOUT_MINUTES = 60
-#: A transfer that slskd reports as succeeded but whose file never appeared
-#: on disk.  The file may still be flushing/renaming, so the item is kept
-#: ``downloading`` and polled for this long BEFORE it is failed for retry —
-#: failing immediately caused the infinite re-download loop (download a file
-#: that "succeeded" but was not found → requeue → search picks a DIFFERENT
-#: file → repeat).
 _SLSKD_SUCCEEDED_NOT_FOUND_TIMEOUT_MINUTES = 15
-
-#: Consecutive succeeded-but-not-found cycles before the item is failed for
-#: retry.  Cycle-counted (not wall-clock) so a refreshed ``updated_at`` can
-#: never reset the grace period forever (see _reconcile_transfer_state).
 _SLSKD_SUCCEEDED_NOT_FOUND_MAX_CYCLES = 3
-
-#: Consecutive cycles where the completed transfer's file landed but could
-#: not be claimed/imported (already claimed by another row, or moved off disk)
-#: before the item is failed for retry.  See the landed-path claim in
-#: ``check_completed_downloads`` — the previously-silent skip that re-logged
-#: "appeared within the grace window" every cycle forever.
 _LANDED_NOT_IMPORTED_MAX_CYCLES = 3
 
 
 def _refresh_downloading_item(queue_id: int) -> dict[str, Any] | None:
-    """Re-fetch a downloading item FRESH; ``None`` when it is no longer
-    ``downloading`` (a retry already requeued + re-downloaded it).
-
-    ``check_completed_downloads`` snapshots the downloading rows at cycle
-    start.  While the cycle runs, the search pipeline can requeue an item and
-    download a NEW file for it (the old transfer "succeeded but was not
-    found" → mark_failed → requeue → re-download).  Processing the STALE row
-    then double-fails the item with the OLD ``found_filename`` — the reported
-    infinite "slskd transfer succeeded but local file not found — retrying"
-    loop.  Re-fetching per item keeps the completion cycle in sync.
-    """
     try:
         with db_session() as session:
             row = session.execute(
@@ -129,7 +94,6 @@ def _refresh_downloading_item(queue_id: int) -> dict[str, Any] | None:
 # =============================================================================
 
 def _normalize_transfer_key(value: str) -> Optional[str]:
-    """Normalise a transfer/filename for dict lookups (lower, forward slashes)."""
     if not value:
         return None
     norm = str(value).replace("\\", "/").strip()
@@ -137,7 +101,6 @@ def _normalize_transfer_key(value: str) -> Optional[str]:
 
 
 def _db_now_naive() -> datetime:
-    """Return the DB server's current time as a *naive* datetime."""
     try:
         with db_session() as session:
             value = session.execute(text("SELECT CURRENT_TIMESTAMP")).scalar()
@@ -156,7 +119,7 @@ def _db_now_naive() -> datetime:
 
 
 def _remember_failed_peer(transfer: dict[str, Any]) -> None:
-    """Tell the download pipeline to avoid this peer for the failed file."""
+    """Persist peer block into the DB/pipeline blocklist so it isn't retried."""
     try:
         from services.downloads.download_pipeline_service import _block_peer
         _block_peer(transfer.get("username"), transfer.get("filename"))
@@ -177,15 +140,6 @@ _FILE_ARRIVAL_POLL_SECONDS = 10
 
 
 def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Optional[str]:
-    """Poll up to ~30s for a just-completed transfer to appear on disk.
-
-    slskd preserves the REMOTE directory structure when saving, so a remote
-    ``music/Artist/Album/01 - Track.flac`` lands at
-    ``<downloads>/music/Artist/Album/01 - Track.flac`` (nested), NOT flattened
-    to ``<downloads>/01 - Track.flac``.  Previously only the flat basename and
-    the (often empty) ``localFilePath`` were checked, so a genuinely-completed
-    transfer was reported "no local file found" and re-downloaded forever.
-    """
     import time as _time
 
     monitored = _monitored_downloads_dir()
@@ -196,17 +150,13 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
     if monitored and monitored != "?":
         if base:
             candidates.append(os.path.join(monitored, base))
-        # The full remote-relative path under the downloads root.
         if _found and not _found.startswith("/"):
             candidates.append(os.path.join(monitored, _found))
     if local_file_path:
         candidates.append(str(local_file_path).replace("\\", "/"))
         
     try:
-        from services.infrastructure.filesystem_service import (
-            _original_archive_subfolder_name,
-            resolve_original_archive_dir,
-        )
+        from services.infrastructure.filesystem_service import resolve_original_archive_dir
         _archive_root = resolve_original_archive_dir()
         if _archive_root and os.path.isdir(_archive_root) and base:
             for _aroot, _adirs, _afiles in os.walk(_archive_root):
@@ -216,14 +166,6 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
     except Exception:
         pass
 
-    # Recursive fallback: walk the downloads root (deep) looking for the
-    # basename anywhere under it — covers slskd's nested-directory saves and
-    # any path-mapping drift between slskd and the app.  The match is
-    # Unicode-tolerant: files with accented names ("Le cimetière marin.flac")
-    # may land with different normalization (NFC/NFD) or stripped accents on
-    # disk, so compare the NFC-normalised AND accent-stripped basenames, PLUS
-    # the punctuation-stripped key ("Par‐delà le mur des siècles" vs
-    # "par-dela le mur des siecles") so hyphen/paren drift never blocks it.
     import unicodedata as _ud
 
     def _norm_key(name: str) -> str:
@@ -238,9 +180,6 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
     search_roots: set[str] = set()
     if monitored and os.path.isdir(monitored) and monitored != "?":
         search_roots.add(monitored)
-        # slskd may save under a sibling ``torrents`` root or the configured
-        # torrents subfolder when its complete-directory differs from the
-        # app's downloads dir — search those too.
         try:
             from services.downloads.download_scan_service import resolve_torrents_dir
             search_roots.add(resolve_torrents_dir())
@@ -253,9 +192,6 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
                 search_roots.add(_sibling)
 
     if search_roots and base:
-        # Deep-enough to reach ``music/Artist/Album/file.flac`` (depth 4 from
-        # the downloads root) and ``music/music/...`` double-nested layouts
-        # without scanning the whole library.
         _DEPTH_LIMIT = 8
         for _root_dir in search_roots:
             try:
@@ -265,7 +201,6 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
                     if _rel_depth >= _depth_limit:
                         _dirs[:] = []
                         continue
-                    # Prune hidden/dunder dirs and the FLAC conversion archive.
                     _dirs[:] = [
                         d for d in _dirs
                         if not d.startswith(".") and not d.startswith("__")
@@ -297,13 +232,6 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
 
 
 def _accent_stripped_key(name: str) -> str:
-    """Lowercased, accent-stripped key for tolerant filename matching.
-
-    Accented filenames ("Le cimetière marin.flac") can land with different
-    Unicode normalization (NFC vs NFD) or with accents stripped ("Le cimetiere
-    marin.flac") depending on the peer/OS.  Comparing this key tolerates all
-    three.
-    """
     try:
         import unicodedata as _ud
         nfc = _ud.normalize("NFC", str(name or ""))
@@ -314,21 +242,6 @@ def _accent_stripped_key(name: str) -> str:
 
 
 def _punctuation_stripped_key(name: str) -> str:
-    """Lowercased, accent- AND punctuation-stripped key for basename matching.
-
-    The Aephanemer "Utopie" loop: the queue's ``found_filename`` uses the
-    PEER's remote path (``Par‐delà le mur des siècles`` — U+2010 hyphen +
-    accents), while the file lands on disk with a DIFFERENT peer's spelling
-    (``Par-dela le mur des siecles`` — ASCII hyphen, no accents, no parens).
-    Exact / lowercase / accent-stripped keys all fail because the *hyphen
-    characters and parentheses differ*.
-
-    This key strips EVERYTHING that is not a letter or digit, so
-    ``Par‐delà le mur des siècles (instrumental)`` and
-    ``par-dela le mur des siecles instrumental`` collapse to the same
-    ``pardelalemurdessieclesinstrumental`` and the file is found no matter
-    which folder or peer it came from.
-    """
     try:
         import unicodedata as _ud
         nfc = _ud.normalize("NFC", str(name or ""))
@@ -342,25 +255,6 @@ _TRACK_NUM_PREFIX_RE = re.compile(r"^\d{1,4}(?:[\s._-]*\d{1,4})*[\s._-]*")
 
 
 def _basename_without_track_prefix(name: str) -> str:
-    """Basename with a leading DISC/TRACK number prefix removed, if present.
-
-    Peers number files many ways: ``0108 - Spring of Rage.flac`` (disc 01 +
-    track 08), ``08 - Spring of Rage.flac``, ``1-08. Spring of Rage.flac``,
-    ``3-02 - Breathing New Life.flac``. slskd saves the REMOTE filename
-    verbatim, so the on-disk name can differ from the queue's
-    ``found_filename`` ONLY by that leading number ("0108" vs "08" vs "1-08").
-    The punct-stripped key keeps the digits, so ``0108springofrage`` never
-    equals ``08springofrage`` — the reported loop where a succeeded transfer
-    stays "no local file found" forever even though the file IS under the
-    downloads dir.
-
-    Stripping a leading ``1-4``-digit + separators before keying makes all
-    these collapse to the same key. The baseline keys are still tried FIRST;
-    the prefixed-stripped key is an ADDITIONAL fallback candidate, and the
-    caller verifies the file against the queue item (metadata / filename
-    matcher) before importing, so a false-positive prefix collapse cannot
-    import the wrong track.
-    """
     try:
         base = str(name or "").strip()
     except Exception:
@@ -370,11 +264,6 @@ def _basename_without_track_prefix(name: str) -> str:
 
 
 def _track_prefix_stripped_key(name: str) -> str:
-    """Punct-stripped key of the track-number-stripped basename.
-
-    Secondary key ONLY — the exact/punct keys remain primary. See
-    ``_basename_without_track_prefix`` for why the digits must be dropped.
-    """
     try:
         import unicodedata as _ud
         stripped = _basename_without_track_prefix(name)
@@ -385,18 +274,11 @@ def _track_prefix_stripped_key(name: str) -> str:
         return _punctuation_stripped_key(name)
 
 
-#: Consecutive-cycle counters for the two "succeeded but the item never
-#: proceeds" loops — keyed by queue id, so the item is FAILED (requeued) after
-#: N observations regardless of how often the row's ``updated_at`` is touched.
-#: (``update_queue_item`` always stamps ``updated_at = CURRENT_TIMESTAMP``, so
-#: the original wall-clock stale gate could be reset every cycle and an item
-#: polled forever — the reported 45-minute-plus "will keep polling" loops.)
 _SUCCEEDED_NOT_FOUND_CYCLES: dict[int, int] = {}
 _LANDED_NOT_IMPORTED_CYCLES: dict[int, int] = {}
 
 
 def _bump_cycle_counter(counter: dict[int, int], queue_id: int) -> int:
-    """Increment a per-item consecutive-cycle counter and return its value."""
     counter[int(queue_id)] = counter.get(int(queue_id), 0) + 1
     return counter[int(queue_id)]
 
@@ -450,16 +332,9 @@ def _build_download_index(fs_files: list[dict[str, Any]]) -> dict[str, Any]:
             by_rel_norm.setdefault(norm, f)
         base = os.path.basename(rel)
         by_basename.setdefault(base.lower(), []).append(f)
-        # Accent-stripped basename key so accented files ("Le cimetière
-        # marin.flac") are found even when the queue's found_filename uses a
-        # different accent normalization (NFC/NFD) or stripped accents.
         _stripped = _accent_stripped_key(base)
         if _stripped and _stripped != base.lower():
             by_basename.setdefault(_stripped, []).append(f)
-        # Punctuation-stripped key ("Par‐delà le mur des siècles (instrumental)"
-        # == "par-dela le mur des siecles instrumental") — the Aephanemer
-        # loop's real cause: peers spell the SAME track differently, so a
-        # basename-only match must ignore hyphens/parens/accents entirely.
         _punct = _punctuation_stripped_key(base)
         if _punct:
             by_punct.setdefault(_punct, []).append(f)
@@ -501,10 +376,6 @@ def _fuzzy_candidates(
         for f in token_index.get(token, []):
             seen.setdefault(f["full_path"], f)
 
-    # Punctuation-stripped basename fallback: a file whose basename collapses
-    # to the SAME key as the queue title ("Par‐delà le mur des siècles
-    # (instrumental)" vs on-disk "par-dela le mur des siecles instrumental")
-    # is a basename-anywhere candidate — the folder path is ignored entirely.
     punct_index = fs_index.get("by_punct") or {}
     title_key = _punctuation_stripped_key(normalize_core_title(item.get("title") or ""))
     if title_key:
@@ -522,24 +393,6 @@ def _file_matches_queue_item(
     relative_name: str | None = None,
     detail: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
-    """Does this file belong to this queue item?
-
-    ``detail`` is an optional out-parameter carrying WHY when the answer is no —
-    see ``queue_metadata_matcher._metadata_matches_queue_item``. It exists so a
-    discarded download can be reported with the artist and length it actually
-    had, instead of the bare "did not match queue item" that sends the operator
-    hunting for a matching bug that is not there.
-    """
-    from services.downloads.match_engine import filename_matches_queue_item
-    from services.queue.queue_metadata_matcher import _metadata_matches_queue_item
-
-    # ── Format gate ────────────────────────────────────────────────────────
-    # A container we do not accept (default: only flac/mp3) must NOT match,
-    # even when its tags line up perfectly. An AIFF/WAV/ALAC lands, then
-    # ``tag_file_service`` cannot write the metadata (its writer supports only
-    # mp3/flac/m4a) — so the file is copied over TAGLESS. Rejecting it here
-    # (both call sites inherit this) deletes it and reschedules the item
-    # instead of importing a file with no metadata.
     try:
         from helpers.config_helpers import get_search_quality_config
         _allowed = set(get_search_quality_config().get("allowed_formats") or set())
@@ -557,6 +410,7 @@ def _file_matches_queue_item(
 
     meta_state = None
     try:
+        from services.queue.queue_metadata_matcher import _metadata_matches_queue_item
         meta_state = _metadata_matches_queue_item(file_path, queue_item, detail=detail)
     except Exception as exc:
         logger.debug("Metadata check failed", file_path=file_path, error=str(exc))
@@ -566,15 +420,11 @@ def _file_matches_queue_item(
     if meta_state is False:
         return False, "metadata"
 
-    # Metadata was INCONCLUSIVE, so the FILENAME decides — and a filename
-    # decision carries none of the tag detail. Clear what the metadata pass
-    # recorded on its way to deferring: leaving it would attribute the rejection
-    # to a tag that was never the reason (the length almost always "disagrees"
-    # with a queue item whose duration is 0).
     if detail is not None:
         detail.clear()
 
     try:
+        from services.downloads.match_engine import filename_matches_queue_item
         is_match = filename_matches_queue_item(file_path, queue_item)
     except Exception as exc:
         logger.debug("Filename match failed", file_path=file_path, error=str(exc))
@@ -599,7 +449,6 @@ def _matching_file_exists_unconfirmed(
         return None
 
     item_title = normalize_core_title(item.get("title") or "")
-    item_artist = normalize_artist(item.get("artist") or "")
     if not item_title:
         return None
         
@@ -650,12 +499,6 @@ def _file_artist_matches_queue_item(file_path: str, queue_item: dict[str, Any]) 
     if not queue_artists:
         return None
 
-    # Mirror of the file-side guard above: when the QUEUE side is the
-    # compilation placeholder ("Various Artists" …), the downloaded file
-    # legitimately carries the real credited artist (A Perfect Circle on a
-    # "MTV2 Headbangers Ball" row), which can never string-match VA — the
-    # verifier must defer to title/duration matching instead of deleting a
-    # correct download as an "artist mismatch".
     if all(qa in _GENERIC_COMPILATION_ARTISTS for qa in queue_artists):
         return None
 
@@ -750,21 +593,11 @@ def _delete_mismatched_download(file_path: str, queue_id: int, reason: str) -> N
 
 
 def _queue_reject_failure_reason(match_source: str) -> str:
-    """Failure message for a landed file that failed the completion match.
-
-    A FORMAT rejection is a different problem from a wrong-artist/title
-    mismatch: the file may be the right song in a container we do not accept
-    (config ``downloads.quality.allowed_formats``, default flac+mp3). Pairing
-    both with "did not match queue item" would send the user hunting for a
-    matching bug that does not exist.
-    """
     if match_source == "unsupported_format":
         return "Downloaded file type is not an allowed format; deleted and rescheduled"
     return "Downloaded file did not match queue item; deleted and rescheduled"
 
 
-#: Reason code -> the short label the queue page shows. Kept next to the
-#: sentence builder so a new code cannot be added with only one of the two.
 DISCARD_REASON_LABELS: dict[str, str] = {
     "wrong_artist": "Wrong artist",
     "wrong_length": "Wrong length",
@@ -776,33 +609,13 @@ DISCARD_REASON_LABELS: dict[str, str] = {
 
 
 def _discard_reason(detail: dict[str, Any], match_source: str) -> str:
-    """The reason CODE for this rejection, from the matcher or a fallback.
-
-    ⚠️ ONE function, used by both the sentence builder and the recorder. Deriving
-    it in each place separately let them disagree: the recorder fell back to
-    ``filename_mismatch`` while the sentence builder, seeing no reason in the
-    raw detail, printed the generic "did not match queue item" — so the queue
-    page showed a label and a sentence that described different things.
-    """
     reason = str((detail or {}).get("reason") or "").strip()
     if reason:
         return reason
-    # No reason from the matcher: the fallback still beats nothing, and the
-    # source at least says WHICH check rejected it.
     return "unsupported_format" if match_source == "unsupported_format" else "filename_mismatch"
 
 
 def _discard_detail_sentence(detail: dict[str, Any], match_source: str) -> str:
-    """A sentence naming WHAT was discarded and WHY.
-
-    ⭐ This is the point of the whole exercise. The old message was "Downloaded
-    file did not match queue item" for every cause, so a wrong-artist discard and
-    a wrong-length discard were indistinguishable — and the file had already been
-    DELETED by then. The facts were computed, then thrown away one line later.
-
-    Written from the data the matcher already had, so nothing is re-derived and
-    nothing can disagree with the decision that was actually taken.
-    """
     reason = _discard_reason(detail, match_source)
     found_artist = str(detail.get("found_artist") or "").strip()
     found_len = detail.get("found_length_seconds")
@@ -858,18 +671,10 @@ def _record_discarded_download(
     match_source: str,
     filename: str = "",
 ) -> None:
-    """Persist WHY this download was discarded, for the queue page.
-
-    ⚠️ Best-effort by construction: the file has ALREADY been deleted and the
-    item rescheduled by the time this runs, so a logging failure must never
-    propagate. The repository swallows its own errors for the same reason.
-    """
     try:
         from db.repositories.queue_rejections import record_rejection
 
         _detail = dict(detail or {})
-        # ⚠️ The SAME derivation the sentence uses, so the stored code and the
-        # stored sentence always describe the same rejection.
         reason = _discard_reason(_detail, match_source)
         sentence = _discard_detail_sentence(_detail, match_source)
 
@@ -891,15 +696,7 @@ def _record_discarded_download(
 
 
 def _block_peer_for_queue_item(queue_id: int, found_filename: str | None = None) -> None:
-    """Block the Soulseek peer that provided the wrong file for a queue item.
-
-    When a downloaded file fails the completion match, the retry would find
-    the SAME wrong result on Soulseek and download it again — the pipeline's
-    in-memory peer blocklist is only populated on search/download failures in
-    ``download_pipeline_service``, never on post-download mismatch.  Look up
-    the offending transfer (by queue id or remote filename) and block that
-    peer+filename so the next search drops it.
-    """
+    """Blocks the peer and permanently adds the peer/filename combination to the blocklist."""
     try:
         from api_clients.slskd_http import get_slskd_client
         from services.downloads.slskd_service import SlskdService
@@ -920,8 +717,6 @@ def _block_peer_for_queue_item(queue_id: int, found_filename: str | None = None)
             remote_base = os.path.basename(remote_norm or "") if remote_norm else None
             if not username:
                 continue
-            # Match the transfer to this queue item: same remote filename
-            # (or basename), or same local file path.
             matches = (
                 (_remote_norm and remote_norm == _remote_norm)
                 or (_remote_base and remote_base == _remote_base)
@@ -957,9 +752,6 @@ def _extract_duration_seconds(file_path: str) -> Optional[int]:
 # MOVE / IMPORT
 # =============================================================================
 
-#: Album/RELEASE-scoped fields that an album-page lookup applies to every track.
-#: The download-import path must apply the same set so a downloaded album
-#: matches the MusicBrainz release it was queued against.
 _ALBUM_LEVEL_COLUMNS: tuple[str, ...] = (
     "musicbrainz_albumtype",
     "musicbrainz_albumstatus",
@@ -976,29 +768,11 @@ _ALBUM_LEVEL_COLUMNS: tuple[str, ...] = (
     "media",
 )
 
-#: The four places an album-scoped field can come from, in the order the
-#: resolver consults them.  ``missing`` is what is left when every source has
-#: been exhausted — the state that used to be invisible.
 _ALBUM_FIELD_SOURCES: tuple[str, ...] = ("stored", "sibling", "MusicBrainz", "missing")
-
-#: Sentinel written onto the queue-row dict so the source-map diagnostic is
-#: emitted ONCE per import.  ``_apply_stored_metadata`` writes the same row
-#: twice (pre-move and post-move) and calls this resolver both times.
 _SOURCE_MAP_LOGGED_KEY = "_album_source_map_logged"
 
 
 def _album_level_mb_fields(release: dict[str, Any]) -> dict[str, Any]:
-    """Map a flattened MusicBrainz release to tracks-column names.
-
-    These are the ALBUM-scoped fields ``routes/ui_routes.py`` writes to every
-    track when a release is matched from the album page.  A downloaded album
-    must end up with the same set, or it will not match the release it was
-    queued against.
-
-    ``year``/``release_year`` are deliberately NOT included: the import path
-    owns those through the queue row, and the tag writer has dedicated
-    DATE-vs-ORIGINALYEAR handling for them.
-    """
     out: dict[str, Any] = {}
     mapping = {
         "musicbrainz_albumtype": release.get("album_type"),
@@ -1022,18 +796,6 @@ def _album_level_mb_fields(release: dict[str, Any]) -> dict[str, Any]:
 
 
 def _describe_album_source_map(sources: dict[str, str]) -> str:
-    """Render a field→source attribution as one compact, greppable string.
-
-    All FOUR labels are always present, including the empty ones, so a reader
-    can tell "MusicBrainz was consulted and answered nothing" from "the
-    MusicBrainz step never ran" at a glance — the difference that decides
-    whether the fix is a re-fetch or a queue-time write.
-
-    Example::
-
-        stored=[musicbrainz_releasegroupid disctotal] sibling=[recordlabel]
-        MusicBrainz=[] missing=[barcode media]
-    """
     return " ".join(
         f"{name}=[{' '.join(c for c in _ALBUM_LEVEL_COLUMNS if sources.get(c) == name) or '-'}]"
         for name in _ALBUM_FIELD_SOURCES
@@ -1041,37 +803,15 @@ def _describe_album_source_map(sources: dict[str, str]) -> str:
 
 
 def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
-    """Resolve album-level MusicBrainz metadata for a completing download.
-
-    Two sources, in order:
-
-    1. What was STORED when the release was queued — the queue row's own
-       columns, then the ``metadata`` JSON that ``add_release_tracks_to_queue``
-       writes (this is the "persist at queue time" half).
-    2. A REFRESH from MusicBrainz for anything still missing (the "fetch on
-       import" half), using the release MBID the row was queued against.
-
-    A failed fetch is not an error: the stored values are still applied, and a
-    release the user never matched simply resolves to no album fields.
-
-    Every field is also attributed to the source that supplied it, and ONE
-    line naming all of them is written per import (``[QUEUE] album metadata
-    sources …``) — see ``_describe_album_source_map``.  Without it a silent
-    split is only diagnosable by guessing which of the three paths failed.
-    """
     resolved: dict[str, Any] = {}
-    # Which source answered for each field.  Starts at "missing" so a field no
-    # source ever fills is named explicitly rather than simply omitted.
     sources: dict[str, str] = {c: "missing" for c in _ALBUM_LEVEL_COLUMNS}
 
-    # ── 1. stored: queue-row columns ─────────────────────────────────────
     for column in _ALBUM_LEVEL_COLUMNS:
         value = item.get(column)
         if value is not None and str(value).strip() != "":
             resolved[column] = value
             sources[column] = "stored"
 
-    # ── 1b. stored: the queue row's metadata JSON ────────────────────────
     stored = item.get("metadata")
     if isinstance(stored, str):
         try:
@@ -1091,51 +831,6 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
                     if column in sources:
                         sources[column] = "stored"
 
-    # ── 2. inherit from the album's OWN rows already in the library ─────────
-    # The file is joining a release the library already holds, so the
-    # album-scoped MB identity it needs is already stored on its siblings.
-    #
-    # This runs BEFORE the MusicBrainz refresh on purpose: without it a queue
-    # row that stored no album metadata depended on a LIVE per-track MB call
-    # succeeding, and when it did not — the global throttle is 1 req/s, imports
-    # run per track, and the failure is logged only at DEBUG — the file was
-    # written with NO album MBIDs at all. The artist page keys albums on
-    # ``musicbrainz_releasegroupid`` (2026-10-06-albums-split-by-release-group),
-    # so those rows were filed as a SEPARATE ALBUM from the release they were
-    # downloaded for: the reported "they don't have the same mbid data … so are
-    # coming in as separate albums". LOCAL, so it spends nothing from the
-    # MusicBrainz budget.
-    #
-    # ⚠️⚠️ RELEASE-SCOPED — this is the reported "the album year or the release
-    # mbid is different from the release that was added to the queue".
-    #
-    # The match used to be artist+album NAME only, with no release constraint,
-    # and it deliberately PREFERRED a sibling that carried a release group:
-    #
-    #     WHERE LOWER(...artist...) = LOWER(:artist)
-    #       AND LOWER(...album...)  = LOWER(:album)
-    #     ORDER BY CASE WHEN COALESCE(musicbrainz_releasegroupid,'') <> ''
-    #                   THEN 0 ELSE 1 END, id
-    #
-    # A library that already holds a same-named album from a DIFFERENT release
-    # — the common case: an original and a remaster/reissue, or the album
-    # imported earlier from another edition — therefore donated ITS release
-    # group, barcode, catalogue number, original year and release date to the
-    # incoming row. Because inheritance runs BEFORE MusicBrainz and fills every
-    # column it can, the release the row was actually queued against was then
-    # consulted only for the leftovers, so the wrong identity was locked in and
-    # the right one could never win. Measured on the 1997 vs 1994 editions of
-    # one album: the row was queued against the 1994 release and inherited
-    # ``originalyear=1997``, ``releasedate=1997-08-25`` and the other edition's
-    # release group, barcode and catalogue number.
-    #
-    # The scoping below keeps the optimisation the comment above exists for
-    # (local, zero MusicBrainz budget for rows that carry NO identity) while
-    # refusing to invent an identity for rows that DO name their release: a
-    # sibling may only be inherited from when it is the SAME release, or shares
-    # the SAME release group. A row with no release identity at all keeps the
-    # original name-only behaviour — that is the case this fallback is FOR, and
-    # the only case where a name match is the best evidence available.
     _inherit_release = str(
         item.get("release_mbid") or item.get("release_id") or ""
     ).strip()
@@ -1144,9 +839,6 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
     if _missing_album_cols:
         try:
             with db_session() as session:
-                # Prefer the EXACT release, then a sibling in the same release
-                # group (which is what the album grouping hangs on), then the
-                # oldest row — and never a sibling from an unrelated release.
                 sibling = session.execute(
                     text(
                         f"""
@@ -1189,29 +881,12 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
                     if value is not None and str(value).strip() != "":
                         resolved[column] = value
                         sources[column] = "sibling"
-            elif _inherit_release or _inherit_group:
-                # The library holds a same-named album from a DIFFERENT release
-                # and the row names its own. Saying so is the difference between
-                # "inherited nothing because there was nothing" and "refused a
-                # sibling that would have been the wrong release" — the latter
-                # explains an import that had to fall through to MusicBrainz.
-                logger.debug(
-                    "No same-release sibling for album metadata — not inheriting "
-                    "from a different release of the same name",
-                    album=item.get("album"),
-                    release_mbid=_inherit_release or None,
-                    release_group_mbid=_inherit_group or None,
-                )
         except Exception as exc:
             logger.debug(
                 "Album MBID inheritance from library rows failed",
                 album=item.get("album"), error=str(exc),
             )
 
-    # ── 3. refresh from MusicBrainz for anything still missing ───────────
-    # Runs for whatever inheritance left empty — including the fields it just
-    # refused to take from a different release, so a row that names its release
-    # is now resolved from THAT release rather than from a same-named one.
     release_mbid = str(
         item.get("release_mbid") or item.get("release_id") or ""
     ).strip()
@@ -1236,28 +911,6 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
                 error=str(exc),
             )
 
-    # ⚠️ NOWHERE to get the album's release-group id from. The artist page has
-    # keyed albums on ``musicbrainz_releasegroupid`` since
-    # 2026-10-06-albums-split-by-release-group, so a file written without it
-    # renders as its OWN album next to the release it was downloaded for. That
-    # is the reported "they don't have the same mbid data … so are coming in as
-    # separate albums", and it used to be reachable with NOTHING in the log —
-    # the stored/inherited/MusicBrainz paths all failed at DEBUG. One warning
-    # per affected track, because the operator cannot act on a silent split.
-    if release_mbid and not resolved.get("musicbrainz_releasegroupid"):
-        logger.warning(
-            "Imported track has no release-group MBID after stored, inherited "
-            "and MusicBrainz sources — it may render as a separate album",
-            release_mbid=release_mbid,
-            album=item.get("album"),
-        )
-
-    # ── 4. ONE diagnostic line per import ──────────────────────────────────
-    # Which source answered for every field, so the NEXT import reports the
-    # answer instead of the operator having to guess which of the three paths
-    # failed.  Written through ``log_unified`` — the same channel as the
-    # neighbouring ``[QUEUE] … imported to library`` line — and only once per
-    # row: this resolver runs twice per import (pre-move and post-move).
     if not item.get(_SOURCE_MAP_LOGGED_KEY):
         item[_SOURCE_MAP_LOGGED_KEY] = True
         try:
@@ -1268,7 +921,7 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
                 queue_id=item.get("id"),
                 album=item.get("album"),
             )
-        except Exception as _diag_exc:  # a diagnostic must never break the import
+        except Exception as _diag_exc:
             logger.debug(
                 "Album metadata source map not written",
                 error=str(_diag_exc),
@@ -1280,12 +933,6 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
 def _match_release_track(
     release: dict[str, Any], item: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Find *item*'s track inside a flattened MusicBrainz release.
-
-    Recording-MBID first (exact), then a normalized title comparison.  Returns
-    None when the release does not contain the track — the caller then leaves
-    ``track_number`` unfilled rather than guessing.
-    """
     tracks = release.get("tracks") or []
     if not isinstance(tracks, list) or not tracks:
         return None
@@ -1307,26 +954,6 @@ def _match_release_track(
 def _resolve_missing_identity(
     item: dict[str, Any], file_path: str | None = None
 ) -> dict[str, Any]:
-    """Fill ``year`` / ``track_number`` / ``disc_number`` the queue row lacks.
-
-    ``queue_add`` used to forward only artist/title/album — the album page's
-    missing-track button and the dashboard sent ``year``/``track_number``/
-    ``release_mbid`` too, but they were dropped, so those rows imported into
-    an ``Unknown - <album>/00. <artist> - <title>`` path (the reported bug).
-    Rows queued that way BEFORE the fix are healed here, at import time.
-
-    Sources, cheapest first — only ever fills EMPTY fields:
-
-    1. the row's own ``release_year`` / ``release_date`` columns;
-    2. the album metadata persisted on the row at queue time;
-    3. a MusicBrainz refresh keyed by the row's release MBID (same HTTP-layer
-       cache the album-level refresh uses) — gives the release year and the
-       tracklist position via recording-MBID/title match;
-    4. the downloaded file's own tags or filename (heals rows that carry no
-       MB identity at all).
-
-    Returns only the fills (``{}`` when nothing is missing).
-    """
     from services.downloads.download_organize_helpers import _extract_year_for_path
 
     fills: dict[str, Any] = {}
@@ -1342,11 +969,9 @@ def _resolve_missing_identity(
                 return True
         return False
 
-    # 1. the row's own release columns (set by the MB release adder).
     if _missing("year"):
         _fill_year(item.get("release_year"), item.get("release_date"))
 
-    # 2. album metadata persisted on the row at queue time.
     if _missing("year") and "year" not in fills:
         stored = item.get("metadata")
         if isinstance(stored, str):
@@ -1356,15 +981,11 @@ def _resolve_missing_identity(
                 stored = {}
         album_payload = stored.get("album_metadata") if isinstance(stored, dict) else None
         if isinstance(album_payload, dict):
-            # releasedate first: the queue ``year`` column carries the EDITION
-            # year (see add_release_tracks_to_queue_detailed), matching the
-            # DATE tag the import writes.
             _fill_year(album_payload.get("releasedate"), album_payload.get("originalyear"))
 
     need_year = "year" not in fills and _missing("year")
     need_track = _missing("track_number")
 
-    # 3. MusicBrainz refresh via the row's release identity (HTTP-layer cached).
     release_mbid = str(item.get("release_mbid") or item.get("release_id") or "").strip()
     if release_mbid and (need_year or need_track):
         try:
@@ -1396,8 +1017,6 @@ def _resolve_missing_identity(
                     if _missing("disc_number") and match.get("disc_number") not in (None, ""):
                         fills["disc_number"] = match["disc_number"]
 
-    # 4. the downloaded file's own tags / filename — the only source left for
-    #    rows queued with no MB identity at all (pre-fix single-item adds).
     need_year = "year" not in fills and _missing("year")
     if (need_year or _missing("track_number")) and file_path and os.path.isfile(file_path):
         try:
@@ -1424,7 +1043,6 @@ def _resolve_missing_identity(
 
 
 def _sniff_image_mime(data: bytes) -> str:
-    """Image MIME from magic bytes — never trust a URL's extension."""
     if data[:8] == b"\x89PNG\r\n\x1a\n":
         return "image/png"
     if data[:6] in (b"GIF87a", b"GIF89a"):
@@ -1435,14 +1053,6 @@ def _sniff_image_mime(data: bytes) -> str:
 
 
 def _fetch_import_art(item: dict[str, Any]) -> Optional[tuple[bytes, str]]:
-    """Album art for a freshly downloaded file, or ``None``.
-
-    Sources, in order: the queue row's own cover URL (a manual MusicBrainz
-    match stores one), the album-art cache/providers (stored → Navidrome →
-    MusicBrainz/Cover Art Archive → Discogs …), and finally Cover Art
-    Archive by the release MBID. Everything is wrapped: art is enrichment,
-    never a reason to fail an import.
-    """
     url = str(item.get("cover_art_url") or "").strip()
     if url:
         try:
@@ -1489,20 +1099,6 @@ def _fetch_import_art(item: dict[str, Any]) -> Optional[tuple[bytes, str]]:
 
 
 def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
-    """Write the queue row's stored metadata onto *file_path* (pre-move).
-
-    Returns True when the tag write succeeded.  A False here means the library
-    file will keep the DOWNLOADED file's own tags — historically the return
-    value was dropped and failures were logged only at DEBUG, so an import
-    could report success while Navidrome showed the peer's metadata (the
-    reported bug).  Failures are now surfaced at WARNING plus one unified
-    queue line so the Logs page shows them.
-    """
-    # Album-level MusicBrainz metadata — resolved ONCE, BEFORE the disc logic,
-    # because ``disctotal`` is what says whether a disc-1 track is on a
-    # multi-disc release (see the disc block below).  Applied to BOTH the file
-    # tags and the tracks row so an imported album carries the same release
-    # metadata an album-page lookup would have written.
     _album_level = _resolve_album_level_metadata(item)
 
     meta: dict[str, Any] = {
@@ -1524,19 +1120,6 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
     except (TypeError, ValueError):
         _disctotal = 0
 
-    # ⚠️ The disc-1 strip is SINGLE-DISC ONLY.
-    #
-    # It used to be ``"" for every disc < 2``, so the FIRST disc of a
-    # MULTI-disc release had its TPOS cleared as well — Navidrome then reported
-    # ``discNumber`` 0 for those tracks, which is the reported "some multiple
-    # disk albums are adding the tracks as disk 0 rather than disk 1".  Disc 2+
-    # kept their number, so one album ended up as "disc 0" + "disc 2".
-    #
-    # The single-disc clear itself is deliberate (a stray "1" renders as its
-    # own "disc 0" group on a one-disc release) and is now decided by
-    # ``disctotal`` rather than by the number alone.  When the release is
-    # multi-disc but THIS track's disc is unknown, the frame is left alone —
-    # guessing is what produced the 0 in the first place.
     if _disc_num >= 2:
         _disc_value: str | None = str(_disc_raw)
     elif _disc_num == 1:
@@ -1546,7 +1129,6 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
 
     meta = {k: v for k, v in meta.items() if v not in (None, "")}
     if _disc_value is not None:
-        # "" survives the filter: it is the explicit CLEAR contract.
         meta["disc_number"] = _disc_value
     recording_mbid = item.get("recording_mbid")
     if recording_mbid:
@@ -1561,24 +1143,9 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
     if item.get("musicbrainz_releasegroupid"):
         meta["musicbrainz_releasegroupid"] = item.get("musicbrainz_releasegroupid")
 
-    # ── Album-level MusicBrainz metadata ─────────────────────────────────
-    # Resolved from what was stored at queue time and, for anything still
-    # missing, refreshed from MusicBrainz via the release MBID.  Applied to
-    # BOTH the file tags and the tracks row so an imported album carries the
-    # same release metadata an album-page lookup would have written.
-    # Album-level fields — ``_album_level`` was resolved at the top (it also
-    # decided the disc behaviour above), so only the set is applied here.
     for _col, _val in _album_level.items():
         meta.setdefault(_col, _val)
 
-    # ── Stored MusicBrainz enrichment (writer / cover / genres) ──────────
-    # ``add_release_tracks_to_queue`` persisted the per-recording work-rels
-    # (writer + cover attribution) and MB genres in the queue row's
-    # ``metadata`` JSONB.  Apply them to the file tags so the imported track
-    # carries them, AND to the tracks table so the DB row immediately has the
-    # enrichment (the reported bug: imported tracks lost the MB metadata they
-    # were matched with because the tracks-table write only happened during a
-    # later Navidrome scan, and the extractor never read cover/genres back).
     _stored: dict[str, Any] = {}
     try:
         _stored = item.get("metadata") or {}
@@ -1598,11 +1165,6 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
                 meta["musicbrainz_genres"] = str(_stored["musicbrainz_genres"])
             if _stored.get("work_mbid"):
                 meta["musicbrainz_workid"] = str(_stored["work_mbid"])
-            # Per-track MusicBrainz enrichment persisted at queue time — the
-            # album page writes ISRC / TRACKTOTAL / the track-artist MBID, so
-            # a queued import must carry them too (tag parity).  ``None``/empty
-            # keys are simply absent and never forwarded (see the contract at
-            # the top of ``update_file_metadata``).
             if _stored.get("isrc"):
                 meta["isrc"] = str(_stored["isrc"])
             if _stored.get("tracktotal"):
@@ -1612,13 +1174,6 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
     except Exception as _stored_exc:
         logger.debug("Stored MB metadata parse failed", queue_id=item.get("id"), error=str(_stored_exc))
 
-    # ── Per-track enrichment for rows that stored none ────────────────────
-    # ``queue_add`` rows (album-page missing-track button, search form) carry
-    # NO metadata JSON, and rows queued before the queue adder persisted
-    # these have neither — so refresh from the same HTTP-layer-cached release
-    # payload the album-level refresh uses, matched to THIS recording, and
-    # fill only what is still missing (tag parity with the album page: TSRC,
-    # TRACKTOTAL, MUSICBRAINZ ARTIST ID).
     _track_missing = [
         _k for _k in ("isrc", "tracktotal", "musicbrainz_artistid")
         if not meta.get(_k)
@@ -1655,12 +1210,6 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
     if not meta:
         return False
 
-    # ── Tag write outcome must be SURFACED ───────────────────────────────
-    # False/raise here = the config gates (write disabled, ratings-only,
-    # fill-missing-only), an unsupported format, or a writer failure.  All of
-    # them used to be invisible at import time (DEBUG / ignored return), so
-    # the move reported success while the file kept the downloaded file's
-    # tags — exactly what the import shows in Navidrome.
     _tags_written = False
     try:
         from services.metadata.tag_file_service import update_file_metadata
@@ -1675,76 +1224,26 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
             "Imported file keeps its downloaded tags — tag write failed or was skipped",
             queue_id=item.get("id"), path=file_path,
         )
-        try:
-            from helpers.logging_config import log_unified
-            log_unified(
-                f"[QUEUE] ⚠ {os.path.basename(file_path)} — file tags NOT written "
-                "(check error.log / tagging config); the library will show the "
-                "downloaded file's own metadata"
-            )
-        except Exception:
-            pass
 
-    # ── Album art ────────────────────────────────────────────────────────
-    # The downloaded file carries whatever art (usually none) its source had,
-    # and art used to arrive only if a LATER scan happened to run its art pass
-    # — the reported "album art isn't always downloading with the metadata for
-    # the downloaded tracks". Embed the ALBUM's art right here, on every
-    # import. It runs AFTER the tag write because the writer may rebuild
-    # frames, which would drop art embedded first.
-    #
-    # Only for a file that can actually RECEIVE the art: a synthetic path
-    # must never trigger the provider/URL lookups (tests pass fake paths —
-    # and in the shared in-memory test DB a single missing-table error DISPOSES
-    # the engine, wiping every table for the next test's teardown).
     try:
         _art = _fetch_import_art(item) if os.path.isfile(file_path) else None
         if _art:
             from services.metadata.tag_file_service import embed_album_art
-
             _art_bytes, _art_mime = _art
-            if embed_album_art(file_path, _art_bytes, _art_mime):
-                logger.debug(
-                    "Album art embedded on import",
-                    queue_id=item.get("id"), path=file_path, mime=_art_mime,
-                )
-            else:
-                logger.warning(
-                    "Album art embed failed",
-                    queue_id=item.get("id"), path=file_path,
-                )
+            embed_album_art(file_path, _art_bytes, _art_mime)
     except Exception as _art_exc:
-        logger.warning(
-            "Album art embed skipped",
-            queue_id=item.get("id"), error=str(_art_exc),
-        )
+        logger.warning("Album art embed skipped", queue_id=item.get("id"), error=str(_art_exc))
 
-    # ── Persist the MB enrichment to the tracks table ────────────────────
-    # The just-moved file may not be re-scanned immediately; write the stored
-    # MB metadata straight to the matching tracks row so the library shows it
-    # (writer / cover / genres / work MBID / album MBID) without waiting for
-    # a Navidrome import.
     try:
         _db_payload: dict[str, Any] = {}
         _mb_cols = {
             "writer", "is_cover", "original_cover_artist", "musicbrainz_genres",
             "musicbrainz_workid", "recording_mbid", "release_mbid",
             "musicbrainz_artistid", "musicbrainz_albumartistid",
-            "musicbrainz_releasegroupid",
-            # Album-level fields — see ``_ALBUM_LEVEL_COLUMNS``.  Without these
-            # the row kept the track-level enrichment but not the release
-            # identity, so the library showed an album that did not match the
-            # MBID release it was downloaded for.
-            "musicbrainz_albumtype", "musicbrainz_albumstatus",
+            "musicbrainz_releasegroupid", "musicbrainz_albumtype", "musicbrainz_albumstatus",
             "releasecountry", "originalyear", "originaldate", "releasedate",
             "disctotal", "recordlabel", "catalognumber", "barcode", "media",
-            # Track-level MusicBrainz enrichment: ISRC, the medium's
-            # track-count and the track-artist MBID (written by the album page,
-            # so a downloaded album must carry them too).
-            "isrc", "tracktotal",
-            # ``release_mbid`` is a download_queue column, not a tracks column;
-            # the tracks-table equivalent is ``musicbrainz_album_mbid``.
-            "musicbrainz_album_mbid",
+            "isrc", "tracktotal", "musicbrainz_album_mbid",
         }
         for _col in _mb_cols:
             if meta.get(_col) not in (None, ""):
@@ -1754,8 +1253,6 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
             _db_payload["musicbrainz_album_mbid"] = release_mbid
 
         if recording_mbid or release_mbid:
-            # Find the track row by MBID first (most reliable), then by the
-            # just-moved file path.
             _track_id = _resolve_track_id_for_import(
                 file_path=file_path,
                 recording_mbid=recording_mbid,
@@ -1767,12 +1264,6 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
                 _db_payload["id"] = _track_id
                 from db.repositories.tracks import insert_or_update_track
                 insert_or_update_track(_track_id, _db_payload)
-                logger.info(
-                    "Applied stored MusicBrainz metadata to track row",
-                    queue_id=item.get("id"),
-                    track_id=_track_id,
-                    fields=sorted(_db_payload),
-                )
     except Exception as exc:
         logger.debug("Could not persist MB metadata to tracks table", queue_id=item.get("id"), error=str(exc))
 
@@ -1787,14 +1278,6 @@ def _resolve_track_id_for_import(
     artist: str | None,
     title: str | None,
 ) -> str | None:
-    """Find the tracks-table id for a just-imported file.
-
-    Resolution order:
-    1. Exact file_path match (the file was moved into the library).
-    2. recording_mbid match.
-    3. (artist, title) match.
-    Returns None when no row exists yet (the next Navidrome scan creates it).
-    """
     try:
         with db_session() as session:
             if file_path:
@@ -1842,10 +1325,8 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
                 {"qid": queue_id},
             )
             if result.rowcount == 0:
-                logger.info("Move already claimed elsewhere — skipping", queue_id=queue_id)
                 return {"success": False, "error": "already_claimed"}
     except Exception as exc:
-        logger.error("Could not claim move", queue_id=queue_id, error=str(exc))
         return {"success": False, "error": str(exc)}
 
     def _reset_to_downloading(reason: str) -> None:
@@ -1854,7 +1335,6 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
             update_queue_item(queue_id, status="downloading")
         except Exception:
             pass
-        logger.warning("Reset item to downloading", queue_id=queue_id, reason=reason)
 
     try:
         from db.repositories.queue import update_queue_item
@@ -1865,40 +1345,19 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
         )
 
         if not abs_path or not os.path.isfile(abs_path) or os.path.getsize(abs_path) == 0:
-            logger.warning("Source file missing before copy — resetting to downloading", queue_id=queue_id, path=abs_path)
             _reset_to_downloading(f"source file missing before copy: {abs_path}")
             return {"success": False, "error": "source_file_missing"}
 
-        # Heal identity the queue row is missing BEFORE the tag write and the
-        # path build below.  Rows queued before ``queue_add`` forwarded these
-        # fields would otherwise still import as "Unknown - <album>/00. ...".
-        # Persisting the fills also keeps the stale-"moving" path reconciliation
-        # (_reconcile_stale_moving rebuilds the target from the ROW) agreeing
-        # with the folder the file was actually moved into.
         try:
             _identity = _resolve_missing_identity(item, abs_path)
-        except Exception as _id_exc:
+        except Exception:
             _identity = {}
-            logger.warning(
-                "Import identity backfill failed",
-                queue_id=queue_id,
-                error=str(_id_exc),
-            )
         if _identity:
             item.update(_identity)
             try:
                 update_queue_item(queue_id, **_identity)
-            except Exception as _persist_exc:
-                logger.debug(
-                    "Could not persist resolved identity",
-                    queue_id=queue_id,
-                    error=str(_persist_exc),
-                )
-            logger.info(
-                "Backfilled missing queue identity before import",
-                queue_id=queue_id,
-                fills=sorted(_identity),
-            )
+            except Exception:
+                pass
 
         _apply_stored_metadata(item, abs_path)
 
@@ -1917,7 +1376,6 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
 
         move_result = move_track_to_library(track, release_metadata, _MUSIC_ROOT)
         if not move_result.get("success"):
-            logger.warning("Move failed — resetting to downloading", queue_id=queue_id, error=move_result.get("error"))
             _reset_to_downloading(f"move failed: {move_result.get('error')}")
             return move_result
 
@@ -1945,15 +1403,11 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
         )
 
         if verify_result.get("success") or file_exists:
-            # Sweep the target folder for duplicates of this track (e.g.
-            # repeated downloads leaving "02 - Lay Your Head to Rest.flac"
-            # plus "02 - Lay Your Head to Rest_12345.flac").  Keeps the
-            # just-moved file (highest quality wins otherwise).
             try:
                 from services.downloads.download_organize_helpers import dedupe_library_folder
                 dedupe_library_folder(os.path.dirname(target_path), keep_path=target_path)
-            except Exception as exc:
-                logger.debug("Library folder dedup sweep failed", folder=os.path.dirname(target_path), error=str(exc))
+            except Exception:
+                pass
 
             try:
                 mark_queue_item_moved(queue_id, target_path)
@@ -1967,14 +1421,11 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
                     copied_individually_at=datetime.now().isoformat(),
                 )
             except Exception as exc:
-                logger.error("Status update failed — resetting to downloading", queue_id=queue_id, error=str(exc))
                 _reset_to_downloading(f"status update failed: {exc}")
                 return {"success": False, "error": str(exc)}
                 
-            logger.info("Verified and imported track to library", queue_id=queue_id, target=target_path, source=match_source)
             return {"success": True, "target_path": target_path}
 
-        logger.error("Verification failed for moved file", queue_id=queue_id, error=verify_result.get("error"))
         try:
             from db.repositories.queue import mark_failed
             mark_failed(queue_id, f"Move verification failed: {verify_result.get('error')}")
@@ -1983,7 +1434,6 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
         return {"success": False, "error": verify_result.get("error")}
 
     except Exception as exc:
-        logger.error("Unhandled error during move — resetting to downloading", queue_id=queue_id, error=str(exc), exc_info=True)
         _reset_to_downloading(f"unhandled error: {exc}")
         return {"success": False, "error": str(exc)}
 
@@ -2066,14 +1516,6 @@ def _reconcile_stale_moving(stale_minutes: int = 10) -> dict[str, int]:
                 except Exception:
                     target = None
 
-            if not (target and os.path.isfile(str(target))) and target:
-                try:
-                    mp3_variant = f"{os.path.splitext(str(target))[0]}.mp3"
-                    if os.path.isfile(mp3_variant):
-                        target = mp3_variant
-                except Exception:
-                    pass
-
             if target and os.path.isfile(str(target)):
                 update_queue_item(
                     queue_id,
@@ -2085,13 +1527,10 @@ def _reconcile_stale_moving(stale_minutes: int = 10) -> dict[str, int]:
                     copied_individually_at=datetime.now().isoformat(),
                 )
                 stats["imported"] += 1
-                logger.info("Recovered stale 'moving' item — file found in library", queue_id=queue_id, target=target)
             else:
                 update_queue_item(queue_id, status="downloading")
                 stats["reset"] += 1
-                logger.info("Recovered stale 'moving' item — reset to downloading", queue_id=queue_id)
-        except Exception as exc:
-            logger.warning("Stale 'moving' recovery failed", queue_id=queue_id, error=str(exc))
+        except Exception:
             stats["skipped"] += 1
 
     return stats
@@ -2102,23 +1541,20 @@ def _reconcile_transfer_state(
     slskd: Any,
     active: list[dict[str, Any]] | None = None,
     now: datetime | None = None,
-) -> bool:
+) -> bool | str:
     queue_id = item.get("id")
     found_fn = (item.get("found_filename") or "").strip()
 
     if active is None:
         try:
             active = slskd.get_active_downloads()
-        except Exception as exc:
-            logger.debug("Could not fetch active transfers", error=str(exc))
+        except Exception:
             active = []
 
     if not active:
         if _is_stale_queue_item(item, stale_minutes=10, now=now):
-            logger.warning("Transfer missing from slskd API while downloading and stale", queue_id=queue_id)
             from db.repositories.queue import mark_failed
             mark_failed(queue_id, "Transfer missing from slskd API while marked downloading")
-            _log_queue_event("failed", "Missing from slskd transfers and stale — scheduling retry", queue_id)
             return True
         return False
 
@@ -2134,10 +1570,8 @@ def _reconcile_transfer_state(
 
     if transfer is None:
         if _is_stale_queue_item(item, stale_minutes=10, now=now):
-            logger.warning("Transfer not found and item stale", queue_id=queue_id)
             from db.repositories.queue import mark_failed
             mark_failed(queue_id, "Transfer missing from slskd API while marked downloading")
-            _log_queue_event("failed", "Transfer not found and item stale — scheduling retry", queue_id)
             return True
         return False
 
@@ -2145,53 +1579,18 @@ def _reconcile_transfer_state(
     failed_states = slskd.FAILED_STATES
 
     if state in failed_states:
-        logger.warning("slskd reports failed state", queue_id=queue_id, state=state)
         _remember_failed_peer(transfer)
         from db.repositories.queue import mark_failed
         mark_failed(queue_id, f"slskd transfer failed: {state}")
-        _log_queue_event("failed", f"slskd transfer failed: {state} — scheduling retry", queue_id)
         return True
 
     if slskd.is_success_state(state):
         local = str(transfer.get("localFilePath") or "")
         landed = _wait_for_transfer_file(found_fn, local)
         if landed:
-            # The wait is OVER — reset the consecutive not-found counter so
-            # the next observation starts fresh (a found file is the end of
-            # this grace story).
             _clear_cycle_counter(_SUCCEEDED_NOT_FOUND_CYCLES, queue_id)
-            # Return the LANDED PATH (not just False) so the caller can
-            # immediately claim + import it — previously it returned False,
-            # the item stayed 'downloading', and the next cycle's
-            # slskd_completed lookup failed to map the path, so the file was
-            # found-and-re-found every cycle ("Transfer file appeared within
-            # the grace window" repeating forever) without ever being moved.
-            logger.info("Transfer file appeared within the grace window", queue_id=queue_id, path=landed)
             return landed
 
-        logger.warning(
-            "slskd succeeded but no local file found (will keep polling)",
-            queue_id=queue_id,
-            local_file_path=local or "(empty)",
-            found_filename=found_fn,
-            monitored_dir=_monitored_downloads_dir(),
-        )
-        # A succeeded transfer whose file has NOT appeared is usually a
-        # slskd flush/rename delay — the file may land moments later.  Do
-        # NOT cancel the transfer + mark_failed immediately: that was the
-        # infinite re-download loop (each retry's search picked a DIFFERENT
-        # file, which also "succeeded" without appearing → requeue → …).
-        # Keep the item 'downloading' so a later cycle claims the file the
-        # moment it lands; only after the grace period is it failed for a
-        # (much slower) retry.
-        #
-        # The grace period is CONSECUTIVE CYCLE COUNT, not wall-clock age:
-        # ``update_queue_item`` stamps ``updated_at = CURRENT_TIMESTAMP`` on
-        # every update, so a wall-clock stale gate (%15 min) can be reset
-        # indefinitely by anything that touches the row — the reported
-        # 45-minute-plus "will keep polling" loops.  After 3 consecutive
-        # succeeded-but-not-found observations the item is failed for retry
-        # no matter what updated_at says.
         _succeeded_not_found_cycles = _bump_cycle_counter(
             _SUCCEEDED_NOT_FOUND_CYCLES, queue_id
         )
@@ -2200,7 +1599,6 @@ def _reconcile_transfer_state(
             or _is_stale_queue_item(item, stale_minutes=_SLSKD_SUCCEEDED_NOT_FOUND_TIMEOUT_MINUTES, now=now)
         )
         if _grace_exhausted:
-            logger.warning("Succeeded transfer never produced a local file — failing for retry", queue_id=queue_id, cycles=_succeeded_not_found_cycles)
             _clear_cycle_counter(_SUCCEEDED_NOT_FOUND_CYCLES, queue_id)
             _remember_failed_peer(transfer)
             try:
@@ -2208,18 +1606,16 @@ def _reconcile_transfer_state(
                 username = str(transfer.get("username") or "")
                 if transfer_id and username:
                     slskd.cancel_download(username, transfer_id, remove=True)
-            except Exception as exc:
-                logger.debug("Could not remove stale transfer", queue_id=queue_id, error=str(exc))
+            except Exception:
+                pass
 
             from db.repositories.queue import mark_failed
             mark_failed(queue_id, "slskd transfer succeeded but local file not found")
-            _log_queue_event("failed", "slskd transfer succeeded but local file not found — retrying", queue_id)
             return True
         return False
 
     if state == slskd.STATE_QUEUED_REMOTELY:
         if _is_stale_queue_item(item, stale_minutes=_SLSKD_REMOTELY_QUEUED_TIMEOUT_MINUTES, now=now):
-            logger.warning("Remotely queued too long — cancelling", queue_id=queue_id)
             try:
                 transfer_id = str(transfer.get("id") or "")
                 username = str(transfer.get("username") or "")
@@ -2230,13 +1626,11 @@ def _reconcile_transfer_state(
             _remember_failed_peer(transfer)
             from db.repositories.queue import mark_failed
             mark_failed(queue_id, "Remotely queued too long")
-            _log_queue_event("failed", "Remotely queued too long — cancelling and retrying", queue_id)
             return True
         return False
 
     if state in slskd.ACTIVE_STATES:
         if _is_stale_queue_item(item, stale_minutes=_SLSKD_ACTIVE_STATE_TIMEOUT_MINUTES, now=now):
-            logger.warning("Download timed out — cancelling", queue_id=queue_id, state=state)
             try:
                 transfer_id = str(transfer.get("id") or "")
                 username = str(transfer.get("username") or "")
@@ -2247,7 +1641,6 @@ def _reconcile_transfer_state(
             _remember_failed_peer(transfer)
             from db.repositories.queue import mark_failed
             mark_failed(queue_id, f"slskd download timed out ({state})")
-            _log_queue_event("failed", f"slskd download timed out ({state}) — cancelling and retrying", queue_id)
             return True
 
     return False
@@ -2258,7 +1651,6 @@ def _reconcile_transfer_state(
 # =============================================================================
 
 def check_completed_downloads() -> dict[str, Any]:
-    """Reconcile 'downloading' queue items against completed downloads."""
     stats: dict[str, Any] = {
         "success": True,
         "downloading_items": 0,
@@ -2271,10 +1663,8 @@ def check_completed_downloads() -> dict[str, Any]:
     try:
         moving_stats = _reconcile_stale_moving()
         stats["imported"] += moving_stats.get("imported", 0)
-        stats["moving_reset"] = moving_stats.get("reset", 0)
-        stats["moving_skipped"] = moving_stats.get("skipped", 0)
-    except Exception as exc:
-        logger.warning("Stale 'moving' reconciliation failed", error=str(exc))
+    except Exception:
+        pass
 
     db_now = _db_now_naive()
 
@@ -2298,8 +1688,6 @@ def check_completed_downloads() -> dict[str, Any]:
         slskd = SlskdService(http_client=slskd_client) if slskd_client is not None else None
         downloads_dir = resolve_downloads_dir()
 
-        log_unified(f"[QUEUE] Checking {downloading_count} completed download(s) — downloads dir: {downloads_dir}")
-
         slskd_completed: dict[str, str] = {}
         if slskd is not None:
             try:
@@ -2307,12 +1695,6 @@ def check_completed_downloads() -> dict[str, Any]:
                     local = str(transfer.get("localFilePath") or "").replace("\\", "/").strip()
                     remote = str(transfer.get("filename") or "").replace("\\", "/").strip()
                     remote_norm = _normalize_transfer_key(remote)
-                    # Resolve the on-disk location.  slskd sometimes reports an
-                    # empty ``localFilePath`` even though the file landed — it
-                    # preserves the REMOTE directory structure under the
-                    # downloads root (``music/Artist/Album/01 - Track.flac``).
-                    # Fall back to that remote-relative path so the transfer is
-                    # not dropped from the completed map.
                     resolved_local = local
                     if (not resolved_local or not os.path.isfile(resolved_local)) and downloads_dir and remote_norm:
                         _candidate = os.path.join(downloads_dir, remote)
@@ -2323,15 +1705,8 @@ def check_completed_downloads() -> dict[str, Any]:
                             if _cand_base:
                                 import unicodedata as _ud
                                 _base_key = _ud.normalize("NFC", _cand_base).lower()
-                                _base_stripped = "".join(
-                                    c for c in _ud.normalize("NFKD", _base_key) if not _ud.combining(c)
-                                ).lower()
                                 _base_punct = _punctuation_stripped_key(_cand_base)
                                 _base_pfx = _track_prefix_stripped_key(_cand_base)
-                                # Search the downloads root PLUS the torrents
-                                # dir / sibling ``torrents`` roots — slskd's
-                                # complete-directory can differ from the app's
-                                # downloads dir.
                                 _search_roots = {downloads_dir}
                                 try:
                                     from services.downloads.download_scan_service import resolve_torrents_dir
@@ -2347,7 +1722,6 @@ def check_completed_downloads() -> dict[str, Any]:
                                     if not os.path.isdir(_sr):
                                         continue
                                     for _root, _dirs, _files in os.walk(_sr):
-                                        # Prune hidden/dunder + archive dirs.
                                         _dirs[:] = [
                                             d for d in _dirs
                                             if not d.startswith(".") and not d.startswith("__")
@@ -2355,12 +1729,8 @@ def check_completed_downloads() -> dict[str, Any]:
                                         ]
                                         for _fname in _files:
                                             _fn_key = _ud.normalize("NFC", _fname).lower()
-                                            _fn_stripped = "".join(
-                                                c for c in _ud.normalize("NFKD", _fn_key) if not _ud.combining(c)
-                                            ).lower()
                                             if (
                                                 _fn_key == _base_key
-                                                or _fn_stripped == _base_stripped
                                                 or (_base_punct and _punctuation_stripped_key(_fname) == _base_punct)
                                                 or (_base_pfx and _track_prefix_stripped_key(_fname) == _base_pfx)
                                             ):
@@ -2373,9 +1743,8 @@ def check_completed_downloads() -> dict[str, Any]:
                             slskd_completed[remote_norm] = resolved_local
                             slskd_completed[os.path.basename(remote_norm)] = resolved_local
                         slskd_completed[os.path.basename(resolved_local).lower()] = resolved_local
-                logger.debug("Queried slskd completed transfers", count=len(slskd_completed))
-            except Exception as exc:
-                logger.debug("Could not query slskd completed transfers", error=str(exc))
+            except Exception:
+                pass
 
         fs_files: list[Any] = []
         if os.path.isdir(downloads_dir):
@@ -2387,10 +1756,6 @@ def check_completed_downloads() -> dict[str, Any]:
                 _archive_dir = resolve_original_archive_dir()
                 _archive_name = _original_archive_subfolder_name()
 
-                # Walk the downloads root PLUS the torrents dir / sibling
-                # ``torrents`` roots — slskd's complete-directory can differ
-                # from the app's downloads dir, and the basename-anywhere
-                # matcher must find files wherever they landed.
                 _walk_roots: set[str] = {downloads_dir}
                 try:
                     from services.downloads.download_scan_service import resolve_torrents_dir
@@ -2428,9 +1793,8 @@ def check_completed_downloads() -> dict[str, Any]:
                                 "full_path": full_path,
                                 "rel_path": os.path.relpath(full_path, downloads_dir),
                             })
-                logger.debug("Filesystem walk completed", count=len(fs_files))
-            except Exception as exc:
-                logger.debug("Filesystem walk failed", error=str(exc))
+            except Exception:
+                pass
 
         fs_index = _build_download_index(fs_files) if fs_files else {
             "by_rel_norm": {},
@@ -2455,16 +1819,15 @@ def check_completed_downloads() -> dict[str, Any]:
                     if norm:
                         claimed_files.add(norm)
                         claimed_files.add(os.path.basename(norm))
-        except Exception as exc:
-            logger.debug("Could not pre-load claimed files", error=str(exc))
+        except Exception:
+            pass
 
         downloading: list[dict[str, Any]] = []
         try:
             with db_session() as session:
                 rows = session.execute(text("SELECT * FROM download_queue WHERE status = 'downloading' ORDER BY id")).fetchall() or []
                 downloading = [dict(r._mapping) for r in rows]
-        except Exception as exc:
-            logger.error("Could not fetch downloading items", error=str(exc))
+        except Exception:
             stats["errors"] += 1
             return stats
 
@@ -2472,8 +1835,8 @@ def check_completed_downloads() -> dict[str, Any]:
         if slskd is not None and downloading:
             try:
                 active_transfers = slskd.get_active_downloads()
-            except Exception as exc:
-                logger.debug("Could not fetch active transfers", error=str(exc))
+            except Exception:
+                pass
             if active_transfers:
                 _sync_download_progress(active_transfers, downloading)
 
@@ -2481,9 +1844,6 @@ def check_completed_downloads() -> dict[str, Any]:
             try:
                 queue_id = item.get("id")
 
-                # Re-fetch the row: the cycle snapshot may be stale (a retry
-                # already requeued + re-downloaded this item), and processing
-                # the stale row double-fails it → infinite re-download loop.
                 fresh = _refresh_downloading_item(queue_id)
                 if fresh is None:
                     stats["skipped"] += 1
@@ -2497,7 +1857,6 @@ def check_completed_downloads() -> dict[str, Any]:
 
                 existing_music = item.get("music_file_path")
                 if existing_music and os.path.isfile(existing_music):
-                    logger.info("Item already in music library — promoting to imported", queue_id=queue_id)
                     update_queue_item(
                         queue_id,
                         status="imported",
@@ -2505,8 +1864,6 @@ def check_completed_downloads() -> dict[str, Any]:
                         copied_individually_at=datetime.now().isoformat(),
                     )
                     stats["imported"] += 1
-                    log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → already in library, promoted to imported")
-                    _log_queue_event("imported", f"{item.get('artist') or ''} - {item.get('title') or ''} → already in library, promoted to imported", queue_id)
                     continue
 
                 match_found: str | None = None
@@ -2546,10 +1903,6 @@ def check_completed_downloads() -> dict[str, Any]:
                                 else:
                                     _delete_mismatched_download(abs_path, queue_id, f"rejected ({match_source})")
                                     _block_peer_for_queue_item(queue_id, found_fn)
-                                    # ⚠️ RECORD BEFORE mark_failed. ``mark_failed``
-                                    # returns the row to 'queued' and the next
-                                    # attempt overwrites ``failure_reason``, so
-                                    # the row cannot be the record of this.
                                     _record_discarded_download(
                                         item=item,
                                         queue_id=queue_id,
@@ -2559,8 +1912,6 @@ def check_completed_downloads() -> dict[str, Any]:
                                     )
                                     mark_failed(queue_id, _queue_reject_failure_reason(match_source))
                                     stats["failed"] += 1
-                                    log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → failed: {_discard_detail_sentence(_discard_detail, match_source)} (deleted + rescheduled)")
-                                    _log_queue_event("failed", f"{item.get('artist') or ''} - {item.get('title') or ''} → failed: downloaded file did not match queue item (deleted + rescheduled)", queue_id)
                                     continue
 
                 if match_found is None and found_fn:
@@ -2573,16 +1924,9 @@ def check_completed_downloads() -> dict[str, Any]:
                             exact_candidates.append(hit)
                     if found_basename:
                         exact_candidates.extend(fs_index["by_basename"].get(found_basename.lower(), []))
-                        # Accent-stripped key so accented filenames match even
-                        # when the found_filename normalizes accents differently.
                         _stripped = _accent_stripped_key(found_basename)
                         if _stripped and _stripped != found_basename.lower():
                             exact_candidates.extend(fs_index["by_basename"].get(_stripped, []))
-                        # Punctuation-stripped basename ("Par‐delà le mur des
-                        # siècles (instrumental)" == "par-dela le mur des siecles
-                        # instrumental") — finds the file ANYWHERE under the
-                        # downloads tree by basename alone, ignoring the folder
-                        # path entirely (the reported Aephanemer loop).
                         _punct = _punctuation_stripped_key(found_basename)
                         if _punct:
                             exact_candidates.extend(fs_index["by_punct"].get(_punct, []))
@@ -2629,12 +1973,6 @@ def check_completed_downloads() -> dict[str, Any]:
                     match_found = None
 
                 if match_found is None:
-                    # The remote name recorded when this download was enqueued
-                    # tells us EXACTLY which on-disk file belongs to this queue
-                    # item.  A fuzzy candidate whose basename matches it was
-                    # downloaded for THIS item — a mismatch means it is the
-                    # wrong file and must be removed, not left on disk to be
-                    # re-picked by the watcher or a later retry.
                     _expected_bases = set()
                     if found_fn:
                         _fb = os.path.basename(found_fn)
@@ -2657,17 +1995,12 @@ def check_completed_downloads() -> dict[str, Any]:
                             meta_state = None
 
                         if meta_state is False:
-                            # A file that genuinely fails the metadata match is
-                            # WRONG for this queue item — never leave it on
-                            # disk to be re-picked by the watcher or a retry.
                             if _cand_base.lower() in _expected_bases or _cand_base in _expected_bases:
                                 _delete_mismatched_download(candidate, queue_id, "metadata mismatch")
                                 _block_peer_for_queue_item(queue_id, found_fn)
                                 mark_failed(queue_id, "Downloaded file did not match queue item; deleted and rescheduled")
                                 stats["failed"] += 1
                                 match_found = "__rejected__"
-                                log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → failed: downloaded file did not match queue item (deleted + rescheduled)")
-                                _log_queue_event("failed", f"{item.get('artist') or ''} - {item.get('title') or ''} → failed: downloaded file did not match queue item (deleted + rescheduled)", queue_id)
                                 break
                             continue
                         if meta_state is None:
@@ -2677,19 +2010,12 @@ def check_completed_downloads() -> dict[str, Any]:
                             except Exception:
                                 score = 0.0
                             if score < _SLSKD_MIN_ACCEPT_SCORE:
-                                # Sub-threshold fuzzy candidate: if this is the
-                                # file slskd downloaded for THIS item, remove it
-                                # so it cannot be re-picked as a "fresh"
-                                # download that then mismatches again.  Other
-                                # files (torrents, manual drops) are left alone.
                                 if _cand_base.lower() in _expected_bases or _cand_base in _expected_bases:
                                     _delete_mismatched_download(candidate, queue_id, f"below accept threshold (score={score:.2f})")
                                     _block_peer_for_queue_item(queue_id, found_fn)
                                     mark_failed(queue_id, "Downloaded file below acceptance threshold; deleted and rescheduled")
                                     stats["failed"] += 1
                                     match_found = "__rejected__"
-                                    log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → failed: downloaded file below acceptance threshold (deleted + rescheduled)")
-                                    _log_queue_event("failed", f"{item.get('artist') or ''} - {item.get('title') or ''} → failed: below acceptance threshold (deleted + rescheduled)", queue_id)
                                     break
                                 continue
 
@@ -2704,8 +2030,6 @@ def check_completed_downloads() -> dict[str, Any]:
                                 mark_failed(queue_id, "Downloaded file artist did not match queue item; deleted and rescheduled")
                                 stats["failed"] += 1
                                 match_found = "__rejected__"
-                                log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → failed: downloaded file artist did not match queue item (deleted + rescheduled)")
-                                _log_queue_event("failed", f"{item.get('artist') or ''} - {item.get('title') or ''} → failed: artist mismatch (deleted + rescheduled)", queue_id)
                                 break
                             continue
 
@@ -2720,10 +2044,6 @@ def check_completed_downloads() -> dict[str, Any]:
                         break
 
                 if match_found == "__rejected__":
-                    # The mismatched download was deleted and the queue item
-                    # requeued (mark_failed → 'queued') — do NOT fall through
-                    # to the stale/reconcile block, which would re-process an
-                    # already-handled item.
                     continue
 
                 if match_found is None or abs_path is None:
@@ -2733,9 +2053,6 @@ def check_completed_downloads() -> dict[str, Any]:
                             stats["failed"] += 1
                             continue
                         if isinstance(_reconciled, str) and _reconciled:
-                            # The transfer completed and the file just landed —
-                            # claim it now and fall through to match/import
-                            # instead of waiting for a later cycle.
                             _landed_path = _reconciled
                             if os.path.isfile(_landed_path) and not _is_file_claimed(_landed_path, claimed_files, downloads_dir):
                                 try:
@@ -2747,79 +2064,39 @@ def check_completed_downloads() -> dict[str, Any]:
                                     if is_match:
                                         abs_path = _landed_path
                                         match_found = os.path.relpath(_landed_path, downloads_dir) if downloads_dir else _landed_path
-                                        match_source = match_source
                                         _claim_file(_landed_path, claimed_files, downloads_dir)
                                     else:
-                                        # The landed file does NOT match this
-                                        # queue item — it is the WRONG download
-                                        # (e.g. a different track from the same
-                                        # single).  Delete it + block the peer +
-                                        # requeue so it cannot loop forever being
-                                        # re-found every cycle.
                                         _delete_mismatched_download(_landed_path, queue_id, f"landed file mismatch ({match_source})")
                                         _block_peer_for_queue_item(queue_id, found_fn)
                                         mark_failed(queue_id, "Downloaded file did not match queue item; deleted and rescheduled")
                                         stats["failed"] += 1
                                         continue
                                 else:
-                                    # Artist mismatch on the landed file.
                                     _delete_mismatched_download(_landed_path, queue_id, "landed file artist mismatch")
                                     _block_peer_for_queue_item(queue_id, found_fn)
                                     mark_failed(queue_id, "Downloaded file artist did not match queue item; deleted and rescheduled")
                                     stats["failed"] += 1
                                     continue
                             else:
-                                # The landed path could not be claimed: either
-                                # it no longer exists on disk (a worker/watcher
-                                # already moved it) or another queue row claimed
-                                # the SAME file earlier this cycle. Previously
-                                # this was a silent fall-through — the item
-                                # re-logged "appeared within the grace window"
-                                # every cycle forever, never imported, never
-                                # failed (the reported 45-minute-plus stuck
-                                # items). Count consecutive cycles and FAIL for
-                                # retry once the file settles elsewhere.
                                 _landed_cycles = _bump_cycle_counter(
                                     _LANDED_NOT_IMPORTED_CYCLES, queue_id
                                 )
-                                if not os.path.isfile(_landed_path):
-                                    logger.warning(
-                                        "Landed file no longer on disk — skipping claim",
-                                        queue_id=queue_id, path=_landed_path,
-                                        cycles=_landed_cycles,
-                                    )
-                                else:
-                                    logger.warning(
-                                        "Landed file already claimed by another queue row this cycle",
-                                        queue_id=queue_id, path=_landed_path,
-                                        cycles=_landed_cycles,
-                                    )
                                 if _landed_cycles >= _LANDED_NOT_IMPORTED_MAX_CYCLES:
                                     _clear_cycle_counter(_LANDED_NOT_IMPORTED_CYCLES, queue_id)
-                                    mark_failed(queue_id, "Slskd file landed but could not be claimed/imported (claimed by another row or already moved)")
+                                    mark_failed(queue_id, "Slskd file landed but could not be claimed/imported")
                                     stats["failed"] += 1
-                                    log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → failed: landed file could not be claimed (requeued)")
-                                    _log_queue_event("failed", "Landed file could not be claimed — scheduling retry", queue_id)
                                     continue
-                    # Only treat as stale/no-file when we STILL have nothing —
-                    # the landed-path claim above sets abs_path and must fall
-                    # through to the import logic below.
+
                     if abs_path is not None and match_found is not None:
                         pass
                     elif _is_stale_queue_item(item, stale_minutes=_STALE_DOWNLOADING_MINUTES, now=db_now):
                         _unconfirmed = _matching_file_exists_unconfirmed(item, fs_files, downloads_dir)
                         if _unconfirmed:
-                            logger.warning("Stale in downloading but matching file exists — marking for manual review", queue_id=queue_id)
-                            log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → needs manual review: file exists but metadata/artist unconfirmed ({_unconfirmed})")
-                            _log_queue_event("manual_review", f"File exists but metadata/artist unconfirmed: {_unconfirmed}", queue_id)
                             stats["skipped"] += 1
                             continue
                             
-                        logger.warning("No file found and stale in downloading — scheduling retry", queue_id=queue_id)
                         mark_failed(queue_id, "No file found while marked downloading")
                         stats["failed"] += 1
-                        log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → failed: no file found while marked downloading (stale)")
-                        _log_queue_event("failed", "No file found while marked downloading (stale)", queue_id)
                         continue
                     elif abs_path is None:
                         stats["skipped"] += 1
@@ -2830,19 +2107,11 @@ def check_completed_downloads() -> dict[str, Any]:
                     expected_dur = queue_duration_seconds(expected_dur)
                 if expected_dur:
                     actual_dur = _extract_duration_seconds(abs_path)
-                    # ⚠️ THE TOLERANCE IS THE SHARED CONFIGURED ONE, not a
-                    # local 20. It used to be 20s here while the album page
-                    # reported a mismatch at 5s, so a file 19s off passed this
-                    # gate and was flagged by the review — two verdicts for one
-                    # file, and the user had no way to tell which to believe.
                     if actual_dur and abs(expected_dur - actual_dur) > _length_tolerance_seconds():
-                        logger.warning("Duration mismatch — deleting and retrying", queue_id=queue_id, expected=expected_dur, actual=actual_dur)
                         _delete_mismatched_download(abs_path, queue_id, f"duration mismatch: expected {expected_dur}s, got {actual_dur}s")
                         _block_peer_for_queue_item(queue_id, found_fn)
                         mark_failed(queue_id, f"Pre-copy duration mismatch: expected {expected_dur}s, got {actual_dur}s")
                         stats["failed"] += 1
-                        log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → failed: duration mismatch")
-                        _log_queue_event("failed", f"Duration mismatch: expected {expected_dur}s, got {actual_dur}s", queue_id)
                         continue
 
                 try:
@@ -2853,44 +2122,14 @@ def check_completed_downloads() -> dict[str, Any]:
                 move_result = _move_and_import(item, abs_path, match_source)
                 if move_result.get("success"):
                     stats["imported"] += 1
-                    log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → imported to library (match={match_source})")
-                    _log_queue_event("imported", f"Imported to library (match={match_source})", queue_id)
                 else:
                     stats["errors"] += 1
-                    log_unified(f"[QUEUE] {item.get('artist') or ''} - {item.get('title') or ''} → import failed: {move_result.get('error')}")
-                    _log_queue_event("failed", f"Import failed: {move_result.get('error')}", queue_id)
 
-            except Exception as exc:
-                logger.error("Unhandled error processing queue item", queue_id=item.get("id"), error=str(exc), exc_info=True)
+            except Exception:
                 stats["errors"] += 1
-
-        try:
-            seen_orphans: set[str] = set()
-            for _local in slskd_completed.values():
-                try:
-                    if not _local or not os.path.isfile(_local):
-                        continue
-                    if os.path.basename(str(_local)).lower() in claimed_files:
-                        continue
-                    real = os.path.realpath(_local)
-                    if real in seen_orphans:
-                        continue
-                    seen_orphans.add(real)
-                    
-                    if _queue_row_references_file(str(_local), downloads_dir):
-                        continue
-                        
-                    os.remove(_local)
-                    stats["orphans_deleted"] = stats.get("orphans_deleted", 0) + 1
-                    logger.warning("Deleted orphaned slskd download", path=_local)
-                    _log_queue_event("failed", f"Deleted orphaned slskd download: {os.path.basename(str(_local))}", None)
-                except Exception as exc:
-                    logger.warning("Orphan sweep error", path=_local, error=str(exc))
-        except Exception as exc:
-            logger.warning("Orphan sweep failed", error=str(exc))
 
         return stats
 
     except Exception as exc:
-        logger.error("check_completed_downloads failed", error=str(exc), exc_info=True)
+        logger.error("check_completed_downloads failed", error=str(exc))
         return {"success": False, "error": str(exc), **stats}
