@@ -116,15 +116,7 @@ def _length_tolerance_seconds() -> float:
         return 5.0
 
 
-# Track-number prefix used when the basename carries no " - " separator:
-# "01. Title", "01.Title", "01 Title", "07 - 12 Title" all mean the same thing.
-# A separator (dash/dot/bracket) or whitespace MUST follow the number, so a
-# title that merely starts with digits ("1999") is never truncated to "9".
 _TRACK_NUMBER_PREFIX_RE = re.compile(r"^\s*\d{1,3}(?:\s*-\s*\d{1,3})?\s*(?:[-\.\)]\s*|\s+)")
-
-# Dash variants used as the artist/title separator.  Only a WHITESPACE-FLANKED
-# dash is a separator: a bare en dash inside a title ("1999–2000") must not
-# split the basename in two.
 _UNICODE_DASH_SEPARATOR_RE = re.compile(r"\s+[\u2010\u2011\u2012\u2013\u2014\u2015]+\s+")
 
 
@@ -132,11 +124,6 @@ def _parse_filename_parts(filename: str) -> dict[str, str | None]:
     """Try to extract artist, album, title, bitrate, and format from a Soulseek filename."""
     name = filename.replace("\\", "/").rsplit("/", 1)[-1]
     name = name.rsplit(".", 1)[0] if "." in name else name
-
-    # Normalise the dash characters peers actually use as the separator
-    # ("Artist – Title", "Artist — Title") to the ASCII " - " the split below
-    # understands.  Without this the ENTIRE basename fell through to
-    # ``title = None`` and the hard title gate rejected the candidate.
     name = _UNICODE_DASH_SEPARATOR_RE.sub(" - ", name)
 
     result: dict[str, str | None] = {
@@ -165,11 +152,6 @@ def _parse_filename_parts(filename: str) -> dict[str, str | None]:
             result["artist"] = parts[0]
             result["title"] = parts[-1]
     elif len(parts) == 2:
-        # "07 - Yesterday's Fire" — the first segment is a TRACK NUMBER, not an
-        # artist.  Treating "07" as the artist polluted the artist-evidence
-        # gate (any filename with the real artist in a parent folder then
-        # passed) and let wrong-album files through.  When the first segment
-        # is purely numeric it is a track number and the second is the title.
         first = parts[0]
         if re.match(r"^\d{1,3}$", first):
             result["title"] = parts[1]
@@ -184,16 +166,6 @@ def _parse_filename_parts(filename: str) -> dict[str, str | None]:
             result["title"] = fallback.group(2).strip()
             result["has_track_number"] = True
 
-    # Nothing matched a structured layout, so the basename IS the title.
-    #
-    # WHY THIS MATTERS: with the artist and album living in the FOLDERS
-    # ("Artist/Album/Song.flac") the basename is often just the track name,
-    # with the track number either absent or dot-separated ("01. Song").  The
-    # structured branches above only understand a " - " separator, so ``title``
-    # stayed None for every one of those layouts — and ``_score_result``'s HARD
-    # TITLE GATE reads exactly that field, so each candidate scored 0.0 and was
-    # rejected even though the artist gate would have accepted it.  In the old
-    # pipeline these matched fine, which is the reported regression.
     if not result["title"]:
         _tail = _TRACK_NUMBER_PREFIX_RE.sub("", name).strip()
         if _tail and _tail != name.strip():
@@ -202,11 +174,6 @@ def _parse_filename_parts(filename: str) -> dict[str, str | None]:
         else:
             result["title"] = name.strip() or None
 
-    # Album from the parent folder when the basename has no album segment
-    # (e.g. "music/The Eternal [AUS]/2013 - When The Circle Of Light Begins
-    # To Fade/07 - Yesterday's Fire.flac" → album from the folder).  This lets
-    # the album gate reject a file pulled from the WRONG release even when the
-    # basename is just "07 - Track.flac".  Skip generic folder names.
     if not result["album"]:
         try:
             _parent = filename.replace("\\", "/").rsplit("/", 1)[0] if "/" in filename.replace("\\", "/") else ""
@@ -267,14 +234,6 @@ def _fmt_local(dt: datetime) -> str:
 
 
 def _next_weekday_slot(now_utc: datetime, weekday: int, clock: str) -> datetime:
-    """Next occurrence of *weekday* at *clock* (``"HH:MM"``, UTC).
-
-    Strictly in the future: if today IS the target day and the clock time has
-    already passed, the slot moves to next week so a retry never lands in the
-    past.  Both the pre-release rescan day (06:00) and the persistent-miss
-    slot (Thursday evening by default) are calendar-aligned weekly retries —
-    ONE arithmetic keeps them consistent.
-    """
     try:
         hour, minute = (int(part) for part in clock.split(":", 1))
         hour = max(0, min(23, hour))
@@ -293,12 +252,6 @@ def _next_pre_release_six_am(now_utc: datetime) -> datetime:
 
 
 def _miss_retry_weekday() -> int:
-    """Weekday (0=Mon..6=Sun) for persistent-miss retries.
-
-    Default 3 (Thursday): Friday is the weekly release day, so the retry
-    lands the evening before — fresh uploads of a previously-unfindable track
-    appear on Soulseek when a release drops.
-    """
     try:
         from helpers.config_helpers import get_config
         value = int((get_config() or {}).get("queue", {}).get("miss_retry_weekday", 3) or 3)
@@ -308,7 +261,6 @@ def _miss_retry_weekday() -> int:
 
 
 def _miss_retry_time() -> str:
-    """Clock (``"HH:MM"``, UTC) for persistent-miss retries (default ``18:00``)."""
     try:
         from helpers.config_helpers import get_config
         raw = str((get_config() or {}).get("queue", {}).get("miss_retry_time", "18:00") or "18:00").strip()
@@ -376,13 +328,6 @@ def _schedule_search_retry(queue_id: int, item: dict, reason: str) -> None:
     else:
         tiers = _search_backoff_hours()
         if retry_count >= len(tiers):
-            # Persistent miss: the escalating tiers (4h/12h/24h) are spent and
-            # this track still never surfaced.  Instead of repeating every 24h
-            # forever (the "day after day" pattern from the search log), the
-            # retry lands on ONE calendar slot per week — the evening before
-            # the release day, when fresh uploads of the track appear on
-            # Soulseek.  The item still returns to the queue automatically:
-            # it is never parked or abandoned.
             next_run = _next_miss_retry_slot(now_utc)
             status = "backed_off"
             _weekday_names = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
@@ -400,13 +345,6 @@ def _schedule_search_retry(queue_id: int, item: dict, reason: str) -> None:
 
 
 def search_disconnected(item: dict, queue_id: int, artist: str, title: str) -> None:
-    """slskd's Soulseek client is not connected — the search never ran.
-
-    Records NO failure and schedules NO retry: the item simply returns to the
-    queue so the next cycle retries once the connection is back.  (Recording
-    ``no_results`` here would punish a connectivity problem with the
-    escalating search-miss backoff, eventually the weekly miss slot.)
-    """
     try:
         update_queue_item(
             queue_id,
@@ -468,16 +406,6 @@ def _search_query_wait(
     shrink_after: int,
     shrunken_wait: int,
 ) -> int:
-    """Per-query wait ceiling for the automatic queue search.
-
-    The primary query (idx 0 of the first bitrate tier) waits ``primary_wait``;
-    every fallback waits ``fallback_wait``.  Once ``consecutive_empty`` queries
-    in a row have returned NOTHING, the remaining queries wait only
-    ``shrunken_wait``: every more-specific variant already failed to surface
-    anything, so the LESS-specific tail of the fallback list should not burn
-    the full ceiling each — that is what made a hopeless track take ~9 minutes
-    (150s + 20 x 20s) to conclude ``no_results``.
-    """
     wait = primary_wait if (idx == 0 and long_first_wait) else fallback_wait
     if shrink_after > 0 and consecutive_empty >= shrink_after and shrunken_wait > 0:
         wait = min(wait, shrunken_wait)
@@ -492,12 +420,6 @@ def _build_fallback_search_queries(item: dict, primary_query: str) -> list[str]:
     album_artist = (item.get("album_artist") or "").strip()
     title = (item.get("title") or "").strip()
 
-    # A compilation's album artist is a PLACEHOLDER ("Various Artists"),
-    # never a performer. Seeding it into a fallback query searches for a name
-    # no shared file carries, and — worse — if such a query ever WON it would
-    # bind the wrong artist, the exact failure recorded in
-    # tests/test_compilation_track_artist.py. The row's own ``artist`` is the
-    # track's credit; only a real album artist earns a fallback.
     if is_track_artist_placeholder(album_artist):
         album_artist = ""
 
@@ -563,14 +485,6 @@ def _build_fallback_search_queries(item: dict, primary_query: str) -> list[str]:
     artist_words = [w for w in effective_artist.split() if w.lower() not in _ARTICLE_WORDS]
     title_words = [w for w in title.split()]
 
-    # ── Fallback explosion guard ──────────────────────────────────────────
-    # The word-drop combinations grow combinatorially: a 5-word title
-    # ("No Encores In a Swan Song") alone generates ~30 title phrases, and
-    # the paired drops multiply that — the search log showed 64-190 queries
-    # per track, EACH waiting up to 60s, so a single un-locatable track
-    # burned 10-60 MINUTES.  Cap the total fallback set so the search for
-    # one track never exceeds a sane bound; the drop-pairs pass only runs
-    # for SHORT titles where it stays small.
     _MAX_FALLBACKS = 20
 
     if len(artist_words) > 1:
@@ -581,8 +495,6 @@ def _build_fallback_search_queries(item: dict, primary_query: str) -> list[str]:
         for t_phrase in _drop_words(title_words)[:_MAX_FALLBACKS]:
             _add(f"{effective_artist} - {t_phrase}")
 
-    # Paired artist+title drops multiply quickly — only for SHORT titles
-    # (≤ 3 words) so the product stays small, and always capped.
     if len(artist_words) > 1 and len(title_words) > 1 and len(title_words) <= 3:
         a_drops = _drop_words(artist_words)[:_MAX_FALLBACKS]
         t_drops = _drop_words(title_words)[:6]
@@ -600,9 +512,6 @@ def _build_fallback_search_queries(item: dict, primary_query: str) -> list[str]:
     if stripped_all:
         _add(stripped_all)
 
-    # Hard ceiling: never return more than this many fallback queries — a
-    # track that can't be found in the first N tries is very unlikely to be
-    # found in tries N+1..190, and the 60s wait each costs is pure waste.
     return fallbacks[:_MAX_FALLBACKS]
 
 
@@ -621,14 +530,6 @@ def _year_mismatch_rejects(filename: str, expected_year: Any) -> bool:
 
 
 def _note_reject(rejects: dict[str, int] | None, reason: str) -> None:
-    """Count why a candidate was hard-rejected.
-
-    Every gate below logs at DEBUG, so a queue item stuck in
-    ``no_qualifying_result`` said "50 candidates" and nothing else — it was
-    impossible to tell a year gate from an album gate without turning on debug
-    logging for a whole run. The counts are surfaced ONCE, at WARNING, by
-    :func:`_select_best_result` when nothing qualifies.
-    """
     if rejects is not None:
         rejects[reason] = rejects.get(reason, 0) + 1
 
@@ -638,19 +539,6 @@ def _queue_item_is_compilation(
     expected_artist: str,
     expected_album_artist: str | None,
 ) -> bool:
-    """True when a queue row asks for a track from a compilation release.
-
-    The queue item's PER-TRACK artist is the real performer; the ALBUM is a
-    "Various Artists" / soundtrack / compilation title, and the same song
-    exists on the artist's own release — so an album name that differs from
-    the queue's is expected on peers and must not hard-reject a candidate
-    whose artist + title agree.
-
-    Mirrors ``services.queue.queue_metadata_matcher``'s ``queue_is_compilation``:
-    the placeholders are the SAME ``_GENERIC_COMPILATION_ARTISTS`` set, so a
-    release the metadata matcher treats as a compilation is treated as one
-    here, and the two verifiers cannot disagree about it.
-    """
     try:
         from helpers.config_helpers import _GENERIC_COMPILATION_ARTISTS
         from helpers.normalization_service import normalize_artist
@@ -700,19 +588,7 @@ def _score_result(
     if expected_album:
         expected_album = _sanitize_slskd_query(expected_album) or expected_album
 
-    # Score the SAME artist credit the evidence gate below trusts.
-    #
-    # The queue artist routinely carries a featured guest ("KNEECAP feat.
-    # Fawzi") that peers never put in the filename.  The gate strips that
-    # suffix before deciding a candidate is acceptable — but the bonus used the
-    # RAW credit, so a candidate the gate had just ACCEPTED still earned 0
-    # artist points and fell under the accept floor anyway:
-    #   "KNEECAP - Better Way To Live.mp3"  ->  25.0  (artist 0 + title 25)
-    #   old pipeline: 1.00 -> accepted.
-    # One derivation, used by both, so the gate and the score can never
-    # disagree about who the artist is.
     from helpers.config_helpers import _FEAT_SUFFIX_RE
-
     credit_artist = _FEAT_SUFFIX_RE.sub("", expected_artist or "").strip() or expected_artist
 
     art_score = _similarity(str(parts.get("artist") or ""), credit_artist)
@@ -721,16 +597,6 @@ def _score_result(
     elif _normalise(credit_artist) in _normalise(filename):
         score += 20
 
-    # ── Hangul / CJK artist evidence fix ─────────────────────────────────
-    # K-pop peers routinely name the artist in Korean ("스트레이 키즈") while
-    # the queue item carries the Latin name ("Stray Kids"), or vice versa.
-    # The artist-evidence gate below used ONLY Latin ``[a-z0-9]`` tokens, so
-    # the Korean-named candidate produced an EMPTY token set and was rejected
-    # as "no artist evidence" — the reported "Soulseek searches for Stray
-    # Kids fail on Korean tracks like 토끼와 거북이" even though the title
-    # matched perfectly.  For Hangul/CJK artists the TITLE is the reliable
-    # discriminator (artist script/romanization varies wildly), so a strong
-    # title match must satisfy the gate.
     parsed_artist = str(parts.get("artist") or "")
     parsed_title = str(parts.get("title") or "")
     _HANGUL_CJK_RE = re.compile(r"[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F\u4E00-\u9FFF\u3040-\u30FF]")
@@ -739,8 +605,6 @@ def _score_result(
         or _HANGUL_CJK_RE.search(parsed_artist or "")
     )
 
-    # Pre-compute whether the TITLE matches strongly — reused by the artist
-    # gate (Hangul/CJK leniency) and by the hard title gate below.
     _title_core_match = False
     _title_core_score = 0.0
     try:
@@ -761,7 +625,6 @@ def _score_result(
     if expected_artist and expected_artist.lower() not in {
         "unknown", "unidentified", "unidentified artist", "various", "various artists", "-",
     }:
-        # Same derivation as the score bonus above — see the comment there.
         gate_artist = credit_artist
         norm_gate = _normalise(gate_artist)
         
@@ -777,11 +640,6 @@ def _score_result(
             if len(w) >= 4
         ]
 
-        # Hangul/CJK artist variant: the expected artist (or the file's
-        # artist) uses a non-Latin script, so Latin-token overlap cannot
-        # prove identity.  A strong title match, an exact artist string in
-        # the filename, or a Hangul-in-filename hit is sufficient evidence —
-        # the artist is only a weak disambiguator for these tracks.
         if _artist_script_ambiguous:
             artist_evidenced = (
                 art_score >= 0.4
@@ -805,11 +663,6 @@ def _score_result(
         _note_reject(rejects, "no_artist_evidence")
         return 0.0
 
-    # Hangul/CJK artist credit: the script-mismatched artist contributes
-    # ~0 to ``art_score``, so a perfect Hangul title match would otherwise
-    # score only ~25-30 (below the 45.0 accept floor).  The artist evidence
-    # was satisfied via the title (or a filename hit), so credit the artist
-    # with a modest bonus to keep these candidates competitive.
     if _artist_script_ambiguous and art_score <= 0.4:
         _artist_credit = 0.0
         if _normalise(parsed_artist or "") == _normalise(expected_artist or ""):
@@ -829,34 +682,12 @@ def _score_result(
     if title_score >= 0.95 and cand_title_words and len(cand_title_words) > 2 * max(1, exp_word_count):
         title_score = 0.6
 
-    # HARD TITLE GATE: a candidate whose title shares no meaningful
-    # similarity with the expected track must be rejected outright.
     title_ok = title_score >= 0.35
 
-    # ── Hangul / CJK title gate fix ──────────────────────────────────────
-    # Pure-Hangul tracks (Stray Kids "일상", "타", "비행기") failed with
-    # ``no_qualifying_result`` even though Soulseek returned 39-101 real
-    # candidates.  Two causes:
-    #   1. ``re.findall(r"[a-z0-9]+")`` drops Hangul entirely → the ASCII
-    #      word fallback found nothing (``exp_word_count == 0``,
-    #      ``significant == []``) and the bracket-stripped core comparison
-    #      was never attempted.
-    #   2. Korean candidates frequently carry annotations ("일상 (Korean
-    #      Ver.)", "미친 놈 (Ex)") that drop the raw SequenceMatcher ratio
-    #      below 0.35 → the HARD TITLE GATE rejected every candidate.
-    # Compare the BRACKET-STRIPPED core titles (normalize_core_title keeps
-    # Hangul intact) so "(Korean Ver.)" / "(Ex)" annotations don't sink the
-    # match.
     if not title_ok:
-        # The core-title comparison was already computed for the artist gate;
-        # reuse it instead of recomputing (bracket-stripped titles keep
-        # Hangul intact so "(Korean Ver.)" / "(Ex)" annotations don't sink
-        # the match).
         if _title_core_match:
             title_score = max(title_score, _title_core_score if _title_core_score >= 0.6 else 0.7)
             title_ok = True
-        # Final fallback: Hangul/CJK expected title present in the raw
-        # filename (the candidate may parse its title segment poorly).
         if not title_ok and re.search(r"[\uAC00-\uD7AF\u4E00-\u9FFF]", expected_title or ""):
             if _normalise(expected_title) in _normalise(filename):
                 title_ok = True
@@ -876,35 +707,6 @@ def _score_result(
     elif _normalise(expected_title) in _normalise(filename):
         score += 15
 
-    # ── Hard ALBUM gate ──────────────────────────────────────────────────
-    # A candidate whose filename explicitly names a DIFFERENT album than the
-    # expected one is the wrong file — e.g. searching "Lament for the Hollow"
-    # (from *Obscured Horizons*) must never download "07 - Yesterday's Fire"
-    # from "When The Circle Of Light Begins To Fade" just because the artist
-    # matches and quality bonuses clear the floor.  The title gate already
-    # blocks most of these, but a coincidental title overlap (same word,
-    # edition annotation) can slip through; the album is the definitive
-    # signal.  Only an exact/near-exact title match is allowed to override
-    # an album mismatch (the candidate may be a single pulled from a
-    # different compilation, or the filename album may be a variant label).
-    #
-    # TWO RELAXATIONS, both still artist+title-gated:
-    #
-    # 1. COMPILATION LENIENCY.  A queue row on a "Various Artists"
-    #    compilation (album_artist is the placeholder) asks for a song that
-    #    ALSO lives on the artist's OWN release.  Peers almost always carry
-    #    it from that original release — a DIFFERENT album name — so an
-    #    album mismatch here is EXPECTED, not evidence of a wrong file
-    #    ("it doesn't match due to the album name being different even
-    #    though the track artist matches the artist and song title").
-    #    The hard reject is skipped; artist + title remain the verification.
-    #
-    # 2. CORE-TITLE OVERRIDE.  A version/edition marker drops the raw
-    #    ``title_score`` below 0.85 even though the BRACKET-STRIPPED core is
-    #    the same song ("Weak and Powerless (Album Version)" vs "Weak and
-    #    Powerless").  That is exactly the same-song-from-another-release
-    #    carve-out the gate already allows for exact titles, so a strong
-    #    core match must override the album mismatch the same way.
     if expected_album:
         parsed_album = str(parts.get("album") or "").strip()
         album_score = _similarity(str(parts.get("album") or ""), expected_album)
@@ -951,17 +753,6 @@ def _score_result(
             _length_tol = _length_tolerance_seconds()
             _length_diff = abs(_want_seconds - _cand_seconds)
 
-            # ⚠️ A HARD GATE, ADDED ALONGSIDE THE BONUS BELOW.
-            #
-            # The length was previously only a SCORING BONUS, so a candidate
-            # tens of seconds off could still win the search — and the
-            # completion verifier then deleted it (at the same tolerance) and
-            # retried. Downloading a file in order to delete it costs the
-            # bandwidth twice, blocks a peer who sent exactly what was asked
-            # for, and hides the real problem: nothing in the pool matched.
-            #
-            # Rejecting here instead makes the failure happen BEFORE the
-            # transfer, and records the reason so the queue can say so.
             if _length_diff > _length_tol:
                 logger.debug(
                     "Rejected candidate — length mismatch",
@@ -973,8 +764,6 @@ def _score_result(
                 _note_reject(rejects, "length_mismatch")
                 return 0.0
 
-            # Still a graded signal WITHIN the accepted range: a candidate that
-            # matches to the second is a better bet than one at the boundary.
             dur_ratio = min(_want_seconds, _cand_seconds) / max(_want_seconds, _cand_seconds)
             if dur_ratio >= 0.9:
                 score += 15 * dur_ratio
@@ -1049,11 +838,6 @@ def _select_best_result(
 
     if scored and scored[0][0] >= min_score:
         best_score, best = scored[0]
-        # INFO, not DEBUG — this module's level is INFO, so the old line was
-        # DROPPED: queue.log could say WHY nothing matched (the WARNING below)
-        # but never WHAT it chose when it did, which is the "matching of songs"
-        # that was missing from the log. Artist and title ride along because a
-        # bare filename cannot be attributed to a track in a log tail.
         logger.info(
             "Selected download candidate",
             artist=expected_artist,
@@ -1065,9 +849,6 @@ def _select_best_result(
         )
         return best
 
-    # ONE line that says which gate fired. Every rejection reason above is a
-    # DEBUG line, so without this the failure is just "50 candidates" — the
-    # shape of the reported "no_qualifying_result" loops that ran for days.
     top_score, top = scored[0] if scored else (0.0, {})
     below_floor = sum(1 for s, _ in scored if 0 < s < min_score)
     if below_floor:
@@ -1080,11 +861,6 @@ def _select_best_result(
         "top_candidate": str(top.get("filename") or "")[:200],
     }
     if miss_sink is not None:
-        # A search run tries MANY fallback queries (up to ~20). One WARNING
-        # PER QUERY buried every real signal in queue.log — a single doomed
-        # item emitted ~20 identical lines every ~15s while holding the queue
-        # cycle lock. The caller collects the misses and warns ONCE with the
-        # closest attempt (see ``_warn_closest_search_miss``).
         miss_sink.append(miss)
         logger.debug(
             "Query yielded no qualifying candidate",
@@ -1116,15 +892,6 @@ def _warn_closest_search_miss(
     album: str | None,
     queries_tried: int,
 ) -> None:
-    """ONE "no result met min_score" warning per search run, not per query.
-
-    A run fans out over fallback queries and bitrate tiers; warning on every
-    fruitless query made queue.log mostly the same line repeated for minutes
-    per doomed item. The closest miss (most candidates, then highest top
-    score) is the one worth explaining; a run where EVERY query returned
-    zero candidates needs no line at all — the ``no_results`` search event
-    already says it.
-    """
     if not misses:
         return
     best_miss = max(
@@ -1154,19 +921,6 @@ def _attempt_candidate_downloads(
     expected_artist: str,
     expected_title: str,
 ) -> tuple[bool, dict[str, Any] | None, str]:
-    """Try each candidate in order; a slot-less peer is SKIPPED, not fatal.
-
-    The BEST candidate having zero free upload slots used to fail the whole
-    item on the spot — while up to two other qualifying candidates sat
-    untried (proven in the wild: a 2-candidate item FAILED on the first
-    peer's slots, and a later retry succeeded from the second peer). The
-    loop below already knew how to skip slot-less peers; the early return
-    simply never let it run for the best candidate.
-
-    Returns ``(success, chosen, fail_reason)``. ``fail_reason`` is
-    ``"item_removed"`` when the queue item vanished mid-attempt, and always
-    names the LAST failure mode seen rather than a stale earlier one.
-    """
     success = False
     chosen = None
     fail_reason = "download_failed"
@@ -1200,17 +954,8 @@ def _attempt_candidate_downloads(
 # =============================================================================
 # LIBRARY-FIRST REUSE
 # =============================================================================
-#
-# A recording that is ALREADY in the main music directory does not need to be
-# downloaded again — compilations re-ship the same track constantly. Before
-# any Soulseek search, the queue looks for an identical recording in the
-# library, copies it into the downloads folder and pushes it through the
-# normal completion path (stored metadata written, file moved into place) as
-# if it had been downloaded.
-
 
 def _library_track_format(album_name: str) -> tuple[bool, bool]:
-    """``(is_live_or_alternate, is_acoustic)`` — the format comparison."""
     from services.catalog.album_classification_service import (
         detect_live_album_type,
         is_live_or_alternate_album,
@@ -1224,19 +969,6 @@ def _library_track_format(album_name: str) -> tuple[bool, bool]:
 
 
 def _library_reuse_source(item: dict[str, Any]) -> str | None:
-    """The library file that can stand in for this download, if there is one.
-
-    All of the request's rules must hold:
-
-    * same title and same performer (normalised comparison);
-    * the queue row's duration is KNOWN and the library copy matches the
-      track length within 2% — the length check is what separates the same
-      recording from an edit, a remix or a different take;
-    * the SAME FORMAT: a studio track never stands in for a live or acoustic
-      one, and vice versa ("Live in Tokyo" is not a substitute for the
-      studio album);
-    * the file exists on disk.
-    """
     title = (item.get("title") or "").strip()
     artist = (item.get("artist") or "").strip()
     if not title or not artist:
@@ -1244,8 +976,6 @@ def _library_reuse_source(item: dict[str, Any]) -> str | None:
 
     expected_duration = queue_duration_seconds(item.get("duration")) if item.get("duration") else None
     if not expected_duration:
-        # Without the queue row's length the "matches the track length" rule
-        # cannot be verified — never reuse on a guess.
         return None
 
     wanted_format = _library_track_format(item.get("album") or "")
@@ -1286,15 +1016,8 @@ def _library_reuse_source(item: dict[str, Any]) -> str | None:
             continue
         if cand_seconds <= 0:
             continue
-        if cand_seconds > 10_000:  # stored as milliseconds (MusicBrainz length)
+        if cand_seconds > 10_000:
             cand_seconds /= 1000.0
-        # ⚠️ The SHARED configured tolerance, not a local 2% ratio.
-        #
-        # A ratio and an absolute tolerance are not interchangeable at the ends
-        # of the range: 2% of a 10-minute track is 12 seconds, so the same rule
-        # allowed four times the difference on a long track that it allowed on a
-        # 4-minute one. The tolerance is what the album page and the queue's
-        # pre-copy verify both use, so all three now agree.
         if abs(cand_seconds - expected_duration) > _length_tolerance_seconds():
             continue
 
@@ -1305,17 +1028,6 @@ def _library_reuse_source(item: dict[str, Any]) -> str | None:
 
 
 def _stage_library_copy(item: dict[str, Any], source_path: str) -> dict[str, Any]:
-    """Copy a library file into the downloads folder as a queued download.
-
-    The row is put into ``downloading`` with NO ``file_path`` — the file then
-    travels the NORMAL completion route (``check_completed_downloads``:
-    stored metadata written, file moved into the library, row ``imported``),
-    exactly like a file Soulseek delivered. Deliberately NO completion call
-    lives here: the queue's move helpers must not become reachable from a
-    scan entry point (``tests/test_scan_never_moves_files`` guards that — a
-    metadata pass may never relocate audio), and the decoupled completion IS
-    the "as if it were a downloaded file" path.
-    """
     from services.downloads.download_folder_service import resolve_downloads_dir
 
     artist = (item.get("artist") or "Unknown").strip()
@@ -1331,7 +1043,6 @@ def _stage_library_copy(item: dict[str, Any], source_path: str) -> dict[str, Any
     )
     os.makedirs(staging_dir, exist_ok=True)
 
-    # A name the completion matcher recognises: {artist} - {title}{ext}.
     ext = os.path.splitext(os.path.basename(source_path))[1] or ".flac"
     staged = os.path.join(staging_dir, f"{_safe(title, 'track')}{ext}")
     if os.path.abspath(staged) == os.path.abspath(source_path):
@@ -1378,12 +1089,6 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
     except Exception as exc:
         logger.debug("Pre-search cleaner skipped", error=str(exc))
 
-    # ── Library-first: reuse an identical recording instead of downloading
-    # Checked BEFORE the search — finding the track here saves the whole
-    # search + download, which is the point of the feature. The copy is
-    # STAGED into the downloads folder and the normal completion cycle
-    # imports it like any download; any failure falls through to the Soulseek
-    # path, so a broken reuse must never stop the item from being downloaded.
     _reuse_source = None
     try:
         _reuse_source = _library_reuse_source(item)
@@ -1411,9 +1116,6 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
     expected_artist = (item.get("artist") or "").strip()
     expected_title = (item.get("title") or "").strip()
     expected_album = (item.get("album") or "").strip() or None
-    # The album_artist is the compilation signal for the album gate: a VA
-    # row's song also lives on the artist's own release, so a peer file from
-    # THAT release has a different — and legitimate — album name.
     expected_album_artist = (item.get("album_artist") or "").strip() or None
     expected_year = item.get("year") or item.get("release_year")
     expected_duration = None
@@ -1469,6 +1171,8 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                     shrink_after=_shrink_after,
                     shrunken_wait=_shrunken_wait,
                 )
+                
+                # Ensure we safely clean up orphaned searches if slskd has old ones
                 results = slskd.search_and_filter(
                     q,
                     min_bitrate=tier_bitrate,
@@ -1477,12 +1181,6 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                     cancel_when_done=True,
                 )
                 if results is None:
-                    # The Soulseek client is DISCONNECTED — the search never
-                    # ran.  This must NOT be recorded as no_results / no
-                    # qualifying result: that would punish a connectivity
-                    # problem with the escalating search-miss backoff (and
-                    # eventually the weekly slot).  Leave the item queued for
-                    # the next cycle instead.
                     search_disconnected(item, queue_id, expected_artist, expected_title)
                     return {"success": False, "status": "slskd_disconnected", "skipped": True}
                 results = _filter_blocked_peers(results)
@@ -1550,17 +1248,6 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
         if not _queue_item_exists(queue_id):
             logger.info("Queue item was removed while searching", queue_id=queue_id)
             return {"success": False, "status": "item_removed"}
-
-        if not best.get("has_free_upload_slot", True):
-            # NOT fatal: the candidate loop below skips slot-less peers and
-            # tries the next qualifying one (a 2-candidate item used to FAIL
-            # here on the best peer's slots — see _attempt_candidate_downloads).
-            logger.info(
-                "Best match peer has no free slots — trying next candidate",
-                queue_id=queue_id,
-                username=best.get("username"),
-                candidates=len(results),
-            )
 
         update_queue_item(queue_id, status="downloading")
 
@@ -1780,8 +1467,6 @@ def transfer_and_verify_download(
     if convert_flac_to_mp3 and source_ext == ".flac":
         final_dest = os.path.splitext(dest_path)[0] + f".{target_format}"
         os.makedirs(os.path.dirname(final_dest), exist_ok=True)
-        # MP3 keeps ID3v2.3 (what Navidrome/picard expect); M4A carries the
-        # same tags in its atoms, so only the codec differs.
         codec_args = (
             ["-c:a", "aac", "-b:a", f"{mp3_bitrate}k"]
             if target_format == "m4a"
@@ -1856,11 +1541,6 @@ def start_release_download(release_id: Any, release_title: str, artist: str, met
             )
 
         queue_source = 'soulseek'
-        # Convert the MB payload to tracks-column names BEFORE handing it over:
-        # ``add_release_tracks_to_queue_detailed`` validates against
-        # ``_ALBUM_LEVEL_COLUMNS`` (column names), while ``mb_data`` is keyed by
-        # MusicBrainz field names (``album_type``, ``status``, …), so passing it
-        # raw would store nothing.
         _album_metadata: dict[str, Any] = {}
         if isinstance(mb_data, dict):
             try:
@@ -1882,9 +1562,6 @@ def start_release_download(release_id: Any, release_title: str, artist: str, met
             album_artist=release_album_artist,
             queue_source=queue_source,
             year=release_year,
-            # Persist the release's ALBUM-scoped metadata onto every queue row
-            # so the post-download import can apply the same field set an
-            # album-page lookup would, without re-querying MusicBrainz.
             album_metadata=(_album_metadata or None),
         )
         queue_ids = list(queue_result.get("queue_ids") or [])
@@ -1894,9 +1571,6 @@ def start_release_download(release_id: Any, release_title: str, artist: str, met
             "mb_release_db_id": mb_release_db_id,
             "queue_items_created": len(queue_ids),
             "queue_ids": queue_ids,
-            # Why nothing was queued, when that is the case. ``None`` once at
-            # least one track made it in. Additive so existing callers that
-            # only read queue_items_created/queue_ids are unaffected.
             "queued": bool(queue_ids),
             "queue_reason": queue_result.get("reason"),
             "queue_message": queue_result.get("message") or "",
