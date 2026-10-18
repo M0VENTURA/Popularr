@@ -163,17 +163,40 @@ class TestTheDuplicateIsAnsweredFromTheCopy:
         assert out["song"]["recording_mbid"] == "rec-1"
 
     def test_it_works_from_a_recording_mbid_alone(self, db):
-        """A track with no ISRC still benefits — the identity is the MBID."""
+        """A track with no ISRC still benefits — the identity is the MBID.
+
+        ⚠️ CONTRACT REVERSED (2026-10-18): the identity is no longer SUFFICIENT
+        on its own — the title must also corroborate. This test used to pass the
+        unrelated label "By Mbid" and expect the copy. Matching on the identity
+        alone is what let three bonus tracks inherit the lead single's data on
+        Arion — "Life Is Not Beautiful" (they all carried its bad ISRC). The
+        asserted PROPERTY is unchanged (an MBID with no ISRC resolves); only the
+        title now has to agree. See
+        ``test_isrc_reuse_requires_title_corroboration.py``.
+        """
         out = get_recording_identity_popularity(
-            [{"id": "t9", "title": "By Mbid", "recording_mbid": "rec-1"}]
+            [{"id": "t9", "title": "Song", "recording_mbid": "rec-1"}]
         )
-        assert out["by mbid"]["lastfm_listeners"] == 84200
+        assert out["song"]["lastfm_listeners"] == 84200
 
     def test_it_works_from_an_isrc_alone(self, db):
+        """Same reversal as above — the ISRC resolves, and the title
+        corroborates."""
+        out = get_recording_identity_popularity(
+            [{"id": "t9", "title": "Song (feat. Someone)", "isrc": "USRC17607839"}]
+        )
+        assert out["song"]["listenbrainz_listens"] == 468
+
+    def test_a_different_title_does_not_answer(self, db):
+        """⭐ THE FIX, pinned here too: the identity alone is NOT enough.
+
+        This is the reported Arion shape — a different song that merely shares
+        the identity must not inherit its data.
+        """
         out = get_recording_identity_popularity(
             [{"id": "t9", "title": "By Isrc", "isrc": "USRC17607839"}]
         )
-        assert out["by isrc"]["listenbrainz_listens"] == 468
+        assert out == {}
 
     def test_it_reads_a_row_whose_isrc_is_still_a_bracketed_list(self, db):
         """⚠️ An UNSCANNED row keeps the raw tag form.
@@ -182,11 +205,15 @@ class TestTheDuplicateIsAnsweredFromTheCopy:
         so a scanned row holds the bare code — but a row that has never been
         through a scan still holds the list. Equality alone would miss it, which
         is why there is a LIKE arm.
+
+        ⚠️ The title corroborates (CONTRACT REVERSED, above): the row is titled
+        "Legacy Form", so the request must say the same song, not the label
+        "Legacy".
         """
         out = get_recording_identity_popularity(
-            [{"id": "t9", "title": "Legacy", "isrc": "USRC17607840"}]
+            [{"id": "t9", "title": "Legacy Form", "isrc": "USRC17607840"}]
         )
-        assert out["legacy"]["lastfm_listeners"] == 1500
+        assert out["legacy form"]["lastfm_listeners"] == 1500
 
     def test_the_entry_is_prefetch_shaped(self, db):
         """So the per-track paths consume it without a branch of their own.
@@ -262,20 +289,23 @@ class TestTheQueryIsPortable:
     """
 
     def test_an_mbid_with_no_isrc(self, db):
+        """⚠️ CONTRACT REVERSED (2026-10-18): the title must corroborate too —
+        see the class note above. The property under test (this arm builds valid
+        SQL alone and resolves the row) is unchanged."""
         assert get_recording_identity_popularity(
-            [{"id": "t9", "title": "Mbid Only", "recording_mbid": "rec-1"}]
-        )["mbid only"]["lastfm_listeners"] == 84200
+            [{"id": "t9", "title": "Song", "recording_mbid": "rec-1"}]
+        )["song"]["lastfm_listeners"] == 84200
 
     def test_an_isrc_with_no_mbid(self, db):
         assert get_recording_identity_popularity(
-            [{"id": "t9", "title": "Isrc Only", "isrc": "USRC17607839"}]
-        )["isrc only"]["listenbrainz_listens"] == 468
+            [{"id": "t9", "title": "Song (feat. Someone)", "isrc": "USRC17607839"}]
+        )["song"]["listenbrainz_listens"] == 468
 
     def test_both_present(self, db):
         assert get_recording_identity_popularity(
-            [{"id": "t9", "title": "Both", "isrc": "USRC17607839",
+            [{"id": "t9", "title": "Song", "isrc": "USRC17607839",
               "recording_mbid": "rec-1"}]
-        )["both"]["lastfm_listeners"] == 84200
+        )["song"]["lastfm_listeners"] == 84200
 
 
 # ---------------------------------------------------------------------------

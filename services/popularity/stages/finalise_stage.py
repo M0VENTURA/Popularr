@@ -4957,7 +4957,25 @@ def _run_global_playlist_rebuild(options: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def _sync_isrc_popularity() -> int:
-    """Sync popularity stats across tracks sharing the same ISRC."""
+    """Sync popularity stats across tracks sharing the same ISRC **and title**.
+
+    ⭐⭐ THE TITLE KEY IS LOAD-BEARING, not decoration. An ISRC identifies a
+    performance, but a WRONG ISRC is common in the wild: measured on Arion —
+    "Life Is Not Beautiful", where three bonus tracks ("The End Of The Fall"
+    plus two 2018 bonus tracks) all carried the lead single's code
+    (FIRAN1800001). Grouping by ``isrc`` alone took ``MAX(score)`` over all four
+    rows and wrote the single's 91.7 onto every bonus track, and
+    ``BOOL_OR(is_single)`` marked them all as singles — before any per-track
+    scoring could correct it.
+
+    A shared ISRC therefore only pools rows that ALSO agree on the title. The
+    comparison is ``LOWER(TRIM(title))`` — crude, but it is the strongest
+    portable key available in SQL (no user function, works on SQLite and
+    PostgreSQL), and an exact-title duplicate is the case this sync exists for.
+    A variant spelling ("Song" vs "Song (feat. X)") now falls back to its own
+    score instead of pooling: it keeps the rating the track actually earned,
+    which is the smaller error.
+    """
     try:
         with db_session() as session:
             result = session.execute(
@@ -4969,14 +4987,16 @@ def _sync_isrc_popularity() -> int:
                     FROM (
                         SELECT
                             isrc,
+                            LOWER(TRIM(title)) AS title_key,
                             MAX(COALESCE(popularity, final_score, 0)) AS max_score,
                             BOOL_OR(COALESCE(is_single, FALSE)) AS max_single_status
                         FROM tracks
                         WHERE isrc IS NOT NULL
                           AND TRIM(isrc) <> ''
-                        GROUP BY isrc
+                        GROUP BY isrc, LOWER(TRIM(title))
                     ) AS source
                     WHERE target.isrc = source.isrc
+                      AND LOWER(TRIM(target.title)) = source.title_key
                       AND (
                           COALESCE(target.popularity, target.final_score, 0)
                               IS DISTINCT FROM source.max_score

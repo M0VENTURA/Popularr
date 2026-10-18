@@ -414,6 +414,20 @@ def get_recording_identity_popularity(
         if str(sibling.get("id") or "") == str(track.get("id") or ""):
             continue
 
+        # ⭐⭐ TITLE CORROBORATION. An ISRC identifies a performance, but a WRONG
+        # ISRC is common in the wild: measured on Arion — "Life Is Not
+        # Beautiful", where three bonus tracks all carried the lead single's code
+        # (FIRAN1800001) and inherited its 42k-listener row. Matching on the
+        # identity ALONE made each one answer from the hit.
+        #
+        # The comparison is on ``normalize_for_aggregation`` keys, which fold
+        # "(feat. X)" / "(Remastered)" / version markers — so a genuine variant
+        # spelling of the SAME song still corroborates, while a different song
+        # that merely shares a bad code cannot.
+        sibling_key = normalize_for_aggregation(str(sibling.get("title") or ""))
+        if sibling_key != key:
+            continue
+
         entry = _sibling_entry(sibling)
         if entry:
             out[key] = entry
