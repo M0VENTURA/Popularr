@@ -127,23 +127,6 @@ def find_blocking_queue_item(
     source: str = "soulseek",
     session: Any = None,
 ) -> dict[str, Any] | None:
-    """The row that would make :func:`insert_queue_item` skip, or ``None``.
-
-    ONE definition, two callers: the insert itself, and the discovery scan —
-    which used to ask a different question (by file path only) and so fell
-    through to the insert every cycle, logging "Duplicate skipped: already in
-    queue" for the same row every few minutes forever.
-
-    The status list is ``BLOCKING_REQUEUE_STATUSES`` and must never be
-    written out by hand: it deliberately excludes completed/imported/
-    in_collection, which are INVISIBLE in the queue — adding a track the user
-    could not see used to report "already in the queue" and insert nothing
-    ("files I'm adding to download aren't showing").
-
-    ``source`` decides the locality half of the rule: a ``local``/``discovered``
-    caller matches only local/discovered rows, anything else matches only
-    non-local ones.
-    """
     from services.queue.queue_constraints import BLOCKING_REQUEUE_STATUSES
 
     _blocking = ",".join(f"'{s}'" for s in sorted(BLOCKING_REQUEUE_STATUSES))
@@ -183,20 +166,10 @@ def insert_queue_item(
     priority: int = 5,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Insert a new item into the download queue."""
     if not (artist or "").strip() and not (title or "").strip():
         return {"success": False, "error": "Artist and title are required"}
 
     with db_session() as session:
-        # Dedupe on normalized (artist, title) across the statuses that BLOCK a
-        # re-add, and ANY source.  Previously the dedupe required
-        # ``source = :source``, so adding the same song via different entry
-        # points (Soulseek search, MusicBrainz release, playlist import,
-        # upcoming releases) created multiple rows for the same track — "20
-        # versions of one song".
-        #
-        # The query lives in find_blocking_queue_item so the discovery scan
-        # can ask the SAME question before it inserts (see that docstring).
         existing_row = find_blocking_queue_item(
             artist=artist, title=title, source=source, session=session,
         )
@@ -237,9 +210,6 @@ def insert_queue_item(
                 "release_id": kwargs.get("release_id"),
                 "release_mbid": kwargs.get("release_mbid"),
                 "recording_mbid": kwargs.get("recording_mbid"),
-                # A COLUMN, not a key inside ``metadata``: the release group is
-                # what the artist page groups albums on, and a queue path that
-                # skipped the JSON blob used to lose it silently.
                 "musicbrainz_releasegroupid": kwargs.get("musicbrainz_releasegroupid"),
                 "duration": kwargs.get("duration"),
                 "import_group": kwargs.get("import_group"),
@@ -293,7 +263,6 @@ def update_queue_item(queue_id: int, **kwargs: Any) -> dict[str, Any] | None:
 
 
 def claim_queue_item(queue_id: int, status: str = "searching") -> dict[str, Any] | None:
-    """Atomically claim a queued item for processing."""
     try:
         with db_session() as session:
             result = session.execute(
@@ -329,7 +298,6 @@ def delete_queue_item(queue_id: int) -> bool:
 
 
 def get_queue_item_by_path(path: str) -> dict[str, Any] | None:
-    """Find the most recently updated queue item owning ``path``."""
     try:
         with db_session() as session:
             result = session.execute(
@@ -409,7 +377,6 @@ def get_queue_status_counts() -> dict[str, int]:
 
 
 def get_active_queue(limit: int = 200) -> list[dict[str, Any]]:
-    """Get non-terminal queue items (active statuses + failed + pending retry)."""
     from services.queue.queue_constraints import (
         ACTIVE_QUEUE_STATUSES,
         FAILED_STATUSES,
@@ -455,23 +422,6 @@ def get_queue_display_items(
     limit: int = 500,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """Queue rows for DISPLAY, restricted to *statuses*.
-
-    ⚠️ NOT a replacement for ``get_active_queue``. That function is used for
-    WORK (the slskd reaper cancels stalled transfers from it, and the folder
-    matcher resolves album tracks from it), so it deliberately excludes
-    ``source IN ('local','discovered')`` — a local-disk folder is not an active
-    transfer. Displaying the queue is a different question from acting on it.
-
-    The queue page's counts and its list disagreed because they came from two
-    different definitions: the "Queued" pill counted a hand-written set that
-    included ``unmatched``/``matched``/``pending_match``/``discovered``, while
-    the listing could not render any of them (nor any local/discovered row).
-    The result was "74 queued but the active queue shows 18". Callers now pass
-    ONE of the ``ACTIVE_SECTION`` / ``READY_SECTION`` / ``FAILED_SECTION`` sets,
-    which partition ``QUEUE_DISPLAY_STATUSES`` — so each row renders in exactly
-    one card and each card's badge is that section's count.
-    """
     if not statuses:
         return []
     status_sql = ", ".join(f"'{s}'" for s in sorted(statuses))
@@ -495,7 +445,9 @@ def get_queue_display_items(
         logger.error("Failed to get queue display items", error=str(e))
         return []
 
+
 def get_ready_for_processing(limit: int = 100) -> list[dict[str, Any]]:
+    """Strictly filters out items whose retry window has not been reached."""
     try:
         with db_session() as session:
             result = session.execute(
@@ -503,10 +455,12 @@ def get_ready_for_processing(limit: int = 100) -> list[dict[str, Any]]:
                     SELECT *
                     FROM download_queue
                     WHERE file_path IS NULL
-                      AND (status = 'queued'
-                           OR (status IN ('backed_off', 'pending_release')
-                               AND next_retry_at <= CURRENT_TIMESTAMP))
-                      AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
+                      AND (
+                           status = 'queued'
+                           OR (status IN ('backed_off', 'pending_release', 'failed')
+                               AND next_retry_at IS NOT NULL 
+                               AND next_retry_at <= CURRENT_TIMESTAMP)
+                          )
                       AND LOWER(COALESCE(source, '')) NOT IN ('local', 'discovered')
                     ORDER BY priority DESC, created_at ASC
                     LIMIT :limit
@@ -520,7 +474,6 @@ def get_ready_for_processing(limit: int = 100) -> list[dict[str, Any]]:
 
 
 def requeue_due_failed_items(limit: int = 50) -> list[dict[str, Any]]:
-    """Requeue legacy ``failed`` rows whose retry window has arrived."""
     requeued: list[dict[str, Any]] = []
     try:
         with db_session() as session:
@@ -686,13 +639,6 @@ def schedule_queue_retry(
 
 
 def _queue_retry_delay_minutes() -> int:
-    """Default retry window (minutes) for an unscheduled failure.
-
-    Only the DELAY is configurable — there is no retry ceiling, because a
-    track that fails to download must always return to the queue rather than
-    being abandoned.  The dead ``max_retries`` column was removed in migration
-    015; ``queue.max_retries`` in config.yaml is no longer read.
-    """
     try:
         from helpers.config_helpers import get_config
         q = (get_config() or {}).get("queue") or {}
@@ -746,6 +692,7 @@ def mark_processing(queue_id: int) -> dict[str, Any] | None:
 
 def mark_completed(queue_id: int) -> dict[str, Any] | None:
     return update_queue_item(queue_id, status="completed")
+
 
 # =============================================================================
 # MATCH TARGETS / REMATCH HELPERS
@@ -848,4 +795,3 @@ from db.repositories.queue_admin import (
     get_queue_items_by_folder, slskd_eligibility_diagnostics,
     delete_folder, remove_group, reset_moving,
 )
-
