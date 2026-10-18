@@ -167,9 +167,6 @@ def _read_download_conversion_settings() -> dict[str, Any]:
         if isinstance(conversion_cfg, dict):
             settings["enabled"] = bool(conversion_cfg.get("enabled", settings["enabled"]))
             mode = str(conversion_cfg.get("mode", settings["mode"]) or settings["mode"]).strip().lower()
-            # WHITELIST of accepted modes: anything else was silently dropped
-            # back to the default, so a new mode had to be added HERE as well
-            # as everywhere it is read (see helpers.config_helpers).
             if is_flac_conversion(mode) or mode == "none":
                 settings["mode"] = mode
             try:
@@ -236,12 +233,6 @@ def _resolve_downloads_root() -> str:
 
 
 def _convert_flac_and_handle_original(source_path: str, dest_path: str, settings: dict[str, Any]) -> bool:
-    """Convert FLAC into the configured format via ffmpeg, then handle the original per config.
-
-    The target container comes from ``conversion_target(mode)`` — MP3
-    (libmp3lame + ID3v2.3) or M4A (AAC), so both share the original-handling
-    logic below instead of it being duplicated per format.
-    """
     source_path = str(source_path).replace("\\", "/")
     bitrate_kbps = int(settings.get("mp3_bitrate_kbps", 320) or 320)
     target = conversion_target(settings.get("mode")) or "mp3"
@@ -315,7 +306,6 @@ def _titles_match(a: str, b: str) -> bool:
 
 
 def move_track_to_library(track: dict[str, Any], release_metadata: dict[str, Any], music_root: str) -> Dict[str, Any]:
-    """Move a track into the configured library structure."""
     file_path = track.get("file_path")
 
     if not file_path:
@@ -373,23 +363,13 @@ def move_track_to_library(track: dict[str, Any], release_metadata: dict[str, Any
     return {"success": True, "target_path": target_path}
 
 
-# Audio extensions considered when sweeping a library folder for duplicates.
 _AUDIO_EXTS = {".flac", ".wav", ".alac", ".aiff", ".ape", ".wv", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wma"}
 
 
 def _filename_title_candidates(filename: str) -> list[str]:
-    """Extract likely track-title candidates from an audio filename.
-
-    Handles common layouts: ``02 - Artist - Title.ext``, ``Artist - Title.ext``,
-    ``02 Title.ext``, and ``Title.ext``.  Returns normalized (casefolded,
-    whitespace-collapsed) candidates, most-specific first.
-    """
     base = os.path.splitext(os.path.basename(filename))[0]
-    # Strip leading track numbers ("02 - ...", "02. ...", "0206 - ...").
     base = re.sub(r"^\d{1,4}\s*[-._]\s*", "", base)
-    # Strip a trailing pid-suffix from the duplicate fallback ("Title_12345").
     base = re.sub(r"_\d{2,}$", "", base)
-    # Split "Artist - Title" / "Artist - Album - Title" on the LAST separator.
     parts = [p.strip() for p in re.split(r"\s*[-–—]\s*", base) if p.strip()]
     candidates = []
     if len(parts) >= 2:
@@ -399,47 +379,50 @@ def _filename_title_candidates(filename: str) -> list[str]:
 
 
 def dedupe_library_folder(folder_path: str, keep_path: str | None = None) -> dict[str, Any]:
-    """Sweep a library folder and remove duplicate copies of the same track.
-
-    Groups audio files by normalized title (last ``-``-separated segment and
-    full basename, with leading track numbers and pid-suffixes stripped).
-    For each group with more than one file, keeps the highest-quality file
-    (lossless > bitrate > sample rate) and deletes the rest.
-
-    This cleans up the accumulated duplicates from repeated downloads of the
-    same track — e.g. ``02 - Lay Your Head to Rest.flac``,
-    ``02 - Lay Your Head to Rest_12345.flac`` — leaving a single best copy.
-
-    ``keep_path`` is never deleted (the file just moved in).
+    """Safe library folder deduplication. 
+    
+    Fixed to avoid false positives on different tracks (like Japanese ver. suffixes).
+    Uses strict metadata title matching when available before cleaning.
     """
     if not folder_path or not os.path.isdir(folder_path):
         return {"removed": 0, "groups": 0}
 
     keep_abs = os.path.abspath(keep_path) if keep_path else None
 
-    def _quality(path: str) -> int:
+    def _get_audio_metadata(path: str) -> tuple[str, str, int]:
+        """Returns (artist, title, quality_score)"""
         score = 100000 if os.path.splitext(path)[1].lower() in {".flac", ".wav", ".alac", ".aiff", ".ape", ".wv"} else 0
+        artist, title = "", ""
         try:
             from mutagen import File as MutagenFile
             audio = MutagenFile(path)
             if audio and hasattr(audio, "info"):
                 score += int(getattr(audio.info, "bitrate", 0) or 0) // 1000
                 score += int(getattr(audio.info, "sample_rate", 0) or 0) // 100
+            if audio and hasattr(audio, "tags") and audio.tags:
+                artist = str(audio.tags.get("TPE1", audio.tags.get("artist", [""]))[0]).strip().casefold()
+                title = str(audio.tags.get("TIT2", audio.tags.get("title", [""]))[0]).strip().casefold()
         except Exception:
             pass
-        return score
+        return artist, title, score
 
-    # group normalized-title -> list of (path, quality)
-    groups: dict[str, list[tuple[str, int]]] = {}
+    groups: dict[str, list[tuple[str, str, str, int]]] = {}
     for entry in os.scandir(folder_path):
         if not entry.is_file():
             continue
         ext = os.path.splitext(entry.name)[1].lower()
         if ext not in _AUDIO_EXTS:
             continue
-        candidates = _filename_title_candidates(entry.name)
-        key = candidates[0] if candidates else entry.name.casefold()
-        groups.setdefault(key, []).append((entry.path, _quality(entry.path)))
+        
+        artist, title, quality = _get_audio_metadata(entry.path)
+        # Fallback to filename candidate if tags are missing
+        if not title:
+            candidates = _filename_title_candidates(entry.name)
+            title = candidates[0] if candidates else entry.name.casefold()
+            
+        # Group strictly by artist + title to prevent cross-song data loss (e.g. different Japanese versions)
+        group_key = f"{artist}::{title}"
+        groups.setdefault(group_key, []).append((entry.path, artist, title, quality))
 
     removed = 0
     group_count = 0
@@ -447,14 +430,13 @@ def dedupe_library_folder(folder_path: str, keep_path: str | None = None) -> dic
         if len(files) < 2:
             continue
         group_count += 1
-        # Keep the highest quality; on ties keep the first (alphabetical) path.
-        files.sort(key=lambda fp: (-fp[1], fp[0]))
+        # Sort by quality descending, then path
+        files.sort(key=lambda fp: (-fp[3], fp[0]))
         keep = files[0][0]
         if keep_abs and os.path.abspath(keep) != keep_abs:
-            # Prefer keeping the just-moved file even if quality ties.
-            if os.path.abspath(keep_abs) in {os.path.abspath(f) for f, _ in files}:
+            if os.path.abspath(keep_abs) in {os.path.abspath(f[0]) for f in files}:
                 keep = keep_abs
-        for path, _ in files:
+        for path, _, _, _ in files:
             if os.path.abspath(path) == os.path.abspath(keep):
                 continue
             if keep_abs and os.path.abspath(path) == keep_abs:
@@ -463,7 +445,7 @@ def dedupe_library_folder(folder_path: str, keep_path: str | None = None) -> dic
                 os.remove(path)
                 removed += 1
                 logger.info(
-                    "Removed duplicate track from library folder",
+                    "Removed duplicate track from library folder safely",
                     folder=folder_path, removed_path=path, kept=keep,
                 )
             except Exception as exc:
