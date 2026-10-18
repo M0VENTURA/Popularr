@@ -307,6 +307,11 @@ function buildConfigObject() {
       favourite_artists_name: getValue('playlists_favourite_artists_name', 'Favourite Artists') || 'Favourite Artists',
       favourite_albums_name: getValue('playlists_favourite_albums_name', 'Favourite Albums') || 'Favourite Albums',
       sync_favourites_from_navidrome: getChecked('playlists_favourite_sync', false),
+      // AI cover art for the Top Genre playlists (Gemini). Key lives in
+      // api_integrations.gemini below.
+      genre_playlist_ai_cover_enabled: getChecked('playlists_genre_ai_cover_enabled', false),
+      genre_playlist_ai_cover_regenerate: getChecked('playlists_genre_ai_cover_regenerate', false),
+      genre_playlist_ai_cover_prompt: getValue('playlists_genre_ai_cover_prompt', ''),
       playlist_order_mode: getValue('playlists_order_mode', 'prominence') || 'prominence',
       // ⚠️ Math.max(0, raw), NOT `|| 25`: 0 means "no per-artist cap", so a
       // `|| default` guard would make that impossible to express.
@@ -693,6 +698,13 @@ function buildConfigObject() {
       audiodb: {
         enabled: getChecked('api_audiodb_enabled'),
         api_key: getValue('api_audiodb_api_key')
+      },
+      // Billable third-party image API. Only used by the Top Genre playlist
+      // covers (playlists.genre_playlist_ai_cover_enabled).
+      gemini: {
+        enabled: getChecked('api_gemini_enabled'),
+        api_key: getValue('api_gemini_api_key'),
+        model: getValue('api_gemini_model', 'gemini-2.5-flash-image') || 'gemini-2.5-flash-image'
       }
     },
     strip_parentheses_filters: Array.from(document.querySelectorAll('#stripKeywordsList .badge'))

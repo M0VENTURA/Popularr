@@ -505,6 +505,23 @@
         <div class="col-12 col-xl-6">
           <div class="border rounded p-3 h-100">
             <div class="d-flex justify-content-between align-items-center mb-2">
+              <h6 class="mb-0 text-info"><i class="bi bi-stars"></i> Google Gemini</h6>
+              <div class="form-check form-switch mb-0">
+                <input class="form-check-input" type="checkbox" id="api_gemini_enabled" {% if config.get('api_integrations', {}).get('gemini', {}).get('enabled') %}checked{% endif %}>
+                <label class="form-check-label" for="api_gemini_enabled">Enabled</label>
+              </div>
+            </div>
+            <label class="form-label form-label-sm" for="api_gemini_api_key">API Key</label>
+            <input type="password" class="form-control form-control-sm" id="api_gemini_api_key" value="{{ config.get('api_integrations', {}).get('gemini', {}).get('api_key', '') }}">
+            <label class="form-label form-label-sm mt-2" for="api_gemini_model">Image Model</label>
+            <input type="text" class="form-control form-control-sm" id="api_gemini_model" placeholder="gemini-2.5-flash-image" value="{{ config.get('api_integrations', {}).get('gemini', {}).get('model', 'gemini-2.5-flash-image') }}">
+            <small class="form-text text-muted">A Google AI Studio API key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. Used ONLY to generate cover artwork for the Top Genre playlists — see <strong>Playlists &rarr; AI Genre Covers</strong>. This API is billable; it stays off until enabled here.</small>
+          </div>
+        </div>
+
+        <div class="col-12 col-xl-6">
+          <div class="border rounded p-3 h-100">
+            <div class="d-flex justify-content-between align-items-center mb-2">
               <h6 class="mb-0"><i class="bi bi-disc"></i> MusicBrainz</h6>
               <div class="form-check form-switch mb-0">
                 <input class="form-check-input" type="checkbox" id="api_musicbrainz_enabled" {% if config.get('api_integrations', {}).get('musicbrainz', {}).get('enabled', True) %}checked{% endif %}>
@@ -3022,6 +3039,25 @@
             <input class="form-check-input" type="checkbox" id="playlists_favourite_sync" {% if config.get('playlists', {}).get('sync_favourites_from_navidrome', false) %}checked{% endif %}>
           </div>
           <span class="help-text">Pull every Navidrome user's stars from Navidrome before building the favourite playlists. Off = only stars already stored locally are used. Default: <strong>off</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_genre_ai_cover_enabled">AI Genre Covers</label>
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="playlists_genre_ai_cover_enabled" {% if config.get('playlists', {}).get('genre_playlist_ai_cover_enabled', false) %}checked{% endif %}>
+          </div>
+          <span class="help-text">Generate AI cover artwork for each <strong>Top Genre</strong> playlist (requires the Google Gemini key above). Artist / Essential playlists are unaffected. Default: <strong>off</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_genre_ai_cover_regenerate">Regenerate AI Covers</label>
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="playlists_genre_ai_cover_regenerate" {% if config.get('playlists', {}).get('genre_playlist_ai_cover_regenerate', false) %}checked{% endif %}>
+          </div>
+          <span class="help-text">Replace covers that were already generated with the same prompt. Leave off to generate each cover once. Default: <strong>off</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_genre_ai_cover_prompt">AI Cover Prompt</label>
+          <input type="text" class="form-control form-control-sm" id="playlists_genre_ai_cover_prompt" placeholder="Leave blank for the built-in prompt" value="{{ config.get('playlists', {}).get('genre_playlist_ai_cover_prompt', '') }}">
+          <span class="help-text">Prompt sent to the image model. <strong>{genre}</strong> is replaced with the genre name. Blank uses the built-in prompt.</span>
         </div>
       </div>
 

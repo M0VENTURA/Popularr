@@ -3740,6 +3740,46 @@ def _create_genre_top_track_playlists(
                 continue
             log_unified(f"📄 Playlist: Synced '{playlist_name}' to Navidrome ({len(_song_ids)} tracks)")
             written += 1
+
+            # ── AI cover art for the TOP GENRE playlists ───────────────────
+            #
+            # ONLY here, and only for a playlist this pass created/updated: an
+            # unchanged playlist keeps the cover it has, so a nightly scan does
+            # not re-bill the image API for identical art. Essential Collections
+            # (artist playlists) keep the artist-image cover they already get.
+            #
+            # Never fatal, and the reason is always logged — an image API that
+            # is out of quota must not cost the scan its file-tag sync.
+            try:
+                from helpers.config_helpers import get_genre_cover_config
+
+                _genre_cover_cfg = get_genre_cover_config()
+                if _genre_cover_cfg["enabled"]:
+                    from services.playlists.genre_cover_service import (
+                        generate_genre_cover,
+                    )
+
+                    _cover_display = _display_genre(genre)
+                    for _cover_client in _navidrome_clients():
+                        _cover = generate_genre_cover(
+                            _cover_display,
+                            playlist_name,
+                            _cover_client,
+                            regenerate=_genre_cover_cfg["regenerate"],
+                        )
+                        if _cover.get("ok"):
+                            if _cover.get("status") == "generated":
+                                log_unified(
+                                    f"🎨 Playlist cover: AI artwork set for '{playlist_name}'"
+                                )
+                            break
+                        logger.warning(
+                            "Genre playlist cover not applied",
+                            playlist=playlist_name,
+                            reason=_cover.get("reason"),
+                        )
+            except Exception as exc:
+                logger.warning("Genre playlist cover generation failed", error=str(exc))
         except Exception as exc:
             logger.warning("Genre playlist API sync failed", genre=genre, error=str(exc))
 

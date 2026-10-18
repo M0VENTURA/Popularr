@@ -1998,6 +1998,65 @@ def get_api_integrations() -> dict[str, Any]:
     return cfg.get("api_integrations", {})
 
 
+def get_gemini_config() -> dict[str, Any]:
+    """Get the Google Gemini settings.
+
+    Config section: ``api_integrations.gemini`` in config.yaml
+
+    Returns:
+        Dict with ``enabled`` (bool), ``api_key`` (str) and ``model`` (str).
+
+    Default Values:
+        - enabled: False   (opt-in: it is a billable third-party API)
+        - api_key: ""
+        - model: "gemini-2.5-flash-image"
+
+    ⚠️ ``api_key`` is read from ``api_integrations.gemini.api_key`` ONLY. It is
+    deliberately NOT also accepted from the legacy top-level ``gemini_api_key``
+    that a couple of the other services still honour: this key is billable, and
+    a key that can arrive from two places cannot be reasoned about (nor
+    redacted reliably) when one of them is stale.
+    """
+    cfg = get_config() or {}
+    integration = cfg.get("api_integrations") or {}
+    section = integration.get("gemini") if isinstance(integration, dict) else None
+    if not isinstance(section, dict):
+        section = {}
+    model = str(section.get("model") or "").strip() or "gemini-2.5-flash-image"
+    return {
+        "enabled": bool(section.get("enabled", False)),
+        "api_key": str(section.get("api_key", "") or ""),
+        "model": model,
+    }
+
+
+def get_genre_cover_config() -> dict[str, Any]:
+    """Get the AI genre-playlist cover settings.
+
+    Config section: ``playlists`` in config.yaml
+
+    Returns:
+        Dict with ``enabled``, ``regenerate`` and ``prompt_template``.
+
+    Default Values:
+        - genre_playlist_ai_cover_enabled: False
+        - genre_playlist_ai_cover_regenerate: False
+        - genre_playlist_ai_cover_prompt: "{genre}" template (see the service)
+
+    NOTE: applies to the TOP GENRE playlists only. The Essential Collections
+    (artist playlists) keep the artist-image cover they already get.
+    """
+    cfg = get_config() or {}
+    p = cfg.get("playlists") or {}
+    if not isinstance(p, dict):
+        p = {}
+    return {
+        "enabled": bool(p.get("genre_playlist_ai_cover_enabled", False)),
+        "regenerate": bool(p.get("genre_playlist_ai_cover_regenerate", False)),
+        "prompt_template": str(p.get("genre_playlist_ai_cover_prompt") or "").strip(),
+    }
+
+
 def get_api_integration(service: str) -> dict[str, Any]:
     """Get settings for a single API integration.
 
