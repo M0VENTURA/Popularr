@@ -2994,6 +2994,35 @@
           <input type="number" step="1" min="0" max="10000" class="form-control form-control-sm" id="playlists_genre_max_tracks" placeholder="300" value="{{ config.get('playlists', {}).get('genre_playlists_max_tracks', 300) }}">
           <span class="help-text">Cap on tracks in each genre playlist after ordering. Set to <strong>0</strong> for no cap — every qualifying track is included. Default: <strong>300</strong></span>
         </div>
+        <div class="input-card">
+          <label for="playlists_favourite_enabled">Favourite Playlists</label>
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="playlists_favourite_enabled" {% if config.get('playlists', {}).get('favourite_playlists_enabled', true) %}checked{% endif %}>
+          </div>
+          <span class="help-text">Build a <strong>Favourite Artists</strong> and a <strong>Favourite Albums</strong> playlist for each Navidrome user, from that user's stars. Each playlist is saved to that user's own Navidrome account. Default: <strong>on</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_favourite_min_stars">Favourite Minimum Stars</label>
+          <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="playlists_favourite_min_stars" placeholder="4" value="{{ config.get('playlists', {}).get('favourite_min_stars', 4) }}">
+          <span class="help-text">Only tracks rated at least this many stars are included. Default: <strong>4</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_favourite_artists_name">Favourite Artists Playlist Name</label>
+          <input type="text" class="form-control form-control-sm" id="playlists_favourite_artists_name" placeholder="Favourite Artists" value="{{ config.get('playlists', {}).get('favourite_artists_name', 'Favourite Artists') }}">
+          <span class="help-text">Name of the per-user playlist built from favourited artists. Default: <strong>Favourite Artists</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_favourite_albums_name">Favourite Albums Playlist Name</label>
+          <input type="text" class="form-control form-control-sm" id="playlists_favourite_albums_name" placeholder="Favourite Albums" value="{{ config.get('playlists', {}).get('favourite_albums_name', 'Favourite Albums') }}">
+          <span class="help-text">Name of the per-user playlist built from favourited albums. Default: <strong>Favourite Albums</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_favourite_sync">Sync Favourites At Scan End</label>
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="playlists_favourite_sync" {% if config.get('playlists', {}).get('sync_favourites_from_navidrome', false) %}checked{% endif %}>
+          </div>
+          <span class="help-text">Pull every Navidrome user's stars from Navidrome before building the favourite playlists. Off = only stars already stored locally are used. Default: <strong>off</strong></span>
+        </div>
       </div>
 
       <!-- Playlist track ordering -->

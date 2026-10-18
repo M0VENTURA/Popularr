@@ -301,6 +301,12 @@ function buildConfigObject() {
         const raw = parseInt(getValue('playlists_genre_max_tracks', '300'), 10);
         return Number.isFinite(raw) && raw >= 0 ? raw : 300;
       })(),
+      // Per-user favourite playlists (Favourite Artists / Favourite Albums).
+      favourite_playlists_enabled: getChecked('playlists_favourite_enabled', true),
+      favourite_min_stars: parseInt(getValue('playlists_favourite_min_stars', '4'), 10) || 4,
+      favourite_artists_name: getValue('playlists_favourite_artists_name', 'Favourite Artists') || 'Favourite Artists',
+      favourite_albums_name: getValue('playlists_favourite_albums_name', 'Favourite Albums') || 'Favourite Albums',
+      sync_favourites_from_navidrome: getChecked('playlists_favourite_sync', false),
       playlist_order_mode: getValue('playlists_order_mode', 'prominence') || 'prominence',
       // ⚠️ Math.max(0, raw), NOT `|| 25`: 0 means "no per-artist cap", so a
       // `|| default` guard would make that impossible to express.

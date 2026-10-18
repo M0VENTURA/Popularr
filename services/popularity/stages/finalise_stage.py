@@ -4841,6 +4841,45 @@ def _run_global_playlist_rebuild(options: dict[str, Any]) -> None:
         except Exception as exc:
             logger.warning("New Music playlist generation failed", error=str(exc))
 
+        # ── Per-user favourite playlists ───────────────────────────────────
+        #
+        # Runs AFTER the rating pass (this function is the scan's tail) so the
+        # 4★/5★ filter reads the ratings this pass just wrote, and BEFORE the
+        # playlist index below so the index records the playlists it creates.
+        #
+        # ⚠️ Per USER, and pushed with that user's own client: Navidrome
+        # refuses a write to a playlist the caller does not own (Subsonic code
+        # 50), which is exactly why these cannot share the server-scoped
+        # client list `_navidrome_clients()` the index uses.
+        #
+        # Never fatal: a Navidrome hiccup here must not cost the scan its
+        # file-tag sync (the same rule the index sync follows).
+        try:
+            from helpers.config_helpers import get_favourite_playlists_config
+
+            _fav_cfg = get_favourite_playlists_config()
+            if _fav_cfg.get("sync_favourites_from_navidrome"):
+                from services.favourites_service import sync_favourites_for_all_users
+
+                _fav_sync = sync_favourites_for_all_users()
+                if _fav_sync.get("errors"):
+                    logger.warning("Favourite sync reported errors", errors=_fav_sync["errors"])
+            if _fav_cfg.get("favourite_playlists_enabled"):
+                from services.playlists.favourite_playlist_service import (
+                    sync_favourite_playlists,
+                )
+
+                _fav_pl = sync_favourite_playlists()
+                if _fav_pl.get("errors"):
+                    logger.warning("Favourite playlists reported errors", errors=_fav_pl["errors"])
+                else:
+                    log_unified(
+                        f"[FINALISE_STAGE] Favourite playlists synced for "
+                        f"{len(_fav_pl.get('users') or [])} user(s)"
+                    )
+        except Exception as exc:
+            logger.warning("Favourite playlist sync failed", error=str(exc))
+
         # ── Playlist index (artist page's "Included in Playlists") ─────────
         #
         # Runs LAST, after every builder above, so the index records what this

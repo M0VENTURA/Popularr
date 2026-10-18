@@ -1017,6 +1017,51 @@ class NavidromeClient:
             logger.error("Failed to unstar track", track_id=track_id, error=str(exc))
             return False
 
+    #: Subsonic's ``star``/``unstar`` take a DIFFERENT parameter per kind:
+    #: ``id`` for a song, ``albumId`` for an album, ``artistId`` for an artist.
+    #: Passing ``id=<album id>`` is accepted by the server and stars NOTHING,
+    #: so the parameter name is part of the call, not a detail.
+    _STAR_PARAM_BY_KIND = {"track": "id", "song": "id", "album": "albumId", "artist": "artistId"}
+
+    def star_entity(self, entity_type: str, navidrome_id: str) -> bool:
+        """Star a track/album/artist by its Navidrome id.
+
+        One method rather than four wrappers: the only thing that varies is the
+        parameter NAME (see :data:`_STAR_PARAM_BY_KIND`), and a wrong one fails
+        silently.
+        """
+        param = self._STAR_PARAM_BY_KIND.get(str(entity_type or "").strip().lower())
+        if not param or not navidrome_id:
+            logger.warning("star_entity: unsupported kind or empty id",
+                           entity_type=entity_type, navidrome_id=navidrome_id)
+            return False
+        try:
+            data = self._get_subsonic_response(
+                "star", timeout=30, **{param: navidrome_id}
+            )
+            return data.get("status") == "ok"
+        except Exception as exc:
+            logger.error("Failed to star entity", entity_type=entity_type,
+                         navidrome_id=navidrome_id, error=str(exc))
+            return False
+
+    def unstar_entity(self, entity_type: str, navidrome_id: str) -> bool:
+        """Un-star a track/album/artist by its Navidrome id."""
+        param = self._STAR_PARAM_BY_KIND.get(str(entity_type or "").strip().lower())
+        if not param or not navidrome_id:
+            logger.warning("unstar_entity: unsupported kind or empty id",
+                           entity_type=entity_type, navidrome_id=navidrome_id)
+            return False
+        try:
+            data = self._get_subsonic_response(
+                "unstar", timeout=30, **{param: navidrome_id}
+            )
+            return data.get("status") == "ok"
+        except Exception as exc:
+            logger.error("Failed to unstar entity", entity_type=entity_type,
+                         navidrome_id=navidrome_id, error=str(exc))
+            return False
+
     def start_scan(self) -> bool:
         try:
             data = self._get_subsonic_response("startScan", timeout=10)

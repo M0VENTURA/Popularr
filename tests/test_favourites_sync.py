@@ -96,6 +96,19 @@ def fav_env(monkeypatch):
             self.unstarred.add(track_id)
             return True
 
+        # ⭐ The service calls ``star_entity``/``unstar_entity``, not the
+        # ``*_track`` pair: Subsonic's ``star`` takes ``id`` for a SONG but
+        # ``albumId`` / ``artistId`` for an album / artist, so a kind-blind
+        # method cannot serve all three (it would star nothing for the other
+        # two, silently).
+        def star_entity(self, entity_type, navidrome_id):
+            self.starred.add(navidrome_id)
+            return True
+
+        def unstar_entity(self, entity_type, navidrome_id):
+            self.unstarred.add(navidrome_id)
+            return True
+
     fake = _FakeNavidrome()
     monkeypatch.setattr(
         "services.favourites_service.get_navidrome_client_for_active_user",

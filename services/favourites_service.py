@@ -61,7 +61,34 @@ def get_active_navidrome_user() -> Optional[dict[str, str]]:
 
 def get_navidrome_client_for_active_user():
     """A Navidrome client for the active user, or None when not configured."""
-    user = get_active_navidrome_user()
+    return get_navidrome_client_for_user(get_active_username())
+
+
+def get_navidrome_user_by_name(username: str) -> Optional[dict[str, str]]:
+    """The configured Navidrome user entry for *username*, or None.
+
+    ⚠️ Exact match only. ``get_active_navidrome_user`` deliberately FALLS BACK
+    to the first configured user, which is right for a single-user install but
+    wrong here: the per-user sync must not silently push one account's
+    playlists as another, so an unknown name is an error, not a fallback.
+    """
+    wanted = str(username or "").strip()
+    if not wanted:
+        return None
+    for user in get_navidrome_users_normalized():
+        if str(user.get("user") or "").strip() == wanted:
+            return user
+    return None
+
+
+def get_navidrome_client_for_user(username: str):
+    """A Navidrome client for a SPECIFIC configured user, or None.
+
+    The client carries the username, and that is what decides whose account a
+    playlist write lands in (Navidrome rejects a write to a playlist the
+    caller does not own — Subsonic code 50).
+    """
+    user = get_navidrome_user_by_name(username)
     if not user:
         return None
     try:
@@ -191,10 +218,16 @@ def toggle_favourite(
     client = get_navidrome_client_for_active_user()
     if client and resolved_nav_id:
         try:
+            # ⭐ ``star_entity``, not ``star_track``: Subsonic's ``star`` takes
+            # ``id`` for a SONG but ``albumId`` / ``artistId`` for an album /
+            # artist. The server ACCEPTS the wrong parameter and stars nothing,
+            # so hearting an album or artist used to vanish silently — only
+            # tracks (whose ``tracks.id`` IS the Navidrome song id, so the bare
+            # ``id`` happened to be right) ever reached Navidrome.
             if liked:
-                nav_synced = bool(client.star_track(resolved_nav_id))
+                nav_synced = bool(client.star_entity(entity_type, resolved_nav_id))
             else:
-                nav_synced = bool(client.unstar_track(resolved_nav_id))
+                nav_synced = bool(client.unstar_entity(entity_type, resolved_nav_id))
         except Exception as exc:
             logger.debug("[FAVOURITES] Navidrome star sync failed: %s", exc)
             nav_synced = False
@@ -217,62 +250,81 @@ def _resolve_navidrome_id(entity_type: str, entity_id: str) -> Optional[str]:
     """Best-effort resolution of the Navidrome ID for a local entity.
 
     Tracks: the local track ``id`` IS the Navidrome song id (the library is
-    imported from Navidrome, so ids line up).  Albums/artists: try a Navidrome
-    lookup by the stored MBID when available; otherwise return the local id
-    and let the caller pass an explicit Navidrome ID.
+    imported from Navidrome, so ids line up) — no lookup needed.
+
+    Albums/artists: resolved by NAME through the Navidrome ``search3`` API.
+
+    ⚠️ This used to query ``albums.navidrome_album_id`` and
+    ``artists.navidrome_artist_id``. **Neither column exists** — there is no
+    ``albums`` table at all, and ``artists`` holds only ``id``/``name`` — so
+    both queries raised (swallowed by the ``except``) and returned ``None``
+    every time. The effect: hearting an album or artist in Popularr never
+    mirrored a star to Navidrome, silently. The API is the only source of a
+    Navidrome album/artist id.
     """
     etype = str(entity_type or "").strip().lower()
     if etype in ("track", "song"):
         return str(entity_id or "") or None
-    # Albums/artists: try to find a Navidrome ID by searching.  If we cannot
-    # resolve one here, return None so the caller can supply it explicitly.
+
+    term = str(entity_id or "").strip()
+    if not term:
+        return None
+
+    client = get_navidrome_client_for_active_user()
+    if not client:
+        return None
+
     try:
-        from sqlalchemy import text
-        if etype == "album":
-            with db_session() as session:
-                row = session.execute(
-                    text("SELECT navidrome_album_id FROM albums WHERE CAST(id AS TEXT) = :id"),
-                    {"id": entity_id},
-                ).fetchone()
-                if row and row[0]:
-                    return str(row[0])
-                # Fall back: match by album name + album artist
-                row2 = session.execute(
-                    text("""
-                        SELECT musicbrainz_album_mbid FROM tracks
-                        WHERE album = :id LIMIT 1
-                    """),
-                    {"id": entity_id},
-                ).fetchone()
-        elif etype == "artist":
-            with db_session() as session:
-                row = session.execute(
-                    text("SELECT navidrome_artist_id FROM artists WHERE name = :name"),
-                    {"name": entity_id},
-                ).fetchone()
-                if row and row[0]:
-                    return str(row[0])
+        found = client.search(term, artist_count=5, album_count=5, song_count=0) or {}
     except Exception as exc:
-        logger.debug("[FAVOURITES] navidrome id resolution failed for %s/%s: %s", entity_type, entity_id, exc)
+        logger.debug("[FAVOURITES] navidrome search failed for %s/%s: %s", entity_type, entity_id, exc)
+        return None
+
+    def _exact(candidates):
+        """An id whose name matches the local value, case/space-insensitively.
+
+        ⚠️ Exact-first, never "take the first hit": a search for one artist's
+        name routinely returns albums by OTHER artists, and starring the wrong
+        id is worse than starring nothing.
+        """
+        wanted = " ".join(term.casefold().split())
+        for cand in candidates or []:
+            if not isinstance(cand, dict):
+                continue
+            name = " ".join(str(cand.get("name") or "").casefold().split())
+            cid = str(cand.get("id") or "").strip()
+            if cid and name == wanted:
+                return cid
+        return None
+
+    if etype == "album":
+        return _exact(found.get("albums"))
+    if etype == "artist":
+        return _exact(found.get("artists"))
     return None
 
 
-def sync_favourites_from_navidrome() -> dict[str, Any]:
-    """Pull the ACTIVE user's starred items from Navidrome into the DB.
+def sync_favourites_from_navidrome(username: Optional[str] = None) -> dict[str, Any]:
+    """Pull a user's starred items from Navidrome into the DB.
 
-    Uses ``getStarred2`` (tracks/albums/artists).  For each starred track,
-    upserts a per-user favourite row keyed by the Navidrome song id.  This is
-    a one-way Navidrome → Popularr refresh; outbound (heart → star) happens
-    immediately in ``toggle_favourite``.
+    Uses ``getStarred2`` (tracks/albums/artists).  ``username`` defaults to the
+    ACTIVE user; ``sync_favourites_for_all_users`` passes each configured user
+    in turn.  One-way Navidrome → Popularr refresh; the outbound direction
+    (heart → star) happens in ``toggle_favourite``.
+
+    ⚠️ Stored per-user: an artist's/album's ``entity_id`` here is its
+    **Navidrome** id (that is what this returns), which is what
+    ``favourite_playlist_service`` needs to expand the starred entities back
+    into songs.
 
     Returns ``{"success": bool, "tracks": int, "albums": int, "artists": int,
     "error": str|None}``.
     """
-    username = get_active_username()
-    client = get_navidrome_client_for_active_user()
+    username = str(username or "").strip() or get_active_username()
+    client = get_navidrome_client_for_user(username)
     if not client:
         return {"success": False, "tracks": 0, "albums": 0, "artists": 0,
-                "error": "Navidrome not configured for active user"}
+                "error": f"Navidrome not configured for user '{username}'"}
 
     try:
         starred = client.get_starred_items() or {}
@@ -305,3 +357,29 @@ def sync_favourites_from_navidrome() -> dict[str, Any]:
 
     logger.info("[FAVOURITES] user=%s synced from Navidrome: %s", username, counts)
     return {"success": True, **counts}
+
+
+def sync_favourites_for_all_users() -> dict[str, Any]:
+    """Pull EVERY configured Navidrome user's stars into the DB.
+
+    Each user gets their OWN rows in ``user_favourites`` (the table's key is
+    ``(username, entity_type, entity_id)``), so the per-user playlist builder
+    can read one account's favourites without ever seeing another's.
+
+    Returns ``{"success", "users": [...], "errors": [...]}``.
+    """
+    from helpers.config_helpers import get_navidrome_users_normalized
+
+    results: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for user in get_navidrome_users_normalized():
+        name = str(user.get("user") or "").strip()
+        if not name:
+            continue
+        outcome = sync_favourites_from_navidrome(username=name)
+        results.append({"username": name, **outcome})
+        if not outcome.get("success"):
+            errors.append(f"{name}: {outcome.get('error')}")
+    if not results:
+        errors.append("No Navidrome users are configured")
+    return {"success": not errors, "users": results, "errors": errors}

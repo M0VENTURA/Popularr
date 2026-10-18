@@ -1452,6 +1452,53 @@ def get_playlists_config() -> dict[str, Any]:
     }
 
 
+def get_favourite_playlists_config() -> dict[str, Any]:
+    """Get the per-user favourite playlist settings.
+
+    Config section: ``playlists`` in config.yaml
+
+    Returns:
+        Dict of toggles and the minimum star rating.
+
+    Default Values:
+        - favourite_playlists_enabled: True
+        - favourite_min_stars: 4
+        - favourite_artists_name: "Favourite Artists"
+        - favourite_albums_name: "Favourite Albums"
+        - sync_favourites_from_navidrome: False
+
+    NOTE: these playlists are PER USER. One Navidrome user's stars produce
+    playlists written to THAT user's own Navidrome account, so two accounts on
+    one server never see each other's (Navidrome refuses a write to a playlist
+    the calling user does not own — Subsonic code 50).
+    """
+    cfg = get_config() or {}
+    p = cfg.get("playlists") or {}
+    if not isinstance(p, dict):
+        p = {}
+    # ⚠️ NOT ``int(p.get("favourite_min_stars", 4) or 4)``: a configured 0 is a
+    # REAL value (1 means "every track qualifies"), and ``0 or 4`` silently made
+    # it 4 — the same falsy-value trap ``_resolve_genre_max_tracks``
+    # (``genre_playlists_max_tracks``) and ``_genre_min_weight`` each document.
+    try:
+        _min_stars = int(p.get("favourite_min_stars", 4))
+    except (TypeError, ValueError):
+        _min_stars = 4
+    return {
+        "favourite_playlists_enabled": bool(p.get("favourite_playlists_enabled", True)),
+        "favourite_min_stars": max(1, min(5, _min_stars)),
+        "favourite_artists_name": str(
+            p.get("favourite_artists_name") or "Favourite Artists"
+        ).strip() or "Favourite Artists",
+        "favourite_albums_name": str(
+            p.get("favourite_albums_name") or "Favourite Albums"
+        ).strip() or "Favourite Albums",
+        "sync_favourites_from_navidrome": bool(
+            p.get("sync_favourites_from_navidrome", False)
+        ),
+    }
+
+
 # -----------------------------------------------------------------------------
 # Genre Aggregation Configuration
 # -----------------------------------------------------------------------------
