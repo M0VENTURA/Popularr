@@ -193,6 +193,40 @@
     }
   });
 
+  // ── Field readers ────────────────────────────────────────────────────────
+  //
+  // ⚠️ IIFE SCOPE ON PURPOSE — do NOT move these back inside
+  // buildConfigObject().
+  //
+  // `collectGenreSelectionConfig()` is a SIBLING of buildConfigObject, not a
+  // nested helper: it is defined further down (GENRE SELECTION ENGINE) and
+  // called from *inside* buildConfigObject as
+  // ``selection: collectGenreSelectionConfig()``. JavaScript resolves a free
+  // variable against where the function is DEFINED, not where it is CALLED — so
+  // while these lived inside buildConfigObject the collector could not see them,
+  // and EVERY Config save died with
+  //
+  //     Could not collect config: getValue is not defined
+  //
+  // Declaring them once, here, makes them visible to every collector in this
+  // module including buildConfigObject itself, which needs no other change.
+  function getValue(id, defaultValue) {
+    const el = document.getElementById(id);
+    return el ? el.value : (defaultValue || '');
+  }
+
+  function getChecked(id, defaultValue) {
+    const el = document.getElementById(id);
+    return el ? el.checked : (defaultValue || false);
+  }
+
+  function parseNumber(id, defaultValue) {
+    const el = document.getElementById(id);
+    if (!el) return defaultValue;
+    const v = parseFloat(el.value);
+    return Number.isNaN(v) ? defaultValue : v;
+  }
+
   // ── Build config object ─────────────────────────────────────────────────
   //
   // PRESERVED VERBATIM from the original file. See the header note: this is
@@ -225,21 +259,6 @@
   const LEGACY_FEATURE_KEYS = ['dry_run', 'sync', 'force', 'verbose', 'perpetual', 'batchrate', 'full_scan', 'auto_boot_navidrome_scan', 'artist'];
 
   function buildConfigObject() {
-    function getValue(id, defaultValue) {
-      const el = document.getElementById(id);
-      return el ? el.value : (defaultValue || '');
-    }
-    function getChecked(id, defaultValue) {
-      const el = document.getElementById(id);
-      return el ? el.checked : (defaultValue || false);
-    }
-    function parseNumber(id, defaultValue) {
-      const el = document.getElementById(id);
-      if (!el) return defaultValue;
-      const v = parseFloat(el.value);
-      return Number.isNaN(v) ? defaultValue : v;
-    }
-
     // Scheduled-job settings are collected below but live under a nested
     // shape, so bind the existing section once instead of re-reading
     // global.pageConfig at every level.
@@ -339,7 +358,18 @@
           fallback_search_max_wait_seconds: parseNumber('queue_fallback_search_max_wait_seconds', 20),
           search_empty_abort_seconds: parseNumber('queue_search_empty_abort_seconds', 90),
           search_empty_shrink_after: parseNumber('queue_search_empty_shrink_after', 4),
-          search_shrunken_wait_seconds: parseNumber('queue_search_shrunken_wait_seconds', 8)
+          search_shrunken_wait_seconds: parseNumber('queue_search_shrunken_wait_seconds', 8),
+          // Auto-restart of a STOPPED queue processor. Cooldown is floored here
+          // as well as server-side, so a typed 0 cannot be saved as "restart in
+          // a tight loop" and then be silently clamped on load.
+          auto_restart: Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.queue && global.pageConfig.queue.auto_restart) || {}),
+            {
+              enabled: getChecked('queue_auto_restart_enabled', true),
+              cooldown_seconds: Math.max(30, parseInt(getValue('queue_auto_restart_cooldown_seconds', '300'), 10) || 300)
+            }
+          )
         }
       ),
       lastfm: Object.assign(
@@ -526,6 +556,13 @@
                 {},
                 _schedJobs.popularity_scan || {},
                 { interval_minutes: parseNumber('scheduler_popularity_scan_interval_minutes', 1440) }
+              ),
+              navidrome_import: Object.assign(
+                {},
+                _schedJobs.navidrome_import || {},
+                // 0 is legal ("never import on a schedule"), so parseNumber and
+                // NOT `|| 240` — that would turn "off" back into "every 4h".
+                { interval_minutes: parseNumber('scheduler_navidrome_import_interval_minutes', 240) }
               )
             }
           )

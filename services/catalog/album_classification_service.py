@@ -409,6 +409,7 @@ def detect_alternate_takes(tracks: list[Any]) -> dict[str, list[Any]]:
         title = track.get("title") if isinstance(track, dict) else str(track)
         groups[alternate_take_group_key(title)].append(track)
 
+
     grouped: dict[str, list[Any]] = {}
     for key, variants in groups.items():
         if len(variants) < 2:

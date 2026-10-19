@@ -18,6 +18,17 @@
     </div>
     {% endif %}
 
+    {#
+      Queue processor health. Empty and hidden while the processor is running —
+      the alert is written by dashboard.js's updateQueueProcessorAlert() only
+      when /api/queue-processor/status says "stopped".
+
+      ⚠️ The container must exist on the page even though it starts empty: the
+      renderer returns early when it cannot find the host, so a missing div
+      would make a stopped processor invisible again with no error anywhere.
+    #}
+    <div id="queueProcessorAlert" class="d-none"></div>
+
     <!-- 1. Library Overview — ONE horizontal strip (see .library-bento) -->
     {% set st = stats | default({}) %}
     <div class="card mb-3 shadow-sm" id="libraryStatsCard">

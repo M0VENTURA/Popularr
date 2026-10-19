@@ -120,6 +120,39 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
+// ===== FIELD READERS =====
+//
+// ⚠️ FILE SCOPE ON PURPOSE — do NOT move these back inside
+// buildConfigObject().
+//
+// `collectGenreSelectionConfig()` is a SIBLING of buildConfigObject, not a
+// nested helper: it is defined further down (GENRE SELECTION ENGINE) and called
+// from *inside* buildConfigObject as ``selection: collectGenreSelectionConfig()``. 
+// JavaScript resolves a free variable against where the function is DEFINED, not
+// where it is CALLED — so while these lived inside buildConfigObject the
+// collector could not see them, and EVERY Config save died with
+//
+//     Could not collect config: getValue is not defined
+//
+// Declaring them once, here, makes them visible to every collector in this
+// file including buildConfigObject itself, which needs no other change.
+function getValue(id, defaultValue) {
+  const el = document.getElementById(id);
+  return el ? el.value : (defaultValue || '');
+}
+
+function getChecked(id, defaultValue) {
+  const el = document.getElementById(id);
+  return el ? el.checked : (defaultValue || false);
+}
+
+function parseNumber(id, defaultValue) {
+  const el = document.getElementById(id);
+  if (!el) return defaultValue;
+  const v = parseFloat(el.value);
+  return Number.isNaN(v) ? defaultValue : v;
+}
+
 // ===== BUILD CONFIG OBJECT =====
 
 function collectFeatureFieldOverrides() {
@@ -148,21 +181,6 @@ function collectFeatureFieldOverrides() {
 const LEGACY_FEATURE_KEYS = ['dry_run', 'sync', 'force', 'verbose', 'perpetual', 'batchrate', 'full_scan', 'auto_boot_navidrome_scan', 'artist'];
 
 function buildConfigObject() {
-  function getValue(id, defaultValue) {
-    const el = document.getElementById(id);
-    return el ? el.value : (defaultValue || '');
-  }
-  function getChecked(id, defaultValue) {
-    const el = document.getElementById(id);
-    return el ? el.checked : (defaultValue || false);
-  }
-  function parseNumber(id, defaultValue) {
-    const el = document.getElementById(id);
-    if (!el) return defaultValue;
-    const v = parseFloat(el.value);
-    return Number.isNaN(v) ? defaultValue : v;
-  }
-
   const navidrome_users = [];
   document.querySelectorAll('.user-card').forEach(card => {
     const user = {
@@ -256,7 +274,18 @@ function buildConfigObject() {
         fallback_search_max_wait_seconds: parseNumber('queue_fallback_search_max_wait_seconds', 20),
         search_empty_abort_seconds: parseNumber('queue_search_empty_abort_seconds', 90),
         search_empty_shrink_after: parseNumber('queue_search_empty_shrink_after', 4),
-        search_shrunken_wait_seconds: parseNumber('queue_search_shrunken_wait_seconds', 8)
+        search_shrunken_wait_seconds: parseNumber('queue_search_shrunken_wait_seconds', 8),
+        // Auto-restart of a STOPPED queue processor. Cooldown is floored here
+        // as well as server-side, so a typed 0 cannot be saved as "restart in
+        // a tight loop" and then be silently clamped on load.
+        auto_restart: Object.assign(
+          {},
+          ((window.pageConfig && window.pageConfig.queue && window.pageConfig.queue.auto_restart) || {}),
+          {
+            enabled: getChecked('queue_auto_restart_enabled', true),
+            cooldown_seconds: Math.max(30, parseInt(getValue('queue_auto_restart_cooldown_seconds', '300'), 10) || 300)
+          }
+        )
       }
     ),
     lastfm: Object.assign(
@@ -418,6 +447,42 @@ function buildConfigObject() {
       auto_popularity_scan: getChecked('watcher_auto_popularity', true),
       downloads_watcher_enabled: getChecked('watcher_downloads_enabled', true)
     },
+    // Scheduled background jobs (APScheduler).
+    //
+    // ⚠️ THIS SECTION MUST BE IN THE PAYLOAD. save_config() REPLACES config.yaml
+    // wholesale, so a payload without `scheduler:` deletes every interval and
+    // the timezone on the next save — silently resetting the scheduled library
+    // sync / popularity scan / Navidrome import to their defaults. Everything
+    // this page does not collect is carried across untouched.
+    scheduler: Object.assign(
+      {},
+      (window.pageConfig && window.pageConfig.scheduler) || {},
+      {
+        jobs: Object.assign(
+          {},
+          ((window.pageConfig && window.pageConfig.scheduler && window.pageConfig.scheduler.jobs) || {}),
+          {
+            // 0 is legal ("never run on a schedule"), so parseNumber and NOT
+            // `parseInt(...) || default` — `||` would turn "off" back on.
+            library_sync: Object.assign(
+              {},
+              (((window.pageConfig || {}).scheduler || {}).jobs || {}).library_sync || {},
+              { interval_minutes: parseNumber('scheduler_library_sync_interval_minutes', 360) }
+            ),
+            popularity_scan: Object.assign(
+              {},
+              (((window.pageConfig || {}).scheduler || {}).jobs || {}).popularity_scan || {},
+              { interval_minutes: parseNumber('scheduler_popularity_scan_interval_minutes', 1440) }
+            ),
+            navidrome_import: Object.assign(
+              {},
+              (((window.pageConfig || {}).scheduler || {}).jobs || {}).navidrome_import || {},
+              { interval_minutes: parseNumber('scheduler_navidrome_import_interval_minutes', 240) }
+            )
+          }
+        )
+      }
+    ),
     features: Object.assign(
       {},
       (window.pageConfig && window.pageConfig.features) || {},

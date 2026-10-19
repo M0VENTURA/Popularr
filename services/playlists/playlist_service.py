@@ -383,21 +383,135 @@ def create_or_update_loved_tracks_playlist() -> dict:
 logger = logging.getLogger(__name__)
 
 
+def _app_local_base_url() -> str:
+    """Absolute base URL for reaching THIS app's own HTTP routes.
+
+    WHY THIS EXISTS. ``get_artist_image()`` falls back to *this app's own*
+    album-art route when the artist has no image of its own, and returns it as a
+    ROOT-RELATIVE path:
+
+        /api/album/Carpathian/Nothing%20to%20Lose/art
+
+    That is a valid ``<img src>`` — the browser resolves it against whatever
+    origin the page came from, which is exactly what a UI wants. It is NOT a
+    valid request target: handed to ``httpx`` it raises
+    ``UnsupportedProtocol`` (the reported error for Carpathian's
+    "Nothing to Lose"), because a URL with no scheme and no host has nothing to
+    connect to.
+
+    Only the BACKEND needs the absolute form, so it is built here, at the point
+    of use, rather than stored in the database — a stored absolute URL would be
+    wrong for anyone reaching the app by a different name (LAN IP, reverse
+    proxy, container hostname), and the artist page would then serve a broken
+    ``<img>`` to those clients.
+
+    Resolution order:
+
+    1. ``POPULARLR_APP_BASE_URL`` — explicit override, for a reverse proxy or an
+       unusual bind (scheme + host + optional port, no trailing slash).
+    2. The host/port the web server was told to bind (``SPTNR_GUNICORN_BIND``,
+       default ``0.0.0.0:5000``), with a wildcard bind rewritten to loopback.
+       ``0.0.0.0`` is a *listen* address, not a destination — connecting to it
+       fails, which would have replaced one broken URL with another.
+    """
+    override = str(os.environ.get("POPULARLR_APP_BASE_URL") or "").strip().rstrip("/")
+    if override:
+        return override
+
+    bind = str(os.environ.get("SPTNR_GUNICORN_BIND") or "").strip() or "0.0.0.0:5000"
+    host, _, port = bind.rpartition(":")
+    if not host or not port.isdigit():
+        # Not a host:port (a bare port, or a unix socket spec) — fall back to
+        # the documented default rather than guessing.
+        host, port = "127.0.0.1", "5000"
+    if host in ("0.0.0.0", "*", "::", "[::]"):
+        host = "127.0.0.1"
+    elif ":" in host and not host.startswith("["):
+        host = f"[{host}]"  # bare IPv6 literal needs brackets in a URL
+    return f"http://{host}:{port}"
+
+
+def _album_art_bytes_for_artist(artist_name: str) -> bytes | None:
+    """The artist's album art, read straight from our own ``album_art`` table.
+
+    The FALLBACK when the HTTP fetch above fails — for example when this process
+    cannot reach its own bind address (an unusual network namespace, or a
+    ``SPTNR_GUNICORN_BIND`` that describes a socket nothing can dial). The bytes
+    are one query away, so a cover should not be lost to an unreachable
+    loopback.
+
+    Picks the newest album art for the artist, which is the same album the
+    artist-image fallback used to build its URL. ⚠️ One deliberate difference:
+    the HTTP route is Navidrome-FIRST and may return the server's own cover,
+    while this returns the artwork stored in ``album_art``. Same album, possibly
+    a different source — acceptable for a fallback, and both are "the artist's
+    album art".
+    """
+    artist = str(artist_name or "").strip()
+    if not artist:
+        return None
+    try:
+        from sqlalchemy import text
+
+        from db.engine import db_session
+
+        with db_session() as session:
+            row = session.execute(
+                text(
+                    "SELECT image_data FROM album_art "
+                    "WHERE LOWER(artist_name) = LOWER(:artist) "
+                    "  AND image_data IS NOT NULL "
+                    "ORDER BY downloaded_at DESC NULLS LAST, LOWER(album_name) ASC "
+                    "LIMIT 1"
+                ),
+                {"artist": artist},
+            ).first()
+        if row and row[0]:
+            return bytes(row[0])
+    except Exception as exc:
+        logger.debug("[PLAYLISTS] Album-art lookup failed for %s: %s", artist_name, exc)
+    return None
+
+
 def _fetch_artist_image_bytes(artist_name: str) -> bytes | None:
-    """Reuse the /artist-page image pipeline: resolved URL -> image bytes."""
+    """Reuse the /artist-page image pipeline: resolved URL -> image bytes.
+
+    ⚠️ ``get_artist_image()`` may answer with a ROOT-RELATIVE path (its
+    album-art fallback serves this app's own ``/api/album/<a>/<b>/art``). The UI
+    wants that form; an HTTP client cannot use it. Relative answers are therefore
+    resolved against this app's own base URL before the request — see
+    ``_app_local_base_url`` — which also means the bytes are exactly what the
+    artist page would serve.
+    """
     try:
         from services.metadata.artist_metadata_service import get_artist_image
+
         data, _code = get_artist_image(artist_name)
-        image_url = data.get("image_url") if isinstance(data, dict) else None
+        image_url = (
+            str((data or {}).get("image_url") or "").strip() if isinstance(data, dict) else ""
+        )
         if not image_url:
             return None
+
+        if not image_url.lower().startswith(("http://", "https://")):
+            if not image_url.startswith("/"):
+                image_url = "/" + image_url
+            image_url = _app_local_base_url() + image_url
+            logger.debug(
+                "[PLAYLISTS] Resolved artist image path to %s for %s", image_url, artist_name
+            )
+
         from api_clients import session
+
         resp = session.get(image_url, timeout=15)
         if resp.status_code == 200 and resp.content:
             return resp.content
     except Exception as exc:
         logger.debug("[PLAYLISTS] Artist image fetch failed for %s: %s", artist_name, exc)
-    return None
+
+    # The URL resolved, but we could not fetch it (or it answered without an
+    # image). Read what we already hold rather than reporting "no image".
+    return _album_art_bytes_for_artist(artist_name)
 
 
 def attach_playlist_cover(playlist_name: str, artist_name: str) -> dict:
@@ -421,6 +535,22 @@ def attach_playlist_cover(playlist_name: str, artist_name: str) -> dict:
     the truth instead of claiming a cover that is not there.
     """
     try:
+        # ── Deferred while a Navidrome import runs ────────────────────────
+        # This path does NOT go through the Subsonic helpers: it uses
+        # Navidrome's NATIVE API (``/auth/login`` + ``POST /api/playlist/{id}/
+        # image``), so ``NavidromeClient`` cannot gate it. It is called from the
+        # finalise stage once per Essential playlist, and it costs a cover-art
+        # read plus a multipart upload each time — exactly the incidental
+        # traffic an import should not have to compete with.
+        #
+        # Reported as ``deferred`` rather than ``disabled``: the two are
+        # different facts, and a reason of "disabled" would send an operator to
+        # check a config flag that is perfectly fine.
+        from services.navidrome.import_gate import is_import_running
+
+        if is_import_running():
+            return {"ok": False, "method": "none", "reason": "deferred — Navidrome import running"}
+
         from helpers.config_helpers import get_config
         cfg = get_config() or {}
         nav_cfg = cfg.get("navidrome") or {}
@@ -497,7 +627,10 @@ def sync_playlists_public() -> dict:
     false — opt-in via config.yaml or the Integrations tab).
 
     Returns ``{"enabled": bool, "checked": int, "made_public": int,
-    "failed": int}``.
+    "failed": int}``, plus ``"deferred": True`` when a running Navidrome import
+    stopped the pass from doing anything at all. That flag matters: "deferred"
+    and "everything was already public" both read as ``checked == 0``, so
+    without it a skipped pass is indistinguishable from a clean one.
     """
     try:
         from helpers.config_helpers import get_config
@@ -507,6 +640,35 @@ def sync_playlists_public() -> dict:
             nav_cfg = {}
         if not bool(nav_cfg.get("auto_public_playlists", False)):
             return {"enabled": False, "checked": 0, "made_public": 0, "failed": 0}
+
+        # ⚠️ THIS PASS CANNOT RUN ALONGSIDE AN IMPORT — SAY SO, DON'T REPORT A
+        # CLEAN ZERO.
+        #
+        # ``getPlaylists`` and ``updatePlaylist`` are both deferred while a
+        # Navidrome import runs, and a deferred read is answered with ``{}``,
+        # which ``fetch_all_playlists`` turns into ``[]``. The loop below then
+        # finds nothing, ``checked`` stays 0, and the pass returns
+        # ``{"enabled": True, "checked": 0, ...}`` — identical to "every playlist
+        # was already public". That silent no-op is how the generated playlists
+        # stopped becoming public once the import started running on a
+        # four-hourly schedule.
+        try:
+            from services.navidrome.import_gate import is_import_running
+
+            if is_import_running():
+                logger.info(
+                    "[PLAYLISTS] Public-sync deferred — Navidrome import running; "
+                    "playlists keep their current visibility this pass"
+                )
+                return {
+                    "enabled": True,
+                    "checked": 0,
+                    "made_public": 0,
+                    "failed": 0,
+                    "deferred": True,
+                }
+        except Exception:
+            pass  # fail open — a broken gate must not disable the pass outright
 
         nav_users = cfg.get("navidrome_users") or []
         if not nav_users and nav_cfg.get("base_url"):

@@ -189,12 +189,39 @@ def sync_playlist_by_name(
         "updated": False,
         "created": False,
         "unchanged": False,
+        "skipped": False,
         "deduped": 0,
         "playlist_id": "",
         "song_count": 0,
     }
     if not client or not name:
         return result
+
+    # ── Deferred while a Navidrome import runs ────────────────────────────
+    #
+    # ⚠️ THIS MUST SKIP, NOT PROCEED. A deferred ``getPlaylists`` returns an
+    # EMPTY list, and an empty list is indistinguishable from "this playlist
+    # does not exist yet" — so the normal path would CREATE a second copy of a
+    # playlist that is sitting right there on the server. The dedupe pass would
+    # then delete one of them on the next run, and the two could ping-pong
+    # exactly as the multi-account bug did.
+    #
+    # "skipped" (rather than an error) tells the caller the truth: nothing was
+    # attempted, and the playlist keeps its current contents.
+    if not force:
+        try:
+            from services.navidrome.import_gate import is_import_running
+
+            if is_import_running():
+                result["success"] = True
+                result["skipped"] = True
+                logger.debug(
+                    "[PLAYLISTS] playlist sync deferred — Navidrome import running",
+                    name=name,
+                )
+                return result
+        except Exception:
+            pass  # fail open: never block a sync on a broken gate
 
     # De-duplicate the requested list while preserving order. Sending the same
     # song twice would otherwise make the stored list permanently differ from

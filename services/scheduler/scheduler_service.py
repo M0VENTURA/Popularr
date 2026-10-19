@@ -215,7 +215,9 @@ def _scheduler_env_enabled() -> bool:
 _JOB_LOCK_KEY_MAP = {
     "library_sync": "popularr_scheduler_library_sync",
     "popularity_scan": "popularr_scheduler_popularity_scan",
+    "navidrome_import": "popularr_scheduler_navidrome_import",
     "download_queue_processor": "popularr_scheduler_download_queue",
+    "queue_processor_watchdog": "popularr_scheduler_queue_watchdog",
     "missing_releases_scan": "popularr_scheduler_missing_releases",
     "upcoming_wikipedia_scrape": "popularr_scheduler_upcoming_wikipedia",
     "upcoming_musicbrainz_scan": "popularr_scheduler_upcoming_musicbrainz",
@@ -552,6 +554,33 @@ def _register_default_jobs(
         except Exception as exc:
             logger.warning("APScheduler failed to register popularity_scan", error=str(exc))
 
+    # ── Navidrome import (keep the database current) ──
+    #
+    # The scheduled Import (the same pipeline the dashboard's Import button
+    # runs) so `tracks` follows the library without anyone pressing it. Default
+    # every 4 hours: often enough that a newly added album appears the same day,
+    # rarely enough that the remote Navidrome rescan it triggers is not a
+    # constant background hum.
+    #
+    # ⚠️ `interval_minutes: 0` disables it, and `enabled: false` too. It is
+    # independent of `library_sync` (the 6-hourly delta sync) on purpose: they
+    # answer different questions, and this one can be turned off without losing
+    # the incremental sync.
+    navidrome_import_interval = _interval("navidrome_import", "interval_minutes", 240)
+    if navidrome_import_interval <= 0 or not _enabled("navidrome_import", "auto_import_enabled", True):
+        _remove_job("navidrome_import")
+    else:
+        try:
+            _put(
+                "navidrome_import", "Navidrome import (keep database current)",
+                IntervalTrigger(minutes=navidrome_import_interval),
+                func=_run_navidrome_import_job,
+                max_instances=1,
+                coalesce=True,
+            )
+        except Exception as exc:
+            logger.warning("APScheduler failed to register navidrome_import", error=str(exc))
+
     # ── Download queue processor ──
     if _enabled("download_queue_processor", "downloads_watcher_enabled", True):
         interval_seconds = _interval(
@@ -581,6 +610,43 @@ def _register_default_jobs(
             logger.warning("APScheduler failed to register download_queue_processor", error=str(exc))
     else:
         _remove_job("download_queue_processor")
+
+    # ── Download queue processor WATCHDOG (auto-restart) ──
+    #
+    # A separate job rather than a hook inside the processor tick, because the
+    # tick only runs when the processor is healthy: the case this exists for is
+    # the one where nothing is driving the queue at all. See
+    # ``services/queue/queue_watchdog_service.py``.
+    #
+    # Gated on the queue processor being enabled as well: a deployment that has
+    # deliberately turned the download queue off must not have a job quietly
+    # kicking cycles into it every minute.
+    try:
+        from services.queue.queue_watchdog_service import (
+            WATCHDOG_JOB_ID,
+            get_auto_restart_config,
+        )
+
+        watchdog_cfg = get_auto_restart_config()
+        queue_enabled = _enabled(
+            "download_queue_processor", "downloads_watcher_enabled", True
+        )
+
+        if watchdog_cfg.get("enabled") and queue_enabled:
+            _put(
+                WATCHDOG_JOB_ID,
+                "Auto-restart a stopped download queue processor",
+                IntervalTrigger(
+                    seconds=float(watchdog_cfg.get("check_interval_seconds") or 60.0)
+                ),
+                func=_run_queue_processor_watchdog_job,
+                max_instances=1,
+                coalesce=True,
+            )
+        else:
+            _remove_job(WATCHDOG_JOB_ID)
+    except Exception as exc:
+        logger.warning("APScheduler failed to register queue_processor_watchdog", error=str(exc))
 
     # ── Missing releases scan ──
     try:
@@ -683,6 +749,84 @@ def _run_library_sync_job() -> None:
             return
         from services.library.library_sync_service import request_library_sync
         request_library_sync()
+
+
+def _run_navidrome_import_job() -> None:
+    """Scheduled Navidrome import tick — keeps ``tracks`` current.
+
+    Runs the SAME pipeline as the dashboard's Import button, so the scheduled and
+    manual paths cannot drift. Three guards, each answering a different question:
+
+    1. ``_job_tick_lock`` — is another WORKER already ticking? (4 hypercorn
+       workers all run this scheduler job; the leader gate covers startup, this
+       covers the steady state.)
+    2. ``is_import_running()`` — is an import already running ANYWHERE? The
+       progress file is cross-process and cross-host (the standalone queue
+       worker shares the state volume), so this catches a manual import, a boot
+       import, or this job's own previous tick still winding down.
+    3. ``is_runtime_running("navidrome")`` — the cheap in-process check, which
+       also covers the window before the progress file is first written.
+
+    ⚠️ IT DOES NOT WAIT FOR — OR BLOCK — OTHER SCANS. A popularity/album scan
+    running at the same time is fine: the import reads Navidrome and writes
+    ``tracks``; the other scans read the library and write scores. What the
+    import DOES do is suppress the other scans' incidental Navidrome polling
+    while it runs (``services/navidrome/import_gate``), so the two are not
+    competing for the server.
+    """
+    with _job_tick_lock("navidrome_import") as _acquired:
+        if not _acquired:
+            logger.debug("Skipping navidrome_import tick — another worker holds the lock")
+            return
+
+        try:
+            from services.navidrome.import_gate import is_import_running
+            from services.scanning.runtime_state import is_runtime_running
+
+            if is_runtime_running("navidrome") or is_import_running():
+                logger.info(
+                    "Skipping scheduled Navidrome import — an import is already running"
+                )
+                return
+        except Exception as exc:
+            logger.debug("Navidrome import pre-check failed", error=str(exc))
+
+        try:
+            from services.scanning.pipelines.navidrome_pipeline import (
+                run_navidrome_import_scan,
+            )
+            from services.scanning.scan_state import get_scan_progress_path
+
+            # mode="all" is the INCREMENTAL import (``diff_mode=not force``), so
+            # a tick with nothing changed costs the marker check and returns —
+            # it is not a forced full rescan every four hours.
+            run_navidrome_import_scan(
+                mode="all",
+                progress_file=get_scan_progress_path("navidrome_scan"),
+            )
+        except Exception as exc:
+            logger.warning("Scheduled Navidrome import failed", error=str(exc))
+
+
+def _run_queue_processor_watchdog_job() -> None:
+    """Scheduled auto-restart tick for a STOPPED download queue processor.
+
+    Guarded like every other job here so two web workers can never both decide
+    the queue is down and both kick it. ``ENABLE_SCHEDULER`` already keeps this
+    to the leader in a multi-worker deployment; the lock is the belt to that
+    pair of braces, and it is the same mechanism the other ticks use.
+    """
+    with _job_tick_lock("queue_processor_watchdog") as _acquired:
+        if not _acquired:
+            logger.debug(
+                "Skipping queue_processor_watchdog tick — another worker holds the lock"
+            )
+            return
+        from services.queue.queue_watchdog_service import (
+            queue_processor_watchdog_tick,
+        )
+
+        queue_processor_watchdog_tick()
 
 
 def _run_missing_releases_job() -> None:

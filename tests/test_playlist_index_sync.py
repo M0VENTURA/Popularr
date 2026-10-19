@@ -223,8 +223,12 @@ class TestFileBackedPlaylists:
         )
         monkeypatch.setattr(svc, "_file_stamp", lambda _p: "stamp1")
         monkeypatch.setattr(
-            svc, "_track_ids_for",
-            lambda entry, clients: (["fake-from-file"], 0),
+            svc,
+            "_track_ids_for",
+            # `**kwargs` because the signature grew `listings=` and `detail=`
+            # for the bounded-prefetch path; this double only cares about
+            # which playlist wins.
+            lambda entry, clients, **kwargs: (["fake-from-file"], 0),
         )
         entry, detail = _remote("nav-1", "Loved Tracks", song_count=1, tracks=["nav-track"])
 
@@ -249,7 +253,7 @@ class TestFileBackedPlaylists:
             }],
         )
         monkeypatch.setattr(svc, "_file_stamp", lambda _p: "s")
-        monkeypatch.setattr(svc, "_track_ids_for", lambda entry, clients: ([], 0))
+        monkeypatch.setattr(svc, "_track_ids_for", lambda entry, clients, **kwargs: ([], 0))
 
         svc.sync_playlist_index([])
 
@@ -349,14 +353,52 @@ class TestUnresolvedReporting:
         assert stats["unresolved"] == 3
         assert stats["entries"] == 2
 
-    def test_a_fetch_failure_is_counted_not_raised(self):
+    def test_a_fetch_failure_keeps_the_previous_entries(self):
+        """A transient read failure must not EMPTY the playlist.
+
+        ⚠️ THIS TEST ASSERTED THE OPPOSITE BEFORE 2026-10-19, and that was the
+        bug. ``fetch_playlist`` swallows every error and returns ``{}``, so the
+        old loop recorded the playlist as having **0 tracks** and wrote that —
+        ``replace_playlist`` deletes the playlist's entries first, so a single
+        failed ``getPlaylist`` erased every indexed row for it and dropped the
+        playlist from the artist page until a later sync happened to succeed.
+        The old contract was pinned as ``unresolved == 2`` and
+        ``entries == 0``; both of those numbers described the data loss.
+
+        The rule now: unreadable is NOT empty. The write is skipped, the
+        playlist keeps whatever it already had, and the failure is counted in
+        ``errors`` (the same bucket a prune refusal uses) rather than being
+        reported as "these 2 tracks did not resolve".
+        """
         entry, _detail = _remote("p10", "Broken", song_count=2)
         client = FakeClient(playlists=[entry], details={}, fetch_error=RuntimeError("boom"))
 
         stats = svc.sync_playlist_index([client])
 
-        assert stats["unresolved"] == 2
-        assert repo.index_sizes()["entries"] == 0
+        assert stats["changed"] == 0, "an unreadable playlist was written"
+        assert stats["entries"] == 0, "no rows should have been written"
+        assert stats["errors"] >= 1, "the failure must be counted somewhere"
+        assert stats["unresolved"] == 0, (
+            "'unresolved' means 'this playlist's ids did not match library tracks'; "
+            "a failure to READ the playlist is not that"
+        )
+
+    def test_an_unreadable_playlist_does_not_delete_its_previous_rows(self):
+        """The actual data-loss scenario, end to end.
+
+        Seed the index, then make the server fail. The rows must survive.
+        """
+        entry, detail = _remote("p11", "Flaky", song_count=2, tracks=["keep-1", "keep-2"])
+        svc.sync_playlist_index([FakeClient(playlists=[entry], details={"p11": detail})])
+        assert repo.index_sizes()["entries"] == 2
+
+        svc.sync_playlist_index(
+            [FakeClient(playlists=[entry], details={}, fetch_error=RuntimeError("boom"))]
+        )
+
+        assert repo.index_sizes()["entries"] == 2, (
+            "a failed fetch deleted the playlist's indexed rows"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -38,7 +38,11 @@ import structlog
 from sqlalchemy import text
 
 from db.engine import db_session
-from helpers.normalization_service import has_cover_marker, titles_match_for_review
+from helpers.normalization_service import (
+    has_cover_marker,
+    normalize_unicode_punctuation,
+    titles_match_for_review,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -108,8 +112,35 @@ def _as_text(value: Any) -> str:
 
 
 def _norm(value: Any) -> str:
-    """Comparison key — case- and whitespace-insensitive."""
-    return " ".join(_as_text(value).casefold().split())
+    """Comparison key — case-, whitespace- AND typography-insensitive.
+
+    ⚠️ THE TYPOGRAPHY FOLD IS LOAD-BEARING. Without it a straight apostrophe and
+    a curly one are different keys, so MusicBrainz offering
+
+        Baby, It's Cold Outside      (library, U+0027)
+        Baby, It’s Cold Outside      (MusicBrainz, U+2019)
+
+    reads as a title the user must approve. The reported symptom was exactly
+    that: singles such as Catatonia's "Baby, It's Cold Outside" and
+    "You've Got a Lot to Answer For", Carpathian's "End of the 1980's" and
+    "Drop It Like It's Hot" were all deferred for manual approval purely because
+    of the quote character.
+
+    These are {"not a change"} — the same string in two typographic styles.
+    Deferring them buries the real proposals in noise and teaches the operator to
+    approve without reading.
+
+    ``normalize_unicode_punctuation`` is deliberately CONSERVATIVE: it maps
+    smart quotes, primes, typographic dashes and NBSP onto their ASCII
+    equivalents. It deletes nothing, so a genuine difference is unaffected —
+    ``"AC/DC"`` and ``"ACDC"`` still differ, as do two different titles.
+
+    ⚠️ Track titles ALSO go through ``titles_match_for_review`` (which removes
+    performance markers). This key does not, and must not: it is used for
+    non-title fields too (album artist, release names, genre names), where
+    stripping brackets or punctuation would hide real differences.
+    """
+    return " ".join(normalize_unicode_punctuation(_as_text(value)).casefold().split())
 
 
 def _genre_value(value: Any) -> Any:

@@ -159,9 +159,6 @@ def api_upcoming_releases() -> Any:
         except Exception:
             pass
 
-        total_where_sql = where_sql
-        count_params = dict(params)
-
         if window_days > 0:
             _today = datetime.now().date()
             _tight_clause = (
@@ -196,11 +193,18 @@ def api_upcoming_releases() -> Any:
                 if not where_sql
                 else where_sql + f" AND {_lib_clause}"
             )
-            total_where_sql = (
-                f" WHERE {_lib_clause}"
-                if not total_where_sql
-                else total_where_sql + f" AND {_lib_clause}"
-            )
+
+        # ⚠️ COUNT AFTER EVERY CLAUSE HAS BEEN APPLIED.
+        #
+        # ``total`` used to be snapshotted BEFORE the tight (``window``) clause
+        # was appended, so a caller passing ``window`` received rows for ±N days
+        # but a ``total`` covering the full configured window. The dashboard's
+        # footer therefore advertised "View All 137 Releases" above a table of
+        # 20, and any client paginating on ``total`` would page into rows the
+        # filter excludes. Taking the snapshot once, here, keeps the count and
+        # the returned page describing the SAME query.
+        total_where_sql = where_sql
+        count_params = dict(params)
 
         with db_session() as session:
             total = session.execute(

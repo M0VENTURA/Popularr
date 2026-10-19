@@ -294,6 +294,28 @@ def queue_processor_status() -> tuple[dict[str, Any], int]:
             + ". Click Restart Processor to start a cycle."
         )
 
+    # ── Auto-restart state ────────────────────────────────────────────────
+    # The dashboard draws its own "queue processor stopped" alert and needs to
+    # say whether anything is being done about it automatically; the Downloads /
+    # Config card shows the same thing. Imported HERE rather than at module
+    # scope because the watchdog reads THIS module for the status it acts on —
+    # a module-level import would be a cycle.
+    try:
+        from services.queue.queue_watchdog_service import auto_restart_snapshot
+
+        auto_restart = auto_restart_snapshot()
+    except Exception as exc:
+        logger.debug("Queue auto-restart snapshot unavailable: %s", exc)
+        auto_restart = {
+            "enabled": False,
+            "cooldown_seconds": None,
+            "check_interval_seconds": None,
+            "last_restart_at": None,
+            "last_restart_iso": None,
+            "last_reason": None,
+            "restart_count": 0,
+        }
+
     return _ok(
         running=running,
         processor_running=running,
@@ -306,6 +328,7 @@ def queue_processor_status() -> tuple[dict[str, Any], int]:
         queue_stats=_queue_processor_stats(),
         detail=detail,
         message=message,
+        auto_restart=auto_restart,
     )
 
 

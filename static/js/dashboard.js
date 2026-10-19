@@ -59,6 +59,133 @@ function escapeHtml(str) {
   return d.innerHTML;
 }
 
+/**
+ * Escape for a DOUBLE-QUOTED HTML ATTRIBUTE.
+ *
+ * ⚠️ `escapeHtml` above is NOT safe here: it round-trips through
+ * createTextNode/innerHTML, which escapes `&`, `<` and `>` but leaves `"` and
+ * `'` alone. The alert id it would carry is built from ARTIST NAMES, so an
+ * artist called `The "X" Band` would close the attribute and inject markup.
+ *
+ * ⚠️ Built from split/join rather than a character-class regex ON PURPOSE. The
+ * escaping set contains BOTH quote characters, so a regex literal would carry
+ * them itself — and `tests/js/_extract.js` deliberately does not understand
+ * regex literals, so it would read those quotes as string delimiters and fail
+ * to brace-match this function out of the shipped source. A probe cannot drive
+ * what it cannot extract.
+ */
+function escapeAttr(value) {
+  return String(value == null ? "" : value)
+    .split("&").join("&amp;")
+    .split("<").join("&lt;")
+    .split(">").join("&gt;")
+    .split('"').join("&quot;")
+    .split("'").join("&#39;");
+}
+
+// ===== Dismissible dashboard alerts =====
+/*
+ * The "artists skipped / abandoned" banner is rebuilt from /api/scan-progress
+ * on EVERY poll (5s), so removing the element alone brought it straight back —
+ * which is why it read as a message with no way to dismiss it. The dismissal
+ * has to be remembered somewhere that survives the re-render AND a reload.
+ *
+ * ⚠️ KEYED ON A FINGERPRINT OF THE CONTENT, not on the scan type and not as a
+ * plain boolean. Dismissing means "I have seen THIS", not "never tell me about
+ * this again" — a coarser key would swallow the NEXT abandonment, which is the
+ * one that actually needs attention.
+ *
+ * localStorage rather than sessionStorage: an artist abandoned an hour ago is
+ * just as true in a new tab, and the report was "it's still there when I come
+ * back".
+ */
+const DISMISSED_ALERTS_KEY = "popularr.dismissedDashboardAlerts";
+
+function readDismissedAlerts() {
+  try {
+    const raw = localStorage.getItem(DISMISSED_ALERTS_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_e) {
+    // Private browsing / corrupt value: treat as "nothing dismissed". The
+    // banner then reappears, which is the safe direction — never the reverse.
+    return {};
+  }
+}
+
+function writeDismissedAlerts(map) {
+  try {
+    localStorage.setItem(DISMISSED_ALERTS_KEY, JSON.stringify(map));
+  } catch (_e) {
+    /* quota / private browsing — the banner simply returns next poll */
+  }
+}
+
+/**
+ * A stable id for ONE scan's abandonment set.
+ *
+ * Sorted at both levels so the id does not depend on object key order, and
+ * built from artist NAMES and REASONS: a re-run that abandons a different
+ * artist — or the same artist for a different reason — is a different id, and
+ * therefore shows up instead of staying hidden behind an old dismissal.
+ */
+function abandonedFingerprint(scan) {
+  const entries = Object.entries((scan && scan.abandoned_artists) || {});
+  const parts = entries.map(([artistName, records]) => {
+    const recs = Array.isArray(records) ? records : [];
+    const reasons = recs
+      .map((r) => `${(r && r.reason) || "unknown"}|${r && r.abandoned ? "abandoned" : "failed"}`)
+      .sort();
+    return `${artistName}=>${reasons.join(",")}`;
+  });
+  return `${(scan && scan.scan_type) || "scan"}::${parts.sort().join(";")}`;
+}
+
+function isAlertDismissed(id) {
+  return Object.prototype.hasOwnProperty.call(readDismissedAlerts(), id);
+}
+
+/**
+ * Acknowledge an alert, and take it off the screen NOW.
+ *
+ * The elements are removed directly rather than waiting for the next poll:
+ * five seconds of a dismissed banner still sitting there reads as a button
+ * that did not work. Elements are matched by PROPERTY, not by an attribute
+ * selector — the id contains quotes, `|` and `>`, none of which are safe to
+ * splice into `querySelectorAll`.
+ */
+function dismissDashboardAlert(id) {
+  if (!id) return;
+  const map = readDismissedAlerts();
+  map[id] = Date.now();
+  writeDismissedAlerts(map);
+  document.querySelectorAll("[data-alert-id]").forEach((el) => {
+    if (el.getAttribute("data-alert-id") === id) el.remove();
+  });
+}
+
+/*
+ * ONE delegated listener for both alert actions, instead of inline onclick.
+ *
+ * Data attributes rather than `onclick="fn('…')"`: the argument is a
+ * fingerprint built from artist names, and threading that through a JS string
+ * inside an HTML attribute is exactly the quoting problem this avoids.
+ */
+document.addEventListener("click", function (event) {
+  const target = event.target;
+  if (!target || typeof target.closest !== "function") return;
+
+  if (target.closest(".js-dismiss-alert")) {
+    const alertEl = target.closest("[data-alert-id]");
+    if (alertEl) dismissDashboardAlert(alertEl.getAttribute("data-alert-id"));
+    return;
+  }
+
+  if (target.closest(".js-restart-queue-processor")) {
+    restartQueueProcessorFromDashboard();
+  }
+});
+
 // ===== Scan Card Polling =====
 (async function () {
   try {
@@ -732,10 +859,34 @@ async function confirmUpcomingCandidate(releaseId, mbidEnc, buttonEl) {
 
 async function loadUpcomingReleasesTable() {
   try {
+    // ⚠️ NO ``window`` PARAMETER — ON PURPOSE. Do not add one back.
+    //
+    // This used to send ``window: 7``, and ``upcoming_releases_routes`` applies
+    // that as a **SYMMETRIC** clause (±N days). It therefore did not mean "the
+    // next week" — it silently REPLACED the configured display window from
+    // ``get_release_window()``, narrowing it from the configured 28 back / 14
+    // forward (43 days) to 7 back / 7 forward (15 days).
+    //
+    // Two consequences, both reported:
+    //
+    //   * the dashboard listed far fewer releases than the dedicated page, which
+    //     sends no ``window`` and so gets the full configured span — two views of
+    //     ONE table disagreeing about what "upcoming" means;
+    //   * the Config page's "Show Last/Show Next (days)" governed the dedicated
+    //     page but NOT the dashboard, so a future album could not be made to
+    //     appear here by configuring anything. Albums are announced weeks to
+    //     months ahead, so a ±7-day span kept only near-term releases — which is
+    //     why this table looked like it was showing singles.
+    //
+    // ``get_release_window()``'s own docstring states the intent plainly: "Its
+    // ``loadUpcomingReleasesTable()`` sends no ``window`` parameter, so the
+    // separate 'tight' clause ... never applies — this function alone governs
+    // what the dashboard shows." The rebuilt dashboard
+    // (``test_site/static/js/pages/dashboard.js``) has always sent none; this is
+    // the live copy catching up.
     const data = await UpcomingReleasesService.fetchReleases({
       filter: dashboardTableFilter === "collection" ? "collection" : undefined,
       include_queue: true,
-      window: 7,
     });
     let releases = data.releases || [];
 
@@ -806,6 +957,48 @@ function updateScanStatusBar(active) {
   icon.innerHTML = '<i class="bi bi-activity"></i>';
 }
 
+/**
+ * The "artists skipped / abandoned" banner, or '' when there is nothing to say.
+ *
+ * The full-scan orchestrator records per-artist failures and budget abandons on
+ * the progress row (scan.abandoned_artists), so the operator can investigate
+ * instead of the scan silently moving past a hung artist.
+ *
+ * Now DISMISSIBLE — see the "Dismissible dashboard alerts" block above for why
+ * the acknowledgement is keyed on a content fingerprint rather than a flag.
+ * Returns '' for a dismissed set, which is what keeps the poll from undoing the
+ * dismissal five seconds later.
+ */
+function abandonedBanner(scan) {
+  const entries = Object.entries((scan && scan.abandoned_artists) || {});
+  if (entries.length === 0) return "";
+
+  const alertId = abandonedFingerprint(scan);
+  if (isAlertDismissed(alertId)) return "";
+
+  const rows = entries.map(([artistName, records]) => {
+    const recs = Array.isArray(records) ? records : [];
+    const reasons = recs.map(r => {
+      const reason = r && r.reason ? String(r.reason) : "unknown";
+      const tag = r && r.abandoned ? '<span class="badge bg-warning text-dark ms-1">abandoned</span>' : '<span class="badge bg-danger ms-1">failed</span>';
+      return `<div class="ms-2 small">${tag} <code>${escapeHtml(reason)}</code></div>`;
+    }).join("");
+    return `<div class="mb-1">
+      <i class="bi bi-exclamation-triangle-fill text-warning me-1"></i><strong>${escapeHtml(artistName)}</strong>
+      ${reasons}
+    </div>`;
+  }).join("");
+
+  return `<div class="alert alert-warning py-2 px-3 mb-2" style="font-size:.85rem;"
+      data-alert-id="${escapeAttr(alertId)}">
+    <button type="button" class="btn-close js-dismiss-alert float-end ms-2"
+            aria-label="Dismiss this alert" title="Dismiss"></button>
+    <div class="fw-semibold mb-1"><i class="bi bi-hourglass-split me-1"></i>Artists skipped / abandoned — investigate</div>
+    ${rows}
+    <div class="text-muted small mt-1">These artists were abandoned after the per-artist time budget or raised an error; their tracks were not fully scanned.</div>
+  </div>`;
+}
+
 function updateActiveScans() {
   fetch(`/api/scan-progress?_ts=${Date.now()}`, { cache: "no-store" })
     .then(r => r.json())
@@ -829,36 +1022,9 @@ function updateActiveScans() {
       panel.style.display = "";
       body.innerHTML = active.map(scan => {
         const pct = Math.min(scan.percent_complete ?? scan.progress ?? 0, 100);
-        // ── Abandoned / failed artists banner ────────────────────────────
-        // The full-scan orchestrator records per-artist failures and budget
-        // abandons on the progress row (scan.abandoned_artists).  Surface
-        // them so the operator can investigate instead of the scan silently
-        // moving past a hung artist.
-        let bannerHtml = "";
-        const abandoned = scan.abandoned_artists || {};
-        const abandonedEntries = Object.entries(abandoned);
-        if (abandonedEntries.length > 0) {
-          const rows = abandonedEntries.map(([artistName, records]) => {
-            const recs = Array.isArray(records) ? records : [];
-            const reasons = recs.map(r => {
-              const reason = r && r.reason ? String(r.reason) : "unknown";
-              const tag = r && r.abandoned ? '<span class="badge bg-warning text-dark ms-1">abandoned</span>' : '<span class="badge bg-danger ms-1">failed</span>';
-              return `<div class="ms-2 small">${tag} <code>${escapeHtml(reason)}</code></div>`;
-            }).join("");
-            return `<div class="mb-1">
-              <i class="bi bi-exclamation-triangle-fill text-warning me-1"></i><strong>${escapeHtml(artistName)}</strong>
-              ${reasons}
-            </div>`;
-          }).join("");
-          bannerHtml = `<div class="alert alert-warning py-2 px-3 mb-2" style="font-size:.85rem;">
-            <div class="fw-semibold mb-1"><i class="bi bi-hourglass-split me-1"></i>Artists skipped / abandoned — investigate</div>
-            ${rows}
-            <div class="text-muted small mt-1">These artists were abandoned after the per-artist time budget or raised an error; their tracks were not fully scanned.</div>
-          </div>`;
-        }
         return `
           <div class="mb-2">
-            ${bannerHtml}
+            ${abandonedBanner(scan)}
             <div class="d-flex justify-content-between align-items-center mb-1">
               <span><i class="bi bi-activity me-1"></i><strong>${escapeHtml(SCAN_TYPE_DISPLAY_NAMES[scan.scan_type] || scan.scan_type)}</strong>
               ${scan.current_stage ? `<span class="badge bg-info ms-2" style="font-size:0.7rem;">${escapeHtml(scan.current_stage)}</span>` : ''}
@@ -874,6 +1040,122 @@ function updateActiveScans() {
     }).catch(() => {});
 }
 
+// ===== Queue processor health =====
+/*
+ * The Downloads page and the Config page both draw a "Download Queue
+ * Processor" card with a Restart button. The DASHBOARD — the page the operator
+ * actually leaves open — said nothing at all, so a processor that had stopped
+ * could sit there refusing to process anything, indefinitely, with the only
+ * evidence on a page nobody was looking at.
+ *
+ * Same endpoint (`/api/queue-processor/status`), same verdict, same action as
+ * that card. Only the presentation differs:
+ *
+ *   * nothing at all while the processor is healthy — a permanent green
+ *     "running" banner on every dashboard load is noise, and
+ *   * an alert with a Restart button when it is stopped.
+ *
+ * An unreachable endpoint also draws nothing. The status endpoint is one of
+ * several the page needs; if it is down, the page is visibly broken already and
+ * a second red box about it adds nothing.
+ */
+function updateQueueProcessorAlert() {
+  const host = document.getElementById("queueProcessorAlert");
+  if (!host) return;
+  fetch(`/api/queue-processor/status?_ts=${Date.now()}`, { cache: "no-store" })
+    .then(r => r.json())
+    .then(data => renderQueueProcessorAlert(host, data))
+    .catch(() => {});
+}
+
+function renderQueueProcessorAlert(host, data) {
+  const status = String((data && data.status) || "").toLowerCase();
+  if (status !== "stopped") {
+    // Running / restarting / unknown: the dashboard stays quiet.
+    host.innerHTML = "";
+    host.classList.add("d-none");
+    return;
+  }
+
+  const auto = (data && data.auto_restart) || {};
+  const notes = [];
+  if (auto.enabled) {
+    const count = Number(auto.restart_count) || 0;
+    notes.push(
+      count > 0
+        ? `Auto-restart is on — restarted ${count} time${count === 1 ? "" : "s"} automatically.`
+        : "Auto-restart is on and will start a cycle automatically."
+    );
+    if (auto.last_restart_iso) {
+      // toLocaleString, not the raw ISO string: this is read by a human, and an
+      // ISO timestamp in local time plus a "Z" is the classic way to mislead.
+      const when = new Date(auto.last_restart_iso);
+      if (!isNaN(when.getTime())) notes.push(`Last automatic restart ${when.toLocaleString()}.`);
+    }
+  } else {
+    notes.push("Auto-restart is turned off — use Restart Processor, or enable it in Config.");
+  }
+
+  host.classList.remove("d-none");
+  host.innerHTML = `
+    <div class="alert alert-danger py-2 px-3 mb-3" style="font-size:.85rem;">
+      <div class="d-flex justify-content-between align-items-start gap-2">
+        <div class="fw-semibold">
+          <i class="bi bi-exclamation-octagon-fill me-1"></i>Download queue processor is not running
+        </div>
+        <button type="button" class="btn btn-sm btn-danger js-restart-queue-processor flex-shrink-0">
+          <i class="bi bi-arrow-clockwise me-1"></i>Restart Processor
+        </button>
+      </div>
+      <div class="small mt-1">${escapeHtml((data && data.message) || "No queue cycle has run recently.")}</div>
+      <div class="text-muted small mt-1">${notes.map(escapeHtml).join(" ")}</div>
+    </div>`;
+}
+
+/**
+ * Restart the queue processor from the dashboard alert.
+ *
+ * POSTs the same endpoint the Downloads page's button uses. The body is
+ * re-rendered IN PLACE rather than through a toast: the alert is where the
+ * operator is looking, and the endpoint distinguishes "re-armed the scheduled
+ * job" from "started a one-off cycle" in the message it returns — information a
+ * toast would throw away.
+ */
+async function restartQueueProcessorFromDashboard() {
+  const button = document.querySelector(".js-restart-queue-processor");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Restarting…";
+  }
+
+  try {
+    const response = await fetch("/api/queue-processor/restart", {
+      method: "POST",
+      headers: { "Accept": "application/json", "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data || data.success === false) {
+      throw new Error((data && data.error) || `HTTP ${response.status}`);
+    }
+    // The verdict needs a cycle to land, so re-read rather than trust the
+    // restart response: the badge must change because the queue moved.
+    updateQueueProcessorAlert();
+  } catch (error) {
+    const host = document.getElementById("queueProcessorAlert");
+    if (host && !host.classList.contains("d-none")) {
+      host.innerHTML = `
+        <div class="alert alert-danger py-2 px-3 mb-3" style="font-size:.85rem;">
+          <div class="fw-semibold"><i class="bi bi-exclamation-octagon-fill me-1"></i>Could not restart the queue processor</div>
+          <div class="small mt-1">${escapeHtml(error && error.message ? error.message : String(error))}</div>
+          <button type="button" class="btn btn-sm btn-danger js-restart-queue-processor mt-2">
+            <i class="bi bi-arrow-clockwise me-1"></i>Try Again
+          </button>
+        </div>`;
+    }
+  }
+}
+
 // ===== Initialization =====
 function updateAll() {
   pollPopularityStatus();
@@ -881,6 +1163,10 @@ function updateAll() {
   pollEssentiaStatus();
   updateActiveScans();
   updateRecentScans();
+  // The queue processor has no card on this page — this is the only thing that
+  // surfaces it, and it is polled alongside everything else so a processor
+  // that stops WHILE the dashboard is open is picked up too.
+  updateQueueProcessorAlert();
 }
 
 document.addEventListener("DOMContentLoaded", function () {

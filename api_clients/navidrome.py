@@ -279,7 +279,15 @@ def _log_subsonic_status(result: dict[str, Any], endpoint: str) -> None:
 class NavidromeClient:
     """HTTP client for Navidrome's Subsonic/OpenSubsonic API."""
 
-    def __init__(self, base_url: str, username: str, password: str, http_session: Any = None, use_token_auth: bool = True):
+    def __init__(
+        self,
+        base_url: str,
+        username: str,
+        password: str,
+        http_session: Any = None,
+        use_token_auth: bool = True,
+        is_import: bool = False,
+    ):
         self.base_url = str(base_url or "").rstrip("/")
         if self.base_url and not re.match(r"^https?://", self.base_url, re.IGNORECASE):
             self.base_url = "http://" + self.base_url
@@ -288,11 +296,44 @@ class NavidromeClient:
         self.password = password or ""
         self.session = http_session or navidrome_session
         self.use_token_auth = use_token_auth
+        #: True only for the client the Navidrome IMPORT builds for itself.
+        #:
+        #: The import defers OTHER work's incidental Subsonic traffic while it
+        #: runs (see ``services/navidrome/import_gate``), and it must not defer
+        #: its OWN — that would deadlock it against itself. Claiming the flag at
+        #: construction is what separates the two, rather than trying to infer
+        #: intent from the endpoint name alone.
+        self.is_import = bool(is_import)
         self._stats_cache: dict[str, Any] | None = None
         self._last_stats_time = 0.0
         # Session token for Navidrome's NATIVE API (playlist artwork upload,
         # ``/auth/login``).  Cached per client and dropped on a 401.
         self._native_token: str = ""
+
+    def _defer_for_import(self, endpoint: str) -> bool:
+        """True when this request should be skipped because an import is running.
+
+        Only the IMPORT sets the gate, and only incidental endpoints are
+        deferred — the import's own client is exempt (``self.is_import``) so it
+        can never wait on itself.
+        """
+        if self.is_import:
+            return False
+        try:
+            from services.navidrome.import_gate import defer_reason, should_defer
+
+            if should_defer(endpoint):
+                logger.debug(
+                    "Navidrome request deferred",
+                    endpoint=endpoint,
+                    reason=defer_reason(),
+                )
+                return True
+        except Exception:
+            # Fail OPEN: a broken gate must not disable rating sync, playlist
+            # sync or cover art. See the gate module's docstring.
+            return False
+        return False
 
     # ------------------------------------------------------------------
     # Core request helpers
@@ -339,6 +380,8 @@ class NavidromeClient:
         return True
 
     def _get_subsonic_response(self, endpoint: str, *, timeout: int = 30, retries: int = _DEFAULT_RETRIES, **params: Any) -> dict[str, Any]:
+        if self._defer_for_import(endpoint):
+            return {}
         if not self.base_url:
             raise ValueError(
                 "Navidrome base_url is empty — Navidrome is not configured. "
@@ -426,6 +469,11 @@ class NavidromeClient:
         return {}
 
     def _post_subsonic_response(self, endpoint: str, *, timeout: int = 60, **params: Any) -> dict[str, Any]:
+        if self._defer_for_import(endpoint):
+            # An empty success body, which is exactly what an update returns on
+            # success — so a deferred write is indistinguishable from a no-op
+            # and callers need no special case.
+            return {"status": "ok"}
         _body = self._build_params(**params) or {}
         url = f"{self.base_url}/rest/{endpoint}"
         try:
@@ -725,6 +773,19 @@ class NavidromeClient:
 
     def update_playlist_public(self, playlist_id: str, public: bool = True) -> bool:
         try:
+            # ⚠️ A DEFERRED CALL MUST NOT REPORT SUCCESS.
+            #
+            # ``_get_subsonic_response`` answers a request it skipped with ``{}``
+            # (see ``_defer_for_import``), and the empty-body-success rule below
+            # turns that into ``True``. Callers then believe a playlist was made
+            # public when nothing was ever sent — a silent lie, and worse than a
+            # failure because nothing retries it.
+            if self._defer_for_import("updatePlaylist"):
+                logger.debug(
+                    "Playlist visibility update deferred — Navidrome import running",
+                    playlist_id=playlist_id,
+                )
+                return False
             data = self._get_subsonic_response(
                 "updatePlaylist",
                 timeout=30,
@@ -946,6 +1007,38 @@ class NavidromeClient:
             return False
 
     def create_playlist(self, name: str, song_ids: list[str], public: bool = True) -> dict[str, Any]:
+        """Create a playlist, then apply visibility as a SECOND write.
+
+        ⚠️ ``public`` CANNOT BE ESTABLISHED BY ``createPlaylist`` ITSELF.
+
+        Navidrome's Subsonic handler reads only ``songId``, ``playlistId`` and
+        ``name``, then calls ``playlists.Create(ctx, playlistId, name, songIds)``
+        — and that Create signature has **no visibility parameter**
+        (``core/playlists/playlists.go``; see also ``server/subsonic/playlists.go``):
+
+            id, err := api.playlists.Create(ctx, playlistId, name, songIds)
+
+        So a ``public=true`` sent with the create is **silently discarded** and
+        the playlist is born PRIVATE. That is why an Essential Collection came
+        out private even though the caller asked for public, and why it only
+        ever became public when the separate ``sync_playlists_public`` pass
+        happened to flip it afterwards — so the moment that pass was skipped or
+        deferred, the playlists stopped being public.
+
+        Visibility is settable only through ``updatePlaylist``, where Navidrome
+        reads ``public`` as a NULLABLE pointer and applies it only when present:
+
+            public := p.BoolPtr("public")
+            ...
+            if public != nil { pls.Public = *public }
+
+        Hence the second write below. Navidrome's own Jellyfin adapter documents
+        the same constraint: *"Create takes no visibility, so a requested one
+        costs a second write."*
+
+        ``public`` is still SENT on the create, because other Subsonic servers
+        may honour it; Navidrome ignoring it is harmless.
+        """
         try:
             params: dict[str, Any] = {
                 "name": str(name or ""),
@@ -954,7 +1047,28 @@ class NavidromeClient:
             _ids = [str(s) for s in (song_ids or []) if str(s or "").strip()]
             if _ids:
                 params["songId"] = _ids
-            return self._post_subsonic_response("createPlaylist", timeout=120, **params)
+            data = self._post_subsonic_response("createPlaylist", timeout=120, **params)
+
+            # The second write. The create response is the only place the new
+            # playlist's id appears, and only a REAL create has one — a deferred
+            # or failed create carries no ``playlist`` object, so this correctly
+            # does nothing rather than inventing an id to write to.
+            _pid = str(((data or {}).get("playlist") or {}).get("id") or "").strip()
+            if _pid and (data or {}).get("status") == "ok":
+                if public and self.update_playlist_public(_pid, True):
+                    data["public"] = True
+                else:
+                    # Not fatal — the playlist exists and holds the right tracks,
+                    # so the create is still a success. Reporting it plainly is
+                    # what stops a private playlist passing for a public one.
+                    data["public"] = False
+                    if public:
+                        logger.warning(
+                            "Playlist created but could not be made public",
+                            name=name,
+                            playlist_id=_pid,
+                        )
+            return data
         except Exception as exc:
             logger.error("Failed to create playlist", name=name, error=str(exc))
             return {}

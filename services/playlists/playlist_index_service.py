@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from helpers.logging_config import log_unified
@@ -92,7 +93,7 @@ def _navidrome_stamp(playlist: dict[str, Any]) -> str:
 # Enumeration
 # ---------------------------------------------------------------------------
 
-def _enumerate(clients: list[Any]) -> tuple[list[dict[str, Any]], int]:
+def _enumerate(clients: list[Any]) -> tuple[list[dict[str, Any]], int, list[list[dict[str, Any]]]]:
     """Every playlist the app can see, file-backed ones first.
 
     Mirrors ``routes/playlists.py::api_playlists_all``'s merge rule: an ``.nsp``
@@ -100,7 +101,15 @@ def _enumerate(clients: list[Any]) -> tuple[list[dict[str, Any]], int]:
     choice or the artist page would list a playlist the Playlists page does not
     show (and vice versa).
 
-    Returns ``(entries, navidrome_error_count)``.
+    Returns ``(entries, navidrome_error_count, listings)``, where ``listings``
+    holds the RAW ``getPlaylists`` payload per client, in client order.
+
+    ⭐ THE LISTINGS ARE RETURNED ON PURPOSE. ``getPlaylists`` is already the most
+    expensive request in this sync — one per server, carrying every playlist's
+    metadata — and throwing the payload away forced ``_track_ids_for`` to call
+    ``client.find_playlist_by_name(...)`` for each rule-based ``.nsp``, which
+    re-fetches the WHOLE listing to answer one name lookup. Keeping the payload
+    makes those lookups free, and inside one sync the listing cannot change.
     """
     from services.playlists.playlist_service import list_nsp_playlists
 
@@ -129,6 +138,7 @@ def _enumerate(clients: list[Any]) -> tuple[list[dict[str, Any]], int]:
         })
 
     errors = 0
+    listings: list[list[dict[str, Any]]] = []
     for client in clients or []:
         try:
             remote = client.fetch_all_playlists() or []
@@ -137,8 +147,37 @@ def _enumerate(clients: list[Any]) -> tuple[list[dict[str, Any]], int]:
             # sync for the others (nor cause the prune below to delete what it
             # could not enumerate).
             errors += 1
+            listings.append([])
             _logger().warning("Playlist index: could not list Navidrome playlists: %s", exc)
             continue
+
+        listings.append([nav for nav in remote if isinstance(nav, dict)])
+
+        # ⚠️ AN EMPTY LISTING DURING AN IMPORT IS NOT AN EMPTY LIBRARY.
+        #
+        # ``fetch_all_playlists`` returns ``[]`` when the request was DEFERRED by
+        # the import gate (it does not raise), which is the same value a genuinely
+        # playlist-free server returns. Trusting it would make ``errors`` stay 0,
+        # the prune would run against a listing that contains only the file-backed
+        # playlists, and EVERY Navidrome playlist would be deleted from the index
+        # — the exact "transient outage becomes a permanently empty artist page"
+        # failure the prune guard exists to prevent.
+        #
+        # Counting it as an error makes the prune refuse, which is the safe
+        # direction: one cycle indexes nothing, nothing is lost.
+        if not remote:
+            try:
+                from services.navidrome.import_gate import is_import_running
+
+                if is_import_running():
+                    errors += 1
+                    _logger().info(
+                        "Playlist index: listing deferred by a running Navidrome import "
+                        "— nothing indexed and pruning refused this pass"
+                    )
+                    continue
+            except Exception:
+                pass
 
         for nav in remote:
             if not isinstance(nav, dict):
@@ -165,12 +204,78 @@ def _enumerate(clients: list[Any]) -> tuple[list[dict[str, Any]], int]:
                 "rule_based": bool(nav.get("criteria")),
             })
 
-    return entries, errors
+    return entries, errors, listings
 
 
 # ---------------------------------------------------------------------------
 # Track resolution
 # ---------------------------------------------------------------------------
+
+def _find_in_listings(
+    name: str,
+    listings: list[list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """Find a playlist by name in the listings ALREADY fetched this sync.
+
+    Replaces ``client.find_playlist_by_name(name)``, which calls
+    ``fetch_all_playlists()`` — re-downloading every playlist's metadata to
+    answer one question, once per rule-based ``.nsp``. Same matching rule the
+    client uses (case-insensitive, trimmed).
+
+    A caller that needs to tell "not found" from "could not list" gets that
+    from the ``errors`` count the sync already tracks, so this stays a pure
+    lookup.
+    """
+    wanted = str(name or "").strip().lower()
+    if not wanted:
+        return None
+    for listing in listings or []:
+        for candidate in listing or []:
+            if str(candidate.get("name") or "").strip().lower() == wanted:
+                return candidate
+    return None
+
+
+def _navidrome_ids_from_detail(detail: dict[str, Any]) -> list[str] | None:
+    """Track ids from a ``getPlaylist`` payload, or ``None`` when UNREADABLE.
+
+    ⚠️ ``NavidromeClient.fetch_playlist`` swallows every failure and returns
+    ``{}``, so "the server did not answer" and "the playlist is empty" arrive as
+    THE SAME VALUE. Telling them apart is the whole point of this helper: an
+    empty playlist has a ``tracks`` key (possibly ``[]``) or reports
+    ``songCount == 0``, while a failed fetch has neither.
+
+    Returning ``None`` for the failed case is what stops a transient error being
+    persisted as "this playlist has no tracks".
+    """
+    if not isinstance(detail, dict) or not detail:
+        return None
+
+    entries = detail.get("tracks")
+    if entries is None:
+        entries = detail.get("entry")
+    if entries is None:
+        # A playlist with songCount 0 legitimately carries no entries list.
+        song_count = detail.get("songCount")
+        try:
+            if song_count is not None and int(song_count) == 0:
+                return []
+        except (TypeError, ValueError):
+            pass
+        return None
+
+    if isinstance(entries, dict):
+        entries = [entries]
+    if not isinstance(entries, (list, tuple)):
+        return None
+
+    ids: list[str] = []
+    for track in entries:
+        if isinstance(track, dict):
+            song_id = str(track.get("id") or "").strip()
+            if song_id:
+                ids.append(song_id)
+    return ids
 
 def _ids_from_paths(paths: list[str]) -> list[str]:
     """Map .m3u file paths onto library track ids.
@@ -205,7 +310,13 @@ def _ids_from_paths(paths: list[str]) -> list[str]:
         return []
 
 
-def _track_ids_for(entry: dict[str, Any], clients: list[Any]) -> tuple[list[str], int]:
+def _track_ids_for(
+    entry: dict[str, Any],
+    clients: list[Any],
+    *,
+    listings: list[list[dict[str, Any]]] | None = None,
+    detail: dict[str, Any] | None = None,
+) -> tuple[list[str] | None, int]:
     """Resolve one playlist's entries to track ids.
 
     Returns ``(ids, unresolved)``. ``unresolved`` counts entries that were in the
@@ -215,25 +326,35 @@ def _track_ids_for(entry: dict[str, Any], clients: list[Any]) -> tuple[list[str]
     query.
     """
     if entry.get("source") == _SOURCE_NAVIDROME:
+        if detail is not None:
+            prefetched = _navidrome_ids_from_detail(detail)
+            if prefetched is not None:
+                return prefetched, max(0, int(entry.get("song_count") or 0) - len(prefetched))
+            # Unusable prefetched payload: fall through to a live fetch rather
+            # than indexing the playlist as empty.
+
         for client in clients or []:
             try:
-                detail = client.fetch_playlist(entry["playlist_id"]) or {}
+                live = client.fetch_playlist(entry["playlist_id"]) or {}
             except Exception as exc:
                 _logger().warning(
                     "Playlist index: could not load playlist %s: %s",
                     entry.get("playlist_id"), exc,
                 )
                 continue
-            ids: list[str] = []
-            for track in detail.get("tracks") or []:
-                if isinstance(track, dict):
-                    song_id = str(track.get("id") or "").strip()
-                    if song_id:
-                        ids.append(song_id)
+            ids = _navidrome_ids_from_detail(live)
+            if ids is None:
+                _logger().debug(
+                    "Playlist index: unreadable payload for %s — not treating it as empty",
+                    entry.get("playlist_id"),
+                )
+                continue
             return ids, max(0, int(entry.get("song_count") or 0) - len(ids))
-        return [], int(entry.get("song_count") or 0)
 
-    # ── File-backed ────────────────────────────────────────────────────────
+        # No client could read it definitively. "Unknown", never "empty".
+        return None, 0
+
+    # ── File-backed ─────────────────────────────────────────────────────
     file_path = str(entry.get("file_path") or "")
     if entry.get("kind") == "m3u":
         from services.playlists.playlist_service import read_m3u_file
@@ -253,24 +374,26 @@ def _track_ids_for(entry: dict[str, Any], clients: list[Any]) -> tuple[list[str]
         # Rule-based or trackIds-only .nsp: the file has no embedded list, so
         # the entries only exist behind Navidrome (the same fallback
         # `_fetch_playlist_tracks` uses for this exact case).
-        for client in clients or []:
-            try:
-                found = client.find_playlist_by_name(str(entry.get("name") or ""))
-                if not found:
-                    continue
-                detail = client.fetch_playlist(found.get("id")) or {}
-                for track in detail.get("tracks") or []:
-                    if isinstance(track, dict):
-                        song_id = str(track.get("id") or "").strip()
-                        if song_id:
-                            ids.append(song_id)
-                if ids:
-                    break
-            except Exception as exc:
-                _logger().debug(
-                    "Playlist index: rule-based lookup failed for %s: %s",
-                    entry.get("name"), exc,
-                )
+        #
+        # ⭐ The NAME is resolved from the listing this sync already fetched, so
+        # this costs no extra ``getPlaylists`` request.
+        found = _find_in_listings(str(entry.get("name") or ""), list(listings or []))
+        found_id = str((found or {}).get("id") or "")
+        if found_id:
+            live = detail or {}
+            if not live:
+                for client in clients or []:
+                    try:
+                        live = client.fetch_playlist(found_id) or {}
+                    except Exception as exc:
+                        _logger().debug(
+                            "Playlist index: rule-based lookup failed for %s: %s",
+                            entry.get("name"), exc,
+                        )
+                        continue
+                    if live:
+                        break
+            ids.extend(_navidrome_ids_from_detail(live) or [])
 
     # `read_nsp_playlist` synthesises `<file>#<n>` for an entry with no id.
     # Those can never join to a track, so they are counted as unresolved rather
@@ -283,17 +406,159 @@ def _track_ids_for(entry: dict[str, Any], clients: list[Any]) -> tuple[list[str]
 # The sync
 # ---------------------------------------------------------------------------
 
+#: Default number of concurrent ``getPlaylist`` fetches.
+#:
+#: Each one is a read of one independent playlist, and the cost is dominated by
+#: Navidrome building/serialising the entry list (~5s for ~1,200 tracks in the
+#: reported run), so the win is close to linear. Four is deliberately
+#: conservative: it is the same order as the tag-write pool, it keeps a small
+#: Navidrome (a NAS, typically) from being asked for more than a handful of
+#: simultaneous large queries, and it turns 66 sequential reads from ~5½ minutes
+#: into well under one.
+#:
+#: Overridable with ``PLAYLIST_INDEX_FETCH_WORKERS`` for a server that can take
+#: more (or needs fewer), and clamped so a typo cannot spawn a thread per
+#: playlist.
+_DEFAULT_FETCH_WORKERS = 4
+_MAX_FETCH_WORKERS = 16
+
+
+def _fetch_worker_count() -> int:
+    """Concurrent ``getPlaylist`` fetches to use, from env with a safe clamp."""
+    raw = str(os.environ.get("PLAYLIST_INDEX_FETCH_WORKERS") or "").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_FETCH_WORKERS
+    if value < 1:
+        return 1
+    return min(value, _MAX_FETCH_WORKERS)
+
+
+def _prefetch_navidrome_details(
+    entries: list[dict[str, Any]],
+    clients: list[Any],
+) -> dict[str, dict[str, Any]]:
+    """Fetch ``getPlaylist`` for every changed Navidrome entry, bounded.
+
+    Returns ``{playlist_id: detail}``. A playlist that could not be fetched is
+    simply ABSENT — ``_track_ids_for`` then does its own (sequential, retrying)
+    live fetch, so a partial result can only ever cost time, never correctness.
+
+    ⚠️ ONLY Navidrome entries are prefetched. File-backed ones read a local file
+    and (for ``.m3u``) issue a small SQL query; those are cheap and, more to the
+    point, the query would touch the shared DB connection from a worker thread.
+    Keeping every DB access on the calling thread is what makes this safe to run
+    against the in-memory test engine, which hands the whole suite ONE
+    connection.
+
+    Results are guarded by an id check: a client that answers for the WRONG
+    playlist is ignored rather than stored under the right one.
+    """
+    targets = [
+        str(entry.get("playlist_id") or "")
+        for entry in entries
+        if entry.get("source") == _SOURCE_NAVIDROME
+        and str(entry.get("playlist_id") or "").strip()
+    ]
+    if not targets or not clients:
+        return {}
+
+    workers = min(_fetch_worker_count(), len(targets))
+    if workers <= 1:
+        result: dict[str, dict[str, Any]] = {}
+        for playlist_id in targets:
+            detail = _fetch_one_playlist(playlist_id, clients)
+            if detail:
+                result[playlist_id] = detail
+        return result
+
+    result = {}
+    try:
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="playlist-index",
+        ) as pool:
+            futures = {
+                pool.submit(_fetch_one_playlist, playlist_id, clients): playlist_id
+                for playlist_id in targets
+            }
+            for future in as_completed(futures):
+                playlist_id = futures[future]
+                try:
+                    detail = future.result()
+                except Exception as exc:
+                    _logger().debug(
+                        "Playlist index: prefetch failed for %s: %s", playlist_id, exc
+                    )
+                    continue
+                if detail:
+                    result[playlist_id] = detail
+    except Exception as exc:
+        # A pool that cannot be built must not cost the sync its work: fall back
+        # to the sequential path the loop already handles.
+        _logger().warning("Playlist index: prefetch pool unavailable: %s", exc)
+        return {}
+    return result
+
+
+def _fetch_one_playlist(playlist_id: str, clients: list[Any]) -> dict[str, Any]:
+    """One playlist's detail from the first client that answers with an id match.
+
+    ``fetch_playlist`` returns ``{}`` on failure (it swallows the exception), so
+    an empty payload is treated as "this client could not answer" and the next
+    one is tried. An empty-but-valid playlist comes back with a ``tracks`` key or
+    ``songCount == 0`` and is therefore still a real answer.
+    """
+    for client in clients or []:
+        try:
+            detail = client.fetch_playlist(playlist_id) or {}
+        except Exception as exc:
+            _logger().debug(
+                "Playlist index: fetch failed for %s: %s", playlist_id, exc
+            )
+            continue
+        if not detail:
+            continue
+        reported_id = str(detail.get("id") or "").strip()
+        if reported_id and reported_id != playlist_id:
+            # A client answered for a DIFFERENT playlist; never store it under
+            # this id.
+            _logger().debug(
+                "Playlist index: ignoring mismatched playlist payload",
+                requested=playlist_id,
+                received=reported_id,
+            )
+            continue
+        return detail
+    return {}
+
 def sync_playlist_index(clients: list[Any] | None = None) -> dict[str, int]:
     """Bring the playlist index up to date. Safe to call repeatedly.
 
     Skips every playlist whose stamp has not moved, so a steady state makes one
     ``fetch_all_playlists`` call per server and no writes.
 
+    TWO PHASES, and the split is deliberate:
+
+    1. every CHANGED playlist's contents are fetched in a bounded thread pool
+       (the expensive part — see ``_prefetch_navidrome_details``), then
+    2. the resolved rows are written one playlist at a time.
+
+    Reads are parallel because they are independent and read-only; writes are
+    sequential because one ``db_session`` per call, a single shared in-memory
+    connection under test, and one transaction per playlist all favour a single
+    writer.
+
     ⚠️ NULL IS NOT A DECISION. The prune at the end only runs when EVERY
     configured server was enumerable. A Navidrome that is down or misconfigured
     returns no playlists, and pruning on that would wipe the index — turning a
     transient outage into a permanently empty artist-page section. An
     unenumerable source is a SKIP, never an empty result.
+
+    The same rule applies one level down: a playlist whose contents could not be
+    READ is skipped entirely rather than stored as empty, because an empty write
+    deletes its rows.
     """
     stats = {
         "playlists": 0,
@@ -307,7 +572,7 @@ def sync_playlist_index(clients: list[Any] | None = None) -> dict[str, int]:
     clients = list(clients or [])
 
     try:
-        entries, errors = _enumerate(clients)
+        entries, errors, listings = _enumerate(clients)
     except Exception as exc:
         _logger().warning("Playlist index: enumeration failed: %s", exc)
         stats["errors"] = 1
@@ -323,6 +588,7 @@ def sync_playlist_index(clients: list[Any] | None = None) -> dict[str, int]:
         stored = {}
 
     seen_ids: list[str] = []
+    changed_entries: list[dict[str, Any]] = []
     for entry in entries:
         playlist_id = str(entry.get("playlist_id") or "")
         if not playlist_id:
@@ -332,8 +598,44 @@ def sync_playlist_index(clients: list[Any] | None = None) -> dict[str, int]:
         if stored.get(playlist_id) == str(entry.get("changed") or ""):
             stats["skipped"] += 1
             continue
+        changed_entries.append(entry)
 
-        track_ids, unresolved = _track_ids_for(entry, clients)
+    # ── Phase 1: fetch the changed playlists' contents, BOUNDED-CONCURRENT ──
+    #
+    # ⭐ WHY CONCURRENCY HERE AND ONLY HERE. Reading one playlist is dominated by
+    # the ``getPlaylist`` round trip: Navidrome has to build and serialise the
+    # whole entry list, which measured at ~5 s for a ~1,200-track playlist. The
+    # reported run had 66 changed playlists at ~1,200 entries each and spent
+    # 5 m 36 s — i.e. every second of it was these calls, one after another.
+    #
+    # They are independent and read-only, so a bounded pool is safe. The DB
+    # writes stay SEQUENTIAL in phase 2: ``db_session`` hands out a connection
+    # per call and the in-memory test engine is a single shared connection, so
+    # concurrent writers would serialise anyway (and on SQLite would contend).
+    # One writer, many readers.
+    prefetched = _prefetch_navidrome_details(changed_entries, clients)
+
+    # ── Phase 2: resolve remaining, then write — sequentially ──────────────
+    for entry in changed_entries:
+        playlist_id = str(entry.get("playlist_id") or "")
+        track_ids, unresolved = _track_ids_for(
+            entry,
+            clients,
+            listings=listings,
+            detail=prefetched.get(playlist_id),
+        )
+        if track_ids is None:
+            # UNREADABLE, not empty. Writing now would delete every indexed row
+            # for this playlist and drop it from the artist page until a later
+            # sync happens to succeed.
+            stats["errors"] += 1
+            _logger().warning(
+                "Playlist index: keeping previous entries for %s — its contents "
+                "could not be read this pass",
+                entry.get("name"),
+            )
+            continue
+
         stats["unresolved"] += unresolved
         try:
             written = _repo.replace_playlist(

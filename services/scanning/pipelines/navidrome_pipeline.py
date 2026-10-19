@@ -127,6 +127,13 @@ def run_navidrome_import_scan(
                 base_url=nav_config.get("base_url"),
                 username=nav_config.get("user"),
                 password=nav_config.get("pass"),
+                # ⚠️ THIS client is exempt from the import gate. The import
+                # defers other work's incidental Subsonic traffic while it runs
+                # (see services/navidrome/import_gate), so the import's own
+                # client must be marked or it would defer ITSELF — every
+                # getArtists/getAlbum returning {} and the import silently
+                # discovering nothing.
+                is_import=True,
             )
 
         # ── Remote Navidrome sync BEFORE the import ───────────────────────

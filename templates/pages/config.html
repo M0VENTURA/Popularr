@@ -984,6 +984,70 @@
     </div>
   </div>
 
+  <!-- Queue Processor Auto-Restart Section -->
+  <div class="card shadow-sm mb-3" id="queue-auto-restart">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-heart-pulse"></i> Queue Processor Auto-Restart</h5>
+      <small class="text-muted">Bring the download queue processor back automatically when it stops</small>
+    </div>
+    <div class="card-body">
+      <p class="text-muted small">
+        The queue processor is the background worker that searches and downloads queued tracks. When it stops,
+        new items are accepted and nothing is processed — the Downloads page and the dashboard both show it as
+        <strong>Stopped</strong>. With this on, the app notices and starts a cycle for you, and the dashboard says
+        when it last happened.
+      </p>
+      <div class="row g-3">
+        <div class="col-12 col-md-6 col-lg-4">
+          <label class="form-label form-label-sm" for="queue_auto_restart_cooldown_seconds">Cooldown Between Auto-Restarts (seconds)</label>
+          <input type="number" min="30" max="86400" class="form-control form-control-sm" id="queue_auto_restart_cooldown_seconds" placeholder="300" value="{{ config.get('queue', {}).get('auto_restart', {}).get('cooldown_seconds', 300) }}">
+          <small class="form-text text-muted">Minimum gap between <strong>automatic</strong> restarts, so a problem that makes every cycle fail cannot turn into a restart loop. The manual <strong>Restart Processor</strong> button is never blocked. Minimum: <strong>30</strong>. Default: <strong>300</strong></small>
+        </div>
+        <div class="col-12">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="queue_auto_restart_enabled" {% if config.get('queue', {}).get('auto_restart', {}).get('enabled', True) %}checked{% endif %}>
+            <label class="form-check-label" for="queue_auto_restart_enabled"><strong>Restart the Processor Automatically When It Stops</strong></label>
+            <small class="d-block text-muted">On by default. Turn this off if you would rather restart the processor yourself — the Restart button on the Downloads page keeps working either way.</small>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scheduled Scans Section -->
+  <div class="card shadow-sm mb-3" id="scheduled-scans">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-clock-history"></i> Scheduled Scans</h5>
+      <small class="text-muted">Background jobs the scheduler runs on its own — separate from every scan button</small>
+    </div>
+    <div class="card-body">
+      {% set sch_jobs = ((config.get('scheduler', {}) or {}).get('jobs', {}) or {}) %}
+      <div class="row g-3">
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="scheduler_library_sync_interval_minutes">Library Sync Interval (minutes)</label>
+          <input type="number" step="1" min="0" max="10080" class="form-control form-control-sm" id="scheduler_library_sync_interval_minutes" value="{{ (sch_jobs.get('library_sync', {}) or {}).get('interval_minutes', 360) }}">
+          <small class="form-text text-muted">Re-imports new and changed Navidrome rows so the library stays in step. <strong>0 = never</strong> (equivalent to unticking <strong>Auto Import</strong> on the Watcher Service card). Default: <strong>360</strong> (6&nbsp;h)</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="scheduler_popularity_scan_interval_minutes">Popularity Scan Interval (minutes)</label>
+          <input type="number" step="1" min="0" max="10080" class="form-control form-control-sm" id="scheduler_popularity_scan_interval_minutes" value="{{ (sch_jobs.get('popularity_scan', {}) or {}).get('interval_minutes', 1440) }}">
+          <small class="form-text text-muted">Runs the <strong>Popularity</strong> mode only — never Finalise, Metadata, Singles or Essentia. <strong>0 = never</strong> (equivalent to unticking <strong>Auto Popularity Scan</strong>). Default: <strong>1440</strong> (24&nbsp;h)</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="scheduler_navidrome_import_interval_minutes">Navidrome Import Interval (minutes)</label>
+          <input type="number" step="1" min="0" max="10080" class="form-control form-control-sm" id="scheduler_navidrome_import_interval_minutes" value="{{ (sch_jobs.get('navidrome_import', {}) or {}).get('interval_minutes', 240) }}">
+          <small class="form-text text-muted">Runs the same <strong>Import</strong> as the dashboard button, so <code>tracks</code> follows your library on its own. <strong>0 = never.</strong> Default: <strong>240</strong> (4&nbsp;h). Other scans keep running; their incidental Navidrome traffic is paused while the import runs.</small>
+        </div>
+      </div>
+      <div class="alert alert-secondary mb-0 mt-3 py-2">
+        <small class="text-muted">
+          These live under <code>scheduler.jobs</code> and are applied the moment you save — the scheduler is re-read
+          on every save, so a new interval takes effect without a restart.
+        </small>
+      </div>
+    </div>
+  </div>
+
   <!-- Download Maintenance Schedulers Section -->
   <div class="card shadow-sm mb-3" id="retry-cleanup-schedulers">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">

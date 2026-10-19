@@ -84,7 +84,11 @@ def _run_library_sync_worker() -> None:
         try:
             from services.playlists.playlist_service import sync_playlists_public
             pl = sync_playlists_public()
-            if pl.get("enabled"):
+            if pl.get("deferred"):
+                logger.info(
+                    "Playlist visibility sync deferred (Navidrome import running)",
+                )
+            elif pl.get("enabled"):
                 logger.info(
                     "Playlist visibility sync complete",
                     checked=pl.get("checked", 0),
@@ -138,7 +142,17 @@ def perform_library_sync() -> dict[str, Any]:
     if not cfg:
         return {"success": False, "skipped": True, "reason": "missing_config"}
 
-    client = NavidromeClient(base_url=cfg["base_url"], username=cfg["user"], password=cfg["pass"])
+    client = NavidromeClient(
+        base_url=cfg["base_url"],
+        username=cfg["user"],
+        password=cfg["pass"],
+        # ⚠️ This IS an import path too, so it must be exempt from the import
+        # gate (see services/navidrome/import_gate). An unmarked client here
+        # would defer its own getArtists/getAlbum calls whenever the manual
+        # import happened to be running, and the scheduled sync would silently
+        # discover no artists.
+        is_import=True,
+    )
     scan_status = client.get_scan_status()
     if not scan_status.get("success"):
         return {"success": False, "skipped": True, "reason": "scan_status_failed"}
