@@ -2382,8 +2382,9 @@ def lookup_musicbrainz_album(Artist: str, Album: str, Existing_mbid: str = "") -
     )
 
     _clean_album = _strip_search_keywords(Album) or Album
+    # Target releasegroup instead of release to map against overarching Release Groups
     Query = (
-        f'release:"{Escape_lucene_special_chars(_clean_album)}" '
+        f'releasegroup:"{Escape_lucene_special_chars(_clean_album)}" '
         f'AND artist:"{Escape_lucene_special_chars(Artist)}"'
     )
     try:
