@@ -10,9 +10,7 @@ https://github.com/slskd/slskd/blob/master/src/slskd/Transfers/API/Controllers/T
 
 IMPORTANT: the real slskd Transfers API requires BOTH `username` and the
 transfer `id` (a server-assigned GUID, not the filename) to address a
-specific download. Several methods below therefore now require a
-`username` argument that earlier versions of this client omitted - those
-earlier calls would have 404'd against a real slskd instance.
+specific download.
 """
 
 from __future__ import annotations
@@ -29,7 +27,7 @@ logger = structlog.get_logger(__name__)
 
 
 class SlskdHttpClient:
-    """Raw slskd API wrapper."""
+    """Raw slskd API wrapper with extended search and transfer management."""
 
     def __init__(
         self,
@@ -76,21 +74,7 @@ class SlskdHttpClient:
     # Search management
     # ------------------------------------------------------------------
     def start_search(self, query: str, timeout: int = 20) -> str | None:
-        """Start a new Soulseek search. Returns the search ID.
-
-        The search id is generated client-side (matching the official
-        slskd-python-api's behavior) rather than only relying on the
-        server's response - the server accepts a client-supplied `id` and
-        will generate its own only if one isn't provided. Generating it
-        ourselves means we know the id immediately, even if the response
-        body is ever malformed or unexpectedly empty.
-
-        Note: slskd enforces a global (not per-client) limit of one
-        concurrent "start search" request at a time and returns 429 if
-        another is already in flight; a single retry is attempted for
-        that specific case since it is expected/transient in a scanning
-        workflow that issues many searches back-to-back.
-        """
+        """Start a new Soulseek search. Returns the search ID."""
         search_id = str(uuid.uuid4())
         body = {"id": search_id, "searchText": query}
 
@@ -130,30 +114,24 @@ class SlskdHttpClient:
             logger.debug("Failed to get search state", search_id=search_id, error=str(exc))
             return {}
 
-    def get_search_results(self, search_id: str, timeout: int = 10) -> list[dict[str, Any]]:
-        """Get results (responses) for a completed search.
+    def get_search_responses(self, search_id: str, timeout: int = 10) -> list[dict[str, Any]]:
+        """Get responses (peer results) for a running or completed search.
 
-        Uses GET /searches/{id}/responses - the actual documented/
-        implemented endpoint. An earlier version of this method called
-        `/searches/{id}/results`, which does not exist in slskd and would
-        404 on every call.
+        GET /searches/{id}/responses. Essential for polling results incrementally
+        and breaking out of search loops early once a qualifying track is found.
         """
         try:
             return self.get_json(f"searches/{search_id}/responses", timeout=timeout, default=[])
         except Exception as exc:
-            logger.debug("Failed to get search results", search_id=search_id, error=str(exc))
+            logger.debug("Failed to get search responses", search_id=search_id, error=str(exc))
             return []
 
-    def stop_search(self, search_id: str) -> bool:
-        """Stop a running search.
+    def get_search_results(self, search_id: str, timeout: int = 10) -> list[dict[str, Any]]:
+        """Get results (responses) for a completed search."""
+        return self.get_search_responses(search_id, timeout=timeout)
 
-        Uses PUT /searches/{id} with no body - this is the real slskd
-        route (confirmed against SearchesController.cs's `Cancel` action).
-        Returns 200 if the search was stopped, or 304 if it was already
-        not in progress; both are treated as "not an error" here. An
-        earlier version of this method POSTed to a `/stop` sub-route that
-        does not exist in slskd and would 404.
-        """
+    def stop_search(self, search_id: str) -> bool:
+        """Stop a running search (PUT /searches/{id})."""
         try:
             resp = self.put(f"searches/{search_id}")
             return resp.status_code in (200, 204, 304)
@@ -162,12 +140,7 @@ class SlskdHttpClient:
             return False
 
     def delete_search(self, search_id: str) -> bool:
-        """Delete a search and its results.
-
-        A 404 counts as success — the search is already gone, which is the
-        state the caller wanted.  (slskd serialises API operations, so a
-        concurrent delete from another worker can legitimately win the race.)
-        """
+        """Delete a search and its results."""
         try:
             resp = self.delete(f"searches/{search_id}")
             return resp.status_code in (200, 204, 404)
@@ -177,10 +150,6 @@ class SlskdHttpClient:
 
     # ------------------------------------------------------------------
     # Transfer management
-    #
-    # NOTE: every non-bulk endpoint below is scoped by BOTH `username` and
-    # the transfer `id` (a server-assigned GUID) - this is a hard
-    # requirement of slskd's real Transfers API, not an optional filter.
     # ------------------------------------------------------------------
     def enqueue_downloads(
         self,
@@ -189,28 +158,7 @@ class SlskdHttpClient:
         timeout: int = 15,
         raise_on_error: bool = False,
     ) -> list[str]:
-        """Queue one or more files for download from a user.
-
-        POSTs to /transfers/downloads/{username} (username in the URL,
-        confirmed against slskd's TransfersController) with a JSON body
-        that is a LIST of {"filename": ..., "size": ...} objects, matching
-        both the controller's `QueueDownloadRequest` shape and the
-        official slskd-python-api's `enqueue(username, files)`.
-
-        `size` is required - the Soulseek protocol needs the expected file
-        size to request the file from the remote peer. Pass the exact
-        `size`/`filename` values from the corresponding search result.
-
-        Returns a list of transfer ids (as returned by newer slskd
-        versions), or an empty list on older versions that return no body,
-        or on failure.
-
-        ⚠️ Because an empty list means BOTH "accepted, older slskd returned
-        no body" and "the request failed", callers that must not treat a
-        silent failure as success should pass ``raise_on_error=True`` and
-        handle the exception. The default stays ``False`` so existing
-        best-effort callers are unaffected.
-        """
+        """Queue one or more files for download from a user."""
         if not username or not files:
             return []
         try:
@@ -227,25 +175,13 @@ class SlskdHttpClient:
             return []
 
     def enqueue_download(self, username: str, filename: str, size: int = 0, timeout: int = 15) -> list[str]:
-        """Convenience wrapper for enqueue_downloads() for a single file.
-
-        `size` should always be supplied from the originating search
-        result; omitting it (leaving the default of 0) may cause slskd/the
-        remote peer to reject the request.
-        """
+        """Convenience wrapper for enqueue_downloads() for a single file."""
         if not size:
-            logger.warning("enqueue_download called without a file size; slskd requires size to request the file from the peer", username=username, filename=filename)
+            logger.warning("enqueue_download called without a file size", username=username, filename=filename)
         return self.enqueue_downloads(username, [{"filename": filename, "size": size}], timeout=timeout)
 
     def get_all_downloads(self, include_removed: bool = False, timeout: int = 10) -> list[dict[str, Any]]:
-        """Get all downloads, grouped by user and directory.
-
-        Each element is a `Transfer` object: {"username": ..., "directories":
-        [{"directory": ..., "files": [...]}]} - NOT a flat list of
-        individual downloads. Callers must traverse directories/files to
-        get individual transfer records (each of which carries its own
-        `id`, needed for get_download/cancel_download/get_queue_position).
-        """
+        """Get all downloads, grouped by user and directory."""
         try:
             return self.get_json(
                 "transfers/downloads",
@@ -257,17 +193,12 @@ class SlskdHttpClient:
             logger.debug("Failed to get all downloads", error=str(exc))
             return []
 
-    # Backwards-compatible alias; the name "active" was misleading since
-    # this endpoint returns all downloads (including completed/failed
-    # ones), not only active/in-progress transfers.
     def get_active_downloads(self, timeout: int = 10) -> list[dict[str, Any]]:
-        """Deprecated alias for get_all_downloads(). See that method's
-        docstring - the underlying endpoint returns ALL downloads, not
-        only active/in-progress ones."""
+        """Alias for get_all_downloads()."""
         return self.get_all_downloads(timeout=timeout)
 
     def get_downloads_for_user(self, username: str, timeout: int = 10) -> dict[str, Any]:
-        """Get all downloads for a specific user (GET /transfers/downloads/{username})."""
+        """Get all downloads for a specific user."""
         if not username:
             return {}
         try:
@@ -277,16 +208,7 @@ class SlskdHttpClient:
             return {}
 
     def retry_download(self, username: str, transfer_id: str, timeout: int = 10) -> bool:
-        """Retry a failed download.
-
-        CAUTION: unlike the other methods in this class, a manual "retry"
-        REST endpoint could not be confirmed against slskd's current
-        controller source. Since slskd 0.26.0, failed-download retries are
-        primarily handled automatically server-side via the
-        `transfers.download.retry.*` config options. If this call
-        consistently 404s against your slskd instance, prefer configuring
-        automatic retries in slskd.yml instead of relying on this method.
-        """
+        """Retry a failed download."""
         try:
             resp = self.post_json(
                 f"transfers/downloads/{username}/{transfer_id}/retry",
@@ -299,13 +221,7 @@ class SlskdHttpClient:
             return False
 
     def get_download(self, username: str, transfer_id: str, timeout: int = 10) -> dict[str, Any]:
-        """Get details for a specific download.
-
-        Requires both `username` and the transfer `id` - slskd's route is
-        GET /transfers/downloads/{username}/{id}. A username-less version
-        of this method previously existed and could never have succeeded
-        against a real slskd instance.
-        """
+        """Get details for a specific download."""
         if not username or not transfer_id:
             return {}
         try:
@@ -315,14 +231,7 @@ class SlskdHttpClient:
             return {}
 
     def cancel_download(self, username: str, transfer_id: str, remove: bool = False, timeout: int = 10) -> bool:
-        """Cancel (and optionally remove) a specific download.
-
-        DELETE /transfers/downloads/{username}/{id}[?remove=true]. Both
-        `username` and the transfer `id` (GUID, not filename) are required
-        by slskd. A previous "legacy" filename-based path variant
-        (`/transfers/downloads/{username}/{filename}`) does not correspond
-        to any real slskd route and would have failed.
-        """
+        """Cancel (and optionally remove) a specific download."""
         if not username or not transfer_id:
             logger.debug("cancel_download requires both username and transfer_id", username=username, transfer_id=transfer_id)
             return False
@@ -346,14 +255,7 @@ class SlskdHttpClient:
             return []
 
     def remove_completed_downloads(self, timeout: int = 10) -> bool:
-        """Remove all completed downloads from the queue.
-
-        Route confirmed as DELETE /transfers/downloads/all/completed against
-        a working production caller (services.downloads.slskd_service). An
-        earlier version of this method guessed "transfers/downloads/completed"
-        (missing the "all/" segment) and was flagged as unverified; that
-        guess was incorrect and has been corrected here.
-        """
+        """Remove all completed downloads from the queue."""
         try:
             resp = self.delete("transfers/downloads/all/completed", timeout=timeout)
             return resp.status_code in (200, 204)
@@ -362,12 +264,7 @@ class SlskdHttpClient:
             return False
 
     def get_queue_position(self, username: str, transfer_id: str, timeout: int = 10) -> int | None:
-        """Get the queue position for a queued download.
-
-        GET /transfers/downloads/{username}/{id}/position. Requires both
-        `username` and the transfer `id` - a username-less version of this
-        method previously existed and could never have succeeded.
-        """
+        """Get the queue position for a queued download."""
         if not username or not transfer_id:
             return None
         try:
@@ -377,8 +274,26 @@ class SlskdHttpClient:
             logger.debug("Failed to get queue position", username=username, transfer_id=transfer_id, error=str(exc))
             return None
 
+    def cancel_all_stalled_downloads(self, timeout: int = 10) -> int:
+        """Cancel downloads that are stuck or errored out across all users."""
+        cancelled_count = 0
+        downloads = self.get_all_downloads(include_removed=False, timeout=timeout)
+        
+        for user_transfer in downloads:
+            username = user_transfer.get("username")
+            for directory in user_transfer.get("directories", []):
+                for file_rec in directory.get("files", []):
+                    status = file_rec.get("status", "").lower()
+                    transfer_id = file_rec.get("id")
+                    
+                    if status in ("cancelled", "errored", "rejected", "timeout") and transfer_id and username:
+                        if self.cancel_download(username, transfer_id, remove=True):
+                            cancelled_count += 1
+                            
+        return cancelled_count
+
     # ------------------------------------------------------------------
-    # User operations (browse, info, status)
+    # User operations
     # ------------------------------------------------------------------
     def browse_user(self, username: str) -> dict[str, Any]:
         """Browse a user's shared files."""
@@ -389,7 +304,7 @@ class SlskdHttpClient:
             return {}
 
     def get_user_info(self, username: str) -> dict[str, Any]:
-        """Get user info (description, upload slots, etc.)."""
+        """Get user info."""
         try:
             return self.get_json(f"users/{username}/info", default={})
         except Exception as exc:
@@ -416,27 +331,12 @@ class SlskdHttpClient:
             return {}
 
     def get_server_state(self) -> dict[str, Any]:
-        """Return the slskd server sub-state across slskd versions.
-
-        Where the connection state lives differs by version, and the
-        ``state`` field is a C# enum-flags STRING (``"Connected, LoggedIn"``)
-        not always a boolean — see ``is_connected``:
-
-          * newer:  ``GET /application/state`` -> ``{..., "server": {...}}``
-          * older:  ``GET /server``            -> the server object itself
-          * older:  ``GET /application``       -> ``{..., "server": {...}}``
-
-        ``application/state`` is probed first because it is the current
-        shape; the ``/server``/``/application`` fallbacks mirror the ORIGINAL
-        client (``old_system/api_clients/slskd.py::get_server_state``),
-        which is what historical (and this) deployment answered.
-        """
+        """Return the slskd server sub-state across slskd versions."""
         state = self.get_state()
         if isinstance(state, dict):
             server = state.get("server")
             if isinstance(server, dict) and server:
                 return server
-            # Some versions carry the server fields at the top level.
             if state.get("state") or state.get("isConnected") is not None:
                 return state
         for endpoint in ("server", "application"):
@@ -454,23 +354,7 @@ class SlskdHttpClient:
         return {}
 
     def is_connected(self) -> bool:
-        """Return True when the Soulseek client is connected and logged in.
-
-        The server state reports connection BOTH ways across slskd versions:
-
-          * explicit booleans — ``isConnected`` (modern) / ``isLoggedIn``;
-          * a C# enum-flags STRING in ``state`` — ``"Connected, LoggedIn"`` /
-            ``"Connected"`` / ``"Disconnected"`` (the shape the ORIGINAL
-            client parsed; the hardening pass read ONLY the booleans, so a
-            healthy server reporting the flag string read as *disconnected*
-            and every search was skipped — the regression restored here).
-
-        Preference order mirrors the original client: an explicit
-        ``isConnected`` boolean is authoritative when present, then
-        ``isLoggedIn``, then the flag string. ``False`` / ``{}`` (endpoint
-        unreachable or no state) means NOT connected — that is what stops the
-        queue recording ``no_results`` + a 24h backoff while slskd is down.
-        """
+        """Return True when the Soulseek client is connected and logged in."""
         server = self.get_server_state()
         if not isinstance(server, dict) or not server:
             return False
@@ -493,7 +377,6 @@ _slskd_client_cache_mtime: float | None = None
 
 
 def _config_file_mtime() -> float | None:
-    """Return the config.yaml mtime, or None when the file is missing."""
     try:
         cfg_path = os.environ.get("CONFIG_PATH", "/config/config.yaml")
         if os.path.exists(cfg_path):
@@ -504,19 +387,9 @@ def _config_file_mtime() -> float | None:
 
 
 def get_slskd_client() -> SlskdHttpClient | None:
-    """Return a configured, cached ``SlskdHttpClient`` instance.
-
-    Reads ``slskd`` from config (``enabled`` / ``web_url`` / ``api_key``).
-    The cached client is rebuilt automatically when config.yaml changes, so a
-    URL/API-key edit from the config page takes effect without restarting —
-    including in long-running queue-worker processes that cache their own
-    copy. Returns ``None`` when slskd is disabled or misconfigured so callers
-    can treat it as "Soulseek unavailable" without raising.
-    """
     global _slskd_client_cache, _slskd_client_cache_mtime
 
     if _slskd_client_cache is not None:
-        # Rebuild when the config file changed since the client was built
         if _config_file_mtime() != _slskd_client_cache_mtime:
             _slskd_client_cache = None
             _slskd_client_cache_mtime = None
@@ -533,11 +406,6 @@ def get_slskd_client() -> SlskdHttpClient | None:
         web_url = str(cfg.get("web_url") or "").strip() or "http://localhost:5030"
         api_key = str(cfg.get("api_key") or "").strip()
 
-        # Use a plain session (no automatic 429 retries) for queue processing.
-        # The shared api_clients session retries 429 responses with exponential
-        # backoff, which turns a fast "slot busy" into a long wait per search
-        # attempt. A plain session lets the caller's own retry loop control the
-        # cadence (mirrors the legacy queue_processor factory).
         import httpx as _httpx
         _plain_session = _httpx.Client(timeout=60.0)
         _slskd_client_cache = SlskdHttpClient(
