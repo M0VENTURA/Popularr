@@ -3577,10 +3577,22 @@ def _create_genre_top_track_playlists(
 
     # PRE-FETCH: Find out which playlists already exist in Navidrome
     existing_playlists = set()
+    # Name → Navidrome playlist id, captured from the SAME fetch so the cover
+    # check costs no extra round trip. The id is what lets
+    # ``generate_genre_cover`` tell "this playlist already carries our art"
+    # from "a playlist with this name exists" — the distinction a playlist that
+    # was deleted and recreated (new id, no image) turns on.
+    existing_playlist_ids: dict[str, str] = {}
     if create_enabled or delete_enabled:
         for client in _navidrome_clients():
             for pl in client.fetch_all_playlists() or []:
-                existing_playlists.add(str(pl.get("name") or "").strip().casefold())
+                _pl_name = str(pl.get("name") or "").strip()
+                if not _pl_name:
+                    continue
+                existing_playlists.add(_pl_name.casefold())
+                _pl_id = str(pl.get("id") or "").strip()
+                if _pl_id:
+                    existing_playlist_ids.setdefault(_pl_name.casefold(), _pl_id)
 
     def _track_genres(row: dict[str, Any]) -> list[str]:
         return _genre_playlist_track_genres(
@@ -3731,6 +3743,13 @@ def _create_genre_top_track_playlists(
     written = 0
     skipped_unchanged = 0
     keep_playlist_names: set[str] = set()
+    # Cover-check outcome counters for the one-line summary below. Without them
+    # a scan that CHECKED 75 covers and applied none was indistinguishable from
+    # one that never looked — the reported "the log says nothing about covers".
+    _cover_checked = 0
+    _cover_generated = 0
+    _cover_skipped = 0
+    _cover_failed = 0
 
     norm_only_genres = None
     if only_genres is not None:
@@ -3809,10 +3828,15 @@ def _create_genre_top_track_playlists(
 
             # ── AI cover art for the TOP GENRE playlists ───────────────────
             #
-            # ONLY here, and only for a playlist this pass created/updated: an
-            # unchanged playlist keeps the cover it has, so a nightly scan does
-            # not re-bill the image API for identical art. Essential Collections
-            # (artist playlists) keep the artist-image cover they already get.
+            # Runs for EVERY playlist this pass synced — created, updated OR
+            # merely unchanged — because the point is to ensure the playlist
+            # HAS its cover, not only to decorate a new one. The check is cheap
+            # when nothing changed: ``generate_genre_cover`` skips without
+            # calling the image API when the recorded art still matches AND the
+            # recorded playlist id is THIS playlist.
+            #
+            # ⚠️ The playlist id is passed IN from the map built above, so
+            # verifying the cover costs no extra Navidrome round trip.
             #
             # Never fatal, and the reason is always logged — an image API that
             # is out of quota must not cost the scan its file-tag sync.
@@ -3826,31 +3850,49 @@ def _create_genre_top_track_playlists(
                     )
 
                     _cover_display = _display_genre(genre)
+                    _cover_checked += 1
                     for _cover_client in _navidrome_clients():
                         _cover = generate_genre_cover(
                             _cover_display,
                             playlist_name,
                             _cover_client,
                             regenerate=_genre_cover_cfg["regenerate"],
+                            playlist_id=existing_playlist_ids.get(playlist_name.casefold()),
                         )
                         if _cover.get("ok"):
                             if _cover.get("status") == "generated":
+                                _cover_generated += 1
                                 log_unified(
                                     f"🎨 Playlist cover: AI artwork set for '{playlist_name}'"
                                 )
+                            else:
+                                _cover_skipped += 1
                             break
                         logger.warning(
                             "Genre playlist cover not applied",
                             playlist=playlist_name,
                             reason=_cover.get("reason"),
                         )
+                    else:
+                        _cover_failed += 1
             except Exception as exc:
+                _cover_failed += 1
                 logger.warning("Genre playlist cover generation failed", error=str(exc))
         except Exception as exc:
             logger.warning("Genre playlist API sync failed", genre=genre, error=str(exc))
 
     if skipped_unchanged:
         logger.debug("Genre playlists unchanged", count=skipped_unchanged)
+
+    # One line, only when the cover check actually ran. Covers being ENABLED
+    # but producing no per-playlist log used to look identical to the feature
+    # not running at all; this makes the pass legible either way.
+    if _cover_checked:
+        log_unified(
+            f"🎨 Genre playlist covers — {_cover_generated} applied, "
+            f"{_cover_skipped} already present, {_cover_failed} failed "
+            f"({_cover_checked} playlist(s) checked)"
+        )
 
     if delete_enabled and only_genres is None:
         if pools:

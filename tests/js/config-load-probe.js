@@ -87,7 +87,11 @@ const sandbox = {
   clearTimeout,
   setInterval,
   clearInterval,
-  pageConfig: {},
+  pageConfig: {
+    playlists: {
+      excluded_artists: ['Artist A', 'Artist B'],
+    },
+  },
 };
 // `pageConfig` is read as `window.pageConfig` in the live copy and
 // `global.pageConfig` in the rebuilt one; both resolve to this sandbox once
@@ -104,6 +108,17 @@ try {
 } catch (error) {
   out.loaded = false;
   out.load_error = error && error.message ? error.message : String(error);
+}
+
+// The page normally initialises the excluded-artists list from pageConfig in
+// its DOMContentLoaded handler; that event never fires in this stub, so run the
+// loader explicitly when the script exposes it.
+if (out.loaded && typeof sandbox.loadExcludedArtists === 'function') {
+  try {
+    sandbox.loadExcludedArtists();
+  } catch (error) {
+    out.excluded_load_error = error && error.message ? error.message : String(error);
+  }
 }
 
 // Both trees publish the collector: the live copy as a bare global function,
@@ -146,6 +161,9 @@ if (out.build_resolved) {
       selection.enabled === true &&
       selection.max_genres === 3 &&
       selection.family_slot_limit === 3;
+    // Excluded artists must round-trip from pageConfig through the collector.
+    const excluded = config && config.playlists && config.playlists.excluded_artists;
+    out.excluded_artists = excluded || null;
   } catch (error) {
     out.collect_ok = false;
     // The reported symptom, verbatim, when this regresses.

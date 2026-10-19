@@ -158,7 +158,25 @@ class TestTheGenreSelectionCollectorReallyRan:
 
 
 # ===========================================================================
-# 3. Structural guard — no second copy for someone to nest again
+# 3. Excluded artists — playlist-exclusion config survives the collector
+# ===========================================================================
+class TestExcludedArtistsRoundTrip:
+    """The playlist-exclusion list is maintained in JS and emitted by the
+    collector.  Because the /config/save-json endpoint replaces the whole
+    ``playlists`` block, dropping this key would erase the user's exclusions on
+    the next save.
+    """
+
+    def test_excluded_artists_load_from_page_config(self, probe_results):
+        for source, result in probe_results.items():
+            assert result.get("excluded_artists") == ["Artist A", "Artist B"], (
+                f"{source}: excluded_artists did not round-trip from pageConfig "
+                f"through the collector (got {result.get('excluded_artists')!r})"
+            )
+
+
+# ===========================================================================
+# 4. Structural guard — no second copy for someone to nest again
 # ===========================================================================
 class TestTheFieldReadersStayInFileScope:
     """The behavioural probe above is the real guard; this pins WHY it works.

@@ -43,6 +43,66 @@ function showToast(title, message, type) {
   toast.show();
 }
 
+// ── Excluded playlist artists ───────────────────────────────────────────
+
+let configExcludedArtists = [];
+
+function normaliseExcludedArtist(name) {
+  return String(name || '').trim().toLowerCase();
+}
+
+function loadExcludedArtists() {
+  const playlists = (window.pageConfig && window.pageConfig.playlists) || {};
+  const fromConfig = playlists.excluded_artists || [];
+  configExcludedArtists = Array.from(fromConfig)
+    .map((a) => String(a).trim())
+    .filter(Boolean);
+  renderExcludedArtists();
+}
+
+function renderExcludedArtists() {
+  const list = document.getElementById('excludedArtistsList');
+  if (!list) return;
+  list.innerHTML = '';
+  if (configExcludedArtists.length === 0) {
+    list.innerHTML = '<span class="text-muted small">No artists excluded.</span>';
+    return;
+  }
+  configExcludedArtists.forEach((artist) => {
+    const badge = document.createElement('span');
+    badge.className = 'badge bg-secondary d-flex align-items-center gap-2';
+    badge.innerHTML = `
+      ${escapeHtml(artist)}
+      <button type="button" class="btn-close btn-close-white" aria-label="Remove" onclick="removeExcludedArtist('${escapeHtml(String(artist).replace(/'/g, "\\'"))}')"></button>
+    `;
+    list.appendChild(badge);
+  });
+}
+
+function addExcludedArtist() {
+  const input = document.getElementById('newExcludedArtistInput');
+  if (!input) return;
+  const name = input.value.trim();
+  if (!name) {
+    showToast('Warning', 'Please enter an artist name', 'warning');
+    return;
+  }
+  const key = normaliseExcludedArtist(name);
+  if (configExcludedArtists.some((a) => normaliseExcludedArtist(a) === key)) {
+    showToast('Warning', 'This artist is already excluded', 'warning');
+    return;
+  }
+  configExcludedArtists.push(name);
+  input.value = '';
+  input.focus();
+  renderExcludedArtists();
+}
+
+function removeExcludedArtist(name) {
+  configExcludedArtists = configExcludedArtists.filter((a) => a !== name);
+  renderExcludedArtists();
+}
+
 // ===== USER CONTEXT =====
 
 function setActiveUserContext(userIndex) {
@@ -365,7 +425,8 @@ function buildConfigObject() {
       },
       exclude_christmas_from_playlists: getChecked('playlists_exclude_christmas', true),
       christmas_playlist_marker: getValue('playlists_christmas_marker', 'christmas') || 'christmas',
-      genre_playlists_name_template: getValue('playlists_genre_name_template', '{genre} - Top Tracks')
+      genre_playlists_name_template: getValue('playlists_genre_name_template', '{genre} - Top Tracks'),
+      excluded_artists: [...configExcludedArtists],
     },
     navidrome: {
       auto_public_playlists: getChecked('api_navidrome_auto_public_playlists', false),
@@ -2092,5 +2153,8 @@ document.addEventListener('DOMContentLoaded', function() {
   if (vocabSave) vocabSave.addEventListener('click', saveGenreVocabulary);
   const vocabReset = document.getElementById('genre_vocab_reset');
   if (vocabReset) vocabReset.addEventListener('click', resetGenreVocabulary);
+  if (document.getElementById('excludedArtistsList')) {
+    loadExcludedArtists();
+  }
   getRetrySchedulerStatus();
 });

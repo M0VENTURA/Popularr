@@ -3186,6 +3186,29 @@
         </div>
       </div>
 
+      <!-- Excluded Playlist Artists -->
+      <div class="card shadow-sm mb-3">
+        <div class="card-header">
+          <h5 class="mb-0"><i class="bi bi-person-slash"></i> Excluded Playlist Artists</h5>
+          <small class="text-muted">Artists that should never be added to auto-generated playlists</small>
+        </div>
+        <div class="card-body">
+          <div class="mb-3">
+            <label class="setting-title" for="newExcludedArtistInput">Excluded Artists</label>
+            <div class="input-group">
+              <input type="text" class="form-control" id="newExcludedArtistInput" placeholder="Add artist to exclude..." onkeydown="if (event.key === 'Enter') { event.preventDefault(); addExcludedArtist(); }">
+              <button class="btn btn-outline-primary" type="button" onclick="addExcludedArtist()">
+                <i class="bi bi-plus-lg"></i> Add
+              </button>
+            </div>
+            <span class="help-text">Press Enter or click Add. Matching is case-insensitive when checking for duplicates.</span>
+          </div>
+          <div id="excludedArtistsList" class="d-flex flex-wrap gap-2">
+            <span class="text-muted small">No artists excluded.</span>
+          </div>
+        </div>
+      </div>
+
       <!-- 3. Naming templates — full-width input cards -->
       <div class="input-card naming-card">
         <label for="playlists_genre_name_template">Genre Playlist Name Template</label>
