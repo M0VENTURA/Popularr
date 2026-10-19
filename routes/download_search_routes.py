@@ -11,7 +11,7 @@ from typing import Any
 import structlog
 from quart import Blueprint, jsonify, request
 
-from api_clients.slskd_http import SlskdHttpClient
+from api_clients.slskd import SlskdHttpClient
 from db.repositories.queue import update_queue_item
 from db.repositories.search_logs import log_slskd_search
 from helpers.config_helpers import get_config, get_search_quality_config
@@ -48,7 +48,6 @@ def _log_manual_search_event(
         if duration_seconds:
             msg += f" in {round(duration_seconds, 1)}s"
         msg += suffix
-
         log_search(msg)
     except Exception as exc:
         logger.debug("Failed to write to search log", error=str(exc))
@@ -73,26 +72,6 @@ def _normalize_slskd_query(value: str) -> str:
     return text_val.strip()
 
 
-def _coerce_optional_int(value: Any, allow_prefix: bool = False) -> int | None:
-    if value is None:
-        return None
-    text_val = str(value).strip()
-    if not text_val:
-        return None
-    candidate = text_val
-    if allow_prefix and "/" in text_val:
-        candidate = text_val.split("/", 1)[0].strip()
-    if not candidate:
-        return None
-    signless = candidate[1:] if candidate.startswith("-") else candidate
-    if not signless.isdigit():
-        return None
-    try:
-        return int(candidate)
-    except (TypeError, ValueError):
-        return None
-
-
 def _file_meets_quality(
     file: Any,
     min_bitrate: int,
@@ -100,36 +79,12 @@ def _file_meets_quality(
     min_length: int,
     allowed_formats: set[str] | None = None,
 ) -> bool:
-    """Does this search file clear the configured quality minimum?
-
-    Applies the SAME rule the automated pipeline applies, via
-    ``SearchFile.matches_quality`` — one definition of "good enough", so the
-    manual and automated views cannot disagree.
-
-    ``allowed_formats`` (bare lowercase extensions) rejects a container we
-    will not accept, so a manual result the download pipeline would refuse is
-    not offered as if it were downloadable.
-
-    ⚠️ An UNKNOWN file is KEPT, never fatal.  This mirrors both
-    ``SearchFile.matches_quality`` (a missing bitrate/sample rate is unknown,
-    not failing) and ``SearchResponse.__post_init__`` ("a single non-dict or
-    mixed list must not drop the whole response").  Letting one odd file raise
-    here would empty the ENTIRE result list — a manual search returning
-    "0 results" when slskd returned 50 is far worse than showing a file of
-    uncertain quality last.
-    """
     try:
         meets = bool(file.matches_quality(min_bitrate, min_sample_rate, allowed_formats=allowed_formats))
-    except Exception as exc:  # noqa: BLE001 — boundary: never lose the list
-        logger.debug(
-            "Quality check unavailable for search file; keeping it",
-            filename=getattr(file, "filename", None),
-            error=str(exc),
-        )
+    except Exception as exc:
+        logger.debug("Quality check unavailable for search file; keeping it", error=str(exc))
         return True
 
-    # ``min_length_seconds`` lives in the same config block, so it counts too —
-    # but only when the length is actually known.
     if meets and min_length:
         try:
             length = int(getattr(file, "length", 0) or 0)
@@ -164,9 +119,6 @@ async def slskd_search() -> Any:
         client = SlskdHttpClient(web_url, api_key)
         slskd_service = SlskdService(http_client=client)
 
-        # Server-state gate: a disconnected Soulseek client cannot search.
-        # Report it distinctly so the UI never suggests "search slot busy"
-        # and the search never records a misleading result.
         try:
             connected = await asyncio.to_thread(slskd_service.is_connected)
         except Exception:
@@ -222,6 +174,41 @@ async def slskd_search() -> Any:
         return jsonify({"error": str(exc)}), 500
 
 
+@slskd_bp.route("/search/<search_id>/stop", methods=["POST"])
+async def slskd_stop_search(search_id: str) -> Any:
+    """Explicitly stop a running slskd search to free up worker threads."""
+    cfg = get_config()
+    slskd_config = cfg.get("slskd", {})
+    if not slskd_config.get("enabled"):
+        return jsonify({"error": "slskd not enabled"}), 400
+
+    try:
+        client = SlskdHttpClient(slskd_config["web_url"], slskd_config.get("api_key", ""))
+        success = await asyncio.to_thread(client.stop_search, search_id)
+        return jsonify({"success": success, "searchId": search_id})
+    except Exception as exc:
+        logger.error("Failed to stop search", search_id=search_id, error=str(exc))
+        return jsonify({"error": str(exc)}), 500
+
+
+@slskd_bp.route("/transfers/cleanup", methods=["POST"])
+async def slskd_cleanup_transfers() -> Any:
+    """Clear out stalled, errored, or timed-out downloads from slskd."""
+    cfg = get_config()
+    slskd_config = cfg.get("slskd", {})
+    if not slskd_config.get("enabled"):
+        return jsonify({"error": "slskd not enabled"}), 400
+
+    try:
+        client = SlskdHttpClient(slskd_config["web_url"], slskd_config.get("api_key", ""))
+        cancelled_count = await asyncio.to_thread(client.cancel_all_stalled_downloads)
+        await asyncio.to_thread(client.remove_completed_downloads)
+        return jsonify({"success": True, "cancelledCount": cancelled_count})
+    except Exception as exc:
+        logger.error("Failed to clean up transfers", error=str(exc))
+        return jsonify({"error": str(exc)}), 500
+
+
 @slskd_bp.route("/search-slot", methods=["GET"])
 def slskd_search_slot() -> Any:
     """Return whether the slskd search slot is free."""
@@ -264,50 +251,21 @@ def slskd_search_results(search_id: str) -> Any:
         slskd_service = SlskdService(http_client=client)
         responses, state, is_complete = slskd_service.get_search_results(search_id, timeout=10)
 
-        # The query drives relevance ranking, exactly as it does for the
-        # automated search. Recorded when the search was started.
         with _manual_search_lock:
             _query = str((_manual_search_state.get(search_id) or {}).get("query") or "")
 
-        # ⚠️ THE CONFIGURED QUALITY MINIMUM, not a hardcoded 192/44100.
-        # Same source the automated pipeline reads (``downloads.quality``), so
-        # the two paths cannot drift apart on what "good enough" means.
         _quality_cfg = get_search_quality_config()
         _min_bitrate = int(_quality_cfg.get("min_bitrate") or 0)
         _min_sample_rate = int(_quality_cfg.get("min_sample_rate") or 0)
         _min_length = int(_quality_cfg.get("min_length_seconds") or 0)
-        # Format allow-list (default flac+mp3). A disallowed container is
-        # DROPPED from the manual list rather than shown as downloadable: the
-        # pipeline would refuse it at completion, so offering it only invites
-        # a download that can never be imported.
         _allowed_formats = set(_quality_cfg.get("allowed_formats") or set())
         _format_filtered = 0
 
         results = []
         for resp in responses or []:
             username = getattr(resp, "username", "") or ""
-            # ⚠️ THE FREE-SLOT FIELD WAS BEING DISCARDED HERE.
-            #
-            # `slskd_service.get_search_results` reads `hasFreeUploadSlot` off
-            # the slskd response into `SearchResponse.has_free_upload_slot`, but
-            # this loop never copied it into the payload — so every consumer that
-            # filters on it saw `undefined`.
-            #
-            # Two client-side filters depend on it and BOTH silently degraded to
-            # "keep everything" (they default a missing value to 1):
-            #   downloads.js renderSoulseekManualSearchResults  (the manual modal)
-            #   downloads.js renderSlskdResults                 (the search tab)
-            # The search tab even printed "filtered zero slots" while filtering
-            # nothing at all. The whole point of the filter — do not offer a peer
-            # that cannot take another upload — was never in effect.
-            #
-            # Sent under BOTH spellings: `freeUploadSlots` is what the existing
-            # clients read, `has_free_upload_slot` matches the service/dataclass
-            # naming so a future consumer does not need a third name for one fact.
             free_slot = bool(getattr(resp, "has_free_upload_slot", True))
             for file in getattr(resp, "files", []) or []:
-                # Drop a container we will not accept (default: only flac/mp3).
-                # ``extension`` is bare + lowercase on SearchFile.
                 if _allowed_formats and (getattr(file, "extension", "") or "") not in _allowed_formats:
                     _format_filtered += 1
                     continue
@@ -331,18 +289,6 @@ def slskd_search_results(search_id: str) -> Any:
                     "meets_quality": bool(meets),
                 })
 
-        # ⚠️ RANK THE MANUAL LIST — it used to be slskd's raw response order, so
-        # the 320 kbps peer with a free upload slot could sit anywhere in 50
-        # rows while the automated search picked it first. Uses the SAME
-        # ``rank_search_results`` the automated path uses (relevance to the
-        # query → free upload slot → bitrate → sample rate → queue length →
-        # speed), so the two views cannot disagree about which peer is best.
-        #
-        # Files that meet the configured quality come FIRST; the rest are kept
-        # and ranked below rather than dropped. A manual search is the tool you
-        # reach for when the automated one found nothing — hiding the only
-        # copy of a rare track because it is 128 kbps would defeat the point.
-        # The count is reported so the UI can say what was filtered.
         ranked = rank_search_results(results, _query)
         qualifying = [r for r in ranked if r.get("meets_quality")]
         below_quality = [r for r in ranked if not r.get("meets_quality")]
@@ -354,10 +300,6 @@ def slskd_search_results(search_id: str) -> Any:
         with _manual_search_lock:
             state_entry = _manual_search_state.get(search_id)
             if state_entry is not None:
-                # Log whenever the result count CHANGES (including the first
-                # non-zero count after a "Completed, TimedOut" terminal flag —
-                # slskd keeps streaming responses past the timeout, and the
-                # frontend grace-polls so this route is hit again).
                 if count != state_entry.get("last_result_count", -1):
                     state_entry["last_result_count"] = count
                     _log_manual_search_event(
@@ -366,11 +308,6 @@ def slskd_search_results(search_id: str) -> Any:
                         result_count=count,
                         notes="results_returned",
                     )
-                # Keep the state alive through the frontend's grace window so
-                # late-arriving results get logged.  Pop only when the search
-                # is complete AND we either have results or have already
-                # observed the terminal state once (a second terminal poll
-                # means the frontend stopped grace-polling).
                 if is_complete:
                     _term_count = state_entry.get("_terminal_seen", 0) + 1
                     state_entry["_terminal_seen"] = _term_count
@@ -383,8 +320,6 @@ def slskd_search_results(search_id: str) -> Any:
             "responseCount": response_count,
             "fileCount": count,
             "isComplete": bool(is_complete),
-            # What the list was judged against, and how many cleared it — the
-            # UI reports this instead of a bare result count.
             "quality": {
                 "min_bitrate": _min_bitrate,
                 "min_sample_rate": _min_sample_rate,
@@ -401,21 +336,7 @@ def slskd_search_results(search_id: str) -> Any:
 
 @slskd_bp.route("/download", methods=["POST"])
 async def slskd_download() -> Any:
-    """Proxy endpoint to download from slskd.
-
-    Accepts TWO payload shapes:
-
-    * **Batch** — ``{"files": [{"username", "filename", "size"}, ...]}``.
-      This is what the search page sends (``downloads_page.js``
-      ``downloadSlskdBatch`` and ``services/slskd.js`` ``download``).  It was
-      silently dropped when the routes were split out of ``app.py``, so every
-      multi-file / "Download selected" request was rejected with
-      "username and filename required".
-    * **Single** — ``{"username", "filename", "size"}``.
-
-    A single download is just a batch of one, so both funnel into
-    ``SlskdService.download_files``.
-    """
+    """Proxy endpoint to download from slskd."""
     cfg = get_config()
     slskd_config = cfg.get("slskd", {})
     if not slskd_config.get("enabled"):
@@ -432,7 +353,6 @@ async def slskd_download() -> Any:
         for entry in files_payload:
             if not isinstance(entry, dict) or not entry.get("username") or not entry.get("filename"):
                 return jsonify({"error": "Each file requires username and filename"}), 400
-        # Retained for the log line below and for callers that mix both shapes.
         files = files_payload
     else:
         username = payload.get("username", "")
@@ -449,9 +369,6 @@ async def slskd_download() -> Any:
 
         requested = sum(int(item.get("requested") or 0) for item in results)
         successful_users = sum(1 for item in results if item.get("success"))
-        # ``requested`` is a count of files slskd ACCEPTED, not files that will
-        # finish.  Reporting success with requested == 0 is the silent no-op
-        # that made a rejected download look enqueued.
         overall_success = requested > 0 and successful_users > 0
 
         label = files[0]["filename"] if len(files) == 1 else f"{len(files)} files"
@@ -501,7 +418,7 @@ async def slskd_cancel() -> Any:
 
     try:
         client = SlskdHttpClient(slskd_config["web_url"], slskd_config.get("api_key", ""))
-        result = await asyncio.to_thread(client.cancel_download, username, filename, transfer_id)
+        result = await asyncio.to_thread(client.cancel_download, username, transfer_id)
         return jsonify({"success": True, "result": result})
     except Exception as exc:
         logger.error("Failed to cancel download", username=username, error=str(exc))
@@ -527,13 +444,7 @@ def slskd_status() -> Any:
 
 @slskd_bp.route("/retry", methods=["POST"])
 async def slskd_retry() -> Any:
-    """Retry a failed Soulseek download.
-
-    slskd scopes a transfer by BOTH the peer username and the server-assigned
-    transfer id — ``POST /transfers/downloads/{username}/{transfer_id}/retry``
-    — so both are required.  This route used to accept a ``filename`` and pass
-    it as the transfer id, which could never match a real transfer.
-    """
+    """Retry a failed Soulseek download."""
     cfg = get_config()
     slskd_config = cfg.get("slskd", {})
     if not slskd_config.get("enabled"):
@@ -541,14 +452,12 @@ async def slskd_retry() -> Any:
 
     payload = (await request.get_json()) or {}
     username = payload.get("username", "")
-    # Accept the legacy ``filename`` key but never use it as a transfer id: a
-    # filename is not a transfer id, and passing one silently retried nothing.
     transfer_id = payload.get("transfer_id") or ""
 
     if not username or not transfer_id:
         return jsonify({
             "error": "username and transfer_id required",
-            "detail": "slskd identifies a transfer by username + transfer id, not by filename.",
+            "detail": "slskd identifies a transfer by username + transfer id.",
         }), 400
 
     try:
@@ -578,8 +487,6 @@ async def slskd_queue_download() -> Any:
     queue_id = payload.get("queue_id")
     username = payload.get("username", "")
     filename = payload.get("filename", "")
-    
-    # NEW: Extract size from payload
     size = payload.get("size")
     
     if not queue_id or not username or not filename:
@@ -598,23 +505,15 @@ async def slskd_queue_download() -> Any:
 
         _stored_filename = str(filename).replace("\\", "/").strip()
 
-        # Only link the queue row once slskd has actually accepted the file.
-        # Marking it "downloading" unconditionally told the completion matcher
-        # to wait for a transfer that was never requested — the row looked
-        # active forever while nothing was downloading.
         if not enqueued:
-            logger.error(
-                "slskd rejected queue download — leaving queue item untouched",
-                queue_id=queue_id,
-                username=username,
-                filename=_stored_filename,
-            )
+            logger.error("slskd rejected queue download", queue_id=queue_id, username=username, filename=_stored_filename)
             return jsonify({
                 "success": False,
                 "error": "slskd did not accept the download request",
                 "requested": requested,
                 "userBatches": results,
             }), 502
+
         try:
             update_queue_item(
                 queue_id,
@@ -635,6 +534,7 @@ async def slskd_queue_download() -> Any:
     except Exception as exc:
         logger.error("Failed to queue download", queue_id=queue_id, error=str(exc))
         return jsonify({"error": str(exc)}), 500
+
 
 @slskd_bp.route("/events", methods=["GET"])
 def slskd_events() -> Any:
@@ -663,13 +563,11 @@ _slsk_banned_words_lock = threading.Lock()
 
 @slsk_bp.route("/banned-words", methods=["GET"])
 def api_get_banned_words() -> Any:
-    """Get banned words and suggested words."""
     return jsonify({"words": list(_slsk_banned_words.keys())})
 
 
 @slsk_bp.route("/banned-words", methods=["POST"])
 async def api_add_banned_word() -> Any:
-    """Add or update a banned word."""
     data = (await request.get_json()) or {}
     word = str(data.get("word") or "").strip().lower()
 
@@ -682,9 +580,8 @@ async def api_add_banned_word() -> Any:
     return jsonify({"success": True})
 
 
-@slsk_bp.route("/banned-words/<path:word>", methods=["DELETE"])
+@slskd_bp.route("/banned-words/<path:word>", methods=["DELETE"])
 def api_delete_banned_word(word: str) -> Any:
-    """Remove a word from the banned words list."""
     with _slsk_banned_words_lock:
         _slsk_banned_words.pop(word.strip().lower(), None)
 
@@ -693,5 +590,4 @@ def api_delete_banned_word(word: str) -> Any:
 
 @slsk_bp.route("/banned-words/dismiss-all", methods=["POST"])
 def api_dismiss_all_suggested_words() -> Any:
-    """Move all suggested words into dismissed."""
     return jsonify({"success": True})
