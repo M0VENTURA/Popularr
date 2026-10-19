@@ -82,6 +82,154 @@ DISC_NUMBER_INCONSISTENT_SQL = (
 )
 
 
+def fetch_disc_inconsistent_albums(
+    session: Any,
+    artist_name: str,
+    artist_expr: str = "COALESCE(NULLIF(album_artist, ''), artist)",
+) -> list[dict[str, Any]]:
+    """Albums where SOME tracks carry a disc number and others do not.
+
+    Returns one dict per inconsistent album: the counts, the disc value, and the
+    offending tracks split into the two groups that need OPPOSITE treatment:
+
+    * ``tracks_with``    — rows that HAVE a disc number. On a single-disc album
+      these are the odd ones out: they are what "Clear Disc #" removes.
+    * ``tracks_without`` — rows that already match the majority case. Clearing is
+      a no-op for them, so presenting them as offenders would be misleading.
+
+    ⚠️ EXTRACTED AS A FUNCTION SO ITS BEHAVIOUR CAN BE EXECUTED IN A TEST.
+    The caller, ``get_artist_corrections``, also runs a PostgreSQL-only
+    ``STRING_AGG(DISTINCT …, ', ')`` query, so the whole function cannot be
+    exercised against SQLite at all. Testing this block through a session-scoped
+    helper means the SHIPPED SQL and the track split run verbatim, instead of
+    being rewritten for the test (which would stop testing production).
+    """
+    album_rows = [
+        dict(r._mapping)
+        for r in session.execute(
+            text(f"""
+                SELECT
+                    album,
+                    COUNT(*) AS track_count,
+                    SUM(CASE WHEN disc_number IS NOT NULL
+                                  AND TRIM(CAST(disc_number AS TEXT)) != ''
+                                  AND CAST(disc_number AS TEXT) != '0'
+                             THEN 1 ELSE 0 END) AS tracks_with_disc,
+                    SUM(CASE WHEN disc_number IS NULL
+                                  OR TRIM(CAST(disc_number AS TEXT)) = ''
+                                  OR CAST(disc_number AS TEXT) = '0'
+                             THEN 1 ELSE 0 END) AS tracks_without_disc,
+                    COUNT(DISTINCT CASE WHEN disc_number IS NOT NULL
+                                        AND TRIM(CAST(disc_number AS TEXT)) != ''
+                                        AND CAST(disc_number AS TEXT) != '0'
+                                    THEN CAST(disc_number AS TEXT) END) AS distinct_disc_values,
+                    MAX(CASE WHEN disc_number IS NOT NULL
+                                  AND TRIM(CAST(disc_number AS TEXT)) != ''
+                                  AND CAST(disc_number AS TEXT) != '0'
+                             THEN CAST(disc_number AS TEXT) END) AS disc_value
+                FROM tracks
+                WHERE LOWER({artist_expr}) = LOWER(:artist)
+                  AND album IS NOT NULL AND TRIM(album) != ''
+                GROUP BY album
+                HAVING {DISC_NUMBER_INCONSISTENT_SQL}
+                ORDER BY album
+            """),
+            {"artist": artist_name},
+        ).fetchall()
+    ]
+
+    # ── The offending TRACKS, not just the counts ───────────────────────────
+    #
+    # The section used to show only per-album counts ("4 with disc #, 10
+    # without"), which says an album is inconsistent but not WHICH tracks
+    # disagree — so the operator had to open the album and eyeball every row to
+    # find the offenders.
+    #
+    # ONE query for every flagged album rather than one per album: the flagged
+    # set is small, but N+1 round trips are exactly the shape that made the
+    # artist page slow before.
+    detail: dict[str, list[dict[str, Any]]] = {}
+    bad_albums = [str(r.get("album") or "") for r in album_rows if r.get("album")]
+    if bad_albums:
+        try:
+            placeholders = ", ".join(f":al{i}" for i in range(len(bad_albums)))
+            track_rows = session.execute(
+                text(f"""
+                    SELECT
+                        album,
+                        id,
+                        title,
+                        disc_number,
+                        track_number,
+                        CAST(disc_number AS TEXT) AS disc_text
+                    FROM tracks
+                    WHERE LOWER({artist_expr}) = LOWER(:artist)
+                      AND album IN ({placeholders})
+                    ORDER BY album,
+                             CASE WHEN disc_number IS NULL
+                                       OR TRIM(CAST(disc_number AS TEXT)) = ''
+                                       OR CAST(disc_number AS TEXT) = '0'
+                                  THEN 1 ELSE 0 END,
+                             CAST(disc_number AS TEXT),
+                             CASE WHEN track_number IS NULL
+                                       OR TRIM(CAST(track_number AS TEXT)) = ''
+                                  THEN 1 ELSE 0 END,
+                             track_number,
+                             title
+                """),
+                {
+                    "artist": artist_name,
+                    **{f"al{i}": name for i, name in enumerate(bad_albums)},
+                },
+            ).fetchall()
+            for row in track_rows:
+                td = dict(row._mapping)
+                raw_disc = td.get("disc_text")
+                # Same "absent" definition as DISC_NUMBER_ABSENT_SQL, so the
+                # track split can never disagree with the counts beside it.
+                has_disc = not (
+                    raw_disc is None
+                    or str(raw_disc).strip() == ""
+                    or str(raw_disc).strip() == "0"
+                )
+                detail.setdefault(str(td.get("album") or ""), []).append({
+                    "id": str(td.get("id") or ""),
+                    "title": str(td.get("title") or "").strip() or "(untitled)",
+                    "disc_number": str(raw_disc).strip() if has_disc else None,
+                    "track_number": (
+                        str(td.get("track_number")).strip()
+                        if td.get("track_number") is not None
+                        and str(td.get("track_number")).strip() != ""
+                        else None
+                    ),
+                    "has_disc_number": has_disc,
+                })
+        except Exception as exc:
+            # The detail is ENHANCEMENT, never the reason the page renders: a
+            # failure here must not cost the counts, the Clear button, or the
+            # rest of the corrections page.
+            logger.debug(
+                "Disc-number track detail fetch failed",
+                artist=artist_name,
+                error=str(exc),
+            )
+
+    results: list[dict[str, Any]] = []
+    for row_dict in album_rows:
+        tracks = detail.get(str(row_dict.get("album") or ""), [])
+        results.append({
+            "album": row_dict.get("album"),
+            "track_count": int(row_dict.get("track_count") or 0),
+            "tracks_with_disc": int(row_dict.get("tracks_with_disc") or 0),
+            "tracks_without_disc": int(row_dict.get("tracks_without_disc") or 0),
+            "distinct_disc_values": int(row_dict.get("distinct_disc_values") or 0),
+            "disc_value": row_dict.get("disc_value"),
+            "tracks_with": [t for t in tracks if t["has_disc_number"]],
+            "tracks_without": [t for t in tracks if not t["has_disc_number"]],
+        })
+    return results
+
+
 def delete_track(track_id: str, delete_file: bool = True) -> tuple[dict[str, Any], int]:
     """Delete a track DB row and optionally remove its local file."""
     row = fetch_track_for_delete(None, track_id)
@@ -657,43 +805,13 @@ def get_artist_corrections(artist_name: str) -> tuple[dict[str, Any], int]:
                     "mbids": mbids,
                 })
 
-            rows = session.execute(text(f"""
-                SELECT
-                    album,
-                    COUNT(*) AS track_count,
-                    SUM(CASE WHEN disc_number IS NOT NULL
-                                  AND TRIM(CAST(disc_number AS TEXT)) != ''
-                                  AND CAST(disc_number AS TEXT) != '0'
-                             THEN 1 ELSE 0 END) AS tracks_with_disc,
-                    SUM(CASE WHEN disc_number IS NULL
-                                  OR TRIM(CAST(disc_number AS TEXT)) = ''
-                                  OR CAST(disc_number AS TEXT) = '0'
-                             THEN 1 ELSE 0 END) AS tracks_without_disc,
-                    COUNT(DISTINCT CASE WHEN disc_number IS NOT NULL
-                                        AND TRIM(CAST(disc_number AS TEXT)) != ''
-                                        AND CAST(disc_number AS TEXT) != '0'
-                                    THEN CAST(disc_number AS TEXT) END) AS distinct_disc_values,
-                    MAX(CASE WHEN disc_number IS NOT NULL
-                                  AND TRIM(CAST(disc_number AS TEXT)) != ''
-                                  AND CAST(disc_number AS TEXT) != '0'
-                             THEN CAST(disc_number AS TEXT) END) AS disc_value
-                FROM tracks
-                WHERE LOWER({artist_expr}) = LOWER(:artist)
-                  AND album IS NOT NULL AND TRIM(album) != ''
-                GROUP BY album
-                HAVING {DISC_NUMBER_INCONSISTENT_SQL}
-                ORDER BY album
-            """), {"artist": artist_name})
-            for r in rows.fetchall():
-                row_dict = dict(r._mapping)
-                disc_inconsistent_albums.append({
-                    "album": row_dict.get("album"),
-                    "track_count": int(row_dict.get("track_count") or 0),
-                    "tracks_with_disc": int(row_dict.get("tracks_with_disc") or 0),
-                    "tracks_without_disc": int(row_dict.get("tracks_without_disc") or 0),
-                    "distinct_disc_values": int(row_dict.get("distinct_disc_values") or 0),
-                    "disc_value": row_dict.get("disc_value"),
-                })
+            # Disc-number inconsistencies, with the offending TRACKS. Extracted
+            # into ``fetch_disc_inconsistent_albums`` so its SQL and track split
+            # are executable in a test (this function also runs a
+            # PostgreSQL-only ``STRING_AGG`` query, so it cannot run on SQLite).
+            disc_inconsistent_albums.extend(
+                fetch_disc_inconsistent_albums(session, artist_name, artist_expr)
+            )
 
             rows = session.execute(text(f"""
                 SELECT

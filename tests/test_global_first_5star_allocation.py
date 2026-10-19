@@ -7,11 +7,15 @@ top tracks by RAW cross-album score at the artist-section pre-pass, and
 exempts them from the per-album era gate and the 5★ slot cap.
 
 Tests:
-- ``_compute_global_5star_locked_titles`` ranks by raw score and locks the
+- ``_compute_global_5star_locked_ids`` ranks by raw score and locks the
   catalog top-% (restricted to genuine single/standout candidates).
 - ``_assign_stars`` honours ``_global_5star_locked`` → 5★ regardless of the
   album's era gate / slot cap.
 - The 5★ slot cap never demotes a locked track.
+
+⚠️ The lock is keyed by TRACK IDENTITY, never by title — see
+``tests/test_global_5star_lock_is_not_title_keyed.py`` for the collision it
+used to cause.
 """
 
 from __future__ import annotations
@@ -47,9 +51,9 @@ def _track(title, raw_score, score=None, conf="high", single=True, **overrides):
     return track
 
 
-class TestComputeGlobal5StarLockedTitles:
+class TestComputeGlobal5StarLockedIds:
     def test_ranks_by_raw_score_locks_top_pct(self, monkeypatch):
-        from services.popularity.scan_stage_runner import _compute_global_5star_locked_titles
+        from services.popularity.scan_stage_runner import _compute_global_5star_locked_ids
 
         # Battle Beast catalog: Eden is the raw #1 (80.4); King for a Day 80.4
         # (tie); NMHE 76.6; lower-scored tracks further down.  8 albums, 91
@@ -70,20 +74,21 @@ class TestComputeGlobal5StarLockedTitles:
             _track("Steel", 64.6, conf="low", single=False),
         ]
 
-        locked = _compute_global_5star_locked_titles("Battle Beast", results, {})
+        locked = _compute_global_5star_locked_ids("Battle Beast", results, {})
 
-        # Eden is the raw #1 and a high-confidence single → locked.
-        assert "eden" in locked
-        assert "king for a day" in locked
-        assert "out of control" in locked
+        # ⭐ KEYED BY TRACK IDENTITY, not title. The fixture's ``_track`` helper
+        # builds ``track_id`` as ``id-<slug>``.
+        assert "id-eden" in locked
+        assert "id-king-for-a-day" in locked
+        assert "id-out-of-control" in locked
         # A live track is never locked.
-        assert "intro (live in helsinki 2023)" not in locked
+        assert "id-intro-(live-in-helsinki-2023)" not in locked
         # A low-confidence non-single with a sub-minimum raw score is not
         # locked (raw 57.9 < 60 min).
-        assert "shutdown" not in locked
+        assert "id-shutdown" not in locked
 
     def test_low_raw_score_never_forced_into_pool(self):
-        from services.popularity.scan_stage_runner import _compute_global_5star_locked_titles
+        from services.popularity.scan_stage_runner import _compute_global_5star_locked_ids
 
         # A confirmed single with a weak raw score must NOT be force-locked
         # just to fill the percentage.
@@ -94,9 +99,9 @@ class TestComputeGlobal5StarLockedTitles:
             _track("Another", 68.0, conf="low", single=False),
             _track("Another 2", 66.0, conf="low", single=False),
         ]
-        locked = _compute_global_5star_locked_titles("Artist", results, {})
-        assert "weak single" not in locked
-        assert "strong track" in locked
+        locked = _compute_global_5star_locked_ids("Artist", results, {})
+        assert "id-weak-single" not in locked
+        assert "id-strong-track" in locked
 
 
 class TestAssignStarsHonoursGlobalLock:

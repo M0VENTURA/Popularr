@@ -25,7 +25,7 @@ from sqlalchemy import text
 
 from api_clients.navidrome import NavidromeClient
 from db.engine import db_session
-from db.repositories.tracks import insert_or_update_track
+from db.repositories.tracks import upsert_tracks_bulk
 from helpers.artist_sort import (
     artist_sort_key,
     artist_sort_letter,
@@ -1679,25 +1679,40 @@ def _apply_album_track_genres(track_id: Any, genres_str: str) -> tuple[int, int]
     return rows, failed
 
 
-def _persist_album_track_payload(track_id: Any, payload: dict[str, Any]) -> tuple[bool, str]:
-    """Write one track's payload to the DB. Returns ``(ok, error)``.
+def _persist_album_track_payloads(
+    payloads: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """Write every collected track payload in ONE session + commit.
 
-    ⚠️ The failure is COUNTED by the caller, not swallowed. This used to be a
-    bare DEBUG log, so a rejected write (e.g. "invalid input syntax for type
-    json" against a JSONB genre column) left ``updated_count`` at 0 and the
-    page flashed "No changes were made." — telling the user their edit was a
-    no-op when in fact the save FAILED, with the only trace an ERROR in the
-    POSTGRES log.
+    Returns ``(updated, failed)``.
+
+    ⚠️ ONE TRANSACTION, NOT ONE PER ROW. The save used to open a fresh
+    ``db_session`` and COMMIT for every track (the old singular helper called
+    ``insert_or_update_track`` per row), so an album cost N transactions. That
+    per-row commit is the wall clock behind the reported slow save — a
+    14-track album spending ~68 s in the DB loop.
+    ``upsert_tracks_bulk`` runs the whole album through a single session and
+    wraps each row in a SAVEPOINT, so one malformed row cannot abort the rest
+    (PostgreSQL aborts the whole transaction on a failed statement otherwise).
+
+    Counting is all-or-nothing at the BATCH level: ``upsert_tracks_bulk``
+    returns False when ANY row failed, and each bad row is logged with its
+    ``track_id`` by the repository. Reporting the batch as a FAILURE rather
+    than a no-op is the safe side of the contract this file keeps defending —
+    a refused write must never read as "No changes were made."
     """
+    if not payloads:
+        return 0, 0
     try:
-        insert_or_update_track(track_id, payload)
-        return True, ""
+        if upsert_tracks_bulk(payloads):
+            return len(payloads), 0
+        return 0, len(payloads)
     except Exception as db_err:
         logger.warning(
-            "Album save: DB update FAILED",
-            track_id=track_id, error=str(db_err),
+            "Album save: bulk DB update FAILED",
+            track_count=len(payloads), error=str(db_err),
         )
-        return False, str(db_err)
+        return 0, len(payloads)
 
 
 def _write_album_track_file_tags(
@@ -2413,6 +2428,9 @@ async def album_detail(album_path: str) -> Any:
         # File-tag work is COLLECTED here and run as one concurrent phase after
         # the loop — see ``_write_album_track_files_concurrently``.
         _file_jobs: list[tuple[Any, dict, dict, bool, bool]] = []
+        # Per-track DB payloads are likewise collected so the whole album can
+        # commit in one transaction instead of paying for one session per row.
+        _db_payloads: list[dict[str, Any]] = []
 
         _write_loop_started = time.monotonic()
         for track in tracks:
@@ -2605,13 +2623,11 @@ async def album_detail(album_path: str) -> Any:
                     if _genre_failed:
                         genre_write_failures += 1
 
-            # Phase 2 — persist: the DB row (album fields, then the staged
-            # review on top, so a per-track value the user kept always wins).
+            # Phase 2 — persist: collect the DB payload. The actual write is
+            # batched across the whole album after the loop, so we pay for one
+            # transaction instead of one session + commit per track.
             if len(payload) > 1:
-                if _persist_album_track_payload(track_id, payload)[0]:
-                    updated_count += 1
-                else:
-                    db_failures += 1
+                _db_payloads.append(payload)
 
             # Phase 3 — file tags: the cover genre and the single-disc clear.
             #
@@ -2687,6 +2703,15 @@ async def album_detail(album_path: str) -> Any:
                             reverted_live_count += 1
                     except Exception as revert_err:
                         logger.debug("Live-state revert failed", track_id=track_id, error=str(revert_err))
+
+        # ── Phase 2b: commit all per-track DB writes in one transaction ──
+        # Every payload collected by the loop lands in ONE session + commit
+        # instead of one per track (the reported ~68 s DB loop on a 14-track
+        # album). Counting is all-or-nothing at the batch level; see
+        # ``_persist_album_track_payloads``.
+        _updated, _failed = _persist_album_track_payloads(_db_payloads)
+        updated_count += _updated
+        db_failures += _failed
 
         # ── Do-not-search-album-release flag ─────────────────────────────
         # A custom album (not on MusicBrainz/Discogs) can be marked so the

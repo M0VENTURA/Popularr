@@ -458,7 +458,7 @@ def album_save(monkeypatch):
     monkeypatch.setattr("helpers.app_hooks.needs_setup", lambda: False)
     monkeypatch.setattr(ui, "db_session", lambda *a, **k: _FakeSession(tracks))
     monkeypatch.setattr(ui, "get_config", lambda: {})
-    monkeypatch.setattr(ui, "insert_or_update_track", lambda track_id, payload: None)
+    monkeypatch.setattr(ui, "upsert_tracks_bulk", lambda payloads: (len(payloads), 0))
     monkeypatch.setattr(
         "db.repositories.metadata.update_track_genres",
         lambda track_id, genres_str: 1,

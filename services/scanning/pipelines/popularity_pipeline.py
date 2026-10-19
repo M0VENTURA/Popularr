@@ -383,6 +383,23 @@ def _run_full_scan_as_artist_pipeline(
     # New cancellation generation: a cancellation raised in a PREVIOUS run must
     # not be able to cancel a same-named artist in this one.
     _scan_epoch = _scan_cancellation.begin_scan()
+
+    # ── The GLOBAL playlist rebuild belongs to the SCAN, not to an artist ──
+    #
+    # Genre top-tracks, New Music and the playlist index all aggregate across the
+    # WHOLE library, so they are rebuilt ONCE here, after the artist loop — not
+    # after each artist. Deferring is what makes that true: every artist's run
+    # builds its OWN ``options`` dict in ``run_scan``, so the
+    # ``_global_playlists_done`` marker on it was re-created each time and could
+    # never suppress anything. A full scan therefore paid a complete genre sync
+    # plus a full ``sync_playlist_index`` (every server playlist, ~75–82k
+    # entries) after EVERY artist — minutes per artist.
+    try:
+        from services.popularity.scan_scope import defer_global_playlists
+
+        defer_global_playlists()
+    except Exception as exc:
+        logger.debug("[FULL_SCAN] Could not defer global playlists", error=str(exc))
     # Stage bands for the overall percentage.  Each artist contributes an
     # equal share; within an artist the four stages (Metadata, Popularity,
     # Singles Detection, Essentia) each take a quarter of that share.  The
@@ -692,6 +709,31 @@ def _run_full_scan_as_artist_pipeline(
         logger.exception("[FULL_SCAN] Artist loop failed", error=str(exc))
         raise
     finally:
+        # ── End-of-scan global playlist rebuild (ONCE, for the whole scan) ──
+        #
+        # ⚠️ CLEAR THE DEFERRAL UNCONDITIONALLY, even on stop/error. A left-set
+        # flag would silently suppress the playlist rebuild of every later
+        # TARGETED scan in this process — a failure mode far worse than a
+        # missing rebuild, and invisible without this.
+        #
+        # The rebuild itself runs only on a COMPLETE scan: pressing Stop must
+        # stop, not then spend minutes rebuilding genre playlists and the whole
+        # playlist index. A stopped scan's playlists are caught up next run.
+        try:
+            from services.popularity.scan_scope import resume_global_playlists
+
+            resume_global_playlists()
+            if status == "complete":
+                from services.popularity.stages.finalise_stage import (
+                    _run_global_playlist_rebuild,
+                )
+
+                _run_global_playlist_rebuild({}, force=True)
+        except Exception as exc:
+            logger.debug(
+                "[FULL_SCAN] End-of-scan playlist rebuild failed", error=str(exc)
+            )
+
         # A completed full scan clears the checkpoint so the NEXT scan starts
         # from the top (no stale resume point).  A stopped/failed scan keeps it
         # so the next run resumes where it left off.

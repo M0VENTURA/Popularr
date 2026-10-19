@@ -294,6 +294,30 @@
                         <tr id="disc-row-{{ loop.index }}">
                             <td class="fw-semibold" data-label="Album">
                                 <a href="/album/{{ artist_name|path_segment }}/{{ row.album|path_segment }}" class="text-decoration-none">{{ row.album }}</a>
+                                {#
+                                  DISCLOSURE: which tracks actually disagree.
+
+                                  The counts beside this say an album is inconsistent
+                                  but not WHICH rows to fix, so the operator had to open
+                                  the album and eyeball every track. The two groups are
+                                  shown apart because they need OPPOSITE treatment — the
+                                  tracks WITH a disc number are the ones to clear, and
+                                  the ones WITHOUT already match the single-disc case.
+
+                                  Only rendered when the detail actually arrived, so a
+                                  failed detail query degrades to exactly the previous
+                                  page rather than to an empty panel.
+                                #}
+                                {% if row.tracks_with or row.tracks_without %}
+                                <button class="btn btn-link btn-sm p-0 ms-2 align-baseline text-decoration-none"
+                                        type="button"
+                                        data-bs-toggle="collapse"
+                                        data-bs-target="#disc-detail-{{ loop.index }}"
+                                        aria-expanded="false"
+                                        aria-controls="disc-detail-{{ loop.index }}">
+                                    <i class="bi bi-list-ul me-1"></i>Show {{ row.track_count }} track(s)
+                                </button>
+                                {% endif %}
                             </td>
                             <td class="text-center" data-label="Total Tracks">{{ row.track_count }}</td>
                             <td class="text-center" data-label="With Disc #">
@@ -320,6 +344,54 @@
                                 {% endif %}
                             </td>
                         </tr>
+                        {% if row.tracks_with or row.tracks_without %}
+                        <tr class="disc-detail-row">
+                            <td colspan="6" class="p-0 border-0">
+                                <div class="collapse" id="disc-detail-{{ loop.index }}">
+                                    <div class="p-3 bg-body-tertiary border-top border-secondary">
+                                        <div class="row g-3">
+                                            {% if row.tracks_with %}
+                                            <div class="col-12 col-lg-6">
+                                                <div class="small fw-bold text-warning mb-2">
+                                                    <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                                                    Have a disc number ({{ row.tracks_with|length }}) — these are the odd ones out
+                                                </div>
+                                                <ul class="list-unstyled mb-0 small">
+                                                    {% for t in row.tracks_with %}
+                                                    <li class="d-flex justify-content-between gap-2 py-1 border-bottom border-secondary-subtle">
+                                                        <span class="text-truncate">
+                                                            {% if t.track_number %}<span class="text-muted me-2">#{{ t.track_number }}</span>{% endif %}{{ t.title }}
+                                                        </span>
+                                                        <span class="badge bg-warning text-dark flex-shrink-0">disc {{ t.disc_number }}</span>
+                                                    </li>
+                                                    {% endfor %}
+                                                </ul>
+                                            </div>
+                                            {% endif %}
+                                            {% if row.tracks_without %}
+                                            <div class="col-12 col-lg-6">
+                                                <div class="small fw-bold text-muted mb-2">
+                                                    <i class="bi bi-dash-circle me-1"></i>
+                                                    No disc number ({{ row.tracks_without|length }}) — already consistent
+                                                </div>
+                                                <ul class="list-unstyled mb-0 small text-muted">
+                                                    {% for t in row.tracks_without %}
+                                                    <li class="text-truncate py-1 border-bottom border-secondary-subtle">
+                                                        {% if t.track_number %}<span class="text-muted me-2">#{{ t.track_number }}</span>{% endif %}{{ t.title }}
+                                                    </li>
+                                                    {% endfor %}
+                                                </ul>
+                                            </div>
+                                            {% endif %}
+                                        </div>
+                                        <div class="extra-small text-muted mt-2">
+                                            Clearing removes the disc number from the highlighted track(s) above, so every track in the album matches. Database values and file tags are both updated.
+                                        </div>
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endif %}
                         {% endfor %}
                     </tbody>
                 </table>

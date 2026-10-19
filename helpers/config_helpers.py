@@ -1499,6 +1499,95 @@ def get_favourite_playlists_config() -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Artists excluded from generated playlists
+# ---------------------------------------------------------------------------
+
+#: Artists that must never be generated into a playlist, whatever else is on.
+#:
+#: ⚠️ DISTINCT FROM ``_ESSENTIAL_EXCLUDED_ARTISTS`` in ``finalise_stage``.
+#: That frozenset is a CODE constant for placeholder credits ("Various Artists",
+#: "Soundtrack", …) — names that are not really an artist. This is a USER list:
+#: real artists the operator does not want playlist entries for (comedy acts,
+#: audiobooks, an unfavourite band, …). Keeping them apart means a user can
+#: remove an entry they added without deleting a placeholder guard the code
+#: depends on, and vice versa.
+_EXCLUDED_PLAYLIST_ARTISTS_KEY = "excluded_artists"
+
+
+def _normalise_excluded_artist(name: Any) -> str:
+    """Comparison key for the excluded-artist list.
+
+    Casefolded and trimmed so "Candlemass", "candlemass " and "CANDLEMASS" are
+    one entry. Punctuation is NOT folded: unlike a track title, an artist name
+    is a stable identifier here, and folding "AC/DC" to "acdc" would make it
+    collide with a genuinely different act called "ACDC".
+    """
+    return str(name or "").strip().casefold()
+
+
+def get_excluded_playlist_artists() -> set[str]:
+    """Artists the user excluded from generated playlists, as comparison keys.
+
+    Config section: ``playlists.excluded_artists`` in config.yaml — a list of
+    artist names.
+
+    Returns a set of :func:`_normalise_excluded_artist` keys, because every
+    caller only ever asks "is this artist excluded?".
+
+    ⚠️ A non-list value is treated as empty rather than iterated. A hand-edited
+    ``excluded_artists: Candlemass`` (a bare string) would otherwise iterate
+    CHARACTER BY CHARACTER and exclude every artist whose name is a single
+    letter — a silent, spectacular failure from a plausible typo.
+    """
+    cfg = get_config() or {}
+    p = cfg.get("playlists") or {}
+    if not isinstance(p, dict):
+        return set()
+    raw = p.get(_EXCLUDED_PLAYLIST_ARTISTS_KEY)
+    if isinstance(raw, dict):
+        # ``{artist: true}`` is a shape a YAML edit can easily produce; its
+        # KEYS carry the same meaning as the list, so accept it.
+        raw = list(raw.keys())
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple, set, frozenset)):
+        if isinstance(raw, str) and raw.strip():
+            raw = [raw]
+        else:
+            return set()
+    return {k for k in (_normalise_excluded_artist(v) for v in raw) if k}
+
+
+def set_excluded_playlist_artists(artists: Any) -> bool:
+    """Replace ``playlists.excluded_artists`` and persist it.
+
+    Sorted and de-duplicated so the stored list is stable: a UI that re-saves an
+    unchanged set must not reorder the file, and an idempotent save must not
+    produce a spurious diff.
+
+    Uses :func:`save_partial_config` (a deep MERGE into the on-disk config)
+    rather than :func:`save_config`, whose argument is the COMPLETE config —
+    passing a section to it would delete every other key in config.yaml.
+    """
+    if isinstance(artists, str):
+        artists = [artists]
+    if not isinstance(artists, (list, tuple, set, frozenset)):
+        return False
+
+    cleaned: dict[str, str] = {}
+    for value in artists:
+        display = str(value or "").strip()
+        key = _normalise_excluded_artist(display)
+        if key and key not in cleaned:
+            cleaned[key] = display
+    ordered = [cleaned[k] for k in sorted(cleaned)]
+    return save_partial_config({"playlists": {_EXCLUDED_PLAYLIST_ARTISTS_KEY: ordered}})
+
+
+def is_artist_excluded_from_playlists(artist: str) -> bool:
+    """True when *artist* is on the user's playlist-exclusion list."""
+    return _normalise_excluded_artist(artist) in get_excluded_playlist_artists()
+
+
 # -----------------------------------------------------------------------------
 # Genre Aggregation Configuration
 # -----------------------------------------------------------------------------

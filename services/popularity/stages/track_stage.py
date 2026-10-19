@@ -90,6 +90,7 @@ from helpers.normalization_service import (
 # Re-fetch threshold provider
 from services.popularity.popularity_cache_policy import (
     get_cache_duration_hours,
+    popularity_sources_are_complete,
     should_use_cached_score,
 )
 
@@ -1572,11 +1573,20 @@ def process_track(
                 int(effective_track.get("lastfm_listeners") or 0) >= 25
                 or int(effective_track.get("listenbrainz_listens") or 0) >= 25
             )
+            # A cached score built while one of the popularity sources was
+            # zero can freeze that source forever: the other source may be
+            # large enough to make the score "credible", so the cache is
+            # reused and the zeroed source is never re-queried.  Treat any
+            # zero source as stale unless the user has explicitly frozen the
+            # track, matching the non-cached branch's behaviour of re-fetching
+            # zeroed sources.  The rule lives next to the other freshness
+            # rules in ``popularity_cache_policy`` so it can be tested alone.
+            _sources_complete = popularity_sources_are_complete(effective_track)
             _cached = (
                 not _force
                 and (frozen_track or should_use_cached_score(effective_track))
-            ) and bool(
-                effective_track.get("final_score") and _has_credible_data
+                and bool(effective_track.get("final_score") and _has_credible_data)
+                and (frozen_track or _sources_complete)
             )
 
             if _cached:

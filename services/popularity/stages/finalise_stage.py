@@ -1352,7 +1352,7 @@ def _assign_stars(
                 # ⭐ A LOCKED TRACK IS NOT RE-LITIGATED BY THE ALBUM'S SHAPE.
                 #
                 # The lock is an ARTIST-wide verdict: the pre-pass
-                # (``_compute_global_5star_locked_titles``) ranks the artist's
+                # (``_compute_global_5star_locked_ids``) ranks the artist's
                 # whole scanned catalogue by ``_raw_combined`` and locks the
                 # top ``global_5star_catalog_top_pct`` that ALSO clear
                 # ``global_5star_min_raw_score``. That raw floor IS the "these
@@ -2305,7 +2305,32 @@ def _normalise_artist_key(artist: Any) -> str:
 
 
 def _is_excluded_essential_artist(artist: str) -> bool:
-    return str(artist or "").strip().casefold() in _ESSENTIAL_EXCLUDED_ARTISTS
+    """True when an artist must not get an Essential Collection.
+
+    Two independent reasons, both of which must be honoured at every call
+    site:
+
+    1. ``_ESSENTIAL_EXCLUDED_ARTISTS`` — placeholders that are not really an
+       artist ("Various Artists", "Soundtrack", …).
+    2. ``playlists.excluded_artists`` — the USER's list, written by
+       "Exclude this artist from Playlists" on the artist page and managed in
+       Config → Playlists.
+
+    ⚠️ The user list was previously honoured ONLY by the genre builder, so an
+    artist excluded there still received an Essential Collection — the exact
+    opposite of what the option says it does.
+    """
+    if str(artist or "").strip().casefold() in _ESSENTIAL_EXCLUDED_ARTISTS:
+        return True
+    try:
+        from helpers.config_helpers import is_artist_excluded_from_playlists
+
+        return is_artist_excluded_from_playlists(artist)
+    except Exception as exc:
+        # Fail OPEN: a config read that fails must not silently stop every
+        # Essential Collection from being built.
+        logger.debug("Excluded-artist config read failed", error=str(exc))
+        return False
 
 
 def _essential_strip_guest_credit(artist: str) -> str:
@@ -3508,6 +3533,47 @@ def _create_genre_top_track_playlists(
     rows = _fetch_genre_playlist_rows(min_stars)
     if not rows:
         return 0
+
+    # ── User-excluded artists ────────────────────────────────────────────────
+    #
+    # "Exclude this artist from Playlists" on the artist page writes
+    # ``playlists.excluded_artists``; this is where it takes effect for the
+    # GENRE collections. Filtered at the ROW level, before any pooling, so an
+    # excluded artist cannot reach any genre playlist through any path —
+    # including the per-genre pools, the family tie-breaks and the per-artist
+    # cap alike. Filtering later (per pool, say) would have to be repeated for
+    # every branch and would leak the artist the moment a branch forgot.
+    #
+    # ⚠️ Compared with the SAME canonical key the rest of this module uses:
+    # ``COALESCE(NULLIF(album_artist, ''), artist)``, casefolded. Comparing raw
+    # ``artist`` would miss the very common case where the album artist carries
+    # the name the user picked on the artist page.
+    try:
+        from helpers.config_helpers import get_excluded_playlist_artists
+
+        _excluded_artists = get_excluded_playlist_artists()
+    except Exception as exc:
+        logger.debug("Excluded-artist config read failed", error=str(exc))
+        _excluded_artists = set()
+
+    if _excluded_artists:
+        _before = len(rows)
+        rows = [
+            r
+            for r in rows
+            if str(r.get("album_artist") or r.get("artist") or "")
+            .strip()
+            .casefold()
+            not in _excluded_artists
+        ]
+        if len(rows) != _before:
+            logger.info(
+                "Genre playlists: skipped excluded artist(s)",
+                tracks_skipped=_before - len(rows),
+                artists=sorted(_excluded_artists),
+            )
+        if not rows:
+            return 0
 
     # PRE-FETCH: Find out which playlists already exist in Navidrome
     existing_playlists = set()
@@ -4858,8 +4924,37 @@ def post_album_star_ratings(
 _GLOBAL_PLAYLIST_LOCK = threading.Lock()
 
 
-def _run_global_playlist_rebuild(options: dict[str, Any]) -> None:
+def _run_global_playlist_rebuild(
+    options: dict[str, Any],
+    *,
+    force: bool = False,
+) -> None:
+    """Rebuild the GLOBAL playlists (genre top-tracks, New Music) + the index.
+
+    ⚠️ ``options`` IS PER-ARTIST during a full scan, so its marker can NEVER
+    make this "once per scan": ``scan_stage_runner.run_scan`` builds a fresh
+    dict for every artist. That inaccuracy is what made a 982-artist scan pay a
+    full genre sync plus an entire playlist-index rebuild after every artist —
+    see ``services/popularity/scan_scope`` for the measurement and the fix.
+
+    The full-scan orchestrator therefore DEFERS this for the duration of the
+    artist loop (every per-artist call returns immediately) and calls it once at
+    the end with ``force=True``.
+    """
     marker = "_global_playlists_done"
+
+    # Deferred to the end of a full scan — the orchestrator owns the rebuild.
+    # ``force=True`` is how that end-of-scan call gets through.
+    if not force:
+        try:
+            from services.popularity.scan_scope import global_playlists_deferred
+
+            if global_playlists_deferred():
+                return
+        except Exception:
+            # A broken flag module must never disable playlist generation.
+            pass
+
     if options.get(marker):
         return
 
@@ -4923,10 +5018,15 @@ def _run_global_playlist_rebuild(options: dict[str, Any]) -> None:
         # ── Playlist index (artist page's "Included in Playlists") ─────────
         #
         # Runs LAST, after every builder above, so the index records what this
-        # pass just created rather than the previous pass's contents. It also
-        # runs ONCE per scan (this function is marker-guarded), not once per
-        # artist — the essential collections are refreshed per artist during the
-        # run, so they are all in place by the time this fires.
+        # pass just created rather than the previous pass's contents.
+        #
+        # ⚠️ "ONCE PER SCAN" IS ENFORCED BY ``scan_scope``, NOT BY THE MARKER
+        # BELOW. This comment used to claim the marker achieved it, which was
+        # false: ``options`` is rebuilt per artist, so on a full scan ``marker``
+        # is always absent and this whole block (genre playlists, New Music,
+        # per-user favourites + the index over every playlist) ran after EVERY
+        # artist. The full-scan orchestrator now defers it and calls this once at
+        # the end; the marker only dedupes repeat calls WITHIN one artist's run.
         #
         # The index sync is cheap when nothing moved: it lists the playlists,
         # compares each `changed` stamp and fetches only the ones that differ.

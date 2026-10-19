@@ -128,10 +128,11 @@ def captured(monkeypatch):
     monkeypatch.setattr(ui, "db_session", lambda *a, **k: _FakeSession(tracks))
     monkeypatch.setattr(ui, "get_config", lambda: {})
 
-    monkeypatch.setattr(
-        ui, "insert_or_update_track",
-        lambda track_id, payload: cap.db_payloads.append(dict(payload)),
-    )
+    def _capture_bulk(payloads):
+        cap.db_payloads.extend(dict(p) for p in payloads)
+        return (len(payloads), 0)
+
+    monkeypatch.setattr(ui, "upsert_tracks_bulk", _capture_bulk)
 
     def _genres(track_id, genres_str):
         cap.genre_calls.append((track_id, genres_str))
@@ -503,10 +504,10 @@ class TestRefusedWritesAreReported:
         monkeypatch.setattr(ui, "update_file_tags", lambda p, t: True)
         monkeypatch.setattr(ui, "track_carries_live_state", lambda t: False)
 
-        def _boom(track_id, payload):
+        def _boom(payloads):
             raise ValueError('invalid input syntax for type json')
 
-        monkeypatch.setattr(ui, "insert_or_update_track", _boom)
+        monkeypatch.setattr(ui, "upsert_tracks_bulk", _boom)
 
         resp = await client.post(ALBUM_URL, form={
             "album_title": "Not Your Kingdom",

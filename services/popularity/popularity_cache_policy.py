@@ -108,6 +108,34 @@ def should_use_cached_score(track):
     return False
 
 
+def popularity_sources_are_complete(track: dict[str, Any]) -> bool:
+    """True only when NEITHER popularity source is zero.
+
+    A score cached while one source was zero freezes that source forever:
+    the OTHER source can be large enough to make the whole score look
+    credible (``_has_credible_data``), so ``should_use_cached_score`` alone
+    reuses the stale ``final_score`` and the zeroed source is never
+    re-queried. Reported as a track showing ``LB: 0.0`` on every scan despite
+    a healthy Last.fm listener count.
+
+    Treating a zero source as incomplete makes the cached path decline and
+    the fresh path re-fetch exactly the source that is zero — the same thing
+    the non-cached branch already does. A genuinely popular track that simply
+    has no ListenBrainz presence re-queries once per scan; that is the
+    intended trade so ``0`` can never be sticky.
+
+    ``5`` and ``True`` coerce through ``int()`` like the scoring path, so a
+    count stored as a string is judged the same way.
+    """
+    try:
+        return (
+            int(track.get("lastfm_listeners") or 0) > 0
+            and int(track.get("listenbrainz_listens") or 0) > 0
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def get_cache_duration_hours(track_year: int | None = None) -> int:
     """Return cache TTL in hours based on track release age.
 

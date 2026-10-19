@@ -256,6 +256,93 @@
     openArtistScanSheet({ preselect: 'metadata', force: true });
   }
 
+  // ── Playlist exclusion ──────────────────────────────────────────────────
+  /*
+    "Exclude This Artist from Playlists" (⋮ → Show More).
+
+    Writes ``playlists.excluded_artists`` through the shared artist API, which
+    both generated-playlist builders read: the genre top-tracks builder filters
+    its rows by it, and the Essential Collection builder treats it as an
+    exclusion (alongside its own placeholder list for "Various Artists" etc.).
+
+    ⚠️ THE LABEL IS SET FROM THE SERVER'S ANSWER, NEVER FROM THE CLICK.
+    Optimistically flipping the label would show "Exclude" even when the config
+    write failed, and the next scan would generate the very playlist the user
+    had just excluded. The endpoint re-reads config.yaml from disk on every
+    call, so its response is the only trustworthy statement of stored state.
+  */
+  function applyPlaylistExclusionState(excluded) {
+    var item = doc.getElementById('artistPlaylistExclusionItem');
+    if (item) item.setAttribute('data-excluded', excluded ? 'true' : 'false');
+
+    var icon = doc.getElementById('artistPlaylistExclusionIcon');
+    if (icon) {
+      icon.className = excluded
+        ? 'bi bi-music-note-beamed me-2'
+        : 'bi bi-slash-circle me-2';
+    }
+    var label = doc.getElementById('artistPlaylistExclusionLabel');
+    if (label) {
+      label.textContent = excluded
+        ? 'Include This Artist in Playlists'
+        : 'Exclude This Artist from Playlists';
+    }
+  }
+
+  function setArtistPlaylistExclusion(excluded) {
+    var artist = artistName();
+    if (!artist) {
+      notifyError('Could not determine the artist name');
+      return Promise.resolve();
+    }
+    return postJson('/api/artist/playlist-exclusion', {
+      artist: artist,
+      excluded: !!excluded,
+    })
+      .then(function (data) {
+        if (!data || !data.success) {
+          notifyError((data && data.error) || 'Could not update playlist exclusion');
+          return;
+        }
+        // Re-derive from the returned list rather than trusting `excluded`:
+        // the server de-duplicates case-insensitively, so its list is truth.
+        var on = (data.artists || []).some(function (a) {
+          return String(a).toLowerCase() === artist.toLowerCase();
+        });
+        applyPlaylistExclusionState(on);
+        notifySuccess(
+          on
+            ? '"' + artist + '" will be skipped by playlist generation'
+            : '"' + artist + '" can be included in playlists again'
+        );
+      })
+      .catch(function (error) {
+        notifyError('Could not update playlist exclusion: ' + (error && error.message ? error.message : error));
+      });
+  }
+
+  /** Called by the ⋮ item: flip whatever the item currently says. */
+  function toggleArtistPlaylistExclusion() {
+    var item = doc.getElementById('artistPlaylistExclusionItem');
+    var currently = item ? item.getAttribute('data-excluded') === 'true' : false;
+    return setArtistPlaylistExclusion(!currently);
+  }
+
+  function loadArtistPlaylistExclusion() {
+    var item = doc.getElementById('artistPlaylistExclusionItem');
+    if (!item) return Promise.resolve();
+    var artist = artistName();
+    if (!artist) return Promise.resolve();
+    return getJson('/api/artist/playlist-exclusion?artist=' + encodeURIComponent(artist))
+      .then(function (data) {
+        if (data && data.success) applyPlaylistExclusionState(!!data.excluded);
+      })
+      .catch(function () {
+        // Leave the default label. The toggle still works and re-reads state
+        // afterwards, so a failed initial load is self-correcting.
+      });
+  }
+
   // ── Bio clamp ───────────────────────────────────────────────────────────
 
   function toggleArtistBio() {
@@ -490,6 +577,7 @@
     // unconditionally would flag every artist whose scan found nothing.
     var artist = artistName();
     if (artist) {
+      loadArtistPlaylistExclusion();
       getJson('/api/artist/missing-releases?artist=' + encodeURIComponent(artist))
         .then(function (data) {
           var count = data && (data.count || data.total);
@@ -516,6 +604,9 @@
   global.fetchArtistCountry = fetchArtistCountry;
   global.editArtistCountry = editArtistCountry;
   global.forceArtistMetadataRefresh = forceArtistMetadataRefresh;
+  global.toggleArtistPlaylistExclusion = toggleArtistPlaylistExclusion;
+  global.setArtistPlaylistExclusion = setArtistPlaylistExclusion;
+  global.loadArtistPlaylistExclusion = loadArtistPlaylistExclusion;
   global.toggleArtistBio = toggleArtistBio;
   global.goToArtistAbout = goToArtistAbout;
   global.openArtistAboutModal = openArtistAboutModal;

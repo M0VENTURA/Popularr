@@ -202,6 +202,23 @@
             <li><a class="dropdown-item" href="javascript:void(0)" onclick="openEditArtistIdsModal()"><i class="bi bi-pencil me-2"></i> Edit External IDs</a></li>
             <li><a class="dropdown-item" href="{{ url_for('artist.api_artist_popularity_report', artist=artist_name) }}" title="CSV of every track: Last.fm + ListenBrainz listens, source scores, combined score and stars — most popular first"><i class="bi bi-bar-chart-line me-2"></i> Download Popularity Report</a></li>
             <li><hr class="dropdown-divider"></li>
+            {#
+              Playlist exclusion. See artist-detail-extras.js for the write and
+              the two generated-playlist builders that honour it.
+
+              ⚠️ The state lives on the <li> (data-excluded) and the label is
+              rewritten from the API's answer — so the menu never claims an
+              artist is excluded when the config write failed. The label starts
+              as the "exclude" invitation, which is correct for the common case
+              of an artist not yet on the list; the initial GET corrects it for
+              one that is.
+            #}
+            <li id="artistPlaylistExclusionItem" data-excluded="false">
+              <button class="dropdown-item" type="button" onclick="toggleArtistPlaylistExclusion()">
+                <i class="bi bi-slash-circle me-2" id="artistPlaylistExclusionIcon"></i>
+                <span id="artistPlaylistExclusionLabel">Exclude This Artist from Playlists</span>
+              </button>
+            </li>
             <li><button class="dropdown-item" type="button" onclick="forceArtistMetadataRefresh()"><i class="bi bi-arrow-repeat me-2"></i> Force Metadata Refresh</button></li>
           </ul>
         </div>

@@ -68,7 +68,10 @@ class TestThePhasesRunInAnOrderThatPreservesTheReview:
 
     def test_the_three_phases_are_called_in_one_pass(self):
         genres = ROUTE_SOURCE.index("_apply_album_track_genres(")
-        persist = ROUTE_SOURCE.index("_persist_album_track_payload(track_id, payload)")
+        # The persist phase now writes the WHOLE album in ONE transaction, so
+        # it is invoked ONCE after the loop rather than once per track. The DB
+        # write must still land before the file phase — that is what this pins.
+        persist = ROUTE_SOURCE.index("_persist_album_track_payloads(_db_payloads)")
         # The FILE phase no longer sits inside the per-track loop: it became
         # ONE phase after it (Cloudflare 524 — N sequential disk passes
         # outlived the origin timeout), and since 2026-10-15 that one phase is
@@ -113,6 +116,11 @@ class TestThePhasesRunInAnOrderThatPreservesTheReview:
         assert "insert_or_update_track(track_id, payload)" not in route, (
             "the DB write is inline in the route again — the phase is bypassed"
         )
+        assert "upsert_tracks_bulk(" not in route, (
+            "the bulk DB write leaked back into the route — it belongs in "
+            "_persist_album_track_payloads so the whole album shares one "
+            "transaction"
+        )
         assert "build_tag_updates(payload)" not in route, (
             "the file-tag write is inline in the route again"
         )
@@ -125,23 +133,52 @@ class TestThePhasesRunInAnOrderThatPreservesTheReview:
 # 2. Phase behaviour
 # ===========================================================================
 class TestPersistPhase:
-    def test_success_reports_ok(self, monkeypatch):
-        monkeypatch.setattr(ui, "insert_or_update_track", lambda tid, payload: True)
-        assert ui._persist_album_track_payload("t1", {"title": "x"}) == (True, "")
+    def test_empty_batch_is_a_no_op(self):
+        assert ui._persist_album_track_payloads([]) == (0, 0)
 
-    def test_failure_is_reported_not_swallowed(self, monkeypatch, caplog):
-        def _boom(_tid, _payload):
+    def test_success_reports_every_row(self, monkeypatch):
+        monkeypatch.setattr(ui, "upsert_tracks_bulk", lambda payloads: True)
+        payloads = [{"id": "t1", "title": "x"}, {"id": "t2", "title": "y"}]
+        assert ui._persist_album_track_payloads(payloads) == (2, 0)
+
+    def test_one_transaction_for_the_whole_album(self, monkeypatch):
+        """The batch goes through ONE ``upsert_tracks_bulk`` call.
+
+        The old per-track helper opened a session + commit for every row —
+        the wall clock behind the reported slow save. The phase must hand the
+        whole list to the bulk writer, not loop over it.
+        """
+        seen: list[list[dict]] = []
+
+        def _record(payloads):
+            seen.append(list(payloads))
+            return True
+
+        monkeypatch.setattr(ui, "upsert_tracks_bulk", _record)
+        payloads = [{"id": "t1"}, {"id": "t2"}, {"id": "t3"}]
+        ui._persist_album_track_payloads(payloads)
+        assert len(seen) == 1, "the album must be written in ONE bulk call"
+        assert seen[0] == payloads
+
+    def test_a_rejected_row_is_reported_not_swallowed(self, monkeypatch):
+        def _boom(_payloads):
             raise ValueError("invalid input syntax for type json")
 
-        monkeypatch.setattr(ui, "insert_or_update_track", _boom)
+        monkeypatch.setattr(ui, "upsert_tracks_bulk", _boom)
 
-        ok, error = ui._persist_album_track_payload("t1", {"title": "x"})
+        updated, failed = ui._persist_album_track_payloads([{"id": "t1"}])
 
-        assert ok is False, "the caller counts this as db_failures"
-        assert "invalid input syntax" in error, (
-            "the DB's own reason must reach the caller — that is what makes "
-            "the failure diagnosable instead of a silent no-op save"
+        assert (updated, failed) == (0, 1), (
+            "a refused write is counted as db_failures, never reported as a "
+            "successful no-op save"
         )
+
+    def test_a_partial_batch_is_reported_as_a_failure(self, monkeypatch):
+        # ``upsert_tracks_bulk`` returns False when ANY row failed (each bad
+        # row is logged with its track_id by the repository). The batch is
+        # then reported as failed rather than "no changes were made".
+        monkeypatch.setattr(ui, "upsert_tracks_bulk", lambda payloads: False)
+        assert ui._persist_album_track_payloads([{"id": "t1"}, {"id": "t2"}]) == (0, 2)
 
 
 class TestGenresPhase:
@@ -406,10 +443,13 @@ class TestTheSaveCannotOutliveTheOriginTimeout:
     def test_the_route_collects_file_jobs_instead_of_writing_inline(self):
         """Phase 3 is queued in the loop and run once, after it."""
         queue_at = ROUTE_SOURCE.index("_file_jobs.append(")
-        persist_at = ROUTE_SOURCE.index("_persist_album_track_payload(track_id, payload)")
+        # The DB write is now ONE batched call after the loop, so the file
+        # JOBS are queued first and the album's single commit follows. What
+        # matters is that the commit still lands before the file phase runs.
+        persist_at = ROUTE_SOURCE.index("_persist_album_track_payloads(_db_payloads)")
         run_at = ROUTE_SOURCE.index("_run_album_file_sync_phases")
 
-        assert persist_at < queue_at < run_at, (
+        assert queue_at < run_at and persist_at < run_at, (
             "the file phase must stay AFTER the database writes and be "
             "started once for the album, not once per track"
         )

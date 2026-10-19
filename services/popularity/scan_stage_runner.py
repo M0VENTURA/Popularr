@@ -1422,7 +1422,47 @@ def _apply_popularity_marking_bump(album_results: list[dict[str, Any]]) -> list[
     return album_results
 
 
-def _compute_global_5star_locked_titles(artist: str, all_results: list[dict[str, Any]], options: dict[str, Any]) -> set[str]:
+def _lock_identity(track: dict[str, Any]) -> str:
+    """Row identity for the global 5★ catalogue lock. NEVER a bare title.
+
+    ⚠️ A NORMALISED TITLE CANNOT IDENTIFY A ROW — the same lesson
+    ``popularity_sources.track_identity_key`` and
+    ``album_recording_batch_key`` already record for the per-album batch. The
+    lock was still keyed by title, so a title in the locked set matched EVERY
+    track sharing it, including a different recording on another disc.
+
+    Reported on Candlemass — ``Dactylis Glomerata``: Disc 1's ``Dustflow``
+    (raw 69.7, above the 60 floor) put ``"dustflow"`` in the set, so Disc 2's
+    ``Dustflow`` (raw 40.2, BELOW the floor) was locked to 5★ as well and the
+    log printed the same title twice with two different raw scores. Because a
+    lock is an ARTIST-wide verdict on a track's OWN popularity, lending it to a
+    second, weaker recording inverts the rating the whole pre-pass exists to
+    protect.
+
+    ``track_id`` is the canonical identity on an album-RESULT dict: the star
+    pipeline and the Navidrome rating sync both read ``track.get("track_id")``.
+    ``id`` is accepted as a fallback because the earlier track-stage inputs
+    carry the DB column name instead.
+
+    A track with NEITHER id cannot be told apart from a same-titled sibling, so
+    it falls back to a namespaced title key. The ``title:`` prefix keeps that
+    key from ever colliding with a real id, and it means an id-less library
+    keeps exactly today's behaviour rather than silently locking nothing.
+    """
+    ident = str(track.get("track_id") or track.get("id") or "").strip()
+    if ident:
+        return ident
+    return "title:" + str(track.get("title") or "").strip().lower()
+
+
+def _compute_global_5star_locked_ids(artist: str, all_results: list[dict[str, Any]], options: dict[str, Any]) -> set[str]:
+    """The artist's catalogue-top track IDENTITIES, for the 5★ lock.
+
+    Was ``..._locked_titles`` and returned lowercased TITLES; that made the lock
+    contagious across same-titled rows (see ``_lock_identity``). Renamed rather
+    than quietly changed, because the old name promised the old behaviour and
+    every caller had to be re-read anyway.
+    """
     try:
         _sd = get_config().get("single_detection") or {}
         _top_pct = float(_sd.get("global_5star_catalog_top_pct", 0.20) or 0.20)
@@ -1457,7 +1497,7 @@ def _compute_global_5star_locked_titles(artist: str, all_results: list[dict[str,
     eligible.sort(key=lambda pair: pair[0], reverse=True)
     n = max(1, math.ceil(len(all_results) * _top_pct))
 
-    return {str(_tr.get("title") or "").strip().lower() for _raw, _tr in eligible[:n] if _raw >= _min_raw}
+    return {_lock_identity(_tr) for _raw, _tr in eligible[:n] if _raw >= _min_raw}
 
 
 def _mark_track_artist_top_band(album_results: list[dict[str, Any]]) -> None:
@@ -1943,7 +1983,8 @@ def run_scan(
     _last_quarter = 0
     _artist_scan_results: dict[str, list[dict[str, Any]]] = {}
     _per_album_posted_keys: set[tuple[str, str]] = set()
-    _artist_5star_locked_titles: dict[str, set[str]] = {}
+    #: artist -> set of locked track IDENTITIES (``_lock_identity``), NOT titles.
+    _artist_5star_locked_ids: dict[str, set[str]] = {}
     _artist_pending_albums: dict[str, list[dict[str, Any]]] = {}
     _artist_db_rows_cache: dict[str, list[Any]] = {}
     _artist_db_listen_cache: dict[str, list[Any]] = {}
@@ -2034,10 +2075,14 @@ def run_scan(
         _db_scores = _load_artist_db_scores(artist, scanned_titles)
         artist_scores = scan_scores + _db_scores
 
-        _locked_set = _artist_5star_locked_titles.get(artist) or set()
+        # ⚠️ MATCHED BY TRACK IDENTITY, NOT TITLE. The set holds
+        # ``_lock_identity`` values; comparing titles here is what let a locked
+        # Disc-1 track hand its 5★ verdict to a weaker same-titled track on
+        # Disc 2.
+        _locked_set = _artist_5star_locked_ids.get(artist) or set()
         if _locked_set:
             for _tr in album_results:
-                if str(_tr.get("title") or "").strip().lower() in _locked_set:
+                if _lock_identity(_tr) in _locked_set:
                     _tr["_global_5star_locked"] = True
                     if not bool(_tr.get("exclude_from_stats")) and not bool(_tr.get("is_live")):
                         log_unified(f"[scan_runner] '{_tr.get('title')}' → GLOBAL 5★ LOCKED (raw {float(_tr.get('_raw_combined') or 0):.1f}, catalog top)")
@@ -2117,10 +2162,10 @@ def run_scan(
         try:
             _all_artist_results = _artist_scan_results.get(artist, [])
             if len(_all_artist_results) >= 5:
-                _locked_titles = _compute_global_5star_locked_titles(artist, _all_artist_results, options)
-                if _locked_titles:
-                    _artist_5star_locked_titles[artist] = _locked_titles
-                    log_unified(f"[scan_runner] Global 5★ pre-pass: locked {len(_locked_titles)} catalog top track(s) for '{artist}'")
+                _locked_ids = _compute_global_5star_locked_ids(artist, _all_artist_results, options)
+                if _locked_ids:
+                    _artist_5star_locked_ids[artist] = _locked_ids
+                    log_unified(f"[scan_runner] Global 5★ pre-pass: locked {len(_locked_ids)} catalog top track(s) for '{artist}'")
         except Exception as exc:
             logger.debug("Global 5★ pre-pass failed", artist=artist, error=str(exc))
 

@@ -248,7 +248,7 @@ def save_env(monkeypatch, db_session):
     ]
     monkeypatch.setattr(ui, "db_session", lambda *a, **kw: _FakeSession(tracks))
     monkeypatch.setattr(ui, "get_config", lambda: {})
-    monkeypatch.setattr(ui, "insert_or_update_track", lambda track_id, payload: True)
+    monkeypatch.setattr(ui, "upsert_tracks_bulk", lambda payloads: (len(payloads), 0))
     monkeypatch.setattr(ui, "resolve_music_file_path", lambda p: None)
     monkeypatch.setattr(ui, "update_file_tags", lambda path, tags: True)
     monkeypatch.setattr(ui, "track_carries_live_state", lambda t: False)

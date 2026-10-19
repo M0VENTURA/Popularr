@@ -41,6 +41,134 @@ artist_bp = Blueprint("artist", __name__)
 
 
 # =============================
+# PLAYLIST EXCLUSION
+# =============================
+#
+# "Exclude this artist from Playlists" (artist page → ⋮) and the matching
+# manager in Config → Playlists are two views of ONE list,
+# ``playlists.excluded_artists`` in config.yaml. Both go through these
+# endpoints so they cannot disagree about the stored shape.
+#
+# ⚠️ THE WRITE IS A READ-MODIFY-WRITE OF THE WHOLE CONFIG FILE. That is what
+# ``save_partial_config`` does (deep-merge into the on-disk config), and it is
+# why the toggle is a single small request rather than a full config POST from
+# the artist page — the artist page has no business submitting the entire
+# settings document, and doing so would clobber any concurrent Config edit.
+# ``save_partial_config`` re-reads from DISK on every call, so the two pages
+# cannot lose each other's changes to a stale cache.
+
+
+@artist_bp.route("/api/artist/playlist-exclusion", methods=["GET"])
+async def api_get_playlist_exclusions() -> Any:
+    """Every artist excluded from generated playlists."""
+    from helpers.config_helpers import (
+        get_excluded_playlist_artists,
+        is_artist_excluded_from_playlists,
+    )
+
+    artist = (request.args.get("artist") or "").strip()
+    try:
+        return jsonify(
+            {
+                "success": True,
+                "artists": sorted(get_excluded_playlist_artists()),
+                "excluded": (
+                    is_artist_excluded_from_playlists(artist) if artist else None
+                ),
+            }
+        )
+    except Exception as exc:
+        logger.error("Failed to read playlist exclusions", error=str(exc))
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@artist_bp.route("/api/artist/playlist-exclusion", methods=["POST"])
+async def api_set_playlist_exclusions() -> Any:
+    """Replace the excluded-artist list, or toggle ONE artist.
+
+    Body:
+        ``{"artists": ["A", "B"]}`` — replace the whole list (Config manager).
+        ``{"artist": "A", "excluded": true}`` — toggle one (artist page).
+
+    Replacing is the Config page's contract: its manager renders every entry
+    and a removal has to be able to remove the LAST one, which an
+    add-only/remove-only endpoint cannot express.
+    """
+    from helpers.config_helpers import (
+        get_excluded_playlist_artists,
+        set_excluded_playlist_artists,
+    )
+
+    payload = (await request.get_json(silent=True)) or {}
+
+    try:
+        if "artists" in payload:
+            raw = payload.get("artists")
+            if not isinstance(raw, list):
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": "`artists` must be a list of artist names",
+                        }
+                    ),
+                    400,
+                )
+            # Preserve the DISPLAY form the user actually typed, but the set
+            # operation must be casefold-insensitive so "Candlemass" and
+            # "candlemass" cannot both be stored.
+            seen: dict[str, str] = {}
+            for value in raw:
+                display = str(value or "").strip()
+                key = display.casefold()
+                if key and key not in seen:
+                    seen[key] = display
+            ok = set_excluded_playlist_artists(list(seen.values()))
+        elif "artist" in payload:
+            artist = str(payload.get("artist") or "").strip()
+            if not artist:
+                return (
+                    jsonify({"success": False, "error": "`artist` is required"}),
+                    400,
+                )
+            key = artist.casefold()
+            # Read the DISPLAY forms back so a toggle does not rewrite every
+            # other entry into the normalised (casefolded) form.
+            current = [a for a in get_excluded_playlist_artists() if a != key]
+            if bool(payload.get("excluded", True)):
+                current.append(artist)
+            ok = set_excluded_playlist_artists(current)
+        else:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": "send either `artists` (replace) or `artist`+`excluded` (toggle)",
+                    }
+                ),
+                400,
+            )
+
+        if not ok:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": "Could not write playlist exclusions to config.yaml",
+                    }
+                ),
+                500,
+            )
+
+        artists = sorted(get_excluded_playlist_artists())
+        logger.info("Playlist exclusions updated", count=len(artists))
+        return jsonify({"success": True, "artists": artists})
+    except Exception as exc:
+        logger.error("Failed to set playlist exclusions", error=str(exc))
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+# =============================
 # CORRECTIONS
 # =============================
 
