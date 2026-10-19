@@ -3750,6 +3750,10 @@ def _create_genre_top_track_playlists(
     _cover_generated = 0
     _cover_skipped = 0
     _cover_failed = 0
+    # True when this pass ran with the genre-cover toggle OFF. Lets the summary
+    # below distinguish "feature disabled" from "feature ran and did nothing",
+    # which otherwise look identical in the log.
+    _cover_flag_off = False
 
     norm_only_genres = None
     if only_genres is not None:
@@ -3822,9 +3826,17 @@ def _create_genre_top_track_playlists(
             keep_playlist_names.add(playlist_name)
             if sync_res.get("skipped"):
                 skipped_unchanged += 1
-                continue
-            log_unified(f"📄 Playlist: Synced '{playlist_name}' to Navidrome ({len(_song_ids)} tracks)")
-            written += 1
+            else:
+                log_unified(f"📄 Playlist: Synced '{playlist_name}' to Navidrome ({len(_song_ids)} tracks)")
+                written += 1
+
+            # ⚠️ REACHED ON THE SKIPPED PATH TOO. ``sync_res["skipped"]`` only
+            # means "this exact content was already pushed by THIS process" —
+            # it says nothing about the playlist's ART. A bare ``continue``
+            # used to fire above, jumping over this entire block, so a playlist
+            # that had synced once was never cover-checked again: enabling the
+            # feature, fixing a bad key, or healing a cover deleted by hand
+            # could not take effect until the playlist's CONTENT changed.
 
             # ── AI cover art for the TOP GENRE playlists ───────────────────
             #
@@ -3844,6 +3856,12 @@ def _create_genre_top_track_playlists(
                 from helpers.config_helpers import get_genre_cover_config
 
                 _genre_cover_cfg = get_genre_cover_config()
+                if not _genre_cover_cfg["enabled"]:
+                    # Record it so the pass can say WHY nothing was checked: a
+                    # Gemini key on its own does not turn covers on (that is a
+                    # separate toggle), and the pair reads as "Gemini is
+                    # configured but no art ever appears".
+                    _cover_flag_off = True
                 if _genre_cover_cfg["enabled"]:
                     from services.playlists.genre_cover_service import (
                         generate_genre_cover,
@@ -3893,6 +3911,23 @@ def _create_genre_top_track_playlists(
             f"{_cover_skipped} already present, {_cover_failed} failed "
             f"({_cover_checked} playlist(s) checked)"
         )
+    elif _cover_flag_off:
+        # Speak up ONLY when the Gemini key is actually configured: otherwise
+        # this is a feature the user simply does not want, and a line per scan
+        # is noise.
+        try:
+            from helpers.config_helpers import get_gemini_config
+
+            _gem = get_gemini_config()
+            _gem_ready = bool(_gem.get("enabled") and _gem.get("api_key"))
+        except Exception:
+            _gem_ready = False
+        if _gem_ready:
+            log_unified(
+                "🎨 Genre playlist covers: OFF — tick 'AI covers for Top Genre "
+                "playlists' in Config ▸ Playlists (adding the Gemini key alone "
+                "does not enable them)"
+            )
 
     if delete_enabled and only_genres is None:
         if pools:

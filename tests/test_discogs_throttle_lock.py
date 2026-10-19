@@ -154,3 +154,81 @@ class TestDiscogsRequestBudget:
 
         assert payload == {}
         assert elapsed < 5.0
+
+
+class TestCooldownHonouredOnSharedLimiterPath:
+    """A 429's cooldown must be waited out EVEN when the cross-process shared
+    limiter is in use.
+
+    The shared-limiter branch RETURNED before the local cooldown logic, so in a
+    deployment the cooldown a 429 armed was never respected: parallel worker
+    threads kept firing at 1 req/s into a limit Discogs had just refused, which
+    turned one 429 into a storm — and each of those requests burned its own 30s
+    budget and gave up with no data."""
+
+    def test_cooldown_is_waited_before_shared_limiter_slot(self):
+        import api_clients.discogs_http as dh
+
+        calls: list[float] = []
+
+        class _StubLimiter:
+            def throttle_discogs(self) -> None:
+                calls.append(time.monotonic())
+
+        original_limiter = dh._rate_limiter
+        original_cooldown = dh._DISCOGS_RATE_LIMIT_UNTIL
+        original_last = dh._DISCOGS_LAST_REQUEST_TIME
+        dh._rate_limiter = _StubLimiter()
+        dh._DISCOGS_RATE_LIMIT_UNTIL = time.time() + 0.5
+        dh._DISCOGS_LAST_REQUEST_TIME = 0.0
+        try:
+            start = time.monotonic()
+            dh.throttle_discogs()
+        finally:
+            dh._rate_limiter = original_limiter
+            dh._DISCOGS_RATE_LIMIT_UNTIL = original_cooldown
+            dh._DISCOGS_LAST_REQUEST_TIME = original_last
+
+        # The shared limiter must still be asked for a slot...
+        assert len(calls) == 1
+        # ...but only AFTER the cooldown has been waited out.
+        assert calls[0] - start >= 0.4
+
+
+class Test429LongCooldownDoesNotBurnBudget:
+    """A 429 carrying a 60s Retry-After must NOT be slept against a 30s budget.
+
+    The guard read ``min(wait_seconds, 1.0)`` — effectively "is one second
+    left?" — so a 60s cooldown cleared it, slept the full 60 seconds, and the
+    request was then abandoned at the top of the next iteration anyway."""
+
+    def test_long_retry_after_gives_up_within_budget(self):
+        import api_clients.discogs_http as dh
+
+        class _Resp:
+            status_code = 429
+            headers = {"Retry-After": "60"}
+
+        class _Session:
+            def request(self, *args, **kwargs):
+                return _Resp()
+
+        client = dh.DiscogsHttpClient(token="tok")
+        client.session = _Session()
+
+        original_budget = dh._DISCOGS_REQUEST_BUDGET_SECONDS
+        dh._DISCOGS_REQUEST_BUDGET_SECONDS = 3.0
+        dh._DISCOGS_RATE_LIMIT_UNTIL = 0.0
+        try:
+            start = time.monotonic()
+            payload = client._request("GET", "/database/search", params={"q": "x"})
+            elapsed = time.monotonic() - start
+        finally:
+            dh._DISCOGS_REQUEST_BUDGET_SECONDS = original_budget
+            # The 429 armed a real shared cooldown — clear it so later tests in
+            # this process do not sleep on it.
+            dh._DISCOGS_RATE_LIMIT_UNTIL = 0.0
+
+        assert payload == {}
+        # Bounded by the request budget, NOT by the 60s header.
+        assert elapsed < 10.0

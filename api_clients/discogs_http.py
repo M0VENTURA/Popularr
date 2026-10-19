@@ -105,6 +105,33 @@ def throttle_discogs() -> None:
     """Respect Discogs request pacing and any active 429 cooldown without blocking locks."""
     global _DISCOGS_LAST_REQUEST_TIME
 
+    # ⚠️ THE 429 COOLDOWN IS WAITED OUT FIRST, ON EVERY PATH.
+    #
+    # It used to be honoured only inside the local fallback at the bottom of
+    # this function, and the shared-limiter path below RETURNED before ever
+    # reaching it (introduced with the 2026-10-07 cross-process Discogs
+    # throttle). In a real deployment the cooldown a 429 arms was therefore
+    # never respected: every other worker thread — and the queue worker
+    # process — kept firing at 1 req/s into a limiter Discogs had just pushed
+    # back on. One 429 became a storm of them, and each of those requests
+    # burned its own 30s budget and gave up with no data ("Discogs request
+    # budget exceeded — giving up").
+    #
+    # The lock is held only to READ the window; the sleep stays outside it so
+    # one sleeping worker cannot serialise the others (the rule
+    # ``TestThrottleDiscogsReleasesLock`` pins).
+    with _DISCOGS_THROTTLE_LOCK:
+        cooldown_wait = _DISCOGS_RATE_LIMIT_UNTIL - time.time()
+        if cooldown_wait > 0:
+            # The pacing clock must not jump ahead of the cooldown: record the
+            # instant the cooldown ends so the next request still gets its full
+            # spacing AFTER it rather than an immediate slot.
+            _DISCOGS_LAST_REQUEST_TIME = max(
+                _DISCOGS_LAST_REQUEST_TIME, _DISCOGS_RATE_LIMIT_UNTIL
+            )
+    if cooldown_wait > 0:
+        time.sleep(min(cooldown_wait, _DISCOGS_MAX_COOLDOWN))
+
     # Deployment-wide budget FIRST: the app and the queue worker are separate
     # processes, so the module-local lock below alone enforced 1 req/s per
     # PROCESS (2+ rps combined) — the burst that Discogs answers with read
@@ -216,7 +243,15 @@ class DiscogsHttpClient:
                     wait_seconds = min(get_retry_after_seconds(response), _DISCOGS_MAX_COOLDOWN)
                     _set_rate_limit_window(wait_seconds)
                     logger.warning("Discogs rate limited", wait_seconds=int(wait_seconds))
-                    if time.monotonic() + min(wait_seconds, 1.0) > _deadline:
+                    # ⚠️ Compare the ACTUAL cooldown against the remaining
+                    # budget. This read ``min(wait_seconds, 1.0)`` — i.e. "is
+                    # there one second left?" — so a 60s Retry-After cleared the
+                    # check against a 30s budget, slept the FULL 60 seconds, and
+                    # only then did the next iteration abandon the request at the
+                    # top of the loop. Every 429 stalled a minute AND still lost
+                    # its data. Bail out BEFORE sleeping instead, and let the
+                    # shared cooldown armed above pace the next attempt.
+                    if time.monotonic() + wait_seconds > _deadline:
                         logger.warning("Discogs request budget exceeded during 429 cooldown", url=url)
                         return {}
                     time.sleep(wait_seconds)
