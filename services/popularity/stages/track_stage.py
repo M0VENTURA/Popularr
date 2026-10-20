@@ -985,6 +985,16 @@ def _resolve_track_mb_metadata(
                 payload["work_mbid"] = mb_data["work_mbid"]
                 payload["musicbrainz_workid"] = mb_data["work_mbid"]
 
+            # ⭐ The "remix of" relation is read from the MusicBrainz recording
+            # and lands here. ``is_remix`` is the authoritative flag — a title
+            # that merely says "remix" is a hint, but a recording whose MB
+            # relation says "recording X is a remix of recording Y" IS a remix
+            # regardless of its title. Persist it so the track page, the
+            # duplicate-artist grouping and the "is this the original?"
+            # decision all agree.
+            if mb_data.get("is_remix"):
+                payload["is_remix"] = True
+
             if recording_mbid and not _from_batch:
                 _raw_existing_writer = track.get("writer")
                 _sanitized_existing_writer = _coerce_writer_list(_raw_existing_writer) if _raw_existing_writer else []

@@ -388,6 +388,51 @@ def credit_artist_mbid(artist_credit: Any) -> str | None:
                 return str(artist["id"])
     return None
 
+def remix_of_recording_id(recording: Any) -> str:
+    """The MBID of the recording this one RE-RECORDS, or "".
+
+    MusicBrainz records a remix as a recording-level relation:
+
+        remix of: [Break Stuff] (recording c8e00a85-…)
+
+    The relation ships with the recording fetch (``recording-rels`` is in the
+    ``inc`` superset), so it costs nothing extra to read — it was simply
+    never looked at.
+
+    ⭐ This is the AUTHORITATIVE remix signal, and it is what the app was
+    missing: a remix album whose titles carry no "(Remix)" wording (Limp
+    Bizkit's "New Old Songs") had no way to tell a remix from the original.
+
+    A recording that re-records ANOTHER one is a remix; a recording that
+    another one re-records is the ORIGINAL. The relation's ``direction``
+    matters, and MusicBrainz points the relation from the remix to the
+    original, so the presence of the relation is the answer.
+    """
+    for relation in (recording or {}).get("relations") or []:
+        if not isinstance(relation, dict):
+            continue
+        if str(relation.get("type") or "").casefold() != "remix of":
+            continue
+        target = relation.get("recording") or {}
+        if isinstance(target, dict) and target.get("id"):
+            return str(target["id"])
+    return ""
+
+
+def remixers_of_recording(recording: Any) -> list[str]:
+    """The artists credited as the remixer(s) of this recording."""
+    names: list[str] = []
+    for relation in (recording or {}).get("relations") or []:
+        if not isinstance(relation, dict):
+            continue
+        if str(relation.get("type") or "").casefold() != "remixer":
+            continue
+        artist = relation.get("artist") or {}
+        if isinstance(artist, dict) and artist.get("name"):
+            names.append(str(artist["name"]))
+    return list(dict.fromkeys(names))
+
+
 def primary_album_artist(artist_credit: list[Any] | str) -> str:
     if isinstance(artist_credit, list) and artist_credit:
         First = artist_credit[0]
@@ -1054,11 +1099,35 @@ class MusicBrainzService:
 
         writers: list[str] = []
         work_mbid = ""
+        # ── The "remix of" relation ─────────────────────────────────────
+        # MusicBrainz records a remix as a RECORDING-level relation pointing
+        # at the recording it re-records:
+        #
+        #     remix of: [Break Stuff] (recording c8e00a85-…)
+        #     remixer: [DJ Lethal]
+        #
+        # The relation was FETCHED (the recording ``inc`` superset includes
+        # ``recording-rels``) but never READ — the parser below only looked
+        # at ``performance``/``recording of``. So a remix on an album whose
+        # titles carry no "(Remix)" wording was indistinguishable from the
+        # original, and the "Remix of" line MusicBrainz itself displays was
+        # invisible to the app.
+        remix_of_recording_mbid = ""
+        remix_of_title = ""
+        remixers: list[str] = []
         try:
+            remix_of_recording_mbid = remix_of_recording_id(recording)
+            remixers = remixers_of_recording(recording)
             for relation in recording.get("relations") or []:
                 if not isinstance(relation, dict):
                     continue
-                if str(relation.get("type") or "").casefold() not in {"performance", "recording of"}:
+                _rel_type = str(relation.get("type") or "").casefold()
+                if _rel_type == "remix of":
+                    _target = relation.get("recording") or {}
+                    if isinstance(_target, dict) and _target.get("title"):
+                        remix_of_title = str(_target["title"])
+                    continue
+                if _rel_type not in {"performance", "recording of"}:
                     continue
                 work = relation.get("work") or {}
                 if not isinstance(work, dict):
@@ -1104,6 +1173,15 @@ class MusicBrainzService:
             "writer": ", ".join(dict.fromkeys(writers)),
             "work_mbid": work_mbid,
             "genres": list(dict.fromkeys(genres)),
+            # ── Remix evidence from the "remix of" recording relation ──────
+            # ``is_remix`` is TRUE only when MusicBrainz itself says this
+            # recording re-records another one. It is the AUTHORITATIVE
+            # signal — a title that merely says "remix" is a hint, and a
+            # title that says nothing is not evidence of an original.
+            "is_remix": bool(remix_of_recording_mbid),
+            "remix_of_recording_mbid": remix_of_recording_mbid,
+            "remix_of_title": remix_of_title,
+            "remixer": ", ".join(dict.fromkeys(remixers)),
         }
 
     def lookup_original_album_year(self, artist: str, album: str, **kwargs: Any) -> int | None:
@@ -2100,6 +2178,14 @@ def _flatten_release(Release: dict[str, Any], release_id: str) -> dict[str, Any]
                 "artist_mbid": credit_artist_mbid(
                     Recording.get("artist-credit")
                 ),
+                # ── The "remix of" recording relation ─────────────────────
+                # MusicBrainz records a remix as a relation from this
+                # recording to the one it re-records. The release tracklist
+                # carries the relation, so it is read HERE too — otherwise a
+                # remix would be flagged on the scan path and not on the
+                # album-lookup path, and the two would disagree.
+                "is_remix": bool(remix_of_recording_id(Recording)),
+                "remix_of_recording_mbid": remix_of_recording_id(Recording),
             }
             if genres:
                 # Stored as a comma-joined STRING (the tag writer splits on
