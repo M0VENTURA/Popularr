@@ -188,25 +188,68 @@ def get_album_genre_sources(
     track_list: list[dict[str, Any]],
     limit: int = 25,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Build ``genre_sources`` for an album from its tracks."""
+    """Build ``genre_sources`` for an album from its tracks.
+
+    ⚠️ Per-TRACK affiliation markers (Cover/Live/Acoustic/…) are DROPPED.
+
+    This pool feeds the album page's "Detected Sources" panel, whose entries
+    are CHECKBOXES: selecting one stages it as an ALBUM genre, and the album
+    save writes the album's genre list to every track that does not have
+    genre evidence of its own. So a single cover track's "Cover" tag, offered
+    here as an album-level choice, becomes "Cover" on all of the album's
+    tracks — the reported "albums are still assigning the cover genre to non
+    cover tracks".
+
+    The affiliation belongs to the track that earned it (its own title and
+    its own sources still carry it); it is not an album property.
+    """
     aggregated = aggregate_tags_with_counts(track_list)
-    return _format_aggregated(aggregated, limit)
+    return _format_aggregated(aggregated, limit, drop_affiliation_tags=True)
 
 
 def get_artist_genre_sources(
     track_list: list[dict[str, Any]],
     limit: int = 30,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Build ``genre_sources`` for an artist from all their tracks."""
+    """Build ``genre_sources`` for an artist from all their tracks.
+
+    ⚠️ Same rule as the album pool: per-track affiliation markers are
+    dropped. The artist page's genre chips are likewise applied to EVERY
+    track of the artist, so a "Cover" offered here would stamp the whole
+    catalogue.
+    """
     aggregated = aggregate_tags_with_counts(track_list)
-    return _format_aggregated(aggregated, limit)
+    return _format_aggregated(aggregated, limit, drop_affiliation_tags=True)
 
 
 def _format_aggregated(
     aggregated: dict[str, Counter[str]],
     limit: int,
+    *,
+    drop_affiliation_tags: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Convert aggregated Counters into sorted, limited tag dicts."""
+    """Convert aggregated Counters into sorted, limited tag dicts.
+
+    ``drop_affiliation_tags`` removes the per-track affiliation markers
+    (Cover/Live/Acoustic/…) from an ALBUM- or ARTIST-level pool — see
+    :func:`get_album_genre_sources`.
+    """
+    if drop_affiliation_tags:
+        from services.enrichment.genre_aggregation_service import (
+            is_track_affiliation_tag,
+        )
+
+        aggregated = {
+            source: Counter(
+                {
+                    tag: count
+                    for tag, count in counter.items()
+                    if not is_track_affiliation_tag(tag)
+                }
+            )
+            for source, counter in aggregated.items()
+        }
+
     result: dict[str, list[dict[str, Any]]] = {}
     for source_name, counter in aggregated.items():
         result[source_name] = [

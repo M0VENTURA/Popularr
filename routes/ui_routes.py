@@ -88,6 +88,22 @@ logger = structlog.get_logger(__name__)
 ui_bp = Blueprint("ui", __name__)
 
 
+#: Fallback affiliation filter, used only if
+#: ``services.enrichment.genre_aggregation_service`` cannot be imported.
+#: It FAILS CLOSED: an album-level genre list that carries "Cover" is a bug
+#: (the marker belongs to the one track that earned it), so a missing helper
+#: must not silently let it through. The Christmas family is NOT an
+#: affiliation marker — a Christmas album IS an album property.
+_FALLBACK_AFFILIATION_FILTER = frozenset({
+    "cover", "live", "acoustic", "unplugged", "remix", "remixed",
+    "instrumental", "comedy", "orchestral", "symphonic", "soundtrack",
+})
+
+
+def _fallback_is_affiliation_tag(value: Any) -> bool:
+    return str(value or "").strip().lower() in _FALLBACK_AFFILIATION_FILTER
+
+
 def _album_type_is_live_state(raw: str | None) -> bool:
     """True when an album-type string describes a LIVE-state release.
 
@@ -822,11 +838,27 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
         return cleaned
 
     def collect_top_genres(rows: list[dict[str, Any]], limit: int = 30) -> list[str]:
+        """The artist page's genre chips, which are applied to EVERY track.
+
+        ⚠️ Per-TRACK affiliation markers (Cover/Live/Acoustic/…) are DROPPED:
+        these chips are checkboxes, and "Apply Selected" writes the chosen
+        genres to every track of the artist. A "Cover" here would stamp the
+        whole catalogue — the reported "albums are still assigning the cover
+        genre to non cover tracks".
+        """
         genre_fields = [
             "manual_genres", "navidrome_genres", "musicbrainz_genres",
             "spotify_genres", "discogs_genres", "lastfm_tags",
             "listenbrainz_genres", "essentia_genres", "mood",
         ]
+
+        try:
+            from services.enrichment.genre_aggregation_service import (
+                is_track_affiliation_tag,
+            )
+        except Exception as exc:
+            logger.debug("Artist genres: affiliation filter unavailable", error=str(exc))
+            is_track_affiliation_tag = _fallback_is_affiliation_tag
 
         counts: dict[str, int] = {}
         display_names: dict[str, str] = {}
@@ -834,6 +866,8 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
         for row in rows:
             for field in genre_fields:
                 for genre in split_tag_values(row.get(field)):
+                    if is_track_affiliation_tag(genre):
+                        continue
                     key = genre.lower()
                     counts[key] = counts.get(key, 0) + 1
                     display_names.setdefault(key, genre)
@@ -1648,12 +1682,34 @@ def _apply_album_track_genres(track_id: Any, genres_str: str) -> tuple[int, int]
     genres-only save reports "No changes were made". A JSONB rejection or a
     connection blip must not vanish silently either: it is counted and logged
     at WARNING.
+
+    ⚠️ The ALBUM's genre list may not carry a per-TRACK affiliation marker.
+    "Cover" (and Live/Acoustic/…) describes ONE recording's performance, and
+    this fill writes the album's list onto a track that has no genre evidence
+    of its own — so a "Cover" in the album list lands on every non-cover
+    track. That is the reported "albums are still assigning the cover genre to
+    non cover tracks if the tag is attached to a album genres". The album-level
+    sources are filtered too (see ``get_album_genre_sources``), so this is the
+    LAST line of defence for a list that reached the form by any other route.
+
+    ⚠️ The filter FAILS CLOSED. If the helper cannot be imported, the
+    affiliation markers are still dropped (by name) — a filter that silently
+    stopped filtering would re-open exactly the bug this guards.
     """
     genres_list = [
         g.strip()
         for g in re.split(r"[,;/\\]+", genres_str)
         if g.strip()
     ]
+    try:
+        from services.enrichment.genre_aggregation_service import (
+            is_track_affiliation_tag,
+        )
+    except Exception as exc:
+        logger.debug("Album save: affiliation filter unavailable", error=str(exc))
+        is_track_affiliation_tag = _fallback_is_affiliation_tag
+
+    genres_list = [g for g in genres_list if not is_track_affiliation_tag(g)]
     if not genres_list:
         return 0, 0
 

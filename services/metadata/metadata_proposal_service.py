@@ -43,6 +43,7 @@ from helpers.normalization_service import (
     normalize_unicode_punctuation,
     titles_match_for_review,
 )
+from services.enrichment.genre_aggregation_service import strip_track_affiliation_tags
 
 logger = structlog.get_logger(__name__)
 
@@ -291,13 +292,26 @@ def _album_genres(metadata: dict[str, Any]) -> str:
     album whose recordings carry no genres proposed nothing even when the
     release group is fully tagged (metal, symphonic metal …). Deduplicates
     case-insensitively, keeping first-seen order.
+
+    ⚠️ The recording union is PER-TRACK evidence, so it is filtered through
+    ``strip_track_affiliation_tags``: MusicBrainz tags a cover recording with
+    the "cover" genre, and that is a fact about THAT recording. Carried into
+    the album-level list it becomes an album genre, and the album save then
+    writes it to every track — the reported "albums are still assigning the
+    cover genre to non cover tracks".
+
+    ⚠️ The values are parsed as LISTS, not split on commas. ``musicbrainz_genres``
+    arrives as ``["Rock", "Pop"]``; ``str(raw).split(",")`` turned that into the
+    literal text ``"['Rock', 'Pop']"``, which was then offered as a genre name.
     """
     seen: list[str] = []
     seen_keys: set[str] = set()
 
-    def _add(raw: Any) -> None:
-        for genre in str(raw or "").split(","):
-            genre = genre.strip()
+    def _add(raw: Any, *, strip_affiliations: bool = False) -> None:
+        names = _genre_list(raw)
+        if strip_affiliations:
+            names = strip_track_affiliation_tags(names)
+        for genre in names:
             key = genre.casefold()
             if genre and key not in seen_keys:
                 seen_keys.add(key)
@@ -306,7 +320,7 @@ def _album_genres(metadata: dict[str, Any]) -> str:
     _add(metadata.get("release_group_genres"))
     _add(metadata.get("release_genres"))
     for track in metadata.get("tracks") or []:
-        _add(track.get("musicbrainz_genres"))
+        _add(track.get("musicbrainz_genres"), strip_affiliations=True)
     return ", ".join(seen)
 
 

@@ -103,6 +103,40 @@ _TRACK_AFFILIATION_FILTER_TAGS: frozenset[str] = frozenset(
     _FILTER_TAGS - frozenset({"christmas", "holiday"})
 )
 
+
+def is_track_affiliation_tag(value: Any) -> bool:
+    """True when ``value`` is a per-TRACK affiliation marker (Cover/Live/…).
+
+    These describe ONE recording's performance, never the album. The
+    Christmas family is deliberately NOT one of them: a Christmas album IS an
+    album property and the playlist builder relies on the tag surviving.
+    """
+    return str(value or "").strip().lower() in _TRACK_AFFILIATION_FILTER_TAGS
+
+
+def strip_track_affiliation_tags(values: Any) -> list[str]:
+    """Drop every per-TRACK affiliation marker from a list of genre names.
+
+    Used wherever an ALBUM-level (or artist-level) genre list is assembled
+    from per-track sources: an affiliation belongs to the track that earned
+    it, and spreading it to siblings is the reported "albums are still
+    assigning the cover genre to non cover tracks".
+
+    The input may be a list of names or any of the delimited/JSON shapes the
+    genre columns use; the output is a list of plain names with the markers
+    removed (case-insensitively) and order preserved.
+    """
+    names: list[str] = []
+    for raw in _parse_genre_input(values) or []:
+        if isinstance(raw, dict):
+            raw = raw.get("name") or ""
+        name = str(raw or "").strip()
+        if not name or is_track_affiliation_tag(name):
+            continue
+        names.append(name)
+    return names
+
+
 _ADMIN_GENRE_WORDS: frozenset[str] = frozenset({
     "covers", "tribute", "tributes", "tribute band",
     "live album", "live recordings", "rework", "reworked", 
