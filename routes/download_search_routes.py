@@ -11,7 +11,7 @@ from typing import Any
 import structlog
 from quart import Blueprint, jsonify, request
 
-from api_clients.slskd import SlskdHttpClient
+from api_clients.slskd_http import SlskdHttpClient
 from db.repositories.queue import update_queue_item
 from db.repositories.search_logs import log_slskd_search
 from helpers.config_helpers import get_config, get_search_quality_config
