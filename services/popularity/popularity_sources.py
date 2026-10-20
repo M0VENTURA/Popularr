@@ -32,6 +32,9 @@ from helpers.normalization_service import (
     strip_cover_attribution,
     strip_diacritics,
     strip_featured_artist,
+    strip_remaster_qualifier,
+    has_remaster_marker,
+    REMASTER_MARKER_RE,
     titles_match_for_review,
 )
 from services.popularity.popularity_matching import (
@@ -588,6 +591,86 @@ def _position_alias_allowed(
     return int(local_track_count) == int(release_track_count)
 
 
+def _release_year(value: Any) -> int | None:
+    """The year of a MusicBrainz date string ("1999-09-20" → 1999)."""
+    match = re.search(r"(?<!\d)(\d{4})(?!\d)", str(value or ""))
+    return int(match.group(1)) if match else None
+
+
+def _release_is_remaster_edition(release: dict[str, Any]) -> bool:
+    """True when this release is a REMASTER / reissue of an older release group.
+
+    ⭐⭐ A REMASTER IS NOT A NEW RECORDING. MusicBrainz mints a brand-new
+    Recording MBID whenever an engineer remasters an album — the audio
+    fingerprint (AcoustID) and the mastering credits changed — but the
+    PERFORMANCE is the same studio performance and the AUDIENCE is the same
+    audience.
+
+    ListenBrainz counts plays per RECORDING MBID, so the split is brutal: the
+    1999 original of "Higher" carries hundreds of thousands of lifetime plays,
+    while the 2024 remaster's fresh Recording MBID carries a few hundred (only
+    the listeners who tagged their files with the new Deluxe MBID). Locking
+    onto the release's Recording MBID therefore paired a huge Last.fm count
+    with a tiny ListenBrainz count for the same song.
+
+    Two triggers:
+    * the RELEASE TITLE says so ("Human Clay (Remastered 2024)");
+    * the release is more than two years newer than its release GROUP's
+      original release — the gap that separates a remaster from a same-year
+      reissue, which reuses the original recordings anyway.
+    """
+    if REMASTER_MARKER_RE.search(str(release.get("title") or "")):
+        return True
+    group = release.get("release-group") or {}
+    if not isinstance(group, dict):
+        return False
+    group_year = _release_year(group.get("first-release-date"))
+    release_year = _release_year(release.get("date") or release.get("first-release-date"))
+    if not group_year or not release_year:
+        return False
+    return (release_year - group_year) > 2
+
+
+def _original_release_of_group(
+    release: dict[str, Any],
+    mb_client: Any,
+) -> dict[str, Any] | None:
+    """The release group's ORIGINAL release — the canonical recordings.
+
+    The original release holds the recordings the audience actually scrobbled:
+    the remaster's Recording MBIDs are new, empty ones. One extra MusicBrainz
+    call returns the whole original tracklist, so every track of the album is
+    corrected at once instead of one search per track.
+    """
+    group = release.get("release-group") or {}
+    if not isinstance(group, dict):
+        return None
+    group_mbid = str(group.get("id") or "").strip()
+    if not group_mbid:
+        return None
+
+    try:
+        releases = mb_client.browse_releases_for_group(group_mbid, inc="media", limit=50) or []
+    except Exception as exc:
+        logger.debug("Release-group browse failed", group=group_mbid, error=str(exc))
+        return None
+
+    group_year = _release_year(group.get("first-release-date"))
+    best = None
+    best_year = None
+    for rel in releases:
+        if not isinstance(rel, dict):
+            continue
+        year = _release_year(rel.get("date") or rel.get("first-release-date"))
+        if year is None:
+            continue
+        if group_year is not None and year == group_year:
+            return rel
+        if best_year is None or year < best_year:
+            best, best_year = rel, year
+    return best
+
+
 def get_listenbrainz_album_tracklist_with_release(
     artist: str,
     album: str,
@@ -605,6 +688,7 @@ def get_listenbrainz_album_tracklist_with_release(
     position_index: dict[tuple[int, int], dict[str, Any]] = {}
     _tracklist_source = ""
 
+    release: dict[str, Any] = {}
     try:
         _lb_rel = lb_get_release_metadata_batch([release_mbid]) or {}
         if isinstance(_lb_rel, dict):
@@ -636,8 +720,37 @@ def get_listenbrainz_album_tracklist_with_release(
     if not recording_mbids:
         return {}, release_mbid
 
+    # ⭐⭐ THE CANONICAL RECORDINGS FOR A REMASTER EDITION.
+    #
+    # A remastered release names NEW Recording MBIDs, and those carry almost
+    # no ListenBrainz plays. The original release of the same release group
+    # holds the recordings the audience actually scrobbled. So when the
+    # resolved release is a remaster/reissue, the ORIGINAL release's tracklist
+    # is indexed too and its recordings win — one extra MusicBrainz call
+    # corrects every track of the album.
+    canonical_titles: dict[str, dict[str, Any]] = {}
+    canonical_mbids: list[str] = []
+    if release and _release_is_remaster_edition(release):
+        try:
+            from services.enrichment.musicbrainz_service import get_shared_mb_client
+            mb = get_shared_mb_client()
+            _original = _original_release_of_group(release, mb)
+            if _original:
+                _index_release_tracklist(
+                    _original.get("media") or [], canonical_titles, {}, canonical_mbids,
+                )
+                logger.info(
+                    "Remastered release — canonical recordings taken from the "
+                    "release group's original",
+                    release_mbid=release_mbid,
+                    original_release_mbid=_original.get("id"),
+                    canonical_tracks=len(canonical_titles),
+                )
+        except Exception as exc:
+            logger.debug("Canonical release lookup failed", release_mbid=release_mbid, error=str(exc))
+
     try:
-        counts = lb_get_recording_popularity_batch(recording_mbids) or {}
+        counts = lb_get_recording_popularity_batch(recording_mbids + canonical_mbids) or {}
     except Exception as exc:
         # A failed COUNT lookup must not cost us the IDENTITY: the release
         # tracklist above already established which recording each position is,
@@ -657,7 +770,15 @@ def get_listenbrainz_album_tracklist_with_release(
 
     out: dict[str, dict[str, int | None]] = {}
     for key, entry in titles_to_mbids.items():
-        total, users = _sum_counts(entry["mbids"])
+        # ⭐ The CANONICAL recording wins when the release is a remaster: it
+        # is the same performance, and it carries the playcount. The release's
+        # own recording is kept only for a title the original release does not
+        # have (a bonus track that really is new).
+        _mbids = entry["mbids"]
+        _canonical = canonical_titles.get(key)
+        if _canonical and len(_canonical["mbids"]) == 1 and len(_mbids) == 1:
+            _mbids = _canonical["mbids"]
+        total, users = _sum_counts(_mbids)
         # IDENTITY is emitted even at ZERO listens, provided the release puts
         # this title at exactly one position. The count is not what identifies
         # the track — the album's own release is — and requiring ``total > 0``
@@ -682,7 +803,10 @@ def get_listenbrainz_album_tracklist_with_release(
             out[key] = {
                 "listenbrainz_listens": total,
                 "listenbrainz_users": users,
-                "recording_mbid": entry["mbids"][0] if entry["mbids"] else None,
+                # The CANONICAL recording (the original release's), so the
+                # track's ListenBrainz figures and its release set belong to
+                # the performance the audience actually played.
+                "recording_mbid": _mbids[0] if _mbids else None,
                 # Consumed by the POSITION pass below, so it can tell a
                 # title-derived identity it must not overwrite from an
                 # arbitrary mbids[0] pick on a same-titled pair.
@@ -1048,11 +1172,17 @@ def get_listenbrainz_album_tracklist_with_release(
             if abs(int(row_len_ms) - row_dur * 1000) > 5000:
                 continue
 
-        row_total, row_users = _sum_counts(row_pos_entry["mbids"])
+        # ⭐ The CANONICAL recording wins here too, for the same reason: a
+        # remastered release's own Recording MBID is the empty one.
+        _row_mbids = row_pos_entry["mbids"]
+        _row_canonical = canonical_titles.get(str(row_pos_entry.get("key") or ""))
+        if _row_canonical and len(_row_canonical["mbids"]) == 1 and len(_row_mbids) == 1:
+            _row_mbids = _row_canonical["mbids"]
+        row_total, row_users = _sum_counts(_row_mbids)
         out[track_identity_key(local_key, row_disc, row_pos)] = {
             "listenbrainz_listens": row_total,
             "listenbrainz_users": row_users,
-            "recording_mbid": row_pos_entry["mbids"][0],
+            "recording_mbid": _row_mbids[0] if _row_mbids else None,
             "release_track_title": str(row_pos_entry.get("title") or ""),
             "local_disc_number": row_disc,
             "local_track_number": row_pos,

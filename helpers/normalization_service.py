@@ -310,6 +310,93 @@ REMASTER_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: The remaster WORD, wherever it appears inside a title.
+REMASTER_MARKER_RE = re.compile(r"\bremaster(?:ed)?\b", re.IGNORECASE)
+
+#: A trailing bracketed qualifier group: opener, inner text, closer.
+_TRAILING_QUALIFIER_RE = re.compile(r"\s*([(\[])([^)\]]*?)\s*([)\]])\s*$")
+
+#: The separator inside a compound qualifier: "radio edit / remastered 2024".
+_QUALIFIER_PART_SEPARATOR_RE = re.compile(r"\s*[/,]\s*")
+
+
+def has_remaster_marker(title: str) -> bool:
+    """True when a title carries a remaster qualifier.
+
+    A remaster is a mastering-engineering pass on the SAME performance, so the
+    marker says "this edition of the studio recording" — NOT "a different
+    recording". That is why it must never be treated as a live/acoustic/remix
+    variant, and why the popularity pipeline resolves a remastered track to the
+    canonical studio recording.
+    """
+    return bool(REMASTER_MARKER_RE.search(str(title or "")))
+
+
+def strip_remaster_qualifier(title: str) -> str:
+    """Strip the REMASTER half of a title, keeping the genuine variant half.
+
+    A compound qualifier names TWO things at once — the variant AND the
+    mastering pass — and only the second half is a remaster:
+
+        "Higher (radio edit / remastered 2024)"  ->  "Higher (radio edit)"
+        "Is This the End? (Scream edit / remastered 2024)"
+                                             ->  "Is This the End? (Scream edit)"
+
+    A qualifier that is ONLY a remaster is dropped entirely, because it says
+    nothing about the performance:
+
+        "Higher (remastered 2024)"  ->  "Higher"
+        "Higher [remastered]"       ->  "Higher"
+        "Higher - 2024 Remaster"     ->  "Higher"
+
+    ⭐ The compound form matters. Stripping the whole bracket would lose the
+    "radio edit" / "Scream edit" half — which names a DIFFERENT performance
+    that must stay separated — and keeping the whole bracket would leave the
+    remaster in place, so the track would neither resolve to the canonical
+    recording nor be recognised as a variant.
+    """
+    value = str(title or "").strip()
+    if not value:
+        return ""
+
+    # A trailing bracketed qualifier that mentions a remaster.
+    match = _TRAILING_QUALIFIER_RE.search(value)
+    if match and REMASTER_MARKER_RE.search(match.group(2)):
+        opener, inner, closer = match.group(1), match.group(2), match.group(3)
+        # ``start(1)`` is the OPENER's index, so the space before the bracket
+        # survives — "Higher (radio edit)" must not become "Higher(radio edit)".
+        head = value[: match.start(1)]
+        kept = _strip_remaster_from_qualifier(inner)
+        if kept:
+            return f"{head}{opener}{kept}{closer}".strip()
+        return head.strip()
+
+    # A standalone trailing remaster marker, bracketed or not.
+    return REMASTER_SUFFIX_RE.sub("", value).strip() or value
+
+
+def _strip_remaster_from_qualifier(inner: str) -> str:
+    """The qualifier's text with the remaster half removed.
+
+    Splits a compound qualifier on its separator and drops the parts that
+    mention a remaster; a single-part qualifier that mentions a remaster is
+    emptied.
+    """
+    parts = [p for p in _QUALIFIER_PART_SEPARATOR_RE.split(inner or "") if p.strip()]
+    if len(parts) > 1:
+        kept = [p.strip() for p in parts if not REMASTER_MARKER_RE.search(p)]
+        return " / ".join(kept)
+
+    # One part: remove the remaster phrase from it, keeping anything else.
+    text = inner or ""
+    text = re.sub(
+        r"\(?\s*(?:\d{4}\s*)?remaster(?:ed)?(?:\s*\d{4})?(?:\s+version)?\s*\)?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.strip(" ,;/-").strip()
+
 
 def strip_single_release_suffix(value: str) -> str:
     return SINGLE_RELEASE_SUFFIX_RE.sub("", value or "").strip()

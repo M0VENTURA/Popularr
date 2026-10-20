@@ -41,6 +41,8 @@ from helpers.normalization_service import (
     normalize_title_for_lookup,
     normalize_title_for_lucene_query,
     strip_remaster_suffix,
+    strip_remaster_qualifier,
+    has_remaster_marker,
     is_remastered_only_variant,
     strip_featured_artist,
     strip_featured_guest_suffix,
@@ -136,6 +138,24 @@ def strip_release_variant_suffix(title: str) -> str:
             if m:
                 return title[:m.start()].rstrip()
     return title
+
+
+def single_match_key(title: str) -> str:
+    """The key a track title is MATCHED on against a single-release title.
+
+    ⭐ A remaster is the SAME performance as the original, so the remaster
+    qualifier must not stop the match. MusicBrainz and Discogs file singles
+    under the plain title ("Higher", "With Arms Wide Open"), while the library
+    copy may carry the mastering pass in its own title ("Higher (remastered
+    2024)"). Comparing those two titles literally missed the single
+    entirely — the reported ``is_single = False`` on a remastered studio
+    single.
+
+    Only the REMASTER half is removed: a compound qualifier keeps its other
+    half ("Higher (radio edit / remastered 2024)" matches "Higher (radio
+    edit)", not "Higher"), because a radio edit is a different release.
+    """
+    return strip_remaster_qualifier(title or "").lower().strip()
 
 
 def is_non_canonical_version_strict(title: str) -> bool:
@@ -371,8 +391,8 @@ def _detect_musicbrainz(title: str, artist: str, artist_mbid: str | None,
                         recording_mbid: str | None = None) -> dict[str, Any]:
                         
     if mb_cached_singles:
-        normalized = (title or "").lower().strip()
-        if normalized in {str(t).lower().strip() for t in mb_cached_singles}:
+        normalized = single_match_key(title)
+        if normalized in {single_match_key(t) for t in mb_cached_singles}:
             return {"source": "musicbrainz", "matched": True, "confidence": 0.9,
                     "metadata": {}, "cached": True}
     try:
@@ -426,8 +446,12 @@ def _detect_musicbrainz(title: str, artist: str, artist_mbid: str | None,
             except Exception as exc:
                 logger.debug("Recording release-group single check failed", recording_mbid=recording_mbid, error=str(exc))
                 
+        # ⭐ The remaster qualifier comes off BEFORE the single lookup: the
+        # single releases are filed under the plain title ("Higher"), and the
+        # library copy may say "Higher (remastered 2024)". The mastering pass
+        # says nothing about whether the song was a single.
         clean_title = strip_featured_guest_suffix(
-            strip_single_release_suffix(title) or title
+            strip_remaster_qualifier(strip_single_release_suffix(title) or title)
         )
         
         if artist_mbid and hasattr(mb_client, "search_release_groups") and _within_budget() and not matched:
@@ -515,10 +539,10 @@ def _detect_discogs(title: str, artist: str, album: str | None,
         return {"source": "discogs", "matched": False, "confidence": 0.0, "metadata": {}}
         
     if cached_single_titles:
-        normalized = (title or "").lower().strip()
-        if normalized in {str(t).lower().strip() for t in cached_single_titles}:
+        normalized = single_match_key(title)
+        if normalized in {single_match_key(t) for t in cached_single_titles}:
             is_promo = bool(cached_promo_titles) and normalized in {
-                str(t).lower().strip() for t in cached_promo_titles
+                single_match_key(t) for t in cached_promo_titles
             }
             return {"source": "discogs", "matched": True,
                     "confidence": 0.85,
@@ -757,7 +781,11 @@ def detect_single_for_track(
 ) -> dict[str, Any]:
     title = title or ""
     artist = artist or ""
-    lookup_title = strip_single_release_suffix(title)
+    # ⭐ The remaster qualifier is not part of the song's identity for single
+    # detection: a remaster of a studio single IS that single. The lookup
+    # title therefore drops it, while the ORIGINAL title is kept for the
+    # variant checks below (a radio edit is still a different release).
+    lookup_title = strip_remaster_qualifier(strip_single_release_suffix(title))
     logger.debug("Checking track single status", artist=artist, track=title)
 
     if not title or not artist:

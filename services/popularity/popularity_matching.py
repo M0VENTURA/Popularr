@@ -32,12 +32,28 @@ def clean_artist_spacing(value: str) -> str:
 # canonical track's Last.fm / ListenBrainz popularity — the two are different
 # performances with different real audiences.
 #
-# Mirrors ``services/queue/queue_matching_config.TITLE_VARIANT_TOKENS`` (the
-# hard subset — "version"/"edit"/"radio" are soft annotations that may be
-# absent from either side without blocking the match).
+# ⚠️ "remaster" / "remastered" are DELIBERATELY NOT here. A remaster is a
+# mastering-engineering pass on the exact same studio performance — the
+# listener pressing "Higher (remastered 2024)" is listening to the flagship
+# studio song "Higher", and the audience is the SAME audience. MusicBrainz
+# mints a new Recording for it (the audio fingerprint and mastering credits
+# changed), which splits the ListenBrainz playcount across two recordings and
+# leaves the remaster with a few hundred plays against the original's
+# hundreds of thousands. Treating the marker as a hard variant is what
+# stranded the remastered track on its own tiny count.
+#
+# So a remastered title is COMPATIBLE with its canonical recording, and the
+# remaster's figures resolve to the canonical studio recording.
+#
+# ⚠️ This is NOT a mirror of
+# ``services/queue/queue_matching_config.TITLE_VARIANT_TOKENS`` — that set
+# governs whether two FILENAME forms refer to the same downloadable file,
+# where "remaster" IS a different file. This set governs whether two
+# RECORDINGS are the same PERFORMANCE for popularity aggregation, where a
+# remaster is the same performance and "remaster" is deliberately absent.
 _HARD_VARIANT_TOKENS = frozenset({
     "acoustic", "demo", "instrumental", "intro", "live",
-    "mix", "orchestral", "remaster", "remastered", "remix",
+    "mix", "orchestral", "remix",
 })
 _SOFT_VARIANT_TOKENS = frozenset({"version", "edit", "radio"})
 
@@ -65,6 +81,7 @@ def title_variants_compatible(title_a: str, title_b: str) -> bool:
         title_variants_compatible("See You in Hell (Live)", "See You in Hell (Live)") -> True
         title_variants_compatible("Hypa Hypa (Remix)", "Hypa Hypa")  -> False
         title_variants_compatible("Herzblut", "Herzblut (Radio Edit)")  -> True  # soft
+        title_variants_compatible("Higher", "Higher (remastered 2024)")  -> True  # same performance
     """
     va = _extract_variant_tokens(title_a) - _SOFT_VARIANT_TOKENS
     vb = _extract_variant_tokens(title_b) - _SOFT_VARIANT_TOKENS

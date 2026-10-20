@@ -1810,8 +1810,23 @@ def process_track(
 
                                             update_payload["recording_mbid_checked_at"] = datetime.now(timezone.utc)
 
+                                        # ⭐ Strip the remaster qualifier for the MBID
+                                        # lookup: a remaster is the SAME performance as
+                                        # the original, and the canonical recording is
+                                        # the one that carries the playcount and is the
+                                        # single-release target. "Higher (remastered
+                                        # 2024)" must resolve to the original "Higher"
+                                        # Recording MBID, not the fresh, near-empty
+                                        # remaster Recording MBID.
+                                        from helpers.normalization_service import (
+                                            strip_remaster_qualifier,
+                                        )
+
+                                        _lookup_title = strip_remaster_qualifier(
+                                            str(raw_title or title or ""),
+                                        )
                                         recording_mbid, _conf = get_shared_mb_service().get_suggested_mbid(
-                                            raw_title or title,
+                                            _lookup_title,
                                             artist,
                                             is_live_release=is_live_release,
                                             edition_annotation=_album_annotation,
