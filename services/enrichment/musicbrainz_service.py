@@ -2088,9 +2088,17 @@ def _flatten_release(Release: dict[str, Any], release_id: str) -> dict[str, Any]
                     if _as_int(medium.get("track-count"), 0) > 0
                     else None
                 ),
-                "artist_mbid": (
-                    credit_artist_mbid(Recording.get("artist-credit"))
-                    or credit_artist_mbid(Release.get("artist-credit"))
+                # ⭐⭐ The per-track artist_mbid comes ONLY from the
+                # RECORDING-level credit. The release-level credit is the
+                # ALBUM artist — on a Various Artists compilation that is the
+                # "Various Artists" MBID, and writing it to every track makes
+                # the duplicate-artist page report every real performer on the
+                # compilation as a "duplicate artist" sharing one MBID.
+                # When the recording-level credit is absent, the per-track
+                # artist_mbid is left NULL rather than being filled with the
+                # album artist's MBID.
+                "artist_mbid": credit_artist_mbid(
+                    Recording.get("artist-credit")
                 ),
             }
             if genres:
