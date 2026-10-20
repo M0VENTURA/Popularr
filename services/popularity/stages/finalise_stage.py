@@ -3439,6 +3439,46 @@ def invalidate_genre_playlist_rows() -> None:
         _GENRE_ROWS_MIN_STARS = None
 
 
+#: The rows a genre refresh pools by — the SAME columns the full builder
+#: reads (``_GENRE_ROWS_SQL``), so a refresh and the builder agree on what a
+#: track contributes to a genre playlist.
+_GENRE_ALBUM_ROWS_SQL = """
+    SELECT id, title, file_path, duration, artist, album_artist,
+           COALESCE(stars, star_rating) AS stars,
+           COALESCE(popularity, final_score, 0) AS popularity_score,
+           COALESCE(is_live, 0) AS is_live,
+           COALESCE(is_compilation, 0) AS is_compilation,
+           genres,
+           lastfm_tags, musicbrainz_genres, discogs_genres,
+           listenbrainz_genres, spotify_genres, essentia_genres,
+           manual_genres, navidrome_genres, audiodb_genres,
+           wikidata_genres
+    FROM tracks
+    WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
+      AND album = :album
+      AND COALESCE(stars, star_rating) >= :min_stars
+"""
+
+
+def _genre_playlist_rows_for_album(
+    artist: str, album: str, min_stars: int,
+) -> list[dict[str, Any]]:
+    """The tracks of ONE album that can pool into a genre playlist.
+
+    ⚠️ Scoped to the album on purpose: this is the cheap half of a refresh.
+    The expensive half (pooling the WHOLE library to decide the final track
+    list of each genre playlist) happens inside
+    ``_create_genre_top_track_playlists``, which is called ONCE per refresh
+    with the union of the affected genres.
+    """
+    with db_session() as session:
+        result = session.execute(
+            text(_GENRE_ALBUM_ROWS_SQL),
+            {"artist": artist, "album": album, "min_stars": min_stars},
+        )
+        return [dict(r._mapping) for r in result.fetchall() or []]
+
+
 def refresh_genre_playlists_for_album(artist: str, album: str) -> int:
     if not _genre_playlists_active():
         return 0
@@ -3450,28 +3490,7 @@ def refresh_genre_playlists_for_album(artist: str, album: str) -> int:
             _cfg = {}
 
         min_stars = max(1, int(_cfg.get("genre_playlists_min_stars", 4) or 4))
-        rows: list[dict[str, Any]] = []
-        with db_session() as session:
-            result = session.execute(
-                text("""
-                    SELECT id, title, file_path, duration, artist, album_artist,
-                           COALESCE(stars, star_rating) AS stars,
-                           COALESCE(popularity, final_score, 0) AS popularity_score,
-                           COALESCE(is_live, 0) AS is_live,
-                           COALESCE(is_compilation, 0) AS is_compilation,
-                           genres,
-                           lastfm_tags, musicbrainz_genres, discogs_genres,
-                           listenbrainz_genres, spotify_genres, essentia_genres,
-                           manual_genres, navidrome_genres, audiodb_genres,
-                           wikidata_genres
-                    FROM tracks
-                    WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
-                      AND album = :album
-                      AND COALESCE(stars, star_rating) >= :min_stars
-                """),
-                {"artist": artist, "album": album, "min_stars": min_stars},
-            )
-            rows = [dict(r._mapping) for r in result.fetchall() or []]
+        rows = _genre_playlist_rows_for_album(artist, album, min_stars)
 
         if not rows:
             return 0
@@ -3500,6 +3519,206 @@ def refresh_genre_playlists_for_album(artist: str, album: str) -> int:
     except Exception as exc:
         logger.debug("Per-album genre playlist refresh failed", artist=artist, album=album, error=str(exc))
         return 0
+
+
+def _genre_affected_genres_for_albums(artist: str, albums: list[str]) -> set[str]:
+    """The genre playlists the tracks of *albums* can pool into.
+
+    ⭐ The album-scoped half of a refresh. The OTHER half — pooling the WHOLE
+    library to decide each genre playlist's final track list — lives in
+    ``_create_genre_top_track_playlists`` and is deliberately NOT done per
+    artist (see ``services/popularity.scan_scope``): it is a whole-library
+    operation, and running it per artist cost minutes each time.
+
+    What IS cheap is this: the artist's own album rows, which say which genres
+    that artist feeds. That is enough to know which genre playlists owe this
+    artist a cover check.
+    """
+    try:
+        from helpers.config_helpers import get_config
+        _cfg = (get_config() or {}).get("playlists") or {}
+    except Exception:
+        _cfg = {}
+
+    min_stars = max(1, int(_cfg.get("genre_playlists_min_stars", 4) or 4))
+    max_genres = max(1, int(_cfg.get("genre_playlists_max_genres", 3) or 3))
+
+    affected: set[str] = set()
+    for album in albums:
+        for row in _genre_playlist_rows_for_album(artist, album, min_stars):
+            for genre in _genre_playlist_track_genres(row, max_genres=max_genres):
+                affected.add(genre)
+    return affected
+
+
+# ---------------------------------------------------------------------------
+# Per-artist AI-cover pass (the full-library-scan gap)
+# ---------------------------------------------------------------------------
+
+#: ``name.casefold() -> Navidrome playlist id``. Cached briefly because a full
+#: library scan asks for it once per artist and the server answers with every
+#: playlist it holds (~600).
+_GENRE_COVER_ID_CACHE: dict[str, str] = {}
+_GENRE_COVER_ID_CACHE_AT = 0.0
+_GENRE_COVER_ID_CACHE_TTL = 300.0
+_GENRE_COVER_ID_LOCK = threading.Lock()
+
+
+def _genre_playlist_ids_by_name() -> dict[str, str]:
+    """``playlist name (casefolded) -> Navidrome playlist id``.
+
+    Best-effort: a server that cannot be reached contributes nothing, and the
+    cover pass then simply finds no playlist to cover — it never raises.
+    """
+    global _GENRE_COVER_ID_CACHE, _GENRE_COVER_ID_CACHE_AT
+
+    now = time.monotonic()
+    with _GENRE_COVER_ID_LOCK:
+        if (
+            _GENRE_COVER_ID_CACHE
+            and (now - _GENRE_COVER_ID_CACHE_AT) < _GENRE_COVER_ID_CACHE_TTL
+        ):
+            return _GENRE_COVER_ID_CACHE
+
+        ids: dict[str, str] = {}
+        for client in _navidrome_clients():
+            try:
+                for pl in client.fetch_all_playlists() or []:
+                    name = str(pl.get("name") or "").strip()
+                    pid = str(pl.get("id") or "").strip()
+                    if name and pid:
+                        ids.setdefault(name.casefold(), pid)
+            except Exception as exc:
+                logger.debug("Genre cover playlist id fetch failed", error=str(exc))
+
+        _GENRE_COVER_ID_CACHE = ids
+        _GENRE_COVER_ID_CACHE_AT = now
+        return ids
+
+
+def refresh_genre_playlist_covers_for_artist(artist: str, albums: list[str]) -> list[str]:
+    """Ensure the AI cover art for the genre playlists *artist*'s albums feed.
+
+    ⭐⭐ WHY THIS EXISTS (the reported "Gemini is still not creating the covers
+    for the genre playlists", and "the playlists dont show during a full
+    library scan that does each artist one by one").
+
+    A full library scan runs one artist at a time, and the GLOBAL genre
+    rebuild is deliberately deferred to the END of the scan (see
+    ``services.popularity.scan_scope``): the genre playlists aggregate the
+    whole library, so rebuilding them after every artist is slow AND
+    semantically wrong.
+
+    The consequence was that the AI-cover check — which lives inside that
+    rebuild — ran ONCE per full scan, at the very end. Artist by artist
+    nothing genre-shaped happened at all, and if the scan was stopped, not
+    even that. The per-ALBUM refresh could not fill the gap either, because it
+    only ran for a single-ALBUM scan.
+
+    So this is that missing step, and it is deliberately CHEAP: it does NOT
+    re-pool the library and does NOT re-sync playlist CONTENT (the expensive
+    half, which still belongs to the end-of-scan rebuild). It only asks
+    "which genre playlists does this artist feed, and does each of them carry
+    our AI cover?" — and generates the missing art.
+
+    Returns the names of the playlists it CHECKED, so the caller can log
+    them. Never raises: an image API that is out of quota must not cost a
+    scan its ratings.
+    """
+    album_names = [str(a).strip() for a in (albums or []) if str(a or "").strip()]
+    if not album_names:
+        return []
+
+    try:
+        from helpers.config_helpers import get_gemini_config, get_genre_cover_config
+
+        cover_cfg = get_genre_cover_config()
+        gem = get_gemini_config()
+        if not cover_cfg["enabled"]:
+            # Say WHY, rather than staying silent. "Enabled a Gemini key but no
+            # art ever appears" is otherwise indistinguishable from "the cover
+            # pass never ran" — the two both produced no log line at all.
+            if gem["enabled"] and gem["api_key"]:
+                log_unified(
+                    "🎨 Genre playlist covers: OFF — tick 'AI Genre Covers' in "
+                    "Config ▸ Playlists (the Gemini key alone does not enable them)"
+                )
+            return []
+        if not gem["enabled"] or not gem["api_key"]:
+            log_unified(
+                "🎨 Genre playlist covers: Gemini is not configured "
+                "(Config ▸ API Integrations ▸ Google Gemini)"
+            )
+            return []
+
+        if not _genre_playlists_active():
+            return []
+
+        affected = _genre_affected_genres_for_albums(artist, album_names)
+        if not affected:
+            return []
+
+        from services.playlists.genre_cover_service import generate_genre_cover
+
+        playlist_ids = _genre_playlist_ids_by_name()
+        clients = _navidrome_clients()
+        if not clients:
+            return []
+
+        # ⭐ The LIST the report asked for: every genre playlist this artist's
+        # updated tracks feed, whether or not it exists on the server yet.
+        touched: list[str] = []
+        applied = 0
+        pending: list[tuple[str, str, str]] = []
+        for genre in sorted(affected):
+            display = _display_genre(genre)
+            playlist_name = _genre_playlist_name(display)
+            touched.append(playlist_name)
+            playlist_id = playlist_ids.get(playlist_name.casefold())
+            if not playlist_id:
+                # The playlist does not exist on the server yet, so there is
+                # nothing to attach art to. The end-of-scan rebuild creates it
+                # and runs its own cover check — do NOT spend an image here.
+                logger.debug(
+                    "Genre playlist not on the server yet — cover deferred",
+                    playlist=playlist_name,
+                )
+                continue
+            pending.append((display, playlist_name, playlist_id))
+
+        for display, playlist_name, playlist_id in pending:
+            for client in clients:
+                cover = generate_genre_cover(
+                    display,
+                    playlist_name,
+                    client,
+                    regenerate=cover_cfg["regenerate"],
+                    playlist_id=playlist_id,
+                )
+                if cover.get("ok"):
+                    if cover.get("status") == "generated":
+                        applied += 1
+                        log_unified(
+                            f"🎨 Playlist cover: AI artwork set for '{playlist_name}'"
+                        )
+                    break
+                logger.warning(
+                    "Genre playlist cover not applied",
+                    playlist=playlist_name,
+                    reason=cover.get("reason"),
+                )
+
+        if touched:
+            log_unified(
+                f"🎨 Genre playlists for '{artist}': {', '.join(touched)} "
+                f"— {applied} cover(s) generated"
+            )
+        return touched
+    except Exception as exc:
+        logger.warning(
+            "Per-artist genre playlist cover pass failed", artist=artist, error=str(exc),
+        )
+        return []
 
 
 def _create_genre_top_track_playlists(
@@ -3754,6 +3973,11 @@ def _create_genre_top_track_playlists(
     # below distinguish "feature disabled" from "feature ran and did nothing",
     # which otherwise look identical in the log.
     _cover_flag_off = False
+    # True when the toggle was ON. Distinguishes "the cover pass never ran"
+    # (no playlist reached the block) from "the feature is off" — the two
+    # produced the SAME silence, which is what made the missing art
+    # impossible to diagnose from the log.
+    _cover_enabled = False
 
     norm_only_genres = None
     if only_genres is not None:
@@ -3862,6 +4086,8 @@ def _create_genre_top_track_playlists(
                     # separate toggle), and the pair reads as "Gemini is
                     # configured but no art ever appears".
                     _cover_flag_off = True
+                else:
+                    _cover_enabled = True
                 if _genre_cover_cfg["enabled"]:
                     from services.playlists.genre_cover_service import (
                         generate_genre_cover,
@@ -3910,6 +4136,15 @@ def _create_genre_top_track_playlists(
             f"🎨 Genre playlist covers — {_cover_generated} applied, "
             f"{_cover_skipped} already present, {_cover_failed} failed "
             f"({_cover_checked} playlist(s) checked)"
+        )
+    elif _cover_enabled:
+        # The feature is ON but NO playlist reached the cover block. That is
+        # not "nothing to do" — it means the pass never got as far as the
+        # cover check, which is exactly what the reported "no Gemini output
+        # and no log line" looked like. Say so instead of staying silent.
+        log_unified(
+            "🎨 Genre playlist covers — enabled, but no genre playlist reached "
+            "the cover check this pass (nothing was synced)"
         )
     elif _cover_flag_off:
         # Speak up ONLY when the Gemini key is actually configured: otherwise

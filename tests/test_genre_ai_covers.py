@@ -363,7 +363,19 @@ class TestTheConfigSurfaceExists:
         }
 
     def test_defaults_are_off_and_sane(self, monkeypatch):
-        """It is a BILLABLE third-party API, so it must default to off."""
+        """⭐ THE BILLABLE-API GUARD LIVES ON THE GEMINI INTEGRATION.
+
+        This test used to assert that the COVER toggle also defaulted to off.
+        That was the defect behind the reported "Gemini is still not creating
+        the covers": Gemini has exactly ONE consumer in this app (these
+        covers), so a second toggle in a different config section asked the
+        user to opt in twice, and the second opt-in was the easy one to miss.
+
+        The guard is therefore the Gemini integration itself — off, with no
+        key, until the user supplies one — and the cover toggle defaults to
+        ON so that configuring Gemini is enough. Turning the covers OFF is
+        still possible (the Config page writes ``false``).
+        """
         import helpers.config_helpers as ch
 
         monkeypatch.setattr(ch, "get_config", lambda: {})
@@ -371,8 +383,21 @@ class TestTheConfigSurfaceExists:
         gem = ch.get_gemini_config()
         cover = ch.get_genre_cover_config()
 
-        assert gem["enabled"] is False and gem["model"] == "gemini-2.5-flash-image"
-        assert cover["enabled"] is False and cover["regenerate"] is False
+        # ⭐ The billing guard: no Gemini, no key, nothing enabled.
+        assert gem["enabled"] is False and gem["api_key"] == ""
+        assert gem["model"] == "gemini-2.5-flash-image"
+        # The cover toggle now follows Gemini rather than gating it twice.
+        assert cover["enabled"] is True and cover["regenerate"] is False
+
+    def test_the_covers_can_still_be_switched_off(self, monkeypatch):
+        """An explicit ``false`` must still win — the default is a default."""
+        import helpers.config_helpers as ch
+
+        monkeypatch.setattr(ch, "get_config", lambda: {
+            "playlists": {"genre_playlist_ai_cover_enabled": False},
+        })
+
+        assert ch.get_genre_cover_config()["enabled"] is False
 
     def test_the_key_is_not_also_read_from_a_legacy_top_level(self, monkeypatch):
         """One source only: a billable key that can arrive from two places

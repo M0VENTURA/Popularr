@@ -471,7 +471,7 @@
       sync_favourites_from_navidrome: getChecked('playlists_favourite_sync', false),
       // AI cover art for the Top Genre playlists (Gemini). Key lives in
       // api_integrations.gemini below.
-      genre_playlist_ai_cover_enabled: getChecked('playlists_genre_ai_cover_enabled', false),
+      genre_playlist_ai_cover_enabled: getChecked('playlists_genre_ai_cover_enabled', true),
       genre_playlist_ai_cover_regenerate: getChecked('playlists_genre_ai_cover_regenerate', false),
       genre_playlist_ai_cover_prompt: getValue('playlists_genre_ai_cover_prompt', ''),
       playlist_order_mode: getValue('playlists_order_mode', 'prominence') || 'prominence',

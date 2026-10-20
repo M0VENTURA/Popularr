@@ -99,6 +99,7 @@ from services.popularity.stages.finalise_stage import (
     finalise_scan,
     post_album_star_ratings,
     prune_genre_playlists_for_deletion,
+    refresh_genre_playlist_covers_for_artist,
     refresh_genre_playlists_for_album,
 )
 from services.popularity.stages.load_stage import load_candidates
@@ -2169,6 +2170,12 @@ def run_scan(
         except Exception as exc:
             logger.debug("Global 5★ pre-pass failed", artist=artist, error=str(exc))
 
+        # ⭐ The albums whose ratings were actually posted for THIS artist.
+        # The cover pass below needs them: they are the albums whose tracks
+        # can feed a genre playlist, and therefore the playlists that owe a
+        # cover check.
+        _updated_albums: list[str] = []
+
         for _pending in pending:
             _album_results_this = _pending.get("album_results") or []
             if not _album_results_this:
@@ -2185,11 +2192,41 @@ def run_scan(
             )
             if _posted:
                 _report_album_summary(_pending.get("report") or {}, _album_results_this)
+                _updated_albums.append(str(_pending.get("album") or ""))
             if _posted and total_albums <= 1:
                 try:
                     refresh_genre_playlists_for_album(artist, str(_pending.get("album") or ""))
                 except Exception as exc:
                     logger.debug("Genre playlist refresh failed", artist=artist, error=str(exc))
+
+        # ── AI cover art for the genre playlists this artist feeds ──────────
+        #
+        # ⭐⭐ WHY THIS IS HERE AND NOT ONLY IN THE END-OF-SCAN REBUILD.
+        #
+        # A full library scan runs one artist at a time, and the GLOBAL genre
+        # rebuild is deliberately deferred to the END of the scan (see
+        # ``services/popularity.scan_scope``): the genre playlists aggregate
+        # the WHOLE library, so rebuilding them after every artist is slow and
+        # semantically wrong.
+        #
+        # The AI-cover check lives inside that rebuild — so during a
+        # 940-artist scan it ran ONCE, at the very end, and if the scan was
+        # stopped, not even that. The per-ALBUM refresh above could not fill
+        # the gap: it only ran for a single-ALBUM scan, and it also re-pools
+        # the whole library, which is the expensive half this path must avoid.
+        #
+        # This pass is the cheap half: it asks which genre playlists this
+        # artist's updated tracks feed and ensures each one carries its AI
+        # cover. The playlist CONTENT is still synced by the end-of-scan
+        # rebuild.
+        #
+        # Never fatal: an image API that is out of quota must not cost the
+        # scan its ratings.
+        if _updated_albums:
+            try:
+                refresh_genre_playlist_covers_for_artist(artist, _updated_albums)
+            except Exception as exc:
+                logger.debug("Genre playlist cover pass failed", artist=artist, error=str(exc))
 
     def _report_album_summary(report: dict[str, Any], album_results: list[dict[str, Any]]) -> None:
         """Emit the closing ALBUM SUMMARY block for one album.

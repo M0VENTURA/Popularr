@@ -3107,9 +3107,9 @@
         <div class="input-card">
           <label for="playlists_genre_ai_cover_enabled">AI Genre Covers</label>
           <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" id="playlists_genre_ai_cover_enabled" {% if config.get('playlists', {}).get('genre_playlist_ai_cover_enabled', false) %}checked{% endif %}>
+            <input class="form-check-input" type="checkbox" id="playlists_genre_ai_cover_enabled" {% if config.get('playlists', {}).get('genre_playlist_ai_cover_enabled', true) %}checked{% endif %}>
           </div>
-          <span class="help-text">Generate AI cover artwork for each <strong>Top Genre</strong> playlist (requires the Google Gemini key above). Artist / Essential playlists are unaffected. Default: <strong>off</strong></span>
+          <span class="help-text">Generate AI cover artwork for each <strong>Top Genre</strong> playlist (requires the Google Gemini key above). Artist / Essential playlists are unaffected. Default: <strong>on</strong> — nothing is generated until a Gemini key is configured.</span>
         </div>
         <div class="input-card">
           <label for="playlists_genre_ai_cover_regenerate">Regenerate AI Covers</label>

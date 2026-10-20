@@ -2128,19 +2128,40 @@ def get_genre_cover_config() -> dict[str, Any]:
         Dict with ``enabled``, ``regenerate`` and ``prompt_template``.
 
     Default Values:
-        - genre_playlist_ai_cover_enabled: False
+        - genre_playlist_ai_cover_enabled: True
         - genre_playlist_ai_cover_regenerate: False
         - genre_playlist_ai_cover_prompt: "{genre}" template (see the service)
 
     NOTE: applies to the TOP GENRE playlists only. The Essential Collections
     (artist playlists) keep the artist-image cover they already get.
+
+    ⭐⭐ WHY ``enabled`` DEFAULTS TO TRUE (the reversal is deliberate).
+
+    Gemini has EXACTLY ONE consumer in this app: the genre-playlist covers
+    (``api_clients/gemini.py`` is imported by nothing else). So a second
+    toggle in a DIFFERENT config section asked the user to say the same thing
+    twice — "I want Gemini artwork" — and the second one was the one that was
+    easy to miss.
+
+    The reported symptom was exactly that: the Gemini key was configured, the
+    log said *"Genre playlist covers: OFF — tick 'AI covers for Top Genre
+    playlists'"*, and no artwork ever appeared. The billing guard is already
+    where it belongs — ``api_integrations.gemini.enabled`` plus a key — so
+    the covers toggle is a SECOND opt-in for the SAME billable API, which
+    strands the feature instead of protecting it.
+
+    So the toggle now DEFAULTS ON, and the billable-API opt-in remains the
+    Gemini integration itself (which is off, with no key, until the user
+    supplies one). Turning the covers OFF is still possible — the Config
+    page's checkbox writes ``false`` — for anyone who configured Gemini for
+    another reason or simply does not want the artwork.
     """
     cfg = get_config() or {}
     p = cfg.get("playlists") or {}
     if not isinstance(p, dict):
         p = {}
     return {
-        "enabled": bool(p.get("genre_playlist_ai_cover_enabled", False)),
+        "enabled": bool(p.get("genre_playlist_ai_cover_enabled", True)),
         "regenerate": bool(p.get("genre_playlist_ai_cover_regenerate", False)),
         "prompt_template": str(p.get("genre_playlist_ai_cover_prompt") or "").strip(),
     }
