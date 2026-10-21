@@ -308,6 +308,14 @@ def add_release_tracks_to_queue_detailed(
             _val = album_metadata.get(_col)
             if _val is not None and str(_val).strip() != "":
                 _album_meta[_col] = _val
+        # The ALBUM's MusicBrainz genres (release group + release). Deliberately
+        # NOT a ``tracks`` column, so it is kept out of the column loop above
+        # and travelled under its own key.
+        _album_genres = str(
+            album_metadata.get("musicbrainz_album_genres") or ""
+        ).strip()
+        if _album_genres:
+            _album_meta["musicbrainz_album_genres"] = _album_genres
     queue_ids: list[int] = []
     in_library = 0
     already_queued = 0

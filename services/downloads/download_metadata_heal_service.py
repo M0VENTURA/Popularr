@@ -95,6 +95,7 @@ HEAL_COLUMNS: tuple[str, ...] = (
     "originalyear",
     "year",
     "release_year",
+    "release_title",
 )
 
 #: Columns the DATABASE can hold but that carry no useful identity when they are

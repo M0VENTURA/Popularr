@@ -752,6 +752,14 @@ def _extract_duration_seconds(file_path: str) -> Optional[int]:
 # MOVE / IMPORT
 # =============================================================================
 
+#: The album-scoped release columns a download import carries and applies.
+#: Every name here must be a real ``tracks`` COLUMN — the list builds the
+#: sibling-inheritance ``SELECT``, so a non-column breaks that query.
+#: ``release_title`` (the edition, "Release Name") and ``release_year`` (this
+#: edition's year) were the two missing ones: the release payload has carried
+#: both since ``_flatten_release``, but the download path dropped them, so a
+#: downloaded album arrived with no edition name/year while the album page's
+#: Lookup MBID proposed both.
 _ALBUM_LEVEL_COLUMNS: tuple[str, ...] = (
     "musicbrainz_albumtype",
     "musicbrainz_albumstatus",
@@ -761,6 +769,8 @@ _ALBUM_LEVEL_COLUMNS: tuple[str, ...] = (
     "originalyear",
     "originaldate",
     "releasedate",
+    "release_title",
+    "release_year",
     "disctotal",
     "recordlabel",
     "catalognumber",
@@ -773,6 +783,12 @@ _SOURCE_MAP_LOGGED_KEY = "_album_source_map_logged"
 
 
 def _album_level_mb_fields(release: dict[str, Any]) -> dict[str, Any]:
+    """Album-scoped release fields, read off a flattened MB release.
+
+    One mapping for every path that imports a release (queue time,
+    post-download, folder match, heal), so a field missing here is missing
+    everywhere.
+    """
     out: dict[str, Any] = {}
     mapping = {
         "musicbrainz_albumtype": release.get("album_type"),
@@ -783,6 +799,17 @@ def _album_level_mb_fields(release: dict[str, Any]) -> dict[str, Any]:
         "originalyear": release.get("original_year"),
         "originaldate": release.get("original_date"),
         "releasedate": release.get("releasedate"),
+        # The SPECIFIC edition name/year. The release GROUP's name is the
+        # album's own identity (``album``), so these say WHICH pressing is held.
+        "release_title": (
+            release.get("specific_release_title")
+            or release.get("release_title")
+        ),
+        "release_year": (
+            release.get("version_release_year")
+            if release.get("version_release_year") not in (None, "")
+            else release.get("release_year")
+        ),
         "disctotal": release.get("disctotal"),
         "recordlabel": release.get("recordlabel"),
         "catalognumber": release.get("catalognumber"),
@@ -792,7 +819,40 @@ def _album_level_mb_fields(release: dict[str, Any]) -> dict[str, Any]:
     for column, value in mapping.items():
         if value is not None and str(value).strip() != "":
             out[column] = value
+
+    # The ALBUM's MusicBrainz genres travel alongside, NOT as a ``tracks``
+    # column — ``_ALBUM_LEVEL_COLUMNS`` is used to build a SELECT, so a
+    # non-column there would break that query.
+    _genres = _album_level_genres(release)
+    if _genres:
+        out["musicbrainz_album_genres"] = _genres
     return out
+
+
+def _album_level_genres(release: dict[str, Any]) -> str:
+    """The ALBUM's MusicBrainz genres: release GROUP then the RELEASE.
+
+    Not the per-recording list — that travels per track and was already
+    imported. This is a FILL for tracks with no genre evidence of their own,
+    so the per-track affiliation markers are stripped: a "Cover" here would be
+    stamped on every track of the album.
+    """
+    from services.enrichment.genre_aggregation_service import (
+        strip_track_affiliation_tags,
+    )
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw in (
+        release.get("release_group_genres"),
+        release.get("release_genres"),
+    ):
+        for genre in strip_track_affiliation_tags(raw):
+            key = genre.casefold()
+            if key and key not in seen:
+                seen.add(key)
+                names.append(genre)
+    return ", ".join(names)
 
 
 def _describe_album_source_map(sources: dict[str, str]) -> str:
@@ -1174,6 +1234,23 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
     except Exception as _stored_exc:
         logger.debug("Stored MB metadata parse failed", queue_id=item.get("id"), error=str(_stored_exc))
 
+    # ── Album-level MusicBrainz genres: a FILL for this track's ``genres`` ──
+    # The release GROUP's and RELEASE's curated genres. Applied ONLY when the
+    # track has NO genre evidence of its own — the album list is an aggregate
+    # of exactly those sources, so writing it back would flatten the track to
+    # the album blend.
+    #
+    # ⚠️ DATABASE ONLY, like the album page's own genre fill. The file's genre
+    # tag belongs to the popularity/finalise scan's DB → file sync; writing it
+    # here would make the import a second genre writer.
+    _album_genre_fill = ""
+    if isinstance(_stored, dict) and not str(
+        _stored.get("musicbrainz_genres") or ""
+    ).strip():
+        _album_genre_fill = str(
+            (_stored.get("album_metadata") or {}).get("musicbrainz_album_genres") or ""
+        ).strip()
+
     _track_missing = [
         _k for _k in ("isrc", "tracktotal", "musicbrainz_artistid")
         if not meta.get(_k)
@@ -1242,12 +1319,16 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
             "musicbrainz_artistid", "musicbrainz_albumartistid",
             "musicbrainz_releasegroupid", "musicbrainz_albumtype", "musicbrainz_albumstatus",
             "releasecountry", "originalyear", "originaldate", "releasedate",
+            "release_title", "release_year",
             "disctotal", "recordlabel", "catalognumber", "barcode", "media",
             "isrc", "tracktotal", "musicbrainz_album_mbid",
         }
         for _col in _mb_cols:
             if meta.get(_col) not in (None, ""):
                 _db_payload[_col] = meta[_col]
+
+        if _album_genre_fill and not _db_payload.get("genres"):
+            _db_payload["genres"] = _album_genre_fill
 
         if release_mbid and not _db_payload.get("musicbrainz_album_mbid"):
             _db_payload["musicbrainz_album_mbid"] = release_mbid

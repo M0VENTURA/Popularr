@@ -91,6 +91,8 @@ SIBLING_B = {
     "catalognumber": "B-CAT",
     "media": "CD",
     "disctotal": "2",
+    "release_title": "Dummy (Remastered)",
+    "release_year": "1997",
     "musicbrainz_albumtype": "Album",
     "musicbrainz_albumstatus": "Official",
     "releasecountry": "GB",
@@ -110,6 +112,8 @@ SIBLING_A = dict(
     barcode="A-BARCODE",
     catalognumber="A-CAT",
     disctotal="1",
+    release_title="Dummy",
+    release_year="1994",
 )
 
 

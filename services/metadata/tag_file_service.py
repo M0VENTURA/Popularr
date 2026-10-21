@@ -855,6 +855,10 @@ _ALBUM_MB_TAG_COLUMNS: tuple[str, ...] = (
     "media",
     "originalyear",
     "originaldate",
+    # ``releasedate`` was missing, so the import wrote the release date to the
+    # DATABASE but not the FILE; the album page's save (which goes through
+    # ``build_tag_updates``) did write it, so the two disagreed.
+    "releasedate",
     # Release/medium totals the album page writes (TRACKTOTAL/DISCTOTAL
     # TXXX or Vorbis) — a queued import must carry them too.
     "tracktotal",
