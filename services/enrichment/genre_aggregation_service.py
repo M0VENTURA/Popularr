@@ -108,10 +108,66 @@ def is_track_affiliation_tag(value: Any) -> bool:
     """True when ``value`` is a per-TRACK affiliation marker (Cover/Live/…).
 
     These describe ONE recording's performance, never the album. The
-    Christmas family is deliberately NOT one of them: a Christmas album IS an
+    holiday family is deliberately NOT one of them: a seasonal album IS an
     album property and the playlist builder relies on the tag surviving.
+
+    ⚠️ Because the family is exempt here, it needs its OWN guard against
+    spreading from one track to an album — see ``_album_is_holiday``.
     """
     return str(value or "").strip().lower() in _TRACK_AFFILIATION_FILTER_TAGS
+
+
+#: The ONE token the whole holiday family collapses to.
+#:
+#: Christmas, Xmas, Noel, Yule, Advent, Hanukkah, Chanukah and Holiday all mean
+#: the SAME thing to this pipeline — seasonal music, one playlist bucket — so
+#: they merge to a single token instead of competing for genre slots. Without
+#: this, an album tagged "Christmas" on one track and "Holiday" on another
+#: produced two near-duplicate pools and two chips for one idea.
+#:
+#: "Holiday" is the umbrella deliberately: it covers Christmas AND the other
+#: winter holidays. Calling the merged token "Christmas" would label a Hanukkah
+#: track as Christmas.
+HOLIDAY_CANONICAL_TOKEN = "Holiday"
+
+#: Every spelling the family arrives under (lower-case, as stored).
+#:
+#: Matches ``album_classification_service.CHRISTMAS_GENRE_TOKENS`` — the two
+#: live in different modules but must agree, so a change to one needs the other.
+HOLIDAY_FAMILY_ALIASES: frozenset[str] = frozenset({
+    "christmas", "xmas", "x mas", "x-mas", "holiday", "holidays",
+    "noel", "yule", "yuletide", "advent", "hanukkah", "chanukah",
+})
+
+
+def is_holiday_family_token(value: Any) -> bool:
+    """True when ``value`` is any spelling of the holiday family."""
+    return str(value or "").strip().lower() in HOLIDAY_FAMILY_ALIASES
+
+
+def canonical_holiday_token(value: Any) -> str:
+    """The family's single token for ``value``, or ``""`` when not holiday."""
+    return HOLIDAY_CANONICAL_TOKEN if is_holiday_family_token(value) else ""
+
+
+def merge_holiday_tokens(genres: list[str]) -> list[str]:
+    """Collapse every holiday spelling to ONE token, keeping its position.
+
+    Order is preserved: the family name takes the slot of the FIRST spelling
+    seen, so a holiday marker that was appended last stays last and the
+    playlist builder's genre window is unaffected.
+    """
+    merged: list[str] = []
+    seen_holiday = False
+    for genre in genres or []:
+        if is_holiday_family_token(genre):
+            if seen_holiday:
+                continue
+            seen_holiday = True
+            merged.append(HOLIDAY_CANONICAL_TOKEN)
+            continue
+        merged.append(genre)
+    return merged
 
 
 def is_propagatable_genre(value: Any) -> bool:
@@ -797,6 +853,72 @@ def update_get_top_genres_with_navidrome(
     return rank_genres_with_local_tags(sources, nav_genres, title=title, album=album)
 
 
+def _album_holiday_votes(rows: list[Any], album: str, indices: list[int]) -> tuple[int, int]:
+    """``(tracks_carrying_a_holiday_token, tracks_examined)`` for an album.
+
+    Only rows that hold ANY genre value are counted, so an album of half-empty
+    rows is judged on the tracks that actually said something rather than on a
+    denominator of blanks.
+    """
+    with_holiday = 0
+    examined = 0
+    for row in rows:
+        row_genres: list[str] = []
+        for idx in indices:
+            try:
+                value = row[idx]
+            except (IndexError, KeyError, TypeError):
+                continue
+            row_genres.extend(_parse_genre_input(value) or [])
+        if not row_genres:
+            continue
+        examined += 1
+        if any(is_holiday_family_token(g) for g in row_genres):
+            with_holiday += 1
+    return with_holiday, examined
+
+
+def album_is_holiday_album(
+    *,
+    album: str = "",
+    track_titles: Any = None,
+    holiday_track_count: int = 0,
+    track_count: int = 0,
+) -> bool:
+    """Is the ALBUM itself seasonal, rather than one track on it?
+
+    ⭐⭐ THE FIX FOR "one track's holiday tag becomes the whole album".
+
+    The holiday family is deliberately exempt from the per-track affiliation
+    filter (a Christmas album IS an album property, and the playlist builder
+    needs the tag outside its genre window). That exemption is what let a
+    single Last.fm "holiday" tag on one track reach every sibling: the album
+    blend kept it, and the album-wide ``UPDATE tracks SET genres`` then wrote
+    it everywhere — including onto tracks that never carried it.
+
+    An album IS seasonal when either signal says so:
+
+    * the album TITLE names it ("A Very Special Christmas", "Holiday Album") —
+      the tag always counts, because the title is album-scoped evidence; or
+    * MOST of the album's tagged tracks carry a holiday token. A majority, not
+      "any": one seasonal bonus track on an otherwise ordinary album ("So Much
+      for the Afterglow" with a single Holiday tag) is a per-TRACK fact, and
+      spreading it re-labels the whole record.
+
+    ``track_titles`` is accepted so a caller with per-track titles can let the
+    title patterns vote too; a per-track title alone never makes the ALBUM
+    seasonal (only the album title does).
+    """
+    from services.catalog.album_classification_service import detect_christmas_song
+
+    if detect_christmas_song("", album):
+        return True
+
+    if holiday_track_count <= 0 or track_count <= 0:
+        return False
+    return holiday_track_count * 2 > track_count
+
+
 def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
     with db_session() as session:
         result = session.execute(
@@ -825,6 +947,7 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
         ("audiodb", 8),
         ("wikidata", 9),
     ]
+    _genre_indices = [idx for _src, idx in column_mapping]
 
     for row in rows:
         for src_key, idx in column_mapping:
@@ -847,13 +970,35 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
     # Last.fm "acoustic", was spread to EVERY track of the album by the
     # album-wide ``UPDATE tracks SET genres`` in ``sync_album_file_tags``.
     # That is the reported "saving track genres to album / attaching Cover to
-    # non-cover songs". Only the Christmas family survives an album blend:
-    # a Christmas album is an album property and the genre-playlist builder
-    # relies on the tag being present outside its 3-genre window.
+    # non-cover songs".
     recommended = [
         g for g in recommended
         if g.strip().lower() not in _TRACK_AFFILIATION_FILTER_TAGS
     ]
+
+    # ── The holiday family needs the guard the affiliation filter gives ────
+    #
+    # The family is EXEMPT from the filter above (a Christmas album IS an album
+    # property), so it had no protection at all and a single track's "holiday"
+    # tag became the whole album's genre. Keep the token ONLY when the album
+    # itself is seasonal — the reported "one track's holiday genre is
+    # propagating to the whole album".
+    _holiday_tracks, _examined = _album_holiday_votes(rows, album, _genre_indices)
+    _keep_holiday = album_is_holiday_album(
+        album=album,
+        holiday_track_count=_holiday_tracks,
+        track_count=_examined,
+    )
+    if not _keep_holiday:
+        recommended = [
+            g for g in recommended
+            if not is_holiday_family_token(g)
+        ]
+    else:
+        # Merge the family's spellings to the ONE canonical token so an album
+        # tagged "Christmas" on one track and "Holiday" on another yields one
+        # bucket rather than two near-duplicates.
+        recommended = merge_holiday_tokens(recommended)
 
     return {"success": True, "artist": artist, "album": album, "genres": recommended}
 

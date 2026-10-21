@@ -2429,8 +2429,23 @@ def _playlist_sync_succeeded(result: dict[str, Any] | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Christmas exclusion policy
+# Seasonal (holiday) exclusion policy
 # ---------------------------------------------------------------------------
+
+#: The ONE pool every seasonal spelling maps to, and its display name.
+#:
+#: ⚠️ ``_HOLIDAY_POOL_KEY`` MUST contain the default
+#: ``christmas_playlist_marker`` ("christmas"), because the marker is what
+#: decides whether a playlist is allowed to hold seasonal music — a pool that
+#: does not match the marker would be excluded-when-it-should-not-be (and
+#: invisible to the Christmas playlist the user asked for). Hence the
+#: "christmas holiday" spelling: it satisfies the default marker AND names the
+#: umbrella the whole family (Christmas / Xmas / Noel / Yule / Hanukkah)
+#: collapses to. A custom marker other than "christmas" can be pointed at the
+#: pool by setting ``christmas_playlist_marker`` to match.
+_HOLIDAY_POOL_KEY = "christmas holiday"
+_HOLIDAY_POOL_DISPLAY = "Holiday"
+
 
 def _christmas_exclusion_enabled() -> bool:
     """True when Christmas music must be kept out of ordinary playlists."""
@@ -3898,16 +3913,23 @@ def _create_genre_top_track_playlists(
             if not norm_key:
                 continue
 
-            # INTERCEPT: Isolate Christmas tracks from standard genres.
-            # A Christmas track only ever lands in a playlist whose name
-            # contains "Christmas" — every other pool is skipped for it.
+            # INTERCEPT: Isolate seasonal tracks from standard genres.
+            # A seasonal track only ever lands in a playlist whose name
+            # contains the marker — every other pool is skipped for it.
+            #
+            # ⚠️ EVERY spelling of the family pools under the ONE canonical
+            # token. Pooling "holiday" and "christmas" separately produced two
+            # near-duplicate playlists for one idea, and — because
+            # ``is_christmas_genre_token("holiday")`` is True — a track whose
+            # only tag was "Holiday" took the ``elif`` branch below and landed
+            # in a plain "Holiday" pool that is NOT matched by the configured
+            # playlist marker, so the exclusion did not cover it.
             if is_christmas and not is_christmas_genre_token(norm_key):
                 target_norm_key = f"christmas {norm_key}"
                 target_display = f"Christmas {genre.title()}"
             elif is_christmas:
-                # It IS the Christmas token, so keep the plain pool name.
-                target_norm_key = norm_key
-                target_display = genre
+                target_norm_key = _HOLIDAY_POOL_KEY
+                target_display = _HOLIDAY_POOL_DISPLAY
             else:
                 target_norm_key = norm_key
                 target_display = genre

@@ -187,12 +187,26 @@ class TestAlbumBlendNeverSpreadsTrackAffiliation:
         assert "rock" in lowered
 
     def test_christmas_is_still_album_valid(self):
+        """⚠️ CHANGED 2026-10-22: the token is now the merged ``Holiday``.
+
+        The property this pins is unchanged — a SEASONAL album is an album
+        property and the genre-playlist builder detects it from the stored
+        value. What changed is the SPELLING: every holiday spelling
+        (Christmas / Xmas / Noel / Yule / Hanukkah …) now merges to the ONE
+        umbrella token "Holiday", at the user's request, so one idea gets one
+        playlist instead of several near-duplicates.
+
+        The album here has 1 of 1 tracks tagged, i.e. every track — so it IS a
+        seasonal album by the majority rule and the token survives. See
+        ``test_holiday_album_propagation.py`` for the case that does NOT.
+        """
         out = _album_recommendations_from_row(
             [["[]", '["rock", "christmas"]', "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]"]]
         )
-        assert "Christmas" in out, (
-            "a Christmas album IS an album property; the genre-playlist "
-            "builder detects it from the stored value"
+        assert "Holiday" in out, (
+            "a seasonal album IS an album property; the genre-playlist "
+            "builder detects it from the stored value. Every spelling of the "
+            "family now travels as the merged 'Holiday' token."
         )
         assert "rock" in {g.lower() for g in out}
 
