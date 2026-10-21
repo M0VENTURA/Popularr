@@ -50,7 +50,13 @@ class _FakeClient:
 
 @pytest.fixture
 def cover_env(tmp_path, monkeypatch):
-    """The real service with a real temp state file and a stubbed Gemini."""
+    """The real service with a real temp state file and a stubbed Gemini.
+
+    The default prompt embeds a RANDOM creative stimulus, so the SAME args
+    produce DIFFERENT prompts on consecutive calls. These tests assert
+    deterministic skip/upgrade behaviour, so a deterministic custom template
+    is used — both ``_digest`` and the service itself render the same prompt,
+    and the skip/upgrade logic is exercised on a reproducible hash."""
     import api_clients.gemini as gemini_mod
     import helpers.config_helpers as cfg_mod
     from services.playlists import genre_cover_service as svc
@@ -59,7 +65,8 @@ def cover_env(tmp_path, monkeypatch):
     monkeypatch.setattr(svc, "_state_path", lambda: str(state_file))
 
     monkeypatch.setattr(cfg_mod, "get_genre_cover_config", lambda: {
-        "enabled": True, "regenerate": False, "prompt_template": "",
+        "enabled": True, "regenerate": False,
+        "prompt_template": "Square album cover for a {genre} playlist.",
     })
     monkeypatch.setattr(cfg_mod, "get_gemini_config", lambda: {
         "enabled": True, "api_key": "test-key", "model": "test-model",
@@ -77,7 +84,14 @@ def cover_env(tmp_path, monkeypatch):
 
 
 def _digest(svc) -> str:
-    return svc._prompt_hash(svc.build_cover_prompt(GENRE, ""))
+    # Match the configured template the service itself uses — the empty
+    # string would fall back to the random default and never match.
+    return svc._prompt_hash(svc.build_cover_prompt(GENRE, _DIGEST_TEMPLATE))
+
+
+#: The deterministic template used by the digest helper — must match the
+#: ``prompt_template`` the ``cover_env`` fixture configures.
+_DIGEST_TEMPLATE = "Square album cover for a {genre} playlist."
 
 
 def _write(path: Path, data: dict) -> None:

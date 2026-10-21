@@ -59,17 +59,19 @@ class TestThePrompt:
 
         assert build_cover_prompt("Folk Metal", "Just a scene") == "Just a scene"
 
-    def test_a_blank_template_falls_back_to_the_builtin(self):
-        from services.playlists.genre_cover_service import (
-            DEFAULT_PROMPT_TEMPLATE,
-            build_cover_prompt,
-        )
+    def test_a_blank_template_falls_back_to_a_dynamic_prompt(self):
+        """No custom template → the prompt is built dynamically with random
+        stimulus and the playlist title."""
+        from services.playlists.genre_cover_service import build_cover_prompt
 
-        # The builtin still has {genre} substituted — the fallback is the
-        # prompt, not the raw constant.
-        assert build_cover_prompt("Folk Metal", "") == DEFAULT_PROMPT_TEMPLATE.replace(
-            "{genre}", "Folk Metal"
-        )
+        rendered = build_cover_prompt("Folk Metal", "", "Folk Metal - Top Tracks")
+
+        # The dynamic prompt carries the playlist name and the genre.
+        assert "Folk Metal - Top Tracks" in rendered
+        assert "Folk Metal" in rendered
+        # And it asks for a single central concept, not a montage.
+        assert "ONE CENTRAL VISUAL CONCEPT" in rendered
+        assert "Do NOT combine multiple unrelated genre symbols" in rendered
 
     def test_a_stray_brace_does_not_raise(self):
         """⚠️ ``str.format`` would raise on a bare brace — a legitimate prompt
@@ -80,16 +82,42 @@ class TestThePrompt:
             "A Metal cover with a { brace"
         )
 
-    def test_the_builtin_asks_for_the_genre_title(self):
-        from services.playlists.genre_cover_service import (
-            DEFAULT_PROMPT_TEMPLATE,
-            build_cover_prompt,
-        )
+    def test_the_dynamic_prompt_anti_cliche_blocklist(self):
+        """The dynamic prompt must explicitly discourage the visual shortcuts
+        that make covers look alike and look 'AI'."""
+        from services.playlists.genre_cover_service import build_cover_prompt
 
-        rendered = build_cover_prompt("Folk Metal", DEFAULT_PROMPT_TEMPLATE)
+        rendered = build_cover_prompt("Folk Metal", "", "Folk Metal - Top Tracks")
 
+        # The universal anti-cliché blocklist.
+        assert "musical instruments" in rendered
+        assert "headphones" in rendered
+        assert "vinyl records" in rendered
+        # The heavy-music anti-cliché blocklist.
+        assert "castles" in rendered
+        assert "skulls" in rendered
+        assert "dead trees" in rendered
+
+    def test_the_dynamic_prompt_includes_random_stimulus(self):
+        """Each call randomises the creative direction, so consecutive
+        generations for the same genre do not produce identical art."""
+        from services.playlists.genre_cover_service import build_cover_prompt
+
+        prompts = {
+            build_cover_prompt("Folk Metal", "", "Folk Metal - Top Tracks")
+            for _ in range(20)
+        }
+        # With 6×6×6×6×6×6 = 46656 possible combinations, 20 calls must
+        # produce more than one distinct prompt.
+        assert len(prompts) > 1, "the prompt is not being randomised"
+
+    def test_playlist_name_defaults_to_genre_when_blank(self):
+        from services.playlists.genre_cover_service import build_cover_prompt
+
+        rendered = build_cover_prompt("Folk Metal", "", "")
+        # The playlist name falls back to the genre — the prompt still
+        # carries a title to render.
         assert "Folk Metal" in rendered
-        assert "Folk Metal" in rendered.split('"')[1]     # the on-art title
 
 
 class TestTheGeminiClient:
@@ -242,15 +270,23 @@ class TestTheCoverService:
         assert saved.get("folk metal")          # recorded, so it will not re-bill
 
     def test_the_same_prompt_is_not_regenerated(self, monkeypatch):
-        """⭐ The cost guard: a nightly scan must not re-make identical art."""
-        _patch_config(monkeypatch)
+        """⭐ The cost guard: a nightly scan must not re-make IDENTICAL art.
+
+        The default prompt now embeds a RANDOM creative stimulus, so two
+        consecutive bare calls produce DIFFERENT prompts and therefore
+        DIFFERENT art — which is the whole point (variety). The cost guard
+        still works when the prompt is deterministic: a custom template with
+        no random axis produces the same hash and IS skipped."""
+        _patch_config(monkeypatch, cover={"prompt_template": "Static art for {genre}"})
         svc, saved = self._wire(monkeypatch)
         client = _FakeClient()
 
         svc.generate_genre_cover("Folk Metal", "Folk Metal - Top Tracks", client)
         second = svc.generate_genre_cover("Folk Metal", "Folk Metal - Top Tracks", client)
 
-        assert second["status"] == "skipped"
+        assert second["status"] == "skipped", (
+            "a deterministic custom prompt must skip regeneration"
+        )
         assert len(client.uploaded) == 1
 
     def test_regenerate_writes_again(self, monkeypatch):

@@ -41,32 +41,211 @@ logger = structlog.get_logger(__name__)
 
 _STATE_FILE_NAME = "genre_playlist_covers.json"
 
-DEFAULT_PROMPT_TEMPLATE = (
-    "Square album cover artwork for a {genre} music playlist. "
-    "Cinematic, atmospheric scene evoking {genre}, rich colour, dramatic "
-    "lighting, highly detailed digital painting. Large bold ornamental title "
-    "text \"{genre}\" centred at the top, weathered metal lettering. "
-    "No band names, no artist names, no faces, no logos, no watermark."
-)
+#: ⭐⭐ THE COVER PROMPT
+#: ─────────────────────────────────────────────────────────────────────────
+#: Why the old template produced near-identical covers
+#: ------------------------------------------------
+#: The previous template always asked for the same thing — "cinematic,
+#: atmospheric scene, rich colour, dramatic lighting, highly detailed digital
+ #: painting" — so every genre got a glowing, misty, fantasy-landscape
+#: render. The model collapsed every prompt onto the SAME visual formula.
+#: That is the look your ear flagged as "AI".
+#: ⭐ What this template does differently
+#: -------------------------------------
+#: 1. RANDOM CREATIVE STIMULUS  —  medium, composition, lighting, texture,
+#:    palette strategy and conceptual approach are chosen at random per call.
+#:    A House cover and a Metalcore cover no longer share a formula; two
+#:    House covers made months apart do not either.
+#: 2. ONE CENTRAL CONCEPT  —  explicitly forbids the "guitar + skull +
+#:    forest + city + lightning + smoke" montage the model otherwise
+#:    defaults to. The art director develops ONE idea and commits to it.
+#: 3. ANTI-CLICHÉ  —  a blocklist of visual shortcuts image models
+#:    over-use, both the universal ones (instruments, headphones, vinyl,
+#:    waveforms) and the genre-agnostic heavy-music ones (castles, skulls,
+#:    dead trees, fire). "Do not assume heavy music requires X".
+#: 4. LET THE MODEL INVENT THE PALETTE  —  colour comes from the music's
+#:    character and a randomly chosen *strategy* (monochromatic, muted +
+#:    accent, warm dominant, …), never from a hard-coded genre→colour map.
+#: 5. TYPOGRAPHY IS SEPARATE  —  the playlist title is rendered in its own
+#:    recommended style, NOT painted by the model (painted text is the most
+#:    recognisable "AI" tell). Your application composites the title on
+#:    afterwards; the artwork reserves space for it.
+#: 6. AUTHENTICITY > RANDOMNESS  —  the random stimuli are suggestions. The
+#:    art director may adapt or reject any of them if they conflict with the
+#:    music. Musical identity wins.
+#
+# Seedable RNG so the same genre + timestamp reproduces, but different
+# timestamps vary. ``random`` is fine here — this is art direction, not
+# security.
+import random
+
+#: The random creative axes. Each call picks one from each list, so the
+#: prompt varies every time. The model receives them as *suggestions*, not
+#: mandatory ingredients.
+_RANDOM_MEDIA = [
+    "35mm film photography", "medium-format photography", "large-format photography",
+    "oil painting", "acrylic painting", "gouache painting", "watercolour painting",
+    "charcoal drawing", "graphite drawing", "ink illustration", "pen illustration",
+    "screen printing", "risograph", "linocut", "woodcut",
+    "collage (physical, tactile)", "mixed media on paper", "mixed media on canvas",
+    "sculpture (clay, plaster, found objects)", "textile / fabric art",
+    "cyanotype", "daguerreotype-style toning", "polaroid / instant film",
+    "digital painting (non-photorealistic)", "vector art (limited palette)",
+    "stained glass", "mosaic", "enamelwork", "metal etching",
+]
+_RANDOM_COMPOSITIONS = [
+    "extreme close-up / macro", "intimate detail of a single object",
+    "wide landscape with a small human element", "bird's-eye / overhead",
+    "low-angle looking up", "tight symmetrical framing",
+    "rule-of-thirds with negative space on the left",
+    "rule-of-thirds with negative space on the right",
+    "central subject surrounded by texture", "panoramic crop",
+    "fragmented / cropped composition", "looking through a window or frame",
+    "reflection in water or glass", "long exposure / motion blur",
+]
+_RANDOM_LIGHTINGS = [
+    "hard directional studio lighting", "soft diffused natural light",
+    "golden hour / warm sunset", "cold overcast daylight",
+    "single dramatic spotlight", "rim lighting / backlight",
+    "low-key / chiaroscuro", "high-key / bright and airy",
+    "neon / artificial coloured light", "candlelight / warm flicker",
+    "moonlight / blue night", "fog / haze diffusion",
+    "harsh midday sun", "light through coloured glass",
+]
+_RANDOM_TEXTURES = [
+    "aged uncoated print", "glossy magazine print", "faded polaroid",
+    "grainy film (ISO 800+)", "clean digital finish",
+    "torn paper edge", "creased / folded surface",
+    "dust and scratches", "chemical staining / light leaks",
+    "fabric weave visible", "rough concrete surface",
+    "rusted metal surface", "weathered wood grain",
+    "water damage / warping", "embossed / debossed print",
+]
+_RANDOM_PALETTES = [
+    "restrained monochromatic", "muted + single accent",
+    "warm dominant", "cold dominant", "high contrast",
+    "low contrast / muted", "complementary clash",
+    "analogous / harmonious", "duotone (two colours only)",
+    "earth tones only", "pastel + desaturated",
+    "neon / saturated against dark", "sepia / warm vintage",
+    "cool silver + blue", "deep jewel tones",
+]
+_RANDOM_CONCEPTS = [
+    "transform an everyday object into an emotional metaphor",
+    "capture a fleeting moment of human stillness",
+    "exploit extreme scale contrast (tiny vs vast)",
+    "find beauty in decay or abandonment",
+    "show the same subject from an unexpected angle",
+    "use shadow and silhouette to suggest rather than show",
+    "freeze motion in an unusual medium (water, smoke, dust)",
+    "juxtapose organic and geometric forms",
+    "render an abstract emotion as a physical texture",
+    "use negative space as the primary subject",
+    "find the extraordinary in the mundane",
+    "show a landscape at an unusual time of day",
+    "use weather (fog, rain, snow) as the main element",
+    "exploit reflection or refraction",
+    "show a process (melting, burning, growing, eroding)",
+]
 
 
-def build_cover_prompt(genre: str, template: str | None = None) -> str:
+def _random_creative_stimulus() -> dict[str, str]:
+    """One random creative direction per cover call.
+
+    Each axis is a SUGGESTION, not a constraint — the art director may
+    adapt or reject any of them. This is what makes covers differ from
+    one generation to the next without losing musical credibility.
+    """
+    return {
+        "medium": random.choice(_RANDOM_MEDIA),
+        "composition": random.choice(_RANDOM_COMPOSITIONS),
+        "lighting": random.choice(_RANDOM_LIGHTINGS),
+        "texture": random.choice(_RANDOM_TEXTURES),
+        "palette_strategy": random.choice(_RANDOM_PALETTES),
+        "conceptual_approach": random.choice(_RANDOM_CONCEPTS),
+    }
+
+
+def build_cover_prompt(genre: str, template: str | None = None, playlist_name: str = "") -> str:
     """Render the prompt for *genre*.
 
-    ``{genre}`` is substituted when present. ⚠️ A template that is missing the
-    placeholder is used AS-IS rather than raising: a user-edited template is
-    still a valid prompt, and ``str.format`` on a stray brace (a legitimate part
-    of a prompt) raises ``KeyError``/``ValueError`` — which would take the whole
-    genre pass down over a typo in a text box.
+    ``{genre}`` and ``{playlist}`` are substituted when present. ⚠️ A template
+    that is missing the placeholder is used AS-IS rather than raising:
+    a user-edited template is still a valid prompt, and ``str.format`` on a
+    stray brace (a legitimate part of a prompt) raises ``KeyError``/
+    ``ValueError`` — which would take the whole genre pass down over a typo
+    in a text box.
+
+    When no custom template is configured, a RANDOM creative stimulus is
+    generated and embedded so consecutive calls for the same genre do NOT
+    produce identical art.
     """
     name = str(genre or "").strip()
-    text = str(template or "").strip() or DEFAULT_PROMPT_TEMPLATE
+    pname = str(playlist_name or "").strip() or name
+    text = str(template or "").strip()
+    if not text:
+        # No custom template — build a varied prompt with random stimulus.
+        s = _random_creative_stimulus()
+        text = (
+            "Create original square 1:1 album-cover artwork for a music playlist "
+            "called \"{playlist}\". The playlist is in the {genre} genre.\n\n"
+            "DEVELOP ONE CENTRAL VISUAL CONCEPT. The cover must have one dominant "
+            "idea, a clear focal point, and a coherent composition. Do NOT "
+            "combine multiple unrelated genre symbols into a collage or montage.\n\n"
+            "SUGGESTED CREATIVE STIMULI (adapt, reinterpret, or reject any that "
+            "conflict with the musical identity — musical authenticity wins):\n"
+            f"  Medium: {s['medium']}\n"
+            f"  Composition: {s['composition']}\n"
+            f"  Lighting: {s['lighting']}\n"
+            f"  Texture: {s['texture']}\n"
+            f"  Palette strategy: {s['palette_strategy']}\n"
+            f"  Conceptual approach: {s['conceptual_approach']}\n\n"
+            "Translate the music's atmosphere, rhythm, emotional character and "
+            "cultural context into visual form. Do NOT literally illustrate the "
+            "genre name. Do NOT prescribe the palette — derive an appropriate "
+            "one from the genre's character, the chosen medium, the subject and "
+            "the lighting.\n\n"
+            "DO NOT AUTOMATICALLY USE: musical instruments, microphones, "
+            "headphones, speakers, vinyl records, equalizer graphics, waveform "
+            "visuals, streaming UI elements, concert photography, neon music "
+            "symbols, guitars, drums, DJ equipment. Do NOT use these unless the "
+            "art director determines one is essential to an unusually strong "
+            "concept. Prefer metaphor, atmosphere, photography, abstraction, "
+            "environment, material, human traces or visual storytelling.\n\n"
+            "DO NOT AUTOMATICALLY RESORT TO: castles, warriors, skulls, "
+            "graveyards, dead trees, swamps, fire, lightning, medieval scenery, "
+            "fantasy typography — even for heavy music. These are clichés, not "
+            "requirements. An element is justified only if the musical identity "
+            "and the chosen concept specifically call for it.\n\n"
+            "TYPOGRAPHY: Render the playlist title \"{playlist}\" as a clean, "
+            "geometric, sans-serif wordmark in the lower third of the image. "
+            "Use a single colour from the artwork's palette — white, black or "
+            "a muted tone — whichever provides the strongest contrast. "
+            "Keep it small, understated and legible at thumbnail size. "
+            "No ornamental fonts, no drop shadows, no bevels, no outlines, "
+            "no distressed metal text, no fake 3D.\n\n"
+            "The artwork must look like a real record sleeve — not like a "
+            "rendered search query, a stock image, or a playlist thumbnail. "
+            "Square format. Visually complete edge to edge. No interface "
+            "elements, no streaming-service branding, no watermarks, no fake "
+            "text other than the playlist title."
+        )
     if "{genre}" in text:
         try:
-            return text.replace("{genre}", name)
+            text = text.replace("{genre}", name)
         except Exception as exc:
-            logger.debug("Cover prompt template substitution failed: %s", exc)
+            logger.debug("Cover prompt genre substitution failed: %s", exc)
+    if "{playlist}" in text:
+        try:
+            text = text.replace("{playlist}", pname)
+        except Exception as exc:
+            logger.debug("Cover prompt playlist substitution failed: %s", exc)
     return text
+
+
+#: Kept for backward compatibility with the config system. The active
+#: template is now built dynamically by ``build_cover_prompt``.
+DEFAULT_PROMPT_TEMPLATE = ""
 
 
 def _state_path() -> str:
@@ -163,7 +342,9 @@ def generate_genre_cover(
     if client is None:
         return {**result, "status": "failed", "reason": "no Navidrome client"}
 
-    prompt = build_cover_prompt(genre, cfg["prompt_template"])
+    prompt = build_cover_prompt(
+        genre, cfg["prompt_template"], playlist_name=str(playlist_name or genre or "")
+    )
     digest = _prompt_hash(prompt)
     genre_key = str(genre or "").strip().casefold()
 

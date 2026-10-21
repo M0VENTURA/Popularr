@@ -79,7 +79,11 @@ class _FakeClient:
 
 @pytest.fixture
 def cover_env(tmp_path, monkeypatch):
-    """The real service with a real temp state file and a stubbed Gemini."""
+    """The real service with a real temp state file and a stubbed Gemini.
+
+    The default prompt embeds a RANDOM creative stimulus. These tests assert
+    deterministic billing behaviour, so a deterministic custom template is
+    used — ``_digest`` and the service render the same prompt."""
     import api_clients.gemini as gemini_mod
     import helpers.config_helpers as cfg_mod
     from services.playlists import genre_cover_service as svc
@@ -88,7 +92,8 @@ def cover_env(tmp_path, monkeypatch):
     monkeypatch.setattr(svc, "_state_path", lambda: str(state_file))
 
     monkeypatch.setattr(cfg_mod, "get_genre_cover_config", lambda: {
-        "enabled": True, "regenerate": False, "prompt_template": "",
+        "enabled": True, "regenerate": False,
+        "prompt_template": "Square album cover for a {genre} playlist.",
     })
     monkeypatch.setattr(cfg_mod, "get_gemini_config", lambda: {
         "enabled": True, "api_key": "test-key", "model": "test-model",
