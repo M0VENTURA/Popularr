@@ -397,7 +397,25 @@ def _album_level_proposals(
     }
 
     proposals: list[dict[str, Any]] = []
-    for form_field in list(resolved) + (["album_genres"] if "album_genres" in resolved else []):
+    # ⭐ The field list must be DE-DUPLICATED.
+    #
+    # ``album_genres`` has no entry in ``_ALBUM_FIELD_SPECS`` — its value is
+    # built by ``_album_genres`` and assigned into ``resolved`` above — so
+    # ``list(resolved)`` ALREADY contains it. The old
+    # ``list(resolved) + (["album_genres"] if "album_genres" in resolved else [])``
+    # appended it a SECOND time, so the loop ran the album-genres branch
+    # twice and produced TWO identical "Genres" proposals.
+    #
+    # The review banner then rendered the same "Genres -> ..." row twice: the
+    # reported "it lists the Genres twice" after choosing a new release group
+    # or using Lookup MBID — both of which regenerate the proposal. (It only
+    # showed when a proposal was actually generated, i.e. when the MusicBrainz
+    # genres differed from the stored ones, which is exactly what those two
+    # actions cause.)
+    _field_order: list[str] = list(resolved)
+    if "album_genres" not in _field_order:
+        _field_order.append("album_genres")
+    for form_field in _field_order:
         proposed = _as_text(resolved.get(form_field))
         if not proposed:
             continue
