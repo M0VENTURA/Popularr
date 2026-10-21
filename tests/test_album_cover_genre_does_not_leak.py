@@ -268,9 +268,23 @@ class TestTheAlbumSaveNeverStampsCoverOntoSiblings:
         assert "live" not in written[0].lower(), written
         assert "acoustic" not in written[0].lower(), written
 
-    def test_christmas_is_kept(self):
+    def test_christmas_does_not_propagate_to_a_track(self):
+        """⚠️ CHANGED (2026-10-21): the Christmas/Holiday family does NOT
+        propagate to a track.
+
+        It used to be kept here, because "a Christmas album IS an album
+        property". But this filter governs what a TRACK INHERITS, and
+        "Christmas" describes the album's OCCASION, not a fact about a track
+        with no genres of its own — so a Christmas compilation must not
+        stamp "Christmas" on every one of its tracks.
+
+        The album's OWN genre list still carries Christmas; that is a
+        different question (see
+        ``tests/test_only_musical_genres_propagate.py``)."""
         written = self._apply("Christmas, Pop")
-        assert "christmas" in written[0].lower(), written
+        assert written
+        assert "christmas" not in written[0].lower(), written
+        assert "Pop" in written[0]
 
     def test_a_list_of_only_markers_writes_nothing(self):
         assert self._apply("Cover") == []

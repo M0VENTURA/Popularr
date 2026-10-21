@@ -719,7 +719,18 @@ def _album_top_genres(
         return []
 
     try:
-        return aggregate_genres(album_source_map, max_genres=max_genres)
+        from services.enrichment.genre_aggregation_service import (
+            is_propagatable_genre,
+        )
+
+        top = aggregate_genres(album_source_map, max_genres=max_genres)
+        # ⭐ Only MUSICAL genres may be INHERITED by a track that has none of
+        # its own. The per-track affiliation markers (Cover/Live/Acoustic/…)
+        # describe ONE recording's performance, and the Christmas/Holiday
+        # family describes the album's occasion — neither is a fact about a
+        # track. Same rule as the album save's fill and the track stage's
+        # inheritance list.
+        return [g for g in top if is_propagatable_genre(g)]
     except Exception:
         return []
 

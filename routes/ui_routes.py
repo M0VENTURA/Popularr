@@ -92,11 +92,16 @@ ui_bp = Blueprint("ui", __name__)
 #: ``services.enrichment.genre_aggregation_service`` cannot be imported.
 #: It FAILS CLOSED: an album-level genre list that carries "Cover" is a bug
 #: (the marker belongs to the one track that earned it), so a missing helper
-#: must not silently let it through. The Christmas family is NOT an
-#: affiliation marker — a Christmas album IS an album property.
+#: must not silently let it through.
+#:
+#: The Christmas/Holiday family is here too, because this filter governs
+#: what a track INHERITS — and "Christmas" describes the album's occasion,
+#: not the track. (The album's OWN genre list keeps Christmas; that is a
+#: different question.)
 _FALLBACK_AFFILIATION_FILTER = frozenset({
     "cover", "live", "acoustic", "unplugged", "remix", "remixed",
     "instrumental", "comedy", "orchestral", "symphonic", "soundtrack",
+    "christmas", "holiday",
 })
 
 
@@ -1692,6 +1697,14 @@ def _apply_album_track_genres(track_id: Any, genres_str: str) -> tuple[int, int]
     sources are filtered too (see ``get_album_genre_sources``), so this is the
     LAST line of defence for a list that reached the form by any other route.
 
+    ⚠️⭐ ONLY MUSICAL GENRES PROPAGATE. The Christmas/Holiday family is
+    excluded here as well: it describes the ALBUM's occasion, not a fact about
+    a track that has no genres of its own. A Christmas compilation must not
+    stamp "Christmas" (or "Holiday") on every one of its tracks — the
+    reported "Holiday, Christmas, Cover shouldn't automatically assign to all
+    tracks if the track doesn't have any genres. Only musical genres should
+    propagate to all tracks."
+
     ⚠️ The filter FAILS CLOSED. If the helper cannot be imported, the
     affiliation markers are still dropped (by name) — a filter that silently
     stopped filtering would re-open exactly the bug this guards.
@@ -1703,13 +1716,13 @@ def _apply_album_track_genres(track_id: Any, genres_str: str) -> tuple[int, int]
     ]
     try:
         from services.enrichment.genre_aggregation_service import (
-            is_track_affiliation_tag,
+            is_propagatable_genre,
         )
     except Exception as exc:
         logger.debug("Album save: affiliation filter unavailable", error=str(exc))
-        is_track_affiliation_tag = _fallback_is_affiliation_tag
+        is_propagatable_genre = _fallback_is_affiliation_tag
 
-    genres_list = [g for g in genres_list if not is_track_affiliation_tag(g)]
+    genres_list = [g for g in genres_list if is_propagatable_genre(g)]
     if not genres_list:
         return 0, 0
 

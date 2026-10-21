@@ -114,6 +114,33 @@ def is_track_affiliation_tag(value: Any) -> bool:
     return str(value or "").strip().lower() in _TRACK_AFFILIATION_FILTER_TAGS
 
 
+def is_propagatable_genre(value: Any) -> bool:
+    """True when an ALBUM-level genre may be INHERITED by a track that has none.
+
+    ⭐⭐ ONLY MUSICAL GENRES PROPAGATE.
+
+    Two families must not spread from an album to its tracks:
+
+    * the per-track affiliation markers (Cover/Live/Acoustic/Remix/
+      Instrumental/…) — they describe ONE recording's performance;
+    * the Christmas/Holiday family — it describes the ALBUM's OCCASION, and a
+      plain track on a Christmas compilation is not itself a Christmas track.
+
+    Both used to reach every track of an album that had one cover or one
+    holiday record, because the album's genre list is a FILL for a track with
+    no genre evidence of its own. The reported symptom: "Holiday, Christmas,
+    Cover shouldn't automatically assign to all tracks if the track doesn't
+    have any genres. Only musical genres should propagate to all tracks."
+
+    ⭐ The CHRISTMAS EXEMPTION in ``_TRACK_AFFILIATION_FILTER_TAGS`` is
+    about the ALBUM's own genre list (the album IS a Christmas album, and the
+    genre-playlist builder reads it from there). This rule is about a TRACK
+    INHERITING that list, which is a different question — so the two do not
+    conflict.
+    """
+    return not is_admin_genre(value)
+
+
 def strip_track_affiliation_tags(values: Any) -> list[str]:
     """Drop every per-TRACK affiliation marker from a list of genre names.
 

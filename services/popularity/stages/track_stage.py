@@ -268,17 +268,15 @@ def _album_top_genres(
 
     try:
         from services.enrichment.genre_aggregation_service import (
-            _TRACK_AFFILIATION_FILTER_TAGS,
+            is_propagatable_genre,
         )
         top = aggregate_genres(album_source_map, max_genres=max_genres)
-        # An album-level inheritance list must not carry per-track affiliation
-        # tags (Cover/Live/Acoustic/…): one track's "cover" source would make
-        # every sparse sibling inherit it. Same rule as the album blend in
-        # ``genre_aggregation_service.get_track_recommendations``.
-        return [
-            g for g in top
-            if g.strip().lower() not in _TRACK_AFFILIATION_FILTER_TAGS
-        ]
+        # ⭐ An album-level INHERITANCE list must carry only MUSICAL genres.
+        # One track's "cover" source would make every sparse sibling inherit
+        # it, and the Christmas/Holiday family describes the album's occasion
+        # rather than a fact about a track with no genres of its own. Same
+        # rule as the album save's fill (ui_routes._apply_album_track_genres).
+        return [g for g in top if is_propagatable_genre(g)]
     except Exception:
         return []
 
