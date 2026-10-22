@@ -1,20 +1,22 @@
 """
 Audio file tag read/write service.
 
-Physical MP3/FLAC tag writing lives here.
+Physical MP3/FLAC/MP4 tag writing lives here.
 DB tag reads are delegated to repository functions only.
 """
 
 from __future__ import annotations
 
+import filecmp
 import logging
 import os
+import re
 import shutil
 import stat
 import tempfile
+import threading
 from pathlib import Path
 from typing import Dict, Any, TYPE_CHECKING, cast
-
 
 # =============================================================================
 # TYPE LAYER (separate from runtime)
@@ -41,7 +43,6 @@ else:
     # because the fallback also writes tags, so this stayed invisible.
     MP3Type = Any
 
-
 # =============================================================================
 # IMPORTS
 # =============================================================================
@@ -55,7 +56,6 @@ from services.metadata.tag_names import (
 )
 
 logger = logging.getLogger(__name__)
-
 
 # =============================================================================
 # SAFE RUNTIME IMPORTS
@@ -71,6 +71,7 @@ try:
         TDRC, TIT2, TMOO, TPE1, TPE2, TPOS, TRCK, TSRC, TXXX, USLT
     )
     from mutagen.mp3 import MP3
+
 except Exception:
     MUTAGEN_AVAILABLE = False
 
@@ -82,18 +83,87 @@ except Exception:
     FLAC = _MissingMutagen
     FLACPicture = _MissingMutagen
     ID3 = _MissingMutagen
-
     APIC = COMM = POPM = TALB = TBPM = TCOM = TCON = _MissingMutagen
     TDRC = TIT2 = TMOO = TPE1 = TPE2 = TPOS = TRCK = TSRC = TXXX = USLT = _MissingMutagen
-
     MP3 = _MissingMutagen
+
+# =============================================================================
+# SHARED HELPERS
+# =============================================================================
+
+#: Every genre separator the app uses: commas, semicolons, slashes AND
+#: backslashes (Navidrome / ID3v2.3 join genres with ``\\`` — e.g.
+#: ``metal\\nu metal\\rock``). One pattern for every writer so ID3, Vorbis and
+#: MP4 can never split the same value differently.
+_GENRE_SPLIT_RE = re.compile(r"[,;/\\]+")
+
+
+def _split_genres(value: Any) -> list[str]:
+    """A genre value as a clean list — one entry per genre.
+
+    A list/tuple/set is taken item by item (each item is already one genre); a
+    string is split on every app separator, so ``"Rock, Metal"`` becomes two
+    genres rather than one literal ``"Rock, Metal"`` genre that Navidrome
+    renders as a single broken genre folder.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(v) for v in value]
+    else:
+        parts = _GENRE_SPLIT_RE.split(str(value))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _as_image_bytes(value: Any, file_path: str = "") -> bytes | None:
+    """Cover art as EXACTLY ``bytes`` — or None when it cannot be.
+
+    mutagen's binary frames raise ``TypeError("data has to be bytes")`` for a
+    ``bytearray``, a ``memoryview`` or a ``str`` — and a blob read back from
+    PostgreSQL arrives as a **memoryview** (``album_art.image_data`` is BYTEA).
+    A ``str`` is REFUSED rather than encoded: it means a path or a base64
+    payload, and encoding it would silently embed garbage into the file.
+    """
+    if isinstance(value, bytes):
+        return value or None
+    if isinstance(value, (bytearray, memoryview)):
+        data = bytes(value)
+        return data or None
+    logger.error(
+        "Cover art for %s is %s, not bytes — not embedded",
+        file_path or "<file>", type(value).__name__,
+    )
+    return None
+
+
+# ── Per-file write lock ──────────────────────────────────────────────────────
+# Every write copies the file, edits the copy and swaps it in. Two writers on
+# the SAME file at once (a scan's tag sync and an album-page save, say) each
+# copy the ORIGINAL, so the second swap silently discards the first one's
+# changes. Serialising per resolved path makes the second writer start from the
+# first one's result. Locks are per file, so different files still write in
+# parallel (the album save's 4-way pool is unaffected).
+_PATH_LOCKS: dict[str, threading.Lock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _path_lock(file_path: str) -> threading.Lock:
+    key = os.path.realpath(file_path)
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _PATH_LOCKS[key] = lock
+        return lock
 
 
 # =============================================================================
 # PUBLIC
 # =============================================================================
 
-# MP3 frame ids per tag key (used by the fill-missing-only pre-check).
+# MP3 frame ids per tag key (used by the fill-missing-only pre-check). Fields
+# mapped to "TXXX" — and any field not listed — are checked by their TXXX
+# description instead (see ``_txxx_desc_for_field``).
 _MP3_FRAME_FOR_FIELD = {
     "title": "TIT2", "artist": "TPE1", "album": "TALB",
     "album_artist": "TPE2", "albumartist": "TPE2", "composer": "TCOM",
@@ -148,51 +218,130 @@ _MB_TXXX_DESC = {
     field: name for field, name in ((f, canonical_tag_name(f)) for f in _MB_ID_FIELDS) if name
 }
 
+#: Fields the fill-missing-only pre-check NEVER treats as "already populated".
+#: The star rating is computed by the app on every scan; under fill-missing-only
+#: a file that ever got a rating would keep it forever. It used to depend on the
+#: format — MP3's POPM frame has no ``text`` so it always rewrote, while FLAC's
+#: RATING comment was detected and frozen. Now both always write.
+_FILL_MISSING_ALWAYS_WRITE = frozenset({"rating"})
+
+#: Writer-internal keys that are not tags in their own right.
+_NON_TAG_KEYS = frozenset({"cover_art_mime"})
+
+
+def _txxx_desc_for_field(field: str) -> str | None:
+    """The TXXX description ``write_id3_tags`` uses for *field* (or None)."""
+    if field == "writer":
+        return "WRITER"
+    canonical = canonical_tag_name(field)
+    if canonical:
+        return canonical
+    if field in _EXTENDED_ALBUM_TAG_FIELDS:
+        return str(field).replace("_", " ").upper()
+    return None
+
+
+def _vorbis_key_for_field(field: str) -> str:
+    """The Vorbis comment name ``write_flac_tags`` uses for *field*."""
+    return canonical_tag_name(field) or _VORBIS_FIELD_MAP.get(field, field)
+
 
 def _existing_non_empty_fields(file_path: str, tags: Dict[str, Any]) -> set[str]:
-    """Tag keys whose on-disk frame already carries a value (fill-missing-only)."""
+    """Tag keys whose on-disk value is already populated (fill-missing-only).
+
+    Checked with the SAME names each writer would write, for every field in
+    *tags*. The old check had two gaps that silently disabled the policy:
+
+    * FLAC looked fields up by their INTERNAL names (``track_number``,
+      ``year``, ``album_artist``, ``genres``) while the writer stores the
+      Vorbis names (``tracknumber``, ``date``, ``albumartist``, ``genre``) —
+      so those always read "missing" and were overwritten.
+    * MP3 only knew the fields in ``_MP3_FRAME_FOR_FIELD``; ``mbid``,
+      ``writer`` and every album-extended TXXX field were always overwritten.
+    * MP4/M4A had no check at all.
+    """
     present: set[str] = set()
     if not MUTAGEN_AVAILABLE:
         return present
+
+    fields = [
+        f for f in tags
+        if f not in _FILL_MISSING_ALWAYS_WRITE and f not in _NON_TAG_KEYS
+    ]
+    if not fields:
+        return present
+
+    suffix = Path(file_path).suffix.lower()
     try:
-        suffix = Path(file_path).suffix.lower()
         if suffix == ".mp3":
-            from mutagen.id3 import ID3 as _ID3
-            tag_obj = _ID3(file_path)
-            for field, frame_id in _MP3_FRAME_FOR_FIELD.items():
-                if frame_id == "TXXX":
-                    # TXXX-based MBID frames: presence depends on the specific
-                    # description, not on any TXXX frame existing at all.
-                    # Compared with normalise_tag_name so a file still carrying a
-                    # LEGACY spelling counts as populated — fill_missing_only is
-                    # the user asking us not to touch existing values, and a
-                    # variant of the field IS that value.
-                    desc = _MB_TXXX_DESC.get(field)
-                    if desc and any(
-                        getattr(f, "text", None)
-                        and normalise_tag_name(getattr(f, "desc", "")) == normalise_tag_name(desc)
-                        for f in tag_obj.getall("TXXX")
-                    ):
+            try:
+                tag_obj = ID3(file_path)
+            except Exception:
+                return present  # no ID3 tag at all → everything is missing
+            # Compared with normalise_tag_name so a file still carrying a
+            # LEGACY spelling counts as populated — fill_missing_only is the
+            # user asking us not to touch existing values, and a variant of
+            # the field IS that value.
+            txxx_names = {
+                normalise_tag_name(getattr(f, "desc", ""))
+                for f in tag_obj.getall("TXXX")
+                if getattr(f, "text", None)
+            }
+            for field in fields:
+                frame_id = _MP3_FRAME_FOR_FIELD.get(field)
+                if frame_id and frame_id != "TXXX":
+                    frames = tag_obj.getall(frame_id)
+                    if frame_id == "APIC":
+                        has_value = any(getattr(f, "data", None) for f in frames)
+                    else:
+                        has_value = any(getattr(f, "text", None) for f in frames)
+                    if has_value:
                         present.add(field)
                     continue
-                if frame_id not in tag_obj:
-                    continue
-                if any(getattr(f, "text", None) for f in tag_obj.getall(frame_id)):
+                desc = _txxx_desc_for_field(field)
+                if desc and normalise_tag_name(desc) in txxx_names:
                     present.add(field)
+
         elif suffix == ".flac":
-            from mutagen.flac import FLAC as _FLAC
-            audio = _FLAC(file_path)
-            for field in tags:
-                values = audio.tags.get(field)
+            audio = FLAC(file_path)
+            vtags = audio.tags
+            for field in fields:
+                if field == "cover_art_data":
+                    if any(getattr(p, "type", None) == 3 for p in audio.pictures):
+                        present.add(field)
+                    continue
+                if vtags is None:
+                    continue
+                # Vorbis comment lookups are case-insensitive.
+                values = vtags.get(_vorbis_key_for_field(field))
                 if values and any(str(v).strip() for v in values):
                     present.add(field)
-    except Exception:
-        pass
+
+        elif suffix in (".m4a", ".mp4"):
+            from mutagen.mp4 import MP4  # type: ignore[import-untyped]
+            audio = MP4(file_path)
+            if audio.tags is None:
+                return present
+            for field in fields:
+                atom = _mp4_atom_for_field(field)
+                if atom and audio.tags.get(atom):
+                    present.add(field)
+    except Exception as exc:
+        logger.debug("Fill-missing pre-check could not read %s: %s", file_path, exc)
     return present
 
 
 def write_tags_to_file(file_path: str, tags: Dict[str, Any]) -> bool:
-    if not file_path or not os.path.exists(file_path):
+    # ── Resolve the path ───────────────────────────────────────────────────
+    # A stored path may be RELATIVE to the music root (Navidrome stores it
+    # that way, and ``rename-file`` can too). Resolving here — once, for every
+    # caller — means a relative path is written instead of failing with
+    # "File not found" at whichever call site forgot to resolve it.
+    if file_path and not os.path.isfile(file_path):
+        resolved = _resolve_music_file_path(file_path)
+        if resolved:
+            file_path = resolved
+    if not file_path or not os.path.isfile(file_path):
         logger.error("File not found: %s", file_path)
         return False
 
@@ -200,21 +349,27 @@ def write_tags_to_file(file_path: str, tags: Dict[str, Any]) -> bool:
     # ``tagging.write_tags_to_file`` master toggle lets Popularr run as a
     # read-only database scanner/UI (external tagger, read-only mounts,
     # network drives).  ``ratings_only`` restricts writes to POPM/RATING
-    # frames; ``fill_missing_only`` never overwrites a populated frame;
-    # ``preserve_file_timestamps`` restores mtime/atime after the write.
+    # frames; ``fill_missing_only`` never overwrites a populated frame.
     try:
         from helpers.config_helpers import get_tagging_config
-        cfg = get_tagging_config()
+        cfg = get_tagging_config() or {}
     except Exception:
         cfg = {}
+
     if not cfg.get("write_tags_to_file", True):
         logger.debug("[TAG] File tag writes disabled (tagging.write_tags_to_file=false) — DB only")
         return False
-    if cfg.get("ratings_only") and not any(k == "rating" for k in (tags or {})):
-        logger.debug("[TAG] ratings_only mode — skipping non-rating write to %s", file_path)
-        return False
 
     tags = dict(tags or {})
+
+    if cfg.get("ratings_only"):
+        # ONLY the rating. The old check let the WHOLE payload through as long
+        # as it also carried a rating, so "ratings only" still wrote titles,
+        # genres and art whenever they travelled with a rating.
+        if "rating" not in tags:
+            logger.debug("[TAG] ratings_only mode — skipping non-rating write to %s", file_path)
+            return False
+        tags = {"rating": tags["rating"]}
 
     # fill_missing_only: never overwrite a frame that already carries a value.
     # Empty incoming values still pass through (they are explicit "clear this
@@ -225,66 +380,34 @@ def write_tags_to_file(file_path: str, tags: Dict[str, Any]) -> bool:
             k: v for k, v in tags.items()
             if k not in already or not str(v or "").strip()
         }
+        if "cover_art_data" not in tags:
+            tags.pop("cover_art_mime", None)
         if not tags:
             return False
 
     # Timestamp policy (Navidrome compatibility):
     #
-    # The atomic writer replaces the original with a NEW inode
-    # (temp + os.replace).  Navidrome's scanner detects file changes by
-    # path + mtime — if we restore the OLD mtime after the swap (the prior
-    # behaviour when preserve_file_timestamps=true), the swapped file looks
-    # "unchanged" to Navidrome, its incremental scan never re-reads it, and
-    # the "mapped tags" index stays stale even though raw tags updated
-    # (the reported bug; the old in-place writer always bumped mtime, so
-    # this never happened before the atomic-write change).
-    #
-    # To stay Navidrome-friendly we keep the swap's fresh mtime whenever the
-    # file's bytes actually changed.  Timestamps are only restored when the
-    # write was a TRUE no-op (identical bytes) — e.g. fill_missing_only left
-    # every frame as-is, or the writer cleared a frame that was already
-    # absent.  Comparing hashes is cheap here because metadata writes are
-    # infrequent (user edits, not per-scan).
-    stat_before = None
-    if cfg.get("preserve_file_timestamps", True):
-        try:
-            stat_before = os.stat(file_path)
-        except OSError:
-            stat_before = None
-
-        if stat_before is not None:
-            try:
-                with open(file_path, "rb") as fh:
-                    bytes_before = fh.read()
-            except OSError:
-                stat_before = None
-
+    # Navidrome's scanner detects file changes by path + mtime, so a file
+    # whose bytes changed MUST keep the fresh mtime of the swap — restoring
+    # the old one made the swapped file look "unchanged" and its mapped-tags
+    # index stayed stale.  A TRUE no-op (identical bytes) must leave the file
+    # untouched entirely.  ``_write_tags_atomic`` now does both: it compares
+    # the edited copy with the original BEFORE the swap and, when nothing
+    # changed, discards the copy and never touches the original — so its
+    # timestamps are preserved without the old approach of reading BOTH
+    # versions of the whole file into memory (two full copies of a 100 MB
+    # FLAC per write, four writes at a time on an album save).
     suffix = Path(file_path).suffix.lower()
 
     # MP4/M4A carries the same metadata in atoms rather than ID3 frames or
     # Vorbis comments; without this branch every m4a write logged "Unsupported
     # file format" and did nothing.
-    if suffix in (".mp3", ".flac", ".m4a", ".mp4"):
-        ok = _write_tags_atomic(file_path, tags)
-    else:
+    if suffix not in (".mp3", ".flac", ".m4a", ".mp4"):
         logger.warning("Unsupported file format: %s", suffix)
-        ok = False
+        return False
 
-    if ok and stat_before is not None:
-        try:
-            with open(file_path, "rb") as fh:
-                bytes_after = fh.read()
-            changed = bytes_after != bytes_before
-        except OSError:
-            changed = True
-        if not changed:
-            # True no-op: restore the original timestamps so the file is
-            # byte-for-byte and timestamp-for-timestamp untouched.
-            try:
-                os.utime(file_path, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
-            except OSError:
-                pass
-    return ok
+    with _path_lock(file_path):
+        return _write_tags_atomic(file_path, tags)
 
 
 def _write_tags_atomic(file_path: str, tags: Dict[str, Any]) -> bool:
@@ -299,12 +422,17 @@ def _write_tags_atomic(file_path: str, tags: Dict[str, Any]) -> bool:
     Windows when source and target share a filesystem (same directory
     guarantees this).
 
-    Returns True on success.  On failure the original file is left untouched.
+    When the edited copy is byte-identical to the original the copy is
+    discarded and the original is never touched (a no-op write keeps its
+    timestamps and does not make Navidrome re-read the file).
+
+    Returns True on success (including a no-op).  On failure the original
+    file is left untouched.
     """
     directory = os.path.dirname(os.path.abspath(file_path)) or "."
     suffix = Path(file_path).suffix.lower()
-
     tmp_path = ""
+
     try:
         with tempfile.NamedTemporaryFile(
             dir=directory, prefix=".populartag_", suffix=suffix, delete=False,
@@ -327,10 +455,27 @@ def _write_tags_atomic(file_path: str, tags: Dict[str, Any]) -> bool:
         if not ok:
             return False
 
-        # Preserve the original's permissions on the replacement.
+        # True no-op: nothing to swap in. ``filecmp`` streams both files in
+        # chunks and stops at the first difference (tags sit at the start of
+        # the file, so a real change is found almost immediately).
+        try:
+            if filecmp.cmp(tmp_path, file_path, shallow=False):
+                return True
+        except OSError:
+            pass
+
+        # Preserve the original's permissions — and, when we are allowed to,
+        # its OWNER — on the replacement. A container running as root would
+        # otherwise hand every edited file to root, and the media server or
+        # the user could no longer modify it.
         try:
             st = os.stat(file_path)
             os.chmod(tmp_path, stat.S_IMODE(st.st_mode))
+            if hasattr(os, "chown"):
+                try:
+                    os.chown(tmp_path, st.st_uid, st.st_gid)
+                except OSError:
+                    pass
         except OSError:
             pass
 
@@ -338,9 +483,11 @@ def _write_tags_atomic(file_path: str, tags: Dict[str, Any]) -> bool:
         os.replace(tmp_path, file_path)
         tmp_path = ""
         return True
+
     except Exception as exc:
         logger.error("Failed to write tags atomically to %s: %s", file_path, exc, exc_info=True)
         return False
+
     finally:
         if tmp_path:
             try:
@@ -354,27 +501,19 @@ def write_rating_to_file(file_path: str, stars: int) -> bool:
 
     Gated by the ``tagging`` config — the master toggle must be enabled;
     ``ratings_only`` mode still permits rating writes (that is its purpose).
+    MP4 has no standard rating atom, so an M4A rating is a no-op.
     """
-    try:
-        from helpers.config_helpers import get_tagging_config
-        if not get_tagging_config().get("write_tags_to_file", True):
-            return False
-    except Exception:
-        pass
     stars = max(1, min(5, int(stars or 0)))
     return write_tags_to_file(file_path, {"rating": stars})
-
 
 # =============================================================================
 # HELPERS
 # =============================================================================
 
 def _set_text_frame(tag_obj: ID3Type, frame_id: str, frame_cls, value: Any) -> None:
-    if value is None or value == "":
-        tag_obj.delall(frame_id)
-        return
-
     tag_obj.delall(frame_id)
+    if value is None or value == "":
+        return
     tag_obj.add(frame_cls(encoding=3, text=[str(value)]))
 
 
@@ -389,7 +528,6 @@ def _clear_txxx_variants(tag_obj: ID3Type, normalized_target: str) -> None:
     """
     clear_id3_variants(tag_obj, normalized_target)
 
-
 # =============================================================================
 # MP3 / ID3
 # =============================================================================
@@ -402,13 +540,10 @@ def write_id3_tags(file_path: str, tags: Dict[str, Any]) -> bool:
     try:
         try:
             audio = cast(MP3Type, MP3(file_path, ID3=ID3))  # type: ignore[arg-type]
-
             if audio.tags is None:
                 audio.add_tags()
-
             tag_obj = cast(ID3Type, audio.tags)
             save = lambda: audio.save(v2_version=3)
-
         except Exception as exc:
             # Say WHY the primary path was abandoned. A silent switch here hid
             # a NameError on the line above for as long as it existed (see the
@@ -421,131 +556,96 @@ def write_id3_tags(file_path: str, tags: Dict[str, Any]) -> bool:
                 tag_obj = cast(ID3Type, ID3(file_path))
             except Exception:
                 tag_obj = cast(ID3Type, ID3())
-
             save = lambda: tag_obj.save(file_path, v2_version=3)
 
         for field, value in tags.items():
-
+            if field in _NON_TAG_KEYS:
+                continue
             if field == "title":
                 _set_text_frame(tag_obj, "TIT2", TIT2, value)
-
             elif field == "artist":
                 _set_text_frame(tag_obj, "TPE1", TPE1, value)
-
             elif field == "album":
                 _set_text_frame(tag_obj, "TALB", TALB, value)
-
             elif field in {"album_artist", "albumartist"}:
                 _set_text_frame(tag_obj, "TPE2", TPE2, value)
-
             elif field == "composer":
                 _set_text_frame(tag_obj, "TCOM", TCOM, value)
-
             elif field == "track_number":
                 _set_text_frame(tag_obj, "TRCK", TRCK, value)
-
             elif field == "disc_number":
                 _set_text_frame(tag_obj, "TPOS", TPOS, value)
-
             elif field in {"year", "date"}:
                 _set_text_frame(tag_obj, "TDRC", TDRC, value)
-
             elif field in {"genre", "genres"}:
                 tag_obj.delall("TCON")
-
-                if value:
-                    import re
-
-                    if isinstance(value, list):
-                        genres = [str(v).strip() for v in value if str(v).strip()]
-                    else:
-                        # Split on ALL genre separators the app uses: commas,
-                        # semicolons, slashes AND backslashes (Navidrome /
-                        # ID3v2.3 conventions join genres with ``\`` — e.g.
-                        # ``metal\nu metal\rock`` — which must become THREE
-                        # TCON values, never one literal ``metal\nu metal\rock``
-                        # genre that Navidrome would render as a single broken
-                        # genre folder).
-                        genres = [
-                            g.strip()
-                            for g in re.split(r"[,;/\\]+", str(value))
-                            if g.strip()
-                        ]
-
-                    if genres:
-                        tag_obj.add(TCON(encoding=3, text=genres))
-
+                genres = _split_genres(value)
+                if genres:
+                    tag_obj.add(TCON(encoding=3, text=genres))
             elif field == "comment":
                 tag_obj.delall("COMM")
-
                 if value:
                     tag_obj.add(COMM(encoding=3, lang="eng", desc="", text=[str(value)]))
-
-            elif field == "rating" and value:
-                # POPM popularimeter: rating byte 0-255 (5★ = 255, 1★ = 51).
-                tag_obj.delall("POPM")
-                tag_obj.add(POPM(
-                    email="",
-                    rating=max(0, min(255, int(value) * 51)),
-                    count=0,
-                ))
-
+            elif field == "rating":
+                if value:
+                    # POPM popularimeter: rating byte 0-255 (5★ = 255, 1★ = 51).
+                    tag_obj.delall("POPM")
+                    tag_obj.add(POPM(
+                        email="",
+                        rating=max(0, min(255, int(value) * 51)),
+                        count=0,
+                    ))
             elif (canonical_tag_name(field) or "") in _MB_ID_CANONICAL:
                 # ONE canonical desc per field, and every spelling of it removed
                 # first — so a track written by the old space-form code and the
                 # new underscore form ends up with a single frame.
                 _canonical = clear_id3_variants(tag_obj, field)
-
                 if value:
                     tag_obj.add(TXXX(encoding=3, desc=_canonical, text=[str(value)]))
-
             elif field == "isrc":
                 tag_obj.delall("TSRC")
-
                 if value:
                     tag_obj.add(TSRC(encoding=3, text=[str(value)]))
-
             elif field == "lyrics":
                 tag_obj.delall("USLT")
-
                 if value:
                     tag_obj.add(USLT(encoding=3, lang="eng", desc="", text=[str(value)]))
-
             elif field == "writer":
                 # TXXX:WRITER — the tag config's writer aliases
                 # (``tags.writer.aliases``) read this frame back.  Clears any
-                # existing WRITER/LYRICIST variants before writing so an
-                # edited writer never leaves a stale duplicate frame.
+                # existing WRITER variants before writing so an edited writer
+                # never leaves a stale duplicate frame.  LYRICIST variants are
+                # cleared too, but only when this same payload is not also
+                # writing a lyricist — otherwise the order of the keys decided
+                # whether the lyricist survived.
                 _clear_txxx_variants(tag_obj, "writer")
-                _clear_txxx_variants(tag_obj, "lyricist")
-
+                if "lyricist" not in tags:
+                    _clear_txxx_variants(tag_obj, "lyricist")
                 if value:
                     tag_obj.add(TXXX(encoding=3, desc="WRITER", text=[str(value)]))
-
-            elif field == "cover_art_data" and value:
-                tag_obj.delall("APIC")
-
-                tag_obj.add(
-                    APIC(
-                        encoding=3,
-                        mime=tags.get("cover_art_mime", "image/jpeg"),
-                        type=3,
-                        desc="Cover",
-                        data=bytes(value),
-                    )
-                )
-
+            elif field == "cover_art_data":
+                if value:
+                    data = _as_image_bytes(value, file_path)
+                    if data is not None:
+                        tag_obj.delall("APIC")
+                        tag_obj.add(
+                            APIC(
+                                encoding=3,
+                                mime=tags.get("cover_art_mime") or "image/jpeg",
+                                type=3,
+                                desc="Cover",
+                                data=data,
+                            )
+                        )
             else:
                 # ── Album-extended fields ───────────────────────────────────
                 # Standard MusicBrainz / album fields that have no native ID3
                 # frame (release type/status/country, originalyear, totals,
                 # media, label, barcode, cover markers, ...) must be written as
                 # TXXX frames — Navidrome reads these back and uses them to
-                # group/merge albums.  They used to be SILENTLY DROPPED for MP3
-                # files, so tracks that never received MB enrichment stayed
-                # missing the album-level tags and Navidrome split the album.
+                # group/merge albums.
                 #
-                # The NAME now comes from the canonical registry, and every
+                # The NAME comes from the canonical registry, and every
                 # spelling of it is cleared first, so one field can never occupy
                 # two frames.  Fields outside the allow-list are ignored: an
                 # arbitrary DB column must not become a tag.
@@ -561,7 +661,6 @@ def write_id3_tags(file_path: str, tags: Dict[str, Any]) -> bool:
     except Exception as exc:
         logger.error("Failed to write ID3 tags: %s", exc, exc_info=True)
         return False
-
 
 # =============================================================================
 # FLAC
@@ -584,8 +683,33 @@ _VORBIS_FIELD_MAP: Dict[str, str] = {
     # the canonical registry (``services.metadata.tag_names``), applied ahead of
     # this map in ``write_flac_tags``.  Only Vorbis-standard RENAMES belong in
     # this table; two tables for the same name is how MP3 and FLAC drifted.
-    "musicbrainz_genres": "GENRE",
+    #
+    # ⚠️ ``musicbrainz_genres`` used to map to ``GENRE`` here. Whenever the
+    # registry had no name for it, a payload carrying both ``genres`` and
+    # ``musicbrainz_genres`` wrote GENRE twice and the MusicBrainz list
+    # (including the "Cover" marker) REPLACED the track's real genres. It
+    # keeps its own comment, like the MP3 writer's TXXX frame.
+    "musicbrainz_genres": "musicbrainz_genres",
 }
+
+
+def _set_flac_front_cover(audio: FLACType, data: bytes, mime: str) -> None:
+    """Make *data* the file's ONE front cover, keeping every other picture.
+
+    ``add_picture`` APPENDS, so embedding art on every album save stacked
+    another copy of the cover into the file each time — the file grew and
+    players picked whichever front cover they found first.
+    """
+    others = [p for p in audio.pictures if getattr(p, "type", None) != 3]
+    audio.clear_pictures()
+    for pic in others:
+        audio.add_picture(pic)
+    pic = FLACPicture()
+    pic.data = data
+    pic.mime = mime or "image/jpeg"
+    pic.type = 3
+    pic.desc = "Cover"
+    audio.add_picture(pic)
 
 
 def write_flac_tags(file_path: str, tags: Dict[str, Any]) -> bool:
@@ -595,8 +719,25 @@ def write_flac_tags(file_path: str, tags: Dict[str, Any]) -> bool:
 
     try:
         audio = cast(FLACType, FLAC(file_path))
+        if audio.tags is None:
+            audio.add_tags()
 
         for field, value in tags.items():
+            if field in _NON_TAG_KEYS:
+                continue
+
+            # Cover art is a PICTURE block, never a comment. It used to fall
+            # through to the generic branch, which stored ``str(bytes)`` — the
+            # whole image as a Python bytes repr — in a COVER_ART_DATA comment.
+            if field == "cover_art_data":
+                if value:
+                    data = _as_image_bytes(value, file_path)
+                    if data is not None:
+                        _set_flac_front_cover(
+                            audio, data, tags.get("cover_art_mime") or "image/jpeg",
+                        )
+                continue
+
             # ONE name per field: the canonical registry decides for every
             # MusicBrainz/album-extended tag, and all of its spellings are
             # removed first.  Vorbis lookups are case-insensitive on READ but
@@ -609,6 +750,7 @@ def write_flac_tags(file_path: str, tags: Dict[str, Any]) -> bool:
                 field = clear_vorbis_variants(audio, _canonical)
             else:
                 field = _VORBIS_FIELD_MAP.get(field, field)
+
             if value is None or str(value).strip() == "":
                 # Empty value = explicit "clear this field" request (mirrors
                 # the MP3 writer, where empty deletes the frame) — e.g. the
@@ -620,22 +762,18 @@ def write_flac_tags(file_path: str, tags: Dict[str, Any]) -> bool:
                     pass
                 continue
 
-            if isinstance(value, (list, tuple, set)):
-                # A genres list must become MULTIPLE Vorbis values — writing
+            if field.lower() == "genre":
+                # Split into multiple Vorbis GENRE values so Navidrome sees
+                # each genre, never one literal separator-joined string.
+                genres = _split_genres(value)
+                if genres:
+                    audio[field] = genres
+                elif field in audio:
+                    del audio[field]
+            elif isinstance(value, (list, tuple, set)):
+                # A list must become MULTIPLE Vorbis values — writing
                 # str(list) would embed the literal "['Rock', 'Metal']".
                 audio[field] = [str(v).strip() for v in value if str(v).strip()]
-            elif field == "genre":
-                # A single genre string may carry the app's separators
-                # (comma, semicolon, slash, backslash — e.g. ``metal\nu
-                # metal\rock``).  Split it into multiple Vorbis GENRE values
-                # so Navidrome sees three genres, never one literal
-                # backslash-joined string.
-                import re as _re
-                audio[field] = [
-                    g.strip()
-                    for g in _re.split(r"[,;/\\]+", str(value))
-                    if g.strip()
-                ]
             else:
                 audio[field] = [str(value)]
 
@@ -646,7 +784,6 @@ def write_flac_tags(file_path: str, tags: Dict[str, Any]) -> bool:
         logger.error("Failed to write FLAC tags: %s", exc, exc_info=True)
         return False
 
-
 # =============================================================================
 # PUBLIC WRAPPERS
 # =============================================================================
@@ -654,7 +791,6 @@ def write_flac_tags(file_path: str, tags: Dict[str, Any]) -> bool:
 def update_file_tags(file_path: str, tag_updates: Dict[str, Any]) -> bool:
     if not file_path or not tag_updates:
         return False
-
     return write_tags_to_file(file_path, tag_updates)
 
 
@@ -663,6 +799,7 @@ def _get_track_file_path(track_id: str) -> str | None:
     try:
         from sqlalchemy import text as _text
         from db.engine import db_session as _db_session
+
         with _db_session() as session:
             row = session.execute(
                 _text("SELECT file_path FROM tracks WHERE CAST(id AS TEXT) = :id"),
@@ -698,6 +835,7 @@ def _resolve_music_file_path(path_value: str | None) -> str | None:
 
     candidates = [raw]
     roots: list[str] = []
+
     # Config-driven root first (authoritative — the app reads the library
     # root from config, not just env).
     try:
@@ -707,6 +845,7 @@ def _resolve_music_file_path(path_value: str | None) -> str | None:
             roots.append(cfg_root)
     except Exception:
         pass
+
     # Legacy env-var roots.
     for env_key in ("MUSIC_FOLDER", "MUSIC_ROOT", "MUSIC_DIR"):
         env_val = os.environ.get(env_key)
@@ -897,14 +1036,13 @@ def build_tag_updates(payload: dict[str, Any]) -> dict[str, Any]:
             # the payload (the MusicBrainz value) stays authoritative.
             tags.setdefault("originalyear", _original_year)
             tags.setdefault("originaldate", _original_year)
+
     return tags
 
 
 def sync_track_tags_to_file(track_id: str) -> bool:
     tags = get_track_tags(track_id)
-
     file_path = _resolve_music_file_path(_get_track_file_path(track_id))
-
     if not file_path:
         logger.warning("No audio file resolved for track %s", track_id)
         return False
@@ -912,10 +1050,9 @@ def sync_track_tags_to_file(track_id: str) -> bool:
     # Only write non-empty values — passing None/"" for a frame would make the
     # writer DELETE that frame from the file (see ``_set_text_frame``).
     tags_to_write = {
-        k: v for k, v in tags.items()
+        k: v for k, v in (tags or {}).items()
         if v is not None and str(v).strip() != ""
     }
-
     if not tags_to_write:
         logger.warning("No editable tags to write for track %s", track_id)
         return False
@@ -958,13 +1095,11 @@ def update_file_metadata(file_path: str, metadata: Dict[str, Any]) -> bool:
         tag_updates["originalyear"] = metadata.get("originalyear")
     elif metadata.get("release_year") and metadata.get("year"):
         tag_updates["originalyear"] = metadata.get("year")
-
     if metadata.get("originaldate"):
         tag_updates["originaldate"] = metadata.get("originaldate")
 
     if metadata.get("recording_mbid"):
         tag_updates["musicbrainz_trackid"] = metadata.get("recording_mbid")
-
     if metadata.get("release_mbid"):
         tag_updates["musicbrainz_albumid"] = metadata.get("release_mbid")
 
@@ -975,7 +1110,6 @@ def update_file_metadata(file_path: str, metadata: Dict[str, Any]) -> bool:
     # it was downloaded for.
     if metadata.get("isrc"):
         tag_updates["isrc"] = metadata.get("isrc")
-
     if metadata.get("musicbrainz_artistid"):
         tag_updates["musicbrainz_artistid"] = metadata.get("musicbrainz_artistid")
 
@@ -1002,12 +1136,9 @@ def update_file_metadata(file_path: str, metadata: Dict[str, Any]) -> bool:
     # ---- Album-level MusicBrainz fields -------------------------------------
     # These are the RELEASE-level identity fields an album-page lookup writes
     # onto every track of the album (type / status / country / album-artist
-    # MBID / release-group MBID).  They were silently DROPPED here: the writer
-    # only forwarded the hand-listed keys above, so a caller could pass them and
-    # an imported album still came out without them.
-    #
-    # ``_COLUMN_TO_TAG_FIELD`` already owns the column→tag mapping, so it is
-    # reused rather than duplicated — any future rename stays in one place.
+    # MBID / release-group MBID).  ``_COLUMN_TO_TAG_FIELD`` already owns the
+    # column→tag mapping, so it is reused rather than duplicated — any future
+    # rename stays in one place.
     for _column in _ALBUM_MB_TAG_COLUMNS:
         _album_value = metadata.get(_column)
         if _album_value is not None and str(_album_value).strip() != "":
@@ -1015,90 +1146,42 @@ def update_file_metadata(file_path: str, metadata: Dict[str, Any]) -> bool:
 
     return write_tags_to_file(file_path, tag_updates)
 
-
 # =============================================================================
 # ALBUM ART
 # =============================================================================
 
-
 def embed_album_art(file_path: str, image_data: bytes, mime_type: str = "image/jpeg") -> bool:
     """Embed album art image data into an audio file's tags.
 
+    Goes through ``write_tags_to_file`` like every other write, so art now:
+
+    * honours the tagging config — it used to write even with
+      ``tagging.write_tags_to_file`` switched OFF (read-only mode);
+    * is written ATOMICALLY and under the per-file lock (it rewrote the file
+      in place, racing any concurrent tag write on the same file);
+    * REPLACES the FLAC front cover instead of appending another copy on every
+      embed;
+    * saves MP3 as ID3v2.3 like every other write (it used to save v2.4, so
+      the version of a file's tag depended on which write touched it last);
+    * supports M4A.
+
     Args:
-        file_path: Path to the audio file (MP3 or FLAC).
-        image_data: Raw image bytes.
+        file_path: Path to the audio file (absolute or relative to the music root).
+        image_data: Raw image bytes (``bytearray``/``memoryview`` accepted).
         mime_type: Image MIME type (``image/jpeg`` or ``image/png``).
 
     Returns:
         True on success, False otherwise.
     """
-    if not file_path or not os.path.exists(file_path) or not image_data:
+    if not file_path or not image_data:
         return False
-
-    # ⚠️⚠️ mutagen requires EXACTLY ``bytes``.
-    #
-    # Both writers below hand the data to mutagen, whose ``BinaryFrame.data``
-    # setter raises ``TypeError("data has to be bytes")`` for a ``bytearray``, a
-    # ``memoryview`` or a ``str`` — and a blob read back from PostgreSQL arrives
-    # as a **memoryview** (``album_art.image_data`` is BYTEA and psycopg2 returns
-    # BYTEA that way).
-    #
-    # ``write_tags_to_file`` earlier in this SAME module already coerces
-    # (``data=bytes(value)``); this function did not, so every track of an album
-    # whose stored art had been kept as-is — source ``navidrome``, or a user
-    # ``upload``/``url``, i.e. exactly the sources ``navidrome_art_may_replace``
-    # protects — failed on import with "data has to be bytes" while the
-    # album-page art path (which goes through ``write_tags_to_file``) worked.
-    #
-    # A ``str`` is REFUSED rather than encoded: it means a path or a base64
-    # payload, and encoding it would silently embed garbage into the file.
-    if not isinstance(image_data, bytes):
-        if isinstance(image_data, (bytearray, memoryview)):
-            image_data = bytes(image_data)
-        else:
-            logger.error(
-                "Failed to embed album art in %s: image data is %s, not bytes",
-                file_path, type(image_data).__name__,
-            )
-            return False
-
-    ext = Path(file_path).suffix.lower()
-    try:
-        if ext == ".mp3":
-            from mutagen.id3 import ID3  # type: ignore[attr-defined]
-            from mutagen.id3._frames import APIC  # type: ignore[import-untyped]
-            audio = MP3(file_path, ID3=ID3)
-            if audio.tags is None:
-                audio.add_tags()
-            audio.tags.delall("APIC")
-            audio.tags.add(APIC(
-                encoding=3, mime=mime_type, type=3, desc="Cover", data=image_data,
-            ))
-            audio.save()
-            return True
-
-        if ext == ".flac":
-            from mutagen.flac import FLAC, Picture
-            audio = FLAC(file_path)
-            pic = Picture()
-            pic.data = image_data
-            pic.mime = mime_type
-            pic.type = 3
-            audio.add_picture(pic)
-            audio.save()
-            return True
-
-        logger.warning("Unsupported format for album art: %s", ext)
+    data = _as_image_bytes(image_data, file_path)
+    if data is None:
         return False
-    except Exception as exc:
-        logger.error("Failed to embed album art in %s: %s", file_path, exc, exc_info=True)
-        return False
-
-
-# =============================================================================
-# FLAC → MP3 CONVERSION
-# =============================================================================
-
+    return write_tags_to_file(
+        file_path,
+        {"cover_art_data": data, "cover_art_mime": mime_type or "image/jpeg"},
+    )
 
 # =============================================================================
 # MP4 / M4A
@@ -1116,16 +1199,23 @@ _MP4_TEXT_ATOMS = {
     "genres": "\xa9gen",
     "composer": "\xa9wrt",
     "comment": "\xa9cmt",
+    "lyrics": "\xa9lyr",
 }
 
 #: Fields MP4 has no native atom for, stored as iTunes freeform atoms
 #: (``----:com.apple.iTunes:<name>``) — the same scheme Picard and MusicBrainz
 #: use, so the values round-trip through other taggers.
+#:
+#: ``mbid`` is listed because ``build_tag_updates`` maps
+#: ``musicbrainz_trackid`` → ``mbid``; without it every M4A written from a DB
+#: row lost its recording id.
 _MP4_FREEFORM_ATOMS = {
+    "mbid": "MusicBrainz Track Id",
     "musicbrainz_trackid": "MusicBrainz Track Id",
     "musicbrainz_albumid": "MusicBrainz Album Id",
     "musicbrainz_releasegroupid": "MusicBrainz Release Group Id",
     "musicbrainz_artistid": "MusicBrainz Artist Id",
+    "musicbrainz_albumartistid": "MusicBrainz Album Artist Id",
     "musicbrainz_releasetrackid": "MusicBrainz Release Track Id",
     "musicbrainz_workid": "MusicBrainz Work Id",
     "originalyear": "Original Year",
@@ -1147,6 +1237,19 @@ _MP4_PAIR_ATOMS = {
 }
 
 
+def _mp4_atom_for_field(field: str) -> str | None:
+    """The MP4 atom key *field* is stored under (or None)."""
+    if field in _MP4_TEXT_ATOMS:
+        return _MP4_TEXT_ATOMS[field]
+    if field in _MP4_PAIR_ATOMS:
+        return _MP4_PAIR_ATOMS[field]
+    if field in _MP4_FREEFORM_ATOMS:
+        return f"----:com.apple.iTunes:{_MP4_FREEFORM_ATOMS[field]}"
+    if field == "cover_art_data":
+        return "covr"
+    return None
+
+
 def _mp4_tag_items(tags: Dict[str, Any]) -> Dict[str, Any]:
     """Turn the writer's logical field names into MP4 atoms mutagen can store.
 
@@ -1156,31 +1259,34 @@ def _mp4_tag_items(tags: Dict[str, Any]) -> Dict[str, Any]:
     an absent key is left alone).
 
     ``rating`` is deliberately absent: MP4 has no standard rating atom, so a
-    star rating written here would be invisible to every player.
+    star rating written here would be invisible to every player. Cover art is
+    handled by ``write_mp4_tags`` (it needs an ``MP4Cover``).
     """
     from helpers.track_ordering import leading_int
 
     items: Dict[str, Any] = {}
-
     for field, atom in _MP4_TEXT_ATOMS.items():
         if field not in tags or tags[field] is None:
             continue
+        if field in ("genre", "genres"):
+            # Several genres = several values in the one atom. ``str(list)``
+            # used to store the literal "['Rock', 'Metal']" as ONE genre.
+            genres = _split_genres(tags[field])
+            items[atom] = genres or None
+            continue
         text = str(tags[field]).strip()
         items[atom] = [text] if text else None
-
     for field, atom in _MP4_PAIR_ATOMS.items():
         if field not in tags or tags[field] is None:
             continue
         number = leading_int(tags[field])
         items[atom] = [(number, 0)] if number is not None else None
-
     for field, atom in _MP4_FREEFORM_ATOMS.items():
         if field not in tags or tags[field] is None:
             continue
         text = str(tags[field]).strip()
         key = f"----:com.apple.iTunes:{atom}"
         items[key] = text.encode("utf-8") if text else None
-
     return items
 
 
@@ -1193,19 +1299,24 @@ def write_mp4_tags(file_path: str, tags: Dict[str, Any]) -> bool:
     if not MUTAGEN_AVAILABLE:
         logger.error("Mutagen not available for MP4 writing")
         return False
-
     try:
-        from mutagen.mp4 import MP4  # type: ignore[import-untyped]
+        from mutagen.mp4 import MP4, MP4Cover  # type: ignore[import-untyped]
 
         audio = MP4(file_path)
         if audio.tags is None:
             audio.add_tags()
-
         for atom, value in _mp4_tag_items(tags).items():
             if value is None:
                 audio.tags.pop(atom, None)
                 continue
             audio.tags[atom] = value
+
+        if tags.get("cover_art_data"):
+            data = _as_image_bytes(tags["cover_art_data"], file_path)
+            if data is not None:
+                mime = str(tags.get("cover_art_mime") or "image/jpeg").lower()
+                fmt = MP4Cover.FORMAT_PNG if "png" in mime else MP4Cover.FORMAT_JPEG
+                audio.tags["covr"] = [MP4Cover(data, imageformat=fmt)]
 
         audio.save()
         return True
@@ -1213,6 +1324,9 @@ def write_mp4_tags(file_path: str, tags: Dict[str, Any]) -> bool:
         logger.error("Failed to write MP4 tags to %s: %s", file_path, exc, exc_info=True)
         return False
 
+# =============================================================================
+# FLAC → MP3 / M4A CONVERSION
+# =============================================================================
 
 def convert_flac_to_m4a(flac_path: str, bitrate: str = "256k") -> str | None:
     """Convert a FLAC file to M4A (AAC) using ffmpeg.
@@ -1276,11 +1390,13 @@ def _convert_flac(flac_path: str, *, target: str, bitrate: str) -> str | None:
         *codec_args,
         "-v", "error", "-y", out_path,
     ]
+
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=300, text=True)
         if result.returncode != 0:
             logger.error("%s conversion failed: %s", label, result.stderr)
             return None
+
         if not os.path.exists(out_path):
             logger.error("Conversion succeeded but output file not found")
             return None
@@ -1295,6 +1411,7 @@ def _convert_flac(flac_path: str, *, target: str, bitrate: str) -> str | None:
             logger.warning("Could not delete original FLAC: %s", exc)
 
         return out_path
+
     except subprocess.TimeoutExpired:
         logger.error("%s conversion timed out after 300s: %s", label, flac_path)
         return None
