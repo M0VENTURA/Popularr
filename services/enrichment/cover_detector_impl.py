@@ -41,7 +41,6 @@ import re
 import threading
 from collections import OrderedDict
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import structlog
@@ -71,8 +70,9 @@ from helpers.normalization_service import (
 )
 
 logger = structlog.get_logger(__name__)
-# Force this specific module to emit DEBUG logs regardless of global config
-logging.getLogger(__name__).setLevel(logging.DEBUG)
+# NOTE: the module used to force itself to DEBUG here regardless of the
+# configured level, flooding the file logs on every scan. Verbosity now
+# follows the global logging config like every other module.
 
 # Matches a trailing "(X Cover)" annotation in a track title.
 _COVER_SUFFIX_RE = re.compile(r"\s*\([^)]+\s+cover\)\s*$", re.IGNORECASE)
@@ -405,6 +405,20 @@ class CoverDetector:
             track_count=len(tracks),
         )
 
+        # ⚠️ WORK ON COPIES WITH STRING IDS. Every set below
+        # (``seen_track_ids``, ``_confirmed_skipped``, ``_fresh_skipped``) is
+        # compared against ``str(id)`` in some places and the RAW id in others.
+        # With integer ids those never matched, so ``_clear_unconfirmed_verdicts``
+        # (which compares strings) saw confirmed covers as "assessed and found
+        # nothing" and CLEARED them. Copies also stop this pass mutating the
+        # caller's rows (it writes ``mbid`` onto them).
+        tracks = [dict(t) for t in (tracks or []) if isinstance(t, dict)]
+        for track in tracks:
+            if track.get("id") is not None and str(track.get("id")).strip():
+                track["id"] = str(track["id"]).strip()
+            else:
+                track["id"] = ""
+
         for track in tracks:
             track.setdefault("album", album)
             track.setdefault("album_artist", artist)
@@ -430,6 +444,10 @@ class CoverDetector:
         #: also holds DETECTED covers — and the two need opposite treatment when
         #: clearing unconfirmed flags at the end of this function.
         _confirmed_skipped: set[str] = set()
+        #: Confirmed covers whose "(X Cover)" title suffix had been lost — see
+        #: the repair below. Counted separately so the summary does not report
+        #: a repair as a new detection.
+        _repaired_titles: set[str] = set()
 
         if not force:
             checked_map = self._load_cover_checked_map([t.get("id") for t in tracks])
@@ -437,7 +455,13 @@ class CoverDetector:
                 tid = track.get("id")
                 if not tid:
                     continue
-                if _checked_fresh(track.get("cover_last_checked") or checked_map.get(tid)):
+                # ``_cover_recheck`` is set by the scan runner when this pass
+                # stripped "(X Cover)" wording from the title: the stored
+                # timestamp says "checked recently", but the evidence the
+                # title-hint step needs only exists on THIS pass.
+                if not track.get("_cover_recheck") and _checked_fresh(
+                    track.get("cover_last_checked") or checked_map.get(tid)
+                ):
                     _fresh_skipped.add(tid)
                     seen_track_ids.add(tid)
                     continue
@@ -456,6 +480,19 @@ class CoverDetector:
                 elif self._is_already_confirmed_cover(track) or self._cover_has_original_artist(track):
                     _confirmed_skipped.add(tid)
                     seen_track_ids.add(tid)
+                    # ── Repair a confirmed cover that lost its title suffix ──
+                    #
+                    # ``apply_cover_metadata_batch`` is the ONLY writer of the
+                    # "(Original Artist Cover)" suffix, and it only runs for a
+                    # NEW detection. A cover confirmed on an earlier scan is
+                    # skipped right here — so once an earlier scan stripped the
+                    # suffix, nothing ever put it back. The stored verdict
+                    # already names the original artist, so the title is
+                    # rebuilt from it with no MusicBrainz lookup at all.
+                    _repair = self._suffix_repair_update(track)
+                    if _repair is not None:
+                        pending_updates.append(_repair)
+                        _repaired_titles.add(tid)
 
         # ⭐ The START line, emitted AFTER the skip scan above so the number of
         # tracks that actually need work is known. That number — not the album's
@@ -841,15 +878,34 @@ class CoverDetector:
             )
 
         if pending_updates:
-            successful = set(apply_cover_metadata_batch(self.db_conn, pending_updates))
+            from db.repositories.cover_detection_repository import build_cover_title
+
+            successful = {
+                str(t) for t in apply_cover_metadata_batch(self.db_conn, pending_updates)
+            }
             for update in pending_updates:
-                tid = update.get("track_id")
+                tid = str(update.get("track_id") or "")
                 if tid not in successful:
                     continue
-                fp = update.get("file_path")
-                if fp and Path(fp).exists():
-                    clean_title = update.get("title", "")
-                    self._update_file_metadata(fp, clean_title, ["Cover"])
+                fp = str(update.get("file_path") or "").strip()
+                if not fp:
+                    continue
+                # The SAME title the batch just stored — WITH its suffix. The
+                # old write used the stripped title, so the DB said "Title (X
+                # Cover)" while the file (what Navidrome reads) said "Title".
+                #
+                # Genres are deliberately NOT written here: this used to set
+                # the file's whole genre list to just "Cover". The album tag
+                # sync merges the marker into the track's real genres.
+                #
+                # No ``Path(fp).exists()`` pre-check: it rejected stored paths
+                # that are RELATIVE to the music root, and the writer resolves
+                # those itself.
+                _full_title = build_cover_title(
+                    update.get("title", ""), update.get("original_artist", "")
+                )
+                if _full_title:
+                    self._update_file_metadata(fp, _full_title, [])
 
         # ── Clear verdicts that this pass could NOT confirm ────────────────
         #
@@ -869,7 +925,7 @@ class CoverDetector:
         # technique has actually been tried against real data.
         self._clear_unconfirmed_verdicts(
             tracks,
-            confirmed_ids={str(r.get("track_id")) for r in cover_results},
+            confirmed_ids={str(r.get("track_id")) for r in cover_results} | _repaired_titles,
             fresh_skipped=_fresh_skipped,
             confirmed_skipped=_confirmed_skipped,
             force=force,
@@ -888,10 +944,63 @@ class CoverDetector:
             f"[COVER_DETECT] {artist} - {album}: {len(cover_results)} cover(s) | "
             f"checked={_checked}, settled-in-window={len(_fresh_skipped)}, "
             f"already-confirmed={len(_confirmed_skipped)}"
+            + (f", titles-repaired={len(_repaired_titles)}" if _repaired_titles else "")
         )
 
         logger.info("Cover detection complete", album=album, found_count=len(cover_results))
-        return cover_results
+        # Repairs are reported to the caller as results too, so the scan runner
+        # rewrites those files' TITLE tags in the album tag sync. They carry
+        # ``repaired=True`` so a caller counting NEW covers can tell them apart.
+        _repair_results = [
+            {
+                "track_id": u["track_id"],
+                "title": u.get("title", ""),
+                "is_cover": True,
+                "original_artist": u.get("original_artist", ""),
+                "original_year": None,
+                "writer": "",
+                "confidence": "stored",
+                "repaired": True,
+            }
+            for u in pending_updates
+            if str(u.get("track_id")) in _repaired_titles
+        ]
+        return cover_results + _repair_results
+
+    def _suffix_repair_update(self, track: dict[str, Any]) -> dict[str, Any] | None:
+        """An update restoring a confirmed cover's "(X Cover)" title, or None.
+
+        Only for a track whose STORED verdict names an original artist, whose
+        title lacks the suffix, that is not user-locked, and whose original is
+        not its own performer (a self-referential verdict is wrong and must not
+        be written into the title).
+        """
+        if track.get("cover_manual_override"):
+            return None
+        if not self._is_cover_flagged(track):
+            return None
+        original = str(track.get("original_cover_artist") or "").strip()
+        title = str(track.get("title") or "").strip()
+        if not original or not title or _has_cover_annotation(title):
+            return None
+        if is_track_artist_placeholder(original):
+            return None
+        performer = str(track.get("artist") or "").strip()
+        if performer and _same_artist(original, performer):
+            return None
+        update = self._build_update(
+            {
+                "track_id": str(track.get("id")),
+                "original_artist": original,
+                "confidence": "stored",
+            },
+            track,
+        )
+        # Keep the reason the original detection recorded.
+        update["is_cover_reason"] = (
+            str(track.get("is_cover_reason") or "").strip() or update["is_cover_reason"]
+        )
+        return update
 
     def _clear_unconfirmed_verdicts(
         self,
@@ -951,7 +1060,7 @@ class CoverDetector:
                     result = session.execute(
                         _text(
                             "UPDATE tracks SET is_cover = 0, is_cover_reason = :reason "
-                            "WHERE id = :id AND cover_manual_override IS NOT TRUE"
+                            "WHERE CAST(id AS TEXT) = :id AND cover_manual_override IS NOT TRUE"
                         ),
                         {
                             "reason": (
@@ -991,7 +1100,7 @@ class CoverDetector:
                 session.execute(
                     _text(
                         f"UPDATE tracks SET cover_last_checked = :checked "
-                        f"WHERE id IN ({placeholders})"
+                        f"WHERE CAST(id AS TEXT) IN ({placeholders})"
                     ),
                     {
                         "checked": datetime.now(timezone.utc).isoformat(),
@@ -1526,8 +1635,8 @@ class CoverDetector:
             with _db_session() as session:
                 rows = session.execute(
                     _text(
-                        f"SELECT id, cover_last_checked FROM tracks "
-                        f"WHERE id IN ({placeholders})"
+                        f"SELECT CAST(id AS TEXT), cover_last_checked FROM tracks "
+                        f"WHERE CAST(id AS TEXT) IN ({placeholders})"
                     ),
                     {f"tid{i}": t for i, t in enumerate(ids)},
                 ).fetchall() or []
