@@ -57,10 +57,11 @@ def _persist_match_result(release_id: int, result: dict[str, Any]) -> None:
     status = result.get("status", "unmatched")
     score = float(result.get("score") or 0.0)
     now = datetime.now().isoformat()
+    candidates = result.get("candidates") or []
     
     with db_session() as session:
-        if status == "matched":
-            best = result["candidates"][0]
+        if status == "matched" and candidates:
+            best = candidates[0]
             release_date = (best.get("first_release_date") or "")[:10]
             primary_type = str(
                 best.get("primary-type") or best.get("primary_type") or best.get("category") or ""
@@ -82,11 +83,15 @@ def _persist_match_result(release_id: int, result: dict[str, Any]) -> None:
                         END,
                         primary_type = :ptype
                     WHERE id = :id"""),
-                {"mbid": best["mbid"], "score": score, "checked": now,
+                {"mbid": best.get("mbid"), "score": score, "checked": now,
                  "date": release_date or None, "ptype": primary_type, "id": release_id},
             )
-        elif status == "candidate":
-            best = result["candidates"][0]
+            try:
+                session.commit()
+            except Exception:
+                pass
+        elif status == "candidate" and candidates:
+            best = candidates[0]
             session.execute(
                 text("""UPDATE upcoming_releases SET
                         candidate_release_group_mbid = :mbid,
@@ -96,8 +101,12 @@ def _persist_match_result(release_id: int, result: dict[str, Any]) -> None:
                         mbid_source = 'auto_candidate',
                         mbid_last_checked_at = :checked
                     WHERE id = :id"""),
-                {"mbid": best["mbid"], "score": score, "checked": now, "id": release_id},
+                {"mbid": best.get("mbid"), "score": score, "checked": now, "id": release_id},
             )
+            try:
+                session.commit()
+            except Exception:
+                pass
         else:
             session.execute(
                 text("""UPDATE upcoming_releases SET
@@ -110,6 +119,10 @@ def _persist_match_result(release_id: int, result: dict[str, Any]) -> None:
                     WHERE id = :id"""),
                 {"score": score, "checked": now, "id": release_id},
             )
+            try:
+                session.commit()
+            except Exception:
+                pass
 
 
 @upcoming_bp.route("", methods=["GET"])
@@ -177,24 +190,6 @@ def api_upcoming_releases() -> Any:
             params["win7_end_year"] = str((_today + timedelta(days=window_days)).year)
 
         if hide_in_library:
-            # ⚠️ THE ANTI-JOIN RUNS AGAINST A MATERIALISED DISTINCT, NOT A
-            # CORRELATED SUBQUERY.
-            #
-            # It used to be written as
-            # ``NOT EXISTS (SELECT 1 FROM tracks t WHERE <norm(t)> = <norm(ur)>)``,
-            # which PostgreSQL plans as a NESTED LOOP: the normalising
-            # REGEXP_REPLACE is re-evaluated for every CANDIDATE TRACK of every
-            # release row, i.e. N releases x M tracks x 4 regex evaluations —
-            # tens of millions on a modest library. That is what turned this
-            # endpoint into a >30 s request and the UI's "Error: Request timed
-            # out after 30s".
-            #
-            # Declaring the normalised track identities as a DISTINCT subquery
-            # lets the planner evaluate each regex ONCE per matching ``tracks``
-            # row (for the inner node) and then HASH-join it against the 2N
-            # release keys. The predicate is unchanged: a release is hidden when
-            # no library track normalises to its (artist, album). No DISTINCT is
-            # needed on the outer query — one match is enough to remove a row.
             _lib_clause = """NOT EXISTS (
                 SELECT 1 FROM (
                     SELECT DISTINCT
@@ -205,9 +200,9 @@ def api_upcoming_releases() -> Any:
                     FROM tracks t
                 ) lib
                 WHERE lib.artist_key = LOWER(REGEXP_REPLACE(
-                          upcoming_releases.artist_name, '[^a-zA-Z0-9]', '', 'g'))
+                        upcoming_releases.artist_name, '[^a-zA-Z0-9]', '', 'g'))
                   AND lib.album_key = LOWER(REGEXP_REPLACE(
-                          upcoming_releases.album_name, '[^a-zA-Z0-9]', '', 'g'))
+                        upcoming_releases.album_name, '[^a-zA-Z0-9]', '', 'g'))
             )"""
             where_sql = (
                 f" WHERE {_lib_clause}"
@@ -215,15 +210,6 @@ def api_upcoming_releases() -> Any:
                 else where_sql + f" AND {_lib_clause}"
             )
 
-        # ⚠️ COUNT AFTER EVERY CLAUSE HAS BEEN APPLIED.
-        #
-        # ``total`` used to be snapshotted BEFORE the tight (``window``) clause
-        # was appended, so a caller passing ``window`` received rows for ±N days
-        # but a ``total`` covering the full configured window. The dashboard's
-        # footer therefore advertised "View All 137 Releases" above a table of
-        # 20, and any client paginating on ``total`` would page into rows the
-        # filter excludes. Taking the snapshot once, here, keeps the count and
-        # the returned page describing the SAME query.
         total_where_sql = where_sql
         count_params = dict(params)
 
@@ -261,12 +247,12 @@ def api_upcoming_releases() -> Any:
                     params = {f"a{i}": _norm(name) for i, name in enumerate(artist_names)}
                     batch = session.execute(
                         text(f"""SELECT DISTINCT LOWER(REGEXP_REPLACE(
-                                      COALESCE(NULLIF(album_artist, ''), artist),
-                                      '[^a-zA-Z0-9]', '', 'g')) AS aname
+                                                COALESCE(NULLIF(album_artist, ''), artist),
+                                                '[^a-zA-Z0-9]', '', 'g')) AS aname
                                 FROM tracks
                                 WHERE LOWER(REGEXP_REPLACE(
-                                      COALESCE(NULLIF(album_artist, ''), artist),
-                                      '[^a-zA-Z0-9]', '', 'g')) IN ({placeholders})"""),
+                                                COALESCE(NULLIF(album_artist, ''), artist),
+                                                '[^a-zA-Z0-9]', '', 'g')) IN ({placeholders})"""),
                         params,
                     )
                     artists_in_collection = {str(row[0]) for row in batch.fetchall()}
@@ -279,20 +265,6 @@ def api_upcoming_releases() -> Any:
         if album_pairs:
             try:
                 with db_session() as session:
-                    # ⚠️ A JOIN AGAINST THE WANTED PAIRS, NOT ONE ``OR`` PER ROW.
-                    #
-                    # This was ``WHERE (norm(artist)=:a0 AND norm(album)=:b0) OR
-                    # (…=:a1 AND …=:b1) OR …`` — one OR branch per release on
-                    # the page. PostgreSQL cannot hash that, so it SCANNED
-                    # ``tracks`` and re-evaluated up to ``limit`` branch tests for
-                    # every track: another N x M pass, on the same request as the
-                    # anti-join above.
-                    #
-                    # Declaring the wanted pairs as a derived table turns it into
-                    # a HASH JOIN on the already-normalised track keys, so the
-                    # normalisation happens once per ``tracks`` row. Written with
-                    # ``UNION ALL`` rather than ``VALUES``/``unnest`` so the same
-                    # SQL runs on SQLite (the test polyfill) and PostgreSQL.
                     wanted_sql = " UNION ALL ".join(
                         f"SELECT :a{i} AS a, :b{i} AS b"
                         for i in range(len(album_pairs))
@@ -303,13 +275,13 @@ def api_upcoming_releases() -> Any:
                         pair_params[f"b{i}"] = _norm(b)
                     batch2 = session.execute(
                         text(f"""WITH lib AS (
-                                    SELECT DISTINCT
-                                        LOWER(REGEXP_REPLACE(COALESCE(NULLIF(album_artist, ''), artist), '[^a-zA-Z0-9]', '', 'g')) AS a,
-                                        LOWER(REGEXP_REPLACE(album, '[^a-zA-Z0-9]', '', 'g')) AS b
-                                    FROM tracks
-                                 ), wanted AS ({wanted_sql})
-                                 SELECT DISTINCT lib.a, lib.b
-                                 FROM lib JOIN wanted ON lib.a = wanted.a AND lib.b = wanted.b"""),
+                                            SELECT DISTINCT
+                                                LOWER(REGEXP_REPLACE(COALESCE(NULLIF(album_artist, ''), artist), '[^a-zA-Z0-9]', '', 'g')) AS a,
+                                                LOWER(REGEXP_REPLACE(album, '[^a-zA-Z0-9]', '', 'g')) AS b
+                                            FROM tracks
+                                          ), wanted AS ({wanted_sql})
+                                     SELECT DISTINCT lib.a, lib.b
+                                     FROM lib JOIN wanted ON lib.a = wanted.a AND lib.b = wanted.b"""),
                         pair_params,
                     )
                     albums_in_collection = {(str(row[0]), str(row[1])) for row in batch2.fetchall()}
@@ -320,9 +292,6 @@ def api_upcoming_releases() -> Any:
         if include_queue and album_pairs:
             try:
                 with db_session() as session:
-                    # Same OR-per-row disease as the album lookup above — a JOIN
-                    # lets the planner hash ``download_queue`` instead of
-                    # re-evaluating ``limit`` branch tests per queued row.
                     wanted_sql = " UNION ALL ".join(
                         f"SELECT :qa{i} AS a, :qb{i} AS b"
                         for i in range(len(album_pairs))
@@ -333,14 +302,14 @@ def api_upcoming_releases() -> Any:
                         q_params[f"qb{i}"] = _norm(b)
                     batch3 = session.execute(
                         text(f"""WITH q AS (
-                                    SELECT DISTINCT
-                                        LOWER(REGEXP_REPLACE(artist, '[^a-zA-Z0-9]', '', 'g')) AS a,
-                                        LOWER(REGEXP_REPLACE(album, '[^a-zA-Z0-9]', '', 'g')) AS b
-                                    FROM download_queue
-                                    WHERE status IN ('queued', 'downloading', 'processing')
-                                 ), wanted AS ({wanted_sql})
-                                 SELECT DISTINCT q.a, q.b
-                                 FROM q JOIN wanted ON q.a = wanted.a AND q.b = wanted.b"""),
+                                            SELECT DISTINCT
+                                                LOWER(REGEXP_REPLACE(artist, '[^a-zA-Z0-9]', '', 'g')) AS a,
+                                                LOWER(REGEXP_REPLACE(album, '[^a-zA-Z0-9]', '', 'g')) AS b
+                                            FROM download_queue
+                                            WHERE status IN ('queued', 'downloading', 'processing')
+                                          ), wanted AS ({wanted_sql})
+                                     SELECT DISTINCT q.a, q.b
+                                     FROM q JOIN wanted ON q.a = wanted.a AND q.b = wanted.b"""),
                         q_params,
                     )
                     queued_pairs = {(str(row[0]), str(row[1])) for row in batch3.fetchall()}
@@ -429,6 +398,7 @@ async def api_match_upcoming_release(release_id: int) -> Any:
                         WHERE id = :id"""),
                     {"mbid": rg_mbid, "source": source, "id": release_id, "checked": datetime.now().isoformat()},
                 )
+                session.commit()
             return jsonify({"success": True, "release_group_mbid": rg_mbid, "match_source": source})
 
         with db_session() as session:
@@ -539,13 +509,17 @@ def api_refresh_upcoming_releases_musicbrainz() -> Any:
             except Exception:
                 continue
 
-            _persist_match_result(release_id, mresult)
-            if mresult["status"] == "matched":
-                matched += 1
-            elif mresult["status"] == "candidate":
-                candidates += 1
-            else:
-                unmatched += 1
+            try:
+                _persist_match_result(release_id, mresult)
+                status = mresult.get("status")
+                if status == "matched":
+                    matched += 1
+                elif status == "candidate":
+                    candidates += 1
+                else:
+                    unmatched += 1
+            except Exception as persist_exc:
+                logger.warning("Failed to persist match result", release_id=release_id, error=str(persist_exc))
 
         logger.info(
             "Refreshed upcoming releases from MusicBrainz",
@@ -570,6 +544,7 @@ def api_clear_upcoming_releases() -> Any:
     try:
         with db_session() as session:
             session.execute(text("DELETE FROM upcoming_releases"))
+            session.commit()
         return jsonify({"success": True})
     except Exception as exc:
         logger.error("Failed to clear upcoming releases", error=str(exc), exc_info=True)
@@ -597,9 +572,6 @@ async def api_add_upcoming_release() -> Any:
 
     try:
         with db_session() as session:
-            # Same-typed row first, then the untyped (Wikipedia/legacy) row
-            # for absorption — never a differently-typed row, so a
-            # same-titled single and album stay distinct.
             dup = session.execute(
                 text("""
                     SELECT id FROM upcoming_releases
@@ -626,9 +598,9 @@ async def api_add_upcoming_release() -> Any:
                             release_date = CASE
                                 WHEN upcoming_releases.release_date IS NULL
                                      OR :date IS NULL
-                                    THEN COALESCE(:date, upcoming_releases.release_date)
+                                     THEN COALESCE(:date, upcoming_releases.release_date)
                                 WHEN :date < upcoming_releases.release_date
-                                    THEN :date
+                                     THEN :date
                                 ELSE upcoming_releases.release_date
                             END,
                             release_year = COALESCE(:year, upcoming_releases.release_year),
@@ -639,6 +611,7 @@ async def api_add_upcoming_release() -> Any:
                     {"id": dup[0], "date": release_date or None, "year": release_year,
                      "mbid": mbid or None, "ptype": primary_type or None},
                 )
+                session.commit()
                 return jsonify({"success": True, "merged": True, "id": dup[0]})
 
             result = session.execute(
@@ -659,9 +632,9 @@ async def api_add_upcoming_release() -> Any:
                         release_date = CASE
                             WHEN upcoming_releases.release_date IS NULL
                                  OR EXCLUDED.release_date IS NULL
-                                THEN COALESCE(EXCLUDED.release_date, upcoming_releases.release_date)
+                                 THEN COALESCE(EXCLUDED.release_date, upcoming_releases.release_date)
                             WHEN EXCLUDED.release_date < upcoming_releases.release_date
-                                THEN EXCLUDED.release_date
+                                 THEN EXCLUDED.release_date
                             ELSE upcoming_releases.release_date
                         END,
                         release_year = COALESCE(EXCLUDED.release_year, upcoming_releases.release_year),
@@ -676,6 +649,7 @@ async def api_add_upcoming_release() -> Any:
                 },
             )
             row = result.fetchone()
+            session.commit()
             return jsonify({"success": True, "merged": False, "id": row[0] if row else None})
     except Exception as exc:
         logger.error("Failed to add upcoming release", error=str(exc), exc_info=True)
