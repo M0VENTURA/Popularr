@@ -177,16 +177,37 @@ def api_upcoming_releases() -> Any:
             params["win7_end_year"] = str((_today + timedelta(days=window_days)).year)
 
         if hide_in_library:
+            # ⚠️ THE ANTI-JOIN RUNS AGAINST A MATERIALISED DISTINCT, NOT A
+            # CORRELATED SUBQUERY.
+            #
+            # It used to be written as
+            # ``NOT EXISTS (SELECT 1 FROM tracks t WHERE <norm(t)> = <norm(ur)>)``,
+            # which PostgreSQL plans as a NESTED LOOP: the normalising
+            # REGEXP_REPLACE is re-evaluated for every CANDIDATE TRACK of every
+            # release row, i.e. N releases x M tracks x 4 regex evaluations —
+            # tens of millions on a modest library. That is what turned this
+            # endpoint into a >30 s request and the UI's "Error: Request timed
+            # out after 30s".
+            #
+            # Declaring the normalised track identities as a DISTINCT subquery
+            # lets the planner evaluate each regex ONCE per matching ``tracks``
+            # row (for the inner node) and then HASH-join it against the 2N
+            # release keys. The predicate is unchanged: a release is hidden when
+            # no library track normalises to its (artist, album). No DISTINCT is
+            # needed on the outer query — one match is enough to remove a row.
             _lib_clause = """NOT EXISTS (
-                SELECT 1 FROM tracks t
-                WHERE LOWER(REGEXP_REPLACE(
-                          COALESCE(NULLIF(t.album_artist, ''), t.artist),
-                          '[^a-zA-Z0-9]', '', 'g'))
-                      = LOWER(REGEXP_REPLACE(upcoming_releases.artist_name,
-                          '[^a-zA-Z0-9]', '', 'g'))
-                  AND LOWER(REGEXP_REPLACE(t.album, '[^a-zA-Z0-9]', '', 'g'))
-                      = LOWER(REGEXP_REPLACE(upcoming_releases.album_name,
-                          '[^a-zA-Z0-9]', '', 'g'))
+                SELECT 1 FROM (
+                    SELECT DISTINCT
+                        LOWER(REGEXP_REPLACE(
+                            COALESCE(NULLIF(t.album_artist, ''), t.artist),
+                            '[^a-zA-Z0-9]', '', 'g')) AS artist_key,
+                        LOWER(REGEXP_REPLACE(t.album, '[^a-zA-Z0-9]', '', 'g')) AS album_key
+                    FROM tracks t
+                ) lib
+                WHERE lib.artist_key = LOWER(REGEXP_REPLACE(
+                          upcoming_releases.artist_name, '[^a-zA-Z0-9]', '', 'g'))
+                  AND lib.album_key = LOWER(REGEXP_REPLACE(
+                          upcoming_releases.album_name, '[^a-zA-Z0-9]', '', 'g'))
             )"""
             where_sql = (
                 f" WHERE {_lib_clause}"
@@ -258,9 +279,22 @@ def api_upcoming_releases() -> Any:
         if album_pairs:
             try:
                 with db_session() as session:
-                    pair_conditions = " OR ".join(
-                        f"(LOWER(REGEXP_REPLACE(COALESCE(NULLIF(album_artist, ''), artist), '[^a-zA-Z0-9]', '', 'g')) = :a{i} "
-                        f"AND LOWER(REGEXP_REPLACE(album, '[^a-zA-Z0-9]', '', 'g')) = :b{i})"
+                    # ⚠️ A JOIN AGAINST THE WANTED PAIRS, NOT ONE ``OR`` PER ROW.
+                    #
+                    # This was ``WHERE (norm(artist)=:a0 AND norm(album)=:b0) OR
+                    # (…=:a1 AND …=:b1) OR …`` — one OR branch per release on
+                    # the page. PostgreSQL cannot hash that, so it SCANNED
+                    # ``tracks`` and re-evaluated up to ``limit`` branch tests for
+                    # every track: another N x M pass, on the same request as the
+                    # anti-join above.
+                    #
+                    # Declaring the wanted pairs as a derived table turns it into
+                    # a HASH JOIN on the already-normalised track keys, so the
+                    # normalisation happens once per ``tracks`` row. Written with
+                    # ``UNION ALL`` rather than ``VALUES``/``unnest`` so the same
+                    # SQL runs on SQLite (the test polyfill) and PostgreSQL.
+                    wanted_sql = " UNION ALL ".join(
+                        f"SELECT :a{i} AS a, :b{i} AS b"
                         for i in range(len(album_pairs))
                     )
                     pair_params = {}
@@ -268,10 +302,14 @@ def api_upcoming_releases() -> Any:
                         pair_params[f"a{i}"] = _norm(a)
                         pair_params[f"b{i}"] = _norm(b)
                     batch2 = session.execute(
-                        text(f"""SELECT DISTINCT
-                                LOWER(REGEXP_REPLACE(COALESCE(NULLIF(album_artist, ''), artist), '[^a-zA-Z0-9]', '', 'g')),
-                                LOWER(REGEXP_REPLACE(album, '[^a-zA-Z0-9]', '', 'g'))
-                              FROM tracks WHERE {pair_conditions}"""),
+                        text(f"""WITH lib AS (
+                                    SELECT DISTINCT
+                                        LOWER(REGEXP_REPLACE(COALESCE(NULLIF(album_artist, ''), artist), '[^a-zA-Z0-9]', '', 'g')) AS a,
+                                        LOWER(REGEXP_REPLACE(album, '[^a-zA-Z0-9]', '', 'g')) AS b
+                                    FROM tracks
+                                 ), wanted AS ({wanted_sql})
+                                 SELECT DISTINCT lib.a, lib.b
+                                 FROM lib JOIN wanted ON lib.a = wanted.a AND lib.b = wanted.b"""),
                         pair_params,
                     )
                     albums_in_collection = {(str(row[0]), str(row[1])) for row in batch2.fetchall()}
@@ -282,9 +320,11 @@ def api_upcoming_releases() -> Any:
         if include_queue and album_pairs:
             try:
                 with db_session() as session:
-                    q_conditions = " OR ".join(
-                        f"(LOWER(REGEXP_REPLACE(artist, '[^a-zA-Z0-9]', '', 'g')) = :qa{i} "
-                        f"AND LOWER(REGEXP_REPLACE(album, '[^a-zA-Z0-9]', '', 'g')) = :qb{i})"
+                    # Same OR-per-row disease as the album lookup above — a JOIN
+                    # lets the planner hash ``download_queue`` instead of
+                    # re-evaluating ``limit`` branch tests per queued row.
+                    wanted_sql = " UNION ALL ".join(
+                        f"SELECT :qa{i} AS a, :qb{i} AS b"
                         for i in range(len(album_pairs))
                     )
                     q_params = {}
@@ -292,11 +332,15 @@ def api_upcoming_releases() -> Any:
                         q_params[f"qa{i}"] = _norm(a)
                         q_params[f"qb{i}"] = _norm(b)
                     batch3 = session.execute(
-                        text(f"""SELECT DISTINCT
-                                LOWER(REGEXP_REPLACE(artist, '[^a-zA-Z0-9]', '', 'g')),
-                                LOWER(REGEXP_REPLACE(album, '[^a-zA-Z0-9]', '', 'g'))
-                              FROM download_queue
-                              WHERE ({q_conditions}) AND status IN ('queued', 'downloading', 'processing')"""),
+                        text(f"""WITH q AS (
+                                    SELECT DISTINCT
+                                        LOWER(REGEXP_REPLACE(artist, '[^a-zA-Z0-9]', '', 'g')) AS a,
+                                        LOWER(REGEXP_REPLACE(album, '[^a-zA-Z0-9]', '', 'g')) AS b
+                                    FROM download_queue
+                                    WHERE status IN ('queued', 'downloading', 'processing')
+                                 ), wanted AS ({wanted_sql})
+                                 SELECT DISTINCT q.a, q.b
+                                 FROM q JOIN wanted ON q.a = wanted.a AND q.b = wanted.b"""),
                         q_params,
                     )
                     queued_pairs = {(str(row[0]), str(row[1])) for row in batch3.fetchall()}

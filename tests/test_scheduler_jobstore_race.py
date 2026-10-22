@@ -115,8 +115,19 @@ class TestStoreAwareRegistration:
     # Config that disables every other built-in job so only the job under
     # test is registered (missing_releases_scan / upcoming_* jobs read the
     # live config through config_helpers, patched below).
+    #
+    # ⚠️ ``navidrome_import`` is disabled BY ITS OWN KEY, not via the Watcher
+    # toggle. It used to fall back to ``watcher.auto_import_enabled``, so this
+    # fixture — which sets that toggle to True while disabling everything else —
+    # left ``navidrome_import`` registering during a test whose whole point is
+    # "no other job is registered", and ``test_existing_job_in_store_is_not_
+    # re_registered`` failed on a call it was not expecting. Naming the job
+    # explicitly keeps the fixture honest and pins the new contract: the
+    # Watcher's Auto Import toggle does NOT govern the four-hourly import.
     _DISABLED_CFG = {
-        "jobs": {},
+        "jobs": {
+            "navidrome_import": {"enabled": False},
+        },
         "watcher": {
             "auto_import_enabled": True,
             "auto_popularity_scan": False,

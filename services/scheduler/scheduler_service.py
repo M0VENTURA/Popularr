@@ -431,9 +431,21 @@ def _register_default_jobs(
     root_cfg = root_cfg if isinstance(root_cfg, dict) else {}
     watcher = cfg.get("watcher") or root_cfg.get("watcher") or {}
 
-    def _enabled(job_id: str, watcher_key: str, default: bool = True) -> bool:
+    def _enabled(job_id: str, watcher_key: str | None, default: bool = True) -> bool:
+        """Decide whether a job runs.
+
+        ``watcher_key`` is the ``watcher:`` field to fall back to when the job's
+        own ``enabled`` key is absent.  Pass ``None`` for a job that must NOT
+        inherit a Watcher toggle — see the ``navidrome_import`` registration for
+        why that distinction exists.
+        """
         try:
-            return bool(jobs.get(job_id, {}).get("enabled", watcher.get(watcher_key, default)))
+            job_cfg = jobs.get(job_id, {}) or {}
+            if "enabled" in job_cfg:
+                return bool(job_cfg.get("enabled"))
+            if watcher_key is None:
+                return default
+            return bool(watcher.get(watcher_key, default))
         except Exception:
             return default
 
@@ -566,8 +578,22 @@ def _register_default_jobs(
     # independent of `library_sync` (the 6-hourly delta sync) on purpose: they
     # answer different questions, and this one can be turned off without losing
     # the incremental sync.
+    #
+    # ⚠️ AND ITS ENABLE FLAG IS ITS OWN — NOT `watcher.auto_import_enabled`.
+    #
+    # This job used to read `_enabled("navidrome_import", "auto_import_enabled",
+    # True)`, so it fell back to the Watcher card's **Auto Import** toggle.
+    # Unticking "Auto Import" therefore DELETED the four-hourly import job: the
+    # exact opposite of what that setting advertises, and it silently killed the
+    # one schedule whose entire purpose is "keep the database current on its
+    # own". The scheduler then reported itself healthy — the job was simply
+    # absent from `scheduler.get_jobs()`, which nothing surfaced.
+    #
+    # Only an explicit `scheduler.jobs.navidrome_import.enabled: false` (or
+    # `interval_minutes: 0`) turns it off now. `library_sync` / `popularity_scan`
+    # keep the Watcher fallback — those are the scans that toggle actually names.
     navidrome_import_interval = _interval("navidrome_import", "interval_minutes", 240)
-    if navidrome_import_interval <= 0 or not _enabled("navidrome_import", "auto_import_enabled", True):
+    if navidrome_import_interval <= 0 or not _enabled("navidrome_import", None, True):
         _remove_job("navidrome_import")
     else:
         try:
