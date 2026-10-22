@@ -856,9 +856,19 @@ def update_get_top_genres_with_navidrome(
 def _album_holiday_votes(rows: list[Any], album: str, indices: list[int]) -> tuple[int, int]:
     """``(tracks_carrying_a_holiday_token, tracks_examined)`` for an album.
 
-    Only rows that hold ANY genre value are counted, so an album of half-empty
-    rows is judged on the tracks that actually said something rather than on a
-    denominator of blanks.
+    ⚠️ ``examined`` counts EVERY row, INCLUDING rows with no genre data at all.
+
+    That is the whole point, and it was the bug in the first version of this
+    helper: counting only the rows that HAD a genre made a SPARSE album score
+    1-of-1 = 100%, so an album where just one track was tagged (the Christmas
+    one) and the other thirteen had no genre data evaluated as SEASONAL and the
+    Holiday token was written to all of them — the reported "all songs on So
+    Much for the Afterglow are being set as Holiday", 14 tracks with a single
+    "Hating You for Christmas".
+
+    ⭐ A MAJORITY MUST BE OVER THE ALBUM'S REAL TRACK COUNT. A denominator
+    that shrinks to fit the evidence turns "one track of fourteen" into
+    "every track we looked at", which is how a minority becomes a majority.
     """
     with_holiday = 0
     examined = 0
@@ -870,8 +880,6 @@ def _album_holiday_votes(rows: list[Any], album: str, indices: list[int]) -> tup
             except (IndexError, KeyError, TypeError):
                 continue
             row_genres.extend(_parse_genre_input(value) or [])
-        if not row_genres:
-            continue
         examined += 1
         if any(is_holiday_family_token(g) for g in row_genres):
             with_holiday += 1
@@ -900,14 +908,19 @@ def album_is_holiday_album(
 
     * the album TITLE names it ("A Very Special Christmas", "Holiday Album") —
       the tag always counts, because the title is album-scoped evidence; or
-    * MOST of the album's tagged tracks carry a holiday token. A majority, not
-      "any": one seasonal bonus track on an otherwise ordinary album ("So Much
-      for the Afterglow" with a single Holiday tag) is a per-TRACK fact, and
+    * MOST of the album's tracks carry a holiday token. A majority, not "any":
+      one seasonal bonus track on an otherwise ordinary album ("So Much for
+      the Afterglow" with a single Holiday tag) is a per-TRACK fact, and
       spreading it re-labels the whole record.
 
-    ``track_titles`` is accepted so a caller with per-track titles can let the
-    title patterns vote too; a per-track title alone never makes the ALBUM
-    seasonal (only the album title does).
+    ⚠️ ``track_count`` MUST be the album's REAL track count — every row, whether
+    or not it has any genre data. See ``_album_holiday_votes`` for why a
+    denominator of "tracks that had something to say" turns a minority into a
+    majority.
+
+    A one-track release whose only track is seasonal IS a seasonal release, so
+    no absolute minimum is imposed: the majority test alone is the rule, and it
+    is only meaningful because the denominator is the full track count.
     """
     from services.catalog.album_classification_service import detect_christmas_song
 

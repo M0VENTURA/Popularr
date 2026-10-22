@@ -135,6 +135,160 @@ class TestAlbumLevelVerdict:
         )
 
 
+class TestTheDenominatorIsTheAlgebraOfTheRealTrackCount:
+    """⭐ THE REPORTED ALBUM: 14 tracks, ONE seasonal, the rest with NO data.
+
+    ``_album_holiday_votes`` used to count only rows that HELD a genre, so this
+    shape scored 1-of-1 = 100% and the album read as seasonal — the Holiday
+    token stayed in the blend and the album-wide write stamped all 14 rows.
+    """
+
+    def test_the_reported_album_is_not_seasonal(self):
+        assert not album_is_holiday_album(
+            album="So Much for the Afterglow", holiday_track_count=1, track_count=14
+        )
+
+    def test_one_seasonal_track_among_untagged_siblings_is_not_enough(self):
+        """The denominator must NOT shrink to the tracks that had data."""
+        assert not album_is_holiday_album(
+            album="Any Album", holiday_track_count=1, track_count=14
+        )
+
+    def test_the_same_ratio_over_two_tracks_still_fails_the_majority(self):
+        assert not album_is_holiday_album(
+            album="Any Album", holiday_track_count=1, track_count=2
+        )
+
+    def test_a_one_track_seasonal_release_is_seasonal(self):
+        """The majority test alone decides — a 1-of-1 IS the whole release."""
+        assert album_is_holiday_album(
+            album="Christmas Single", holiday_track_count=1, track_count=1
+        )
+
+    def test_the_vote_counter_counts_EVERY_row(self):
+        """⭐ The bug lived in the helper's denominator, not the rule."""
+        import json
+
+        from services.enrichment.genre_aggregation_service import _album_holiday_votes
+
+        class _Row:
+            def __init__(self, vals):
+                self._v = vals
+
+            def __getitem__(self, i):
+                return self._v[i]
+
+        seasonal = _Row(["[]", json.dumps(["Hard Rock", "Holiday"]), "[]", "[]", "[]",
+                         "[]", "[]", "[]", "[]", "[]"])
+        blank = _Row(["[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]"])
+        rows = [seasonal] + [blank] * 13
+
+        with_holiday, examined = _album_holiday_votes(rows, "Album", list(range(10)))
+        assert with_holiday == 1
+        assert examined == 14, (
+            "rows with no genre data must still count toward the denominator, "
+            "or one tagged track of fourteen reads as 100%"
+        )
+
+    def test_the_untagged_rows_do_not_inflate_the_holiday_count(self):
+        import json
+
+        from services.enrichment.genre_aggregation_service import _album_holiday_votes
+
+        class _Row:
+            def __init__(self, vals):
+                self._v = vals
+
+            def __getitem__(self, i):
+                return self._v[i]
+
+        blank = _Row(["[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]"])
+        with_holiday, examined = _album_holiday_votes([blank] * 5, "Album", list(range(10)))
+        assert with_holiday == 0
+        assert examined == 5
+
+
+class TestTheReportedAlbumEndToEnd:
+    """14 rows, one seasonal, all 14 already stamped Holiday by an old scan."""
+
+    def _seed(self):
+        import json
+
+        from sqlalchemy import text
+
+        from db.engine import db_session
+        from db.models import Track
+
+        with db_session() as session:
+            Track.__table__.create(session.get_bind(), checkfirst=True)
+            session.execute(text("DELETE FROM tracks"))
+            for i in range(1, 15):
+                is_xmas = (i == 14)
+                session.execute(
+                    text("""
+                        INSERT INTO tracks
+                            (id, artist, album_artist, album, title, file_path,
+                             genres, musicbrainz_genres, lastfm_tags, discogs_genres,
+                             track_number, disc_number)
+                        VALUES (:id, :a, :a, 'So Much for the Afterglow', :title,
+                                :fp, :g, :mb, :lf, :dc, :n, '1')
+                    """),
+                    {
+                        "id": f"evy-{i}", "a": "Everclear",
+                        "title": "Hating You for Christmas" if is_xmas else f"Track {i}",
+                        "fp": f"/music/evy{i}.flac",
+                        "g": "Holiday",
+                        "mb": json.dumps(["Hard Rock", "Holiday"]) if is_xmas else "[]",
+                        "lf": json.dumps(["Alternative Rock"]) if is_xmas else "[]",
+                        "dc": json.dumps(["Hard Rock"]) if is_xmas else "[]",
+                        "n": str(i),
+                    },
+                )
+            session.commit()
+
+    def _holiday_rows(self) -> int:
+        from sqlalchemy import text
+
+        from db.engine import db_session
+
+        with db_session() as session:
+            rows = session.execute(
+                text("SELECT genres FROM tracks WHERE album = 'So Much for the Afterglow'")
+            ).fetchall()
+        return sum(
+            1 for r in rows
+            if "holiday" in str((getattr(r, "_mapping", None) or {}).get("genres") or "").lower()
+        )
+
+    def test_the_album_blend_carries_no_holiday_token(self):
+        self._seed()
+        from db.engine import db_session
+        from services.enrichment.genre_aggregation_service import get_track_recommendations
+        from sqlalchemy import text
+
+        blend = get_track_recommendations("Everclear", "So Much for the Afterglow").get("genres")
+        assert not any(is_holiday_family_token(g) for g in (blend or [])), blend
+        with db_session() as session:
+            session.execute(text("DELETE FROM tracks"))
+
+    def test_the_scan_REMOVES_the_stale_holiday_from_every_row(self):
+        """⭐ The reported damage is repaired, not merely stopped."""
+        self._seed()
+        from sqlalchemy import text
+
+        from db.engine import db_session
+        from services.metadata.album_tag_sync_service import sync_album_file_tags
+
+        assert self._holiday_rows() == 14, "precondition: every row starts stamped"
+        sync_album_file_tags("Everclear", "So Much for the Afterglow")
+        assert self._holiday_rows() == 0, (
+            "the album-wide write must have replaced the stale Holiday with the "
+            "album's real genres"
+        )
+        with db_session() as session:
+            session.execute(text("DELETE FROM tracks"))
+
+
 # ---------------------------------------------------------------------------
 # 3. End to end: the album blend the write actually uses
 # ---------------------------------------------------------------------------

@@ -108,6 +108,51 @@ Sweep of 19 genre/playlist/album suites diffed against a pristine clone —
 `test_genre_consensus_aggregation.py` and `test_genre_backslash_splitting.py`,
 unrelated). `import app` → 425 routes.
 
+## Follow-up (same day) — the denominator was still wrong
+
+Reported again with the SAME album, plus the log evidence:
+
+```
+Excluded Christmas tracks from playlist 'Everclear - Essential Collection'
+    excluded=7 kept=24
+[GENRE_COVER] cover applied genre='Holiday' playlist='Holiday - Top Tracks'
+```
+
+⭐⭐ **THE MAJORITY RULE WAS COMPUTED OVER THE WRONG DENOMINATOR.**
+`_album_holiday_votes` counted only the rows that HELD a genre, so an album
+where ONE track carried data (the Christmas one) and the other thirteen had
+NONE scored **1-of-1 = 100%** → seasonal → the Holiday token stayed in the
+blend, and the album-wide write then stamped all 14 rows. Measured:
+
+| Shape | Before | After |
+| --- | --- | --- |
+| 14 tracks, 1 seasonal, 13 with NO genre data | **SEASONAL** | not seasonal |
+| 14 tracks, 1 seasonal, all 14 tagged | not seasonal | not seasonal |
+| 1-track release, 1 seasonal | seasonal | seasonal (correct) |
+| 12 tracks, 10 seasonal | seasonal | seasonal (correct) |
+
+The album blend for the reported shape went `['Hard Rock', 'Holiday']` →
+`['Hard Rock']`.
+
+⭐⭐ **A MAJORITY MUST BE OVER THE ALBUM'S REAL TRACK COUNT.** A denominator
+that shrinks to fit the evidence converts "one track of fourteen" into "every
+track we looked at" — a minority becomes a majority.
+
+**The existing damage is repaired.** With the blend now non-empty and
+Holiday-free, the album-wide write fires and replaces the stale value:
+verified end to end, **14/14 rows carrying Holiday → 0/14** after one scan.
+
+⚠️ A first attempt ALSO imposed an absolute minimum of 2 seasonal tracks. That
+was wrong — a one-track seasonal release IS seasonal — and it broke the pinned
+`test_christmas_is_still_album_valid`. Removed; the corrected denominator alone
+is the rule.
+
+Added to the same suite: the denominator algebra (every row counted, untagged
+rows not inflating the holiday count), the reported album's blend, and the
+end-to-end repair. **Oracle: the 4 new tests fail on the previous commit.**
+Sweep of 18 genre/playlist suites vs a pristine clone — identical failure sets,
+0 new failures.
+
 ## Files
 
 * `services/enrichment/genre_aggregation_service.py` — the family vocabulary,
