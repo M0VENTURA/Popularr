@@ -1712,11 +1712,15 @@ def _persist_album_relative_scores(rows: list[dict[str, Any]]) -> None:
                 if not tid:
                     continue
                 session.execute(
-                    text("UPDATE tracks SET final_score = :s, popularity = :s WHERE id = :id"),
+                    text(
+                        "UPDATE tracks SET final_score = :s, popularity = :s "
+                        "WHERE CAST(id AS TEXT) = :id"
+                    ),
                     {"s": float(tr.get("final_score") or 0), "id": tid},
                 )
     except Exception as exc:
-        logger.debug("Album-relative score persist failed", error=str(exc))
+        # WARNING: when this fails the remapped scores silently never save.
+        logger.warning("Album-relative score persist failed", error=str(exc))
 
 
 def _persist_popularity_marking(rows: list[dict[str, Any]]) -> None:
@@ -1741,7 +1745,7 @@ def _persist_popularity_marking(rows: list[dict[str, Any]]) -> None:
                         "UPDATE tracks SET popularity_marked = :marked, "
                         "single_confidence = COALESCE(:conf, single_confidence), "
                         "single_sources = COALESCE(CAST(:sources AS JSONB), single_sources) "
-                        "WHERE id = :id"
+                        "WHERE CAST(id AS TEXT) = :id"
                     ),
                     {
                         "marked": bool(tr.get("popularity_marked")),
@@ -1751,7 +1755,7 @@ def _persist_popularity_marking(rows: list[dict[str, Any]]) -> None:
                     },
                 )
     except Exception as exc:
-        logger.debug("Popularity marking persist failed", error=str(exc))
+        logger.warning("Popularity marking persist failed", error=str(exc))
 
 
 def _execute_track_jobs_safely(
@@ -2606,6 +2610,36 @@ def run_scan(
                 continue
 
             # -------------------------------------------------------------
+            # Load-time snapshot of every track row.
+            #
+            # Taken HERE — before annotation repair and
+            # ``prepare_tracks_for_album``, both of which rewrite the loaded
+            # dicts IN PLACE. ``track_stage`` diffs its result against this
+            # copy and persists ONLY the columns that changed, so:
+            #
+            #   * an edit saved on the album page while this scan runs is no
+            #     longer overwritten by the scan's stale copy of the row;
+            #   * the freeze flag set out-of-band below is no longer reset;
+            #   * the in-place cleanups (cover-wording title strip, annotation
+            #     repair) still differ from the snapshot, so they ARE saved;
+            #   * ``tag_changed`` compares against what the row really held.
+            #
+            # ``_previous_genres`` is the same moment's genres, handed to
+            # ``sync_album_file_tags`` as the baseline for "did this track's
+            # genres change this pass" — by the time it runs, the track stage
+            # has already rewritten ``genres`` in the DB.
+            # -------------------------------------------------------------
+            _db_snapshots: dict[str, dict[str, Any]] = {
+                str(_t.get("id")): dict(_t)
+                for _t in (tracks or [])
+                if isinstance(_t, dict) and _t.get("id") is not None
+            }
+            options["_db_snapshots"] = _db_snapshots
+            _previous_genres: dict[str, Any] = {
+                _tid: _snap.get("genres") for _tid, _snap in _db_snapshots.items()
+            }
+
+            # -------------------------------------------------------------
             # Annotation repair.
             #
             # Collapses duplicated annotations in this album's name and track
@@ -3117,6 +3151,9 @@ def run_scan(
                 # title+artist search cannot tell a plainly titled version-marked
                 # track from its studio namesake.
                 # -------------------------------------------------------------
+                # Reset FIRST: if the build below raises, the previous album's
+                # batch must not be offered to this album's tracks.
+                options["mb_batch_metadata"] = {}
                 if not _singles_pass and not options.get("popularity_only"):
                     try:
                         options["mb_batch_metadata"] = _build_album_recording_batch(
@@ -3296,10 +3333,17 @@ def run_scan(
                                     session.execute(
                                         text(
                                             "UPDATE tracks SET popularity_frozen = TRUE, popularity_frozen_at = CURRENT_TIMESTAMP "
-                                            "WHERE id = :id AND COALESCE(popularity_frozen, FALSE) = FALSE"
+                                            "WHERE CAST(id AS TEXT) = :id AND COALESCE(popularity_frozen, FALSE) = FALSE"
                                         ),
-                                        {"id": prepared_track.get("id")},
+                                        {"id": str(prepared_track.get("id"))},
                                     )
+                                # Mirror the write in memory. Otherwise the track
+                                # stage persisted the row's stale FALSE straight
+                                # back over it (full-row write) and every scan
+                                # re-froze the same tracks. With the snapshot diff
+                                # the column is unchanged and not written at all;
+                                # this keeps the old full-row path correct too.
+                                prepared_track["popularity_frozen"] = True
                             except Exception as exc:
                                 logger.debug("Could not persist freeze flag", track_id=prepared_track.get("id"), error=str(exc))
 
@@ -3597,14 +3641,32 @@ def run_scan(
                 if not options.get("popularity_only") and not options.get("singles_detection_only"):
                     try:
                         log_unified(f"[TAG_SYNC] Syncing cleaned metadata to audio files for '{album}'...")
+                        # Scope the file pass to the tracks whose file-relevant
+                        # values changed (plus corrected titles — the comment
+                        # above says they are always included, but the code
+                        # only ever added ``tag_changed`` ids). The tag sync
+                        # also keeps never-synced tracks and any track whose
+                        # genres moved against ``_previous_genres``.
+                        #
+                        # ⚠️ Passed as a SET, even when empty — ``None`` means
+                        # "sync every track". The one exception: results from a
+                        # track stage that predates ``tag_changed`` (no result
+                        # carries the key) fall back to ``None``, because an
+                        # empty set there would wrongly mean "nothing changed".
+                        _tag_changed_known = any(
+                            isinstance(_r, dict) and "tag_changed" in _r
+                            for _r in (_track_results_ordered or [])
+                        )
                         _tag_sync = sync_album_file_tags(
                             artist=artist,
                             album=album,
                             corrected_title_ids=_corrected_title_ids or None,
-                            # Only the tracks the scan WROTE this pass — see the
-                            # changed-ids block above. A re-scan of an album whose
-                            # rows all matched skips the mutagen re-reads entirely.
-                            changed_track_ids=_album_changed_track_ids or None,
+                            changed_track_ids=(
+                                (_album_changed_track_ids | _corrected_title_ids)
+                                if _tag_changed_known
+                                else None
+                            ),
+                            previous_genres=_previous_genres,
                         )
                         if _tag_sync and (_tag_sync.get("files_updated") or _tag_sync.get("corrections_recorded")):
                             _album_report["metadata_corrections"] = int(_tag_sync.get("corrections_recorded") or 0)
