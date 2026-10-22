@@ -44,7 +44,8 @@ from helpers.normalization_service import detect_cover_and_normalize_title
 from services.enrichment.cover_detector_impl import CoverDetector
 
 logger = structlog.get_logger(__name__)
-logging.getLogger(__name__).setLevel(logging.DEBUG)
+# Verbosity follows the global logging config (the module used to force
+# itself to DEBUG, flooding the file logs on every scan).
 
 _ARTIST_TRACK_COLUMNS = (
     "id",                       # 0
@@ -65,6 +66,13 @@ _ARTIST_TRACK_COLUMNS = (
     "cover_manual_override",    # 15
     "cover_last_checked",       # 16
     "musicbrainz_workid",       # 17
+    # Added: the deep pass reads these. Without ``recording_mbid`` a track the
+    # metadata scan resolved looked "unresolved" and was skipped by the
+    # identity-gated steps; ``is_cover_reason`` is kept when a confirmed
+    # cover's title suffix is repaired.
+    "recording_mbid",           # 18
+    "is_cover_reason",          # 19
+    "musicbrainz_trackid",      # 20
 )
 
 
@@ -130,58 +138,47 @@ def detect_covers_for_artist(
             # ``musicbrainz_workid`` -> ``work_mbid`` at the top of
             # ``detect_covers_for_album``, so selecting the column is enough.
             "musicbrainz_workid": row_get(row, "musicbrainz_workid", 17, ""),
+            "recording_mbid": row_get(row, "recording_mbid", 18, ""),
+            "is_cover_reason": row_get(row, "is_cover_reason", 19, ""),
+            "musicbrainz_trackid": row_get(row, "musicbrainz_trackid", 20, ""),
         }
         album_key = track["album"] or "_no_album"
         albums.setdefault(album_key, []).append(track)
 
     updated = 0
-    with db_session() as session:
-        for album_name, tracks in albums.items():
-            # Prefer the album artist the scan was requested for; the first
-            # track's artist can be a featured or per-track credit.
-            artist = artist_name or (tracks[0].get("album_artist") or tracks[0].get("artist") or album_name)
-            try:
-                results = detector.detect_covers_for_album(
-                    album=album_name, artist=artist, tracks=tracks, force=force,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Cover detection failed for album",
-                    artist=artist_name,
-                    album=album_name,
-                    error=str(exc),
-                )
-                continue
+    for album_name, tracks in albums.items():
+        # Prefer the album artist the scan was requested for; the first
+        # track's artist can be a featured or per-track credit.
+        artist = artist_name or (tracks[0].get("album_artist") or tracks[0].get("artist") or album_name)
+        try:
+            results = detector.detect_covers_for_album(
+                album=album_name, artist=artist, tracks=tracks, force=force,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Cover detection failed for album",
+                artist=artist_name,
+                album=album_name,
+                error=str(exc),
+            )
+            continue
 
-            # Persist detection results back to the database
-            for res in results:
-                track_id = res.get("id")
-                is_cover = bool(res.get("is_cover"))
-                original_artist = res.get("original_cover_artist", "")
-                
-                try:
-                    session.execute(
-                        text(
-                            "UPDATE tracks SET "
-                            "is_cover = :is_cover, "
-                            "original_cover_artist = :original_cover_artist, "
-                            "cover_last_checked = CURRENT_TIMESTAMP "
-                            "WHERE id = :id"
-                        ),
-                        {
-                            "is_cover": is_cover,
-                            "original_cover_artist": original_artist,
-                            "id": track_id,
-                        },
-                    )
-                    updated += 1
-                except Exception as exc:
-                    logger.error(
-                        "Failed to update cover status for track",
-                        track_id=track_id,
-                        error=str(exc),
-                    )
-        session.commit()
+        # The detector has ALREADY persisted every verdict, title and genre
+        # (``apply_cover_metadata_batch``), cleared unconfirmed flags and
+        # stamped ``cover_last_checked``. This loop only COUNTS the results.
+        #
+        # ⚠️ It used to write them again, reading ``res["id"]`` and
+        # ``res["original_cover_artist"]`` — but results carry ``track_id``
+        # and ``original_artist``. Every UPDATE matched ``id = NULL`` (no
+        # row), so the artist-level scan reported "updated" for writes that
+        # never happened; and had the id matched, the wrong key would have
+        # blanked the original artist the batch had just stored.
+        for res in results:
+            track_id = str(res.get("track_id") or "").strip()
+            if not track_id:
+                continue
+            if not res.get("repaired"):
+                updated += 1
 
     logger.info(
         "Cover detection complete for artist",
@@ -278,37 +275,45 @@ def detect_cover_song(
         logger.debug("Cover detected via title annotation", track=title)
         return True, "title_annotation"
 
-    if track_data and (track_data.get("work_mbid") or track_data.get("musicbrainz_workid")):
+    work_mbid = ""
+    if track_data:
+        work_mbid = str(
+            track_data.get("work_mbid") or track_data.get("musicbrainz_workid") or ""
+        ).strip()
+    if work_mbid and artist:
+        # ⭐ SIDE-EFFECT FREE. This used to run the FULL album pipeline on a
+        # one-track mock album. That pipeline WRITES: it persists covers
+        # (renaming the title), clears "unconfirmed" verdicts and stamps
+        # ``cover_last_checked`` — from inside the track stage, mid-scan, racing
+        # the stage's own save. With no ``id`` on ``track_data`` the mock used
+        # id "1", so those writes landed on whatever REAL track has id 1.
+        #
+        # The work-first check is the only part this quick check needs: one
+        # cached browse of the work's recordings, no database access.
         try:
-            mock_track = {
-                "id": track_data.get("id") or "1",
-                "title": title,
-                "artist": artist,
-                "mbid": track_data.get("recording_mbid") or track_data.get("mbid"),
-                "isrc": track_data.get("isrc"),
-                "writer": track_data.get("writer") or writer,
-                "composer": composer,
-                # ``musicbrainz_workid`` is the real column; ``work_mbid`` the
-                # in-memory key. Accept both so the DB value (persisted by the
-                # metadata scan) reaches the detector without an online search.
-                "work_mbid": track_data.get("work_mbid") or track_data.get("musicbrainz_workid"),
-            }
-            detector = CoverDetector()
-            
-            album_name = track_data.get("album") or "Unknown Album"
-            results = detector.detect_covers_for_album(
-                album=album_name, 
-                artist=artist, 
-                tracks=[mock_track], 
-                force=force
-            )
-            
-            if results and results[0].get("is_cover"):
-                logger.debug("Cover detected via MusicBrainz relations", track=title)
-                return True, "musicbrainz_work_relation"
-                
+            from helpers.normalization_service import is_track_artist_placeholder
+
+            if not is_track_artist_placeholder(artist):
+                original = CoverDetector()._detect_via_work_id(
+                    work_mbid=work_mbid,
+                    performer=artist,
+                    exclude_mbid=str(
+                        track_data.get("recording_mbid") or track_data.get("mbid") or ""
+                    ).strip(),
+                )
+                if original:
+                    # Published for the caller, which may record the original
+                    # artist so the deep pass treats the verdict as confirmed.
+                    track_data["_detected_original_artist"] = str(
+                        original.get("artist") or ""
+                    ).strip()
+                    logger.debug("Cover detected via MusicBrainz work", track=title)
+                    return True, "musicbrainz_work_relation"
+                if original == {}:
+                    logger.debug("Cover check: work recordings are the performer's own", track=title)
+                    return False, "work_original"
         except Exception as exc:
-            logger.debug("CoverDetector engine failed", track=title, error=str(exc))
+            logger.debug("Work-based cover check failed", track=title, error=str(exc))
 
     if composer or writer:
         for credit in (composer, writer):
