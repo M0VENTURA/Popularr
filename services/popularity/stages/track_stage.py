@@ -77,7 +77,11 @@ from services.catalog.album_classification_service import (
 )
 
 # Genre aggregation
-from services.enrichment.genre_aggregation_service import aggregate_genres, _parse_genre_input
+from services.enrichment.genre_aggregation_service import (
+    _parse_genre_input,
+    aggregate_genres,
+    is_track_affiliation_tag,
+)
 
 # DB & Normalization
 from db.repositories.tracks import insert_or_update_track
@@ -481,7 +485,16 @@ _ALBUM_TYPE_COLUMNS = frozenset({"musicbrainz_albumtype", "spotify_album_type", 
 _ALBUM_MBID_COLUMNS = frozenset({
     "musicbrainz_album_mbid", "musicbrainz_albumid", "musicbrainz_releasegroupid",
 })
-_STALE_PROTECTED_COLUMNS = frozenset({"title", "album_artist"}) | _ALBUM_TYPE_COLUMNS | _ALBUM_MBID_COLUMNS
+# ``album`` is protected as well: the loaded row is read BEFORE the album
+# stage and the deferred album rename, so on the full-row fallback (no
+# snapshot) its stale album name was written straight back over a rename —
+# the reported "Digimortal (digipak)" that never stuck. A payload that really
+# sets the album (MusicBrainz filling an EMPTY album) still claims it.
+_STALE_PROTECTED_COLUMNS = (
+    frozenset({"title", "album", "album_artist"})
+    | _ALBUM_TYPE_COLUMNS
+    | _ALBUM_MBID_COLUMNS
+)
 
 _MB_RG_GENRE_CACHE: dict[str, tuple[list, list]] = {}
 _MB_RECORDING_GENRE_CACHE: dict[str, tuple[list, list]] = {}
@@ -2423,18 +2436,51 @@ def process_track(
                     cover_artist = _t_art or _a_art
                     
                 raw_track = track_context.get("track", {}) if isinstance(track_context, dict) else {}
+                _stored_orig = _as_str(
+                    raw_track.get("original_cover_artist")
+                    or track.get("original_cover_artist")
+                    or ""
+                ).strip()
                 cover_data = {
+                    # ``id`` is REQUIRED context, never a placeholder: the old
+                    # quick check fell back to id "1" and wrote to that row.
+                    "id": track_id,
+                    "artist": _t_art,
+                    "album_artist": _a_art,
+                    "album": _as_str(album_context.get("album") or track.get("album") or ""),
                     "is_cover": raw_track.get("is_cover") or track.get("is_cover"),
-                    "original_cover_artist": raw_track.get("original_cover_artist") or "",
+                    "original_cover_artist": _stored_orig,
                     "cover_manual_override": raw_track.get("cover_manual_override") or track.get("cover_manual_override") or False,
                     "writer": effective_track.get("writer"),
-                    "work_mbid": effective_track.get("work_mbid"),
+                    "isrc": effective_track.get("isrc"),
+                    "recording_mbid": (
+                        effective_track.get("recording_mbid")
+                        or effective_track.get("mbid")
+                        or effective_track.get("musicbrainz_trackid")
+                    ),
+                    # The STORED work id (real column) as well as this pass's
+                    # in-memory one, so the quick check can use MusicBrainz work
+                    # relations on every scan, not only when metadata resolved
+                    # the work during this pass.
+                    "work_mbid": (
+                        effective_track.get("work_mbid")
+                        or effective_track.get("musicbrainz_workid")
+                    ),
                 }
                 force_cover = bool(options.get("force_cover_detection"))
 
                 _cover_wording_removed = bool(track.get("title_had_cover_wording"))
                 _cover_manual_override = bool(cover_data.get("cover_manual_override"))
-                if _cover_wording_removed and not _cover_manual_override:
+                # ⚠️ A cover the deep pass already CONFIRMED (flag + original
+                # artist) keeps its "(X Cover)" title. Forcing a re-check here
+                # bypassed the confirmed shortcut, the quick check (which cannot
+                # confirm it from a title that ``prepare`` already stripped)
+                # answered "no match", the stripped title was saved, and the
+                # deep pass then skipped the track as settled — so the suffix
+                # was lost on EVERY scan. Only an UNCONFIRMED track's wording is
+                # re-assessed.
+                _stored_confirmed = bool(cover_data["is_cover"]) and bool(_stored_orig)
+                if _cover_wording_removed and not _cover_manual_override and not _stored_confirmed:
                     force_cover = True
 
                 is_cover, reason = detect_cover_song(
@@ -2444,7 +2490,18 @@ def process_track(
                 )
                 if is_cover:
                     update_payload["is_cover"] = True
-                    update_payload["is_cover_reason"] = reason
+                    # A cached verdict keeps the reason its detection recorded
+                    # ("originally by …"); overwriting it with
+                    # "already_confirmed" on every scan lost that provenance.
+                    if reason not in ("already_confirmed", "manual_override"):
+                        update_payload["is_cover_reason"] = reason
+                    # The quick check's work lookup names the original artist.
+                    # Stored only when none is known, so a user/deep-pass value
+                    # is never replaced. The TITLE is left to the deep pass,
+                    # which owns the "(X Cover)" suffix.
+                    _quick_orig = _as_str(cover_data.get("_detected_original_artist") or "").strip()
+                    if _quick_orig and not _stored_orig and not _cover_manual_override:
+                        update_payload["original_cover_artist"] = _quick_orig
                     # Start from the track's REAL MusicBrainz genres — fetched
                     # this pass OR already stored. Reading only the payload
                     # started from [] whenever the fetch was skipped (genres
@@ -2554,7 +2611,43 @@ def process_track(
                 context_title=_as_str(effective_track.get("title")),
                 context_album=_as_str(album_context.get("album"))
             )
-            if aggregated:
+            # ⚠️ The album tag sync OWNS ``genres`` during a scan: it runs after
+            # this stage and replaces the column with the album blend (or each
+            # various-artists track's own list). Writing this stage's list
+            # first made ``genres`` change TWICE per track per scan, so every
+            # track was re-saved on every re-scan.
+            #
+            # This list is therefore written only when:
+            #   * the track has NO genres yet (a fill — new tracks get genres
+            #     straight away), or
+            #   * album tag sync is switched off (this IS the final value), or
+            #   * the track's per-track MARKERS changed (Cover/Live/Acoustic…).
+            #     Those describe one recording, the album blend deliberately
+            #     strips them, and the tag sync re-adds each track's markers
+            #     from the track's own genres — so a newly detected cover must
+            #     reach ``genres`` here or the "Cover" genre never appears.
+            _sync_owns_genres = True
+            try:
+                from helpers.config_helpers import get_tagging_config
+
+                _sync_owns_genres = bool(
+                    (get_tagging_config() or {}).get("sync_album_tags_on_scan", True)
+                )
+            except Exception:
+                _sync_owns_genres = True
+
+            _stored_genre_list = _parse_genre_input(track.get("genres")) or []
+            _stored_markers = {
+                str(g).casefold() for g in _stored_genre_list if is_track_affiliation_tag(g)
+            }
+            _new_markers = {
+                str(g).casefold() for g in (aggregated or []) if is_track_affiliation_tag(g)
+            }
+            if aggregated and (
+                not _sync_owns_genres
+                or not _stored_genre_list
+                or _new_markers != _stored_markers
+            ):
                 update_payload["genres"] = ", ".join(aggregated)
         except Exception as e:
             logger.debug("Genre aggregation failed", track_id=track_id, error=str(e))
@@ -2794,6 +2887,10 @@ def process_track(
         "recording_mbid", "mbid", "musicbrainz_albumid", "musicbrainz_album_mbid",
         "musicbrainz_releasegroupid", "musicbrainz_artistid",
         "musicbrainz_releasetrackid", "musicbrainz_workid",
+        # A newly detected cover must reach the FILE too (Navidrome reads the
+        # file): without these, a track whose only change was the cover verdict
+        # was dropped from the tag sync.
+        "is_cover", "original_cover_artist", "musicbrainz_genres",
     )
     # ⚠️ The baseline is the row AS LOADED — never ``effective_track``, which
     # already has ``update_payload`` merged in, so every comparison was a value
