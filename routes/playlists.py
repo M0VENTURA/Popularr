@@ -10,7 +10,9 @@ Handles:
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import time
 
 from quart import Blueprint, render_template, redirect, url_for, session, request, jsonify, send_file
 
@@ -714,6 +716,9 @@ def api_playlists_all():
                 "track_count": entry["track_count"],
                 "rule_based": entry["rule_based"],
                 "kind": entry.get("kind", "nsp"),
+                "cover_art_url": _playlist_cover_url(
+                    "file", f"file::{entry['file_name']}", entry["file_path"], entry["name"]
+                ),
             })
 
         for nav in nav_playlists:
@@ -731,15 +736,68 @@ def api_playlists_all():
                 "comment": str(nav.get("comment") or ""),
                 "track_count": int(nav.get("songCount") or 0) or len(nav.get("entry") or []),
                 "rule_based": bool(nav.get("criteria")),
+                "cover_art_url": _playlist_cover_url(
+                    "navidrome", str(nav.get("id") or ""), None, name
+                ),
             })
 
         merged.sort(key=lambda item: (item["type"] != "smart", item["name"].lower()))
-        return jsonify({"playlists": merged, "navidrome_configured": bool(client)})
+        return jsonify({
+            "playlists": merged,
+            "navidrome_configured": bool(client),
+            "ai_cover_available": _ai_cover_available(),
+        })
     except Exception as exc:
         # Never let an exception escape to an HTML error page — the frontend
         # expects JSON and would choke on a rendered template.
         logging.error("Failed to list playlists: %s", exc, exc_info=True)
         return jsonify({"error": f"Failed to list playlists: {exc}", "playlists": []}), 500
+
+
+# =============================================================================
+# PLAYLIST COVER ART
+# =============================================================================
+#
+# Every playlist thumbnail goes through ``/api/playlist/art`` rather than
+# pointing the browser at Navidrome directly:
+#
+#   * the browser has no Navidrome session, and ``getCoverArt`` needs the
+#     Subsonic credentials — an ``<img src>`` cannot carry them;
+#   * which playlist maps to which Navidrome cover is a SERVER decision (a
+#     file-backed smart playlist is only a name until Navidrome is asked).
+#
+# The proxy answers with the placeholder SVG on any miss, so a playlist with no
+# art renders as a neutral tile instead of a broken image.
+
+def _ai_cover_available() -> bool:
+    """True when the Regenerate button should be shown.
+
+    Both halves must be configured: the Gemini integration (billable, off with
+    no key by default) and the cover toggle. The button is hidden otherwise —
+    offering an action that can only fail is worse than not offering it.
+    """
+    try:
+        from helpers.config_helpers import get_gemini_config, get_genre_cover_config
+
+        gem = get_gemini_config()
+        cfg = get_genre_cover_config()
+        return bool(gem["enabled"] and gem["api_key"] and cfg["enabled"])
+    except Exception as exc:
+        logging.debug("AI cover availability check failed: %s", exc)
+        return False
+
+
+def _playlist_cover_url(
+    source: str, playlist_id: str, file_path: str | None, name: str
+) -> str:
+    """The in-app URL for a playlist's thumbnail (query params, cacheable)."""
+    from urllib.parse import urlencode
+
+    params = {"source": source, "id": playlist_id, "name": name or ""}
+    if file_path:
+        params["file_path"] = file_path
+    return f"/api/playlist/art?{urlencode(params)}"
+
 
 
 @playlists_bp.route("/api/playlists/generate/recommendations", methods=["POST"])
@@ -899,6 +957,176 @@ async def api_playlists_tracks():
 # -----------------------------------------------------------------------------
 # ADD TRACK TO PLAYLIST (album/track page picker)
 # -----------------------------------------------------------------------------
+
+def _resolve_navidrome_playlist_for_art(
+    source: str, playlist_id: str, file_path: str, name: str
+) -> dict | None:
+    """The Navidrome playlist a thumbnail request refers to, or None.
+
+    A file-backed playlist has no Navidrome id of its own, so it is resolved by
+    NAME — the same lookup ``_fetch_playlist_tracks`` uses for a rule-based
+    ``.nsp``. Failure is a normal outcome (an unimported playlist has no cover),
+    so every path returns None rather than raising.
+    """
+    from routes.navidrome import get_navidrome_client
+
+    client = get_navidrome_client()
+    if not client:
+        return None
+    try:
+        if source == "navidrome":
+            if not playlist_id:
+                return None
+            return client.fetch_playlist(playlist_id) or None
+        lookup = str(name or "").strip()
+        if not lookup:
+            return None
+        return client.find_playlist_by_name(lookup)
+    except Exception as exc:
+        logging.debug("Playlist art lookup failed: %s", exc)
+        return None
+
+
+@playlists_bp.route("/api/playlist/art", methods=["GET"])
+async def api_playlist_art():
+    """Serve one playlist's cover art.
+
+    The browser cannot fetch this itself — Navidrome's ``getCoverArt`` needs the
+    Subsonic credentials and an ``<img src>`` cannot carry them.
+
+    ⚠️ The cover id comes from the PLAYLIST payload's own ``coverArt`` field,
+    not from the playlist id. ``getCoverArt`` expects a coverArt ID
+    (``pl-<hash>`` for a playlist with uploaded art); passing the playlist id
+    would 404 or return an unrelated image.
+    """
+    from services.enrichment.album_art_service import get_album_art_placeholder_svg
+
+    source = str(request.args.get("source") or "navidrome").strip()
+    playlist_id = str(request.args.get("id") or "").strip()
+    file_path = str(request.args.get("file_path") or "").strip()
+    name = str(request.args.get("name") or "").strip()
+
+    try:
+        from routes.navidrome import get_navidrome_client
+
+        client = get_navidrome_client()
+        if client:
+            resolved = await asyncio.to_thread(
+                _resolve_navidrome_playlist_for_art, source, playlist_id, file_path, name
+            )
+            cover_id = str((resolved or {}).get("coverArt") or "").strip()
+            if cover_id:
+                data = await asyncio.to_thread(client.get_cover_art_bytes, cover_id, 300)
+                if data:
+                    mime = "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+                    response = await send_file(io.BytesIO(data), mimetype=mime)
+                    # Short cache: a regenerated cover must appear promptly, but
+                    # a list of 60 playlists should not re-fetch on every paint.
+                    response.headers["Cache-Control"] = "public, max-age=300"
+                    return response
+    except Exception as exc:
+        logging.debug("Playlist art fetch failed: %s", exc)
+
+    placeholder = get_album_art_placeholder_svg(size=300)
+    placeholder.headers["Cache-Control"] = "no-store"
+    return placeholder
+
+
+def _genre_from_playlist_name(name: str) -> str:
+    """``"Metalcore - Top Tracks"`` → ``"Metalcore"``.
+
+    The template is configurable, so the affixes are read from config rather
+    than hard-coded; when the name does not match the template the whole name is
+    the genre — the AI is art-directing THIS playlist, and a name it was never
+    briefed on is still a better brief than an empty one.
+    """
+    raw = str(name or "").strip()
+    if not raw:
+        return ""
+    try:
+        from helpers.config_helpers import get_playlists_config
+
+        template = str(
+            (get_playlists_config() or {}).get("genre_playlist_name_template")
+            or "{genre} - Top Tracks"
+        )
+    except Exception:
+        template = "{genre} - Top Tracks"
+
+    if "{genre}" in template:
+        prefix, _, suffix = template.partition("{genre}")
+        prefix, suffix = prefix.strip(), suffix.strip()
+        if prefix and raw.startswith(prefix):
+            raw = raw[len(prefix):].strip()
+        if suffix and raw.endswith(suffix):
+            raw = raw[: -len(suffix)].strip()
+    return raw or str(name or "").strip()
+
+
+@playlists_bp.route("/api/playlist/regenerate-cover", methods=["POST"])
+async def api_playlist_regenerate_cover():
+    """Regenerate a playlist's cover with Gemini, on demand.
+
+    Gated on BOTH the Gemini integration and the cover toggle — the same gate
+    the scan uses — so the button can only appear where it can actually work.
+    """
+    data = (await request.get_json(silent=True)) or {}
+    name = str(data.get("name") or "").strip()
+    playlist_id = str(data.get("id") or "").strip()
+
+    if not name:
+        return jsonify({"ok": False, "error": "Playlist name is required"}), 400
+
+    if not _ai_cover_available():
+        return jsonify({
+            "ok": False,
+            "error": (
+                "AI cover art is not configured. Enable the Gemini integration "
+                "and add an API key on the Config page."
+            ),
+        }), 400
+
+    from routes.navidrome import get_navidrome_client
+
+    client = get_navidrome_client()
+    if not client:
+        return jsonify({"ok": False, "error": "Navidrome is not configured"}), 400
+
+    genre = _genre_from_playlist_name(name)
+
+    def _run() -> dict:
+        from services.playlists.genre_cover_service import generate_genre_cover
+
+        return generate_genre_cover(
+            genre,
+            name,
+            client,
+            regenerate=True,
+            playlist_id=playlist_id or None,
+        )
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except Exception as exc:
+        logging.error("Cover regeneration failed: %s", exc, exc_info=True)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    if not result.get("ok"):
+        return jsonify({
+            "ok": False,
+            "status": result.get("status"),
+            "error": result.get("reason") or "Cover generation failed",
+        }), 400
+
+    # The stored cover changes but the thumbnail URL does not, so the browser
+    # would keep its cached copy — ``cache_bust`` lets the client force a refetch.
+    return jsonify({
+        "ok": True,
+        "status": result.get("status"),
+        "playlist_id": result.get("playlist_id") or playlist_id,
+        "cache_bust": int(time.time()),
+    })
+
 
 def _find_playlist_entry(playlist_id: str) -> dict | None:
     """Look up a file-backed playlist entry by its ``file::<name>`` id."""

@@ -79,7 +79,9 @@
               <button type="button" class="btn btn-sm btn-outline-secondary d-lg-none" data-action="playlists-back" title="Back to playlists">
                 <i class="bi bi-arrow-left"></i> Back
               </button>
-              <span id="detailIcon" class="fs-5"></span>
+              {# The playlist's cover, fetched through the server (the browser has
+                 no Navidrome session). Falls back to the placeholder tile. #}
+              <img id="detailCover" class="playlist-detail-cover rounded" alt="" loading="lazy">
               <div style="min-width:0">
                 <h6 class="mb-0 text-truncate" id="detailName"></h6>
                 <small class="text-muted" id="detailMeta"></small>
@@ -92,6 +94,13 @@
               </div>
             </div>
             <div class="d-flex align-items-center gap-2">
+              {# Hidden unless BOTH the Gemini integration and the cover toggle
+                 are configured — an action that can only fail is worse than
+                 none. The server re-checks the gate on the request. #}
+              <button type="button" class="btn btn-sm btn-outline-warning text-nowrap d-none" id="detailRegenerateBtn"
+                      data-action="playlists-regenerate-cover" title="Generate new AI cover art with Gemini">
+                <i class="bi bi-magic"></i> <span class="d-none d-sm-inline">New Cover</span>
+              </button>
               <button type="button" class="btn btn-sm btn-outline-success text-nowrap" data-action="playlists-export" title="Download all playlist tracks as a ZIP file">
                 <i class="bi bi-download"></i> Export
               </button>

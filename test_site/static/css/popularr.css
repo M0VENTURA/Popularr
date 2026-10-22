@@ -1519,3 +1519,40 @@ form .form-check-input[name="force"] + .form-check-label {
     margin-right: 0.4em;
     background: var(--tertiary-bg, #282828);
 }
+
+
+/* ==========================================================================
+   PLAYLISTS PAGE — cover art
+   ==========================================================================
+   The thumbnail is square and fixed-size in both the list card and the detail
+   header, so a 300px source image never reflows the row while it loads. The
+   placeholder SVG is the same aspect, so the swap is not a layout shift.
+   ========================================================================== */
+
+.playlist-cover {
+    width: 40px;
+    height: 40px;
+    flex: 0 0 40px;
+    object-fit: cover;
+    background: var(--secondary-bg);
+    border: 1px solid color-mix(in srgb, white 12%, transparent);
+}
+
+.playlist-detail-cover {
+    width: 56px;
+    height: 56px;
+    flex: 0 0 56px;
+    object-fit: cover;
+    background: var(--secondary-bg);
+    border: 1px solid color-mix(in srgb, white 12%, transparent);
+}
+
+/* Below lg the detail header wraps, so the cover must not push the actions
+   off-screen. Slightly smaller, and the name column is allowed to shrink. */
+@media (max-width: 991.98px) {
+    .playlist-detail-cover {
+        width: 44px;
+        height: 44px;
+        flex: 0 0 44px;
+    }
+}

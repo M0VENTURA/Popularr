@@ -72,6 +72,9 @@
   let exportJobId = null;
   let exportPoller = null;
   let exportTransientRetries = 0;
+  // Reported by /api/playlists/all: both the Gemini integration and the cover
+  // toggle must be configured before the Regenerate button is offered.
+  let aiCoverAvailable = false;
 
   const compactView = global.matchMedia('(max-width: 767.98px)');
 
@@ -148,6 +151,7 @@
     try {
       const data = await global.api.getJson('/api/playlists/all');
       playlists = data.playlists || [];
+      aiCoverAvailable = Boolean(data.ai_cover_available);
       renderList();
       showPlaylistList();
     } catch (error) {
@@ -213,11 +217,20 @@
       ? '<span class="badge bg-info-subtle text-info-emphasis text-nowrap">Rules</span>'
       : `<span class="badge bg-secondary-subtle text-secondary-emphasis text-nowrap">${esc(String(playlist.track_count || 0))} tracks</span>`;
 
+    // The server resolves the thumbnail (the browser has no Navidrome session).
+    // ``alt=""`` because the name sits right beside it — a screen reader
+    // reading the playlist name twice is noise.
+    const cover = playlist.cover_art_url
+      ? `<img class="playlist-cover rounded" src="${esc(playlist.cover_art_url)}" alt="" loading="lazy"
+              onerror="this.replaceWith(playlistCoverFallback('${esc(playlistIcon(playlist))}'))">`
+      : `<span class="playlist-cover rounded d-flex align-items-center justify-content-center"><i class="bi ${playlistIcon(playlist)}"></i></span>`;
+
     card.className = `card playlist-card ${isActive ? 'border-primary' : ''}`;
     card.style.cursor = 'pointer';
     card.innerHTML = `
-      <div class="card-body py-2 d-flex justify-content-between align-items-center gap-2">
-        <div style="min-width:0">
+      <div class="card-body py-2 d-flex align-items-center gap-2">
+        ${cover}
+        <div class="flex-grow-1" style="min-width:0">
           <div class="d-flex align-items-center gap-2">
             <i class="bi ${playlistIcon(playlist)}"></i>
             <span class="fw-semibold text-truncate">${esc(playlist.name)}</span>
@@ -240,6 +253,14 @@
     return card;
   }
 
+  /** The tile shown when a playlist has no art, or its image fails to load. */
+  function playlistCoverFallback(iconClass) {
+    const span = document.createElement('span');
+    span.className = 'playlist-cover rounded d-flex align-items-center justify-content-center';
+    span.innerHTML = `<i class="bi ${esc(iconClass || 'bi-collection-play')}"></i>`;
+    return span;
+  }
+
   // ── Detail / tracks ─────────────────────────────────────────────────────
 
   async function selectPlaylist(playlist) {
@@ -250,9 +271,27 @@
     document.getElementById('detailHeader').classList.remove('d-none');
     document.getElementById('detailEmpty').classList.add('d-none');
     document.getElementById('detailTracksWrap').classList.remove('d-none');
-    document.getElementById('detailIcon').className = `bi ${playlistIcon(playlist)}`;
     document.getElementById('detailName').textContent = playlist.name;
     document.getElementById('detailComment').textContent = playlist.comment || '';
+
+    // ── Cover art ──────────────────────────────────────────────────────────
+    // The URL is server-built and cache-busted per regeneration, so the image
+    // is re-pointed on EVERY selection rather than only when it changes.
+    const coverEl = document.getElementById('detailCover');
+    if (coverEl) {
+      if (playlist.cover_art_url) {
+        coverEl.src = playlist.cover_art_url;
+        coverEl.classList.remove('d-none');
+        coverEl.onerror = () => coverEl.classList.add('d-none');
+      } else {
+        coverEl.classList.add('d-none');
+      }
+    }
+
+    // The Regenerate button only exists where the feature can work — the server
+    // reports the gate, so the UI never offers an action that must fail.
+    const regenBtn = document.getElementById('detailRegenerateBtn');
+    if (regenBtn) regenBtn.classList.toggle('d-none', !aiCoverAvailable);
     document.getElementById('detailMeta').textContent =
       `${playlist.type === 'smart' ? 'Smart' : 'Regular'} playlist · ` +
       `${playlist.rule_based ? 'rule-based' : (playlist.track_count || 0) + ' tracks'}`;
@@ -336,6 +375,61 @@
   }
 
   /**
+   * Regenerate the selected playlist's cover with Gemini.
+   *
+   * The AI brief comes from the playlist NAME (the server strips the configured
+   * "{genre} - Top Tracks" affixes), so this works for any playlist the user
+   * points it at — not only the auto-generated genre ones.
+   *
+   * The button is disabled for the duration: generation is a multi-second
+   * billable call and a double-click would spend quota twice.
+   */
+  async function regenerateCover() {
+    if (!currentPlaylist) return;
+    const btn = document.getElementById('detailRegenerateBtn');
+    if (!btn || btn.disabled) return;
+
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Generating…';
+
+    try {
+      const data = await global.api.postJson('/api/playlist/regenerate-cover', {
+        id: currentPlaylist.id,
+        source: currentPlaylist.source,
+        name: currentPlaylist.name,
+      });
+      if (!data || !data.ok) {
+        throw new Error((data && data.error) || 'Cover generation failed');
+      }
+
+      // The cover is replaced but the thumbnail URL is unchanged, so the browser
+      // would serve its cached copy — append the server's cache-bust token.
+      const bust = data.cache_bust || Date.now();
+      const base = String(currentPlaylist.cover_art_url || '').split('&_cb=')[0];
+      if (base) {
+        currentPlaylist.cover_art_url = `${base}&_cb=${bust}`;
+        const coverEl = document.getElementById('detailCover');
+        if (coverEl) {
+          coverEl.classList.remove('d-none');
+          coverEl.src = base + '&_cb=' + bust;
+        }
+      }
+      // The list thumbnail holds the same stale URL; re-render so it refreshes.
+      renderList();
+      showAlert(data.status === 'skipped'
+        ? 'Cover already up to date.'
+        : 'New cover art generated.');
+    } catch (error) {
+      console.error('regenerateCover:', error);
+      showAlert(error.message || 'Cover generation failed', true);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = original;
+    }
+  }
+
+  /**
    * Mobile compact rows: Title (bold) / Artist • Album (muted) on the left,
    * duration + stars on the right — no horizontal scrolling.
    */
@@ -384,6 +478,14 @@
     document.getElementById('detailStacked').innerHTML = '';
     document.getElementById('detailPathRow').classList.add('d-none');
     document.getElementById('detailPathRow').classList.remove('d-flex');
+    // Drop the previous playlist's cover AND its onerror handler — a stale
+    // handler would hide the next playlist's image if that one also failed.
+    const cover = document.getElementById('detailCover');
+    if (cover) {
+      cover.removeAttribute('src');
+      cover.onerror = null;
+      cover.classList.add('d-none');
+    }
     currentTracks = [];
   }
 
@@ -842,6 +944,7 @@
     selectPlaylist,
     applyPlaylistFilter,
     formatDuration,
+    regenerateCover,
   };
 
   // ── Markup binding ──────────────────────────────────────────────────────
@@ -870,6 +973,7 @@
     'playlists-submit-generate': () => submitGenerator(),
     'playlists-import-csv': () => openCsvImportModal(),
     'playlists-create-from-import': () => createPlaylistFromImport(),
+    'playlists-regenerate-cover': () => regenerateCover(),
   };
 
   function bindActions() {
@@ -913,4 +1017,5 @@
   global.openCsvImportModal = openCsvImportModal;
   global.submitCsvImport = submitCsvImport;
   global.createPlaylistFromImport = createPlaylistFromImport;
+  global.regenerateCover = regenerateCover;
 })(window);
