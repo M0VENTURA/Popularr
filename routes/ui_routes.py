@@ -2083,6 +2083,16 @@ _COVER_FETCH_DEADLINE_SECONDS = 12.0
 #: normal album comfortably inside it.
 _INLINE_DISK_BUDGET_SECONDS = 45.0
 
+#: Hard ceiling for the WHOLE save, kept under Cloudflare's 100s origin timeout
+#: with headroom for the redirect + flash. The inline disk phase gets whatever
+#: is left of this (capped by ``_INLINE_DISK_BUDGET_SECONDS``), so slow earlier
+#: phases can no longer push the total past the 524 line.
+_SAVE_TOTAL_BUDGET_SECONDS = 85.0
+
+#: The inline disk phase always gets at least this long, so a save never
+#: abandons its tagging instantly just because the DB phase was slow.
+_INLINE_DISK_MIN_SECONDS = 5.0
+
 # A release-group MBID is the identity of a RELEASE — the same album NAME can
 # belong to several of them (a re-issue, a deluxe edition), and a single
 # release's tracks can carry several different YEARS (a compilation credits the
@@ -2134,22 +2144,27 @@ async def album_detail(album_path: str) -> Any:
         
     cfg = get_config()
 
-    with db_session() as session:
-        result = session.execute(
-            text("""
-                SELECT *
-                FROM tracks
-                WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
-                  AND LOWER(COALESCE(album, '')) = LOWER(:album)
-                ORDER BY
-                    COALESCE(disc_number, '1'),
-                    CAST(NULLIF(regexp_replace(COALESCE(CAST(track_number AS TEXT), ''), '[^0-9].*$', ''), '') AS INTEGER) NULLS LAST,
-                    track_number,
-                    title
-            """),
-            {"artist": artist_name, "album": album_name},
-        )
-        tracks = [dict(r._mapping) for r in result.fetchall()]
+    # Off the event loop: shared by GET and POST, and a slow database here
+    # used to stall every other request on this worker (timeout fix).
+    def _load_album_tracks() -> list[dict[str, Any]]:
+        with db_session() as session:
+            result = session.execute(
+                text("""
+                    SELECT *
+                    FROM tracks
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                      AND LOWER(COALESCE(album, '')) = LOWER(:album)
+                    ORDER BY
+                        COALESCE(disc_number, '1'),
+                        CAST(NULLIF(regexp_replace(COALESCE(CAST(track_number AS TEXT), ''), '[^0-9].*$', ''), '') AS INTEGER) NULLS LAST,
+                        track_number,
+                        title
+                """),
+                {"artist": artist_name, "album": album_name},
+            )
+            return [dict(r._mapping) for r in result.fetchall()]
+
+    tracks = await asyncio.to_thread(_load_album_tracks)
 
     # ⚠️ The ORDER BY above is only a PRE-SORT. ``disc_number``/``track_number``
     # are TEXT and ``COALESCE`` does not treat '' as missing, so a blank DISC
@@ -2502,312 +2517,327 @@ async def album_detail(album_path: str) -> Any:
         _db_payloads: list[dict[str, Any]] = []
 
         _write_loop_started = time.monotonic()
-        for track in tracks:
-            track_id = track.get("id")
-            if not track_id:
-                continue
-
-            payload: dict[str, Any] = {"id": track_id}
-
-            if new_title and new_title != track.get("album"):
-                payload["album"] = new_title
-
-            if new_artist and new_artist != (track.get("album_artist") or track.get("artist")):
-                payload["album_artist"] = new_artist
-                payload["artist"] = new_artist
-
-            # Backfilled MB album metadata — applied to EVERY track so the
-            # audio files carry the complete, consistent tag set.
-            if _mb_albumartist_mbid:
-                payload["musicbrainz_albumartistid"] = _mb_albumartist_mbid
-            if _mb_albumtype:
-                payload["musicbrainz_albumtype"] = _mb_albumtype
-            if _mb_albumstatus:
-                payload["musicbrainz_albumstatus"] = _mb_albumstatus
-            if _mb_releasecountry:
-                payload["releasecountry"] = _mb_releasecountry
-            if _mb_originalyear:
-                payload["originalyear"] = _mb_originalyear
-
-            # ── Per-track MusicBrainz enrichment (writer / cover / genre) ─
-            # Tracks that have a related WORK (via the recording's work-rels)
-            # get their writer(s) updated; tracks whose work is by a DIFFERENT
-            # artist are covers and are marked ``is_cover`` with the original
-            # artist attributed.  MB genres are also applied per recording.
-            _cover_original_artist: str | None = None
-            _cover_renamed_title: str | None = None
-            if _mb_track_map:
-                _rec_mbid = str(track.get("recording_mbid") or "").strip()
-                _mb_tt = _mb_track_map.get(_rec_mbid)
-                if _mb_tt:
-                    if _mb_tt.get("writer") and not track_composer:
-                        payload["writer"] = _mb_tt["writer"]
-                    if _mb_tt.get("is_cover"):
-                        payload["is_cover"] = 1
-                        _cover_original_artist = str(_mb_tt.get("original_cover_artist") or "").strip()
-                        if _cover_original_artist:
-                            payload["original_cover_artist"] = _cover_original_artist
-                    if _mb_tt.get("musicbrainz_genres"):
-                        payload["musicbrainz_genres"] = _mb_tt["musicbrainz_genres"]
-                    if _mb_tt.get("work_mbid"):
-                        payload["musicbrainz_workid"] = _mb_tt["work_mbid"]
-
-            # ── Cover rename + genre (same convention as the cover-detection
-            #    area) ─────────────────────────────────────────────────────
-            # A confirmed cover is renamed to "Title (Original Artist Cover)"
-            # and gets the "Cover" genre, matching the standalone cover
-            # detector so the whole library uses one convention.
-            if payload.get("is_cover") and _cover_original_artist:
-                _cur_title = str(track.get("title") or "").strip()
-                if _cur_title and "cover)" not in _cur_title.lower():
-                    _cover_renamed_title = f"{_cur_title} ({_cover_original_artist} Cover)"
-                    payload["title"] = _cover_renamed_title
-
-            # The two years are DISTINCT and stored separately:
-            #   year          -> the album's ORIGINAL year (the release group's
-            #                    first release), so a reissue groups with the
-            #                    original pressing.
-            #   release_year  -> THIS edition's year.
-            # Falling back to release_year preserves the old behaviour for a
-            # library that carries only a single date.
-            if original_year:
-                payload["year"] = original_year
-            elif release_year:
-                payload["year"] = release_year
-
-            if release_year:
-                try:
-                    payload["release_year"] = int(release_year)
-                except ValueError:
-                    pass
-
-            if release_title:
-                payload["release_title"] = release_title
-
-            if album_type:
-                payload["spotify_album_type"] = album_type
-                payload["musicbrainz_albumtype"] = album_type
-                # ``releasetype`` is what the FILE carries (and what Navidrome
-                # reads back), so a type chosen here must reach it too — and it
-                # is the PRIMARY form, the same normalisation the scan writes.
-                # Without it the file kept the old release type, so the album
-                # page's choice was contradicted everywhere outside the DB.
-                payload["releasetype"] = normalize_primary_release_type(album_type)
-
-            if track_artist and track_artist != track.get("artist"):
-                payload["artist"] = track_artist
-            if track_composer:
-                payload["writer"] = track_composer
-
-            if album_mbid:
-                payload["musicbrainz_album_mbid"] = album_mbid
-                payload["musicbrainz_albumid"] = album_mbid
-            if album_rg_mbid:
-                payload["musicbrainz_releasegroupid"] = album_rg_mbid
-            if artist_mbid:
-                payload["musicbrainz_artistid"] = artist_mbid
-            if discogs_id:
-                payload["discogs_album_id"] = discogs_id
-
-            if cover_url:
-                payload["cover_art_url"] = cover_url
-
-            # ── Apply this track's staged MusicBrainz review ─────────────
-            # Written AFTER the album-level values so a per-track value the
-            # user reviewed and kept wins over the album-wide default.
-            # Whitelisted fields only; anything else in the payload is ignored.
-            _staged_for_track = _staged_updates.get(str(track_id))
-            if _staged_for_track:
-                for _sfield, _svalue in _staged_for_track.items():
-                    if _sfield not in _STAGED_WRITABLE:
-                        continue
-                    if _svalue is None or str(_svalue).strip() == "":
-                        continue
-                    payload[_sfield] = _svalue
-                # A reviewed cover verdict renames the title to the library's
-                # "Title (Original Artist Cover)" convention — mirroring the
-                # compare/apply path — unless the title was staged explicitly.
-                _staged_cover_artist = str(
-                    _staged_for_track.get("original_cover_artist") or ""
-                ).strip()
-                if _staged_for_track.get("is_cover") and _staged_cover_artist:
-                    _base_title = str(
-                        payload.get("title") or track.get("title") or ""
-                    ).strip()
-                    if _base_title and "cover)" not in _base_title.lower():
-                        payload["title"] = f"{_base_title} ({_staged_cover_artist} Cover)"
-
-            for field, value in release_values.items():
-                if value:
-                    payload[field] = value
-
-            # Single-disc albums: strip the per-track disc_number so neither
-            # the DB nor the audio file tags carry a bogus disc position.
-            # Only set this when the payload is otherwise being written (the
-            # field is TEXT; an empty string clears the frame on file write).
-            #
-            # ⚠️ An EXPLICITLY REVIEWED disc number wins over the inference
-            # below. The strip is an album-level heuristic about the library's
-            # existing tags; the staged value is the user having just confirmed
-            # the correct position against MusicBrainz. Without this guard,
-            # saving a review for a track whose disc number was actually wrong
-            # threw the correction away and wrote back the bogus value —
-            # silently, because the surrounding save still reported success.
-            # ``disc_number`` is in ``_STAGED_WRITABLE``, so this is also what
-            # that whitelist promises the user.
-            _disc_staged = bool(_staged_updates.get(str(track_id), {}).get("disc_number"))
-            if _strip_disc_numbers and not _disc_staged:
-                _cur_disc = str(track.get("disc_number") or "").strip()
-                # A "0" disc is a bogus single-disc value — always clear it.
-                if _cur_disc and _cur_disc != "0":
-                    payload["disc_number"] = ""
-                elif _cur_disc == "0":
-                    payload["disc_number"] = ""
-            elif _multi_disc:
-                # Multi-disc: ensure every track has a non-empty disc_number
-                # (default to "1" when unset, and never "0") so the album
-                # displays correctly.
-                _cur_disc = str(payload.get("disc_number") or track.get("disc_number") or "").strip()
-                if not _cur_disc or _cur_disc == "0":
-                    payload["disc_number"] = "1"
-
-            if genres_str:
-                # Phase 1 — genres: the DATABASE columns only. The file's
-                # genre tag is the popularity scan's job (DB → file), so this
-                # pass never writes it.
-                #
-                # Track-level genres WIN: a track with its own evidence
-                # (MusicBrainz, Last.fm, Navidrome, manual, …) keeps it, and
-                # the album's list is only a FILL for tracks that have none.
-                if _track_keeps_its_own_genres(track, _staged_for_track):
-                    genre_tracks_kept += 1
-                else:
-                    _genre_rows, _genre_failed = _apply_album_track_genres(
-                        track_id, genres_str,
-                    )
-                    # Genres bypass ``payload``, so they must be counted here or
-                    # a genres-only save is reported as "No changes were made".
-                    if _genre_rows:
-                        genre_only_writes += 1
-                    if _genre_failed:
-                        genre_write_failures += 1
-
-            # Phase 2 — persist: collect the DB payload. The actual write is
-            # batched across the whole album after the loop, so we pay for one
-            # transaction instead of one session + commit per track.
-            if len(payload) > 1:
-                _db_payloads.append(payload)
-
-            # Phase 3 — file tags: the cover genre and the single-disc clear.
-            #
-            # QUEUED, not written inline: the write below reads the file twice
-            # (``preserve_file_timestamps`` compares the bytes) and rewrites it,
-            # so doing it here made the loop one N-fold sequence of disk passes
-            # — the wall clock behind the reported **Cloudflare 524** on save.
-            # The job carries the payload built above; nothing mutates it after
-            # this point, so the worker sees exactly what this track was saved
-            # with.
-            _file_jobs.append(
-                (track_id, track, payload, _strip_disc_numbers, _disc_staged)
-            )
-
-            # ── Live-state revert: ONLY when the album is RECLASSIFIED ──────
-            #
-            # ⚠️ THIS USED TO RUN ON EVERY SAVE OF A NON-LIVE ALBUM, and it
-            # DELETED the live/acoustic/unplugged marker from the title.
-            #
-            # `revert_track_live_state` does two things: it clears the
-            # is_live/is_acoustic/album_context_live flags AND it rewrites the
-            # title through `strip_live_acoustic_suffix`. So on an ordinary
-            # album save, a track whose metadata had just been updated to
-            # "Song (Unplugged)" was silently reduced back to "Song" — the
-            # reported "saving removes live, unplugged or acoustic from a track
-            # even if the metadata had updated to include them".
-            #
-            # The old guard only asked "is the SAVED type non-live?", which is
-            # true for every ordinary album — so it fired essentially always.
-            # That is the wrong question. The revert exists to undo tagging the
-            # pipeline had applied because it believed the album was live; it is
-            # only meaningful when that belief has just CHANGED.
-            #
-            # This save path cannot express that change either: it never writes
-            # is_live / is_acoustic / album_context_live (none is in the payload
-            # built above, and none is in `_STAGED_WRITABLE`). Nothing about the
-            # live state was cleared here, so there is nothing to undo.
-            #
-            # The correct condition is therefore "the album WAS live and is now
-            # being saved as non-live" — a RECLASSIFICATION. The stored type is
-            # read from the track rows the page already loaded, so no extra
-            # query is introduced. A track-level edit that genuinely clears
-            # `is_live` is handled by the track routes, which compare the old
-            # and new values directly.
-            _stored_type = str(
-                track.get("musicbrainz_albumtype")
-                or track.get("spotify_album_type")
-                or track.get("album_type")
-                # See ``category_for_album_row``: the tag/guessed type is a
-                # fallback for an unclassified album, never a competing
-                # opinion about a classified one.
-                or track.get("releasetype")
-                or ""
-            ).lower()
-            # ⚠️ `+acoustic` counts as live-state too. The OLD guard only
-            # checked "+live"/"(live)", so an album typed `album+acoustic` was
-            # treated as an ordinary album and had its "(Acoustic)" titles
-            # stripped on every save — the acoustic half of the same report.
-            # `_apply_live_remix_album_tagging` applies the Acoustic label on
-            # exactly that type, so the revert must recognise it as live state.
-            _stored_type_was_live = _album_type_is_live_state(_stored_type)
-            _saved_type_is_live = _album_type_is_live_state((album_type or "").lower())
-
-            if _stored_type_was_live and not _saved_type_is_live:
-                # Guard first: the revert opens its own session and re-reads the
-                # row, so calling it for every track on a plainly studio album
-                # cost one SELECT per track and logged two INFO lines each for
-                # no work. `track_carries_live_state` inspects the row we
-                # already hold and only lets genuinely suspicious tracks through.
-                if track_carries_live_state(track):
-                    try:
-                        if revert_track_live_state(str(track_id)):
-                            reverted_live_count += 1
-                    except Exception as revert_err:
-                        logger.debug("Live-state revert failed", track_id=track_id, error=str(revert_err))
-
-        # ── Phase 2b: commit all per-track DB writes in one transaction ──
-        # Every payload collected by the loop lands in ONE session + commit
-        # instead of one per track (the reported ~68 s DB loop on a 14-track
-        # album). Counting is all-or-nothing at the batch level; see
-        # ``_persist_album_track_payloads``.
-        _updated, _failed = _persist_album_track_payloads(_db_payloads)
-        updated_count += _updated
-        db_failures += _failed
-
-        # ── Do-not-search-album-release flag ─────────────────────────────
-        # A custom album (not on MusicBrainz/Discogs) can be marked so the
-        # album-release lookups are skipped. Written ALBUM-WIDE AFTER the
-        # rename below so every track agrees on the final artist/album.
+        # ⚠️ THE DATABASE PHASE RUNS IN A WORKER THREAD (timeout fix).
         #
-        # ⚠️ PRESENCE-GATED: the checkbox now lives in its OWN card with its
-        # own Save button (POST /api/album/lookup-skip), so this big save no
-        # longer carries the field. If the handler kept reading
-        # ``form.get(...)`` unconditionally, every big save would compute False
-        # and CLEAR the flag — and a live-tree save (whose form never had the
-        # field at all) would clear a custom album marked from the rebuilt page.
-        # "Absent" must mean "not part of this save", so only write when the
-        # field was actually posted.
-        try:
-            if "album_lookup_skip" in form:
-                from services.metadata.album_lookup_skip_service import set_album_lookup_skip
-                _skip_lookup = str(form.get("album_lookup_skip") or "").strip().lower() in (
-                    "1", "true", "on", "yes"
+        # Everything below — per-track payload build, the per-track genre fills
+        # (one session each), the live-state reverts, the bulk upsert and the
+        # lookup-skip write — is SYNCHRONOUS database work. It used to run
+        # inline in this ``async`` handler, so a slow database stalled the
+        # whole hypercorn worker AND had no deadline: the one unbounded phase
+        # of the save, and the remaining cause of the Cloudflare 524. It now
+        # runs via ``asyncio.to_thread``; nothing in it awaits, and ``form`` is
+        # an already-materialised MultiDict, so it is thread-safe to read.
+        def _album_db_phase() -> None:
+            nonlocal updated_count, reverted_live_count, db_failures
+            nonlocal genre_write_failures, genre_only_writes, genre_tracks_kept
+            for track in tracks:
+                track_id = track.get("id")
+                if not track_id:
+                    continue
+
+                payload: dict[str, Any] = {"id": track_id}
+
+                if new_title and new_title != track.get("album"):
+                    payload["album"] = new_title
+
+                if new_artist and new_artist != (track.get("album_artist") or track.get("artist")):
+                    payload["album_artist"] = new_artist
+                    payload["artist"] = new_artist
+
+                # Backfilled MB album metadata — applied to EVERY track so the
+                # audio files carry the complete, consistent tag set.
+                if _mb_albumartist_mbid:
+                    payload["musicbrainz_albumartistid"] = _mb_albumartist_mbid
+                if _mb_albumtype:
+                    payload["musicbrainz_albumtype"] = _mb_albumtype
+                if _mb_albumstatus:
+                    payload["musicbrainz_albumstatus"] = _mb_albumstatus
+                if _mb_releasecountry:
+                    payload["releasecountry"] = _mb_releasecountry
+                if _mb_originalyear:
+                    payload["originalyear"] = _mb_originalyear
+
+                # ── Per-track MusicBrainz enrichment (writer / cover / genre) ─
+                # Tracks that have a related WORK (via the recording's work-rels)
+                # get their writer(s) updated; tracks whose work is by a DIFFERENT
+                # artist are covers and are marked ``is_cover`` with the original
+                # artist attributed.  MB genres are also applied per recording.
+                _cover_original_artist: str | None = None
+                _cover_renamed_title: str | None = None
+                if _mb_track_map:
+                    _rec_mbid = str(track.get("recording_mbid") or "").strip()
+                    _mb_tt = _mb_track_map.get(_rec_mbid)
+                    if _mb_tt:
+                        if _mb_tt.get("writer") and not track_composer:
+                            payload["writer"] = _mb_tt["writer"]
+                        if _mb_tt.get("is_cover"):
+                            payload["is_cover"] = 1
+                            _cover_original_artist = str(_mb_tt.get("original_cover_artist") or "").strip()
+                            if _cover_original_artist:
+                                payload["original_cover_artist"] = _cover_original_artist
+                        if _mb_tt.get("musicbrainz_genres"):
+                            payload["musicbrainz_genres"] = _mb_tt["musicbrainz_genres"]
+                        if _mb_tt.get("work_mbid"):
+                            payload["musicbrainz_workid"] = _mb_tt["work_mbid"]
+
+                # ── Cover rename + genre (same convention as the cover-detection
+                #    area) ─────────────────────────────────────────────────────
+                # A confirmed cover is renamed to "Title (Original Artist Cover)"
+                # and gets the "Cover" genre, matching the standalone cover
+                # detector so the whole library uses one convention.
+                if payload.get("is_cover") and _cover_original_artist:
+                    _cur_title = str(track.get("title") or "").strip()
+                    if _cur_title and "cover)" not in _cur_title.lower():
+                        _cover_renamed_title = f"{_cur_title} ({_cover_original_artist} Cover)"
+                        payload["title"] = _cover_renamed_title
+
+                # The two years are DISTINCT and stored separately:
+                #   year          -> the album's ORIGINAL year (the release group's
+                #                    first release), so a reissue groups with the
+                #                    original pressing.
+                #   release_year  -> THIS edition's year.
+                # Falling back to release_year preserves the old behaviour for a
+                # library that carries only a single date.
+                if original_year:
+                    payload["year"] = original_year
+                elif release_year:
+                    payload["year"] = release_year
+
+                if release_year:
+                    try:
+                        payload["release_year"] = int(release_year)
+                    except ValueError:
+                        pass
+
+                if release_title:
+                    payload["release_title"] = release_title
+
+                if album_type:
+                    payload["spotify_album_type"] = album_type
+                    payload["musicbrainz_albumtype"] = album_type
+                    # ``releasetype`` is what the FILE carries (and what Navidrome
+                    # reads back), so a type chosen here must reach it too — and it
+                    # is the PRIMARY form, the same normalisation the scan writes.
+                    # Without it the file kept the old release type, so the album
+                    # page's choice was contradicted everywhere outside the DB.
+                    payload["releasetype"] = normalize_primary_release_type(album_type)
+
+                if track_artist and track_artist != track.get("artist"):
+                    payload["artist"] = track_artist
+                if track_composer:
+                    payload["writer"] = track_composer
+
+                if album_mbid:
+                    payload["musicbrainz_album_mbid"] = album_mbid
+                    payload["musicbrainz_albumid"] = album_mbid
+                if album_rg_mbid:
+                    payload["musicbrainz_releasegroupid"] = album_rg_mbid
+                if artist_mbid:
+                    payload["musicbrainz_artistid"] = artist_mbid
+                if discogs_id:
+                    payload["discogs_album_id"] = discogs_id
+
+                if cover_url:
+                    payload["cover_art_url"] = cover_url
+
+                # ── Apply this track's staged MusicBrainz review ─────────────
+                # Written AFTER the album-level values so a per-track value the
+                # user reviewed and kept wins over the album-wide default.
+                # Whitelisted fields only; anything else in the payload is ignored.
+                _staged_for_track = _staged_updates.get(str(track_id))
+                if _staged_for_track:
+                    for _sfield, _svalue in _staged_for_track.items():
+                        if _sfield not in _STAGED_WRITABLE:
+                            continue
+                        if _svalue is None or str(_svalue).strip() == "":
+                            continue
+                        payload[_sfield] = _svalue
+                    # A reviewed cover verdict renames the title to the library's
+                    # "Title (Original Artist Cover)" convention — mirroring the
+                    # compare/apply path — unless the title was staged explicitly.
+                    _staged_cover_artist = str(
+                        _staged_for_track.get("original_cover_artist") or ""
+                    ).strip()
+                    if _staged_for_track.get("is_cover") and _staged_cover_artist:
+                        _base_title = str(
+                            payload.get("title") or track.get("title") or ""
+                        ).strip()
+                        if _base_title and "cover)" not in _base_title.lower():
+                            payload["title"] = f"{_base_title} ({_staged_cover_artist} Cover)"
+
+                for field, value in release_values.items():
+                    if value:
+                        payload[field] = value
+
+                # Single-disc albums: strip the per-track disc_number so neither
+                # the DB nor the audio file tags carry a bogus disc position.
+                # Only set this when the payload is otherwise being written (the
+                # field is TEXT; an empty string clears the frame on file write).
+                #
+                # ⚠️ An EXPLICITLY REVIEWED disc number wins over the inference
+                # below. The strip is an album-level heuristic about the library's
+                # existing tags; the staged value is the user having just confirmed
+                # the correct position against MusicBrainz. Without this guard,
+                # saving a review for a track whose disc number was actually wrong
+                # threw the correction away and wrote back the bogus value —
+                # silently, because the surrounding save still reported success.
+                # ``disc_number`` is in ``_STAGED_WRITABLE``, so this is also what
+                # that whitelist promises the user.
+                _disc_staged = bool(_staged_updates.get(str(track_id), {}).get("disc_number"))
+                if _strip_disc_numbers and not _disc_staged:
+                    _cur_disc = str(track.get("disc_number") or "").strip()
+                    # A "0" disc is a bogus single-disc value — always clear it.
+                    if _cur_disc and _cur_disc != "0":
+                        payload["disc_number"] = ""
+                    elif _cur_disc == "0":
+                        payload["disc_number"] = ""
+                elif _multi_disc:
+                    # Multi-disc: ensure every track has a non-empty disc_number
+                    # (default to "1" when unset, and never "0") so the album
+                    # displays correctly.
+                    _cur_disc = str(payload.get("disc_number") or track.get("disc_number") or "").strip()
+                    if not _cur_disc or _cur_disc == "0":
+                        payload["disc_number"] = "1"
+
+                if genres_str:
+                    # Phase 1 — genres: the DATABASE columns only. The file's
+                    # genre tag is the popularity scan's job (DB → file), so this
+                    # pass never writes it.
+                    #
+                    # Track-level genres WIN: a track with its own evidence
+                    # (MusicBrainz, Last.fm, Navidrome, manual, …) keeps it, and
+                    # the album's list is only a FILL for tracks that have none.
+                    if _track_keeps_its_own_genres(track, _staged_for_track):
+                        genre_tracks_kept += 1
+                    else:
+                        _genre_rows, _genre_failed = _apply_album_track_genres(
+                            track_id, genres_str,
+                        )
+                        # Genres bypass ``payload``, so they must be counted here or
+                        # a genres-only save is reported as "No changes were made".
+                        if _genre_rows:
+                            genre_only_writes += 1
+                        if _genre_failed:
+                            genre_write_failures += 1
+
+                # Phase 2 — persist: collect the DB payload. The actual write is
+                # batched across the whole album after the loop, so we pay for one
+                # transaction instead of one session + commit per track.
+                if len(payload) > 1:
+                    _db_payloads.append(payload)
+
+                # Phase 3 — file tags: the cover genre and the single-disc clear.
+                #
+                # QUEUED, not written inline: the write below reads the file twice
+                # (``preserve_file_timestamps`` compares the bytes) and rewrites it,
+                # so doing it here made the loop one N-fold sequence of disk passes
+                # — the wall clock behind the reported **Cloudflare 524** on save.
+                # The job carries the payload built above; nothing mutates it after
+                # this point, so the worker sees exactly what this track was saved
+                # with.
+                _file_jobs.append(
+                    (track_id, track, payload, _strip_disc_numbers, _disc_staged)
                 )
-                set_album_lookup_skip(
-                    new_artist or artist_name,
-                    new_title or album_name,
-                    _skip_lookup,
-                )
-        except Exception as _skip_lookup_err:
-            logger.debug("Album lookup-skip flag write failed", error=str(_skip_lookup_err))
+
+                # ── Live-state revert: ONLY when the album is RECLASSIFIED ──────
+                #
+                # ⚠️ THIS USED TO RUN ON EVERY SAVE OF A NON-LIVE ALBUM, and it
+                # DELETED the live/acoustic/unplugged marker from the title.
+                #
+                # `revert_track_live_state` does two things: it clears the
+                # is_live/is_acoustic/album_context_live flags AND it rewrites the
+                # title through `strip_live_acoustic_suffix`. So on an ordinary
+                # album save, a track whose metadata had just been updated to
+                # "Song (Unplugged)" was silently reduced back to "Song" — the
+                # reported "saving removes live, unplugged or acoustic from a track
+                # even if the metadata had updated to include them".
+                #
+                # The old guard only asked "is the SAVED type non-live?", which is
+                # true for every ordinary album — so it fired essentially always.
+                # That is the wrong question. The revert exists to undo tagging the
+                # pipeline had applied because it believed the album was live; it is
+                # only meaningful when that belief has just CHANGED.
+                #
+                # This save path cannot express that change either: it never writes
+                # is_live / is_acoustic / album_context_live (none is in the payload
+                # built above, and none is in `_STAGED_WRITABLE`). Nothing about the
+                # live state was cleared here, so there is nothing to undo.
+                #
+                # The correct condition is therefore "the album WAS live and is now
+                # being saved as non-live" — a RECLASSIFICATION. The stored type is
+                # read from the track rows the page already loaded, so no extra
+                # query is introduced. A track-level edit that genuinely clears
+                # `is_live` is handled by the track routes, which compare the old
+                # and new values directly.
+                _stored_type = str(
+                    track.get("musicbrainz_albumtype")
+                    or track.get("spotify_album_type")
+                    or track.get("album_type")
+                    # See ``category_for_album_row``: the tag/guessed type is a
+                    # fallback for an unclassified album, never a competing
+                    # opinion about a classified one.
+                    or track.get("releasetype")
+                    or ""
+                ).lower()
+                # ⚠️ `+acoustic` counts as live-state too. The OLD guard only
+                # checked "+live"/"(live)", so an album typed `album+acoustic` was
+                # treated as an ordinary album and had its "(Acoustic)" titles
+                # stripped on every save — the acoustic half of the same report.
+                # `_apply_live_remix_album_tagging` applies the Acoustic label on
+                # exactly that type, so the revert must recognise it as live state.
+                _stored_type_was_live = _album_type_is_live_state(_stored_type)
+                _saved_type_is_live = _album_type_is_live_state((album_type or "").lower())
+
+                if _stored_type_was_live and not _saved_type_is_live:
+                    # Guard first: the revert opens its own session and re-reads the
+                    # row, so calling it for every track on a plainly studio album
+                    # cost one SELECT per track and logged two INFO lines each for
+                    # no work. `track_carries_live_state` inspects the row we
+                    # already hold and only lets genuinely suspicious tracks through.
+                    if track_carries_live_state(track):
+                        try:
+                            if revert_track_live_state(str(track_id)):
+                                reverted_live_count += 1
+                        except Exception as revert_err:
+                            logger.debug("Live-state revert failed", track_id=track_id, error=str(revert_err))
+
+            # ── Phase 2b: commit all per-track DB writes in one transaction ──
+            # Every payload collected by the loop lands in ONE session + commit
+            # instead of one per track (the reported ~68 s DB loop on a 14-track
+            # album). Counting is all-or-nothing at the batch level; see
+            # ``_persist_album_track_payloads``.
+            _updated, _failed = _persist_album_track_payloads(_db_payloads)
+            updated_count += _updated
+            db_failures += _failed
+
+            # ── Do-not-search-album-release flag ─────────────────────────────
+            # A custom album (not on MusicBrainz/Discogs) can be marked so the
+            # album-release lookups are skipped. Written ALBUM-WIDE AFTER the
+            # rename below so every track agrees on the final artist/album.
+            #
+            # ⚠️ PRESENCE-GATED: the checkbox now lives in its OWN card with its
+            # own Save button (POST /api/album/lookup-skip), so this big save no
+            # longer carries the field. If the handler kept reading
+            # ``form.get(...)`` unconditionally, every big save would compute False
+            # and CLEAR the flag — and a live-tree save (whose form never had the
+            # field at all) would clear a custom album marked from the rebuilt page.
+            # "Absent" must mean "not part of this save", so only write when the
+            # field was actually posted.
+            try:
+                if "album_lookup_skip" in form:
+                    from services.metadata.album_lookup_skip_service import set_album_lookup_skip
+                    _skip_lookup = str(form.get("album_lookup_skip") or "").strip().lower() in (
+                        "1", "true", "on", "yes"
+                    )
+                    set_album_lookup_skip(
+                        new_artist or artist_name,
+                        new_title or album_name,
+                        _skip_lookup,
+                    )
+            except Exception as _skip_lookup_err:
+                logger.debug("Album lookup-skip flag write failed", error=str(_skip_lookup_err))
+
+        await asyncio.to_thread(_album_db_phase)
 
         # The database half is done — recorded here so the phase log can still
         # separate the DB loop from everything that touches the disk.
@@ -2846,7 +2876,11 @@ async def album_detail(album_path: str) -> Any:
                     timeout=_COVER_FETCH_DEADLINE_SECONDS,
                 )
                 if _cover_bytes:
-                    save_album_art_to_db(artist_name, album_name, _cover_bytes, source="url", mime_type=_cover_mime)
+                    await asyncio.to_thread(
+                        save_album_art_to_db,
+                        artist_name, album_name, _cover_bytes,
+                        source="url", mime_type=_cover_mime,
+                    )
             except (asyncio.TimeoutError, TimeoutError):
                 logger.warning(
                     "Album save: cover fetch hit its deadline — saving without new art",
@@ -2944,10 +2978,19 @@ async def album_detail(album_path: str) -> Any:
             # AWAIT, not the work: the worker thread keeps writing and lands
             # every tag it was given. The response just stops claiming to have
             # confirmed them, which is what ``_disk_abandoned`` records below.
+            # Budget = what is LEFT of the total, not a fixed 45s on top of
+            # whatever the earlier phases already spent.
+            _disk_budget = max(
+                _INLINE_DISK_MIN_SECONDS,
+                min(
+                    _INLINE_DISK_BUDGET_SECONDS,
+                    _SAVE_TOTAL_BUDGET_SECONDS - (time.monotonic() - _save_started),
+                ),
+            )
             try:
                 _disk = await asyncio.wait_for(
                     asyncio.to_thread(_run_album_file_sync_phases, _file_payload),
-                    timeout=_INLINE_DISK_BUDGET_SECONDS,
+                    timeout=_disk_budget,
                 )
             except (asyncio.TimeoutError, TimeoutError):
                 _disk = {}
@@ -2957,11 +3000,11 @@ async def album_detail(album_path: str) -> Any:
                     "responding now, the writes continue in the background",
                     artist=artist_name, album=album_name,
                     tracks=len(_file_jobs),
-                    budget_seconds=_INLINE_DISK_BUDGET_SECONDS,
+                    budget_seconds=round(_disk_budget, 1),
                 )
                 log_unified(
                     f"⏱ Album save: {len(_file_jobs)} file(s) still being tagged "
-                    f"after {_INLINE_DISK_BUDGET_SECONDS:.0f}s — the database is "
+                    f"after {_disk_budget:.0f}s — the database is "
                     f"saved and the files are being written in the background"
                 )
             file_sync_failures += int(_disk.get("file_failures") or 0)
@@ -3894,7 +3937,9 @@ async def track_detail(track_id: str) -> Any:
                         try:
                             tags_to_write = build_tags_to_write_local(update_values)
                             if tags_to_write:
-                                file_write_success = write_tags_to_file(resolved_path, tags_to_write)
+                                file_write_success = await asyncio.to_thread(
+                                    write_tags_to_file, resolved_path, tags_to_write,
+                                )
                                 if file_write_success:
                                     await flash("Track metadata updated and written to the audio file.", "success")
                                 else:
