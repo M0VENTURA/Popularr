@@ -933,12 +933,50 @@ def album_is_holiday_album(
 
 
 def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
+    """The ALBUM-level genre blend, and whether the album is seasonal.
+
+    ⚠️⚠️ ``navidrome_genres`` IS DELIBERATELY NOT READ. Reading it made the
+    blend FEED ON ITS OWN OUTPUT.
+
+    ``navidrome_genres`` is not an independent source. Navidrome serves the tags
+    of the FILES ON DISK, and this pipeline WRITES those files
+    (``album_tag_sync_service.sync_album_file_tags`` → ``_put("genres", …)`` →
+    the ``TCON``/``genre`` frame). So the sequence is:
+
+        1. a scan writes the album blend into every track's ``genres``;
+        2. ``sync_album_file_tags`` pushes ``genres`` into each file's tags;
+        3. Navidrome re-reads those files and serves the genre back;
+        4. the next import stores it as ``navidrome_genres``;
+        5. this function counts ``navidrome_genres`` as genre EVIDENCE.
+
+    Whatever step 1 got wrong therefore returns as step 5's PROOF that it was
+    right, and the value can never be observed to go away. Measured on a clean
+    14-track album with one Christmas song and no holiday tag anywhere:
+
+        before the round trip:  blend = ['Alternative Rock']            (no Holiday)
+        after  the round trip:  blend = ['Alternative Rock', 'Holiday'] (Holiday!)
+                                _album_holiday_votes → 14/14 carry holiday
+                                album_is_holiday_album → True
+
+    ⭐ A TAG PIPELINE MUST NOT TREAT A REFLECTION OF ITS OWN WRITE AS EVIDENCE.
+    No threshold or majority rule can fix that: a majority rule was already in
+    place, and the contaminated evidence made the majority look unanimous. This
+    is the reported "it's STILL assigning holiday to all tracks" after the
+    majority fix — the denominator was correct, the EVIDENCE was poisoned.
+
+    This also matches the convention the rest of the codebase already follows:
+    ``genre_selection`` weights ``navidrome`` 0.30 as "a tie-breaker, never a
+    sole source", and the VA path calls ``aggregate_genres(…, nav_genres=None)``
+    because "passing nav_genres would let Navidrome decide a tie on an album".
+    Navidrome is still available to the selection engine through the separate
+    ``nav_genres`` parameter; it just must not be a member of the source map.
+    """
     with db_session() as session:
         result = session.execute(
             text("""
                 SELECT lastfm_tags, musicbrainz_genres, discogs_genres,
                        listenbrainz_genres, spotify_genres, essentia_genres,
-                       manual_genres, navidrome_genres, audiodb_genres, wikidata_genres
+                       manual_genres, audiodb_genres, wikidata_genres
                 FROM tracks 
                 WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist 
                   AND album = :album
@@ -956,9 +994,8 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
         ("spotify", 4),
         ("essentia", 5),
         ("manual", 6),
-        ("navidrome", 7),
-        ("audiodb", 8),
-        ("wikidata", 9),
+        ("audiodb", 7),
+        ("wikidata", 8),
     ]
     _genre_indices = [idx for _src, idx in column_mapping]
 

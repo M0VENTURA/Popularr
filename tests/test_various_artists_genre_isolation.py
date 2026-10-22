@@ -48,6 +48,22 @@ def _insert(session, rows: list[dict]) -> None:  # type: ignore[type-arg]
     Only columns declared on ``db.models.Track`` are used: the unit suite
     builds its schema from the ORM (``Track.__table__.create`` in conftest),
     so a column that exists only in ``db/schema.py`` cannot be inserted here.
+
+    ⚠️ A PRIMARY source (``musicbrainz_genres``) is required, and a SECOND
+    primary (``discogs_genres``) is provided when the fixture asks for it.
+    ``_vote_genres`` ends with a "strict primary confirmation" guardrail that
+    DELETES any genre voted only by navidrome/essentia, and the confidence
+    floor drops a genre with too little weight behind it — so a fixture built
+    from ``navidrome_genres`` alone aggregates to ``[]`` or to a single
+    survivor and would assert nothing.
+
+    ⚠️ ``navidrome_genres`` NO LONGER VOTES in the album blend at all (the
+    blend used to read it, which made it feed on the file tags this pipeline
+    writes — see ``tests/test_album_blend_does_not_read_navidrome.py``). This
+    helper still stores it, because per-track Navidrome data is real; it just
+    cannot be what carries a fixture over the threshold. ``discogs_genres``
+    is the second INDEPENDENT source used for that, which is also a truer
+    model of a library that has more than one provider configured.
     """
     from sqlalchemy import text
 
@@ -56,10 +72,10 @@ def _insert(session, rows: list[dict]) -> None:  # type: ignore[type-arg]
             text("""
                 INSERT INTO tracks
                     (id, artist, album_artist, album, title, genres,
-                     musicbrainz_genres, navidrome_genres, musicbrainz_albumtype,
-                     track_number, disc_number)
+                     musicbrainz_genres, discogs_genres, navidrome_genres,
+                     musicbrainz_albumtype, track_number, disc_number)
                 VALUES (:id, :artist, :album_artist, :album, :title, :genres,
-                        :mb, :nav, :album_type, :num, '1')
+                        :mb, :disc, :nav, :album_type, :num, '1')
             """),
             {
                 "id": row["id"],
@@ -76,6 +92,10 @@ def _insert(session, rows: list[dict]) -> None:  # type: ignore[type-arg]
                 # pass the control test.
                 "genres": row["db_genre"],
                 "mb": '["' + row["source_genre"] + '"]',
+                "disc": (
+                    '["' + row["second_genre"] + '"]'
+                    if row.get("second_genre") else None
+                ),
                 "nav": '["' + row["source_genre"] + '"]',
                 "album_type": row.get("album_type"),
                 "num": row["num"],
@@ -198,6 +218,12 @@ class TestVerseArtistGenreIsolation:
                 "id": tid, "artist": artist, "album_artist": VA_ALBUM_ARTIST,
                 "album": VA_ALBUM, "title": f"Song {artist}",
                 "db_genre": own[tid], "source_genre": own[tid],
+                # A SECOND INDEPENDENT primary source, so each performer's genre
+                # has enough corroborating weight to clear the confidence floor.
+                # It used to be Navidrome that supplied the second vote — which
+                # was modelling exactly the self-referential state the blend no
+                # longer trusts (Navidrome serves the tags this pipeline writes).
+                "second_genre": own[tid],
                 "num": str(n),
             }
             for n, (tid, artist) in enumerate(zip(own, performers), 1)
