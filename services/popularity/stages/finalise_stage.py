@@ -1033,6 +1033,13 @@ def _assign_stars(
     track.pop("_ratio_5star_reason", None)
     track.pop("_computed_album_z", None)
     track.pop("_computed_artist_z", None)
+    # The pre-pass flag ``_global_5star_locked`` is INPUT and is never
+    # mutated here, so a re-rate (provisional -> reconciled) sees the same
+    # lock. Whether the lock was actually HONOURED is recorded separately in
+    # ``_lock_honoured``, which is what the slot/short-track caps read.
+    track.pop("_lock_honoured", None)
+    for _stale_key in [k for k in track if str(k).startswith("_compilation_")]:
+        track.pop(_stale_key, None)
 
     is_live = (
         bool(track.get("is_live"))
@@ -1079,7 +1086,7 @@ def _assign_stars(
     track["_computed_artist_z"] = artist_z
 
     if single_confidence == "user":
-        track["_global_5star_locked"] = True
+        track["_lock_honoured"] = True
         return 5
 
     popularity_marked = bool(track.get("popularity_marked"))
@@ -1114,10 +1121,9 @@ def _assign_stars(
                 and artist_z >= th["star5_artist_z"] - _epsilon_art
             )
             if _clears_5star_bounds:
-                track["_global_5star_locked"] = True
+                track["_lock_honoured"] = True
                 track["_ratio_5star_reason"] = "lock_bypasses_album_shape_gate"
                 return 5
-            track["_global_5star_locked"] = False
             track["_force_floor"] = 4
             return 4
 
@@ -1868,7 +1874,7 @@ def _essential_playlists_enabled(options: dict[str, Any]) -> bool:
         return True
 
 
-_NEW_MUSIC_MIN_TRACKS = 100
+_NEW_MUSIC_MIN_TRACKS = 25
 _NEW_MUSIC_MAX_TRACKS = 100
 
 
@@ -2297,8 +2303,11 @@ _CLIENTS_CACHED_AT = 0.0
 _CLIENTS_TTL_SECONDS = 300.0
 
 _PLAYLIST_SIG_LOCK = threading.Lock()
-_PLAYLIST_SIGNATURES: "OrderedDict[str, str]" = OrderedDict()
+_PLAYLIST_SIGNATURES: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
 _PLAYLIST_SIG_MAX = 2000
+#: A remembered push expires after this long, so a playlist deleted or edited
+#: in Navidrome's own UI is re-pushed without needing an app restart.
+_PLAYLIST_SIG_TTL_SECONDS = 3600.0
 
 
 def _navidrome_server_key(base_url: str) -> str:
@@ -2368,7 +2377,13 @@ def _playlist_already_pushed(playlist_name: str, signature: str) -> bool:
     key = str(playlist_name or "").strip().casefold()
     with _PLAYLIST_SIG_LOCK:
         existing = _PLAYLIST_SIGNATURES.get(key)
-        if existing == signature:
+        if not existing:
+            return False
+        sig, pushed_at = existing
+        if (time.monotonic() - pushed_at) >= _PLAYLIST_SIG_TTL_SECONDS:
+            _PLAYLIST_SIGNATURES.pop(key, None)
+            return False
+        if sig == signature:
             _PLAYLIST_SIGNATURES.move_to_end(key)
             return True
     return False
@@ -2377,7 +2392,7 @@ def _playlist_already_pushed(playlist_name: str, signature: str) -> bool:
 def _record_playlist_push(playlist_name: str, signature: str) -> None:
     key = str(playlist_name or "").strip().casefold()
     with _PLAYLIST_SIG_LOCK:
-        _PLAYLIST_SIGNATURES[key] = signature
+        _PLAYLIST_SIGNATURES[key] = (signature, time.monotonic())
         _PLAYLIST_SIGNATURES.move_to_end(key)
         while len(_PLAYLIST_SIGNATURES) > _PLAYLIST_SIG_MAX:
             _PLAYLIST_SIGNATURES.popitem(last=False)
@@ -3414,7 +3429,7 @@ def _apply_live_album_slot_caps(
 
     def _protected(track: dict[str, Any]) -> bool:
         return (
-            bool(track.get("_global_5star_locked"))
+            bool(track.get("_lock_honoured"))
             or str(track.get("single_confidence") or "").strip().casefold() == "user"
             or int(track.get("_force_floor") or 0) >= 5
         )
@@ -3512,7 +3527,7 @@ def _apply_short_track_star_cap(
 
 def _short_track_cap_is_protected(track: dict[str, Any]) -> bool:
     """True when a track's rating is an explicit instruction, not a guess."""
-    if bool(track.get("_global_5star_locked")) and not track.get("_compilation_rating_mode"):
+    if bool(track.get("_lock_honoured")):
         return True
     if str(track.get("single_confidence") or "").strip().casefold() == "user":
         return True
@@ -3831,7 +3846,7 @@ def post_album_star_ratings(
                 if (
                     int(track.get("stars") or 0) == 5
                     and (
-                        bool(track.get("_global_5star_locked"))
+                        bool(track.get("_lock_honoured"))
                         or str(track.get("single_confidence") or "").strip().casefold() == "user"
                         or int(track.get("_force_floor") or 0) == 5
                     )
@@ -3890,6 +3905,9 @@ def post_album_star_ratings(
             stars = int(track.get("stars") or 0)
             if not track_id or stars < 1:
                 continue
+            if stars == _stored_stars.get(track_id, 0) and stars_reconciled is None:
+                # Unchanged and no reconcile flag to set — nothing to write.
+                continue
             if stars != _stored_stars.get(track_id, 0):
                 _ratings_changed = True
             param: dict[str, Any] = {"stars": stars, "tid": track_id}
@@ -3899,7 +3917,7 @@ def post_album_star_ratings(
 
         if _batch_params:
             _sets_sql = "stars = :stars" + (", stars_reconciled = :rec" if stars_reconciled is not None else "")
-            _update_stmt = text(f"UPDATE tracks SET {_sets_sql} WHERE id = :tid")
+            _update_stmt = text(f"UPDATE tracks SET {_sets_sql} WHERE CAST(id AS TEXT) = :tid")
             try:
                 with db_session() as session:
                     session.execute(_update_stmt, _batch_params)
@@ -4049,7 +4067,9 @@ def post_album_star_ratings(
                 continue
 
             _rating_changed = stars != _stored_stars.get(track_id, 0)
-            if not (_skip_unchanged and not _rating_changed):
+            # Provisional ratings are reconciled at the artist boundary; the
+            # reconcile pass writes the file tag, so skip it here.
+            if not provisional and not (_skip_unchanged and not _rating_changed):
                 try:
                     from services.metadata.tag_file_service import (
                         _resolve_music_file_path,
@@ -4153,7 +4173,7 @@ def post_album_star_ratings(
         except Exception as log_exc:
             logger.debug("Album progress log failed", artist=artist, album=album, error=str(log_exc))
 
-        if options.get("sync_navidrome", True):
+        if options.get("sync_navidrome", True) and not provisional:
             _attempted = 0
             _synced = 0
             _skipped = 0
@@ -4524,6 +4544,7 @@ def finalise_scan(*, results: list[dict[str, Any]], options: dict[str, Any]) -> 
         try:
             _isrc_updated = _sync_isrc_popularity()
             if _isrc_updated:
+                invalidate_genre_playlist_rows()
                 log_unified(
                     f"[FINALISE_STAGE] ISRC sync: {_isrc_updated} track(s) updated; "
                     f"affected star ratings will be recalculated during the next rating pass"
