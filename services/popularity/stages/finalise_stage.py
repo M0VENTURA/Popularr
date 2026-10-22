@@ -3686,6 +3686,13 @@ def post_album_star_ratings(
         _stored_stars: dict[str, int] = {}
         _stored_paths: dict[str, str] = {}
         _stored_durations: dict[str, float] = {}
+        # Tracks whose stored stars are PROVISIONAL (``stars_reconciled`` is
+        # explicitly FALSE). The provisional pass persists stars without
+        # writing the file tag or syncing Navidrome, so on the reconcile pass
+        # these rows must count as "needs writing" even when the star value
+        # did not move — otherwise an unchanged rating never leaves the DB.
+        # NULL counts as reconciled (rows that predate the column).
+        _stored_unreconciled: set[str] = set()
         try:
             _album_ids = [
                 str(t.get("track_id") or "").strip()
@@ -3696,7 +3703,7 @@ def post_album_star_ratings(
                 with db_session() as _sess:
                     _rows = _sess.execute(
                         text(
-                            "SELECT id, COALESCE(stars, star_rating, 0) AS stars, file_path, duration "
+                            "SELECT id, COALESCE(stars, star_rating, 0) AS stars, stars_reconciled, file_path, duration "
                             "FROM tracks WHERE CAST(id AS TEXT) IN :ids"
                         ).bindparams(bindparam("ids", expanding=True)),
                         {"ids": _album_ids},
@@ -3704,6 +3711,8 @@ def post_album_star_ratings(
                 for _r in _rows:
                     _m = _r._mapping
                     _stored_stars[str(_m.get("id"))] = int(_m.get("stars") or 0)
+                    if _m.get("stars_reconciled") is False:
+                        _stored_unreconciled.add(str(_m.get("id")))
                     _p = str(_m.get("file_path") or "").strip()
                     if _p:
                         _stored_paths[str(_m.get("id"))] = _p
@@ -3896,6 +3905,17 @@ def post_album_star_ratings(
             album=album,
         )
 
+        def _needs_external_write(track_id: str, stars: int) -> bool:
+            """Must this rating be written to the FILE and to Navidrome?
+
+            True when the value changed, or when this is the RECONCILE pass and
+            the stored row is still provisional (its earlier write deliberately
+            skipped the file + Navidrome, so this pass owes them).
+            """
+            if stars != _stored_stars.get(track_id, 0):
+                return True
+            return stars_reconciled is True and track_id in _stored_unreconciled
+
         # 3. Persist calculated and capped ratings (batched with per-row fallback)
         _ratings_changed = False
         _persist_failures = 0
@@ -3905,8 +3925,12 @@ def post_album_star_ratings(
             stars = int(track.get("stars") or 0)
             if not track_id or stars < 1:
                 continue
-            if stars == _stored_stars.get(track_id, 0) and stars_reconciled is None:
-                # Unchanged and no reconcile flag to set — nothing to write.
+            if stars == _stored_stars.get(track_id, 0) and not (
+                stars_reconciled is True and track_id in _stored_unreconciled
+            ):
+                # Unchanged, and nothing to promote from provisional to
+                # reconciled. A provisional pass never downgrades an already
+                # reconciled row whose stars did not move.
                 continue
             if stars != _stored_stars.get(track_id, 0):
                 _ratings_changed = True
@@ -4066,9 +4090,10 @@ def post_album_star_ratings(
             if not track_id:
                 continue
 
-            _rating_changed = stars != _stored_stars.get(track_id, 0)
+            _rating_changed = _needs_external_write(track_id, stars)
             # Provisional ratings are reconciled at the artist boundary; the
-            # reconcile pass writes the file tag, so skip it here.
+            # reconcile pass writes the file tag (including ratings that did
+            # not move but were stored provisionally), so skip it here.
             if not provisional and not (_skip_unchanged and not _rating_changed):
                 try:
                     from services.metadata.tag_file_service import (
@@ -4186,7 +4211,7 @@ def post_album_star_ratings(
                     continue
                 track_id = str(track.get("track_id") or "")
                 if track_id:
-                    if _skip_unchanged and stars == _stored_stars.get(track_id, 0):
+                    if _skip_unchanged and not _needs_external_write(track_id, int(stars)):
                         _skipped += 1
                         continue
 
