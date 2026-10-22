@@ -8,6 +8,20 @@ Responsibilities:
     - Delegate to downloads/queue services.
     - Run lightweight periodic maintenance hooks.
     - Return consistent service-style responses.
+
+Fairness (why this changed)
+---------------------------
+The ready list used to include 'queued' rows still waiting on their retry
+time, ordered oldest first, and the batch was cut to the free in-flight slots
+BEFORE any claim. Every slot went to old rows the claim then refused (409,
+counted as "failed"), so newer items never started and the old ones were
+retried the moment their wait ended. Now:
+
+* the repository returns only claimable rows, fewest attempts first;
+* a refused claim is a SKIP that uses no slot, and the batch keeps going
+  until the free slots are filled with items that actually START;
+* an item is marked failed here only when the processor left it in the claim
+  status, so attempts are not counted twice.
 """
 
 from __future__ import annotations
@@ -16,7 +30,7 @@ import importlib
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping, Optional, Tuple
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 import structlog
 
@@ -103,6 +117,44 @@ MAINTENANCE_CANDIDATES: tuple[MaintenanceCandidate, ...] = (
         "reap_stalled_transfers",
     ),
 )
+
+#: Substrings that identify a DATABASE outage (the log shows DNS failures for
+#: ``popularr-postgres``, "shutting down", "recovery mode" and "not yet
+#: accepting connections"). Used to skip the rest of a cycle instead of
+#: running every hook into the same error.
+_DB_OUTAGE_MARKERS: tuple[str, ...] = (
+    "operationalerror",
+    "could not translate host name",
+    "connection refused",
+    "the database system is",
+    "server closed the connection",
+    "timeout expired",
+    "could not connect",
+    "connection to server",
+)
+
+
+def is_db_outage_error(error: Any) -> bool:
+    """True when ``error`` (exception or message) looks like a lost database."""
+    text_value = str(error or "").lower()
+    if not text_value:
+        return False
+    return any(marker in text_value for marker in _DB_OUTAGE_MARKERS)
+
+
+def database_available() -> bool:
+    """Cheap probe: can the database answer a trivial query right now?"""
+    try:
+        from sqlalchemy import text
+
+        from db.engine import db_session
+
+        with db_session() as session:
+            session.execute(text("SELECT 1"))
+        return True
+    except Exception as exc:
+        logger.debug("Database probe failed", error=str(exc))
+        return False
 
 
 # =============================================================================
@@ -235,6 +287,20 @@ def _claim_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _still_claimed(queue_id: int) -> bool:
+    """Is the row still in the claim status (the processor set no outcome)?
+
+    Fails CLOSED (False): when the status cannot be read we do not know the
+    processor left it alone, and marking it failed then could count an
+    attempt twice or push a live transfer back to 'queued'. A row genuinely
+    left in 'searching' is reset by ``cleanup_stuck_items`` anyway.
+    """
+    try:
+        return bool(queue_repository.item_has_status(int(queue_id), CLAIM_STATUS))
+    except Exception:
+        return False
+
+
 def _mark_failed(
     item: Mapping[str, Any],
     reason: str,
@@ -296,25 +362,32 @@ def process_queue_item(
 
     claimed = _claim_item(raw_item)
     if not claimed:
-        return _fail(
-            "Failed to claim queue item for processing",
-            409,
-            queue_id=queue_id,
-        )
+        # Another driver took it, or its retry time has not arrived yet. Not a
+        # failure: reporting it as one (409) made a batch that started nothing
+        # look like real work, and it used up a slot.
+        return _ok(skipped=True, queue_id=queue_id, reason="not_claimable")
 
     try:
         result = resolved_processor(claimed)
         payload, status = normalise_result(result)
         payload.setdefault("queue_id", queue_id)
 
-        if status >= 500:
+        # The pipeline normally records its own outcome (downloading,
+        # backed_off, mark_failed…). Only a row it left in the CLAIM status is
+        # marked failed here — so an attempt is never counted twice, and a live
+        # transfer is never pushed back to 'queued'. The old check also ignored
+        # every failure below HTTP 500, leaving those rows in 'searching' until
+        # the stuck cleanup reset them.
+        failed = (status >= 400 or payload.get("success") is False) and not payload.get("skipped")
+        if failed and _still_claimed(queue_id):
             _mark_failed(claimed, payload.get("error") or "Queue item processor failed")
 
         return payload, status
 
     except Exception as exc:
         logger.exception("Queue item processing failed", queue_id=queue_id, error=str(exc))
-        _mark_failed(claimed, str(exc))
+        if _still_claimed(queue_id):
+            _mark_failed(claimed, str(exc))
         try:
             from services.queue.queue_diagnostics_service import log_queue_event
             log_queue_event(
@@ -334,7 +407,12 @@ def process_next_batch(
     max_in_flight: int | None = None,
     use_cycle_lock: bool = True,
 ) -> tuple[dict[str, Any], int]:
-    """Process a batch of ready queue items."""
+    """Process a batch of ready queue items.
+
+    ``limit`` is how many ready rows are FETCHED; at most the free in-flight
+    slots are STARTED. Fetching more than the slots lets a refused claim be
+    skipped without wasting the slot.
+    """
     started_at = time.time()
 
     try:
@@ -361,19 +439,22 @@ def process_next_batch(
             )
 
         def _run_batch() -> tuple[dict[str, Any], int]:
-            items = _get_ready_items(limit)
             available_slots = _available_in_flight_slots(max_in_flight)
-            
-            if len(items) > available_slots:
-                logger.debug(
-                    "In-flight cap reached — processing subset of ready items",
-                    in_flight=max_in_flight - available_slots,
-                    max_in_flight=max_in_flight,
-                    processing=available_slots,
-                    total=len(items),
+            if available_slots <= 0:
+                # Every slot is busy: do not even fetch. Waiting is correct.
+                return _ok(
+                    total=0,
+                    processed=0,
+                    succeeded=0,
+                    skipped=0,
+                    failed=0,
+                    throttled=True,
+                    more_ready=False,
+                    elapsed_seconds=round(time.time() - started_at, 3),
+                    results=[],
                 )
-                items = items[:available_slots]
 
+            items = _get_ready_items(limit)
             if not items:
                 return _ok(
                     total=0,
@@ -381,7 +462,8 @@ def process_next_batch(
                     succeeded=0,
                     skipped=0,
                     failed=0,
-                    throttled=max_in_flight - available_slots > 0,
+                    throttled=False,
+                    more_ready=False,
                     elapsed_seconds=round(time.time() - started_at, 3),
                     results=[],
                 )
@@ -391,6 +473,8 @@ def process_next_batch(
                 processor=processor,
                 inter_item_delay_seconds=inter_item_delay_seconds,
                 started_at=started_at,
+                max_to_start=available_slots,
+                fetch_limit=limit,
             )
 
         if use_cycle_lock:
@@ -400,9 +484,7 @@ def process_next_batch(
                 if not acquired:
                     # DEBUG: with the standalone worker AND the scheduler
                     # thread both driving cycles, this fires for every other
-                    # driver on every tick — at INFO it was thousands of
-                    # identical lines a day in queue.log. It is expected
-                    # contention, not an event anyone acts on.
+                    # driver on every tick. It is expected contention.
                     logger.debug("Another queue cycle holds the lock — skipping batch")
                     return _ok(
                         total=0,
@@ -411,6 +493,7 @@ def process_next_batch(
                         skipped=0,
                         failed=0,
                         throttled=True,
+                        more_ready=False,
                         reason="Another queue cycle is running",
                         elapsed_seconds=round(time.time() - started_at, 3),
                         results=[],
@@ -421,7 +504,7 @@ def process_next_batch(
 
     except Exception as exc:
         logger.exception("process_next_batch failed", error=str(exc))
-        return _fail(str(exc), 500)
+        return _fail(str(exc), 500, db_outage=is_db_outage_error(exc))
 
 
 def _resolve_max_in_flight() -> int:
@@ -456,23 +539,45 @@ def _process_batch(
     processor: ProcessorFunc,
     inter_item_delay_seconds: float | None,
     started_at: float,
+    max_to_start: int | None = None,
+    fetch_limit: int | None = None,
 ) -> tuple[dict[str, Any], int]:
     processed = 0
     succeeded = 0
     skipped = 0
     failed = 0
+    started = 0
+    reached_end = True
     results: list[dict[str, Any]] = []
 
     for index, item in enumerate(items):
+        if max_to_start is not None and started >= max_to_start:
+            reached_end = False
+            break
+
         queue_id = _item_id(item)
 
         try:
             payload, status = process_queue_item(item, processor=processor)
-            processed += 1
 
             if payload.get("skipped"):
+                # A skip used no slot and did no network work: no delay, and it
+                # does not count toward ``max_to_start``.
                 skipped += 1
-            elif status < 400 and payload.get("success", True):
+                results.append({
+                    "queue_id": queue_id,
+                    "status_code": status,
+                    "success": True,
+                    "skipped": True,
+                    "reason": payload.get("reason"),
+                    "error": None,
+                })
+                continue
+
+            processed += 1
+            started += 1
+
+            if status < 400 and payload.get("success", True):
                 succeeded += 1
             else:
                 failed += 1
@@ -481,14 +586,23 @@ def _process_batch(
                 "queue_id": queue_id,
                 "status_code": status,
                 "success": payload.get("success", status < 400),
-                "skipped": bool(payload.get("skipped")),
+                "skipped": False,
                 "error": payload.get("error"),
             })
+
+            # A lost database ends the batch: every remaining item would fail
+            # the same way, and marking them failed would also fail.
+            if is_db_outage_error(payload.get("error")):
+                logger.warning("Database unavailable — ending queue batch early", queue_id=queue_id)
+                reached_end = False
+                break
+
         except Exception as exc:
             logger.exception("Unhandled batch item failure", queue_id=queue_id, error=str(exc))
             failed += 1
+            started += 1
 
-            if queue_id:
+            if queue_id and _still_claimed(queue_id):
                 _mark_failed(item, str(exc))
 
             results.append({
@@ -497,6 +611,9 @@ def _process_batch(
                 "success": False,
                 "error": str(exc),
             })
+            if is_db_outage_error(exc):
+                reached_end = False
+                break
 
         if (
             inter_item_delay_seconds
@@ -507,12 +624,24 @@ def _process_batch(
 
     elapsed_seconds = round(time.time() - started_at, 3)
 
+    # More rows may be waiting when the fetch was full and every fetched row
+    # was consumed (skipped or started) without filling the slots. The worker
+    # uses this to run the next cycle straight away instead of sleeping.
+    more_ready = bool(
+        reached_end
+        and fetch_limit is not None
+        and len(items) >= fetch_limit
+        and (max_to_start is None or started < max_to_start)
+    )
+
     return _ok(
         total=len(items),
         processed=processed,
         succeeded=succeeded,
         skipped=skipped,
         failed=failed,
+        started=started,
+        more_ready=more_ready,
         elapsed_seconds=elapsed_seconds,
         results=results,
     )
@@ -523,34 +652,51 @@ def _process_batch(
 # =============================================================================
 
 def run_maintenance() -> tuple[dict[str, Any], int]:
-    """Run optional queue/download maintenance hooks."""
+    """Run optional queue/download maintenance hooks.
+
+    Stops at the first DATABASE-outage failure: the remaining hooks would hit
+    the same error (the log shows every hook failing in turn during each
+    Postgres restart), which only adds noise and slows recovery.
+    """
     results: list[dict[str, Any]] = []
+    db_outage = False
 
     for hook in _iter_maintenance_hooks():
         hook_name = f"{hook.__module__}.{hook.__name__}"
         try:
             result = hook()
             payload, status = normalise_result(result)
+            error = payload.get("error")
             results.append({
                 "hook": hook_name,
                 "status_code": status,
-                "success": payload.get("success", status < 400),
-                "error": payload.get("error"),
+                "success": payload.get("success", status < 400) and not error,
+                "error": error,
             })
+            if is_db_outage_error(error):
+                db_outage = True
+                break
         except Exception as exc:
-            logger.exception("Maintenance hook failed", hook=hook_name, error=str(exc))
+            if is_db_outage_error(exc):
+                logger.warning("Maintenance hook hit a database outage", hook=hook_name)
+                db_outage = True
+            else:
+                logger.exception("Maintenance hook failed", hook=hook_name, error=str(exc))
             results.append({
                 "hook": hook_name,
                 "status_code": 500,
                 "success": False,
                 "error": str(exc),
             })
+            if db_outage:
+                break
 
     failures = [row for row in results if not row.get("success")]
 
     return _ok(
         hooks=len(results),
         failures=len(failures),
+        db_outage=db_outage,
         results=results,
     )
 
@@ -562,30 +708,18 @@ def process_cycle(
 ) -> tuple[dict[str, Any], int]:
     """Full worker cycle (optional maintenance + queue batch processing).
 
-    ⚠️ The maintenance pass is INSIDE the cycle lock. It used to run *before*
-    the lock was taken, while ``process_next_batch`` took it for the batch — so
-    the two drivers of this module (the standalone ``queue_worker`` process
-    started by ``entrypoint.sh`` / the systemd unit, and the APScheduler
-    ``download_queue_processor`` thread) both executed ``run_maintenance()``.
+    ⚠️ The maintenance pass is INSIDE the cycle lock, so the standalone worker
+    and the APScheduler thread never both run it (two
+    ``check_completed_downloads`` passes could reconcile the same transfer).
 
-    That is exactly the hazard ``services/queue/queue_lock.py`` exists to
-    prevent, and it was visible as the reported DUPLICATE log line: two
-    ``check_completed_downloads`` passes per interval each printed ``[QUEUE]
-    Checking N completed download(s)``.  It is not only cosmetic — that hook
-    moves files and writes rows, so two processes could reconcile the same
-    transfer concurrently.
+    A database outage found by maintenance ends the cycle before the batch:
+    the batch would only fail every item against the same missing database.
     """
     from services.queue.queue_lock import queue_cycle_lock
 
     started_at = time.time()
     with queue_cycle_lock() as acquired:
         if not acquired:
-            # Another driver owns this cycle; ITS maintenance pass covers the
-            # same work, so skipping here is what keeps it from running twice.
-            # ``_ok`` ALREADY returns ``(payload, status)`` — appending a status
-            # here would nest the tuple and hand the caller a tuple as payload.
-            # DEBUG: expected dual-driver contention (see the batch skip above)
-            # — at INFO this alone was ~4 identical lines per minute.
             logger.debug("Another queue cycle holds the lock — skipping cycle")
             return _ok(
                 total=0,
@@ -594,6 +728,7 @@ def process_cycle(
                 skipped=0,
                 failed=0,
                 throttled=True,
+                more_ready=False,
                 reason="Another queue cycle is running",
                 elapsed_seconds=round(time.time() - started_at, 3),
             )
@@ -601,6 +736,14 @@ def process_cycle(
         maintenance_payload: dict[str, Any] | None = None
         if run_maintenance_hooks:
             maintenance_payload, _ = run_maintenance()
+            if (maintenance_payload or {}).get("db_outage"):
+                return _fail(
+                    "Database unavailable",
+                    503,
+                    db_outage=True,
+                    more_ready=False,
+                    maintenance=maintenance_payload,
+                )
 
         # The lock is already held by this function — taking it again inside
         # ``process_next_batch`` would wait the full attempt budget and then
