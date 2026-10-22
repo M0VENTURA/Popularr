@@ -82,45 +82,43 @@ import math
 import re
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from datetime import datetime
 from statistics import mean, median, stdev
 from typing import Any
+from urllib.parse import urlsplit
 
 import structlog
 from sqlalchemy import bindparam, text
 
 from db.engine import db_session
 from db.utils import row_get
+from helpers.config_helpers import get_standout_config
+from helpers.logging_config import log_unified
+from helpers.normalization_service import normalize_unicode_punctuation
+from services.catalog.album_classification_service import (
+    METAL_GENRE_FAMILY,
+    is_christmas_genre as is_christmas_genre_token,
+    is_christmas_track,
+    is_instrumental_track_title,
+    is_live_or_alternate_track_title,
+    is_metal_genre,
+    iter_genre_tokens,
+)
 from services.popularity.popularity_math import (
     age_skew_multiplier,
     album_prominence_score,
     album_ratio_standout,
     apply_album_relative_popularity,
+    calculate_percentile_star_rating,
     calculate_robust_zscore,
     effective_album_ratio,
-    calculate_percentile_star_rating,
+    fmt_count as _fmt_count,
     is_live_album_context,
     live_album_star_from_artist_z,
     playlist_popularity_score,
-    fmt_count as _fmt_count,
 )
 from services.popularity.popularity_zscore import composite_listener_z
-from services.catalog.album_classification_service import (
-    is_christmas_genre as is_christmas_genre_token,
-    is_christmas_track,
-    is_instrumental_track_title,
-    is_live_or_alternate_track_title,
-    # The genre-playlist family tests: one parser for every stored genre form
-    # (``iter_genre_tokens``), the string test, and the vocabulary-family name
-    # the tie-break compares against.
-    METAL_GENRE_FAMILY,
-    is_metal_genre,
-    iter_genre_tokens,
-)
-from helpers.config_helpers import get_standout_config
-from helpers.logging_config import log_unified
-from helpers.normalization_service import normalize_unicode_punctuation
 
 logger = structlog.get_logger(__name__)
 
@@ -176,6 +174,7 @@ def _live_star_thresholds() -> dict[str, float]:
         "star2_album_z": _tier("star_2", "album_z", -1.2),
         "epsilon": _safe_float(cfg.get("star_epsilon_score_points"), 0.5),
         "listener_5star_z": _safe_float(cfg.get("listener_5star_z_threshold"), 1.0),
+        "live_4star_requires_single": 1.0 if bool(cfg.get("live_4star_requires_single", True)) else 0.0,
     }
 
 
@@ -252,15 +251,7 @@ def _live_album_scaling_configured() -> bool:
 
 
 def _album_ratio_rules(*, live: bool = False) -> dict[str, float]:
-    """Album ratio-standout thresholds, read live from config.
-
-    ``live=True`` selects the ``live_*`` variants, which are deliberately
-    looser: a live album routinely has a flat BOTTOM (crowd noise, applause,
-    and tuning appear on every track, so the least-played cut is not far below
-    the most-played). The floor ratio therefore carries little signal there,
-    and the default requires only two of the three multipliers instead of
-    all three.
-    """
+    """Album ratio-standout thresholds, read live from config."""
     cfg = get_standout_config() or {}
     block = cfg.get("album_ratio_standout") or {}
     if not isinstance(block, dict):
@@ -302,14 +293,9 @@ def _album_ratio_standout_ok(
       the multipliers meaningless. Last.fm is preferred; ListenBrainz is the
       fallback when Last.fm has no usable series.
 
-    * **Raw counts, never log-transformed.** This is the subtle one. A log
-      compression (``log10(n) * 16``, as ``album_prominence_score`` does) is
-      monotonic but massively shrinks large ratios: 500,000 vs 10,000 is a 50x
-      spread in raw listeners but only ~1.42x after log compression, because
-      ``log10`` maps both to 5.7 and 4.0. Taking the ratio AFTER compressing
-      therefore destroys exactly the dynamic range this test exists to
-      measure, and every album looks flat. The multipliers must be taken on the
-      linear counts the user actually sees.
+    * **Raw counts, never log-transformed.** A log compression is monotonic
+      but massively shrinks large ratios. Taking the ratio AFTER compressing
+      therefore destroys exactly the dynamic range this test exists to measure.
 
     Returns ``(ok, reason)``. ``ok`` is True when the test is DISABLED or the
     data is too thin to judge, so this gate only ever blocks a 5★ it can
@@ -333,7 +319,6 @@ def _album_ratio_standout_ok(
     elif len(lb_series) >= 3 and track_lb > 0:
         counts, candidate, source = lb_series, track_lb, "listenbrainz"
     else:
-        # Neither provider has a usable album series for this track.
         return True, "ratio_inconclusive(no_usable_series)"
 
     ok, reason, _ratios = album_ratio_standout(
@@ -392,13 +377,6 @@ def _lb_unusable_cohort(
     this album's own LF/LB pairs — exactly the test ``track_stage`` applies
     when it zeroes the count, so a track classified here is treated the same
     way it was scored.
-
-    Returns ``(track_ids, scores)``: the ids let the caller flag one track, the
-    scores are the cohort's rating pool. A track with an unusable source is
-    scored from Last.fm ALONE, so rating it against an album median its
-    siblings lifted with healthy ListenBrainz points measures it against a
-    distribution it is not part of (the reported "Prison Sex" case: 57.3 on a
-    median of ~57 → +0.05 → 3★, while two-source siblings sat at 60-62).
     """
     unusable: set[str] = set()
     scores: list[float] = []
@@ -537,11 +515,15 @@ def _album_z_band_star(
     is_live: bool = False,
     single_confidence: str = "low",
     max_stars: int = 5,
+    thresholds: dict[str, float] | None = None,
+    precomputed_album_z: tuple[float, float] | None = None,
+    precomputed_artist_z: tuple[float, float] | None = None,
 ) -> int:
     """Album-relative 1-4★ rating from the z-score bands."""
     if score <= 0:
         return 1
 
+    th = thresholds if thresholds is not None else _live_star_thresholds()
     valid = [
         float(s) for s in
         (reference_scores if reference_scores is not None else album_scores or [])
@@ -550,16 +532,17 @@ def _album_z_band_star(
     if len(valid) < 3:
         # A SINGLE/EP RELEASE (1-2 track album) has no album distribution; the
         # album z is 0.0 by construction. Rate the base band against the
-        # artist's catalogue when it is large enough to be one — the same
-        # fallback ``_assign_stars`` now uses for its z-scores. ``max_stars``
-        # still applies (a live album's tighter ceiling, for example).
+        # artist's catalogue when it is large enough to be one.
         if artist_scores:
             valid_artist = [
                 float(s) for s in artist_scores if float(s or 0) > 0
             ]
             if len(valid_artist) >= 5:
-                artist_z, artist_spread = _compute_artist_z(score, valid_artist)
-                th = _live_star_thresholds()
+                artist_z, artist_spread = (
+                    precomputed_artist_z
+                    if precomputed_artist_z is not None
+                    else _compute_artist_z(score, valid_artist)
+                )
                 epsilon = _star_epsilon_z(artist_spread, th["epsilon"])
                 if artist_z >= th["star4_artist_z"] - epsilon:
                     return min(4, int(max_stars))
@@ -570,24 +553,26 @@ def _album_z_band_star(
                 return 1
         return min(3, int(max_stars))
 
-    album_z, spread = _compute_album_z(score, valid)
-    th = _live_star_thresholds()
+    album_z, spread = (
+        precomputed_album_z
+        if precomputed_album_z is not None
+        else _compute_album_z(score, valid)
+    )
     epsilon = _star_epsilon_z(spread, th["epsilon"])
 
     artist_eligible_4star = True
     if artist_scores:
         valid_artist = [float(s) for s in artist_scores if float(s or 0) > 0]
         if len(valid_artist) >= 5 and len(valid_artist) > len(valid):
-            artist_z, artist_spread = _compute_artist_z(score, valid_artist)
+            artist_z, artist_spread = (
+                precomputed_artist_z
+                if precomputed_artist_z is not None
+                else _compute_artist_z(score, valid_artist)
+            )
             artist_eligible_4star = artist_z >= th["star4_artist_z"] - _star_epsilon_z(artist_spread, th["epsilon"])
 
     if is_live and album_z >= th["star4_album_z"] - epsilon:
-        try:
-            _requires_single = bool(
-                get_standout_config().get("live_4star_requires_single", True)
-            )
-        except Exception:
-            _requires_single = True
+        _requires_single = bool(th.get("live_4star_requires_single", 1.0))
         if _requires_single and str(single_confidence or "low").strip().casefold() not in ("high", "medium", "user"):
             return min(3, int(max_stars))
 
@@ -609,21 +594,14 @@ def _live_album_stars(
     organic: bool,
     album_lf_listeners: list[float] | None = None,
     album_lb_listens: list[float] | None = None,
+    thresholds: dict[str, float] | None = None,
+    precomputed_album_z: tuple[float, float] | None = None,
+    precomputed_artist_z: tuple[float, float] | None = None,
 ) -> tuple[int, str]:
-    """Star rating for a track on a LIVE album, driven by artist-z.
-
-    A 5★ produced here is additionally subject to the album RATIO standout
-    test (``_album_ratio_standout_ok``, live variant). Artist-z answers
-    "how does this track compare to the artist's catalogue?"; it does not
-    answer "does this live record actually contain a standout?". A live album
-    whose tracks are uniformly played across the artist's career can clear the
-    artist-z 5★ band while being internally flat, so the ratio test is applied
-    as the final gate and demotes a failing 5★ to 4★.
-
-    A user override is never demoted — it is an explicit instruction.
-    """
+    """Star rating for a track on a LIVE album, driven by artist-z."""
     rules = _live_album_rules()
     max_stars = int(rules["max_stars"])
+    th = thresholds if thresholds is not None else _live_star_thresholds()
 
     valid_artist = [float(s) for s in (artist_scores or []) if float(s or 0) > 0]
     if len(valid_artist) < int(rules["min_catalogue"]):
@@ -635,13 +613,23 @@ def _live_album_stars(
             is_live=True,
             single_confidence=single_confidence,
             max_stars=max_stars,
+            thresholds=th,
+            precomputed_album_z=precomputed_album_z,
+            precomputed_artist_z=precomputed_artist_z,
         )
         return min(band, max_stars), f"thin_catalogue(n={len(valid_artist)})"
 
-    artist_z, artist_spread = _compute_artist_z(score, valid_artist)
-    album_z, _album_spread = _compute_album_z(score, album_scores)
+    artist_z, artist_spread = (
+        precomputed_artist_z
+        if precomputed_artist_z is not None
+        else _compute_artist_z(score, valid_artist)
+    )
+    album_z, _album_spread = (
+        precomputed_album_z
+        if precomputed_album_z is not None
+        else _compute_album_z(score, album_scores)
+    )
 
-    th = _live_star_thresholds()
     epsilon_z = _star_epsilon_z(artist_spread, th["epsilon"])
 
     stars, reason = live_album_star_from_artist_z(
@@ -684,8 +672,12 @@ def _album_top_genres(
     if not album_tracks:
         return []
 
-    from services.enrichment.genre_aggregation_service import aggregate_genres, _parse_genre_input
-    
+    from services.enrichment.genre_aggregation_service import (
+        _parse_genre_input,
+        aggregate_genres,
+        is_propagatable_genre,
+    )
+
     album_source_map: dict[str, list[str]] = {}
     _source_cols = [
         ("musicbrainz", "musicbrainz_genres"),
@@ -719,63 +711,8 @@ def _album_top_genres(
         return []
 
     try:
-        from services.enrichment.genre_aggregation_service import (
-            is_propagatable_genre,
-        )
-
         top = aggregate_genres(album_source_map, max_genres=max_genres)
-        # ⭐ Only MUSICAL genres may be INHERITED by a track that has none of
-        # its own. The per-track affiliation markers (Cover/Live/Acoustic/…)
-        # describe ONE recording's performance, and the Christmas/Holiday
-        # family describes the album's occasion — neither is a fact about a
-        # track. Same rule as the album save's fill and the track stage's
-        # inheritance list.
         return [g for g in top if is_propagatable_genre(g)]
-    except Exception:
-        return []
-
-
-def _artist_dominant_genres(
-    artist: str,
-    *,
-    max_genres: int = 3,
-) -> list[str]:
-    """Fetches and aggregates genres across the artist's entire catalog."""
-    if not artist:
-        return []
-    try:
-        from db.engine import db_session as _db_session
-        from sqlalchemy import text as _text
-
-        rows: list[dict[str, Any]] = []
-        with _db_session() as session:
-            result = session.execute(
-                _text("""
-                    SELECT musicbrainz_genres, discogs_genres, lastfm_tags,
-                           listenbrainz_genres, spotify_genres, navidrome_genres,
-                           audiodb_genres, wikidata_genres
-                    FROM tracks
-                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
-                      AND (
-                        COALESCE(musicbrainz_genres::text, '') <> ''
-                        OR COALESCE(discogs_genres::text, '') <> ''
-                        OR COALESCE(lastfm_tags::text, '') <> ''
-                        OR COALESCE(listenbrainz_genres::text, '') <> ''
-                        OR COALESCE(spotify_genres::text, '') <> ''
-                        OR COALESCE(navidrome_genres::text, '') <> ''
-                        OR COALESCE(audiodb_genres::text, '') <> ''
-                        OR COALESCE(wikidata_genres::text, '') <> ''
-                      )
-                    LIMIT 500
-                """),
-                {"artist": artist},
-            )
-            rows = [dict(r._mapping) for r in result.fetchall() or []]
-
-        if not rows:
-            return []
-
-        return _album_top_genres(rows, max_genres=max_genres)
     except Exception:
         return []
 
@@ -785,16 +722,7 @@ def _artist_dominant_genres(
 # ---------------------------------------------------------------------------
 
 def _compilation_track_artist(track: dict[str, Any]) -> str:
-    """Return the CREDITED recording artist for a compilation track.
-
-    Compilations share one ``album_artist`` folder (e.g. "Various Artists")
-    across many different recording artists. Rating a compilation track
-    correctly requires comparing it against the artist actually credited on
-    that recording, which is carried in ``track["artist"]`` by the track
-    stage. ``album_artist``/``canonical_artist`` are intentionally NOT
-    preferred here, since on a compilation those usually resolve back to the
-    compilation's shared album artist rather than the recording artist.
-    """
+    """Return the CREDITED recording artist for a compilation track."""
     return str(track.get("artist") or track.get("album_artist") or "").strip()
 
 
@@ -812,21 +740,20 @@ _UNRATABLE_TRACK_ARTISTS = _VA_ALBUM_ARTIST_NAMES | frozenset({
     "unknown artist", "unknown", "none", "n/a", "not available",
 })
 
+_MULTI_ARTIST_CREDIT_RE = re.compile(
+    r"[,&/]|\s+(?:and|with|feat\.?|ft\.?|featuring)\s+",
+    re.IGNORECASE,
+)
+
 
 def _is_online_rankable_artist(name: str) -> bool:
-    """True when ``name`` could plausibly be a real, chartable artist.
-
-    Compilation credits carry placeholder artists -- "[dialogue]",
-    "Various Artists", "Unknown Artist". Asking Last.fm to chart those is
-    either a wasted request or, worse, a fuzzy match against some OTHER
-    artist's catalogue, which would rate the track by foreign chart data.
-    """
-    text = str(name or "").strip()
-    if not text:
+    """True when ``name`` could plausibly be a real, chartable artist."""
+    text_val = str(name or "").strip()
+    if not text_val:
         return False
-    if text.startswith("[") and text.endswith("]"):
+    if text_val.startswith("[") and text_val.endswith("]"):
         return False
-    return text.casefold() not in _UNRATABLE_TRACK_ARTISTS
+    return text_val.casefold() not in _UNRATABLE_TRACK_ARTISTS
 
 
 def _online_catalogue_stars(
@@ -835,48 +762,14 @@ def _online_catalogue_stars(
     track_title: str,
     rules: dict[str, Any],
 ) -> tuple[int, dict[str, Any]]:
-    """Rate a compilation track by its RANK in the artist's ONLINE catalogue.
-
-    ``compute_track_artist_scores`` can only rank a track against the songs
-    this library actually owns. For a compilation that is frequently one or two
-    songs per artist, so the artist's genuine global hit cannot be recognised
-    -- its own #1 is ranked against a two-entry distribution and lands in the
-    thin-catalogue fallback.
-
-    ``artist.getTopTracks`` returns the artist's real discography ordered by
-    global playcount, so a track's POSITION in that list is exactly "how popular
-    is this song for this artist, worldwide".  Because Last.fm reports
-    ``listeners`` on both sides from the same dataset, the rank is directly
-    usable with no scale conversion.
-
-    Returns ``(stars, detail)``; ``stars`` is 0 when the lookup produced nothing
-    usable, and callers MUST treat that as "unknown" rather than "unpopular" so
-    a network miss can never demote a track.
-    """
+    """Rate a compilation track by its RANK in the artist's ONLINE catalogue."""
     detail: dict[str, Any] = {"source": "none"}
     if not bool(rules.get("enabled", 1)):
         return 0, detail
 
     if not _is_online_rankable_artist(credited_artist):
-        # "[dialogue]"/"Various Artists" and friends name no real artist --
-        # never spend a request (or borrow someone else's chart) for them.
         return 0, {"source": "pseudo_artist"}
 
-    # ⭐ Try the credited artist, then each name WITHIN the credit. A
-    # multi-artist collaboration ("Poppy, Amy Lee & Courtney LaPlante") is not
-    # an entity Last.fm indexes, so the lookup returns an empty catalogue —
-    # the reported "End of You": LF 5 listeners, catalogue_n=0, then
-    # ``absolute_thin_catalogue_fallback`` on a 0.0 score → 1★ for a track by
-    # three well-known artists. The same string also shrank
-    # "(un)familiar., STOMACH BOOK, …" to a 5-entry catalogue.
-    #
-    # The PRIMARY (first credited) artist is the right entity to ask: it is the
-    # one the release is filed under and the one the provider charts.
-    #
-    # ⚠️ Expansion happens ONLY for a credit that actually joins several
-    # artists. A single-artist credit keeps its exact previous behaviour —
-    # one lookup, one answer — so nothing about the ordinary path (including
-    # its call count) changes.
     candidates: list[str] = []
     _seen_candidates: set[str] = set()
 
@@ -889,25 +782,16 @@ def _online_catalogue_stars(
 
     _add_candidate(credited_artist)
     try:
-        import re as _re
-
-        _MULTI_ARTIST_RE = _re.compile(
-            r"[,&/]|\s+(?:and|with|feat\.?|ft\.?|featuring)\s+",
-            _re.IGNORECASE,
-        )
-        if _MULTI_ARTIST_RE.search(credited_artist):
+        if _MULTI_ARTIST_CREDIT_RE.search(credited_artist):
             from services.popularity.popularity_matching import (
                 get_artist_lookup_candidates,
                 get_primary_artist_preserve_case,
             )
 
-            # The credited string first (unchanged behaviour for a single
-            # artist), then the library's own variant builder, then the primary
-            # artist, then every name the credit lists on its own.
             for candidate in get_artist_lookup_candidates(credited_artist):
                 _add_candidate(candidate)
             _add_candidate(get_primary_artist_preserve_case(credited_artist))
-            for part in _MULTI_ARTIST_RE.split(credited_artist):
+            for part in _MULTI_ARTIST_CREDIT_RE.split(credited_artist):
                 _add_candidate(part)
     except Exception as exc:
         logger.debug("Artist candidate expansion failed", artist=credited_artist, error=str(exc))
@@ -931,9 +815,6 @@ def _online_catalogue_stars(
                 rank_info = _info
                 matched_candidate = candidate
                 break
-            # Keep the FIRST answer that came back, so the detail dict reports
-            # the real source ("…_beyond" for a title off the chart) — a miss
-            # must stay "unknown", never "unpopular".
             if not rank_info:
                 rank_info = _info
         if not rank_info:
@@ -956,19 +837,11 @@ def _online_catalogue_stars(
     rank = int(rank_info.get("rank") or 0)
     detail = dict(rank_info)
 
-    # A catalogue too small to rank meaningfully is no better than the local
-    # thin-catalogue fallback -- let the caller keep its existing behaviour.
     if rank <= 0 or total < int(rules.get("min_catalogue_size", 5)):
         return 0, detail
 
     percentile = float(rank_info.get("percentile") or 1.0)
 
-    # The artist's single most popular song is 5★ by definition. This is not
-    # just a convenience: a percentile cut-off is a FRACTION of the catalogue,
-    # so on a 20-song discography a 2% band covers only the top 0.4 songs and
-    # is mathematically unreachable by any track. Special-casing rank #1 keeps
-    # the configured percentages meaningful for the tiers below it without
-    # making the top tier impossible for a short catalogue.
     if rank == 1 or percentile <= float(rules.get("rank_percentile_5star", 0.02)):
         stars = 5
     elif percentile <= float(rules.get("rank_percentile_4star", 0.10)):
@@ -990,56 +863,19 @@ def _resolve_compilation_flags(
     artist: str,
     album: str,
 ) -> tuple[bool, bool]:
-    """Best-effort ``(is_compilation, is_va_compilation)`` from local data.
-
-    FALLBACK ONLY, for a caller that has no album context to hand (the
-    ``finalise_scan`` grouping path). The scan runner passes the flags down
-    explicitly, because it is the layer that still holds the album context.
-
-    Two sources, in order of authority:
-
-    1. ``classify_compilation_category`` when the track rows carry a type tag
-       — a MusicBrainz/Spotify "compilation" classification plus a folder
-       filed under a generic name is a VA compilation.
-    2. The credited ARTIST alone. ``is_compilation_album`` reads only the type
-       tag and the TITLE, so a folder named "Little Nicky" filed under
-       "Various Artists" returns False from it — the reported reason a real
-       compilation was rated as a studio album.
-    3. The album TITLE (``detect_greatest_hits_album``) — a third source
-       because the first two cannot see a tagless greatest-hits album. This
-       mirrors ``prepare_album_context``, which promotes exactly those albums
-       to single-artist compilations: if the two paths disagreed, the
-       end-of-run ``finalise_scan`` would re-rate the album as a STUDIO album
-       and wipe the artist-catalogue rating the scan just posted — the same
-       class of bug sources 1./2. exist to prevent. Like the live verdict,
-       this is a FALLBACK: a type tag that positively says "album" still wins
-       (``test_a_plain_album_stays_plain`` pins that for a real best-of).
-    """
+    """Best-effort ``(is_compilation, is_va_compilation)`` from local data."""
     row = album_results[0] if album_results else {}
-    # ⭐⭐ ONE key list for the whole app — see ``joined_album_type``.
-    #
-    # A JOIN, never an ``or``-chain: a chain reads the FIRST non-empty column
-    # and stops, so an album whose sources DISAGREE lost its compilation
-    # marking — measured, ``spotify_album_type="album"`` together with
-    # ``musicbrainz_album_type="album+compilation"`` returned ``(False, False)``
-    # and the end-of-run ``finalise_scan`` re-rated the album as a STUDIO
-    # release ("marked as album+compilation but stuck with the star ratings").
-    #
-    # This is the SAME helper the live rating path (``prepare_album_context``)
-    # now uses, so the scan and a later re-finalise can no longer reach opposite
-    # verdicts for one album. ``releasetype`` is in the list because it is the
-    # file-tag column a Navidrome import writes.
-    from services.catalog.album_classification_service import joined_album_type
+    from services.catalog.album_classification_service import (
+        classify_compilation_category,
+        detect_greatest_hits_album,
+        joined_album_type,
+    )
 
     type_text = joined_album_type(row)
     album_artist = str(row.get("album_artist") or artist or "").strip()
     generic_artist = album_artist.casefold() in _VA_ALBUM_ARTIST_NAMES
 
     try:
-        from services.catalog.album_classification_service import (
-            classify_compilation_category,
-        )
-
         category = classify_compilation_category(
             artist=artist,
             album=album,
@@ -1048,9 +884,6 @@ def _resolve_compilation_flags(
             type_text=type_text,
         ) or ""
     except Exception as exc:
-        # A classification failure must not silently claim "studio album":
-        # the title check below still runs, and ``category`` stays "" so the
-        # artist/title sources decide.
         logger.debug(
             "Compilation classification failed",
             artist=artist, album=album, error=str(exc),
@@ -1060,18 +893,7 @@ def _resolve_compilation_flags(
     if category:
         return True, category == "va"
     if generic_artist:
-        # A folder filed under "Various Artists" (etc.) is a compilation
-        # whatever the type tag and title say.
         return True, True
-
-    # A greatest-hits / best-of TITLE is a compilation on its own evidence
-    # (see the docstring), but ONLY when no type tag spoke: a tag that says
-    # "album" keeps the album a studio album, exactly like the guard in
-    # ``prepare_album_context``. Checked AFTER the VA sources so a
-    # Various-Artists record titled "Greatest Hits" keeps its VA flags.
-    from services.catalog.album_classification_service import (
-        detect_greatest_hits_album,
-    )
 
     if not type_text and detect_greatest_hits_album(album=album, artist=artist):
         return True, False
@@ -1085,37 +907,7 @@ def compute_track_artist_scores(
     *,
     exclude_album: str | None = None,
 ) -> list[float]:
-    """Build the credited track artist's catalogue score distribution.
-
-    Combines in-memory scan results for the SAME pass (so a large multi-CD
-    compilation with several tracks by the same artist gets a usable
-    distribution even before anything is persisted) with the artist's
-    existing database history, excluding any (album, title) pair already
-    covered by the in-memory scores so nothing is double-counted.
-
-    ⭐ ``exclude_album`` keeps the album UNDER RATING out of its own reference:
-    an album must not help set the distribution it is then measured against.
-
-    This matters most for exactly the album this function exists for — a
-    greatest-hits / best-of. Every one of its tracks is a hit by construction,
-    so leaving them in does two things at once, both wrong:
-
-    * the artist's catalogue mean is dragged UP by the album's own hits, which
-      pushes every track's z DOWN and flattens the whole album (measured: an
-      8-track best-of against a 27-track catalogue of the same artist went from
-      "4 tracks at 5★" to "no track above 4★, seven at 3★" purely from the
-      album being counted in its own reference);
-    * the same recording is counted twice — once on the best-of and once on the
-      album it was lifted from — so the hits carry double weight in a
-      distribution they are supposed to be exceptional against.
-
-    The (album, title) dedupe above cannot catch the second case: the two
-    copies are different (album, title) pairs.
-
-    A library that owns ONLY the best-of is left with a thin catalogue, which
-    is the honest answer — a best-of cannot evidence anything about the artist's
-    range — and it falls through to the online/thin path.
-    """
+    """Build the credited track artist's catalogue score distribution."""
     artist_key = str(track_artist or "").strip().casefold()
     if not artist_key:
         return []
@@ -1135,8 +927,6 @@ def compute_track_artist_scores(
             continue
 
         result_album = str(result.get("album") or "").strip().casefold()
-        # Register the key FIRST, so a DB row for this album is skipped by the
-        # dedupe below even when the score itself is being excluded.
         scanned_keys.add(
             (
                 result_album,
@@ -1169,10 +959,6 @@ def compute_track_artist_scores(
             if score <= 0 or is_bonus_track_title(title):
                 continue
 
-            # Album-level exclusion, NOT just the (album, title) dedupe below:
-            # a stored title can differ from the scanned one (a rename, or a
-            # feat. credit the scan moved onto the artist), and those rows still
-            # belong to the album under rating.
             if exclude_key and album.casefold() == exclude_key:
                 continue
 
@@ -1199,13 +985,7 @@ def _build_compilation_track_artist_scores(
     *,
     exclude_album: str | None = None,
 ) -> dict[str, list[float]]:
-    """Build one score distribution per credited artist on a compilation.
-
-    ``exclude_album`` is the compilation being rated: its own tracks must not
-    be part of the distribution it is judged against. See
-    ``compute_track_artist_scores`` for why that matters (it is the difference
-    between a best-of being able to produce 5★ tracks and not).
-    """
+    """Build one score distribution per credited artist on a compilation."""
     credited_artists = {
         _compilation_track_artist(track)
         for track in album_results
@@ -1232,27 +1012,18 @@ def _assign_stars(
     album_model: dict[str, Any] | None = None,
     is_compilation: bool = False,
     artist_listen_distribution: list[float] | None = None,
-    #: True only for a "Various Artists" compilation. It selects WHICH
-    #: catalogue rates the track: a VA compilation always uses the credited
-    #: artist's ONLINE chart (each credited artist owns too little locally),
-    #: while a single-artist compilation uses the local artist catalogue.
-    #: This replaced a ``generic_compilation_artist`` parameter that was
-    #: declared, threaded from the caller and never read.
     is_va_compilation: bool = False,
     is_live_album: bool = False,
     source_unusable: bool = False,
     cohort_scores: list[float] | None = None,
     compilation_raw_scores: list[float] | None = None,
+    *,
+    thresholds: dict[str, float] | None = None,
+    organic_floor: tuple[float, float] | None = None,
+    force_star_percentiles: tuple[float, float] | None = None,
+    compilation_online_rules: dict[str, Any] | None = None,
 ) -> int:
-    """Assign 1-5 star rating to a single track.
-
-    ``artist_scores`` for a COMPILATION track must already be the CREDITED
-    track artist's own catalogue distribution (see
-    ``_build_compilation_track_artist_scores``), not the compilation
-    album/album-artist's shared pool. The caller (``post_album_star_ratings``)
-    is responsible for resolving that distribution per track before calling
-    this function.
-    """
+    """Assign 1-5 star rating to a single track."""
     score = float(track.get("popularity_score") or track.get("final_score") or 0)
     single_confidence = str(track.get("single_confidence") or "low").strip().casefold()
 
@@ -1260,6 +1031,8 @@ def _assign_stars(
     track.pop("_force_floor", None)
     track.pop("_live_reason", None)
     track.pop("_ratio_5star_reason", None)
+    track.pop("_computed_album_z", None)
+    track.pop("_computed_artist_z", None)
 
     is_live = (
         bool(track.get("is_live"))
@@ -1267,33 +1040,20 @@ def _assign_stars(
         or is_live_or_alternate_track_title(track.get("title"))
     )
 
-    if single_confidence == "user":
-        track["_global_5star_locked"] = True
-        return 5
+    th = thresholds if thresholds is not None else _live_star_thresholds()
 
-    th = _live_star_thresholds()
-
-    try:
-        from services.popularity.popularity_config import get_single_organic_floor
-        _org_score, _org_listeners = get_single_organic_floor()
-    except Exception as exc:
-        logger.debug("Organic floor config read failed, using defaults", error=str(exc))
-        _org_score, _org_listeners = 45.0, 1000.0
+    if organic_floor is not None:
+        _org_score, _org_listeners = organic_floor
+    else:
+        try:
+            from services.popularity.popularity_config import get_single_organic_floor
+            _org_score, _org_listeners = get_single_organic_floor()
+        except Exception as exc:
+            logger.debug("Organic floor config read failed, using defaults", error=str(exc))
+            _org_score, _org_listeners = 45.0, 1000.0
 
     organic = score >= _org_score or int(track.get("lastfm_listeners") or 0) >= _org_listeners
 
-    # Cohort rating (optional): a track whose ListenBrainz source was rejected
-    # is scored from Last.fm alone, so the album pool — lifted by its
-    # siblings' healthy ListenBrainz component — is not the distribution it
-    # belongs to. It is rated among the tracks that share its fate instead,
-    # and only when that cohort is large enough to be one (otherwise the
-    # fallback IS the album pool: unchanged behaviour). Computed HERE because
-    # the z-scores below are the first readers.
-    #
-    # Compilations are excluded deliberately: their stars come from the
-    # credited artist's ONLINE catalogue or absolute thresholds (the local
-    # catalogue branch is hard-disabled below), which are not album-relative,
-    # so there is no album pool for a cohort to replace.
     _cohort_pool = list(cohort_scores or [])
     _use_lb_cohort = (
         bool(source_unusable)
@@ -1302,28 +1062,25 @@ def _assign_stars(
     )
     _album_pool = _cohort_pool if _use_lb_cohort else album_scores
 
-    # A SINGLE/EP RELEASE (an album holding only 1-2 tracks) has no meaningful
-    # album distribution: ``_compute_album_z`` needs min_count=3, so its album
-    # z is 0.0 by construction and the base band below hard-caps such albums at
-    # 3★ forever, however popular the single is (reported: "songs on single
-    # releases seem to be scoring low"). Rate them against the ARTIST's
-    # catalogue instead — the same reasoning the compilation branch documents
-    # next door ("there is no separate album pool that means anything"). The
-    # era caps still gate the 5★ (catalogue-top cutoff / top-N / slots), so a
-    # merely-mid single cannot inflate past its true catalogue position.
     _small_album_pool = (
         len([s for s in _album_pool if float(s or 0) > 0])
         < _LB_COHORT_MIN_TRACKS
     )
     if is_compilation or _small_album_pool:
-        # Both z-scores are computed against the SAME credited-artist
-        # catalogue distribution -- there is no separate "album" pool that
-        # means anything for a compilation track (or a 1-2 track single).
         album_z, album_spread = _compute_artist_z(score, artist_scores)
         artist_z, artist_spread = album_z, album_spread
     else:
         album_z, album_spread = _compute_album_z(score, _album_pool)
         artist_z, artist_spread = _compute_artist_z(score, artist_scores)
+
+    # Cache the exact z-scores that rated this track so downstream sorting
+    # and logging in post_album_star_ratings do not recompute or drift.
+    track["_computed_album_z"] = album_z
+    track["_computed_artist_z"] = artist_z
+
+    if single_confidence == "user":
+        track["_global_5star_locked"] = True
+        return 5
 
     popularity_marked = bool(track.get("popularity_marked"))
     if is_instrumental_track_title(str(track.get("title") or "")):
@@ -1339,18 +1096,15 @@ def _assign_stars(
             organic,
             album_lf_listeners=album_lf_listeners,
             album_lb_listens=album_lb_listens,
+            thresholds=th,
+            precomputed_album_z=(album_z, album_spread),
+            precomputed_artist_z=(artist_z, artist_spread),
         )
         track["_live_reason"] = live_reason
         if live_stars >= 5:
             track["_era_5star"] = True
         return live_stars
 
-    # The catalogue-top pre-pass lock is only meaningful when it was computed
-    # against the SAME distribution being used to rate the track. For
-    # compilations that distribution is the credited artist's own catalogue,
-    # resolved just above -- so the lock is honoured there via the ordinary
-    # 5-star z-score bounds instead of this whole-album/whole-compilation
-    # shortcut.
     if track.get("_global_5star_locked") and not popularity_only and not is_compilation:
         if not is_live and organic:
             _epsilon_alb = _star_epsilon_z(album_spread, th["epsilon"])
@@ -1360,33 +1114,6 @@ def _assign_stars(
                 and artist_z >= th["star5_artist_z"] - _epsilon_art
             )
             if _clears_5star_bounds:
-                # ⭐ A LOCKED TRACK IS NOT RE-LITIGATED BY THE ALBUM'S SHAPE.
-                #
-                # The lock is an ARTIST-wide verdict: the pre-pass
-                # (``_compute_global_5star_locked_ids``) ranks the artist's
-                # whole scanned catalogue by ``_raw_combined`` and locks the
-                # top ``global_5star_catalog_top_pct`` that ALSO clear
-                # ``global_5star_min_raw_score``. That raw floor IS the "these
-                # counts are real, not noise" test the album ratio gate exists
-                # to supply — so running the ratio test here double-counts the
-                # guard, and it does so with NARROWER evidence (one album's
-                # linear Last.fm spread) against a WIDER verdict.
-                #
-                # Measured on Abney Park: "The Wake" (6.8k LF, raw 74.4, the
-                # artist's catalogue top) held the lock and cleared both
-                # z-bounds, then failed the ratio test at
-                # ``runner_up=1.11x/1.50x`` — because the album's #2 ("The
-                # Only One", 6.1k LF) is ALSO one of the artist's best tracks.
-                # Two hits on one album can never be 1.5x apart, so NO track on
-                # that album could reach 5★. Every locked track in the report
-                # was demoted the same way, and the veto also ERASED the flag
-                # (``= False`` below), which disarmed the downstream
-                # protections that key off it — the era slot cap's protected
-                # list and ``_short_track_cap_is_protected``.
-                #
-                # Not an unconditional award: the z-bounds above still gate the
-                # lock. The ratio test stays in force on the ordinary
-                # (unlocked) 5★ path below, where it is the ONLY shape guard.
                 track["_global_5star_locked"] = True
                 track["_ratio_5star_reason"] = "lock_bypasses_album_shape_gate"
                 return 5
@@ -1424,13 +1151,15 @@ def _assign_stars(
         and not popularity_only
     ):
         try:
-            from services.popularity.popularity_config import get_artist_force_star_percentiles
-            _force5_pct, _force4_pct = get_artist_force_star_percentiles()
+            if force_star_percentiles is not None:
+                _force5_pct, _force4_pct = force_star_percentiles
+            else:
+                from services.popularity.popularity_config import get_artist_force_star_percentiles
+                _force5_pct, _force4_pct = get_artist_force_star_percentiles()
             _track_listens = float(track.get("lastfm_listeners") or 0)
             if _track_listens > 0 and (_force5_pct > 0 or _force4_pct > 0):
                 _valid = [float(v) for v in artist_listen_distribution if float(v or 0) > 0]
                 if len(_valid) >= 5:
-                    _valid.sort(reverse=True)
                     _rank = sum(1 for v in _valid if v > _track_listens) + 1
                     _pct = _rank / len(_valid)
                     if _force5_pct > 0 and _pct <= _force5_pct:
@@ -1453,38 +1182,16 @@ def _assign_stars(
             float(v) for v in (artist_scores or []) if float(v or 0) > 0
         ]
 
-        # The online-catalogue block is read ONCE: ``min_local_catalogue``
-        # decides WHICH rater answers below, and the rank bands drive it when
-        # the local catalogue cannot.
-        try:
-            from helpers.config_helpers import get_compilation_online_catalogue_config
-            _online_rules = get_compilation_online_catalogue_config()
-        except Exception as exc:
-            logger.debug("Compilation online config read failed", error=str(exc))
-            _online_rules = {}
+        if compilation_online_rules is not None:
+            _online_rules = compilation_online_rules
+        else:
+            try:
+                from helpers.config_helpers import get_compilation_online_catalogue_config
+                _online_rules = get_compilation_online_catalogue_config()
+            except Exception as exc:
+                logger.debug("Compilation online config read failed", error=str(exc))
+                _online_rules = {}
 
-        # ⭐ WHICH CATALOGUE ANSWERS DEPENDS ON WHO THE COMPILATION IS BY.
-        #
-        # * A **VA** compilation groups MANY credited artists, each owning one
-        #   or two songs in the library, so the LOCAL catalogue can never
-        #   answer "is this that artist's hit?" — always go online. That is the
-        #   2026-09-21 online-catalogue decision, and why this flag used to be
-        #   hard-wired ``False``.
-        # * A **SINGLE-ARTIST** compilation is that one artist's own record, so
-        #   ``artist_scores`` IS a real catalogue and the local z-bands answer
-        #   the same question. Forcing it online made a best-of unreachable at
-        #   the top: the online rater's 5★ band is the artist's GLOBAL top 2%
-        #   (``rank_percentile_5star``), which across Metallica's 150-track
-        #   career is its three biggest songs — so every track of "Garage Inc."
-        #   was capped at 4★ however strong its CAT-Z (reported: "Whiskey in
-        #   the Jar", CAT-Z +2.00, 928.2k LF, rank 12/150 = top 7.7% → 4★),
-        #   and tracks outside the online list fell through to the ABSOLUTE
-        #   fallback and flattened to 1★/2★ ("The Weight of Words": 22 of 24).
-        #
-        # ``min_local_catalogue`` is the thinness guard from the same config
-        # block: below it there is no distribution to compute a robust z
-        # against, so a single-artist compilation falls back to the online
-        # chart — which is what keeps a barely-owned artist working.
         try:
             _min_local = int(float(_online_rules.get("min_local_catalogue") or 5.0))
         except (TypeError, ValueError):
@@ -1495,9 +1202,6 @@ def _assign_stars(
         )
 
         if has_usable_catalogue:
-            # ``album_z``/``artist_z`` were already computed above against
-            # this SAME credited-artist distribution, so re-use them rather
-            # than recomputing.
             catalogue_z = artist_z
             _epsilon_z = _star_epsilon_z(artist_spread, th["epsilon"])
 
@@ -1512,26 +1216,15 @@ def _assign_stars(
             else:
                 comp_stars = 1
 
-            # Verified single status is corroborating evidence -- it can
-            # raise a track to a floor, but it does not override a track's
-            # position within its own artist's catalogue.
             if is_verified_single and organic and not popularity_only:
                 comp_stars = max(comp_stars, 3)
 
             track["_compilation_rating_mode"] = "track_artist_catalogue"
             track["_compilation_artist_z"] = catalogue_z
         else:
-            # Thin LOCAL catalogue: fewer than 5 usable scores for the credited
-            # artist means a robust z-score cannot be computed. Rather than
-            # falling straight to absolute thresholds -- which cannot tell an
-            # artist's global #1 from filler, because the library only owns one
-            # or two of their songs -- consult the artist's ONLINE catalogue and
-            # rate by the track's real-world rank within it.
             _online_stars = 0
             _online_detail: dict[str, Any] = {"source": "none"}
             try:
-                from helpers.config_helpers import get_compilation_online_catalogue_config
-                _online_rules = get_compilation_online_catalogue_config()
                 _online_stars, _online_detail = _online_catalogue_stars(
                     credited_artist=_compilation_track_artist(track),
                     track_title=str(track.get("title") or ""),
@@ -1546,15 +1239,6 @@ def _assign_stars(
 
             if _online_stars > 0:
                 comp_stars = _online_stars
-                # ⭐ A VERIFIED SINGLE floors at 3★ on this path too. The
-                # local-catalogue branch above and the absolute fallback below
-                # BOTH apply this floor, so the online path skipping it demoted
-                # tracks independent sources confirm were RELEASED as singles —
-                # measured on "Nightmare Revisited", where "Making Christmas"
-                # (Rise Against) and "Oogie Boogie's Song" (Tiger Army) are both
-                # single=high and both landed 2★. The online rank still decides
-                # anything ABOVE the floor; the floor only stops it burying a
-                # confirmed single below what the other two paths guarantee.
                 if is_verified_single and organic and not popularity_only:
                     comp_stars = max(comp_stars, 3)
                 track["_compilation_rating_mode"] = "track_artist_online_catalogue"
@@ -1574,8 +1258,6 @@ def _assign_stars(
                     percentile=round(float(_online_detail.get("percentile") or 0.0), 4),
                     stars=comp_stars,
                 )
-            # Absolute popularity thresholds, used only when the credited
-            # artist's online catalogue is unavailable or too small to rank.
             elif is_verified_single and not popularity_only:
                 if score >= 55.0 or raw_lf >= 1_000_000:
                     comp_stars = 5
@@ -1605,32 +1287,10 @@ def _assign_stars(
 
         track["_compilation_catalogue_size"] = len(valid_catalogue_scores)
 
-        # ------------------------------------------------------------------
-        # ⭐ TWO ABSOLUTE GUARDS ON THE COMPILATION TIER.
-        #
-        # The artist-catalogue percentile above is SCALE-FREE by design, and
-        # that is its weakness on a compilation: "#1 of 9 songs" is 5★ whether
-        # the artist has a million listeners or 713. Reported on an 81-track
-        # playlist compilation — "devil may cry" (713 LF, #3/171) and "type
-        # shit" (1.2k LF, #1/9) took 5★ while Deftones (401.2k LF, #58/187)
-        # and Korn (53.6k LF) were buried at 3★/1★. Both guards below need an
-        # ABSOLUTE view, which the percentile alone cannot provide.
-        # ------------------------------------------------------------------
+        # Two absolute guards on the compilation tier (re-using _online_rules)
         try:
-            from helpers.config_helpers import get_compilation_online_catalogue_config
-            _tier_rules = get_compilation_online_catalogue_config()
-        except Exception as exc:
-            logger.debug("Compilation tier config read failed", error=str(exc))
-            _tier_rules = {}
-
-        # (a) THE TOP-TIER GATE: a compilation's 5★ must ALSO clear an absolute
-        # bar, because "most popular song for this artist" on a tiny catalogue
-        # is not the same claim as "a hit". The artist's own catalogue still
-        # decides everything BELOW the top tier, and a strong absolute score
-        # still reaches 5★ — this only stops the scale-free #1-of-9 promotion.
-        try:
-            _min_score = float(_tier_rules.get("top_tier_min_score") or 0.0)
-            _min_listeners = float(_tier_rules.get("top_tier_min_listeners") or 0.0)
+            _min_score = float(_online_rules.get("top_tier_min_score") or 0.0)
+            _min_listeners = float(_online_rules.get("top_tier_min_listeners") or 0.0)
         except (TypeError, ValueError):
             _min_score, _min_listeners = 0.0, 0.0
 
@@ -1652,17 +1312,9 @@ def _assign_stars(
                     min_listeners=int(_min_listeners),
                 )
 
-        # (b) THE COMPILATION-STANDOUT FLOOR: the mirror image. A heavyweight's
-        # deep discography buries their GENUINE hit — the same track that leads
-        # this compilation by every cross-artist measure sits at #159/190 for
-        # its artist. The compilation's own raw distribution IS cross-artist
-        # comparable (that is what ``raw_score`` is for), so a track in its top
-        # band is a standout HERE and floors at 4★. Never 5★: the artist
-        # catalogue keeps ownership of the top tier, so the floor lifts a
-        # buried hit without flattening the album.
         try:
-            _floor_pct = float(_tier_rules.get("standout_floor_percentile") or 0.0)
-            _floor_stars = int(_tier_rules.get("standout_floor_stars") or 0)
+            _floor_pct = float(_online_rules.get("standout_floor_percentile") or 0.0)
+            _floor_stars = int(_online_rules.get("standout_floor_stars") or 0)
         except (TypeError, ValueError):
             _floor_pct, _floor_stars = 0.0, 0
 
@@ -1704,6 +1356,9 @@ def _assign_stars(
         artist_scores=artist_scores,
         is_live=is_live,
         single_confidence=single_confidence,
+        thresholds=th,
+        precomputed_album_z=(album_z, album_spread),
+        precomputed_artist_z=(artist_z, artist_spread),
     )
 
     if (
@@ -1721,31 +1376,17 @@ def _assign_stars(
             if _album_rank(score, _album_pool) > album_top_n:
                 five_star_eligible = False
 
-        # Ratio ("shape of popularity") gate. The z-bounds above answer "is
-        # this track far above its album's mean?"; on a small, flat album the
-        # spread shrinks too, so a 6-listener gap over the runner-up can clear
-        # every z-bound while the album plainly has no standout. The ratio
-        # test is scale-free and closes that hole. It runs LAST so the cheap
-        # checks short-circuit first, and it is skipped once a track has
-        # already been rejected for a cheaper reason.
         if five_star_eligible:
-            # THE FIX: Context-Aware Shape Gating
-            # We only apply the strict ratio test to older, unpopular albums to 
-            # prevent 14 vs 11 listen inflation. We bypass it for new releases 
-            # (<= 2 years old) or albums that are successful for this specific artist.
+            current_yr = datetime.now().year
             try:
                 track_yr_raw = track.get("year") or track.get("release_year")
-                if track_yr_raw:
-                    track_yr = int(str(track_yr_raw)[:4])
-                else:
-                    track_yr = datetime.now().year
+                track_yr = int(str(track_yr_raw)[:4]) if track_yr_raw else current_yr
             except (ValueError, TypeError):
-                track_yr = datetime.now().year
-                
-            album_age = datetime.now().year - track_yr
+                track_yr = current_yr
+
+            album_age = current_yr - track_yr
             album_era = album_model.get("era", "peak") if album_model else "peak"
-            
-            # Apply test ONLY if album is > 2 years old AND is a "minor" (unpopular) release
+
             if album_age > 2 and album_era == "minor":
                 _ratio_ok, _ratio_reason = _album_ratio_standout_ok(
                     track,
@@ -1754,10 +1395,9 @@ def _assign_stars(
                     live=is_live,
                 )
             else:
-                # Bypass the test for successful albums (American Idiot) or new releases
                 _ratio_ok = True
                 _ratio_reason = f"bypassed_by_context(age={album_age}, era={album_era})"
-                
+
             track["_ratio_5star_reason"] = _ratio_reason
             if not _ratio_ok:
                 five_star_eligible = False
@@ -1805,8 +1445,8 @@ def _build_album_model(
     """3-step scaling model context for ONE album."""
     try:
         from services.popularity.popularity_math import (
-            album_prominence_score,
             album_prominence_median,
+            album_prominence_score,
         )
 
         current_album = str(album_results[0].get("album") or "")
@@ -1938,43 +1578,7 @@ def _effective_order_score(
     row: dict[str, Any],
     mode: str,
 ) -> float:
-    """The score a PLAYLIST sorts on, in a form comparable ACROSS albums.
-
-    ⭐⭐ WHY THIS EXISTS — the defect it fixes
-    -----------------------------------------
-    ``tracks.popularity`` / ``tracks.final_score`` hold an **album-relative**
-    value: ``_apply_album_relative_normalization`` re-maps the raw score through
-    a robust z-score against the track's OWN album distribution and then through
-    a logistic (``_persist_album_relative_scores`` writes it). It answers "how
-    far above its own record does this track sit", which is exactly what star
-    rating needs — but it is NOT comparable between two albums.
-
-    Ordering a multi-artist/multi-album playlist on it therefore ranks ALBUM
-    CONTEXT, not the track. Measured with the real function: a raw 10 on a
-    low-median album stores as 29.1 while a raw 65 on a high-median album stores
-    as 18.7, so the weaker track sorts FIRST. The same raw score of 50 stores as
-    50.0, 50.0 or 61.1 depending only on its album's spread.
-
-    ``popularity_math.top_songs_by_genre``'s own docstring already says an
-    album-relative score "is only meaningful within one album's own
-    distribution" — and that function was never called.
-
-    ``mode="prominence"`` uses ``playlist_popularity_score``: the MAXIMUM of
-    the track's two RAW global counts, each log-scaled and UNCLAMPED. Those are
-    absolute counts, so the value means the same thing on every album, and the
-    ``max`` keeps it monotonic in both signals with no saturation — see that
-    function's docstring for the two playlist defects the weighted mean caused
-    (it rewarded MISSING ListenBrainz data and saturated at 100).
-
-    ``mode="stored"`` keeps the existing behaviour (used as the fallback when a
-    track has no listener data to compare on).
-
-    ⚠️ ``stars`` is NOT a substitute for this score: ``_assign_stars`` rates a
-    track against its own album AND artist distributions, so star tiers are
-    album-relative. That is why they are the COARSE primary (see
-    ``_playlist_order_key``) rather than the ordering signal — the tier gates a
-    track's position, and this score ranks the tracks inside it.
-    """
+    """The score a PLAYLIST sorts on, in a form comparable ACROSS albums."""
     if mode == "prominence":
         prominence = playlist_popularity_score(
             int(row.get("lastfm_listeners") or 0),
@@ -1989,39 +1593,7 @@ def _playlist_order_key(
     row: dict[str, Any],
     mode: str = "prominence",
 ) -> tuple:
-    """Full sort key for a generated playlist, most preferred first.
-
-    ⭐⭐ PRIMARY key: the STAR TIER (5 → 4 → 3 …).
-
-    Measured on a synthetic 600-track pool sliced to 300: ordering by
-    popularity alone admitted **54 more 3★ tracks** and dropped **26 fewer
-    5★** than the pipeline it replaced, because the popularity measure is now
-    unclamped — a 3★ track with the most listeners genuinely outranks a 5★ track
-    with fewer, and it was landing at position 1. A playlist named
-    ``<genre> - Top Tracks`` must not lead with 3★ tracks.
-
-    The old key got this right by ACCIDENT: ``album_prominence_score`` saturates
-    at 100 from ~1.78M Last.fm listeners, so every popular track TIED and the
-    ``-stars`` tie-break then ordered the head by tier. Removing the clamp was
-    necessary (it made the key monotonic and stopped album-relative ordering
-    leaking back through the tie-breakers) — but the star preference it had been
-    supplying must be restated EXPLICITLY rather than left to a rounding rule.
-
-    ⭐ SECOND key: ``_effective_order_score``, cross-album comparable (raw global
-    listener counts). It orders WITHIN a tier, where star values separate
-    nothing because they are equal by construction. This is where the removed
-    clamp's work is now done properly.
-
-    ``title`` stays the final tie-breaker so the order is DETERMINISTIC — a
-    playlist rebuilt from an unchanged library must produce byte-identical
-    output, or the push cache can never settle.
-
-    NOTE on the old objection: stars ARE album-relative (``_assign_stars`` rates
-    against the track's own album and artist), so they are a COARSE tier, not a
-    precise cross-album measure — hence they gate position, not rank within it.
-    The Essential Collection already orders the same way
-    (``_ordered_by_percentile_then_prominence``).
-    """
+    """Full sort key for a generated playlist, most preferred first."""
     return (
         -int(row.get("stars") or 0),
         -float(_effective_order_score(row, mode)),
@@ -2034,29 +1606,7 @@ def _apply_artist_cap(
     ordered: list[dict[str, Any]],
     max_per_artist: int | None,
 ) -> list[dict[str, Any]]:
-    """Limit how many tracks ONE credited artist may contribute.
-
-    ⭐ Without a cap, ranking by popularity alone lets a prolific artist with a
-    consistent catalogue monopolise a genre playlist. Measured on a synthetic
-    400-track pool (2 artists x 100 tracks, 20 artists x 10): the two large
-    artists took **200 of 300 tracks (67%)**.
-
-    ⚠️⚠️ CONTRACT CHANGE (this revision): the cap now BINDS — overflow is
-    DROPPED, not deferred. It previously deferred the overflow to the end "so a
-    genre with only one qualifying artist still yields a full playlist", but
-    the caller then SLICES the ordered list to ``genre_playlists_max_tracks``,
-    so the deferred tracks came straight back: measured, ``Max Tracks Per
-    Artist = 25`` on a 300-track playlist handed the dominant artist **60 slots
-    (200 of 300 with spreading off)** while the Config page promises the cap
-    "stops one prolific artist filling a genre playlist". A quota that cannot
-    bind is not a quota.
-
-    ⚠️ The cost, documented rather than hidden: a genre whose qualifying pool is
-    dominated by fewer artists than ``ceil(max_tracks / max_per_artist)`` now
-    yields a SHORTER playlist. That is the cap working as configured — set the
-    option to ``0`` for no limit, which restores the previous behaviour
-    exactly. ``None`` or ``<= 0`` means unlimited.
-    """
+    """Limit how many tracks ONE credited artist may contribute."""
     if not max_per_artist or max_per_artist <= 0:
         return ordered
 
@@ -2071,29 +1621,7 @@ def _apply_artist_cap(
 
 
 def _interleave_artists(ordered: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Spread a ranked list so consecutive tracks rarely share an artist.
-
-    ⭐ Purpose: a playlist that is a pure score ranking arrives ALBUM-BLOCKED —
-    the top tracks of one record sit next to each other and the list is
-    effectively "album by album". Spreading the artists gives the ranking a
-    listenable shape without changing WHICH tracks are included.
-
-    ⭐⭐ WHY NOT A ROUND-ROBIN: a plain round-robin emits each artist's #2 after
-    EVERY artist's #1, so the global ranking is only correct for the first
-    round. Measured on a 3-artist pool the pool's 2nd-strongest track was pushed
-    behind its 6th-strongest, because the round-robin had already moved on to a
-    weaker track from another artist.
-
-    This takes, at each step, the STRONGEST remaining track whose artist did not
-    just play — so the list stays as close to the true ranking as the
-    no-consecutive-artist rule allows. A run is only broken when no other artist
-    remains (a single-artist tail).
-
-    ⚠️ A re-order, never a re-rank: membership is untouched, each artist's own
-    tracks keep their relative order, and the overall winner still leads.
-    """
-    from collections import defaultdict
-
+    """Spread a ranked list so consecutive tracks rarely share an artist."""
     buckets: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
     artist_order: list[str] = []
     for rank, row in enumerate(ordered):
@@ -2113,7 +1641,6 @@ def _interleave_artists(ordered: list[dict[str, Any]]) -> list[dict[str, Any]]:
         pick_key: str | None = None
         pick_rank: int | None = None
 
-        # Preferred: the strongest head whose artist did not just play.
         for key in artist_order:
             pos = positions[key]
             bucket = buckets[key]
@@ -2123,7 +1650,6 @@ def _interleave_artists(ordered: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if pick_rank is None or rank < pick_rank:
                 pick_rank, pick_key = rank, key
 
-        # Unavoidable run (every remaining artist is the one that just played).
         if pick_key is None:
             for key in artist_order:
                 pos = positions[key]
@@ -2152,13 +1678,7 @@ def _ordered_playlist_rows(
     max_per_artist: int | None = None,
     interleave: bool = False,
 ) -> list[dict[str, Any]]:
-    """Apply the full ordering pipeline to a playlist's winning tracks.
-
-    Order of operations is deliberate:
-      1. RANK on the cross-album-comparable key.
-      2. CAP each artist, DROPPING the overflow so the quota really binds.
-      3. Optionally INTERLEAVE artists, which only re-orders step 2's result.
-    """
+    """Apply the full ordering pipeline to a playlist's winning tracks."""
     ordered = sorted(winners, key=lambda r: _playlist_order_key(r, order_mode))
     ordered = _apply_artist_cap(ordered, max_per_artist)
     if interleave:
@@ -2170,40 +1690,20 @@ def _ordered_by_percentile_then_prominence(
     winners: list[dict[str, Any]],
     mode: str = "prominence",
 ) -> list[dict[str, Any]]:
-    """Essential-Collection ordering: star tier, then catalogue percentile.
-
-    Kept deliberately SEPARATE from ``_playlist_order_key`` because an Essential
-    Collection is a SINGLE artist: every track is scored against the same
-    catalogue, so the album-relative remapping that makes a cross-artist order
-    unsound does not apply here, and the catalogue percentile is a legitimate
-    primary key.
-
-    What changes is the tie-break. The old key fell back to
-    ``-popularity_score``, which is derived from the SAME album-relative value as
-    the percentile — so it could not separate two tracks whose percentiles were
-    equal, and the order between albums was decided by how tightly spread each
-    album was. The raw listener-based prominence is used instead, which reflects
-    the tracks' actual standing.
-    """
+    """Essential-Collection ordering: star tier, then catalogue percentile."""
     return sorted(
         winners,
         key=lambda r: (
-            -int(r.get("stars") or 0),                                # 5★ tier first
-            -float(r.get("percentile") or 0.0),                       # catalogue percentile in tier
-            -float(_effective_order_score(r, mode)),                  # cross-album standing
-            str(r.get("title") or "").casefold(),                     # deterministic
+            -int(r.get("stars") or 0),
+            -float(r.get("percentile") or 0.0),
+            -float(_effective_order_score(r, mode)),
+            str(r.get("title") or "").casefold(),
         ),
     )
 
 
 def _resolve_max_per_artist(cfg: dict[str, Any]) -> int | None:
-    """Per-artist track cap for a generated playlist.
-
-    ``0`` (or a missing/invalid value) means UNLIMITED, which is the documented
-    meaning everywhere else in this config (see ``track_timeout_seconds``): a
-    cap that silently becomes a default would make "0 = no limit" impossible to
-    express. Default **25** applies the anti-monopoly cap out of the box.
-    """
+    """Per-artist track cap for a generated playlist."""
     raw = cfg.get("genre_playlists_max_per_artist", 25)
     try:
         value = int(raw)
@@ -2272,65 +1772,31 @@ def _essential_playlist_name(artist: str) -> str:
         )
     except Exception:
         template = "{artist} - Essential Collection"
-        
+
     try:
         from helpers.normalization_service import normalize_the_prefix
         artist_display = normalize_the_prefix(artist)
     except Exception:
         artist_display = artist
-        
+
     name = str(template).replace("{artist}", artist_display).strip()
     return name or f"{artist_display} - Essential Collection"
-  
+
+
 def _normalise_essential_title(title: str) -> str:
-    """Key used to decide whether two rows are the SAME track.
-
-    ⚠️ Unicode punctuation must be folded, not just lowercased. The library
-    holds the same recording twice with different apostrophes — the straight
-    ``'`` (U+0027) in one file and the typographic ``’`` (U+2019) in the other —
-    and this key is what every playlist builder groups by. Comparing them
-    raw produced two different keys, so both copies of Korn's "Y'all Want a
-    Single" survived de-duplication into the same playlist.
-
-    The reported clue was a 2-second duration difference, but duration was
-    never part of this key; the apostrophe was, and it is the difference that
-    actually defeats the grouping. Folding the whole class (quotes, primes,
-    dashes, NBSP) also closes the same hole for "–"/"—" and NBSP variants,
-    which fail identically.
-    """
+    """Key used to decide whether two rows are the SAME track."""
     t = normalize_unicode_punctuation(str(title or "")).strip().lower()
     t = _ESSENTIAL_TITLE_NOISE_RE.sub(" ", t)
     return re.sub(r"\s+", " ", t).strip()
 
 
 def _normalise_artist_key(artist: Any) -> str:
-    """Key used to decide whether two rows share a credited ARTIST.
-
-    The other half of the de-duplication key, and the same defect class as
-    ``_normalise_essential_title``: an artist credited with a typographic
-    apostrophe in one file ("Guns N’ Roses") and a straight one in another
-    ("Guns N' Roses") otherwise produced two keys, so a pair of duplicates
-    survived on the artist component alone.
-    """
+    """Key used to decide whether two rows share a credited ARTIST."""
     return normalize_unicode_punctuation(str(artist or "")).strip().casefold()
 
 
 def _is_excluded_essential_artist(artist: str) -> bool:
-    """True when an artist must not get an Essential Collection.
-
-    Two independent reasons, both of which must be honoured at every call
-    site:
-
-    1. ``_ESSENTIAL_EXCLUDED_ARTISTS`` — placeholders that are not really an
-       artist ("Various Artists", "Soundtrack", …).
-    2. ``playlists.excluded_artists`` — the USER's list, written by
-       "Exclude this artist from Playlists" on the artist page and managed in
-       Config → Playlists.
-
-    ⚠️ The user list was previously honoured ONLY by the genre builder, so an
-    artist excluded there still received an Essential Collection — the exact
-    opposite of what the option says it does.
-    """
+    """True when an artist must not get an Essential Collection."""
     if str(artist or "").strip().casefold() in _ESSENTIAL_EXCLUDED_ARTISTS:
         return True
     try:
@@ -2338,8 +1804,6 @@ def _is_excluded_essential_artist(artist: str) -> bool:
 
         return is_artist_excluded_from_playlists(artist)
     except Exception as exc:
-        # Fail OPEN: a config read that fails must not silently stop every
-        # Essential Collection from being built.
         logger.debug("Excluded-artist config read failed", error=str(exc))
         return False
 
@@ -2432,17 +1896,6 @@ def _playlist_sync_succeeded(result: dict[str, Any] | None) -> bool:
 # Seasonal (holiday) exclusion policy
 # ---------------------------------------------------------------------------
 
-#: The ONE pool every seasonal spelling maps to, and its display name.
-#:
-#: ⚠️ ``_HOLIDAY_POOL_KEY`` MUST contain the default
-#: ``christmas_playlist_marker`` ("christmas"), because the marker is what
-#: decides whether a playlist is allowed to hold seasonal music — a pool that
-#: does not match the marker would be excluded-when-it-should-not-be (and
-#: invisible to the Christmas playlist the user asked for). Hence the
-#: "christmas holiday" spelling: it satisfies the default marker AND names the
-#: umbrella the whole family (Christmas / Xmas / Noel / Yule / Hanukkah)
-#: collapses to. A custom marker other than "christmas" can be pointed at the
-#: pool by setting ``christmas_playlist_marker`` to match.
 _HOLIDAY_POOL_KEY = "christmas holiday"
 _HOLIDAY_POOL_DISPLAY = "Holiday"
 
@@ -2468,12 +1921,7 @@ def _christmas_playlist_marker() -> str:
 
 
 def _playlist_allows_christmas(playlist_name: str) -> bool:
-    """True when ``playlist_name`` is allowed to contain Christmas tracks.
-
-    Only a playlist whose NAME contains the marker (default "christmas") may
-    hold Christmas music. Everything else — Essential Collection, New Music,
-    every ordinary genre playlist — must exclude it.
-    """
+    """True when ``playlist_name`` is allowed to contain Christmas tracks."""
     marker = _christmas_playlist_marker()
     return marker in str(playlist_name or "").casefold()
 
@@ -2482,11 +1930,7 @@ def _filter_christmas_rows(
     rows: list[dict[str, Any]],
     playlist_name: str,
 ) -> list[dict[str, Any]]:
-    """Drop Christmas tracks unless ``playlist_name`` is a Christmas playlist.
-
-    Returns ``rows`` unchanged when the exclusion is disabled or the playlist is
-    Christmas-eligible, so callers can apply it unconditionally.
-    """
+    """Drop Christmas tracks unless ``playlist_name`` is a Christmas playlist."""
     if not _christmas_exclusion_enabled():
         return rows
     if _playlist_allows_christmas(playlist_name):
@@ -2538,8 +1982,6 @@ def _create_new_music_playlist() -> int:
         logger.debug("New Music fetch failed", error=str(exc))
         return 0
 
-    # Christmas music is seasonal and must not surface in a rolling "recently
-    # added" playlist.
     rows = _filter_christmas_rows(rows, "New Music")
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -2652,18 +2094,6 @@ def _sync_essential_playlist(
     if artist_scores is None:
         try:
             with db_session() as session:
-                # ⚠️ Case-INSENSITIVE, matching the track-row query just below.
-                #
-                # This used `... = :artist` while the row fetch used
-                # `LOWER(TRIM(...)) = LOWER(TRIM(:artist))`. When the artist name
-                # the scan iterates differs only in case from the stored
-                # `album_artist` (clean_artist_name_for_storage title-cases), the
-                # row query still returns the artist's tracks but this one
-                # returned ZERO rows. The cohort then fell back to an EMPTY list,
-                # and `calculate_percentile_star_rating(score, [])` returns
-                # percentile 0.0 for EVERY track — so the playlist's PRIMARY sort
-                # key became a constant and the ordering silently collapsed to
-                # the tie-breakers (star tier, then raw score, then title).
                 res = session.execute(
                     text(
                         "SELECT final_score FROM tracks "
@@ -2734,9 +2164,6 @@ def _sync_essential_playlist(
         except Exception as exc:
             logger.debug("Featured-track merge failed", artist=artist, error=str(exc))
 
-    # Christmas music is excluded from every Essential Collection. Only a
-    # playlist whose name contains the configured marker may hold it, and an
-    # artist's Essential Collection is never one.
     rows = _filter_christmas_rows(rows, playlist_name)
 
     def _track_year(row: dict[str, Any]) -> int:
@@ -2757,11 +2184,11 @@ def _sync_essential_playlist(
     for group in grouped.values():
         group.sort(
             key=lambda r: (
-                int(r.get("is_live") or 0),              # 1. Penalize live tracks
-                -int(r.get("stars") or 0),               # 2. Highest stars wins (5★ beats 4★)
-                -float(r.get("popularity_score") or 0),  # 3. Highest popularity breaks ties
-                int(r.get("is_compilation") or 0),       # 4. Compilation status moved down to a tie-breaker
-                _track_year(r),                          # 5. Earliest release year
+                int(r.get("is_live") or 0),
+                -int(r.get("stars") or 0),
+                -float(r.get("popularity_score") or 0),
+                int(r.get("is_compilation") or 0),
+                _track_year(r),
                 str(r.get("title") or "").casefold(),
             ),
         )
@@ -2771,23 +2198,10 @@ def _sync_essential_playlist(
         _delete_playlist_from_navidrome(playlist_name)
         return False
 
-    # Percentile against the artist's own catalogue is the primary ordering
-    # key: star tier is a coarse bucket and many tracks tie inside it, so
-    # ordering on percentile first produces a genuinely ranked best-of rather
-    # than an arbitrary run through the 5★ tier.
     for w in winners:
         _, pct = calculate_percentile_star_rating(float(w.get("popularity_score") or 0), artist_scores)
         w["percentile"] = pct
 
-    # ⭐ An Essential Collection is a SINGLE artist, so every track's score is
-    # relative to the same catalogue — album-relative remapping does NOT distort
-    # the comparison here, and the catalogue percentile IS the right primary key.
-    # What the old key could not do is break ties meaningfully: `-percentile`
-    # then `-popularity_score` are both derived from the same album-relative
-    # value, so two albums' tracks could interleave purely by album spread.
-    # Star tier and percentile stay PRIMARY (unchanged behaviour); the raw
-    # cross-album listener signal is used as the tie-breaker within a percentile
-    # bucket, which is strictly more informative than the remapped score.
     winners = _ordered_by_percentile_then_prominence(winners, order_mode)
     winners = winners[:max_tracks]
 
@@ -2817,20 +2231,11 @@ def _sync_essential_playlist(
 # Genre top-tracks playlists
 # ---------------------------------------------------------------------------
 
-# Default maximum number of tracks in a "<Genre> - Top Tracks" playlist.
-# Override per-install with ``playlists.genre_playlists_max_tracks``.
 _GENRE_PLAYLIST_DEFAULT_MAX_TRACKS = 300
 
 
 def _resolve_genre_max_tracks(cfg: dict[str, Any]) -> int | None:
-    """Max tracks per genre playlist; ``None`` means UNLIMITED.
-
-    ``0`` expresses "no cap" (the documented meaning everywhere else in this
-    config — see ``_resolve_max_per_artist``); a missing/invalid value falls
-    back to ``_GENRE_PLAYLIST_DEFAULT_MAX_TRACKS``.  The old expression
-    (``int(cfg.get(...) or 300)``) silently turned a configured ``0`` back
-    into 300, making the documented no-cap option impossible to express.
-    """
+    """Max tracks per genre playlist; ``None`` means UNLIMITED."""
     raw = cfg.get("genre_playlists_max_tracks", _GENRE_PLAYLIST_DEFAULT_MAX_TRACKS)
     try:
         value = int(raw)
@@ -2897,76 +2302,21 @@ _PLAYLIST_SIG_MAX = 2000
 
 
 def _navidrome_server_key(base_url: str) -> str:
-    """A comparison key that identifies the SERVER behind a base URL.
-
-    Scheme and host are case-folded — `https://Nav.Example.com` and
-    `https://nav.example.com` are the same server and DNS is insensitive to
-    case — while the PATH is left exactly as written, because a URL path is
-    case-sensitive and a reverse proxy mounted at `/Sub/Navidrome` is not the
-    same endpoint as `/sub/navidrome`.
-
-    Falls back to a plain casefold when the value is not a parseable URL rather
-    than raising: a malformed entry must not take the whole client list down,
-    and two malformed entries that differ only by case are still far more likely
-    to be the same server than not.
-
-    ⚠️ THE OUTER ``rstrip("/")`` IS THE LOAD-BEARING NORMALISATION, and the
-    ``parts.path`` below needs no rstrip of its own. Because every trailing
-    slash has already been removed from ``text``, ``parts.path`` can never end
-    in "/" — ``urlsplit("https://h")`` and ``urlsplit("https://h/")`` both
-    report ``""`` here, and ``"https://h/p/"`` reports ``"/p"``. A
-    ``parts.path.rstrip("/")`` is therefore unreachable, and having one made it
-    read as the line that makes trailing slashes equivalent when it was not:
-    mutating IT changed nothing and escaped the oracle, which is the signal that
-    a line is dead rather than that a test is weak.
-    """
-    text = str(base_url or "").strip().rstrip("/")
-    if not text:
+    """A comparison key that identifies the SERVER behind a base URL."""
+    text_val = str(base_url or "").strip().rstrip("/")
+    if not text_val:
         return ""
     try:
-        from urllib.parse import urlsplit
-
-        parts = urlsplit(text)
+        parts = urlsplit(text_val)
         if parts.scheme and parts.netloc:
             return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path}"
     except Exception:
         pass
-    return text.casefold()
+    return text_val.casefold()
 
 
 def _navidrome_clients() -> list[Any]:
-    """One client per SERVER — not one per configured user.
-
-    ⭐ WHY THE DEDUPE. `navidrome_users` is a list of ACCOUNTS, and two accounts
-    routinely point at the SAME server (a personal login and an admin one). This
-    function used to build a client for each, and every caller then ran the same
-    playlist sync once per client — against one server, twice.
-
-    That is not merely wasted work, it is actively destructive. A Navidrome
-    playlist belongs to the server and is OWNED BY the user that created it, so:
-
-      * client A creates "Alternative Rock - Top Tracks" owned by A;
-      * client B, which cannot see A's playlist, finds nothing by that name and
-        creates its OWN copy of it;
-      * each client's next sync sees two playlists with the name, keeps the one
-        it can own and DELETES the other — the dedupe pass in
-        ``sync_playlist_by_name``.
-
-    The two then recreate what the other deleted, forever. The observed symptom
-    was exactly that ping-pong: `7fNI…` deleted as a duplicate in one pass and a
-    fresh `1xYY…` created moments later in the same run.
-
-    Playlists are PUBLIC by default, so every account on the server sees the one
-    playlist the first account creates. One sync per server is therefore both
-    sufficient and correct, and the first configured user for that server is the
-    owner it belongs to.
-
-    ⚠️ Deliberately scoped to THIS function. `rating_sync_service` and
-    `favourites_service` call the same config getter and must NOT be deduped —
-    star ratings and favourites are per-USER data, so two accounts on one server
-    legitimately produce different results. Only playlist operations are
-    server-scoped, and this function is used by nothing else.
-    """
+    """One client per SERVER — not one per configured user."""
     global _CLIENTS_CACHE, _CLIENTS_CACHED_AT
     now = time.monotonic()
     with _CLIENTS_LOCK:
@@ -2975,8 +2325,8 @@ def _navidrome_clients() -> list[Any]:
 
     clients: list[Any] = []
     try:
-        from helpers.config_helpers import get_navidrome_users_normalized
         from api_clients.navidrome import NavidromeClient
+        from helpers.config_helpers import get_navidrome_users_normalized
 
         seen_servers: dict[str, str] = {}
         for user in get_navidrome_users_normalized():
@@ -2988,8 +2338,6 @@ def _navidrome_clients() -> list[Any]:
 
             key = _navidrome_server_key(base_url)
             if key and key in seen_servers:
-                # Logged rather than silent: "my second account is being
-                # ignored" is otherwise indistinguishable from a broken config.
                 logger.info(
                     "Navidrome user skipped — same server as an earlier entry",
                     user=username,
@@ -3071,8 +2419,14 @@ def _sweep_orphaned_genre_playlists_from_navidrome(keep_playlist_names: set[str]
     try:
         if not _genre_playlists_delete_enabled():
             return
-        suffix = _genre_playlist_name("GENRE").replace("GENRE", "", 1).strip()
-        if not suffix:
+        sentinel = "__GENRE_SENTINEL__"
+        rendered = _genre_playlist_name(sentinel)
+        if sentinel not in rendered:
+            return
+        prefix, suffix = rendered.split(sentinel, 1)
+        prefix_cf = prefix.casefold()
+        suffix_cf = suffix.casefold()
+        if not prefix_cf and not suffix_cf:
             return
 
         keep_keys = {str(name).strip().casefold() for name in keep_playlist_names if str(name).strip()}
@@ -3080,9 +2434,14 @@ def _sweep_orphaned_genre_playlists_from_navidrome(keep_playlist_names: set[str]
         for client in _navidrome_clients():
             for playlist in client.fetch_all_playlists() or []:
                 name = str(playlist.get("name") or "").strip()
-                if suffix.casefold() not in name.casefold():
+                name_cf = name.casefold()
+                if prefix_cf and not name_cf.startswith(prefix_cf):
                     continue
-                if name.casefold() in keep_keys:
+                if suffix_cf and not name_cf.endswith(suffix_cf):
+                    continue
+                if len(name_cf) <= len(prefix_cf) + len(suffix_cf):
+                    continue
+                if name_cf in keep_keys:
                     continue
                 playlist_id = str(playlist.get("id") or "").strip()
                 if playlist_id and client.delete_playlist(playlist_id):
@@ -3100,13 +2459,7 @@ def _log_dropped_playlist_tracks(
     dropped_ids: list[str],
     rows: list[dict[str, Any]] | None,
 ) -> None:
-    """Name the tracks Navidrome refused to store.
-
-    The service only has ids; the CALLER has the rows that produced them, so
-    this turns ``dropped=['3f9…']`` into *"Stabbing Westward - Shame"* — the
-    difference between a warning you can act on and one you can only re-run the
-    import against and hope.
-    """
+    """Name the tracks Navidrome refused to store."""
     by_id = {str(r.get("id") or ""): r for r in (rows or [])}
     named: list[str] = []
     for track_id in dropped_ids[:8]:
@@ -3182,8 +2535,6 @@ def _sync_playlist_to_navidrome(
                 synced["unchanged"] += 1
             synced["deduped"] += int(result.get("deduped") or 0)
 
-            # The service verified what Navidrome actually STORED; if it kept
-            # fewer tracks than we asked for, say which ones they were.
             _dropped = [str(i) for i in (result.get("dropped_ids") or [])]
             if _dropped:
                 _log_dropped_playlist_tracks(playlist_name, _dropped, rows)
@@ -3196,10 +2547,6 @@ def _sync_playlist_to_navidrome(
             ):
                 synced["unchanged"] += 1
             elif not result.get("success"):
-                # A returned failure (e.g. Navidrome code 50: playlist not
-                # owned by the configured non-admin user) used to count as
-                # NOTHING — the playlist stayed stale while the scan summary
-                # only ever reported successes.
                 synced["failed"] += 1
         except Exception as exc:
             logger.warning("Navidrome playlist push failed", name=playlist_name, error=str(exc))
@@ -3230,22 +2577,13 @@ _TRACK_OWN_GENRE_COLUMNS: tuple[str, ...] = (
 
 
 def _track_own_genre_tokens(row: dict[str, Any]) -> list[str]:
-    """Every genre token the TRACK itself carries, from its per-source columns.
-
-    ⚠️ ``tracks.genres`` deliberately is NOT consulted here. On an ordinary
-    album it is one blended list written to every row by
-    ``sync_album_file_tags``, so it cannot answer "is THIS track metal?" — it
-    only answers "is anything on this album metal?". A Various-Artists album is
-    the exception (its per-track genres are written per track), which is why the
-    caller unions the two surfaces rather than trusting either alone.
-    """
+    """Every genre token the TRACK itself carries, from its per-source columns."""
     tokens: list[str] = []
     for column in _TRACK_OWN_GENRE_COLUMNS:
         raw = row.get(column)
         if not raw:
             continue
         tokens.extend(iter_genre_tokens(raw))
-    # De-duplicate, preserving order (the columns are already priority-ordered).
     seen: set[str] = set()
     out: list[str] = []
     for token in tokens:
@@ -3265,30 +2603,18 @@ def _resolve_playlist_genres(
     Returns ``(genres, owned)``.
 
     ``owned=True`` means the track carries genre tags of its own, so those
-    decide — the album blend is ignored. ``owned=False`` means the track has no
-    tags of its own and the album-level blend is all there is to go on, which is
-    the sparse-track case the fallback exists for.
-
-    ⭐ Why this matters (the reported "Iridescent in Alternative Metal"): with a
-    single blended ``genres`` value per album, EVERY track of a Linkin Park
-    album carries the same metal tag, so a soft electronic track joins the metal
-    playlist and a metal track joins the rock one. Reading the track's own
-    columns is what separates them.
+    decide (capped to ``max_genres``) — the album blend is ignored.
+    ``owned=False`` means the track has no tags of its own and falls back
+    to the album-level blend.
     """
     own = _track_own_genre_tokens(row)
     if own:
-        return own, True
+        return own[:max_genres], True
     return _genre_playlist_track_genres(row, max_genres=max_genres), False
 
 
 def _full_genre_tokens(row: dict[str, Any]) -> list[str]:
-    """Every genre token available for this track: its own plus the blend.
-
-    UNTRUNCATED, unlike ``_genre_playlist_track_genres``. Family tests ("is this
-    metal?") must never run against a truncated window — the same trap the
-    Christmas check documents, where a fourth-position tag was invisible and a
-    Christmas track pooled into the ordinary playlists.
-    """
+    """Every genre token available for this track: its own plus the blend."""
     tokens = _track_own_genre_tokens(row)
     tokens.extend(iter_genre_tokens(row.get("genres")))
     seen: set[str] = set()
@@ -3305,37 +2631,7 @@ def _track_is_metal_by_identity(
     *,
     use_family_tiebreak: bool,
 ) -> bool:
-    """Is this track's genre identity METAL?
-
-    Two tests, and the choice between them is the reported bug:
-
-    * ``use_family_tiebreak`` (the default) asks the genre VOCABULARY for the
-      DECIDING family — see ``Vocabulary.family_decider``. It ranks the tokens
-      by specificity then order, so "grunge" (family rock) outvotes a later
-      "alternative metal", while a track whose most specific genre IS metal
-      stays metal. This is the requested rule: *"grunge is usually more aligned
-      to rock than alt metal, where nu metal is closer to metal."*
-    * ``False`` keeps the original SUBSTRING test, which only asks whether the
-      letters "metal" appear in any token. It cannot tell Audioslave from Tool,
-      because both carry a metal tag — which is why Alternative Rock was losing
-      every crossover act.
-
-    ⚠️ The fallback applies ONLY to tokens the vocabulary does not know, and
-    that distinction is the whole reason this helper exists rather than a
-    one-line call to ``family_decider``. An earlier version handed the FULL token
-    list to the substring test whenever the family was not metal, so a considered
-    "rock" answer fell straight through to the metal tag sitting further down the
-    list — the same exclusion, just with more steps. Ranked and filtered
-    separately, a known "rock" verdict is final for the genres that were judged.
-
-    The unknown-token fallback is also the answer to the original rationale for
-    a substring test ("the subgenre vocabulary is unbounded"): a brand-new
-    subgenre spelling still matches, while every genre the vocabulary knows gets
-    the considered answer.
-
-    An empty identity is never metal, so an untagged track cannot be excluded
-    on a family it does not have.
-    """
+    """Is this track's genre identity METAL?"""
     if not tokens:
         return False
 
@@ -3347,8 +2643,6 @@ def _track_is_metal_by_identity(
             if family == METAL_GENRE_FAMILY:
                 return True
             if family:
-                # The vocabulary judged the genres it recognises and none of
-                # them is metal. Only an unrecognised token may still be.
                 return bool(unknown) and is_metal_genre(unknown)
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Genre family tie-break unavailable", error=str(exc))
@@ -3361,14 +2655,7 @@ def _playlist_identity_tokens(
     *,
     own_tags_win: bool,
 ) -> list[str]:
-    """The genre tokens that decide which podcast… playlists a track may enter.
-
-    ``own_tags_win`` implements the requested rule: a track is judged on ITS OWN
-    tags whenever it has any, and only a track with none of its own falls back
-    to the album-level blend. That is what stops a fallback-inherited tag —
-    "this album is alternative metal" — from moving a track that is itself only
-    tagged alternative rock / pop rock / electronic.
-    """
+    """The genre tokens that decide which playlists a track may enter."""
     if own_tags_win:
         own = _track_own_genre_tokens(row)
         if own:
@@ -3440,7 +2727,7 @@ def _fetch_genre_playlist_rows(min_stars: int) -> list[dict[str, Any]]:
             and _GENRE_ROWS_MIN_STARS == min_stars
             and (now - _GENRE_ROWS_AT) < _GENRE_ROWS_TTL_SECONDS
         ):
-            return _GENRE_ROWS_CACHE
+            return list(_GENRE_ROWS_CACHE)
 
     rows: list[dict[str, Any]] = []
     try:
@@ -3455,7 +2742,7 @@ def _fetch_genre_playlist_rows(min_stars: int) -> list[dict[str, Any]]:
         _GENRE_ROWS_CACHE = rows
         _GENRE_ROWS_MIN_STARS = min_stars
         _GENRE_ROWS_AT = now
-    return rows
+    return list(rows)
 
 
 def invalidate_genre_playlist_rows() -> None:
@@ -3465,9 +2752,6 @@ def invalidate_genre_playlist_rows() -> None:
         _GENRE_ROWS_MIN_STARS = None
 
 
-#: The rows a genre refresh pools by — the SAME columns the full builder
-#: reads (``_GENRE_ROWS_SQL``), so a refresh and the builder agree on what a
-#: track contributes to a genre playlist.
 _GENRE_ALBUM_ROWS_SQL = """
     SELECT id, title, file_path, duration, artist, album_artist,
            COALESCE(stars, star_rating) AS stars,
@@ -3489,14 +2773,7 @@ _GENRE_ALBUM_ROWS_SQL = """
 def _genre_playlist_rows_for_album(
     artist: str, album: str, min_stars: int,
 ) -> list[dict[str, Any]]:
-    """The tracks of ONE album that can pool into a genre playlist.
-
-    ⚠️ Scoped to the album on purpose: this is the cheap half of a refresh.
-    The expensive half (pooling the WHOLE library to decide the final track
-    list of each genre playlist) happens inside
-    ``_create_genre_top_track_playlists``, which is called ONCE per refresh
-    with the union of the affected genres.
-    """
+    """The tracks of ONE album that can pool into a genre playlist."""
     with db_session() as session:
         result = session.execute(
             text(_GENRE_ALBUM_ROWS_SQL),
@@ -3524,19 +2801,8 @@ def refresh_genre_playlists_for_album(artist: str, album: str) -> int:
         max_genres = max(1, int(_cfg.get("genre_playlists_max_genres", 3) or 3))
         affected: set[str] = set()
         for row in rows:
-            # ⚠️ The POOLING resolver — `_genre_playlist_track_genres`, which
-            # reads ``tracks.genres`` (the album blend) and is what
-            # ``_create_genre_top_track_playlists`` actually pools by.
-            #
-            # This called ``_resolve_playlist_genres`` (own-tags-first) and
-            # claimed in a comment to be "the SAME resolver the full builder
-            # uses". It is not, and the consequence was silent: `affected` could
-            # OMIT a genre the full builder WOULD pool a track into, so this
-            # refresh skipped a playlist that needed updating and it stayed
-            # stale until the next full rebuild. Two different answers to
-            # "which playlists does this album touch", on a path whose entire
-            # job is to keep them in step.
-            for genre in _genre_playlist_track_genres(row, max_genres=max_genres):
+            genres, _owned = _resolve_playlist_genres(row, max_genres=max_genres)
+            for genre in genres:
                 affected.add(genre)
 
         if not affected:
@@ -3548,18 +2814,7 @@ def refresh_genre_playlists_for_album(artist: str, album: str) -> int:
 
 
 def _genre_affected_genres_for_albums(artist: str, albums: list[str]) -> set[str]:
-    """The genre playlists the tracks of *albums* can pool into.
-
-    ⭐ The album-scoped half of a refresh. The OTHER half — pooling the WHOLE
-    library to decide each genre playlist's final track list — lives in
-    ``_create_genre_top_track_playlists`` and is deliberately NOT done per
-    artist (see ``services/popularity.scan_scope``): it is a whole-library
-    operation, and running it per artist cost minutes each time.
-
-    What IS cheap is this: the artist's own album rows, which say which genres
-    that artist feeds. That is enough to know which genre playlists owe this
-    artist a cover check.
-    """
+    """The genre playlists the tracks of *albums* can pool into."""
     try:
         from helpers.config_helpers import get_config
         _cfg = (get_config() or {}).get("playlists") or {}
@@ -3572,7 +2827,8 @@ def _genre_affected_genres_for_albums(artist: str, albums: list[str]) -> set[str
     affected: set[str] = set()
     for album in albums:
         for row in _genre_playlist_rows_for_album(artist, album, min_stars):
-            for genre in _genre_playlist_track_genres(row, max_genres=max_genres):
+            genres, _owned = _resolve_playlist_genres(row, max_genres=max_genres)
+            for genre in genres:
                 affected.add(genre)
     return affected
 
@@ -3581,9 +2837,6 @@ def _genre_affected_genres_for_albums(artist: str, albums: list[str]) -> set[str
 # Per-artist AI-cover pass (the full-library-scan gap)
 # ---------------------------------------------------------------------------
 
-#: ``name.casefold() -> Navidrome playlist id``. Cached briefly because a full
-#: library scan asks for it once per artist and the server answers with every
-#: playlist it holds (~600).
 _GENRE_COVER_ID_CACHE: dict[str, str] = {}
 _GENRE_COVER_ID_CACHE_AT = 0.0
 _GENRE_COVER_ID_CACHE_TTL = 300.0
@@ -3591,11 +2844,7 @@ _GENRE_COVER_ID_LOCK = threading.Lock()
 
 
 def _genre_playlist_ids_by_name() -> dict[str, str]:
-    """``playlist name (casefolded) -> Navidrome playlist id``.
-
-    Best-effort: a server that cannot be reached contributes nothing, and the
-    cover pass then simply finds no playlist to cover — it never raises.
-    """
+    """``playlist name (casefolded) -> Navidrome playlist id``."""
     global _GENRE_COVER_ID_CACHE, _GENRE_COVER_ID_CACHE_AT
 
     now = time.monotonic()
@@ -3604,7 +2853,7 @@ def _genre_playlist_ids_by_name() -> dict[str, str]:
             _GENRE_COVER_ID_CACHE
             and (now - _GENRE_COVER_ID_CACHE_AT) < _GENRE_COVER_ID_CACHE_TTL
         ):
-            return _GENRE_COVER_ID_CACHE
+            return dict(_GENRE_COVER_ID_CACHE)
 
         ids: dict[str, str] = {}
         for client in _navidrome_clients():
@@ -3619,38 +2868,11 @@ def _genre_playlist_ids_by_name() -> dict[str, str]:
 
         _GENRE_COVER_ID_CACHE = ids
         _GENRE_COVER_ID_CACHE_AT = now
-        return ids
+        return dict(ids)
 
 
 def refresh_genre_playlist_covers_for_artist(artist: str, albums: list[str]) -> list[str]:
-    """Ensure the AI cover art for the genre playlists *artist*'s albums feed.
-
-    ⭐⭐ WHY THIS EXISTS (the reported "Gemini is still not creating the covers
-    for the genre playlists", and "the playlists dont show during a full
-    library scan that does each artist one by one").
-
-    A full library scan runs one artist at a time, and the GLOBAL genre
-    rebuild is deliberately deferred to the END of the scan (see
-    ``services.popularity.scan_scope``): the genre playlists aggregate the
-    whole library, so rebuilding them after every artist is slow AND
-    semantically wrong.
-
-    The consequence was that the AI-cover check — which lives inside that
-    rebuild — ran ONCE per full scan, at the very end. Artist by artist
-    nothing genre-shaped happened at all, and if the scan was stopped, not
-    even that. The per-ALBUM refresh could not fill the gap either, because it
-    only ran for a single-ALBUM scan.
-
-    So this is that missing step, and it is deliberately CHEAP: it does NOT
-    re-pool the library and does NOT re-sync playlist CONTENT (the expensive
-    half, which still belongs to the end-of-scan rebuild). It only asks
-    "which genre playlists does this artist feed, and does each of them carry
-    our AI cover?" — and generates the missing art.
-
-    Returns the names of the playlists it CHECKED, so the caller can log
-    them. Never raises: an image API that is out of quota must not cost a
-    scan its ratings.
-    """
+    """Ensure the AI cover art for the genre playlists *artist*'s albums feed."""
     album_names = [str(a).strip() for a in (albums or []) if str(a or "").strip()]
     if not album_names:
         return []
@@ -3661,9 +2883,6 @@ def refresh_genre_playlist_covers_for_artist(artist: str, albums: list[str]) -> 
         cover_cfg = get_genre_cover_config()
         gem = get_gemini_config()
         if not cover_cfg["enabled"]:
-            # Say WHY, rather than staying silent. "Enabled a Gemini key but no
-            # art ever appears" is otherwise indistinguishable from "the cover
-            # pass never ran" — the two both produced no log line at all.
             if gem["enabled"] and gem["api_key"]:
                 log_unified(
                     "🎨 Genre playlist covers: OFF — tick 'AI Genre Covers' in "
@@ -3691,8 +2910,6 @@ def refresh_genre_playlist_covers_for_artist(artist: str, albums: list[str]) -> 
         if not clients:
             return []
 
-        # ⭐ The LIST the report asked for: every genre playlist this artist's
-        # updated tracks feed, whether or not it exists on the server yet.
         touched: list[str] = []
         applied = 0
         pending: list[tuple[str, str, str]] = []
@@ -3702,9 +2919,6 @@ def refresh_genre_playlist_covers_for_artist(artist: str, albums: list[str]) -> 
             touched.append(playlist_name)
             playlist_id = playlist_ids.get(playlist_name.casefold())
             if not playlist_id:
-                # The playlist does not exist on the server yet, so there is
-                # nothing to attach art to. The end-of-scan rebuild creates it
-                # and runs its own cover check — do NOT spend an image here.
                 logger.debug(
                     "Genre playlist not on the server yet — cover deferred",
                     playlist=playlist_name,
@@ -3751,9 +2965,6 @@ def _create_genre_top_track_playlists(
     prune_only: bool = False,
     only_genres: set[str] | None = None,
 ) -> int:
-    from collections import defaultdict
-    import re
-
     try:
         from helpers.config_helpers import get_config
         cfg = (get_config() or {}).get("playlists") or {}
@@ -3764,8 +2975,7 @@ def _create_genre_top_track_playlists(
     max_genres = max(1, int(cfg.get("genre_playlists_max_genres", 3) or 3))
     create_threshold = max(1, int(cfg.get("genre_playlists_create_threshold", 100) or 100))
     delete_threshold = max(1, int(cfg.get("genre_playlists_delete_threshold", 80) or 80))
-    max_tracks = _resolve_genre_max_tracks(cfg)  # None = unlimited (0 in config)
-    # ⭐ Ordering controls (see _effective_order_score / _apply_artist_cap).
+    max_tracks = _resolve_genre_max_tracks(cfg)
     order_mode = str(cfg.get("playlist_order_mode", "prominence") or "prominence").strip().lower()
     if order_mode not in ("prominence", "stored"):
         order_mode = "prominence"
@@ -3779,20 +2989,6 @@ def _create_genre_top_track_playlists(
     if not rows:
         return 0
 
-    # ── User-excluded artists ────────────────────────────────────────────────
-    #
-    # "Exclude this artist from Playlists" on the artist page writes
-    # ``playlists.excluded_artists``; this is where it takes effect for the
-    # GENRE collections. Filtered at the ROW level, before any pooling, so an
-    # excluded artist cannot reach any genre playlist through any path —
-    # including the per-genre pools, the family tie-breaks and the per-artist
-    # cap alike. Filtering later (per pool, say) would have to be repeated for
-    # every branch and would leak the artist the moment a branch forgot.
-    #
-    # ⚠️ Compared with the SAME canonical key the rest of this module uses:
-    # ``COALESCE(NULLIF(album_artist, ''), artist)``, casefolded. Comparing raw
-    # ``artist`` would miss the very common case where the album artist carries
-    # the name the user picked on the artist page.
     try:
         from helpers.config_helpers import get_excluded_playlist_artists
 
@@ -3820,13 +3016,7 @@ def _create_genre_top_track_playlists(
         if not rows:
             return 0
 
-    # PRE-FETCH: Find out which playlists already exist in Navidrome
     existing_playlists = set()
-    # Name → Navidrome playlist id, captured from the SAME fetch so the cover
-    # check costs no extra round trip. The id is what lets
-    # ``generate_genre_cover`` tell "this playlist already carries our art"
-    # from "a playlist with this name exists" — the distinction a playlist that
-    # was deleted and recreated (new id, no image) turns on.
     existing_playlist_ids: dict[str, str] = {}
     if create_enabled or delete_enabled:
         for client in _navidrome_clients():
@@ -3840,26 +3030,22 @@ def _create_genre_top_track_playlists(
                     existing_playlist_ids.setdefault(_pl_name.casefold(), _pl_id)
 
     def _track_genres(row: dict[str, Any]) -> list[str]:
-        return _genre_playlist_track_genres(
+        genres, _owned = _resolve_playlist_genres(
             row,
             max_genres=max_genres,
         )
+        return genres
 
-    # ── Genre exclusion rules (see get_genre_exclusion_config) ─────────────
-    #
-    # A track's GENRE IDENTITY is read from its own per-source columns whenever
-    # it has any, because ``tracks.genres`` is one blended list fanned out to
-    # every track of an album — it can say "something on this album is metal",
-    # never "this track is metal". Pooling by the blend is what put a soft
-    # electronic Linkin Park track into Alternative Metal and the band's metal
-    # tracks into Alternative Rock.
     try:
         from helpers.config_helpers import get_genre_exclusion_config
         _excl = get_genre_exclusion_config()
     except Exception as exc:
         logger.debug("Genre exclusion config read failed", error=str(exc))
-        _excl = {"enabled": True, "own_tags_win": True,
-                 "metal_excluded_from": ["alternative rock"]}
+        _excl = {
+            "enabled": True,
+            "own_tags_win": True,
+            "metal_excluded_from": ["alternative rock"],
+        }
 
     _excl_enabled = bool(_excl.get("enabled", True))
     _own_tags_win = bool(_excl.get("own_tags_win", True))
@@ -3878,30 +3064,11 @@ def _create_genre_top_track_playlists(
     for row in rows:
         track_genres = _track_genres(row)
 
-        # The FULL per-track set for the family tests below. Reusing the
-        # truncated ``track_genres`` would test only the first N genres — the
-        # trap the Christmas check documents next door.
         _identity = _playlist_identity_tokens(row, own_tags_win=_own_tags_win)
         _track_is_metal = _excl_enabled and _track_is_metal_by_identity(
             _identity, use_family_tiebreak=_use_family_tiebreak
         )
 
-        # Christmas detection MUST use the FULL genre list, not the truncated
-        # window above.
-        #
-        # ``_genre_playlist_track_genres`` returns at most ``max_genres`` items,
-        # and the genre aggregator APPENDS filter tags (Christmas / Live /
-        # Cover / Remaster) after the voted genres — so a Christmas track with
-        # three real genres stores "pop, rock, metal, Christmas" and the window
-        # shows only "pop, rock, metal". Testing the window for the literal
-        # word "christmas" therefore returned False and the track pooled
-        # straight into the ordinary Pop/Rock/Metal playlists, which is the
-        # reported bug.
-        #
-        # ``is_christmas_track`` also matches the other spellings the aggregator
-        # can store ("Holiday", "Xmas", "Noel", …) and falls back to the
-        # title/album patterns, so a track whose only signal is a "Holiday" tag
-        # is caught too.
         is_christmas = is_christmas_track(
             title=str(row.get("title") or ""),
             album=str(row.get("album") or ""),
@@ -3913,17 +3080,6 @@ def _create_genre_top_track_playlists(
             if not norm_key:
                 continue
 
-            # INTERCEPT: Isolate seasonal tracks from standard genres.
-            # A seasonal track only ever lands in a playlist whose name
-            # contains the marker — every other pool is skipped for it.
-            #
-            # ⚠️ EVERY spelling of the family pools under the ONE canonical
-            # token. Pooling "holiday" and "christmas" separately produced two
-            # near-duplicate playlists for one idea, and — because
-            # ``is_christmas_genre_token("holiday")`` is True — a track whose
-            # only tag was "Holiday" took the ``elif`` branch below and landed
-            # in a plain "Holiday" pool that is NOT matched by the configured
-            # playlist marker, so the exclusion did not cover it.
             if is_christmas and not is_christmas_genre_token(norm_key):
                 target_norm_key = f"christmas {norm_key}"
                 target_display = f"Christmas {genre.title()}"
@@ -3934,12 +3090,6 @@ def _create_genre_top_track_playlists(
                 target_norm_key = norm_key
                 target_display = genre
 
-            # ── Genre exclusion: a metal track may not enter a rock playlist ──
-            #
-            # Asked of the track's GENRE IDENTITY (its own tags, or the album
-            # blend for a track with none of its own), never of the truncated
-            # window — a metal tag in the fourth position must still disqualify.
-            # See ``get_genre_exclusion_config``.
             if _track_is_metal and norm_key in _metal_excluded_from:
                 _excluded_counts[norm_key] += 1
                 continue
@@ -3952,8 +3102,6 @@ def _create_genre_top_track_playlists(
                 "stars": int(row.get("stars") or 0),
                 "score": float(row.get("popularity_score") or row.get("final_score") or 0),
                 "popularity_score": float(row.get("popularity_score") or row.get("final_score") or 0),
-                # Raw global listener counts: the ONLY cross-album-comparable
-                # signal available here (``popularity_score`` is album-relative).
                 "lastfm_listeners": int(row.get("lastfm_listeners") or 0),
                 "listenbrainz_listens": int(row.get("listenbrainz_listens") or 0),
                 "artist": str(row.get("artist") or row.get("album_artist") or ""),
@@ -3974,9 +3122,6 @@ def _create_genre_top_track_playlists(
             item["title"].casefold(),
         )
 
-    # Report the genre-exclusion verdicts. A rule that silently drops tracks is
-    # indistinguishable from a bug ("why is this song not in Alternatives?"), so
-    # the count per playlist is logged at INFO — one line, only when it fires.
     if _excluded_counts:
         _parts = ", ".join(
             f"{genre}: {count}" for genre, count in sorted(_excluded_counts.items())
@@ -3995,21 +3140,11 @@ def _create_genre_top_track_playlists(
     written = 0
     skipped_unchanged = 0
     keep_playlist_names: set[str] = set()
-    # Cover-check outcome counters for the one-line summary below. Without them
-    # a scan that CHECKED 75 covers and applied none was indistinguishable from
-    # one that never looked — the reported "the log says nothing about covers".
     _cover_checked = 0
     _cover_generated = 0
     _cover_skipped = 0
     _cover_failed = 0
-    # True when this pass ran with the genre-cover toggle OFF. Lets the summary
-    # below distinguish "feature disabled" from "feature ran and did nothing",
-    # which otherwise look identical in the log.
     _cover_flag_off = False
-    # True when the toggle was ON. Distinguishes "the cover pass never ran"
-    # (no playlist reached the block) from "the feature is off" — the two
-    # produced the SAME silence, which is what made the missing art
-    # impossible to diagnose from the log.
     _cover_enabled = False
 
     norm_only_genres = None
@@ -4039,28 +3174,20 @@ def _create_genre_top_track_playlists(
 
         if prune_only:
             continue
-            
-        # FIX: If it doesn't exist, we need 100 to create it. 
-        # If it DOES exist, we only need 80 to update it!
+
         if not playlist_exists and qualifying_count < create_threshold:
             continue
-            
+
         if not create_enabled and not playlist_exists:
             continue
 
-        # ⭐ Rank on a CROSS-ALBUM-comparable key, cap per artist, then spread.
-        # Previously this was `winners.sort(key=_popularity_order)` — a pure
-        # stored-score ranking, where the stored score is album-relative, so the
-        # order reflected album context rather than the tracks.
-        # ⚠️ The cap DROPS the overflow now (it used to defer it, which the
-        # `max_tracks` slice below then pulled straight back in).
         winners = _ordered_playlist_rows(
             winners,
             order_mode=order_mode,
             max_per_artist=max_per_artist,
             interleave=interleave_artists,
         )
-        if max_tracks:  # None/0 = no cap
+        if max_tracks:
             winners = winners[:max_tracks]
 
         _song_ids = [str(t.get("id") or "").strip() for t in winners if str(t.get("id") or "").strip()]
@@ -4070,8 +3197,6 @@ def _create_genre_top_track_playlists(
         try:
             sync_res = _sync_playlist_to_navidrome(playlist_name, _song_ids, rows=winners)
             if not _playlist_sync_succeeded(sync_res):
-                # Previously a bare `continue`: the playlist silently kept its
-                # old tracks while the scan reported only the successes.
                 logger.warning(
                     "Genre playlist sync failed — Navidrome keeps its previous contents",
                     genre=genre,
@@ -4087,37 +3212,11 @@ def _create_genre_top_track_playlists(
                 log_unified(f"📄 Playlist: Synced '{playlist_name}' to Navidrome ({len(_song_ids)} tracks)")
                 written += 1
 
-            # ⚠️ REACHED ON THE SKIPPED PATH TOO. ``sync_res["skipped"]`` only
-            # means "this exact content was already pushed by THIS process" —
-            # it says nothing about the playlist's ART. A bare ``continue``
-            # used to fire above, jumping over this entire block, so a playlist
-            # that had synced once was never cover-checked again: enabling the
-            # feature, fixing a bad key, or healing a cover deleted by hand
-            # could not take effect until the playlist's CONTENT changed.
-
-            # ── AI cover art for the TOP GENRE playlists ───────────────────
-            #
-            # Runs for EVERY playlist this pass synced — created, updated OR
-            # merely unchanged — because the point is to ensure the playlist
-            # HAS its cover, not only to decorate a new one. The check is cheap
-            # when nothing changed: ``generate_genre_cover`` skips without
-            # calling the image API when the recorded art still matches AND the
-            # recorded playlist id is THIS playlist.
-            #
-            # ⚠️ The playlist id is passed IN from the map built above, so
-            # verifying the cover costs no extra Navidrome round trip.
-            #
-            # Never fatal, and the reason is always logged — an image API that
-            # is out of quota must not cost the scan its file-tag sync.
             try:
                 from helpers.config_helpers import get_genre_cover_config
 
                 _genre_cover_cfg = get_genre_cover_config()
                 if not _genre_cover_cfg["enabled"]:
-                    # Record it so the pass can say WHY nothing was checked: a
-                    # Gemini key on its own does not turn covers on (that is a
-                    # separate toggle), and the pair reads as "Gemini is
-                    # configured but no art ever appears".
                     _cover_flag_off = True
                 else:
                     _cover_enabled = True
@@ -4161,9 +3260,6 @@ def _create_genre_top_track_playlists(
     if skipped_unchanged:
         logger.debug("Genre playlists unchanged", count=skipped_unchanged)
 
-    # One line, only when the cover check actually ran. Covers being ENABLED
-    # but producing no per-playlist log used to look identical to the feature
-    # not running at all; this makes the pass legible either way.
     if _cover_checked:
         log_unified(
             f"🎨 Genre playlist covers — {_cover_generated} applied, "
@@ -4171,18 +3267,11 @@ def _create_genre_top_track_playlists(
             f"({_cover_checked} playlist(s) checked)"
         )
     elif _cover_enabled:
-        # The feature is ON but NO playlist reached the cover block. That is
-        # not "nothing to do" — it means the pass never got as far as the
-        # cover check, which is exactly what the reported "no Gemini output
-        # and no log line" looked like. Say so instead of staying silent.
         log_unified(
             "🎨 Genre playlist covers — enabled, but no genre playlist reached "
             "the cover check this pass (nothing was synced)"
         )
     elif _cover_flag_off:
-        # Speak up ONLY when the Gemini key is actually configured: otherwise
-        # this is a feature the user simply does not want, and a line per scan
-        # is noise.
         try:
             from helpers.config_helpers import get_gemini_config
 
@@ -4318,11 +3407,7 @@ def _apply_live_album_slot_caps(
     artist: str,
     album: str,
 ) -> None:
-    """Cap 5★ and 4★ counts on a live album.
-
-    Protected tracks (user overrides, global 5★ locks, forced floors) are
-    never demoted; everything else is demoted lowest-score-first.
-    """
+    """Cap 5★ and 4★ counts on a live album."""
     rules = _live_album_rules()
     max5 = max(0, int(rules["max_5star_slots"]))
     max4 = max(0, int(rules["max_4star_slots"]))
@@ -4376,25 +3461,7 @@ def _apply_short_track_star_cap(
     artist: str = "",
     album: str = "",
 ) -> int:
-    """Clamp very short tracks to at most ``max_stars``.
-
-    A 50-second track is a skit, an interlude or a hidden-track joke.  Last.fm
-    and ListenBrainz count those as full "listens", so on a popular album a
-    short track's raw play counts can out-rank the album's real songs and land
-    4★/5★.  ``statistics.short_track_star_cap`` (default: enabled, 70s, 2★)
-    is a FINAL clamp applied after every other star path — era slots, the
-    live-album caps and the single-driven floors — so nothing restores the
-    rating afterwards.
-
-    Algorithmic ratings only: a user override (``single_confidence == "user"``),
-    a global 5★ lock, a forced floor or a hearted track is an explicit
-    instruction and is never clamped. Note that hearts are ALSO protected
-    downstream — ``apply_favourite_rating_floor`` runs after persistence and
-    raises hearted tracks back to the configured floor, so a heart wins even
-    when this clamp could not see the flag.
-
-    Returns the number of tracks whose rating was lowered.
-    """
+    """Clamp very short tracks to at most ``max_stars``."""
     try:
         from helpers.config_helpers import get_short_track_star_cap_config
         _cfg = get_short_track_star_cap_config()
@@ -4406,8 +3473,6 @@ def _apply_short_track_star_cap(
         return 0
     max_duration = float(_cfg.get("max_duration_seconds") or 0)
     max_stars = int(_cfg.get("max_stars") or 0)
-    # A zero threshold or a ceiling below 1★ would silence music rather than
-    # cap it — treat both as "disabled".
     if max_duration <= 0 or max_stars < 1 or max_stars >= 5:
         return 0
 
@@ -4425,9 +3490,6 @@ def _apply_short_track_star_cap(
 
         _previous = int(track.get("stars") or 0)
         track["stars"] = max_stars
-        # These flags claim a 5★/4★ award that no longer holds; leaving them
-        # set would let a downstream slot-cap pass treat the track as
-        # protected and keep it above the clamp.
         track["_era_5star"] = False
         _force = int(track.get("_force_floor") or 0)
         if _force > max_stars:
@@ -4449,17 +3511,7 @@ def _apply_short_track_star_cap(
 
 
 def _short_track_cap_is_protected(track: dict[str, Any]) -> bool:
-    """True when a track's rating is an explicit instruction, not a guess.
-
-    ⚠️ The lock is honoured ONLY when it actually DROVE the rating. The
-    compilation branch ignores ``_global_5star_locked`` by design — it rates on
-    the credited artist's catalogue — so a locked COMPILATION track is still an
-    algorithmic rating and the short-track cap must apply to it. Reading the
-    flag alone exempted it, which is the reported "Opening stays 4★": the
-    artist-boundary pre-pass locked Danny Elfman's 60-second "Opening" (the
-    provisional pass had correctly capped it to 2★), and the reconcile pass
-    then skipped the cap because of that inert lock.
-    """
+    """True when a track's rating is an explicit instruction, not a guess."""
     if bool(track.get("_global_5star_locked")) and not track.get("_compilation_rating_mode"):
         return True
     if str(track.get("single_confidence") or "").strip().casefold() == "user":
@@ -4473,14 +3525,7 @@ def _track_duration_seconds(
     track: dict[str, Any],
     durations: dict[str, float],
 ) -> float | None:
-    """Best-effort track duration in seconds from the row or the DB lookup.
-
-    Normalises milliseconds to seconds: some sources store duration in ms, and
-    a raw ms value compared against a seconds threshold would silently exempt
-    every track from the cap.  The division only fires above one hour, so a
-    genuine long track (an 11-minute epic at 700s) is never misread as 0.7s
-    and wrongly capped.
-    """
+    """Best-effort track duration in seconds from the row or the DB lookup."""
     raw = track.get("duration")
     if raw in (None, ""):
         track_id = str(track.get("track_id") or "").strip()
@@ -4507,38 +3552,7 @@ def post_album_star_ratings(
     stars_reconciled: bool | None = None,
     provisional: bool = False,
 ) -> dict[str, int]:
-    """Assign, persist, log and sync star ratings for ONE album.
-
-    ``is_compilation``/``is_va_compilation`` are passed in by the scan runner,
-    which is the only layer that still holds the album CONTEXT (artist, title,
-    MusicBrainz types). They used to be re-derived here, from
-    ``album_results[0]["album_type"]`` — a key the track stage never sets — so
-    the value always collapsed to ``""`` and every compilation was then rated
-    as a studio album. The reported symptom: a "Various Artists - Little
-    Nicky" compilation whose tracks were scored against the compilation's own
-    shared pool instead of each credited artist's catalogue, with the scan log
-    printing a plain ``Z-SCORE`` header instead of ``CAT-Z`` and
-    ``[COMPILATION: per-track-artist rating]``.
-
-    When the caller has no context (the ``finalise_scan`` grouping path),
-    ``None`` falls back to the local title/artist heuristics.
-
-    ``stars_reconciled`` is written alongside the stars (tri-state):
-      * ``False`` — the PER-ALBUM pass posted these stars provisionally, with
-        only the artist context available at that moment;
-      * ``True``  — the artist-boundary RECONCILE pass re-rated the album with
-        the complete catalogue;
-      * ``None``  — leave the column untouched (callers that are not part of
-        the two-phase rating, e.g. the finalise grouping path).
-    See ``tracks.stars_reconciled`` in db/schema.py.
-
-    ``provisional`` marks the PER-ALBUM phase-1 call: it persists exactly the
-    same way (that is the whole point — durability), but suppresses the
-    per-track ``[TRACK_RESULT]`` lines and the SCAN RESULTS table, which are
-    only meaningful once the artist-boundary reconcile has applied the
-    complete-catalogue context. Phase 1 logs one compact line instead, so the
-    log still shows one full table per album — at reconcile time, as before.
-    """
+    """Assign, persist, log and sync star ratings for ONE album."""
     album = (
         str(
             album_results[0].get("album")
@@ -4555,13 +3569,6 @@ def post_album_star_ratings(
     navidrome_synced = 0
 
     try:
-        # NOTE: a local ``generic_compilation_artist`` (the album artist being
-        # one of ``_VA_ALBUM_ARTIST_NAMES``) used to be computed here and
-        # threaded into ``_assign_stars``, which never read it. The rating
-        # branch now keys off the caller's authoritative ``is_va_compilation``
-        # — the value ``_resolve_compilation_flags`` / the scan runner already
-        # produced, which also covers the "4+ credited artists" heuristic a
-        # name check cannot see.
         if is_compilation is None:
             is_compilation, is_va_compilation = _resolve_compilation_flags(
                 album_results=album_results,
@@ -4649,25 +3656,9 @@ def post_album_star_ratings(
 
         _log_scan_weights(artist, album, album_model, is_live_album=is_live_album)
 
-        # Compilation albums group many different credited recording artists
-        # under one shared album/album_artist folder. Build a per-credited-
-        # artist score distribution up front so each track can be rated
-        # against ITS OWN artist's catalogue, not the compilation's shared
-        # pool (which for a "Various Artists" release carries no meaningful
-        # per-artist signal at all).
-        #: The compilation's OWN cross-artist distribution, from the PRE-REMAP
-        #: blend. ``album_scores`` cannot serve this: for a compilation every
-        #: track's ``popularity_score`` has already been remapped onto its own
-        #: artist's catalogue (``_apply_track_artist_relative_normalization``),
-        #: so those values are no longer comparable across artists. The raw
-        #: blend is, and that is what the standout floor ranks against.
+        compilation_track_artist_scores: dict[str, list[float]] = {}
         compilation_raw_scores: list[float] = []
         if is_compilation:
-            # ⭐ ``exclude_album``: the compilation is not evidence about itself.
-            # Without it the album's own hits lift the credited artist's
-            # catalogue mean, which flattens the whole album downwards — a
-            # greatest-hits record could produce no 5★ at all, however big its
-            # hits (see ``compute_track_artist_scores``).
             compilation_track_artist_scores = _build_compilation_track_artist_scores(
                 album_results, exclude_album=album
             )
@@ -4752,12 +3743,29 @@ def post_album_star_ratings(
         except Exception as exc:
             logger.debug("Artist listen distribution failed", artist=artist, error=str(exc))
 
+        # Pre-resolve album-wide configs once to avoid per-track re-reads in _assign_stars
+        _thresholds = _live_star_thresholds()
+        try:
+            from services.popularity.popularity_config import get_single_organic_floor
+            _organic_floor: tuple[float, float] | None = get_single_organic_floor()
+        except Exception:
+            _organic_floor = (45.0, 1000.0)
+
+        try:
+            from services.popularity.popularity_config import get_artist_force_star_percentiles
+            _force_star_pcts: tuple[float, float] | None = get_artist_force_star_percentiles()
+        except Exception:
+            _force_star_pcts = None
+
+        _comp_online_rules: dict[str, Any] | None = None
+        if is_compilation:
+            try:
+                from helpers.config_helpers import get_compilation_online_catalogue_config
+                _comp_online_rules = get_compilation_online_catalogue_config()
+            except Exception:
+                _comp_online_rules = {}
+
         # 1. Assign star ratings in memory
-        #
-        # The same-fate cohort, built ONCE per album: tracks whose
-        # ListenBrainz source is unusable (zero, or rejected by the Log-MAD
-        # audit) are rated among each other instead of against a median their
-        # two-source siblings lifted (the reported "Prison Sex" case).
         _lb_unusable_ids, _lb_cohort_scores = _lb_unusable_cohort(album_results)
         for track in album_results:
             try:
@@ -4781,9 +3789,6 @@ def post_album_star_ratings(
                     album_model=album_model,
                     is_compilation=is_compilation,
                     artist_listen_distribution=_artist_listen_distribution,
-                    # The authoritative VA verdict from the caller. It selects
-                    # the catalogue that rates a compilation track: online for
-                    # VA, local artist catalogue for a single-artist record.
                     is_va_compilation=bool(is_va_compilation),
                     is_live_album=is_live_album,
                     source_unusable=(
@@ -4791,6 +3796,10 @@ def post_album_star_ratings(
                     ),
                     cohort_scores=_lb_cohort_scores,
                     compilation_raw_scores=compilation_raw_scores,
+                    thresholds=_thresholds,
+                    organic_floor=_organic_floor,
+                    force_star_percentiles=_force_star_pcts,
+                    compilation_online_rules=_comp_online_rules,
                 )
             except Exception as exc:
                 track_id = str(track.get("track_id") or "").strip()
@@ -4809,7 +3818,6 @@ def post_album_star_ratings(
 
         # 2. Enforce slot caps before persistence
         if is_live_album and not is_compilation:
-            # Live albums use their own, much tighter caps.
             _apply_live_album_slot_caps(album_results, artist, album)
         elif album_model.get("has_benchmark") and not is_compilation:
             _rules, _, _ = _live_album_scaling()
@@ -4841,10 +3849,14 @@ def post_album_star_ratings(
             ]
             automatic_five_star_tracks.sort(
                 key=lambda track: (
-                    _compute_album_z(
-                        float(track.get("popularity_score") or track.get("final_score") or 0),
-                        album_scores,
-                    )[0],
+                    float(
+                        track.get("_computed_album_z")
+                        if track.get("_computed_album_z") is not None
+                        else _compute_album_z(
+                            float(track.get("popularity_score") or track.get("final_score") or 0),
+                            album_scores,
+                        )[0]
+                    ),
                     float(track.get("popularity_score") or track.get("final_score") or 0),
                 ),
                 reverse=True,
@@ -4861,54 +3873,7 @@ def post_album_star_ratings(
                     protected=len(protected_five_star_tracks),
                 )
 
-        # 2.5 Enforce 4-star percentage cap before persistence
-        # DISABLED: This was a hardcoded override that artificially crushed 4-star ratings.
-        # It has been commented out to respect your organic score distributions.
-        """
-        if album_model.get("has_benchmark") and not is_compilation and not is_live_album:
-            baseline_tracks = int(album_results[0].get("original_track_count") or 0)
-            if baseline_tracks <= 0:
-                local_count = len(album_results)
-                baseline_tracks = local_count if local_count < 14 else 12
-
-            era = str(album_model.get("era") or "peak")
-            era_caps = {"peak": 0.30, "solid": 0.20, "minor": 0.15}
-            cap_pct = era_caps.get(era, 0.20)
-            max_4star_slots = max(1, int(baseline_tracks * cap_pct))
-
-            # A verified single is exempt: the percentage cap exists to stop
-            # album filler inflating the 4★ count, not to demote tracks that
-            # independent sources confirm were released as singles.
-            automatic_4star_tracks = [
-                track for track in album_results
-                if int(track.get("stars") or 0) == 4
-                and not bool(track.get("_global_5star_locked"))
-                and int(track.get("_force_floor") or 0) < 4
-                and str(track.get("single_confidence") or "low").strip().casefold() not in ("high", "medium", "user")
-            ]
-            automatic_4star_tracks.sort(
-                key=lambda track: float(track.get("popularity_score") or track.get("final_score") or 0),
-                reverse=True
-            )
-
-            if len(automatic_4star_tracks) > max_4star_slots:
-                for track in automatic_4star_tracks[max_4star_slots:]:
-                    track["stars"] = 3
-                    logger.info(
-                        "Era slot cap applied: 4★ → 3★",
-                        artist=artist, album=album,
-                        title=track.get("title"), cap=max_4star_slots,
-                        baseline_tracks=baseline_tracks
-                    )
-        """
-
         # 2.9 Clamp very short tracks (skits / interludes / jokes).
-        # This is deliberately the LAST rating pass: the era and live-album
-        # caps above can write 4★ to a demoted 5★, so a clamp applied before
-        # them would be undone. Applying it here means nothing downstream
-        # restores a 4★/5★ on a track the config says is too short to earn
-        # one. User overrides and hearts are exempt (see the helper). Any
-        # resulting change from the stored rating is picked up below.
         _apply_short_track_star_cap(
             album_results,
             durations=_stored_durations,
@@ -4916,45 +3881,47 @@ def post_album_star_ratings(
             album=album,
         )
 
-        # 3. Persist calculated and capped ratings first
+        # 3. Persist calculated and capped ratings (batched with per-row fallback)
         _ratings_changed = False
         _persist_failures = 0
-        with db_session() as session:
-            for track in album_results:
-                track_id = str(track.get("track_id") or "").strip()
-                stars = int(track.get("stars") or 0)
-                if not track_id or stars < 1:
-                    continue
+        _batch_params: list[dict[str, Any]] = []
+        for track in album_results:
+            track_id = str(track.get("track_id") or "").strip()
+            stars = int(track.get("stars") or 0)
+            if not track_id or stars < 1:
+                continue
+            if stars != _stored_stars.get(track_id, 0):
+                _ratings_changed = True
+            param: dict[str, Any] = {"stars": stars, "tid": track_id}
+            if stars_reconciled is not None:
+                param["rec"] = bool(stars_reconciled)
+            _batch_params.append(param)
 
-                if stars != _stored_stars.get(track_id, 0):
-                    _ratings_changed = True
-
-                nested = session.begin_nested()
-                try:
-                    _sets = "stars = :stars"
-                    _params: dict[str, Any] = {"stars": stars, "tid": track_id}
-                    # Write the reconcile flag ATOMICALLY with the stars so a
-                    # crash can never leave a star value whose provenance is
-                    # unknown (see tracks.stars_reconciled).
-                    if stars_reconciled is not None:
-                        _sets += ", stars_reconciled = :rec"
-                        _params["rec"] = bool(stars_reconciled)
-                    session.execute(
-                        text(f"UPDATE tracks SET {_sets} WHERE id = :tid"),
-                        _params,
-                    )
-                    if nested.is_active:
-                        nested.commit()
-                except Exception as exc:
-                    _persist_failures += 1
-                    logger.warning(
-                        "Rating persist failed", track_id=track_id,
-                        artist=artist, album=album, error=str(exc),
-                    )
-                    try:
-                        nested.rollback()
-                    except Exception as rollback_exc:
-                        logger.debug("Rating persist rollback failed", track_id=track_id, error=str(rollback_exc))
+        if _batch_params:
+            _sets_sql = "stars = :stars" + (", stars_reconciled = :rec" if stars_reconciled is not None else "")
+            _update_stmt = text(f"UPDATE tracks SET {_sets_sql} WHERE id = :tid")
+            try:
+                with db_session() as session:
+                    session.execute(_update_stmt, _batch_params)
+            except Exception as batch_exc:
+                logger.debug("Batch rating persist failed, falling back to per-row savepoints", error=str(batch_exc))
+                with db_session() as session:
+                    for param in _batch_params:
+                        nested = session.begin_nested()
+                        try:
+                            session.execute(_update_stmt, param)
+                            if nested.is_active:
+                                nested.commit()
+                        except Exception as exc:
+                            _persist_failures += 1
+                            logger.warning(
+                                "Rating persist failed", track_id=param["tid"],
+                                artist=artist, album=album, error=str(exc),
+                            )
+                            try:
+                                nested.rollback()
+                            except Exception as rollback_exc:
+                                logger.debug("Rating persist rollback failed", track_id=param["tid"], error=str(rollback_exc))
 
         if _persist_failures:
             logger.warning(
@@ -5013,7 +3980,10 @@ def post_album_star_ratings(
             _track_score = float(track.get("popularity_score") or track.get("final_score") or 0)
             _final_score = float(track.get("final_score") or _track_score or 0)
 
-            if is_compilation:
+            if track.get("_computed_album_z") is not None and track.get("_computed_artist_z") is not None:
+                _album_z = float(track["_computed_album_z"])
+                _artist_z = float(track["_computed_artist_z"])
+            elif is_compilation:
                 _rating_scores_for_log = compilation_track_artist_scores.get(
                     _compilation_track_artist(track).casefold(), []
                 )
@@ -5047,9 +4017,6 @@ def post_album_star_ratings(
                 _credited_artist_for_log = _compilation_track_artist(track) or artist
                 _catalogue_n = int(track.get("_rating_catalogue_size") or 0)
                 _rating_mode = str(track.get("_compilation_rating_mode") or "unknown")
-                # When the rating came from the artist's ONLINE catalogue,
-                # show the real-world rank (#1 of 47) instead of a z-score
-                # that was never computed against the local library.
                 if _rating_mode == "track_artist_online_catalogue":
                     _rank = int(track.get("_compilation_online_rank") or 0)
                     _total = int(track.get("_compilation_online_total") or 0)
@@ -5105,20 +4072,6 @@ def post_album_star_ratings(
             _pop_only = bool(options.get("popularity_only"))
             singles_detected = [] if _pop_only else [t for t in album_results if t.get("is_single")]
 
-            # ── PER-ALBUM (provisional) phase: log, then continue ──────────
-            #
-            # The provisional call has already persisted the stars, the file
-            # tags and (below) the Navidrome ratings — the durability half is
-            # COMPLETE. What it must NOT print is the SCAN RESULTS table: that
-            # table is computed with the artist context available SO FAR, so
-            # printing it now AND again at the artist boundary would both double
-            # the log and present a not-yet-reconciled table as final. One
-            # compact line here; the full table is printed by the reconcile
-            # pass, exactly once per album, as before.
-            #
-            # ⚠️ Deliberately NOT an early return: the Navidrome sync further
-            # down is part of the durability this phase exists for. An early
-            # return would leave every provisionally-rated track unsynced.
             if provisional:
                 log_unified(
                     f"[RATINGS] Provisional ratings for '{album}' "
@@ -5126,12 +4079,6 @@ def post_album_star_ratings(
                     + " | ".join(f"{k}★: {v}" for k, v in sorted(star_counts.items(), reverse=True) if v)
                 )
             else:
-                # Reported for EVERY album, not only when something was
-                # detected. Gating on ``singles_detected`` meant an album that
-                # yielded no singles left no trace in the Scanner tab, so while
-                # the status bar said "Singles Detection" the log looked exactly
-                # like a hung stage and the only proof of life was the raw info
-                # log.
                 if _pop_only:
                     log_unified(f"Singles Detection - skipped (popularity only) in '{album}'")
                 else:
@@ -5146,7 +4093,9 @@ def post_album_star_ratings(
                     t_title = str(t.get("title") or "Unknown").strip()
                     t_score = float(t.get("popularity_score") or t.get("final_score") or 0)
 
-                    if is_compilation:
+                    if t.get("_computed_album_z") is not None:
+                        album_z = float(t["_computed_album_z"])
+                    elif is_compilation:
                         _ref_scores_for_row = compilation_track_artist_scores.get(
                             _compilation_track_artist(t).casefold(), []
                         )
@@ -5274,22 +4223,9 @@ def _run_global_playlist_rebuild(
     *,
     force: bool = False,
 ) -> None:
-    """Rebuild the GLOBAL playlists (genre top-tracks, New Music) + the index.
-
-    ⚠️ ``options`` IS PER-ARTIST during a full scan, so its marker can NEVER
-    make this "once per scan": ``scan_stage_runner.run_scan`` builds a fresh
-    dict for every artist. That inaccuracy is what made a 982-artist scan pay a
-    full genre sync plus an entire playlist-index rebuild after every artist —
-    see ``services/popularity/scan_scope`` for the measurement and the fix.
-
-    The full-scan orchestrator therefore DEFERS this for the duration of the
-    artist loop (every per-artist call returns immediately) and calls it once at
-    the end with ``force=True``.
-    """
+    """Rebuild the GLOBAL playlists (genre top-tracks, New Music) + the index."""
     marker = "_global_playlists_done"
 
-    # Deferred to the end of a full scan — the orchestrator owns the rebuild.
-    # ``force=True`` is how that end-of-scan call gets through.
     if not force:
         try:
             from services.popularity.scan_scope import global_playlists_deferred
@@ -5297,7 +4233,6 @@ def _run_global_playlist_rebuild(
             if global_playlists_deferred():
                 return
         except Exception:
-            # A broken flag module must never disable playlist generation.
             pass
 
     if options.get(marker):
@@ -5321,19 +4256,6 @@ def _run_global_playlist_rebuild(
         except Exception as exc:
             logger.warning("New Music playlist generation failed", error=str(exc))
 
-        # ── Per-user favourite playlists ───────────────────────────────────
-        #
-        # Runs AFTER the rating pass (this function is the scan's tail) so the
-        # 4★/5★ filter reads the ratings this pass just wrote, and BEFORE the
-        # playlist index below so the index records the playlists it creates.
-        #
-        # ⚠️ Per USER, and pushed with that user's own client: Navidrome
-        # refuses a write to a playlist the caller does not own (Subsonic code
-        # 50), which is exactly why these cannot share the server-scoped
-        # client list `_navidrome_clients()` the index uses.
-        #
-        # Never fatal: a Navidrome hiccup here must not cost the scan its
-        # file-tag sync (the same rule the index sync follows).
         try:
             from helpers.config_helpers import get_favourite_playlists_config
 
@@ -5360,26 +4282,6 @@ def _run_global_playlist_rebuild(
         except Exception as exc:
             logger.warning("Favourite playlist sync failed", error=str(exc))
 
-        # ── Playlist index (artist page's "Included in Playlists") ─────────
-        #
-        # Runs LAST, after every builder above, so the index records what this
-        # pass just created rather than the previous pass's contents.
-        #
-        # ⚠️ "ONCE PER SCAN" IS ENFORCED BY ``scan_scope``, NOT BY THE MARKER
-        # BELOW. This comment used to claim the marker achieved it, which was
-        # false: ``options`` is rebuilt per artist, so on a full scan ``marker``
-        # is always absent and this whole block (genre playlists, New Music,
-        # per-user favourites + the index over every playlist) ran after EVERY
-        # artist. The full-scan orchestrator now defers it and calls this once at
-        # the end; the marker only dedupes repeat calls WITHIN one artist's run.
-        #
-        # The index sync is cheap when nothing moved: it lists the playlists,
-        # compares each `changed` stamp and fetches only the ones that differ.
-        #
-        # ⚠️ Clients come from `_navidrome_clients()` — the SERVER-scoped
-        # factory — not from a per-account source. Playlists belong to the
-        # server, and using a per-account client list here is what produced the
-        # duplicate-playlist ping-pong this module's docstring describes.
         try:
             from services.playlists.playlist_index_service import sync_playlist_index
 
@@ -5387,8 +4289,6 @@ def _run_global_playlist_rebuild(
             if _index_stats.get("changed") or _index_stats.get("pruned"):
                 logger.info("Playlist index synced", **_index_stats)
         except Exception as exc:
-            # Never fatal: the index only feeds a display section, and a
-            # failure here must not cost the scan its file-tag sync.
             logger.debug("Playlist index sync failed", error=str(exc))
 
         try:
@@ -5402,25 +4302,7 @@ def _run_global_playlist_rebuild(
 # ---------------------------------------------------------------------------
 
 def _sync_isrc_popularity() -> int:
-    """Sync popularity stats across tracks sharing the same ISRC **and title**.
-
-    ⭐⭐ THE TITLE KEY IS LOAD-BEARING, not decoration. An ISRC identifies a
-    performance, but a WRONG ISRC is common in the wild: measured on Arion —
-    "Life Is Not Beautiful", where three bonus tracks ("The End Of The Fall"
-    plus two 2018 bonus tracks) all carried the lead single's code
-    (FIRAN1800001). Grouping by ``isrc`` alone took ``MAX(score)`` over all four
-    rows and wrote the single's 91.7 onto every bonus track, and
-    ``BOOL_OR(is_single)`` marked them all as singles — before any per-track
-    scoring could correct it.
-
-    A shared ISRC therefore only pools rows that ALSO agree on the title. The
-    comparison is ``LOWER(TRIM(title))`` — crude, but it is the strongest
-    portable key available in SQL (no user function, works on SQLite and
-    PostgreSQL), and an exact-title duplicate is the case this sync exists for.
-    A variant spelling ("Song" vs "Song (feat. X)") now falls back to its own
-    score instead of pooling: it keeps the rating the track actually earned,
-    which is the smaller error.
-    """
+    """Sync popularity stats across tracks sharing the same ISRC **and title**."""
     try:
         with db_session() as session:
             result = session.execute(
@@ -5462,8 +4344,8 @@ def finalise_scan(*, results: list[dict[str, Any]], options: dict[str, Any]) -> 
     log_unified(f"[FINALISE_STAGE] Finalising scan — {track_count} tracks processed")
 
     try:
-        from services.popularity.popularity_config import get_single_organic_floor
         from helpers.config_helpers import get_config
+        from services.popularity.popularity_config import get_single_organic_floor
         _floor_score, _floor_listeners = get_single_organic_floor()
         _standout_cfg = get_standout_config() or {}
         _lz = _safe_float(_standout_cfg.get("listener_5star_z_threshold"), 1.0)
@@ -5502,8 +4384,6 @@ def finalise_scan(*, results: list[dict[str, Any]], options: dict[str, Any]) -> 
         except Exception as exc:
             logger.error("Finalisation failed on empty results", error=str(exc))
         return
-
-    from collections import defaultdict
 
     by_artist: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in results:
@@ -5555,10 +4435,27 @@ def finalise_scan(*, results: list[dict[str, Any]], options: dict[str, Any]) -> 
                     _med = median(_valid_scores)
                     _mads = [abs(s - _med) for s in _valid_scores]
                     _mad = median(_mads) if _mads else 0.0
-                    _album_count = len({str(r.get("album") or "") for r in artist_results if r.get("album")})
+                    _album_names = {
+                        str(r.get("album") or "").strip().casefold()
+                        for r in artist_results
+                        if str(r.get("album") or "").strip()
+                    }
                     _artist_id = _resolve_navidrome_artist_id(artist) or artist
 
                     with db_session() as session:
+                        _db_albums = session.execute(
+                            text(
+                                "SELECT DISTINCT LOWER(TRIM(album)) FROM tracks "
+                                "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
+                                "  AND album IS NOT NULL AND TRIM(album) <> ''"
+                            ),
+                            {"artist": artist},
+                        ).fetchall() or []
+                        for _row in _db_albums:
+                            if _row and _row[0]:
+                                _album_names.add(str(_row[0]))
+
+                        _album_count = len(_album_names)
                         session.execute(
                             text("""
                                 INSERT INTO artist_stats
