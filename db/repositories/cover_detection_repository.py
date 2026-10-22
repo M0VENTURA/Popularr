@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -48,7 +49,7 @@ def track_has_original_by_artist(
                     SELECT 1 FROM tracks
                     WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
                       AND LOWER(title) = LOWER(:title)
-                      AND COALESCE(is_cover, 0) = 0
+                      AND COALESCE(CAST(is_cover AS INTEGER), 0) = 0
                     LIMIT 1
                 """),
                 {"artist": artist, "title": title},
@@ -148,8 +149,8 @@ def get_track_writers_from_db(conn, track_id: str) -> List[str]:
     try:
         with db_session() as session:
             row = session.execute(
-                text("SELECT writer FROM tracks WHERE id = :id"),
-                {"id": track_id},
+                text("SELECT writer FROM tracks WHERE CAST(id AS TEXT) = :id"),
+                {"id": str(track_id)},
             ).fetchone()
         if row:
             raw = row[0]
@@ -176,8 +177,11 @@ def is_cover_fully_confirmed(conn, track_id: str) -> bool:
     try:
         with db_session() as session:
             row = session.execute(
-                text("SELECT is_cover, original_cover_artist, cover_manual_override FROM tracks WHERE id = :id"),
-                {"id": track_id},
+                text(
+                    "SELECT is_cover, original_cover_artist, cover_manual_override "
+                    "FROM tracks WHERE CAST(id AS TEXT) = :id"
+                ),
+                {"id": str(track_id)},
             ).fetchone()
         if not row:
             return False
@@ -200,8 +204,8 @@ def get_track_genres(conn, track_id: str) -> dict:
     try:
         with db_session() as session:
             row = session.execute(
-                text("SELECT genres, musicbrainz_genres FROM tracks WHERE id = :id"),
-                {"id": track_id},
+                text("SELECT genres, musicbrainz_genres FROM tracks WHERE CAST(id AS TEXT) = :id"),
+                {"id": str(track_id)},
             ).fetchone()
         if row:
             return {
@@ -218,10 +222,39 @@ def get_track_genres(conn, track_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _genre_list_from_db(raw: Any) -> Optional[list]:
+    """A stored genre column as a list, or ``None`` when it cannot be read.
+
+    ⚠️ ``None`` means "do NOT overwrite". A JSONB column arrives from the
+    driver as a Python LIST, which ``json.loads`` rejects — the old code then
+    fell back to ``[]`` and saved ``["Cover"]``, WIPING the track's real
+    MusicBrainz genres. An unreadable value is now left exactly as it is.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return list(raw)
+    if isinstance(raw, tuple):
+        return list(raw)
+    text_value = str(raw).strip()
+    if not text_value or text_value.lower() in ("null", "none", "[]"):
+        return []
+    try:
+        parsed = json.loads(text_value)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
 def apply_cover_metadata_batch(conn, updates: List[Dict], max_retries: int = 5) -> List[str]:
     """Persist cover metadata for a batch of tracks.
 
-    Returns the list of successfully-updated track IDs.
+    For every update: "Cover" is added to ``musicbrainz_genres`` (never
+    replacing the real genres), the title gains its "(Original Artist Cover)"
+    suffix, and ``is_cover`` / ``is_cover_reason`` / ``original_cover_artist``
+    are stored.
+
+    Returns the list of successfully-updated track IDs (as strings).
     Uses deterministic retry with exponential back-off.
     """
     if not updates:
@@ -240,48 +273,54 @@ def apply_cover_metadata_batch(conn, updates: List[Dict], max_retries: int = 5) 
             successful: List[str] = []
             with db_session() as session:
                 for update in rows:
-                    tid = update["track_id"]
-                    title = update.get("title", "")
-                    orig = update.get("original_artist", "")
-                    reason = update.get("is_cover_reason") or (f"Originally by {orig}" if orig else "Cover detection")
-                    new_title = _build_cover_title(title, orig)
+                    tid = str(update["track_id"])
+                    title = update.get("title", "") or ""
+                    orig = str(update.get("original_artist", "") or "").strip()
+                    reason = update.get("is_cover_reason") or (
+                        f"Originally by {orig}" if orig else "Cover detection"
+                    )
+                    new_title = build_cover_title(title, orig)
 
-                    # Add "Cover" to musicbrainz_genres.
+                    # ── "Cover" genre, merged — never replacing ───────────
                     try:
                         row = session.execute(
-                            text("SELECT musicbrainz_genres FROM tracks WHERE id = :id"),
+                            text(
+                                "SELECT musicbrainz_genres FROM tracks "
+                                "WHERE CAST(id AS TEXT) = :id"
+                            ),
                             {"id": tid},
                         ).fetchone()
                     except Exception:
                         row = None
-                    mb_raw = row[0] if row else ""
-                    try:
-                        mb_list = json.loads(mb_raw) if mb_raw and mb_raw != "null" else []
-                        if not isinstance(mb_list, list):
-                            mb_list = []
-                    except (json.JSONDecodeError, TypeError):
-                        mb_list = []
-                    if "Cover" not in [str(g).strip() for g in mb_list]:
+                    mb_list = _genre_list_from_db(row[0] if row else None)
+                    if mb_list is not None and "cover" not in {
+                        str(g).strip().casefold() for g in mb_list
+                    }:
                         mb_list.insert(0, "Cover")
                         session.execute(
-                            text("UPDATE tracks SET musicbrainz_genres = :genres WHERE id = :id"),
-                            {"genres": json.dumps(mb_list), "id": tid},
+                            text(
+                                "UPDATE tracks SET musicbrainz_genres = :genres "
+                                "WHERE CAST(id AS TEXT) = :id"
+                            ),
+                            {"genres": json.dumps(mb_list, ensure_ascii=False), "id": tid},
                         )
 
-                    if new_title != title:
+                    if new_title and new_title != title:
                         session.execute(
-                            text("UPDATE tracks SET title = :title WHERE id = :id"),
+                            text("UPDATE tracks SET title = :title WHERE CAST(id AS TEXT) = :id"),
                             {"title": new_title, "id": tid},
                         )
+
                     session.execute(
                         text(
                             "UPDATE tracks SET is_cover = 1, is_cover_reason = :reason, "
-                            "original_cover_artist = :orig WHERE id = :id"
+                            "original_cover_artist = :orig "
+                            "WHERE CAST(id AS TEXT) = :id "
+                            "AND cover_manual_override IS NOT TRUE"
                         ),
                         {"reason": reason, "orig": orig, "id": tid},
                     )
                     successful.append(tid)
-
             return successful
         except Exception as exc:
             if attempt < max_retries - 1:
@@ -297,20 +336,33 @@ def apply_cover_metadata_batch(conn, updates: List[Dict], max_retries: int = 5) 
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Title helpers
 # ---------------------------------------------------------------------------
 
-_COVER_SUFFIX_RE_INTERNAL = __import__("re").compile(
-    r'\s*\([^)]+\s+cover\)\s*$', __import__("re").IGNORECASE,
-)
+#: A trailing "(X Cover)" annotation. ONE definition, shared with the
+#: detector, so the suffix that is added and the suffix that is recognised
+#: can never drift apart.
+COVER_SUFFIX_RE = re.compile(r"\s*\([^)]+\s+cover\)\s*$", re.IGNORECASE)
 
 
-def _build_cover_title(title: str, original_artist: Optional[str]) -> str:
-    if _COVER_SUFFIX_RE_INTERNAL.search(title or ""):
+def build_cover_title(title: str, original_artist: Optional[str]) -> str:
+    """``title`` with its "(Original Artist Cover)" suffix — idempotent.
+
+    A title that already carries ANY "(X Cover)" suffix is returned
+    unchanged, so re-applying a verdict can never stack a second suffix.
+    """
+    title = str(title or "").strip()
+    if not title or COVER_SUFFIX_RE.search(title):
         return title
+    original_artist = str(original_artist or "").strip()
     if original_artist:
         return f"{title} ({original_artist} Cover)"
     return title
+
+
+# Backwards-compatible private name (imported elsewhere).
+_build_cover_title = build_cover_title
+_COVER_SUFFIX_RE_INTERNAL = COVER_SUFFIX_RE
 
 
 def _loose_normalize(value: str) -> str:
