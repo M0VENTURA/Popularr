@@ -1284,11 +1284,60 @@ def _close_artist_essential_section(artist_name: str | None, options: dict[str, 
     return done, featured_rows
 
 
-def _run_album_cover_detection(artist: str, album: str, tracks: list[dict[str, Any]], options: dict[str, Any]) -> None:
+_COVER_WORDING_RE = re.compile(r"\s*\([^)]+\s+cover\)\s*$", re.IGNORECASE)
+
+
+def _restore_cover_wording_titles(
+    tracks: list[dict[str, Any]],
+    snapshots: dict[str, dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Hand the deep cover pass each title AS STORED, where only cover wording differs.
+
+    ``prepare_tracks_for_album`` strips "(X Cover)" from the loaded titles IN
+    PLACE, and the deep pass receives those same rows. That hid the wording
+    from the title-hint step, and made every confirmed cover look as if it had
+    lost its suffix. Each row whose stored title differs from the loaded one
+    ONLY by that wording is given the stored title back (on a copy) and marked
+    ``_cover_recheck`` so the 90-day "recently checked" window does not skip
+    the evidence that exists only on this pass.
+
+    A title that differs for any OTHER reason (a MusicBrainz title the track
+    stage promoted, an annotation repair) is left as loaded — restoring it
+    would hand the deep pass a stale title to write back.
+
+    Pure: no database access, so it can be tested on its own.
+    """
+    if not snapshots:
+        return tracks
+    out: list[dict[str, Any]] = []
+    for row in tracks or []:
+        snap = snapshots.get(str(row.get("id") or "")) or {}
+        stored = str(snap.get("title") or "").strip()
+        loaded = str(row.get("title") or "").strip()
+        if (
+            stored
+            and stored != loaded
+            and _COVER_WORDING_RE.search(stored)
+            and _COVER_WORDING_RE.sub("", stored).strip().casefold() == loaded.casefold()
+        ):
+            row = dict(row)
+            row["title"] = stored
+            row["_cover_recheck"] = True
+        out.append(row)
+    return out
+
+
+def _run_album_cover_detection(artist: str, album: str, tracks: list[dict[str, Any]], options: dict[str, Any]) -> set[str]:
+    """Run the deep cover pass for one album.
+
+    Returns the ids of the tracks whose cover TITLE was written this pass (new
+    covers and repaired suffixes), so the album tag sync rewrites exactly those
+    files' TITLE tags instead of leaving them fill-if-missing.
+    """
     if not artist or not tracks:
-        return
+        return set()
     if options.get("singles_only") or options.get("singles_with_missing_popularity") or options.get("popularity_only"):
-        return
+        return set()
 
     try:
         _covers_enabled = bool(get_feature("cover_detection_enabled", True))
@@ -1296,7 +1345,9 @@ def _run_album_cover_detection(artist: str, album: str, tracks: list[dict[str, A
         _covers_enabled = True
 
     if not _covers_enabled:
-        return
+        return set()
+
+    tracks = _restore_cover_wording_titles(tracks, options.get("_db_snapshots"))
 
     # ------------------------------------------------------------------
     # Overlay the artist the track stage RESOLVED onto the rows this pass
@@ -1361,19 +1412,25 @@ def _run_album_cover_detection(artist: str, album: str, tracks: list[dict[str, A
         # and a track list. The single count this function used to log said only
         # "N cover(s) found", so an album where nothing needed checking and one
         # where every track was checked both produced one identical line.
-        detect_covers_for_album(
+        _results = detect_covers_for_album(
             album=album,
             artist=artist,
             tracks=tracks,
             conn=None,
             force=bool(options.get("force")),
-        )
+        ) or []
+        return {
+            str(r.get("track_id"))
+            for r in _results
+            if isinstance(r, dict) and r.get("track_id") and r.get("is_cover")
+        }
     except Exception as exc:
         logger.debug("Cover detection failed", artist=artist, album=album, error=str(exc))
         # ⚠️ Also surfaced on the scan log: the failure used to reach only
         # ``debug.log``, so a pass that silently did nothing looked exactly like
         # a pass that found no covers.
         log_unified(f"[COVER_DETECT] {artist} - {album}: failed ({exc})")
+        return set()
 
 
 def _artist_top_marked_cutoffs(scan_scores: list[float], db_scores: list[float], top_percentile: float = 0.10, medium_percentile: float = 0.20, large_catalog_percentile: float | None = None, large_catalog_threshold: int = 30) -> tuple[float | None, float | None, int, int]:
@@ -3573,7 +3630,12 @@ def run_scan(
                 if _resolved_mbids:
                     options["resolved_track_mbids"] = _resolved_mbids
 
-                _run_album_cover_detection(artist=artist, album=album, tracks=tracks, options=options)
+                # Ids whose cover TITLE the deep pass wrote (new covers and
+                # repaired "(X Cover)" suffixes) — fed to the tag sync below so
+                # their files' TITLE tags are REWRITTEN, not fill-if-missing.
+                _cover_title_ids = _run_album_cover_detection(
+                    artist=artist, album=album, tracks=tracks, options=options,
+                ) or set()
 
                 # --- RECOMMEND-INSTEAD-OF-APPLY (metadata_update.apply_during_scan) ---
                 # When the Config page has metadata updating set to "Recommend only",
@@ -3657,12 +3719,13 @@ def run_scan(
                             isinstance(_r, dict) and "tag_changed" in _r
                             for _r in (_track_results_ordered or [])
                         )
+                        _title_rewrite_ids = _corrected_title_ids | _cover_title_ids
                         _tag_sync = sync_album_file_tags(
                             artist=artist,
                             album=album,
-                            corrected_title_ids=_corrected_title_ids or None,
+                            corrected_title_ids=_title_rewrite_ids or None,
                             changed_track_ids=(
-                                (_album_changed_track_ids | _corrected_title_ids)
+                                (_album_changed_track_ids | _title_rewrite_ids)
                                 if _tag_changed_known
                                 else None
                             ),
