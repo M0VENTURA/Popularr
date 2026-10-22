@@ -447,7 +447,19 @@ def get_queue_display_items(
 
 
 def get_ready_for_processing(limit: int = 100) -> list[dict[str, Any]]:
-    """Strictly filters out items whose retry window has not been reached."""
+    """Items that can be claimed RIGHT NOW, fairest first.
+
+    ⚠️ SAME eligibility as ``claim_queue_item``. A 'queued' row waiting on its
+    ``next_retry_at`` used to be returned anyway, oldest first, so the
+    orchestrator spent every in-flight slot on rows the claim then refused —
+    newer items never started, and the old ones were retried the moment their
+    wait ended (the reported "keeps retrying old files"). 'failed' rows are
+    returned to the queue by ``requeue_due_failed_items``, never claimed here.
+
+    Order: priority, then FEWEST attempts (never-tried rows first, so the
+    whole queue gets one turn before anything is retried), then the row that
+    has been due the longest.
+    """
     try:
         with db_session() as session:
             result = session.execute(
@@ -455,14 +467,13 @@ def get_ready_for_processing(limit: int = 100) -> list[dict[str, Any]]:
                     SELECT *
                     FROM download_queue
                     WHERE file_path IS NULL
-                      AND (
-                           status = 'queued'
-                           OR (status IN ('backed_off', 'pending_release', 'failed')
-                               AND next_retry_at IS NOT NULL 
-                               AND next_retry_at <= CURRENT_TIMESTAMP)
-                          )
+                      AND status IN ('queued', 'backed_off', 'pending_release')
+                      AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
                       AND LOWER(COALESCE(source, '')) NOT IN ('local', 'discovered')
-                    ORDER BY priority DESC, created_at ASC
+                    ORDER BY priority DESC,
+                             COALESCE(retry_count, 0) ASC,
+                             COALESCE(next_retry_at, created_at) ASC,
+                             id ASC
                     LIMIT :limit
                 """),
                 {"limit": limit},
@@ -473,42 +484,80 @@ def get_ready_for_processing(limit: int = 100) -> list[dict[str, Any]]:
         return []
 
 
-def requeue_due_failed_items(limit: int = 50) -> list[dict[str, Any]]:
-    requeued: list[dict[str, Any]] = []
+def count_ready_for_processing() -> int:
+    """How many rows ``get_ready_for_processing`` could return right now."""
     try:
         with db_session() as session:
-            result = session.execute(
-                text("""
-                    SELECT *
-                    FROM download_queue
-                    WHERE status = 'failed'
-                      AND file_path IS NULL
-                      AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
-                    ORDER BY updated_at ASC
-                    LIMIT :limit
-                """),
-                {"limit": limit},
+            return int(
+                session.execute(
+                    text("""
+                        SELECT COUNT(*)
+                        FROM download_queue
+                        WHERE file_path IS NULL
+                          AND status IN ('queued', 'backed_off', 'pending_release')
+                          AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
+                          AND LOWER(COALESCE(source, '')) NOT IN ('local', 'discovered')
+                    """)
+                ).scalar()
+                or 0
             )
-            rows = [dict(r._mapping) for r in result.fetchall()]
-            _delay_default = _queue_retry_delay_minutes()
-            next_retry_expr = interval_minutes_expr(session, ":delay")
-            for row in rows:
-                qid = row.get("id")
-                delay_minutes = max(1, int(row.get("retry_delay_minutes") or _delay_default))
+    except Exception as e:
+        logger.error("Failed to count items ready for processing", error=str(e))
+        return 0
+
+
+def requeue_due_failed_items(limit: int = 50) -> list[dict[str, Any]]:
+    """Return due 'failed' rows to the queue, READY to claim.
+
+    ⚠️ Three changes from the old version:
+
+    * ``retry_count`` is NOT incremented here. The attempt was counted when
+      the row failed; counting it again doubled every row's attempts.
+    * ``next_retry_at`` is CLEARED. Setting a fresh future time made the
+      re-queued row unclaimable while the old ready query still put it at the
+      front of the list — the loop that starved newer items.
+    * Rows past ``queue.max_retry_attempts``, rows the USER cancelled, and
+      rows that already have a file are left alone. Cancelled downloads used
+      to come back on their own.
+    """
+    try:
+        with db_session() as session:
+            rows = [
+                dict(r._mapping)
+                for r in session.execute(
+                    text("""
+                        SELECT *
+                        FROM download_queue
+                        WHERE status = 'failed'
+                          AND file_path IS NULL
+                          AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
+                          AND COALESCE(retry_count, 0) < :max_attempts
+                          AND COALESCE(failure_reason, '') <> :cancelled
+                          AND LOWER(COALESCE(source, '')) NOT IN ('local', 'discovered')
+                        ORDER BY COALESCE(retry_count, 0) ASC, updated_at ASC
+                        LIMIT :limit
+                    """),
+                    {
+                        "limit": limit,
+                        "max_attempts": _queue_max_attempts(),
+                        "cancelled": CANCELLED_REASON,
+                    },
+                ).fetchall()
+            ]
+            if rows:
+                placeholders = ", ".join(f":id{i}" for i in range(len(rows)))
                 session.execute(
                     text(f"""
                         UPDATE download_queue
                         SET status = 'queued',
-                            retry_count = retry_count + 1,
-                            failure_reason = NULL,
-                            next_retry_at = {next_retry_expr},
+                            next_retry_at = NULL,
                             updated_at = CURRENT_TIMESTAMP
-                        WHERE id = :qid
+                        WHERE id IN ({placeholders})
+                          AND status = 'failed'
                     """),
-                    {"qid": qid, "delay": delay_minutes},
+                    {f"id{i}": r["id"] for i, r in enumerate(rows)},
                 )
-                requeued.append(row)
-        return requeued
+        return rows
     except Exception as exc:
         logger.error("Failed to requeue due failed items", error=str(exc))
         return []
@@ -612,68 +661,262 @@ def get_completed_by_group(group_id: str) -> list[dict[str, Any]]:
 # STATUS HELPERS (STATE TRANSITIONS)
 # =============================================================================
 
+#: ``failure_reason`` written by a user cancel. Rows with it are never
+#: re-queued automatically — the user asked for the download to stop.
+CANCELLED_REASON = "Cancelled by user"
+
+
+def _queue_cfg() -> dict[str, Any]:
+    try:
+        return (get_config() or {}).get("queue") or {}
+    except Exception:
+        return {}
+
+
+def _queue_retry_delay_minutes() -> int:
+    """First retry delay (``queue.failure_retry_delay_minutes``, default 30)."""
+    try:
+        return max(1, int(_queue_cfg().get("failure_retry_delay_minutes", 30) or 30))
+    except (TypeError, ValueError):
+        return 30
+
+
+def _queue_max_delay_minutes() -> int:
+    """Backoff ceiling (``queue.max_retry_delay_minutes``, default 24 h)."""
+    try:
+        return max(1, int(_queue_cfg().get("max_retry_delay_minutes", 1440) or 1440))
+    except (TypeError, ValueError):
+        return 1440
+
+
+def _queue_max_attempts() -> int:
+    """Attempts before a row stays 'failed' (``queue.max_retry_attempts``, default 8)."""
+    try:
+        return max(1, int(_queue_cfg().get("max_retry_attempts", 8) or 8))
+    except (TypeError, ValueError):
+        return 8
+
+
 def schedule_queue_retry(
     queue_id: int,
     status: str,
     next_retry_at: str,
     reason: str = "",
 ) -> dict[str, Any] | None:
+    """Park a row until ``next_retry_at`` with the caller's chosen status.
+
+    'backed_off' / 'pending_release' are deliberate long waits (persistent
+    misses, unreleased albums) and are honoured as given. A row scheduled
+    back to plain 'queued' is an ordinary failed attempt, so it obeys the
+    attempt limit like ``mark_failed`` — otherwise a file that keeps failing
+    verification (the log's BIGBANG / Snot / Eurythmics rows, retried ~hourly
+    for days) would cycle forever.
+    """
     try:
         with db_session() as session:
-            session.execute(
+            row = session.execute(
                 text("""
                     UPDATE download_queue
-                    SET status = :status,
+                    SET status = CASE
+                            WHEN :status = 'queued'
+                                 AND COALESCE(retry_count, 0) + 1 >= :max_attempts THEN 'failed'
+                            ELSE :status
+                        END,
                         next_retry_at = :next_retry,
                         failure_reason = :reason,
-                        retry_count = retry_count + 1,
+                        retry_count = COALESCE(retry_count, 0) + 1,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = :qid
+                    RETURNING id, status, retry_count
                 """),
-                {"qid": queue_id, "status": status, "next_retry": next_retry_at, "reason": reason},
-            )
-        return {"success": True, "id": queue_id, "status": status}
+                {
+                    "qid": queue_id,
+                    "status": status,
+                    "next_retry": next_retry_at,
+                    "reason": reason,
+                    "max_attempts": _queue_max_attempts(),
+                },
+            ).fetchone()
+        if not row:
+            return None
+        m = row._mapping
+        return {"success": True, "id": m["id"], "status": m["status"], "retry_count": m["retry_count"]}
     except Exception as exc:
         logger.error("Failed to schedule queue retry", queue_id=queue_id, error=str(exc))
         return None
 
 
-def _queue_retry_delay_minutes() -> int:
-    try:
-        from helpers.config_helpers import get_config
-        q = (get_config() or {}).get("queue") or {}
-        return max(1, int(q.get("failure_retry_delay_minutes", 30) or 30))
-    except Exception:
-        return 30
+def mark_failed(
+    queue_id: int,
+    reason: str,
+    *,
+    count_attempt: bool = True,
+) -> dict[str, Any] | None:
+    """Record a failed attempt and schedule the retry with exponential backoff.
 
+    Delay = ``retry_delay_minutes`` (row) or ``queue.failure_retry_delay_minutes``
+    × 2^attempts, capped at ``queue.max_retry_delay_minutes``. With the defaults:
+    30 min, 1 h, 2 h, 4 h, 8 h, 16 h, then daily. After
+    ``queue.max_retry_attempts`` the row becomes 'failed' and stops cycling;
+    "Retry all failed" gives it a fresh start.
 
-def mark_failed(queue_id: int, reason: str) -> dict[str, Any] | None:
-    delay = _queue_retry_delay_minutes()
+    The old version retried after a FIXED delay and never gave up, so a
+    file that always failed was downloaded, rejected and deleted about once
+    an hour indefinitely.
+
+    ``count_attempt=False`` is for infrastructure outages (slskd down): the row
+    waits the first-retry delay but does not use up an attempt.
+    """
     try:
         with db_session() as session:
-            session.execute(
+            row = session.execute(
                 text("""
                     UPDATE download_queue
                     SET failure_reason = :reason,
-                        retry_count = retry_count + 1,
+                        retry_count = COALESCE(retry_count, 0) + :inc,
                         next_retry_at = GREATEST(
                             COALESCE(next_retry_at, CURRENT_TIMESTAMP),
-                            CURRENT_TIMESTAMP
-                                + (COALESCE(retry_delay_minutes, :delay) * INTERVAL '1 minute')
+                            CURRENT_TIMESTAMP + (
+                                LEAST(
+                                    :cap,
+                                    COALESCE(retry_delay_minutes, :delay)
+                                        * POWER(2, CASE WHEN :inc = 1
+                                                        THEN LEAST(COALESCE(retry_count, 0), 10)
+                                                        ELSE 0 END)
+                                ) * INTERVAL '1 minute'
+                            )
                         ),
                         status = CASE
+                            WHEN :inc = 1
+                                 AND COALESCE(retry_count, 0) + 1 >= :max_attempts THEN 'failed'
                             WHEN status IN ('backed_off', 'pending_release') THEN status
                             ELSE 'queued'
                         END,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = :qid
+                    RETURNING id, status, retry_count
                 """),
-                {"qid": queue_id, "reason": reason, "delay": delay},
+                {
+                    "qid": queue_id,
+                    "reason": reason,
+                    "inc": 1 if count_attempt else 0,
+                    "delay": _queue_retry_delay_minutes(),
+                    "cap": _queue_max_delay_minutes(),
+                    "max_attempts": _queue_max_attempts(),
+                },
+            ).fetchone()
+        if not row:
+            return None
+        m = row._mapping
+        if str(m["status"]) == "failed":
+            logger.info(
+                "Queue item reached its retry limit — left as failed",
+                queue_id=queue_id,
+                attempts=m["retry_count"],
+                reason=reason,
             )
-        return {"success": True, "id": queue_id}
+        return {"success": True, "id": m["id"], "status": m["status"], "retry_count": m["retry_count"]}
     except Exception as exc:
         logger.error("Failed to mark queue item failed", queue_id=queue_id, error=str(exc))
         return None
+
+
+# =============================================================================
+# REJECTED CANDIDATES (per queue row)
+# =============================================================================
+#
+# The log shows the SAME file from the SAME peer downloaded, rejected and
+# deleted for one row ~20 times (queue_id 6667: mugilaw's "FXXK IT (KR ver.)"
+# from 15 Oct to 17 Oct) — the "Blocked peer" warning fired every time, but
+# the next search selected that candidate again. These helpers remember the
+# rejected (username, filename) pairs ON THE ROW (``metadata`` JSON), so the
+# pipeline's candidate selection can skip them. They must be called from the
+# completion service (record) and the pipeline's selection (skip).
+
+_REJECTED_KEY = "rejected_candidates"
+_REJECTED_MAX = 50
+
+
+def _candidate_key(username: Any, filename: Any) -> str:
+    name = str(filename or "").replace("\\", "/").strip().casefold()
+    return f"{str(username or '').strip().casefold()}|{name}"
+
+
+def record_rejected_candidate(
+    queue_id: int,
+    username: str,
+    filename: str,
+    reason: str = "",
+) -> bool:
+    """Remember that ``username``/``filename`` was rejected for this row."""
+    if not queue_id or not (username or filename):
+        return False
+    try:
+        with db_session() as session:
+            row = session.execute(
+                text("SELECT metadata FROM download_queue WHERE id = :id FOR UPDATE"),
+                {"id": queue_id},
+            ).fetchone()
+            if not row:
+                return False
+            raw = row[0]
+            if isinstance(raw, str):
+                try:
+                    meta = json.loads(raw) if raw.strip() else {}
+                except (TypeError, ValueError):
+                    meta = {}
+            elif isinstance(raw, dict):
+                meta = dict(raw)
+            else:
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            rejected = [r for r in (meta.get(_REJECTED_KEY) or []) if isinstance(r, dict)]
+            key = _candidate_key(username, filename)
+            if any(r.get("key") == key for r in rejected):
+                return True
+            rejected.append({
+                "key": key,
+                "username": str(username or ""),
+                "filename": str(filename or ""),
+                "reason": str(reason or "")[:200],
+                "at": datetime.now().isoformat(timespec="seconds"),
+            })
+            meta[_REJECTED_KEY] = rejected[-_REJECTED_MAX:]
+            session.execute(
+                text("UPDATE download_queue SET metadata = :meta WHERE id = :id"),
+                {"meta": json.dumps(meta, ensure_ascii=False), "id": queue_id},
+            )
+        return True
+    except Exception as exc:
+        logger.error("Failed to record rejected candidate", queue_id=queue_id, error=str(exc))
+        return False
+
+
+def get_rejected_candidate_keys(item_or_id: Any) -> set[str]:
+    """Keys of the candidates rejected for a row (pass the row or its id)."""
+    try:
+        if isinstance(item_or_id, dict):
+            raw = item_or_id.get("metadata")
+        else:
+            row = get_queue_item(int(item_or_id))
+            raw = (row or {}).get("metadata")
+        if isinstance(raw, str):
+            raw = json.loads(raw) if raw.strip() else {}
+        if not isinstance(raw, dict):
+            return set()
+        return {
+            str(r.get("key"))
+            for r in (raw.get(_REJECTED_KEY) or [])
+            if isinstance(r, dict) and r.get("key")
+        }
+    except Exception:
+        return set()
+
+
+def is_rejected_candidate(item_or_id: Any, username: str, filename: str) -> bool:
+    """True when this exact candidate was already rejected for the row."""
+    return _candidate_key(username, filename) in get_rejected_candidate_keys(item_or_id)
 
 
 def mark_imported(queue_id: int, target_path: str) -> dict[str, Any] | None:
