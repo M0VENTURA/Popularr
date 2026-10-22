@@ -13,6 +13,7 @@ rate-limit exhaustion and 300s+ timeout stalls on large albums.
 from __future__ import annotations
 
 import json
+import threading
 import time
 import re
 from collections import Counter
@@ -484,19 +485,131 @@ _STALE_PROTECTED_COLUMNS = frozenset({"title", "album_artist"}) | _ALBUM_TYPE_CO
 
 _MB_RG_GENRE_CACHE: dict[str, tuple[list, list]] = {}
 _MB_RECORDING_GENRE_CACHE: dict[str, tuple[list, list]] = {}
-_MB_RECORDING_GENRE_SEARCH_CACHE: dict[tuple[str, str], list] = {}
+#: Discogs genres+styles per (artist, album) — release genres are ALBUM-level,
+#: so one search serves every track of the album instead of one per track
+#: (a 20-track album was 20 Discogs searches and hit the rate limit).
 _DISCOGS_GENRE_CACHE: dict[tuple[str, str], list] = {}
 _LB_RECORDING_TAGS_CACHE: dict[str, list] = {}
 _GENRE_CACHE_MAX = 4000
 
+# ⚠️ The scan runs up to 8 ``process_track`` workers at once. Unguarded, the
+# eviction loop could raise "dictionary changed size during iteration", and
+# reading ``cache[key]`` straight after the put could raise KeyError when
+# another thread had just evicted it — either way the genre was silently
+# skipped. All access goes through this lock, and callers keep the fetched
+# value in a local instead of reading it back.
+_GENRE_CACHE_LOCK = threading.Lock()
+_MISSING = object()
+
+
+def _bounded_cache_get(cache: dict[Any, Any], key: Any) -> Any:
+    """Cached value for *key*, or ``_MISSING``."""
+    with _GENRE_CACHE_LOCK:
+        return cache.get(key, _MISSING)
+
 
 def _bounded_cache_put(cache: dict[Any, Any], key: Any, value: Any) -> None:
-    while len(cache) >= _GENRE_CACHE_MAX:
-        try:
-            cache.pop(next(iter(cache)))
-        except (StopIteration, KeyError):
-            break
-    cache[key] = value
+    with _GENRE_CACHE_LOCK:
+        while len(cache) >= _GENRE_CACHE_MAX:
+            try:
+                cache.pop(next(iter(cache)))
+            except (StopIteration, KeyError):
+                break
+        cache[key] = value
+
+
+#: "feat." credits — WORD-bounded. A plain ``"feat" in text`` also matched
+#: "Feather", "Defeated" and "Feats", which flagged them as featured tracks
+#: and changed their score.
+_FEATURED_RE = re.compile(r"\b(?:feat|ft|featuring)\b\.?", re.IGNORECASE)
+
+
+def _is_featured(*texts: Any) -> bool:
+    return any(_FEATURED_RE.search(str(t or "")) for t in texts)
+
+
+def _batch_mb_entry(
+    options: dict[str, Any],
+    *,
+    artist: str,
+    title: str,
+    track: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """The album-release batch entry for this track, by the batch's OWN keys.
+
+    The batch is keyed by ``album_recording_batch_key`` (position-qualified
+    first, then plain). Two fallbacks here used to build their own
+    ``f"{artist}::{title}"`` string instead, which only matched if that
+    happened to be the key format — the same lookup ``_resolve_track_mb_metadata``
+    does correctly.
+    """
+    batch = options.get("mb_batch_metadata") or {}
+    if not batch or not artist or not title:
+        return None
+    for key in _album_recording_batch_keys(
+        primary_artist=artist,
+        primary_title=title,
+        disc=(track or {}).get("disc_number"),
+        track_number=(track or {}).get("track_number"),
+    ):
+        entry = batch.get(key)
+        if entry:
+            return entry
+    # Legacy key form, kept so nothing that matched before stops matching.
+    return batch.get(f"{artist.lower()}::{title.lower()}")
+
+
+# ── Persisting only what changed ─────────────────────────────────────────
+_JSONISH_FIELDS = frozenset({
+    "musicbrainz_genres", "discogs_genres", "lastfm_tags",
+    "listenbrainz_genres", "spotify_genres", "essentia_genres",
+    "manual_genres", "navidrome_genres", "single_sources", "writer",
+    "audiodb_genres", "wikidata_genres", "mb_ignored_fields",
+})
+
+
+def _comparable(value: Any, field: str = "") -> Any:
+    """A value normalised for "did this column change?" comparisons.
+
+    JSON columns come back from the DB as lists but are written as JSON text,
+    so both sides are parsed before comparing. Anything that cannot be
+    normalised is compared as stripped text. A false "changed" only costs a
+    redundant write; a false "unchanged" would lose data, so every doubt
+    resolves to "changed".
+    """
+    if value is None:
+        return None
+    if field in _JSONISH_FIELDS or isinstance(value, (list, dict)):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                return value.strip()
+        if isinstance(value, (list, dict)):
+            return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    if isinstance(value, float):
+        return round(value, 6)
+    return str(value).strip()
+
+
+def _changed_columns(
+    effective_track: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """Columns of *effective_track* that differ from the load-time *snapshot*.
+
+    Keys starting with ``_`` are in-memory scan state, never columns.
+    """
+    changed: dict[str, Any] = {}
+    for key, value in effective_track.items():
+        if key == "id" or str(key).startswith("_"):
+            continue
+        if key not in snapshot:
+            changed[key] = value
+            continue
+        if _comparable(value, key) != _comparable(snapshot.get(key), key):
+            changed[key] = value
+    return changed
 
 
 def _strip_album_type_columns(
@@ -791,7 +904,7 @@ def _reconstruct_raw_blend(
             release_date=_as_str(track.get("year") or track.get("release_year")) or None,
             is_single=bool(track.get("is_single")),
             has_mb_meta=bool(_rec_mbid),
-            is_featured_track=("feat" in _artist.lower()) or ("feat" in _title.lower()),
+            is_featured_track=_is_featured(_artist, _title),
             is_live_track=is_live_track,
             is_instrumental_track=is_instrumental_track(_title),
             artist_lf_context=artist_lf_context,
@@ -1543,8 +1656,10 @@ def process_track(
                     update_payload["isrc"] = isrc
 
             if not isrc:
-                _batch_mb = options.get("mb_batch_metadata") or {}
-                _mb_entry = _batch_mb.get(f"{artist.lower()}::{str(raw_title or title).lower()}")
+                _mb_entry = _batch_mb_entry(
+                    options, artist=artist, title=str(raw_title or title or ""),
+                    track=effective_track,
+                )
                 _batch_isrc = _as_str((_mb_entry or {}).get("isrc") or "").strip()
                 if _batch_isrc:
                     isrc = _batch_isrc
@@ -1670,11 +1785,18 @@ def process_track(
                 if _force and _prefetch_entry and not _prefetch_entry.get("_album_tracklist"):
                     _prefetch_entry = None
 
+                # ``listenbrainz_listens`` is not loaded until the ListenBrainz
+                # block below, so it was always 0 here — the "both sources
+                # thin" test reduced to ``lastfm_listeners < 25``. Use the
+                # STORED count it was meant to read.
+                _stored_lb_for_lf = _as_int(effective_track.get("listenbrainz_listens") or 0)
+                _stored_lf = lastfm_listeners
+                _stored_lf_play = lastfm_playcount
                 if (
                     _force
                     or not has_fresh_lf
                     or lastfm_listeners == 0
-                    or (lastfm_listeners < 25 and listenbrainz_listens < 25)
+                    or (lastfm_listeners < 25 and _stored_lb_for_lf < 25)
                 ):
                     if (
                         _prefetch_entry
@@ -1743,15 +1865,20 @@ def process_track(
                                 update_payload["lastfm_listeners"] = lastfm_listeners
                                 update_payload["lastfm_playcount"] = lastfm_playcount
                                 update_payload["lastfm_last_updated"] = now_ts
-                        except Exception:
-                            lastfm_listeners = 0
-                            lastfm_playcount = 0
+                        except Exception as exc:
+                            # Keep the STORED counts. Zeroing them scored the
+                            # track as if it had no listeners, and the lower
+                            # ``final_score`` was saved — a brief Last.fm
+                            # outage dragged down every track scanned in it.
+                            # Nothing is stamped, so the next pass retries.
+                            logger.debug(
+                                "Last.fm fetch failed — keeping stored count",
+                                track_id=track_id, error=str(exc),
+                            )
+                            lastfm_listeners = _stored_lf
+                            lastfm_playcount = _stored_lf_play
 
-                _is_feat_variant = (
-                    "feat" in str(artist or "").casefold()
-                    or "feat" in str(raw_title or "").casefold()
-                    or "feat" in str(title or "").casefold()
-                )
+                _is_feat_variant = _is_featured(artist, raw_title, title)
                 if deep_pop_agg and _is_feat_variant and (bool(update_payload.get("_from_prefetch")) or lastfm_listeners == 0):
                     try:
                         from helpers.config_helpers import get_config as _get_cfg2
@@ -1791,7 +1918,7 @@ def process_track(
                             update_payload["recording_mbid"] = _album_rec_mbid
                             update_payload["mbid"] = _album_rec_mbid
                     else:
-                        if listenbrainz_listens == 0 and not recording_mbid and (raw_title or title) and artist:
+                        if not recording_mbid and (raw_title or title) and artist:
                             try:
                                 if isrc:
                                     from services.popularity.popularity_sources import resolve_isrc_recording
@@ -1804,8 +1931,10 @@ def process_track(
                                         _lb_source = "isrc_resolved"
 
                                 if not recording_mbid:
-                                    _batch_mb = options.get("mb_batch_metadata") or {}
-                                    _mb_entry = _batch_mb.get(f"{artist.lower()}::{str(raw_title or title).lower()}")
+                                    _mb_entry = _batch_mb_entry(
+                                        options, artist=artist, title=str(raw_title or title or ""),
+                                        track=effective_track,
+                                    )
                                     if _mb_entry and _mb_entry.get("recording_mbid"):
                                         recording_mbid = _mb_entry["recording_mbid"]
                                     else:
@@ -1842,26 +1971,42 @@ def process_track(
                                         )
 
                                 if recording_mbid:
-                                    _lb_source = _lb_source or "mbid_resolved"
+                                    if _lb_source == "none":
+                                        _lb_source = "mbid_resolved"
                                     update_payload["recording_mbid"] = recording_mbid
                                     update_payload["mbid"] = recording_mbid
                             except Exception:
                                 recording_mbid = None
 
-                        if listenbrainz_listens == 0 and recording_mbid:
+                        # ⚠️ Fetched whenever this branch runs — i.e. the stored
+                        # count is STALE, forced, or zero. It used to require
+                        # ``listenbrainz_listens == 0``, so a track that ever
+                        # had a count was NEVER re-fetched, yet the timestamp
+                        # below still marked it fresh for another full cache
+                        # period.
+                        if recording_mbid:
                             _lb_source = "single_lookup"
                             try:
                                 lb = ListenBrainzClient()
-                                lb_result = lb.get_recording_popularity(recording_mbid) if recording_mbid else {}
-                                listenbrainz_listens = _as_int(lb_result.get("total_listen_count") if isinstance(lb_result, dict) else 0)
-                                listenbrainz_users = _as_int(lb_result.get("total_user_count") if isinstance(lb_result, dict) else 0)
-                            except Exception:
-                                listenbrainz_listens = 0
-                                listenbrainz_users = 0
+                                lb_result = lb.get_recording_popularity(recording_mbid)
+                                if isinstance(lb_result, dict) and lb_result:
+                                    listenbrainz_listens = _as_int(lb_result.get("total_listen_count") or 0)
+                                    listenbrainz_users = _as_int(lb_result.get("total_user_count") or 0)
+                                # An empty answer keeps the stored counts.
+                            except Exception as exc:
+                                # Keep the stored counts and do NOT stamp, so
+                                # the next pass retries. Zeroing them saved a
+                                # 0 with a fresh timestamp.
+                                logger.debug(
+                                    "ListenBrainz fetch failed — keeping stored count",
+                                    track_id=track_id, error=str(exc),
+                                )
+                                _lb_source = "error"
 
-                    update_payload["listenbrainz_listens"] = listenbrainz_listens
-                    update_payload["listenbrainz_users"] = listenbrainz_users
-                    update_payload["listenbrainz_last_updated"] = now_ts
+                    if _lb_source != "error":
+                        update_payload["listenbrainz_listens"] = listenbrainz_listens
+                        update_payload["listenbrainz_users"] = listenbrainz_users
+                        update_payload["listenbrainz_last_updated"] = now_ts
 
                 is_live_flag = bool(
                     is_live_release
@@ -1869,10 +2014,7 @@ def process_track(
                 )
                 _resolved_is_live = bool(_resolved_is_live or is_live_flag)
                 is_instrumental_flag = is_instrumental_track(raw_title or title)
-                is_featured_flag = bool(
-                    "feat" in str(artist or "").lower()
-                    or "feat" in str(raw_title or title).lower()
-                )
+                is_featured_flag = _is_featured(artist, raw_title or title)
                 has_mb_meta = bool(recording_mbid)
                 prior_single = bool(effective_track.get("is_single"))
 
@@ -2176,10 +2318,12 @@ def process_track(
 
                     _rg_mbid = str(track.get("musicbrainz_releasegroupid") or "").strip()
                     if _rg_mbid:
-                        if _rg_mbid not in _MB_RG_GENRE_CACHE:
+                        _cached_rg = _bounded_cache_get(_MB_RG_GENRE_CACHE, _rg_mbid)
+                        if _cached_rg is _MISSING:
                             _rg = mb_raw.get_release_group(_rg_mbid, inc="genres+tags") or {}
-                            _bounded_cache_put(_MB_RG_GENRE_CACHE, _rg_mbid, (_rg.get("genres") or [], _rg.get("tags") or []))
-                        mb_genres, _ = _MB_RG_GENRE_CACHE[_rg_mbid]
+                            _cached_rg = (_rg.get("genres") or [], _rg.get("tags") or [])
+                            _bounded_cache_put(_MB_RG_GENRE_CACHE, _rg_mbid, _cached_rg)
+                        mb_genres, _ = _cached_rg
 
                     if not mb_genres:
                         _rec_mbid = str(
@@ -2189,10 +2333,12 @@ def process_track(
                             or ""
                         ).strip()
                         if _rec_mbid:
-                            if _rec_mbid not in _MB_RECORDING_GENRE_CACHE:
+                            _cached_rec = _bounded_cache_get(_MB_RECORDING_GENRE_CACHE, _rec_mbid)
+                            if _cached_rec is _MISSING:
                                 _rec = mb_raw.get_recording(_rec_mbid, inc="genres+tags") or {}
-                                _bounded_cache_put(_MB_RECORDING_GENRE_CACHE, _rec_mbid, (_rec.get("genres") or [], _rec.get("tags") or []))
-                            mb_genres, _ = _MB_RECORDING_GENRE_CACHE[_rec_mbid]
+                                _cached_rec = (_rec.get("genres") or [], _rec.get("tags") or [])
+                                _bounded_cache_put(_MB_RECORDING_GENRE_CACHE, _rec_mbid, _cached_rec)
+                            mb_genres, _ = _cached_rec
 
                     if mb_genres:
                         _mb_names = [g.get("name") for g in mb_genres if isinstance(g, dict) and g.get("name")]
@@ -2208,13 +2354,35 @@ def process_track(
                     _discogs_cfg = (_get_disc_cfg().get("api_integrations", {}) or {}).get("discogs", {}) or {}
                     _discogs_token = str(_discogs_cfg.get("token") or "").strip()
                     if _discogs_token and _discogs_token.lower() not in ("your_discogs_token", "placeholder"):
-                        discogs = DiscogsHttpClient(token=_discogs_token)
-                        results = discogs.search_database({"q": f"{artist} {title}", "type": "release", "per_page": 1}) or []
-                        if results:
-                            genres = results[0].get("genre", []) or []
-                            styles = results[0].get("style", []) or []
-                            if genres or styles:
-                                update_payload["discogs_genres"] = json.dumps(list(set(genres + styles)), ensure_ascii=False)
+                        # Discogs genres/styles belong to the RELEASE, so the
+                        # search is for the album (one per album, cached) and
+                        # only falls back to the track title when the album is
+                        # unknown.
+                        _disc_album = _as_str(
+                            album_context.get("album") or track.get("album") or ""
+                        ).strip()
+                        _disc_subject = _disc_album or _as_str(title)
+                        _disc_key = (_as_str(artist).casefold(), _disc_subject.casefold())
+                        _disc_values = _bounded_cache_get(_DISCOGS_GENRE_CACHE, _disc_key)
+                        if _disc_values is _MISSING:
+                            discogs = DiscogsHttpClient(token=_discogs_token)
+                            results = discogs.search_database(
+                                {"q": f"{artist} {_disc_subject}", "type": "release", "per_page": 1}
+                            ) or []
+                            _disc_values = []
+                            if results:
+                                _genres = results[0].get("genre", []) or []
+                                _styles = results[0].get("style", []) or []
+                                # Order-preserving de-dupe. ``list(set(...))``
+                                # came out in a different order on every
+                                # process (string hashing is randomised), so
+                                # the column "changed" on every scan.
+                                _disc_values = list(dict.fromkeys(
+                                    str(g).strip() for g in (_genres + _styles) if str(g).strip()
+                                ))
+                            _bounded_cache_put(_DISCOGS_GENRE_CACHE, _disc_key, _disc_values)
+                        if _disc_values:
+                            update_payload["discogs_genres"] = json.dumps(_disc_values, ensure_ascii=False)
                 except Exception as e:
                     logger.debug("Discogs genre fetch failed", track_id=track_id, error=str(e))
 
@@ -2223,7 +2391,10 @@ def process_track(
                 try:
                     _lb_mbid = (mb_data or {}).get("recording_mbid") or track.get("recording_mbid")
                     if _lb_mbid:
-                        lb_tags = get_recording_tags(_lb_mbid) or []
+                        lb_tags = _bounded_cache_get(_LB_RECORDING_TAGS_CACHE, str(_lb_mbid))
+                        if lb_tags is _MISSING:
+                            lb_tags = get_recording_tags(_lb_mbid) or []
+                            _bounded_cache_put(_LB_RECORDING_TAGS_CACHE, str(_lb_mbid), lb_tags)
                         names = [str(t.get("tag") or t.get("name") or "").strip() for t in lb_tags if isinstance(t, dict)]
                         if names:
                             update_payload["listenbrainz_genres"] = json.dumps([n for n in names if n], ensure_ascii=False)
@@ -2274,13 +2445,26 @@ def process_track(
                 if is_cover:
                     update_payload["is_cover"] = True
                     update_payload["is_cover_reason"] = reason
-                    _mbg = update_payload.get("musicbrainz_genres") or []
+                    # Start from the track's REAL MusicBrainz genres — fetched
+                    # this pass OR already stored. Reading only the payload
+                    # started from [] whenever the fetch was skipped (genres
+                    # already stored), so a detected cover had its genres
+                    # REPLACED by just ["Cover"].
+                    _mbg = (
+                        update_payload.get("musicbrainz_genres")
+                        or track.get("musicbrainz_genres")
+                        or []
+                    )
                     if isinstance(_mbg, str):
                         try:
                             _mbg = json.loads(_mbg)
                         except Exception:
                             _mbg = []
-                    _cover_list = ["Cover"] + [g for g in _mbg if g != "Cover"]
+                    if not isinstance(_mbg, list):
+                        _mbg = []
+                    _cover_list = ["Cover"] + [
+                        str(g) for g in _mbg if str(g).strip() and str(g) != "Cover"
+                    ]
                     update_payload["musicbrainz_genres"] = json.dumps(_cover_list, ensure_ascii=False)
                 elif _cover_wording_removed and not _cover_manual_override:
                     # ── STRIP THE WORDING ONLY — NEVER THE VERDICT ────────────
@@ -2481,15 +2665,37 @@ def process_track(
         elif _val is None:
             effective_track[_j_field] = "[]"
 
+    # ── Write only what changed ─────────────────────────────────────────
+    # The whole loaded row used to be written back. Any column edited by the
+    # user DURING the scan (an album save on the page) was overwritten with the
+    # scan's stale copy, and a flag the runner set out-of-band
+    # (``popularity_frozen``) was reset to the stale value on every pass.
+    #
+    # The runner passes a copy of each row taken BEFORE
+    # ``prepare_tracks_for_album`` (``options["_db_snapshots"]``, keyed by id),
+    # so the in-place cleanups prepare makes (e.g. the cover-wording strip)
+    # still count as changes and are saved. Without a snapshot the old
+    # full-row write is used, so deploying this file alone changes nothing.
+    _snapshots = options.get("_db_snapshots")
+    _snapshot = (
+        _snapshots.get(track_id) if isinstance(_snapshots, dict) else None
+    )
+    if isinstance(_snapshot, dict):
+        _persist_row = _changed_columns(effective_track, _snapshot)
+    else:
+        _persist_row = effective_track
+
     _persist_sink = options.get("_deferred_persist")
-    if _persist_sink is not None:
+    if not _persist_row:
+        pass  # nothing changed — no write at all
+    elif _persist_sink is not None:
         try:
-            _persist_sink.add({**effective_track, "id": track_id})
+            _persist_sink.add({**_persist_row, "id": track_id})
         except Exception as e:
             logger.debug("Deferred persist enqueue failed", track_id=track_id, error=str(e))
     else:
         try:
-            insert_or_update_track(track_id, effective_track)
+            insert_or_update_track(track_id, _persist_row)
         except Exception as e:
             logger.warning("DB Persist failed", track_id=track_id, error=str(e))
 
@@ -2574,21 +2780,35 @@ def process_track(
     # mutagen on every scan. Scoping its work to the tracks whose DB tag
     # values ACTUALLY changed this pass turns a re-scan of an already-synced
     # album from ~90-120s of file reads into a near-no-op. The columns below
-    # mirror exactly what _db_tag_candidates reads.
+    # mirror what _db_tag_candidates reads.
+    #
+    # ⚠️ ``genres`` is deliberately NOT here. This stage writes its own
+    # 2-genre list and the album tag sync then replaces it with the album
+    # blend, so the two rarely agree and ``genres`` would flag nearly every
+    # track on every scan — the very file re-reads this exists to avoid.
+    # ``sync_album_file_tags`` detects genre changes itself, against the
+    # genres each track held BEFORE the scan (``previous_genres``).
     _TAG_FILE_COLUMNS = (
         "title", "artist", "album", "album_artist", "originalyear", "originaldate",
-        "track_number", "disc_number", "isrc", "writer", "genres", "lyrics",
+        "track_number", "disc_number", "isrc", "writer", "lyrics",
         "recording_mbid", "mbid", "musicbrainz_albumid", "musicbrainz_album_mbid",
         "musicbrainz_releasegroupid", "musicbrainz_artistid",
         "musicbrainz_releasetrackid", "musicbrainz_workid",
     )
+    # ⚠️ The baseline is the row AS LOADED — never ``effective_track``, which
+    # already has ``update_payload`` merged in, so every comparison was a value
+    # against itself and ``tag_changed`` was ALWAYS False. The load-time
+    # snapshot is preferred over ``track`` because ``prepare_track_context``
+    # rewrites some fields in place (the cover-wording title strip), and that
+    # rewrite must reach the file too.
+    _tag_baseline = _snapshot if isinstance(_snapshot, dict) else track
     _tag_changed = False
     for _col in _TAG_FILE_COLUMNS:
         if _col not in update_payload:
             continue
-        _old = str((effective_track or track).get(_col) or "").strip()
-        _new = str(update_payload.get(_col) or "").strip()
-        if str(_old).casefold() != str(_new).casefold():
+        _old = _comparable(_tag_baseline.get(_col), _col)
+        _new = _comparable(update_payload.get(_col), _col)
+        if str(_old or "").casefold() != str(_new or "").casefold():
             _tag_changed = True
             break
 
