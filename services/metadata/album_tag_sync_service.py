@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
+from sqlalchemy import bindparam
 
 from services.enrichment.musicbrainz_service import get_shared_mb_client
 
@@ -506,6 +507,121 @@ def is_various_artists_album(
     return category == "va"
 
 
+#: Genre tokens that describe ONE recording and must survive the album-wide
+#: genre write. Mirrors ``genre_aggregation_service._TRACK_AFFILIATION_FILTER_TAGS``
+#: (the set the ALBUM BLEND strips), read here so a track can be given back the
+#: markers it earned.
+_AFFILIATION_MARKERS: tuple[str, ...] = (
+    "Cover", "Live", "Acoustic", "Unplugged", "Remix", "Remixed",
+    "Instrumental", "Comedy", "Orchestral", "Symphonic", "Soundtrack",
+)
+
+#: The per-track FLAGS that ARE an affiliation, and the marker each one means.
+#: The flag is authoritative — the cover pass sets ``is_cover = 1`` and writes
+#: "Cover" into ``musicbrainz_genres``, but NOT into the display ``genres``
+#: column the album-wide write below replaces.
+_AFFILIATION_FLAGS: tuple[tuple[str, str], ...] = (
+    ("is_cover", "Cover"),
+    ("is_live", "Live"),
+    ("is_acoustic", "Acoustic"),
+    ("is_remix", "Remix"),
+)
+
+
+def _track_affiliation_markers(track: dict[str, Any]) -> list[str]:
+    """The per-TRACK markers this recording earned, from its own evidence.
+
+    ⭐ REQUIRED because the album-wide genre write below replaces EVERY track's
+    ``genres`` with the album blend — and the blend deliberately has the
+    affiliation tags stripped (they are per-track facts, not album properties).
+    So a track the cover pass had just marked "Cover" came out of the same scan
+    with that marker gone: ``is_cover = 1`` survived but the genre did not, which
+    is the reported "the Cover genre isn't being applied".
+
+    Read from the track's own FLAGS first (authoritative — they are what the
+    detection actually decided), then from its own genre sources, so a
+    hand-tagged "Live" in ``lastfm_tags`` is honoured too.
+    """
+    markers: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        key = name.casefold()
+        if key and key not in seen:
+            seen.add(key)
+            markers.append(name)
+
+    for column, marker in _AFFILIATION_FLAGS:
+        value = track.get(column)
+        if value in (1, True, "1", "true", "True"):
+            _add(marker)
+
+    # The track's OWN source columns. ``genres`` is deliberately included: it is
+    # what the track stage wrote for this recording before this pass ran.
+    for column in (
+        "genres", "musicbrainz_genres", "manual_genres", "navidrome_genres",
+        "lastfm_tags", "lastfm_genres", "listenbrainz_genres", "discogs_genres",
+        "spotify_genres", "essentia_genres", "audiodb_genres", "wikidata_genres",
+    ):
+        raw = track.get(column)
+        if not raw:
+            continue
+        values: list[str] = raw if isinstance(raw, list) else []
+        if not values:
+            text_value = str(raw).strip()
+            if text_value.startswith("["):
+                try:
+                    parsed = json.loads(text_value)
+                    if isinstance(parsed, list):
+                        values = [str(v) for v in parsed]
+                except Exception:
+                    values = []
+            if not values:
+                values = [g for g in re.split(r"[,;/\\|]+", text_value) if g]
+        for value in values:
+            name = str(value).strip()
+            if name and name.casefold() in {m.casefold() for m in _AFFILIATION_MARKERS}:
+                _add(name)
+
+    return markers
+
+
+def _genre_tokens(value: Any) -> list[str]:
+    """Split any stored genre form into display names, order preserved."""
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    text_value = str(value).strip()
+    if not text_value or text_value.lower() in ("[]", "{}", "null", "none"):
+        return []
+    if text_value.startswith("["):
+        try:
+            parsed = json.loads(text_value)
+            if isinstance(parsed, list):
+                return [str(v).strip() for v in parsed if str(v).strip()]
+        except Exception:
+            pass
+    return [g.strip() for g in re.split(r"[,;/\\|]+", text_value) if g.strip()]
+
+
+def _merge_album_blend_with_affiliations(
+    blend: str, markers: list[str]
+) -> str:
+    """The album blend plus the affiliation markers THIS track earned.
+
+    Dedupes case-insensitively and appends, so the album's musical genres stay
+    in the leading positions (the playlist builder reads only the first few).
+    """
+    merged = _genre_tokens(blend)
+    seen = {g.casefold() for g in merged}
+    for marker in markers or []:
+        if marker.casefold() not in seen:
+            seen.add(marker.casefold())
+            merged.append(marker)
+    return ", ".join(merged)
+
+
 def sync_album_file_tags(
     artist: str,
     album: str,
@@ -598,14 +714,67 @@ def sync_album_file_tags(
             if rec_data and rec_data.get("genres"):
                 clean_genres = ", ".join(rec_data["genres"])
 
+                # ⭐⭐ A track keeps the affiliation markers IT earned.
+                #
+                # The blend above is ALBUM-scoped and deliberately has the
+                # per-track affiliation tags stripped from it (Cover/Live/
+                # Acoustic/… describe one recording's performance). Writing it
+                # to every track therefore DELETED the marker the scan had just
+                # applied — a cover track came out of the same scan with
+                # ``is_cover = 1`` but no "Cover" genre, which is the reported
+                # "the Cover genre isn't being applied".
+                #
+                # One album-wide UPDATE cannot express that, so when any track
+                # earned a marker the write is split: the un-marked tracks take
+                # the album blend in one statement (the common case stays a
+                # single query), and each marked track gets the blend plus its
+                # own markers.
+                _marked: list[tuple[dict[str, Any], list[str]]] = []
+                for t in tracks:
+                    _markers = _track_affiliation_markers(t)
+                    if _markers:
+                        _marked.append((t, _markers))
+
+                _marked_ids = {str(t.get("id")) for t, _m in _marked}
+
                 with db_session() as session:
-                    session.execute(
-                        text("UPDATE tracks SET genres = :g WHERE COALESCE(NULLIF(album_artist, ''), artist) = :a AND album = :alb"),
-                        {"g": clean_genres, "a": artist, "alb": album}
-                    )
+                    if not _marked:
+                        session.execute(
+                            text("UPDATE tracks SET genres = :g WHERE COALESCE(NULLIF(album_artist, ''), artist) = :a AND album = :alb"),
+                            {"g": clean_genres, "a": artist, "alb": album}
+                        )
+                    else:
+                        session.execute(
+                            text(
+                                "UPDATE tracks SET genres = :g "
+                                "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :a "
+                                "AND album = :alb AND id NOT IN :ids"
+                            ).bindparams(bindparam("ids", expanding=True)),
+                            {
+                                "g": clean_genres, "a": artist, "alb": album,
+                                "ids": sorted(_marked_ids),
+                            }
+                        )
+                        for _track, _markers in _marked:
+                            _tid = str(_track.get("id") or "")
+                            if not _tid:
+                                continue
+                            session.execute(
+                                text("UPDATE tracks SET genres = :g WHERE id = :id"),
+                                {
+                                    "g": _merge_album_blend_with_affiliations(
+                                        clean_genres, _markers
+                                    ),
+                                    "id": _tid,
+                                },
+                            )
 
                 for t in tracks:
-                    t["genres"] = clean_genres
+                    _markers = _track_affiliation_markers(t)
+                    t["genres"] = (
+                        _merge_album_blend_with_affiliations(clean_genres, _markers)
+                        if _markers else clean_genres
+                    )
     except Exception as exc:
         logger.warning("Active genre database cleanup failed", error=str(exc))
     # -------------------------------------------------------------------------
