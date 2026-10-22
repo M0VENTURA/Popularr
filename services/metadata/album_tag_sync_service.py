@@ -627,6 +627,7 @@ def sync_album_file_tags(
     album: str,
     corrected_title_ids: set[str] | None = None,
     changed_track_ids: set[str] | None = None,
+    previous_genres: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fill missing file tags + record corrections for one album's tracks.
 
@@ -643,6 +644,26 @@ def sync_album_file_tags(
     waste — the reported ~90-120s per already-synced album was exactly this
     repeat. Tracks in the set (or never synced) are re-read and stamped
     ``file_tags_synced_at``; the rest are skipped.
+
+    ⚠️ The skip is applied AFTER the album genre blend, not before it. The
+    blend is written to EVERY track of the album in the database, so a track
+    whose own metadata did not change can still have NEW genres — filtering
+    first left those genres in the DB but never in the file (which is what
+    Navidrome reads). A track therefore stays in the file pass when it is in
+    ``changed_track_ids``, was never synced, OR its genres differ from what
+    it held before this scan.
+
+    ``previous_genres`` — ``{track_id: genres}`` as the track held them
+    BEFORE this scan (the runner still has the load-time rows). This is the
+    baseline for "did the genres change". Without it the baseline is the
+    freshly loaded DB value, which the track stage has already overwritten
+    with its own per-track list — so nearly every track would read as changed
+    and the skip would save nothing.
+
+    The album year and the MusicBrainz perfect-match check are also resolved
+    over the WHOLE album before the skip: computed over a filtered subset,
+    ``_is_perfect_match`` (which requires ``len(tracks) == mb_count``) always
+    failed and the year majority vote ran on a partial album.
     """
     try:
         from helpers.config_helpers import get_tagging_config
@@ -657,28 +678,18 @@ def sync_album_file_tags(
     if not tracks:
         return {"skipped": "no_tracks", "files_updated": 0, "corrections_recorded": 0}
 
-    # ── Skip tracks the scan did not touch this pass ─────────────────────
-    # ``changed_track_ids`` is the ids the scan WROTE. A track not in it and
-    # already reconciled (``file_tags_synced_at`` set) cannot have drifted: its
-    # file tags were verified against the DB on the pass that wrote it. Reading
-    # every audio file on every scan (mutagen open ~1s per FLAC) was the
-    # dominant repeat cost in a re-scan of a recently-scanned artist.
-    if changed_track_ids is not None:
-        _changed = {str(i) for i in changed_track_ids}
-        tracks = [
-            t for t in tracks
-            if str(t.get("id") or "") in _changed
-            or not (t.get("file_tags_synced_at"))
-        ]
-        if not tracks:
-            return {
-                "artist": artist,
-                "album": album,
-                "skipped": "no_track_changes",
-                "files_updated": 0,
-                "corrections_recorded": 0,
-                "tracks": 0,
-            }
+    # Genres each track held BEFORE this pass's album blend, keyed by id.
+    # Used after the blend to tell which tracks' genres really changed.
+    _genres_before: dict[str, str] = {}
+    for _t in tracks:
+        _tid = str(_t.get("id") or "")
+        if not _tid:
+            continue
+        if previous_genres is not None and _tid in {str(k) for k in previous_genres}:
+            _prev = {str(k): v for k, v in previous_genres.items()}.get(_tid)
+        else:
+            _prev = _t.get("genres")
+        _genres_before[_tid] = ", ".join(_genre_tokens(_prev))
 
     # -------------------------------------------------------------------------
     # ACTIVE GENRE CLEANUP
@@ -705,6 +716,23 @@ def sync_album_file_tags(
             # genres were frozen at whatever Navidrome imported. Each track now
             # gets ITS OWN aggregated genres, with Navidrome excluded.
             updated = sync_various_artists_track_genres(tracks, album=album)
+            # The helper writes the DB; re-read so the rows here (and the
+            # genre-change check below) carry what it actually stored.
+            _va_ids = [str(t.get("id")) for t in tracks if t.get("id") is not None]
+            if _va_ids:
+                with db_session() as session:
+                    _rows = session.execute(
+                        text(
+                            "SELECT CAST(id AS TEXT) AS id, genres FROM tracks "
+                            "WHERE CAST(id AS TEXT) IN :ids"
+                        ).bindparams(bindparam("ids", expanding=True)),
+                        {"ids": _va_ids},
+                    ).mappings().all()
+                _fresh_genres = {str(r["id"]): r["genres"] for r in _rows}
+                for t in tracks:
+                    _tid = str(t.get("id") or "")
+                    if _tid in _fresh_genres:
+                        t["genres"] = _fresh_genres[_tid]
             logger.debug(
                 "Per-track genre sync on a various-artists album",
                 artist=artist, album=album, tracks=len(tracks), updated=updated,
@@ -737,37 +765,39 @@ def sync_album_file_tags(
 
                 _marked_ids = {str(t.get("id")) for t, _m in _marked}
 
+                # ⚠️ Written BY THE IDS ALREADY LOADED, never by artist/album.
+                # ``_load_fresh_tracks`` matches case-insensitively and across
+                # every "X feat. Y" album-artist variant; the old exact
+                # ``album_artist = :a AND album = :alb`` UPDATE could match
+                # NOTHING for exactly those albums, while the file pass below
+                # still wrote the new genres — file and DB then disagreed.
+                _unmarked_ids = sorted(
+                    str(t.get("id")) for t in tracks
+                    if t.get("id") is not None and str(t.get("id")) not in _marked_ids
+                )
+
                 with db_session() as session:
-                    if not _marked:
-                        session.execute(
-                            text("UPDATE tracks SET genres = :g WHERE COALESCE(NULLIF(album_artist, ''), artist) = :a AND album = :alb"),
-                            {"g": clean_genres, "a": artist, "alb": album}
-                        )
-                    else:
+                    if _unmarked_ids:
                         session.execute(
                             text(
                                 "UPDATE tracks SET genres = :g "
-                                "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :a "
-                                "AND album = :alb AND id NOT IN :ids"
+                                "WHERE CAST(id AS TEXT) IN :ids"
                             ).bindparams(bindparam("ids", expanding=True)),
-                            {
-                                "g": clean_genres, "a": artist, "alb": album,
-                                "ids": sorted(_marked_ids),
-                            }
+                            {"g": clean_genres, "ids": _unmarked_ids},
                         )
-                        for _track, _markers in _marked:
-                            _tid = str(_track.get("id") or "")
-                            if not _tid:
-                                continue
-                            session.execute(
-                                text("UPDATE tracks SET genres = :g WHERE id = :id"),
-                                {
-                                    "g": _merge_album_blend_with_affiliations(
-                                        clean_genres, _markers
-                                    ),
-                                    "id": _tid,
-                                },
-                            )
+                    for _track, _markers in _marked:
+                        _tid = str(_track.get("id") or "")
+                        if not _tid:
+                            continue
+                        session.execute(
+                            text("UPDATE tracks SET genres = :g WHERE CAST(id AS TEXT) = :id"),
+                            {
+                                "g": _merge_album_blend_with_affiliations(
+                                    clean_genres, _markers
+                                ),
+                                "id": _tid,
+                            },
+                        )
 
                 for t in tracks:
                     _markers = _track_affiliation_markers(t)
@@ -799,9 +829,66 @@ def sync_album_file_tags(
     # loaded rows carry the same ids, but normalise anyway (ids are cast to
     # strings somewhere in the pipeline).
     _corrected_ids = {str(_i) for _i in (corrected_title_ids or set())}
+
+    # ── Skip tracks with nothing new for their file ──────────────────────
+    # Applied HERE — after the genre blend, the album year and the
+    # perfect-match check have all seen the WHOLE album (see the docstring).
+    # A track is kept when the scan wrote it, its title was corrected, it was
+    # never synced, or its genres differ from what it held before this pass.
+    _file_tracks = tracks
+    _genre_changed = 0
+    if changed_track_ids is not None:
+        _changed = {str(i) for i in changed_track_ids} | _corrected_ids
+        _file_tracks = []
+        for t in tracks:
+            _tid = str(t.get("id") or "")
+            _now = ", ".join(_genre_tokens(t.get("genres")))
+            _genres_moved = _norm(_now) != _norm(_genres_before.get(_tid, ""))
+            if _genres_moved and _tid not in _changed:
+                _genre_changed += 1
+            if (
+                _tid in _changed
+                or not t.get("file_tags_synced_at")
+                or _genres_moved
+            ):
+                _file_tracks.append(t)
+        if not _file_tracks:
+            return {
+                "artist": artist,
+                "album": album,
+                "skipped": "no_track_changes",
+                "perfect_match": perfect,
+                "files_updated": 0,
+                "corrections_recorded": 0,
+                "tracks": 0,
+            }
+
+    try:
+        from services.metadata.tag_file_service import (
+            resolve_music_file_path,
+            write_tags_to_file,
+        )
+    except Exception as exc:
+        logger.warning("Tag writer unavailable — file tag sync skipped", error=str(exc))
+        return {
+            "artist": artist, "album": album, "skipped": "writer_unavailable",
+            "files_updated": 0, "corrections_recorded": 0, "tracks": 0,
+        }
+
     _synced_ids: list[str] = []
-    for track in tracks:
-        file_path = str(track.get("file_path") or "").strip()
+    for track in _file_tracks:
+        stored_path = str(track.get("file_path") or "").strip()
+        if not stored_path:
+            continue
+        # ⚠️ RESOLVE FIRST, then test existence. The stored path may be
+        # RELATIVE to the music root (``rename-file`` stores it that way);
+        # ``os.path.exists`` on the raw value was False for every such track,
+        # so they were silently skipped — never tagged, never stamped, and
+        # re-visited (and re-skipped) on every scan.
+        try:
+            file_path = resolve_music_file_path(stored_path) or stored_path
+        except Exception:
+            file_path = stored_path
         if not file_path or not os.path.exists(file_path):
             continue
         _synced_ids.append(str(track.get("id") or ""))
@@ -843,14 +930,8 @@ def sync_album_file_tags(
 
         if fill:
             try:
-                from services.metadata.tag_file_service import (
-                    resolve_music_file_path,
-                    write_tags_to_file,
-                )
-                # The stored path may be relative to the music root; the writer
-                # returns False for a path that does not exist.
-                resolved = resolve_music_file_path(str(file_path or ""))
-                if resolved and write_tags_to_file(resolved, fill):
+                # ``file_path`` is already resolved and known to exist.
+                if write_tags_to_file(file_path, fill):
                     files_updated += 1
                 # ⚠️ WARNING, not DEBUG: a tag fill that silently did nothing is
                 # exactly the "I saved it and nothing changed" report, and DEBUG
@@ -858,7 +939,7 @@ def sync_album_file_tags(
                 else:
                     logger.warning(
                         "Tag fill did not write the file",
-                        track_id=track.get("id"), file_path=str(file_path or ""),
+                        track_id=track.get("id"), file_path=file_path,
                     )
             except Exception as exc:
                 logger.warning(
@@ -891,7 +972,10 @@ def sync_album_file_tags(
         "perfect_match": perfect,
         "files_updated": files_updated,
         "corrections_recorded": corrections_recorded,
-        "tracks": len(tracks),
+        # Tracks whose FILE was examined this pass (after the skip).
+        "tracks": len(_file_tracks),
+        # Kept only because the album genre blend changed their genres.
+        "genre_only_tracks": _genre_changed,
     }
 
 
@@ -915,11 +999,13 @@ def _stamp_tag_sync(artist: str, album: str, track_ids: list[str]) -> None:
     try:
         with _db_session() as session:
             session.execute(
-                _text(f"UPDATE tracks SET file_tags_synced_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})"),
+                _text(f"UPDATE tracks SET file_tags_synced_at = CURRENT_TIMESTAMP WHERE CAST(id AS TEXT) IN ({placeholders})"),
                 params,
             )
     except Exception as exc:
-        logger.debug("File-tag sync stamp failed", album=album, error=str(exc))
+        # WARNING: a stamp that never lands makes every scan re-read every
+        # file of the album — the exact cost the skip exists to remove.
+        logger.warning("File-tag sync stamp failed", album=album, error=str(exc))
 
 
 def _load_fresh_tracks(artist: str, album: str) -> list[dict[str, Any]]:
