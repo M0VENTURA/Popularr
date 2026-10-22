@@ -20,14 +20,15 @@ import json
 import logging
 import math
 import re
-from collections import defaultdict
+import threading
+from collections import OrderedDict, defaultdict
 from typing import Any
 
 import structlog
 from sqlalchemy import text
 
 from db.engine import db_session
-from helpers.config_helpers import get_genre_weights, get_genre_synonyms
+from helpers.config_helpers import get_genre_synonyms, get_genre_weights
 
 logger = structlog.get_logger(__name__)
 logging.getLogger(__name__).setLevel(logging.DEBUG)
@@ -84,39 +85,6 @@ _GENERIC_ROOT_PATTERNS: dict[str, re.Pattern[str]] = {
     root: re.compile(rf"\b{re.escape(root)}\b") for root in _GENERIC_ROOTS
 }
 
-# Tags that are stripped from the main "genre" voting pool, 
-# but safely appended at the end of the list for playlist filtering
-_FILTER_TAGS: frozenset[str] = frozenset({
-    "live", "acoustic", "unplugged", "remix", "remixed", 
-    "instrumental", "cover", "comedy", "orchestral", 
-    "symphonic", "soundtrack", "christmas", "holiday"
-})
-
-#: Subset of ``_FILTER_TAGS`` that describe ONE TRACK's performance
-#: (a cover, a live take, an acoustic arrangement…). They may be appended
-#: to the track whose own title/sources justify them, but must NEVER be
-#: spread to every track of an album by an album-level blend — that is the
-#: reported "track genres saved to album / Cover on non-cover songs".
-#: The Christmas family stays album-valid: a Christmas album IS an album
-#: property and the playlist builder depends on the tag surviving.
-_TRACK_AFFILIATION_FILTER_TAGS: frozenset[str] = frozenset(
-    _FILTER_TAGS - frozenset({"christmas", "holiday"})
-)
-
-
-def is_track_affiliation_tag(value: Any) -> bool:
-    """True when ``value`` is a per-TRACK affiliation marker (Cover/Live/…).
-
-    These describe ONE recording's performance, never the album. The
-    holiday family is deliberately NOT one of them: a seasonal album IS an
-    album property and the playlist builder relies on the tag surviving.
-
-    ⚠️ Because the family is exempt here, it needs its OWN guard against
-    spreading from one track to an album — see ``_album_is_holiday``.
-    """
-    return str(value or "").strip().lower() in _TRACK_AFFILIATION_FILTER_TAGS
-
-
 #: The ONE token the whole holiday family collapses to.
 #:
 #: Christmas, Xmas, Noel, Yule, Advent, Hanukkah, Chanukah and Holiday all mean
@@ -138,6 +106,46 @@ HOLIDAY_FAMILY_ALIASES: frozenset[str] = frozenset({
     "christmas", "xmas", "x mas", "x-mas", "holiday", "holidays",
     "noel", "yule", "yuletide", "advent", "hanukkah", "chanukah",
 })
+
+# Tags that are stripped from the main "genre" voting pool,
+# but safely appended at the end of the list for playlist filtering
+_FILTER_TAGS: frozenset[str] = frozenset({
+    "live", "acoustic", "unplugged", "remix", "remixed",
+    "remaster", "remastered", "instrumental", "cover",
+    "comedy", "orchestral", "symphonic", "soundtrack",
+    "christmas", "holiday",
+})
+
+#: Canonical display mapping for intercepted filter tags so variants like
+#: "remixed" / "remix" or "remastered" / "remaster" resolve deterministically.
+_CANONICAL_FILTER_DISPLAY: dict[str, str] = {
+    "live": "Live",
+    "acoustic": "Acoustic",
+    "unplugged": "Unplugged",
+    "remix": "Remix",
+    "remixed": "Remix",
+    "remaster": "Remaster",
+    "remastered": "Remaster",
+    "instrumental": "Instrumental",
+    "cover": "Cover",
+    "comedy": "Comedy",
+    "orchestral": "Orchestral",
+    "symphonic": "Symphonic",
+    "soundtrack": "Soundtrack",
+    "christmas": "Christmas",
+    "holiday": HOLIDAY_CANONICAL_TOKEN,
+}
+
+#: Subset of ``_FILTER_TAGS`` that describe ONE TRACK's performance
+#: (a cover, a live take, an acoustic arrangement, a remaster…). They may be
+#: appended to the track whose own title/sources justify them, but must NEVER
+#: be spread to every track of an album by an album-level blend — that is the
+#: reported "track genres saved to album / Cover on non-cover songs".
+#: The Christmas family stays album-valid: a Christmas album IS an album
+#: property and the playlist builder depends on the tag surviving.
+_TRACK_AFFILIATION_FILTER_TAGS: frozenset[str] = frozenset(
+    _FILTER_TAGS - frozenset({"christmas", "holiday"})
+)
 
 
 def is_holiday_family_token(value: Any) -> bool:
@@ -170,6 +178,20 @@ def merge_holiday_tokens(genres: list[str]) -> list[str]:
     return merged
 
 
+def is_track_affiliation_tag(value: Any) -> bool:
+    """True when ``value`` is a per-TRACK affiliation marker (Cover/Live/…).
+
+    These describe ONE recording's performance, never the album. The
+    holiday family is deliberately NOT one of them: a seasonal album IS an
+    album property and the playlist builder relies on the tag surviving.
+
+    ⚠️ Because the family is exempt here, it needs its OWN guard against
+    spreading from one track to an album — see ``album_is_holiday_album``.
+    """
+    cleaned = _strip_admin_genre_markers(str(value or "").strip().lower())
+    return cleaned in _TRACK_AFFILIATION_FILTER_TAGS
+
+
 def is_propagatable_genre(value: Any) -> bool:
     """True when an ALBUM-level genre may be INHERITED by a track that has none.
 
@@ -177,7 +199,7 @@ def is_propagatable_genre(value: Any) -> bool:
 
     Two families must not spread from an album to its tracks:
 
-    * the per-track affiliation markers (Cover/Live/Acoustic/Remix/
+    * the per-track affiliation markers (Cover/Live/Acoustic/Remix/Remaster/
       Instrumental/…) — they describe ONE recording's performance;
     * the Christmas/Holiday family — it describes the ALBUM's OCCASION, and a
       plain track on a Christmas compilation is not itself a Christmas track.
@@ -194,6 +216,8 @@ def is_propagatable_genre(value: Any) -> bool:
     INHERITING that list, which is a different question — so the two do not
     conflict.
     """
+    if is_track_affiliation_tag(value) or is_holiday_family_token(value):
+        return False
     return not is_admin_genre(value)
 
 
@@ -222,10 +246,10 @@ def strip_track_affiliation_tags(values: Any) -> list[str]:
 
 _ADMIN_GENRE_WORDS: frozenset[str] = frozenset({
     "covers", "tribute", "tributes", "tribute band",
-    "live album", "live recordings", "rework", "reworked", 
+    "live album", "live recordings", "rework", "reworked",
     "mashup", "mashups", "demo", "demos", "mixtape", "mixtapes",
     "soundtracks", "score", "scores", "original soundtrack",
-    "karaoke", "instrumentals", "bootleg", "bootlegs", 
+    "karaoke", "instrumentals", "bootleg", "bootlegs",
     "unofficial", "promo", "promos", "sampler",
 })
 
@@ -259,19 +283,36 @@ def _strip_admin_genre_markers(value: str) -> str:
     return text_value.strip()
 
 
+def _canonical_filter_tag(raw_genre: str) -> str | None:
+    """Resolve a raw genre string to its canonical filter tag display name, or None."""
+    lower_g = str(raw_genre or "").strip().lower()
+    if not lower_g:
+        return None
+    for candidate in (lower_g, _strip_admin_genre_markers(lower_g)):
+        if not candidate:
+            continue
+        if candidate in _CANONICAL_FILTER_DISPLAY:
+            return _CANONICAL_FILTER_DISPLAY[candidate]
+        if is_holiday_family_token(candidate):
+            return HOLIDAY_CANONICAL_TOKEN
+    return None
+
+
 def is_admin_genre(genre: Any) -> bool:
     if not genre:
         return True
     value = str(genre).strip().lower()
     if not value:
         return True
+    if value in _FILTER_TAGS or is_holiday_family_token(value):
+        return True
     value = _strip_admin_genre_markers(value)
     if not value:
         return True
     if value in _ADMIN_GENRE_WORDS:
         return True
-    # Filter tags shouldn't participate in main voting pool
-    if value in _FILTER_TAGS: 
+    # Filter tags and holiday variants shouldn't participate in main voting pool
+    if value in _FILTER_TAGS or is_holiday_family_token(value):
         return True
     return False
 
@@ -297,21 +338,27 @@ _JUNK_GENRE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\d{3,4}$"),
     re.compile(r"^\d+\s*'s$"),
     re.compile(r"^(19|20)\d{2}s?$"),
-    re.compile(r"^[a-z]*\d+[a-z]*$"),
+    re.compile(r"^\d{2}s$"),
     re.compile(r"^(my|the|a|an)\b", re.IGNORECASE),
 )
 
 
-def is_junk_genre(genre: Any) -> bool:
-    if not genre:
-        return True
+def _junk_filter_enabled() -> bool:
     try:
         from helpers.config_helpers import get_config
         _cfg = get_config() or {}
-        if not bool(_cfg.get("genres", {}).get("junk_filter", True)):
-            return False
+        return bool(_cfg.get("genres", {}).get("junk_filter", True))
     except Exception:
-        pass
+        return True
+
+
+def is_junk_genre(genre: Any, *, enabled: bool | None = None) -> bool:
+    if not genre:
+        return True
+    if enabled is None:
+        enabled = _junk_filter_enabled()
+    if not enabled:
+        return False
     value = str(genre).strip().lower()
     if not value:
         return True
@@ -329,12 +376,13 @@ def normalize_genre_for_vote(genre: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", value)
 
 
-def _source_weight(source: str) -> float:
-    try:
-        weights = get_genre_weights() or {}
-    except Exception:
-        weights = GENRE_WEIGHTS or {}
-        
+def _source_weight(source: str, weights: dict[str, Any] | None = None) -> float:
+    if weights is None:
+        try:
+            weights = get_genre_weights() or {}
+        except Exception:
+            weights = GENRE_WEIGHTS or {}
+
     if source in weights:
         return float(weights[source] or 0)
     if source == "essentia":
@@ -353,7 +401,7 @@ def _genre_min_weight() -> float:
 
 def _parse_genre_input(raw: Any) -> list[str]:
     """Robust parser handling lists, dicts, JSONB scalars, and delimited strings."""
-    
+
     def _extract(r: Any) -> list[str]:
         if not r:
             return []
@@ -367,7 +415,7 @@ def _parse_genre_input(raw: Any) -> list[str]:
                 elif item is not None:
                     res.extend(_extract(str(item)))
             return res
-            
+
         if isinstance(r, dict):
             res = []
             for _, v in r.items():
@@ -378,12 +426,12 @@ def _parse_genre_input(raw: Any) -> list[str]:
                 elif v is not None:
                     res.extend(_extract(str(v)))
             return res
-            
+
         if isinstance(r, str):
             stripped = r.strip()
             if not stripped or stripped.lower() in ("[]", "{}", "null", "none"):
                 return []
-                
+
             if stripped.startswith("[") or stripped.startswith("{"):
                 try:
                     parsed = json.loads(stripped)
@@ -391,7 +439,7 @@ def _parse_genre_input(raw: Any) -> list[str]:
                         return _extract(parsed)
                 except Exception:
                     pass
-                    
+
             # Split strings on delimiters and ruthlessly strip ALL brackets/quotes
             parts = []
             for g in re.split(r"[,;/\\]+", stripped):
@@ -399,11 +447,11 @@ def _parse_genre_input(raw: Any) -> list[str]:
                 if clean_g and clean_g.lower() not in ("null", "none"):
                     parts.append(clean_g)
             return parts
-            
+
         return []
 
     raw_list = _extract(raw)
-    
+
     seen = set()
     clean = []
     for g in raw_list:
@@ -413,7 +461,7 @@ def _parse_genre_input(raw: Any) -> list[str]:
         if k not in seen:
             seen.add(k)
             clean.append(g)
-            
+
     return clean
 
 
@@ -499,33 +547,37 @@ def _vote_genres(
     source_hits: dict[str, set[str]] = defaultdict(set)
     intercepted_filters: set[str] = set()
 
+    junk_enabled = _junk_filter_enabled()
+    try:
+        weights = get_genre_weights() or {}
+    except Exception:
+        weights = GENRE_WEIGHTS or {}
+
     for source, raw_genres in (source_map or {}).items():
-        base_weight = _source_weight(source)
+        # Strip @entity suffix if caller passed v2-style keys into legacy voter
+        clean_source = source.split("@", 1)[0] if "@" in source else source
+        base_weight = _source_weight(clean_source, weights=weights)
         genres = _parse_genre_input(raw_genres)
 
         for rank, genre in enumerate(genres or []):
-            lower_g = genre.strip().lower()
-            
             # Intercept filter tags before junk/admin validation strips them
-            if lower_g in _FILTER_TAGS or _strip_admin_genre_markers(lower_g) in _FILTER_TAGS:
-                # Resolve specifically if it matches our clean set
-                matched_filter = next((f for f in _FILTER_TAGS if f in lower_g), None)
-                if matched_filter:
-                    intercepted_filters.add(matched_filter.title())
+            matched_filter = _canonical_filter_tag(genre)
+            if matched_filter:
+                intercepted_filters.add(matched_filter)
 
-            if is_junk_genre(genre) or is_admin_genre(genre):
+            if is_junk_genre(genre, enabled=junk_enabled) or is_admin_genre(genre):
                 continue
-                
+
             key = normalize_genre_for_vote(genre)
             if not key:
                 continue
-                
+
             decay = 1.0 / math.log2(rank + 2)
             weighted_vote = base_weight * decay
-            
+
             votes[key] += weighted_vote
             spellings[key].append((weighted_vote, normalize_genre(genre)))
-            source_hits[key].add(source)
+            source_hits[key].add(clean_source)
 
     for key, (weight, spelling) in (extra_votes or {}).items():
         votes[key] += weight
@@ -545,13 +597,10 @@ def _vote_genres(
     # --- Strict Primary Confirmation Guardrail ---
     # Navidrome and Essentia can ONLY confirm primary sources. They cannot
     # confirm each other, nor can they stand alone.
-    keys_to_delete = []
-    
-    for k, hits in source_hits.items():
-        is_primary_backed = bool(hits & (primary_sources | {"context"}))
-        
-        if not is_primary_backed:
-            keys_to_delete.append(k)
+    keys_to_delete = [
+        k for k, hits in source_hits.items()
+        if not bool(hits & (primary_sources | {"context"}))
+    ]
 
     for k in keys_to_delete:
         del votes[k]
@@ -572,9 +621,10 @@ def _context_boost_votes(context_title: str, context_album: str) -> dict[str, tu
 def _normalize_nav_keys(nav_genres: Any) -> frozenset[str]:
     if not nav_genres:
         return frozenset()
+    junk_enabled = _junk_filter_enabled()
     keys = set()
     for g in _parse_genre_input(nav_genres):
-        if not g or is_junk_genre(g) or is_admin_genre(g):
+        if not g or is_junk_genre(g, enabled=junk_enabled) or is_admin_genre(g):
             continue
         key = normalize_genre_for_vote(g)
         if key:
@@ -604,7 +654,7 @@ def _rank_genres(
 
     display_names = [_resolve_display_name(k, spellings) for k in qualified]
     cleaned = clean_conflicting_genres(display_names)
-    
+
     # -----------------------------------------------------------------
     # DYNAMIC 3RD GENRE INCLUSION
     # -----------------------------------------------------------------
@@ -613,11 +663,11 @@ def _rank_genres(
         runner_up_key = normalize_genre_for_vote(cleaned[max_genres])
         runner_up_weight = votes.get(runner_up_key, 0.0)
         runner_up_hits = len(source_hits.get(runner_up_key, set()))
-        
+
         # Compare against the weakest included genre (e.g. rank #2)
         borderline_key = normalize_genre_for_vote(cleaned[max_genres - 1])
         borderline_weight = votes.get(borderline_key, 0.0)
-        
+
         # Rule: If it appears in at least 2 sources and has >= 60% of the weight of #2, include it!
         if runner_up_hits >= 2 and borderline_weight > 0 and (runner_up_weight / borderline_weight) >= 0.60:
             logger.debug(f"Promoted strong runner-up genre '{cleaned[max_genres]}' past the cutoff")
@@ -629,68 +679,55 @@ def _rank_genres(
     return final_list
 
 
-def _append_extra_genres(genres: list[str], title: str, album: str, intercepted_filters: set[str] = None) -> list[str]:
+def _append_extra_genres(
+    genres: list[str],
+    title: str,
+    album: str,
+    intercepted_filters: set[str] | None = None,
+) -> list[str]:
     title_lower = str(title or "").lower()
     context_lower = f"{title or ''} {album or ''}".lower()
-    
+    filters = set(intercepted_filters or ())
+
     # Base heuristic checks
-    # ⚠️ The parenthetical alternation was corrupted in de12b3cf to
-    # ``(live\vert{}acoustic\vert{}unplugged)`` — a Python regex where ``\v``
-    # is a vertical-tab escape — so it NEVER matched and live/acoustic tracks
-    # stopped being tagged. Restored to the original alternation.
     if bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", title_lower)) or \
        any(re.search(p, context_lower) for p in [r"\bconcert\b", r"\bat\s+\w+\s+(arena|stadium|hall|club|theatre|theater)"]):
-        if intercepted_filters is not None:
-            intercepted_filters.add("Live")
+        filters.add("Live")
 
-    # "Cover" is a per-TRACK affiliation, never an album property. The old
-    # ``\b(cover|tribute)\b`` over title+album tagged ordinary songs whose
-    # title merely contains the word ("Cover Me Now") and every track of an
-    # album named "Covers: A Tribute …". Only the same strict forms the cover
-    # detector uses justify it: a trailing "(X Cover)" suffix, "cover of",
-    # or "originally by" — matched on the TITLE only.
+    # "Cover" is a per-TRACK affiliation, never an album property.
     if (re.search(r"[\(\[]\s*[^)\]]+\s+cover\s*[\)\]]\s*$", title_lower)
             or re.search(r"\bcover\s+of\b|\boriginally\s+by\b", title_lower)):
-        if intercepted_filters is not None:
-            intercepted_filters.add("Cover")
+        filters.add("Cover")
 
     if "remaster" in title_lower or "remaster" in context_lower:
-        if intercepted_filters is not None:
-            intercepted_filters.add("Remaster")
+        filters.add("Remaster")
 
-    # Append all safely intercepted filter tags
+    # Append all safely intercepted filter tags in deterministic order
     existing_lower = {g.lower() for g in genres}
-    for f_tag in (intercepted_filters or []):
+    for f_tag in sorted(filters):
         if f_tag.lower() not in existing_lower:
             genres.append(f_tag)
+            existing_lower.add(f_tag.lower())
 
     return genres
 
 
 def _collect_intercepted_filter_tags(source_map: dict[str, Any] | None) -> set[str]:
-    """Every ``_FILTER_TAGS`` token present in the sources, title-cased.
+    """Every ``_FILTER_TAGS`` / holiday token present in the sources, canonically cased.
 
     Extracted from ``_vote_genres`` so the canonical-selection engine can keep
     appending the SAME filter tags the legacy engine does. Those tags are not
     genres — they are the playlist/filter markers (Live, Cover, Acoustic,
-    Christmas) that other code depends on, and dropping them just because the
-    genre SLOTS are chosen differently would break live/acoustic filtering.
-
-    ⚠️ Behaviour is intentionally IDENTICAL to the original inline loop, including
-    the ``next(...)`` over a frozenset. That lookup is order-dependent when two
-    filter words match one value (``remixed`` matches both ``remix`` and
-    ``remixed``), so it is a latent nondeterminism — left alone here rather than
-    quietly changed, because the point of this extraction is to share the
-    behaviour, not to revise it.
+    Christmas/Holiday) that other code depends on, and dropping them just
+    because the genre SLOTS are chosen differently would break live/acoustic
+    and seasonal filtering.
     """
     intercepted: set[str] = set()
     for raw_genres in (source_map or {}).values():
         for genre in _parse_genre_input(raw_genres) or []:
-            lower_g = genre.strip().lower()
-            if lower_g in _FILTER_TAGS or _strip_admin_genre_markers(lower_g) in _FILTER_TAGS:
-                matched_filter = next((f for f in _FILTER_TAGS if f in lower_g), None)
-                if matched_filter:
-                    intercepted.add(matched_filter.title())
+            matched = _canonical_filter_tag(genre)
+            if matched:
+                intercepted.add(matched)
     return intercepted
 
 
@@ -739,8 +776,6 @@ def _aggregate_genres_v2(
 
     moved = result.get("moved") or {}
     if moved:
-        # Worth a debug line: "why is my mood/genre missing" is otherwise
-        # unanswerable, and this is where a mis-classified value shows up.
         logger.debug(
             "Genre selection set non-genre values aside",
             moods=len(moved.get("mood") or []),
@@ -819,10 +854,11 @@ def get_top_genres_with_navidrome(
     online_top = _rank_genres(votes, spellings, source_hits, max_genres=2, nav_keys=nav_keys)
     online_top = _append_extra_genres(online_top, title, album, intercepted_filters)
 
+    junk_enabled = _junk_filter_enabled()
     nav_cleaned = sorted({
         normalize_genre(g).capitalize()
         for g in _parse_genre_input(nav_genres)
-        if g and not is_junk_genre(g) and not is_admin_genre(g)
+        if g and not is_junk_genre(g, enabled=junk_enabled) and not is_admin_genre(g)
     })
     return online_top, nav_cleaned
 
@@ -941,35 +977,9 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
     ``navidrome_genres`` is not an independent source. Navidrome serves the tags
     of the FILES ON DISK, and this pipeline WRITES those files
     (``album_tag_sync_service.sync_album_file_tags`` → ``_put("genres", …)`` →
-    the ``TCON``/``genre`` frame). So the sequence is:
-
-        1. a scan writes the album blend into every track's ``genres``;
-        2. ``sync_album_file_tags`` pushes ``genres`` into each file's tags;
-        3. Navidrome re-reads those files and serves the genre back;
-        4. the next import stores it as ``navidrome_genres``;
-        5. this function counts ``navidrome_genres`` as genre EVIDENCE.
-
-    Whatever step 1 got wrong therefore returns as step 5's PROOF that it was
-    right, and the value can never be observed to go away. Measured on a clean
-    14-track album with one Christmas song and no holiday tag anywhere:
-
-        before the round trip:  blend = ['Alternative Rock']            (no Holiday)
-        after  the round trip:  blend = ['Alternative Rock', 'Holiday'] (Holiday!)
-                                _album_holiday_votes → 14/14 carry holiday
-                                album_is_holiday_album → True
+    the ``TCON``/``genre`` frame).
 
     ⭐ A TAG PIPELINE MUST NOT TREAT A REFLECTION OF ITS OWN WRITE AS EVIDENCE.
-    No threshold or majority rule can fix that: a majority rule was already in
-    place, and the contaminated evidence made the majority look unanimous. This
-    is the reported "it's STILL assigning holiday to all tracks" after the
-    majority fix — the denominator was correct, the EVIDENCE was poisoned.
-
-    This also matches the convention the rest of the codebase already follows:
-    ``genre_selection`` weights ``navidrome`` 0.30 as "a tie-breaker, never a
-    sole source", and the VA path calls ``aggregate_genres(…, nav_genres=None)``
-    because "passing nav_genres would let Navidrome decide a tie on an album".
-    Navidrome is still available to the selection engine through the separate
-    ``nav_genres`` parameter; it just must not be a member of the source map.
     """
     with db_session() as session:
         result = session.execute(
@@ -977,8 +987,8 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
                 SELECT lastfm_tags, musicbrainz_genres, discogs_genres,
                        listenbrainz_genres, spotify_genres, essentia_genres,
                        manual_genres, audiodb_genres, wikidata_genres
-                FROM tracks 
-                WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist 
+                FROM tracks
+                WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
                   AND album = :album
             """),
             {"artist": artist, "album": album},
@@ -1011,28 +1021,15 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
                 # being weighted as the most specific evidence available.
                 source_map.setdefault(f"{src_key}@album", []).extend(parsed_vals)
 
-    recommended = aggregate_genres(source_map, max_genres=2)
+    recommended = aggregate_genres(source_map, max_genres=2, context_album=album)
 
     # ── Album blend must NOT carry per-track affiliation tags ──────────────
-    #
-    # ``aggregate_genres`` appends every ``_FILTER_TAGS`` token it finds in ANY
-    # track's sources — so one genuine cover's "cover", or one track's
-    # Last.fm "acoustic", was spread to EVERY track of the album by the
-    # album-wide ``UPDATE tracks SET genres`` in ``sync_album_file_tags``.
-    # That is the reported "saving track genres to album / attaching Cover to
-    # non-cover songs".
     recommended = [
         g for g in recommended
-        if g.strip().lower() not in _TRACK_AFFILIATION_FILTER_TAGS
+        if not is_track_affiliation_tag(g)
     ]
 
     # ── The holiday family needs the guard the affiliation filter gives ────
-    #
-    # The family is EXEMPT from the filter above (a Christmas album IS an album
-    # property), so it had no protection at all and a single track's "holiday"
-    # tag became the whole album's genre. Keep the token ONLY when the album
-    # itself is seasonal — the reported "one track's holiday genre is
-    # propagating to the whole album".
     _holiday_tracks, _examined = _album_holiday_votes(rows, album, _genre_indices)
     _keep_holiday = album_is_holiday_album(
         album=album,
@@ -1045,9 +1042,8 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
             if not is_holiday_family_token(g)
         ]
     else:
-        # Merge the family's spellings to the ONE canonical token so an album
-        # tagged "Christmas" on one track and "Holiday" on another yields one
-        # bucket rather than two near-duplicates.
+        if not any(is_holiday_family_token(g) for g in recommended):
+            recommended.append(HOLIDAY_CANONICAL_TOKEN)
         recommended = merge_holiday_tokens(recommended)
 
     return {"success": True, "artist": artist, "album": album, "genres": recommended}
@@ -1058,16 +1054,15 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
 #:
 #: ``navidrome_genres`` is DELIBERATELY absent. On a compilation each track has
 #: a different performer, so the album-level write is skipped (it would hand
-#: one blended list to every performer) — and with no per-track writer at all,
-#: a VA track's ``genres`` was frozen at whatever Navidrome imported while
-#: ``musicbrainz_genres`` / ``lastfm_genres`` / … sat right next to it.
+#: one blended list to every performer).
 VA_GENRE_SOURCES: tuple[tuple[str, str], ...] = (
     ("musicbrainz_genres", "musicbrainz"),
     ("discogs_genres", "discogs"),
     ("audiodb_genres", "audiodb"),
     ("essentia_genres", "essentia"),
     ("listenbrainz_genres", "listenbrainz"),
-    ("lastfm_genres", "lastfm"),
+    ("lastfm_tags", "lastfm"),
+    ("lastfm_genres", "lastfm"),  # Kept as alias fallback if caller passes pre-mapped dict
     ("spotify_genres", "spotify"),
     ("wikidata_genres", "wikidata"),
     ("manual_genres", "manual"),
@@ -1085,60 +1080,33 @@ def va_track_source_map(track: dict[str, Any]) -> dict[str, list[str]]:
     for column, source in VA_GENRE_SOURCES:
         values = _parse_genre_input(track.get(column))
         if values:
-            source_map.setdefault(source, []).extend(values)
+            existing = source_map.setdefault(source, [])
+            existing_lower = {v.lower() for v in existing}
+            for v in values:
+                if v.lower() not in existing_lower:
+                    existing.append(v)
+                    existing_lower.add(v.lower())
     return source_map
 
 
 # ---------------------------------------------------------------------------
 # ARTIST-LEVEL GENRE FALLBACK
-#
-# Requested:
-#
-#   "When scanning a various artists collection, if the track has no genre data
-#    online, can it fall back to using the genres for the track artist? If on
-#    the local db it can be grabbed from that artist or looked up on
-#    Musicbrainz, discogs and last.fm"
-#
-# A VA track with nothing of its own was LEFT ALONE (its Navidrome value
-# survived) — correct, but on a compilation that value is often the disc
-# tagger's guess or empty. The PERFORMER is known, and the performer's genres
-# are exactly the missing evidence: the artist's own rows elsewhere in the
-# library, or the artist on MusicBrainz / Discogs / Last.fm.
 # ---------------------------------------------------------------------------
 
-#: PRIORITY order. The ranks are the SAME sources the track vote weighs, so the
-#: ordering can never contradict ``genres.weights`` in config — but this is a
-#: PRIORITY, not a threshold. See :func:`fallback_genres_for_artist` for why the
-#: ``genres.min_weight`` rule cannot be reused here.
 _ARTIST_GENRE_SOURCE_ORDER: tuple[str, ...] = (
-    # The user's OWN library first: those genres were already curated by an
-    # earlier scan (or by hand), which is better evidence than a fresh lookup.
     "library",
     "musicbrainz",
     "discogs",
     "lastfm",
 )
 
-#: ``{casefolded artist: [genre, ...]}`` for the life of the process.
-#:
-#: A VA album can carry twenty different performers and every track is visited
-#: once per scan, so without this the SAME artist would be looked up again for
-#: each of its tracks (and again on the next album). The lookups behind a miss
-#: are: one local query, up to two MusicBrainz requests at 1 req/s, one Discogs
-#: search and one Last.fm call.
-_ARTIST_GENRE_FALLBACK_CACHE: dict[str, list[str]] = {}
+_ARTIST_GENRE_FALLBACK_LOCK = threading.Lock()
+_ARTIST_GENRE_FALLBACK_CACHE: "OrderedDict[str, list[str]]" = OrderedDict()
+_ARTIST_GENRE_FALLBACK_MAX = 2048
 
 
 def _artist_genres_from_library(artist: str, *, exclude_track_id: str = "") -> list[str]:
-    """The artist's genres that are ALREADY in this database.
-
-    Two places, cheapest first — neither costs a network call:
-
-    * the other tracks credited to this artist (their ``genres`` column is
-      what a previous scan resolved, so it is already aggregated);
-    * ``artists.lastfm_artist_tags``, the Last.fm artist tags a scan of that
-      artist's own music caches (``_fetch_artist_lastfm_tags``).
-    """
+    """The artist's genres that are ALREADY in this database."""
     genres: list[str] = []
 
     try:
@@ -1176,12 +1144,7 @@ def _artist_genres_from_library(artist: str, *, exclude_track_id: str = "") -> l
 
 
 def _artist_genres_from_musicbrainz(artist: str) -> list[str]:
-    """MusicBrainz artist genres.
-
-    TWO requests, because MB exposes genres on the artist LOOKUP only — a
-    search result carries no ``genres`` however ``inc`` is spelled. The search
-    is exact-anchored so a same-named artist cannot answer for this one.
-    """
+    """MusicBrainz artist genres."""
     try:
         from services.enrichment.musicbrainz_service import get_shared_mb_client
 
@@ -1219,13 +1182,7 @@ def _artist_genres_from_discogs(artist: str) -> list[str]:
 
 
 def _artist_genres_from_lastfm(artist: str) -> list[str]:
-    """Last.fm artist top tags.
-
-    The tags are also written to ``artists.lastfm_artist_tags`` (fill-if-empty),
-    the same per-artist cache a scan of that artist's own music fills. That is
-    what makes the fallback CONVERGE: the next scan finds the artist in the
-    local tier and stops calling Last.fm for it.
-    """
+    """Last.fm artist top tags."""
     try:
         from helpers.config_helpers import get_config
 
@@ -1252,11 +1209,7 @@ def _artist_genres_from_lastfm(artist: str) -> list[str]:
 
 
 def _cache_lastfm_artist_tags(artist: str, names: list[str]) -> None:
-    """Store Last.fm artist tags on the artist row, only when it has none.
-
-    Best-effort and never overwriting: ``_fetch_artist_lastfm_tags`` treats a
-    populated column as a cache hit, so a second writer must not clobber it.
-    """
+    """Store Last.fm artist tags on the artist row, only when it has none."""
     if not artist or not names:
         return
     try:
@@ -1286,28 +1239,15 @@ def _escape_lucene(value: str) -> str:
 def _merge_artist_genre_sources(
     sources: dict[str, list[str]], max_genres: int = 2
 ) -> list[str]:
-    """Rank artist-level candidates: source PRIORITY first, then vote order.
-
-    Pure, so the ordering is testable without a database or a network.
-
-    ⚠️ ``genres.min_weight`` is deliberately NOT applied here. That rule exists
-    to stop a lone weak TRACK tag defining a track — but an artist's OWN top
-    tags are the artist's genre consensus, and the fallback only runs when the
-    track has nothing at all: thresholding it would mean a Last.fm-only artist
-    (weight 0.10) gets no fallback, and the request would fail for exactly the
-    compilations it was made for. The weight is used as the ORDER instead:
-    library → MusicBrainz → Discogs → Last.fm.
-
-    Junk and admin tags (years, "seen live", filter tags) are dropped before
-    ranking — the same filters the main vote uses.
-    """
+    """Rank artist-level candidates: source PRIORITY first, then vote order."""
     ranked: list[str] = []
     seen: set[str] = set()
+    junk_enabled = _junk_filter_enabled()
 
     for source in _ARTIST_GENRE_SOURCE_ORDER:
         for raw in sources.get(source) or []:
             name = str(raw or "").strip()
-            if not name or is_junk_genre(name) or is_admin_genre(name):
+            if not name or is_junk_genre(name, enabled=junk_enabled) or is_admin_genre(name):
                 continue
             key = normalize_genre_for_vote(name)
             if not key or key in seen:
@@ -1326,18 +1266,7 @@ def fallback_genres_for_artist(
     exclude_track_id: str = "",
     max_genres: int = 2,
 ) -> list[str]:
-    """Genres for the PERFORMER, for a VA track that has none of its own.
-
-    Local database FIRST — an artist already in this library has curated
-    genres, and reading them costs nothing. The online lookups (MusicBrainz,
-    Discogs, Last.fm) only run when the local answer is empty.
-
-    A placeholder performer ("Various Artists" on a track that inherited the
-    album credit) is NOT an artist to look up, so it returns nothing.
-
-    Memoised per artist for the life of the process: a compilation's tracks
-    share performers, and every track is visited once per scan.
-    """
+    """Genres for the PERFORMER, for a VA track that has none of its own."""
     artist = str(artist or "").strip()
     if not artist:
         return []
@@ -1351,9 +1280,11 @@ def fallback_genres_for_artist(
         pass
 
     key = artist.casefold()
-    cached = _ARTIST_GENRE_FALLBACK_CACHE.get(key)
-    if cached is not None:
-        return list(cached)
+    with _ARTIST_GENRE_FALLBACK_LOCK:
+        cached = _ARTIST_GENRE_FALLBACK_CACHE.get(key)
+        if cached is not None:
+            _ARTIST_GENRE_FALLBACK_CACHE.move_to_end(key)
+            return list(cached)
 
     sources: dict[str, list[str]] = {}
     library = _artist_genres_from_library(artist, exclude_track_id=exclude_track_id)
@@ -1366,11 +1297,12 @@ def fallback_genres_for_artist(
 
     resolved = _merge_artist_genre_sources(sources, max_genres=max_genres)
 
-    # A LOOKUP THAT FOUND NOTHING IS NOT CACHED. An artist whose data is added
-    # to MusicBrainz (or to the library) later must be able to answer on the
-    # next scan; caching the miss would freeze it for the process's lifetime.
     if resolved:
-        _ARTIST_GENRE_FALLBACK_CACHE[key] = list(resolved)
+        with _ARTIST_GENRE_FALLBACK_LOCK:
+            _ARTIST_GENRE_FALLBACK_CACHE[key] = list(resolved)
+            _ARTIST_GENRE_FALLBACK_CACHE.move_to_end(key)
+            while len(_ARTIST_GENRE_FALLBACK_CACHE) > _ARTIST_GENRE_FALLBACK_MAX:
+                _ARTIST_GENRE_FALLBACK_CACHE.popitem(last=False)
         logger.info(
             "Artist genre fallback resolved",
             artist=artist,
@@ -1392,14 +1324,7 @@ def _genre_spelling_canon(value: Any) -> list[str]:
 
 
 def _same_genre_value(existing: Any, proposed: str) -> bool:
-    """True when the track already carries these genres, in any spelling.
-
-    ``_genre_sets_equal`` normalises case and whitespace but not punctuation,
-    so MusicBrainz's ``hip-hop`` read as a change against a stored ``Hip Hop``
-    and the track was rewritten — a database row and a physical file-tag
-    rewrite for a difference that is only a spelling variant of one genre.
-    The genres still have to MATCH; only the spelling is allowed to differ.
-    """
+    """True when the track already carries these genres, in any spelling."""
     try:
         from services.metadata.metadata_proposal_service import _genre_sets_equal
 
@@ -1413,31 +1338,9 @@ def _same_genre_value(existing: Any, proposed: str) -> bool:
 def sync_various_artists_track_genres(
     tracks: list[dict[str, Any]], album: str = ""
 ) -> int:
-    """Give each track of a VA compilation the genres ITS OWN sources rate.
+    """Give each track of a VA compilation the genres ITS OWN sources rate."""
+    pending_updates: list[tuple[dict[str, Any], Any, str, str]] = []
 
-    The album-level write in ``sync_album_file_tags`` is correctly skipped for a
-    compilation — it hands one blended list to every performer — but nothing
-    replaced it, so a VA track's ``genres`` never moved off the Navidrome value
-    the import wrote. This is the per-track replacement: each row is judged on
-    its own sources and written by its own id, never album-wide.
-
-    ``nav_genres=None`` is deliberate: Navidrome normally acts as the
-    tie-breaker, and the whole point here is that it must not decide.
-
-    Two rules keep it safe:
-
-    * a track with no online source FALLS BACK TO ITS PERFORMER'S genres
-      (:func:`fallback_genres_for_artist` — the local library first, then
-      MusicBrainz / Discogs / Last.fm). Only when that is empty too is the row
-      left untouched, keeping its Navidrome value rather than blanking it.
-    * ``aggregate_genres`` applies ``genres.min_weight`` (0.25), so a lone
-      Last.fm (0.10) / ListenBrainz (0.15) / Spotify (0.05) source cannot define
-      a track by itself — the same rule every other genre path follows.
-      MusicBrainz (0.40), Discogs (0.25) and Manual (0.30) each clear it alone.
-
-    Returns the number of tracks actually updated.
-    """
-    updated = 0
     for track in tracks:
         track_id = track.get("id")
         if not track_id:
@@ -1445,9 +1348,6 @@ def sync_various_artists_track_genres(
 
         source_map = va_track_source_map(track)
         if source_map:
-            # A VA track's own columns are TRACK-level evidence: on a
-            # compilation each track has a different performer, so pooling them
-            # would describe the compilation rather than the recording.
             source_map = {f"{k}@track": v for k, v in source_map.items()}
             top_genres = aggregate_genres(
                 source_map,
@@ -1458,13 +1358,12 @@ def sync_various_artists_track_genres(
             )
             origin = "own sources"
         else:
-            # The track has nothing of its own on a compilation. Its PERFORMER
-            # does, though — see ``fallback_genres_for_artist``.
             top_genres = fallback_genres_for_artist(
                 str(track.get("artist") or ""),
                 exclude_track_id=str(track_id),
             )
             origin = "track artist"
+
         if not top_genres:
             continue
 
@@ -1472,12 +1371,24 @@ def sync_various_artists_track_genres(
         if _same_genre_value(track.get("genres"), genres_str):
             continue
 
-        try:
-            with db_session() as session:
-                session.execute(
-                    text("UPDATE tracks SET genres = :genres WHERE id = :track_id"),
-                    {"genres": genres_str, "track_id": track_id},
-                )
+        pending_updates.append((track, track_id, genres_str, origin))
+
+    if not pending_updates:
+        return 0
+
+    updated = 0
+    batch_params = [
+        {"genres": genres_str, "track_id": track_id}
+        for _track, track_id, genres_str, _origin in pending_updates
+    ]
+
+    try:
+        with db_session() as session:
+            session.execute(
+                text("UPDATE tracks SET genres = :genres WHERE id = :track_id"),
+                batch_params,
+            )
+        for track, track_id, genres_str, origin in pending_updates:
             track["genres"] = genres_str
             updated += 1
             if origin == "track artist":
@@ -1487,11 +1398,29 @@ def sync_various_artists_track_genres(
                     artist=str(track.get("artist") or ""),
                     genres=genres_str,
                 )
-        except Exception as exc:
-            logger.debug(
-                "Various-artist track genre sync failed",
-                track_id=track_id, error=str(exc),
-            )
+    except Exception as batch_exc:
+        logger.debug("Batch VA genre update failed, falling back to per-row", error=str(batch_exc))
+        for track, track_id, genres_str, origin in pending_updates:
+            try:
+                with db_session() as session:
+                    session.execute(
+                        text("UPDATE tracks SET genres = :genres WHERE id = :track_id"),
+                        {"genres": genres_str, "track_id": track_id},
+                    )
+                track["genres"] = genres_str
+                updated += 1
+                if origin == "track artist":
+                    logger.debug(
+                        "Various-artist track genre set from its artist",
+                        track_id=track_id,
+                        artist=str(track.get("artist") or ""),
+                        genres=genres_str,
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "Various-artist track genre sync failed",
+                    track_id=track_id, error=str(exc),
+                )
 
     if updated:
         logger.info(
@@ -1574,7 +1503,8 @@ def adjust_genres(genres: list[str], artist_is_metal: bool = False) -> list[str]
 
 
 def enrich_genres_aggressively(artist_name: str, conn: Any = None, verbose: bool = False) -> set[str]:
-    genres_collected: set[str] = set()
+    genres_collected: list[str] = []
+    junk_enabled = _junk_filter_enabled()
 
     def _add_clean(raw_genres: list[str] | None, source: str) -> None:
         if not raw_genres:
@@ -1583,18 +1513,15 @@ def enrich_genres_aggressively(artist_name: str, conn: Any = None, verbose: bool
         for g in raw_genres:
             if not g:
                 continue
-            if is_junk_genre(g) or is_admin_genre(g):
+            if is_junk_genre(g, enabled=junk_enabled) or is_admin_genre(g):
                 logger.debug("Filtered out junk/admin genre tag", source=source, genre=g)
                 continue
-            kept.append(g.lower())
+            kept.append(normalize_genre(g))
 
         if kept:
-            genres_collected.update(kept)
+            genres_collected.extend(kept)
             if verbose:
                 logger.info(f"{source} genres found", artist=artist_name, count=len(kept))
-
-    # Discogs and MusicBrainz fallback calls removed here 
-    # Genres are now read directly from the database tracks table
 
     try:
         from api_clients.audiodb import get_audiodb_genres
@@ -1620,19 +1547,27 @@ def enrich_genres_aggressively(artist_name: str, conn: Any = None, verbose: bool
     except Exception as e:
         logger.debug("Last.fm genre lookup failed", artist=artist_name, error=str(e))
 
-    if genres_collected:
+    cleaned = clean_conflicting_genres(genres_collected)[:3]
+
+    if cleaned:
         try:
             with db_session() as session:
                 result = session.execute(
                     text(
                         "UPDATE tracks SET genres = :genres_str "
-                        "WHERE artist = :artist_name AND (genres IS NULL OR genres = '')"
+                        "WHERE LOWER(TRIM(COALESCE(NULLIF(album_artist, ''), artist))) = LOWER(TRIM(:artist_name)) "
+                        "  AND (genres IS NULL OR TRIM(genres) = '')"
                     ),
-                    {"genres_str": ", ".join(sorted(genres_collected)), "artist_name": artist_name},
+                    {"genres_str": ", ".join(cleaned), "artist_name": artist_name},
                 )
             if verbose:
-                logger.info("Updated tracks with enriched genres", updated_rows=result.rowcount, artist=artist_name, genres_count=len(genres_collected))
+                logger.info(
+                    "Updated tracks with enriched genres",
+                    updated_rows=result.rowcount,
+                    artist=artist_name,
+                    genres_count=len(cleaned),
+                )
         except Exception as e:
             logger.debug("Failed to update genres in DB", artist=artist_name, error=str(e))
 
-    return genres_collected
+    return set(cleaned)
