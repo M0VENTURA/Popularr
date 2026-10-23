@@ -915,8 +915,19 @@ def get_rejected_candidate_keys(item_or_id: Any) -> set[str]:
 
 
 def is_rejected_candidate(item_or_id: Any, username: str, filename: str) -> bool:
-    """True when this exact candidate was already rejected for the row."""
-    return _candidate_key(username, filename) in get_rejected_candidate_keys(item_or_id)
+    """True when this candidate was already rejected for the row.
+
+    Matches the exact ``username|filename`` record, and also a record with NO
+    username (written when the peer could not be identified), which rejects
+    that filename from any peer.
+    """
+    keys = get_rejected_candidate_keys(item_or_id)
+    if not keys:
+        return False
+    return (
+        _candidate_key(username, filename) in keys
+        or _candidate_key("", filename) in keys
+    )
 
 
 def mark_imported(queue_id: int, target_path: str) -> dict[str, Any] | None:
