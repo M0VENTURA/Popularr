@@ -451,6 +451,7 @@ class CoverDetector:
 
         earliest: dict[str, Any] | None = None
         earliest_year = 9999
+        performer_year = 9999
         credited = 0
         for rec in recordings:
             if not isinstance(rec, dict) or not rec.get("id"):
@@ -466,9 +467,11 @@ class CoverDetector:
             if not rec_artist:
                 continue
             credited += 1
-            if _same_artist(rec_artist, performer):
-                continue
             year = year_from_recording(rec)
+            if _same_artist(rec_artist, performer):
+                if year is not None and year < performer_year:
+                    performer_year = year
+                continue
             if year is None or year >= earliest_year:
                 continue
             earliest_year = year
@@ -478,7 +481,24 @@ class CoverDetector:
                 "confidence": "medium",
             }
 
+        # ⚠️ The performer recorded it FIRST: they originated the song, and
+        # every other credit is a later cover OF them. The old rule returned
+        # the earliest OTHER artist regardless, so any original with a later
+        # cover on MusicBrainz was flagged as a cover of that cover.
+        if earliest and performer_year <= earliest_year:
+            return {}
+
         if earliest:
+            # A recording by one of the song's WRITERS outranks "earliest on
+            # this page": the browse is one unordered page of a possibly huge
+            # list, so the true original may be missing from it entirely (the
+            # reported "Jai Sang Park" attribution for PSY's song). Only asked
+            # for a candidate cover, so originals pay no extra request.
+            by_writer = self._original_by_writer(
+                {work_mbid}, performer=performer, exclude_mbid=exclude_mbid,
+            )
+            if by_writer:
+                return {**by_writer, "confidence": "medium"}
             return earliest
         # The work HAS recordings bearing a credit and none of them differs
         # from the performer — the performer originated the song.
@@ -1468,6 +1488,63 @@ class CoverDetector:
                 return {**original, "confidence": "high"}
         return None
 
+    def _original_by_writer(
+        self,
+        work_ids: set[str],
+        *,
+        performer: str,
+        exclude_mbid: str = "",
+    ) -> dict[str, Any] | None:
+        """A recording of the work PERFORMED by one of its writers.
+
+        The writer-performer is the original in almost every case (PSY wrote
+        and recorded 강남스타일). This finds it even when the earliest-recording
+        rule cannot: a famous song has hundreds of recordings in no fixed
+        order, so the one page the browse returns may not contain the 2012
+        original at all. Matched on the artist's MusicBrainz ID, so credit
+        spellings ("Jai Sang Park" vs "PSY") do not matter. The work and its
+        recording list are both cached, so this adds no request on a repeat.
+        """
+        for work_id in sorted(work_ids or ()):
+            try:
+                work = _ngs_relations(self.mb.get_work(work_id, inc="artist-rels") or {})
+            except Exception as exc:
+                logger.debug("Writer-performer lookup failed", work_mbid=work_id, error=str(exc))
+                continue
+            writer_ids = {
+                str((rel.get("artist") or {}).get("id") or "")
+                for rel in work.get("artist-relation-list", []) or []
+                if str(rel.get("type", "")).lower() in _WRITER_RELATION_TYPES
+            } - {""}
+            if not writer_ids:
+                continue
+            best: dict[str, Any] | None = None
+            best_year = 9999
+            for rec in self._work_recordings(work_id):
+                if not isinstance(rec, dict):
+                    continue
+                if exclude_mbid and str(rec.get("id") or "") == exclude_mbid:
+                    continue
+                for credit in rec.get("artist-credit") or []:
+                    if not isinstance(credit, dict):
+                        continue
+                    artist = credit.get("artist") or {}
+                    if str(artist.get("id") or "") not in writer_ids:
+                        continue
+                    name = str(artist.get("name") or credit.get("name") or "").strip()
+                    if not name or (performer and _same_artist(name, performer)):
+                        continue
+                    year = year_from_recording(rec)
+                    # The writer's EARLIEST recording of the song; one with no
+                    # known year still beats nothing.
+                    if best is None or (year is not None and year < best_year):
+                        best_year = year if year is not None else 9999
+                        best = {"artist": name, "year": year, "confidence": "high"}
+                    break
+            if best:
+                return best
+        return None
+
     def _writer_from_cover_work(
         self,
         work_ids: set[str],
@@ -1490,10 +1567,12 @@ class CoverDetector:
                 if str(rel.get("type", "")).lower() not in _WRITER_RELATION_TYPES:
                     continue
                 artist = rel.get("artist") or {}
-                # The credited NAME on the relation first (e.g. "PSY"), then
-                # the artist's own name (e.g. "Jai Sang Park").
+                # The artist's OWN name first ("PSY"). ``target-credit`` is how
+                # the writing credit is printed — often a legal name ("Jai Sang
+                # Park") no listener would recognise as the original artist. The
+                # old order produced "Gangnam Style (Jai Sang Park Cover)".
                 name = str(
-                    rel.get("target-credit") or artist.get("name") or ""
+                    artist.get("name") or rel.get("target-credit") or ""
                 ).strip()
                 if name and not (performer and _same_artist(name, performer)):
                     return {"artist": name, "year": None, "confidence": "medium"}
@@ -1568,6 +1647,15 @@ class CoverDetector:
                 return candidate
             if chain_result:
                 return chain_result
+            # The writer's own recording of the song (PSY's 강남스타일), found
+            # by artist ID — before falling back to naming the writer.
+            by_writer = self._original_by_writer(
+                cover_work_ids,
+                performer=album_artist,
+                exclude_mbid=recording_mbid,
+            )
+            if by_writer:
+                return by_writer
             # Still a confirmed cover: name the work's writer as the original
             # rather than discard a verdict MusicBrainz states outright.
             return self._writer_from_cover_work(cover_work_ids, performer=album_artist)
