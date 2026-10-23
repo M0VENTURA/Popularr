@@ -964,7 +964,11 @@ class MusicBrainzService:
                 "recording.get",
                 self.http.get_recording,
                 mbid,
-                inc="artist-credits+releases+release-groups+work-rels+genres",
+                # ``work-level-rels`` brings the WORK's own relations (composer /
+                # lyricist) inside the recording's work relation. Without it
+                # ``writer`` was always empty on this path, so the cover
+                # detector's writer step had nothing to compare.
+                inc="artist-credits+releases+release-groups+work-rels+work-level-rels+artist-rels+genres",
                 Log_context={**context, "mbid": mbid},
             )
             if not recording and _known_mbid:
@@ -1099,6 +1103,12 @@ class MusicBrainzService:
 
         writers: list[str] = []
         work_mbid = ""
+        # ⭐ "cover recording of <work>": MusicBrainz models a cover as the
+        # ``cover`` ATTRIBUTE on the recording's performance relation to its
+        # work. It was fetched and never read, so a cover MusicBrainz states
+        # outright (Feuerschwanz's "Gangnam Style" -> PSY's 강남스타일) reached
+        # the cover detector as an ordinary track.
+        cover_work_mbid = ""
         # ── The "remix of" relation ─────────────────────────────────────
         # MusicBrainz records a remix as a RECORDING-level relation pointing
         # at the recording it re-records:
@@ -1133,7 +1143,18 @@ class MusicBrainzService:
                 if not isinstance(work, dict):
                     continue
                 if work.get("id"):
-                    work_mbid = str(work.get("id"))
+                    _attrs = {
+                        str(a).strip().casefold()
+                        for a in (relation.get("attributes") or [])
+                        if str(a).strip()
+                    }
+                    if "cover" in _attrs:
+                        cover_work_mbid = str(work.get("id"))
+                        # The covered work wins the slot: it is the one the
+                        # cover detector's work step needs.
+                        work_mbid = cover_work_mbid
+                    elif not work_mbid:
+                        work_mbid = str(work.get("id"))
                 for work_relation in work.get("relations") or []:
                     if not isinstance(work_relation, dict):
                         continue
@@ -1172,6 +1193,9 @@ class MusicBrainzService:
             "confidence": confidence,
             "writer": ", ".join(dict.fromkeys(writers)),
             "work_mbid": work_mbid,
+            # True when MusicBrainz itself says this recording is a cover.
+            "is_cover_relation": bool(cover_work_mbid),
+            "cover_work_mbid": cover_work_mbid,
             "genres": list(dict.fromkeys(genres)),
             # ── Remix evidence from the "remix of" recording relation ──────
             # ``is_remix`` is TRUE only when MusicBrainz itself says this
