@@ -33,8 +33,22 @@ _STUCK_DOWNLOAD_SECONDS = 6 * 3600
 _STUCK_MOVING_MINUTES = 10
 
 
+def _retry_delay_minutes() -> int:
+    try:
+        from db.repositories.queue import _queue_retry_delay_minutes
+
+        return int(_queue_retry_delay_minutes())
+    except Exception:
+        return 30
+
+
 def reset_abandoned_items() -> dict[str, int]:
-    """Reset items left in 'searching'/'processing' by a previous worker."""
+    """Reset items left in 'searching'/'processing' by a previous worker.
+
+    Run at worker startup. Rows that already have a downloaded file are left
+    alone: putting one back to 'queued' would make it unclaimable (the claim
+    requires ``file_path IS NULL``) and it would sit in the queue forever.
+    """
     reset = 0
     try:
         with db_session() as session:
@@ -44,6 +58,7 @@ def reset_abandoned_items() -> dict[str, int]:
                     SET status = 'queued',
                         updated_at = CURRENT_TIMESTAMP
                     WHERE status IN ('searching', 'processing')
+                      AND file_path IS NULL
                 """)
             )
             reset = int(result.rowcount or 0)
@@ -70,6 +85,7 @@ def cleanup_stuck_items() -> dict[str, Any]:
                     SET status = 'queued',
                         updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'searching'
+                      AND file_path IS NULL
                       AND updated_at < CURRENT_TIMESTAMP - make_interval(secs => :seconds)
                 """),
                 {"seconds": _STUCK_SEARCH_SECONDS},
@@ -83,6 +99,7 @@ def cleanup_stuck_items() -> dict[str, Any]:
                     SET status = 'queued',
                         updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'processing'
+                      AND file_path IS NULL
                       AND updated_at < CURRENT_TIMESTAMP - make_interval(secs => :seconds)
                 """),
                 {"seconds": _STUCK_SEARCH_SECONDS},
@@ -95,11 +112,17 @@ def cleanup_stuck_items() -> dict[str, Any]:
                     UPDATE download_queue
                     SET status = 'failed',
                         failure_reason = 'Stuck in downloading state',
+                        -- A hung transfer IS an attempt. Without counting it the
+                        -- row was re-queued and hung again every 6 hours forever.
+                        retry_count = COALESCE(retry_count, 0) + 1,
+                        -- Wait before the auto-retry picks it up, instead of
+                        -- re-queuing it on the very next cycle.
+                        next_retry_at = CURRENT_TIMESTAMP + make_interval(mins => :delay),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'downloading'
                       AND updated_at < CURRENT_TIMESTAMP - make_interval(secs => :seconds)
                 """),
-                {"seconds": _STUCK_DOWNLOAD_SECONDS},
+                {"seconds": _STUCK_DOWNLOAD_SECONDS, "delay": _retry_delay_minutes()},
             )
             downloading_reset = int(result.rowcount or 0)
 
