@@ -118,13 +118,54 @@ def _db_now_naive() -> datetime:
     return datetime.utcnow()
 
 
-def _remember_failed_peer(transfer: dict[str, Any]) -> None:
-    """Persist peer block into the DB/pipeline blocklist so it isn't retried."""
+def _record_rejected_for_row(
+    queue_id: Any,
+    username: Any,
+    filename: Any,
+    reason: str = "",
+) -> None:
+    """Remember this candidate as rejected FOR THIS QUEUE ROW.
+
+    The peer block below is global and lives in the pipeline; this record is
+    per row and survives restarts, so the next search for the row skips the
+    exact file that already failed. The log shows why it is needed: queue row
+    6667 downloaded, rejected and deleted the same file from the same peer
+    about 20 times while the block was logged every time.
+    """
+    if not queue_id or not (username or filename):
+        return
+    try:
+        from db.repositories.queue import record_rejected_candidate
+
+        record_rejected_candidate(
+            int(queue_id),
+            str(username or ""),
+            str(filename or ""),
+            reason=reason,
+        )
+    except Exception as exc:
+        logger.debug("Rejected-candidate record failed", queue_id=queue_id, error=str(exc))
+
+
+def _remember_failed_peer(
+    transfer: dict[str, Any],
+    queue_id: Any = None,
+    reason: str = "",
+) -> None:
+    """Persist peer block into the DB/pipeline blocklist so it isn't retried.
+
+    With a ``queue_id`` the exact candidate is also recorded on the row, so a
+    peer that rejected or stalled THIS file is not chosen for it again.
+    """
     try:
         from services.downloads.download_pipeline_service import _block_peer
         _block_peer(transfer.get("username"), transfer.get("filename"))
     except Exception:
         pass
+    if queue_id:
+        _record_rejected_for_row(
+            queue_id, transfer.get("username"), transfer.get("filename"), reason
+        )
 
 
 def _monitored_downloads_dir() -> str:
@@ -135,8 +176,13 @@ def _monitored_downloads_dir() -> str:
         return "?"
 
 
-_FILE_ARRIVAL_POLLS = 3
-_FILE_ARRIVAL_POLL_SECONDS = 10
+#: ⚠️ ONE look, no sleeping. This used to poll 3 × 10 s for EVERY transfer
+#: slskd reported as succeeded but whose file was not visible yet — inside the
+#: queue cycle lock, so a handful of slow landings froze the whole queue for
+#: minutes. The completion check runs again next cycle anyway, and
+#: ``_SLSKD_SUCCEEDED_NOT_FOUND_MAX_CYCLES`` already gives the file its grace.
+_FILE_ARRIVAL_POLLS = 1
+_FILE_ARRIVAL_POLL_SECONDS = 0
 
 
 def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Optional[str]:
@@ -220,14 +266,15 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
     if not candidates:
         return None
 
-    for _ in range(_FILE_ARRIVAL_POLLS):
+    for _attempt in range(max(1, _FILE_ARRIVAL_POLLS)):
         for path in candidates:
             try:
                 if path and os.path.isfile(path):
                     return path
             except Exception:
                 pass
-        _time.sleep(_FILE_ARRIVAL_POLL_SECONDS)
+        if _FILE_ARRIVAL_POLL_SECONDS > 0 and _attempt < _FILE_ARRIVAL_POLLS - 1:
+            _time.sleep(_FILE_ARRIVAL_POLL_SECONDS)
     return None
 
 
@@ -695,44 +742,60 @@ def _record_discarded_download(
         logger.debug("Could not record discarded download", queue_id=queue_id, error=str(exc))
 
 
-def _block_peer_for_queue_item(queue_id: int, found_filename: str | None = None) -> None:
-    """Blocks the peer and permanently adds the peer/filename combination to the blocklist."""
+def _block_peer_for_queue_item(
+    queue_id: int,
+    found_filename: str | None = None,
+    reason: str = "rejected download",
+) -> None:
+    """Block the peer that served a rejected file, and record the candidate on the row.
+
+    The peer is looked up in slskd's completed transfers. The candidate is
+    recorded on the queue row EVEN WHEN that lookup fails (slskd unreachable,
+    or the transfer already removed): the old version returned early in those
+    cases, so nothing at all stopped the next search choosing the same file.
+    Without a username the record matches that filename from ANY peer.
+    """
+    _remote = str(found_filename or "").replace("\\", "/").strip()
+    _blocked_user = ""
     try:
         from api_clients.slskd_http import get_slskd_client
         from services.downloads.slskd_service import SlskdService
 
         client = get_slskd_client()
-        if client is None:
-            return
-        slskd = SlskdService(http_client=client)
+        if client is not None:
+            slskd = SlskdService(http_client=client)
 
-        _remote = str(found_filename or "").replace("\\", "/").strip()
-        _remote_norm = _normalize_transfer_key(_remote) if _remote else None
-        _remote_base = os.path.basename(_remote_norm or "") if _remote_norm else None
+            _remote_norm = _normalize_transfer_key(_remote) if _remote else None
+            _remote_base = os.path.basename(_remote_norm or "") if _remote_norm else None
 
-        for transfer in slskd.get_completed_transfers():
-            username = str(transfer.get("username") or "")
-            remote = str(transfer.get("filename") or "").replace("\\", "/").strip()
-            remote_norm = _normalize_transfer_key(remote) if remote else None
-            remote_base = os.path.basename(remote_norm or "") if remote_norm else None
-            if not username:
-                continue
-            matches = (
-                (_remote_norm and remote_norm == _remote_norm)
-                or (_remote_base and remote_base == _remote_base)
-                or (_remote_base and remote_norm and remote_norm.endswith(f"/{_remote_base}"))
-            )
-            if not matches:
-                continue
-            try:
-                from services.downloads.download_pipeline_service import _block_peer
-                _block_peer(username, remote)
-                logger.warning("Blocked peer after mismatched download", queue_id=queue_id, username=username, filename=remote[:120])
-            except Exception as _be:
-                logger.debug("Peer block skipped", queue_id=queue_id, error=str(_be))
-            return
+            for transfer in slskd.get_completed_transfers():
+                username = str(transfer.get("username") or "")
+                remote = str(transfer.get("filename") or "").replace("\\", "/").strip()
+                remote_norm = _normalize_transfer_key(remote) if remote else None
+                remote_base = os.path.basename(remote_norm or "") if remote_norm else None
+                if not username:
+                    continue
+                matches = (
+                    (_remote_norm and remote_norm == _remote_norm)
+                    or (_remote_base and remote_base == _remote_base)
+                    or (_remote_base and remote_norm and remote_norm.endswith(f"/{_remote_base}"))
+                )
+                if not matches:
+                    continue
+                _blocked_user = username
+                if remote:
+                    _remote = remote
+                try:
+                    from services.downloads.download_pipeline_service import _block_peer
+                    _block_peer(username, remote)
+                    logger.warning("Blocked peer after mismatched download", queue_id=queue_id, username=username, filename=remote[:120])
+                except Exception as _be:
+                    logger.debug("Peer block skipped", queue_id=queue_id, error=str(_be))
+                break
     except Exception as exc:
         logger.debug("Peer-block lookup failed", queue_id=queue_id, error=str(exc))
+
+    _record_rejected_for_row(queue_id, _blocked_user, _remote, reason)
 
 
 def _extract_duration_seconds(file_path: str) -> Optional[int]:
@@ -1660,7 +1723,7 @@ def _reconcile_transfer_state(
     failed_states = slskd.FAILED_STATES
 
     if state in failed_states:
-        _remember_failed_peer(transfer)
+        _remember_failed_peer(transfer, queue_id, reason=str(state))
         from db.repositories.queue import mark_failed
         mark_failed(queue_id, f"slskd transfer failed: {state}")
         return True
@@ -1681,7 +1744,7 @@ def _reconcile_transfer_state(
         )
         if _grace_exhausted:
             _clear_cycle_counter(_SUCCEEDED_NOT_FOUND_CYCLES, queue_id)
-            _remember_failed_peer(transfer)
+            _remember_failed_peer(transfer, queue_id, reason=str(state))
             try:
                 transfer_id = str(transfer.get("id") or "")
                 username = str(transfer.get("username") or "")
@@ -1704,7 +1767,7 @@ def _reconcile_transfer_state(
                     slskd.cancel_download(username, transfer_id, remove=True)
             except Exception:
                 pass
-            _remember_failed_peer(transfer)
+            _remember_failed_peer(transfer, queue_id, reason=str(state))
             from db.repositories.queue import mark_failed
             mark_failed(queue_id, "Remotely queued too long")
             return True
@@ -1719,7 +1782,7 @@ def _reconcile_transfer_state(
                     slskd.cancel_download(username, transfer_id, remove=True)
             except Exception:
                 pass
-            _remember_failed_peer(transfer)
+            _remember_failed_peer(transfer, queue_id, reason=str(state))
             from db.repositories.queue import mark_failed
             mark_failed(queue_id, f"slskd download timed out ({state})")
             return True
