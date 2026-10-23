@@ -272,10 +272,10 @@ def _all_work_ids(recording: dict[str, Any]) -> set[str]:
 def _release_date_key(rec: dict[str, Any]) -> str:
     """Earliest known release date as a sortable "YYYY-MM-DD" string.
 
-    Comparing YEARS alone tied two 2013 recordings of "Wake Me Up" (Avicii's
-    single, 17 June 2013, and Aloe Blacc's own later version), and the tie
-    went to the wrong one. A missing month/day sorts last within its year;
-    no date at all sorts after everything.
+    Comparing YEARS alone tied two 1997 recordings of "My Heart Will Go On"
+    and two 2013 recordings of "Wake Me Up", and each tie went to the wrong
+    artist. A missing month/day sorts last within its year; no date at all
+    sorts after everything ("9999-99-99").
     """
     dates: list[str] = []
     for value in (rec.get("first-release-date"), rec.get("date")):
@@ -292,6 +292,10 @@ def _release_date_key(rec: dict[str, Any]) -> str:
             parts = [p.zfill(2) if i else p for i, p in enumerate(parts)]
             keys.append("-".join(parts))
     return min(keys) if keys else "9999-99-99"
+
+
+def _undated(key: str) -> bool:
+    return key.startswith("9999")
 
 
 def log_unified_safe(message: str) -> None:
@@ -451,10 +455,14 @@ class CoverDetector:
         except Exception as exc:
             logger.debug("Work recording browse failed", work_mbid=work_mbid, error=str(exc))
             return []
-        with self._mem_lock:
-            self._work_recording_cache[work_mbid] = recordings
-            while len(self._work_recording_cache) > _WORK_RECORDING_CACHE_MAX:
-                self._work_recording_cache.popitem(last=False)
+        # An EMPTY page is never cached: it is far more often a failed or
+        # throttled request than a song with no recordings, and caching it hid
+        # every recording of that work for the rest of the scan.
+        if recordings:
+            with self._mem_lock:
+                self._work_recording_cache[work_mbid] = recordings
+                while len(self._work_recording_cache) > _WORK_RECORDING_CACHE_MAX:
+                    self._work_recording_cache.popitem(last=False)
         return recordings
 
     def _detect_via_work_id(
@@ -486,8 +494,8 @@ class CoverDetector:
             return None
 
         earliest: dict[str, Any] | None = None
-        earliest_year = 9999
-        performer_year = 9999
+        earliest_key = "9999-99-99"
+        performer_key = "9999-99-99"
         credited = 0
         for rec in recordings:
             if not isinstance(rec, dict) or not rec.get("id"):
@@ -503,22 +511,22 @@ class CoverDetector:
             if not rec_artist:
                 continue
             credited += 1
-            year = year_from_recording(rec)
+            key = _release_date_key(rec)
             if _same_artist(rec_artist, performer):
-                if year is not None and year < performer_year:
-                    performer_year = year
+                if key < performer_key:
+                    performer_key = key
                 continue
-            if year is None or year >= earliest_year:
+            if _undated(key) or key >= earliest_key:
                 continue
-            earliest_year = year
+            earliest_key = key
             earliest = {
                 "artist": rec_artist,
-                "year": year,
+                "year": year_from_recording(rec),
                 "confidence": "medium",
             }
 
         # The performer recorded it FIRST: they originated the song.
-        if earliest and performer_year <= earliest_year:
+        if earliest and not _undated(performer_key) and performer_key <= earliest_key:
             return {}
 
         if earliest:
@@ -1517,19 +1525,16 @@ class CoverDetector:
         return None
 
     def _artist_bands(self, artist_id: str) -> list[dict[str, str]]:
-        """Groups the artist is a member of: ``[{"id", "name"}]``.
+        """Performing identities linked to a writer: ``[{"id", "name", "kind"}]``.
 
-        A song is usually WRITTEN by a person but RECORDED by their band
-        ("School": written by Kurt Cobain, recorded by Nirvana).
+        * ``is person`` — a performance name for a legal name ("Tim Bergling"
+          is credited for writing, "Avicii" for releases). ``kind="alias"``.
+        * ``member of band`` — bands the writer played in ("Kurt Cobain" ->
+          Nirvana). ``kind="band"``.
 
-        ⚠️ Direction is NOT filtered. The JSON service reports a person's
-        membership as ``forward``, but other client shapes omit or flip it;
-        filtering on it silently returned no bands. Queried on a PERSON, every
-        "member of band" relation points at a group anyway.
-
-        Only a NON-EMPTY answer is cached: an empty one may be a failed request
-        (rate limit / circuit breaker), and caching it would hide the band for
-        the rest of the scan.
+        Direction is not filtered (client shapes differ). Only a NON-EMPTY
+        answer is cached, so a throttled request cannot hide a band for the
+        rest of the scan.
         """
         if not artist_id:
             return []
@@ -1541,18 +1546,21 @@ class CoverDetector:
         try:
             details = _ngs_relations(self.mb.get_artist(artist_id, inc="artist-rels") or {})
             for rel in details.get("artist-relation-list", []) or []:
-                # "is person": a legal name's PERFORMANCE NAME — MusicBrainz
-                # credits writing to "Tim Bergling" and releases to "Avicii",
-                # linked by this relation. Followed like a band, so the
-                # performance name becomes a candidate original.
-                if str(rel.get("type", "")).strip().lower() not in {
-                    "member of band", "member", "is person",
-                }:
+                rtype = str(rel.get("type", "")).strip().lower()
+                if rtype == "is person":
+                    kind = "alias"
+                elif rtype in {"member of band", "member"}:
+                    kind = "band"
+                else:
                     continue
                 band = rel.get("artist") or {}
                 bid = str(band.get("id") or "").strip()
                 if bid and bid != artist_id and all(b["id"] != bid for b in bands):
-                    bands.append({"id": bid, "name": str(band.get("name") or "").strip()})
+                    bands.append({
+                        "id": bid,
+                        "name": str(band.get("name") or "").strip(),
+                        "kind": kind,
+                    })
         except Exception as exc:
             logger.debug("Band lookup failed", artist_id=artist_id, error=str(exc))
         if bands:
@@ -1577,6 +1585,62 @@ class CoverDetector:
                 writers.append({"id": wid, "name": str(artist.get("name") or "").strip()})
         return str(work.get("title") or "").strip(), writers
 
+    def _ranked_writer_candidates(
+        self, writers: list[dict[str, str]]
+    ) -> list[tuple[str, str]]:
+        """Writer-linked performers, MOST LIKELY ORIGINAL FIRST.
+
+        The old order (each writer's bands, then the writer) let one writer
+        with a long band history fill the search budget: "Crazy Train" listed
+        sixteen of Bob Daisley's bands before Ozzy Osbourne — the actual
+        original — who was never searched. Ranked now as:
+
+        1. Performance names of writers ("is person": Tim Bergling -> Avicii).
+        2. Bands shared by two or more writers (the band the song was written
+           FOR — Blizzard of Ozz for all three "Crazy Train" writers).
+        3. The writers themselves (PSY, Ozzy Osbourne).
+        4. Each writer's remaining bands, round-robin, so no one writer's
+           history crowds out the others (Nirvana for "School").
+        """
+        aliases: list[tuple[str, str]] = []
+        band_lists: list[list[tuple[str, str]]] = []
+        band_count: dict[str, int] = {}
+        band_name: dict[str, str] = {}
+        for writer in writers[:4]:
+            own: list[tuple[str, str]] = []
+            for linked in self._artist_bands(writer["id"]):
+                if linked.get("kind") == "alias":
+                    aliases.append((linked["id"], linked["name"]))
+                else:
+                    own.append((linked["id"], linked["name"]))
+                    band_count[linked["id"]] = band_count.get(linked["id"], 0) + 1
+                    band_name[linked["id"]] = linked["name"]
+            band_lists.append(own)
+
+        ordered: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        def _add(aid: str, name: str) -> None:
+            if aid and aid not in seen:
+                seen.add(aid)
+                ordered.append((aid, name))
+
+        for aid, name in aliases:
+            _add(aid, name)
+        for aid in sorted(
+            (b for b, c in band_count.items() if c >= 2),
+            key=lambda b: (-band_count[b], band_name[b]),
+        ):
+            _add(aid, band_name[aid])
+        for writer in writers[:4]:
+            _add(writer["id"], writer["name"])
+        depth = max((len(lst) for lst in band_lists), default=0)
+        for i in range(depth):
+            for lst in band_lists:
+                if i < len(lst):
+                    _add(*lst[i])
+        return ordered
+
     def _original_by_writer(
         self,
         work_ids: set[str],
@@ -1584,20 +1648,23 @@ class CoverDetector:
         performer: str,
         exclude_mbid: str = "",
         title_hint: str = "",
+        max_candidates: int = 8,
     ) -> dict[str, Any] | None:
-        """The earliest recording of the work by a WRITER or a writer's BAND.
+        """The EARLIEST recording of the work by a writer-linked performer.
 
         PSY wrote and recorded 강남스타일; Kurt Cobain wrote "School" and
-        Nirvana recorded it. Candidates are matched by MusicBrainz artist ID,
-        so credit spellings ("Kurdt Kobain", "Jai Sang Park") do not matter.
+        Nirvana recorded it; Tim Bergling wrote "Wake Me Up" and released it
+        as Avicii. Candidates come from ``_ranked_writer_candidates`` and are
+        matched by MusicBrainz ARTIST ID, so credit spellings do not matter.
 
-        1. The work's cached recording page (no extra request).
-        2. A search per candidate: ``arid:<id> AND recording:"<title>"``,
-           tried with the work title and the track's own title.
-        3. The same search by artist NAME, in case the id search misses.
+        1. The work's recording page (cached; no extra request).
+        2. One search per candidate (``arid:<id> AND recording:"<title>"``),
+           for up to ``max_candidates``. ⚠️ It does NOT stop at the first hit:
+           a co-writer's own later version (Aloe Blacc's "Wake Me Up") would
+           otherwise beat the original. Every hit is compared by full date.
+        3. Searches by artist NAME, only when no id search found anything.
 
-        Emits ONE scan-log line saying what it tried, so a writer fallback is
-        never a mystery.
+        Medium confidence: inferred from writer credits, not a stated relation.
         """
         for work_id in sorted(work_ids or ()):
             work_title, writers = self._work_writers(work_id)
@@ -1606,11 +1673,8 @@ class CoverDetector:
                     f"[COVER_DETECT] original lookup: work {work_id} has no writer credits"
                 )
                 continue
-            candidates: dict[str, str] = {}
-            for writer in writers[:4]:
-                for band in self._artist_bands(writer["id"]):
-                    candidates.setdefault(band["id"], band["name"])
-                candidates.setdefault(writer["id"], writer["name"])
+            ranked = self._ranked_writer_candidates(writers)
+            candidates: dict[str, str] = dict(ranked)
 
             best: dict[str, Any] | None = None
             best_key = "9999-99-99"
@@ -1634,21 +1698,17 @@ class CoverDetector:
                     if not name or (performer and _same_artist(name, performer)):
                         return
                     key = _release_date_key(rec)
-                    # Earliest full DATE wins (not just year), so a writer's
-                    # own later version cannot tie with the hit single.
                     if best is None or key < best_key:
                         best_key = key
                         best = {
                             "artist": name,
                             "year": year_from_recording(rec),
-                            # MEDIUM: inferred from writer credits, not a
-                            # relation MusicBrainz states. HIGH is reserved
-                            # for a stated cover-of / chain result.
                             "confidence": "medium",
                         }
                     return
 
-            for rec in self._work_recordings(work_id):
+            page = self._work_recordings(work_id)
+            for rec in page:
                 _consider(rec)
 
             titles = [t for t in dict.fromkeys([
@@ -1656,40 +1716,55 @@ class CoverDetector:
                 _COVER_SUFFIX_RE.sub("", str(title_hint or "")).strip(),
             ]) if t]
             searches = 0
-            if best is None and titles:
-                for aid, aname in list(candidates.items())[:6]:
-                    for field, value in (("arid", aid), ("artist", aname)):
-                        if not value or best is not None:
-                            continue
+            if titles:
+                targets = {canonical_track_title(t) for t in titles}
+
+                def _search(query: str) -> int:
+                    nonlocal searches
+                    searches += 1
+                    try:
+                        found = self.mb.search_recordings(query, limit=10) or []
+                    except Exception as exc:
+                        logger.debug("Writer-performer search failed", query=query, error=str(exc))
+                        return 0
+                    hits = 0
+                    for rec in found:
+                        if canonical_track_title(str(rec.get("title") or "")) in targets:
+                            _consider(rec)
+                            hits += 1
+                    return hits
+
+                total_hits = 0
+                # The page already answered for candidates it contained; the
+                # searches cover candidates whose recordings were not on it.
+                if best is None or not page:
+                    for aid, _name in ranked[:max_candidates]:
                         for ttl in titles:
-                            target = canonical_track_title(ttl)
-                            if field == "arid":
-                                query = f"arid:{value} AND recording:\"{escape_lucene_special_chars(ttl)}\""
-                            else:
-                                query = (
-                                    f"artist:\"{escape_lucene_special_chars(value)}\" AND "
-                                    f"recording:\"{escape_lucene_special_chars(ttl)}\""
-                                )
-                            searches += 1
-                            try:
-                                found = self.mb.search_recordings(query, limit=10) or []
-                            except Exception as exc:
-                                logger.debug("Writer-performer search failed", query=query, error=str(exc))
+                            hits = _search(
+                                f'arid:{aid} AND recording:"{escape_lucene_special_chars(ttl)}"'
+                            )
+                            total_hits += hits
+                            if hits:
+                                break
+                    if total_hits == 0:
+                        for _aid, aname in ranked[:max_candidates]:
+                            if not aname:
                                 continue
-                            for rec in found:
-                                if canonical_track_title(str(rec.get("title") or "")) == target:
-                                    _consider(rec)
+                            _search(
+                                f'artist:"{escape_lucene_special_chars(aname)}" AND '
+                                f'recording:"{escape_lucene_special_chars(titles[0])}"'
+                            )
                             if best is not None:
                                 break
-                    if best is not None:
-                        break
 
             log_unified_safe(
                 "[COVER_DETECT] original lookup: writers="
                 + ", ".join(w["name"] for w in writers[:4])
-                + " | candidates=" + (", ".join(candidates.values()) or "none")
-                + f" | searches={searches}"
-                + f" | result={(best or {}).get('artist') or 'none'}"
+                + " | candidates=" + (", ".join(n for _a, n in ranked[:max_candidates]) or "none")
+                + f" | page={len(page)} | searches={searches}"
+                + " | result=" + (
+                    f"{best['artist']} ({best_key[:10]})" if best else "none"
+                )
             )
             if best:
                 return best
@@ -1705,14 +1780,18 @@ class CoverDetector:
     ) -> dict[str, Any] | None:
         """Earliest non-performer recording of the work across several pages.
 
-        Up to ``max_pages`` × 100 recordings (page 1 is already cached). Each
-        extra page is one request, so this runs ONLY when every other way of
-        naming the original has failed. Medium confidence: "earliest on
-        MusicBrainz" is strong but not a stated relation.
+        Runs ONLY when naming the songwriter is the alternative. Up to
+        ``max_pages`` × 100 recordings (page 1 cached). When no candidate has
+        a usable date, the artist with the MOST recordings of the song wins —
+        Bonnie Tyler has seven on "Holding Out for a Hero" — because an
+        artist who keeps re-recording a song is almost always its owner.
+        Emits counts so a "none" result explains itself.
         """
         for work_id in sorted(work_ids or ()):
             best: dict[str, Any] | None = None
             best_key = "9999-99-99"
+            per_artist: dict[str, int] = {}
+            seen = performer_n = covers = undated = 0
             pages_read = 0
             for page in range(max_pages):
                 try:
@@ -1726,8 +1805,7 @@ class CoverDetector:
                             offset=page * 100,
                         ) or []
                 except TypeError:
-                    # An HTTP client that predates ``offset``.
-                    break
+                    break  # HTTP client predates ``offset``
                 except Exception as exc:
                     logger.debug("Work page browse failed", work_mbid=work_id, page=page, error=str(exc))
                     break
@@ -1735,17 +1813,22 @@ class CoverDetector:
                 for rec in recordings:
                     if not isinstance(rec, dict) or not rec.get("id"):
                         continue
+                    seen += 1
                     if exclude_mbid and str(rec.get("id")) == exclude_mbid:
                         continue
                     if _has_cover_annotation(str(rec.get("title") or "")):
+                        covers += 1
                         continue
                     name = str(artist_from_credit(rec.get("artist-credit", []) or []) or "").strip()
                     if not name or is_track_artist_placeholder(name):
                         continue
                     if performer and _same_artist(name, performer):
+                        performer_n += 1
                         continue
+                    per_artist[name] = per_artist.get(name, 0) + 1
                     key = _release_date_key(rec)
-                    if key.startswith("9999"):
+                    if _undated(key):
+                        undated += 1
                         continue
                     if best is None or key < best_key:
                         best_key = key
@@ -1756,10 +1839,19 @@ class CoverDetector:
                         }
                 if len(recordings) < 100:
                     break
+
+            how = "earliest"
+            if best is None and per_artist:
+                top_name, top_n = sorted(per_artist.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+                if top_n >= 2:
+                    best = {"artist": top_name, "year": None, "confidence": "low"}
+                    how = f"most recordings ({top_n})"
+
             log_unified_safe(
                 f"[COVER_DETECT] earliest-recording lookup: work {work_id} | "
-                f"pages={pages_read} | result="
-                + (f"{best['artist']} ({best_key[:10]})" if best else "none")
+                f"pages={pages_read} seen={seen} performer={performer_n} "
+                f"covers={covers} undated={undated} | result="
+                + (f"{best['artist']} via {how}" if best else "none")
             )
             if best:
                 return best
@@ -1832,18 +1924,19 @@ class CoverDetector:
             if not cover_work_ids:
                 return chain_result
 
-            # ⭐ "cover recording of <work>" IS the proof. MusicBrainz models
-            # most covers this way — as an attribute on the recording's WORK
-            # relation, not as a recording-to-recording link — so a track
-            # carrying it is a cover whether or not the original can be named.
-            # The old code then hunted the original with a TITLE search, which
-            # fails whenever the original's title differs: Feuerschwanz's
-            # "Gangnam Style" is a cover of PSY's "강남스타일", and a search for
-            # "Gangnam Style" returns other covers (excluded) and never PSY,
-            # so a modelled cover was reported as "not a cover".
+            # ⭐ "cover recording of <work>" IS the proof. Only the ORIGINAL
+            # still has to be named. Most reliable first:
             #
-            # The work's OWN recording list is the complete candidate set, so
-            # it is asked first; the title search stays as a fallback.
+            # 1. The work's own recording page (earliest other artist, then
+            #    cross-checked against the writers inside the helper).
+            # 2. A writer-linked performer (PSY, Nirvana, Avicii, Ozzy).
+            # 3. A title search over the MusicBrainz index — MEDIUM now: it
+            #    only inspects a dozen hits, so a famous song's original is
+            #    often missing and the earliest stray result wins ("Basket
+            #    Case" -> relaXsing, "My Heart Will Go On" -> James Last).
+            # 4. A modelled cover chain.
+            # 5. Several more pages of the work's recordings.
+            # 6. Naming the songwriter (low).
             from_work = self._original_from_cover_work(
                 cover_work_ids,
                 performer=album_artist,
@@ -1851,21 +1944,6 @@ class CoverDetector:
             )
             if from_work:
                 return from_work
-
-            search_title = (
-                seed.get("title") or _COVER_SUFFIX_RE.sub("", title).strip() or title
-            )
-            candidate = self._earliest_work_recording(
-                work_ids=cover_work_ids,
-                search_title=search_title,
-                exclude_mbid=recording_mbid,
-                album_artist=album_artist,
-                confidence="high",
-            )
-            if candidate:
-                return candidate
-            if chain_result:
-                return chain_result
             by_writer = self._original_by_writer(
                 cover_work_ids,
                 performer=album_artist,
@@ -1874,13 +1952,20 @@ class CoverDetector:
             )
             if by_writer:
                 return by_writer
-            # Songs written FOR someone else (Bonnie Tyler's "Holding Out for
-            # a Hero": written by Jim Steinman and Dean Pitchford) have no
-            # writer or band credit to search. Their original is simply the
-            # earliest recording of the work — which, for a song with hundreds
-            # of covers, may only be on a later page. Only reached when the
-            # alternative is naming the songwriter, so the extra pages are
-            # rare.
+            search_title = (
+                seed.get("title") or _COVER_SUFFIX_RE.sub("", title).strip() or title
+            )
+            candidate = self._earliest_work_recording(
+                work_ids=cover_work_ids,
+                search_title=search_title,
+                exclude_mbid=recording_mbid,
+                album_artist=album_artist,
+                confidence="medium",
+            )
+            if candidate:
+                return candidate
+            if chain_result:
+                return chain_result
             deep = self._earliest_across_pages(
                 cover_work_ids,
                 performer=album_artist,
@@ -1888,10 +1973,6 @@ class CoverDetector:
             )
             if deep:
                 return deep
-            # Still a confirmed cover: name the work's writer as the original
-            # rather than discard a verdict MusicBrainz states outright. LOW
-            # confidence: it names the writer, not a performer, and is the
-            # result most likely to need a manual correction.
             fallback = self._writer_from_cover_work(cover_work_ids, performer=album_artist)
             if fallback:
                 fallback = {**fallback, "confidence": "low"}
@@ -1924,7 +2005,7 @@ class CoverDetector:
             return None
 
         earliest: dict[str, Any] | None = None
-        earliest_year = 9999
+        earliest_key = "9999-99-99"
         inspected = 0
 
         for rec in recordings:
@@ -1960,13 +2041,16 @@ class CoverDetector:
 
             # A candidate without a year cannot be shown to precede anything,
             # so it is not eligible to be called the original.
-            year = year_from_recording(details)
-            if year is None or year >= earliest_year:
-                logger.debug("Skipping candidate: Missing year or not earlier", mbid=rid, year=year, earliest_year=earliest_year)
+            key = _release_date_key(details)
+            if _undated(key) or key >= earliest_key:
+                logger.debug("Skipping candidate: Missing date or not earlier", mbid=rid, date=key, earliest=earliest_key)
                 continue
-
-            earliest_year = year
-            earliest = {"artist": rec_artist, "year": year, "confidence": confidence}
+            earliest_key = key
+            earliest = {
+                "artist": rec_artist,
+                "year": year_from_recording(details),
+                "confidence": confidence,
+            }
 
         return earliest
 
