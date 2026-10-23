@@ -563,23 +563,44 @@ class MusicBrainzHttpClient:
 
         ``offset`` pages past the first 100: a famous song has hundreds of
         recordings in no fixed order, so the original is often not on page 1.
+
+        ⚠️ If the request comes back EMPTY with an include other than
+        ``artist-credits``, it is retried once with ``artist-credits`` only.
+        A browse that rejects one include (HTTP 400) returns nothing at all,
+        which made the cover detector's whole work-recording path silently
+        find nothing ("pages=1 | result=none" on songs with hundreds of
+        recordings). Recordings carry ``first-release-date`` either way.
         """
         if not self.enabled or not work_mbid:
             return []
         offset = max(0, int(offset or 0))
-        cache_key = f"{work_mbid}::{inc}::{min(limit, 100)}::{offset}"
+        page = min(limit, 100)
+        cache_key = f"{work_mbid}::{inc}::{page}::{offset}"
         cached = _WORK_RECORDINGS_CACHE.get(cache_key)
         if cached is not None:
             return cached
-        params = {"fmt": "json", "work": work_mbid, "limit": min(limit, 100)}
-        if offset:
-            params["offset"] = offset
-        if inc:
-            params["inc"] = inc
-        payload = self.get("recording", params=params)
-        recordings = payload.get("recordings", []) if isinstance(payload.get("recordings"), list) else []
+
+        def _fetch(include: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            params: dict[str, Any] = {"fmt": "json", "work": work_mbid, "limit": page}
+            if offset:
+                params["offset"] = offset
+            if include:
+                params["inc"] = include
+            payload = self.get("recording", params=params)
+            recs = payload.get("recordings", []) if isinstance(payload.get("recordings"), list) else []
+            return payload, recs
+
+        payload, recordings = _fetch(inc)
+        if not recordings and inc and inc != "artist-credits":
+            logger.info(
+                "MusicBrainz work browse returned nothing — retrying with artist-credits only",
+                work_mbid=work_mbid,
+                inc=inc,
+                offset=offset,
+            )
+            payload, recordings = _fetch("artist-credits")
         # Only a real answer is cached; an empty one may be a failed request.
-        if payload:
+        if payload and recordings:
             _WORK_RECORDINGS_CACHE.set(cache_key, recordings)
         return recordings
 
