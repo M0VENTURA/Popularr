@@ -269,6 +269,16 @@ def _all_work_ids(recording: dict[str, Any]) -> set[str]:
     return ids
 
 
+def log_unified_safe(message: str) -> None:
+    """Write to the scan log the operator watches; never raises."""
+    try:
+        from helpers.logging_config import log_unified
+
+        log_unified(message)
+    except Exception:
+        logger.info(message)
+
+
 def _has_cover_annotation(title: str) -> bool:
     return bool(_COVER_SUFFIX_RE.search(title or ""))
 
@@ -482,16 +492,11 @@ class CoverDetector:
                 "confidence": "medium",
             }
 
-        # The performer recorded it FIRST: they originated the song, and every
-        # other credit is a later cover OF them.
+        # The performer recorded it FIRST: they originated the song.
         if earliest and performer_year <= earliest_year:
             return {}
 
         if earliest:
-            # A recording by a WRITER or a writer's BAND outranks "earliest on
-            # this page": the page is one unordered slice of a possibly huge
-            # list, so the true original may be missing from it. Only asked for
-            # a candidate cover, so originals pay no extra request.
             by_writer = self._original_by_writer(
                 {work_mbid}, performer=performer, exclude_mbid=exclude_mbid,
             )
@@ -1487,12 +1492,19 @@ class CoverDetector:
         return None
 
     def _artist_bands(self, artist_id: str) -> list[dict[str, str]]:
-        """Bands the artist is a member of: ``[{"id", "name"}]``, cached.
+        """Groups the artist is a member of: ``[{"id", "name"}]``.
 
-        A song is usually WRITTEN by a person but RECORDED by their band:
-        "School" is written by Kurt Cobain and recorded by Nirvana. Matching
-        recordings only against the writers' own artist IDs found nothing, so
-        the writer fallback named "Kurt Cobain" as the original artist.
+        A song is usually WRITTEN by a person but RECORDED by their band
+        ("School": written by Kurt Cobain, recorded by Nirvana).
+
+        ⚠️ Direction is NOT filtered. The JSON service reports a person's
+        membership as ``forward``, but other client shapes omit or flip it;
+        filtering on it silently returned no bands. Queried on a PERSON, every
+        "member of band" relation points at a group anyway.
+
+        Only a NON-EMPTY answer is cached: an empty one may be a failed request
+        (rate limit / circuit breaker), and caching it would hide the band for
+        the rest of the scan.
         """
         if not artist_id:
             return []
@@ -1504,19 +1516,17 @@ class CoverDetector:
         try:
             details = _ngs_relations(self.mb.get_artist(artist_id, inc="artist-rels") or {})
             for rel in details.get("artist-relation-list", []) or []:
-                if str(rel.get("type", "")).strip().lower() != "member of band":
-                    continue
-                # Forward from a PERSON = the person is a member OF the target.
-                if str(rel.get("direction", "forward")).strip().lower() != "forward":
+                if str(rel.get("type", "")).strip().lower() not in {"member of band", "member"}:
                     continue
                 band = rel.get("artist") or {}
                 bid = str(band.get("id") or "").strip()
-                if bid and all(b["id"] != bid for b in bands):
+                if bid and bid != artist_id and all(b["id"] != bid for b in bands):
                     bands.append({"id": bid, "name": str(band.get("name") or "").strip()})
         except Exception as exc:
             logger.debug("Band lookup failed", artist_id=artist_id, error=str(exc))
-        with self._mem_lock:
-            self._artist_band_cache[artist_id] = bands
+        if bands:
+            with self._mem_lock:
+                self._artist_band_cache[artist_id] = bands
         return bands
 
     def _work_writers(self, work_id: str) -> tuple[str, list[dict[str, str]]]:
@@ -1542,27 +1552,31 @@ class CoverDetector:
         *,
         performer: str,
         exclude_mbid: str = "",
+        title_hint: str = "",
     ) -> dict[str, Any] | None:
         """The earliest recording of the work by a WRITER or a writer's BAND.
 
-        The writer, or the band they wrote it for, is the original performer
-        in almost every case: PSY wrote and recorded 강남스타일; Kurt Cobain
-        wrote "School" and Nirvana recorded it. Matched by MusicBrainz ARTIST
-        ID, so credit spellings ("Jai Sang Park" vs "PSY") do not matter.
+        PSY wrote and recorded 강남스타일; Kurt Cobain wrote "School" and
+        Nirvana recorded it. Candidates are matched by MusicBrainz artist ID,
+        so credit spellings ("Kurdt Kobain", "Jai Sang Park") do not matter.
 
         1. The work's cached recording page (no extra request).
-        2. If the page does not contain one — a famous song has hundreds of
-           recordings in no fixed order, so the original is often not on it —
-           a targeted search per candidate artist:
-           ``arid:<id> AND recording:"<work title>"``.
+        2. A search per candidate: ``arid:<id> AND recording:"<title>"``,
+           tried with the work title and the track's own title.
+        3. The same search by artist NAME, in case the id search misses.
+
+        Emits ONE scan-log line saying what it tried, so a writer fallback is
+        never a mystery.
         """
         for work_id in sorted(work_ids or ()):
             work_title, writers = self._work_writers(work_id)
             if not writers:
+                log_unified_safe(
+                    f"[COVER_DETECT] original lookup: work {work_id} has no writer credits"
+                )
                 continue
             candidates: dict[str, str] = {}
             for writer in writers[:4]:
-                # Bands first: they are the usual original performer.
                 for band in self._artist_bands(writer["id"]):
                     candidates.setdefault(band["id"], band["name"])
                 candidates.setdefault(writer["id"], writer["name"])
@@ -1597,23 +1611,46 @@ class CoverDetector:
             for rec in self._work_recordings(work_id):
                 _consider(rec)
 
-            if best is None and work_title:
-                for aid in list(candidates)[:6]:
-                    query = (
-                        f"arid:{aid} AND "
-                        f'recording:"{escape_lucene_special_chars(work_title)}"'
-                    )
-                    try:
-                        found = self.mb.search_recordings(query, limit=10) or []
-                    except Exception as exc:
-                        logger.debug("Writer-performer search failed", artist_id=aid, error=str(exc))
-                        continue
-                    target = canonical_track_title(work_title)
-                    for rec in found:
-                        if canonical_track_title(str(rec.get("title") or "")) != target:
+            titles = [t for t in dict.fromkeys([
+                work_title,
+                _COVER_SUFFIX_RE.sub("", str(title_hint or "")).strip(),
+            ]) if t]
+            searches = 0
+            if best is None and titles:
+                for aid, aname in list(candidates.items())[:6]:
+                    for field, value in (("arid", aid), ("artist", aname)):
+                        if not value or best is not None:
                             continue
-                        _consider(rec)
+                        for ttl in titles:
+                            target = canonical_track_title(ttl)
+                            if field == "arid":
+                                query = f"arid:{value} AND recording:\"{escape_lucene_special_chars(ttl)}\""
+                            else:
+                                query = (
+                                    f"artist:\"{escape_lucene_special_chars(value)}\" AND "
+                                    f"recording:\"{escape_lucene_special_chars(ttl)}\""
+                                )
+                            searches += 1
+                            try:
+                                found = self.mb.search_recordings(query, limit=10) or []
+                            except Exception as exc:
+                                logger.debug("Writer-performer search failed", query=query, error=str(exc))
+                                continue
+                            for rec in found:
+                                if canonical_track_title(str(rec.get("title") or "")) == target:
+                                    _consider(rec)
+                            if best is not None:
+                                break
+                    if best is not None:
+                        break
 
+            log_unified_safe(
+                "[COVER_DETECT] original lookup: writers="
+                + ", ".join(w["name"] for w in writers[:4])
+                + " | candidates=" + (", ".join(candidates.values()) or "none")
+                + f" | searches={searches}"
+                + f" | result={(best or {}).get('artist') or 'none'}"
+            )
             if best:
                 return best
         return None
@@ -1640,9 +1677,9 @@ class CoverDetector:
                 if str(rel.get("type", "")).lower() not in _WRITER_RELATION_TYPES:
                     continue
                 artist = rel.get("artist") or {}
-                # The artist's OWN name first ("PSY"). ``target-credit`` is how
-                # the writing credit is printed — often a legal name ("Jai Sang
-                # Park") no listener would recognise as the original artist.
+                # The artist's OWN name first ("PSY", "Kurt Cobain").
+                # ``target-credit`` is how the credit is printed — a legal name
+                # or alias ("Jai Sang Park", "Kurdt Kobain").
                 name = str(
                     artist.get("name") or rel.get("target-credit") or ""
                 ).strip()
@@ -1719,18 +1756,22 @@ class CoverDetector:
                 return candidate
             if chain_result:
                 return chain_result
-            # The writer's (or their band's) own recording — PSY, Nirvana —
-            # before falling back to naming the writer.
             by_writer = self._original_by_writer(
                 cover_work_ids,
                 performer=album_artist,
                 exclude_mbid=recording_mbid,
+                title_hint=title,
             )
             if by_writer:
                 return by_writer
             # Still a confirmed cover: name the work's writer as the original
-            # rather than discard a verdict MusicBrainz states outright.
-            return self._writer_from_cover_work(cover_work_ids, performer=album_artist)
+            # rather than discard a verdict MusicBrainz states outright. LOW
+            # confidence: it names the writer, not a performer, and is the
+            # result most likely to need a manual correction.
+            fallback = self._writer_from_cover_work(cover_work_ids, performer=album_artist)
+            if fallback:
+                fallback = {**fallback, "confidence": "low"}
+            return fallback
         except Exception as exc:
             logger.debug(
                 "Recording-relation detection failed",
