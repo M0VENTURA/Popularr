@@ -269,6 +269,31 @@ def _all_work_ids(recording: dict[str, Any]) -> set[str]:
     return ids
 
 
+def _release_date_key(rec: dict[str, Any]) -> str:
+    """Earliest known release date as a sortable "YYYY-MM-DD" string.
+
+    Comparing YEARS alone tied two 2013 recordings of "Wake Me Up" (Avicii's
+    single, 17 June 2013, and Aloe Blacc's own later version), and the tie
+    went to the wrong one. A missing month/day sorts last within its year;
+    no date at all sorts after everything.
+    """
+    dates: list[str] = []
+    for value in (rec.get("first-release-date"), rec.get("date")):
+        if value:
+            dates.append(str(value))
+    for rel in rec.get("releases") or []:
+        if isinstance(rel, dict) and rel.get("date"):
+            dates.append(str(rel["date"]))
+    keys: list[str] = []
+    for d in dates:
+        d = d.strip()
+        if len(d) >= 4 and d[:4].isdigit():
+            parts = (d.split("-") + ["99", "99"])[:3]
+            parts = [p.zfill(2) if i else p for i, p in enumerate(parts)]
+            keys.append("-".join(parts))
+    return min(keys) if keys else "9999-99-99"
+
+
 def log_unified_safe(message: str) -> None:
     """Write to the scan log the operator watches; never raises."""
     try:
@@ -1516,7 +1541,13 @@ class CoverDetector:
         try:
             details = _ngs_relations(self.mb.get_artist(artist_id, inc="artist-rels") or {})
             for rel in details.get("artist-relation-list", []) or []:
-                if str(rel.get("type", "")).strip().lower() not in {"member of band", "member"}:
+                # "is person": a legal name's PERFORMANCE NAME — MusicBrainz
+                # credits writing to "Tim Bergling" and releases to "Avicii",
+                # linked by this relation. Followed like a band, so the
+                # performance name becomes a candidate original.
+                if str(rel.get("type", "")).strip().lower() not in {
+                    "member of band", "member", "is person",
+                }:
                     continue
                 band = rel.get("artist") or {}
                 bid = str(band.get("id") or "").strip()
@@ -1582,10 +1613,10 @@ class CoverDetector:
                 candidates.setdefault(writer["id"], writer["name"])
 
             best: dict[str, Any] | None = None
-            best_year = 9999
+            best_key = "9999-99-99"
 
             def _consider(rec: dict[str, Any]) -> None:
-                nonlocal best, best_year
+                nonlocal best, best_key
                 if not isinstance(rec, dict):
                     return
                 if exclude_mbid and str(rec.get("id") or "") == exclude_mbid:
@@ -1602,10 +1633,19 @@ class CoverDetector:
                     name = str(artist.get("name") or credit.get("name") or candidates[aid]).strip()
                     if not name or (performer and _same_artist(name, performer)):
                         return
-                    year = year_from_recording(rec)
-                    if best is None or (year is not None and year < best_year):
-                        best_year = year if year is not None else 9999
-                        best = {"artist": name, "year": year, "confidence": "high"}
+                    key = _release_date_key(rec)
+                    # Earliest full DATE wins (not just year), so a writer's
+                    # own later version cannot tie with the hit single.
+                    if best is None or key < best_key:
+                        best_key = key
+                        best = {
+                            "artist": name,
+                            "year": year_from_recording(rec),
+                            # MEDIUM: inferred from writer credits, not a
+                            # relation MusicBrainz states. HIGH is reserved
+                            # for a stated cover-of / chain result.
+                            "confidence": "medium",
+                        }
                     return
 
             for rec in self._work_recordings(work_id):
@@ -1650,6 +1690,76 @@ class CoverDetector:
                 + " | candidates=" + (", ".join(candidates.values()) or "none")
                 + f" | searches={searches}"
                 + f" | result={(best or {}).get('artist') or 'none'}"
+            )
+            if best:
+                return best
+        return None
+
+    def _earliest_across_pages(
+        self,
+        work_ids: set[str],
+        *,
+        performer: str,
+        exclude_mbid: str = "",
+        max_pages: int = 4,
+    ) -> dict[str, Any] | None:
+        """Earliest non-performer recording of the work across several pages.
+
+        Up to ``max_pages`` × 100 recordings (page 1 is already cached). Each
+        extra page is one request, so this runs ONLY when every other way of
+        naming the original has failed. Medium confidence: "earliest on
+        MusicBrainz" is strong but not a stated relation.
+        """
+        for work_id in sorted(work_ids or ()):
+            best: dict[str, Any] | None = None
+            best_key = "9999-99-99"
+            pages_read = 0
+            for page in range(max_pages):
+                try:
+                    if page == 0:
+                        recordings = self._work_recordings(work_id)
+                    else:
+                        recordings = self.mb.browse_work_recordings(
+                            work_id,
+                            inc="artist-credits+releases",
+                            limit=100,
+                            offset=page * 100,
+                        ) or []
+                except TypeError:
+                    # An HTTP client that predates ``offset``.
+                    break
+                except Exception as exc:
+                    logger.debug("Work page browse failed", work_mbid=work_id, page=page, error=str(exc))
+                    break
+                pages_read += 1
+                for rec in recordings:
+                    if not isinstance(rec, dict) or not rec.get("id"):
+                        continue
+                    if exclude_mbid and str(rec.get("id")) == exclude_mbid:
+                        continue
+                    if _has_cover_annotation(str(rec.get("title") or "")):
+                        continue
+                    name = str(artist_from_credit(rec.get("artist-credit", []) or []) or "").strip()
+                    if not name or is_track_artist_placeholder(name):
+                        continue
+                    if performer and _same_artist(name, performer):
+                        continue
+                    key = _release_date_key(rec)
+                    if key.startswith("9999"):
+                        continue
+                    if best is None or key < best_key:
+                        best_key = key
+                        best = {
+                            "artist": name,
+                            "year": year_from_recording(rec),
+                            "confidence": "medium",
+                        }
+                if len(recordings) < 100:
+                    break
+            log_unified_safe(
+                f"[COVER_DETECT] earliest-recording lookup: work {work_id} | "
+                f"pages={pages_read} | result="
+                + (f"{best['artist']} ({best_key[:10]})" if best else "none")
             )
             if best:
                 return best
@@ -1764,6 +1874,20 @@ class CoverDetector:
             )
             if by_writer:
                 return by_writer
+            # Songs written FOR someone else (Bonnie Tyler's "Holding Out for
+            # a Hero": written by Jim Steinman and Dean Pitchford) have no
+            # writer or band credit to search. Their original is simply the
+            # earliest recording of the work — which, for a song with hundreds
+            # of covers, may only be on a later page. Only reached when the
+            # alternative is naming the songwriter, so the extra pages are
+            # rare.
+            deep = self._earliest_across_pages(
+                cover_work_ids,
+                performer=album_artist,
+                exclude_mbid=recording_mbid,
+            )
+            if deep:
+                return deep
             # Still a confirmed cover: name the work's writer as the original
             # rather than discard a verdict MusicBrainz states outright. LOW
             # confidence: it names the writer, not a performer, and is the
