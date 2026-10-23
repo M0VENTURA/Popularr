@@ -275,11 +275,13 @@ class CoverDetector:
 
     # -- work-first ------------------------------------------------------
 
-    def _work_recordings(self, work_mbid: str, limit: int = 25) -> list[dict[str, Any]]:
+    def _work_recordings(self, work_mbid: str, limit: int = 100) -> list[dict[str, Any]]:
         """Browse a work's recordings, cached per detector instance.
 
-        The earliest recordings of the work are what decide the cover
-        question, so 25 candidates is plenty and keeps the payload small.
+        ⚠️ 100 (the MusicBrainz browse maximum), not 25. A famous song has
+        hundreds of recordings and the browse is NOT ordered by date, so a
+        25-row page routinely missed the original altogether — "Gangnam
+        Style" has well over 25 covers on MusicBrainz. It is still ONE request.
         """
         with self._mem_lock:
             cached = self._work_recording_cache.get(work_mbid, _MISS)
@@ -454,6 +456,20 @@ class CoverDetector:
             for track in tracks:
                 tid = track.get("id")
                 if not tid:
+                    continue
+                # ── Repair BEFORE the freshness skip ───────────────────────
+                # A confirmed cover whose "(X Cover)" suffix was lost was
+                # almost always checked RECENTLY — that is the scan that
+                # stripped it — so the 90-day window below would hide it for
+                # months. The repair needs no MusicBrainz lookup (the stored
+                # original artist is enough), so it runs first; the
+                # ``continue`` stops the later branch repairing it twice.
+                _early_repair = self._suffix_repair_update(track)
+                if _early_repair is not None:
+                    _confirmed_skipped.add(tid)
+                    seen_track_ids.add(tid)
+                    pending_updates.append(_early_repair)
+                    _repaired_titles.add(tid)
                     continue
                 # ``_cover_recheck`` is set by the scan runner when this pass
                 # stripped "(X Cover)" wording from the title: the stored
@@ -1302,6 +1318,65 @@ class CoverDetector:
             )
         return best
 
+    def _original_from_cover_work(
+        self,
+        work_ids: set[str],
+        *,
+        performer: str,
+        exclude_mbid: str = "",
+    ) -> dict[str, Any] | None:
+        """Original artist of a cover, from the covered WORK's own recordings.
+
+        The earliest recording credited to someone other than the performer —
+        the same rule as the work-first step (``_detect_via_work_id``), which
+        is reused so both paths agree. Confidence is HIGH: the cover itself is
+        stated by MusicBrainz, only the attribution is inferred.
+        """
+        for work_id in sorted(work_ids or ()):
+            try:
+                original = self._detect_via_work_id(
+                    work_mbid=work_id,
+                    performer=performer,
+                    exclude_mbid=exclude_mbid,
+                )
+            except Exception as exc:
+                logger.debug("Cover-work original lookup failed", work_mbid=work_id, error=str(exc))
+                continue
+            if original:
+                return {**original, "confidence": "high"}
+        return None
+
+    def _writer_from_cover_work(
+        self,
+        work_ids: set[str],
+        *,
+        performer: str,
+    ) -> dict[str, Any] | None:
+        """Last resort for a STATED cover whose original recording is unknown.
+
+        Names the work's composer/lyricist as the original artist (medium
+        confidence). Better than discarding the verdict: the track IS a cover
+        by MusicBrainz's own relation.
+        """
+        for work_id in sorted(work_ids or ()):
+            try:
+                work = self.mb.get_work(work_id, inc="artist-rels") or {}
+            except Exception as exc:
+                logger.debug("Cover-work writer lookup failed", work_mbid=work_id, error=str(exc))
+                continue
+            for rel in work.get("artist-relation-list", []) or []:
+                if str(rel.get("type", "")).lower() not in _WRITER_RELATION_TYPES:
+                    continue
+                artist = rel.get("artist") or {}
+                # The credited NAME on the relation first (e.g. "PSY"), then
+                # the artist's own name (e.g. "Jai Sang Park").
+                name = str(
+                    rel.get("target-credit") or artist.get("name") or ""
+                ).strip()
+                if name and not (performer and _same_artist(name, performer)):
+                    return {"artist": name, "year": None, "confidence": "medium"}
+        return None
+
     def _detect_via_recording_relation(
         self,
         recording_mbid: str,
@@ -1337,6 +1412,26 @@ class CoverDetector:
             if not cover_work_ids:
                 return chain_result
 
+            # ⭐ "cover recording of <work>" IS the proof. MusicBrainz models
+            # most covers this way — as an attribute on the recording's WORK
+            # relation, not as a recording-to-recording link — so a track
+            # carrying it is a cover whether or not the original can be named.
+            # The old code then hunted the original with a TITLE search, which
+            # fails whenever the original's title differs: Feuerschwanz's
+            # "Gangnam Style" is a cover of PSY's "강남스타일", and a search for
+            # "Gangnam Style" returns other covers (excluded) and never PSY,
+            # so a modelled cover was reported as "not a cover".
+            #
+            # The work's OWN recording list is the complete candidate set, so
+            # it is asked first; the title search stays as a fallback.
+            from_work = self._original_from_cover_work(
+                cover_work_ids,
+                performer=album_artist,
+                exclude_mbid=recording_mbid,
+            )
+            if from_work:
+                return from_work
+
             search_title = (
                 seed.get("title") or _COVER_SUFFIX_RE.sub("", title).strip() or title
             )
@@ -1347,7 +1442,13 @@ class CoverDetector:
                 album_artist=album_artist,
                 confidence="high",
             )
-            return candidate or chain_result
+            if candidate:
+                return candidate
+            if chain_result:
+                return chain_result
+            # Still a confirmed cover: name the work's writer as the original
+            # rather than discard a verdict MusicBrainz states outright.
+            return self._writer_from_cover_work(cover_work_ids, performer=album_artist)
         except Exception as exc:
             logger.debug(
                 "Recording-relation detection failed",
