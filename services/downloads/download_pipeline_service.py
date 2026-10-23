@@ -30,7 +30,6 @@ from db.repositories.library import upsert_musicbrainz_release
 from db.repositories.queue import (
     get_ready_for_processing,
     mark_failed,
-    mark_processing,
     update_queue_item,
 )
 from helpers.config_helpers import get_length_tolerance_seconds
@@ -55,22 +54,45 @@ logger = structlog.get_logger(__name__)
 # =============================================================================
 
 _BLOCKED_PEER_TTL_SECONDS = int(
-    os.environ.get("SLSKD_BLOCKED_PEER_TTL_SECONDS", "7200")
+    os.environ.get("SLSKD_BLOCKED_PEER_TTL_SECONDS", "86400")
 )
 _blocked_peers: dict[tuple[str, str], float] = {}
 
 
+def _peer_key(username: str | None, filename: str | None) -> tuple[str, str]:
+    """One spelling for a (peer, file) pair.
+
+    ⚠️ THE REASON BLOCKS NEVER WORKED. Search results carry the peer's path
+    with BACKSLASHES (``shared\\d-side\\BIGBANG\\...``) while the completion
+    service blocks the path it stored with FORWARD slashes
+    (``shared/d-side/BIGBANG/...``). The raw strings never matched, so the log
+    printed "Blocked peer" for ``mugilaw`` about 20 times while the same file
+    kept being selected. Both sides now normalise separators and case.
+    """
+    name = str(filename or "").replace("\\", "/").strip().casefold()
+    return (str(username or "").strip().casefold(), name)
+
+
 def _block_peer(username: str | None, filename: str | None) -> None:
-    """Remember that *username* rejected/failed this file for *ttl* seconds."""
+    """Remember that *username* rejected/failed this file for *ttl* seconds.
+
+    In memory only (lost on restart). The per-queue-row record
+    (``record_rejected_candidate``) is the durable one.
+    """
     if not username or not filename:
         return
-    _blocked_peers[(str(username), str(filename))] = time.time() + _BLOCKED_PEER_TTL_SECONDS
+    _blocked_peers[_peer_key(username, filename)] = time.time() + _BLOCKED_PEER_TTL_SECONDS
+    # Bounded: drop expired entries once the map gets large.
+    if len(_blocked_peers) > 5000:
+        now = time.time()
+        for key in [k for k, until in _blocked_peers.items() if until < now]:
+            _blocked_peers.pop(key, None)
 
 
 def _is_peer_blocked(username: str | None, filename: str | None) -> bool:
     if not username or not filename:
         return False
-    key = (str(username), str(filename))
+    key = _peer_key(username, filename)
     blocked_until = _blocked_peers.get(key)
     if blocked_until is None:
         return False
@@ -88,6 +110,33 @@ def _filter_blocked_peers(results: list[dict[str, Any]]) -> list[dict[str, Any]]
         r for r in results
         if not _is_peer_blocked(r.get("username"), r.get("filename"))
     ]
+
+
+def _filter_rejected_for_item(
+    results: list[dict[str, Any]],
+    item: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int]:
+    """Drop candidates already rejected FOR THIS QUEUE ROW (durable, per row).
+
+    Returns ``(kept, dropped_count)``. Reads the row's stored record once; if
+    the repository helper is unavailable, nothing is dropped.
+    """
+    if not results:
+        return results, 0
+    try:
+        from db.repositories.queue import _candidate_key, get_rejected_candidate_keys
+
+        keys = get_rejected_candidate_keys(item.get("id") or item)
+    except Exception:
+        return results, 0
+    if not keys:
+        return results, 0
+    kept = [
+        r for r in results
+        if _candidate_key(r.get("username"), r.get("filename")) not in keys
+        and _candidate_key("", r.get("filename")) not in keys
+    ]
+    return kept, len(results) - len(kept)
 
 
 # =============================================================================
@@ -344,12 +393,21 @@ def _schedule_search_retry(queue_id: int, item: dict, reason: str) -> None:
     _log_queue_event(status, f"{artist} - {title} → {note}", queue_id)
 
 
+#: How long a row waits when slskd is disconnected. Without a wait the row
+#: was immediately claimable again, so every cycle claimed and skipped the
+#: whole batch while slskd was down.
+_DISCONNECTED_RETRY_MINUTES = 5
+
+
 def search_disconnected(item: dict, queue_id: int, artist: str, title: str) -> None:
     try:
         update_queue_item(
             queue_id,
             status="queued",
             failure_reason="slskd disconnected — search not attempted",
+            next_retry_at=(
+                datetime.now(timezone.utc) + timedelta(minutes=_DISCONNECTED_RETRY_MINUTES)
+            ).isoformat(),
         )
     except Exception:
         pass
@@ -821,7 +879,14 @@ def _select_best_result(
     *,
     expected_album_artist: str | None = None,
     miss_sink: list[dict[str, Any]] | None = None,
+    qualifying_sink: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
+    """Score ``results`` and return the best one at or above ``min_score``.
+
+    ``qualifying_sink`` (optional) receives EVERY result at or above
+    ``min_score``, best first — the only safe fallback candidates if the best
+    one cannot be downloaded.
+    """
     scored: list[tuple[float, dict]] = []
     rejects: dict[str, int] = {}
 
@@ -835,6 +900,8 @@ def _select_best_result(
         scored.append((s, r))
 
     scored.sort(key=lambda pair: -pair[0])
+    if qualifying_sink is not None:
+        qualifying_sink.extend(r for s, r in scored if s >= min_score)
 
     if scored and scored[0][0] >= min_score:
         best_score, best = scored[0]
@@ -1127,7 +1194,12 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
     started_at = time.time()
 
     try:
-        mark_processing(queue_id)
+        # The row stays in the CLAIM status ('searching'). ``mark_processing``
+        # moved it to 'processing', which the in-flight count does not
+        # include — so the orchestrator could start more searches than
+        # ``max_in_flight`` allowed — and which the orchestrator's
+        # "processor left it claimed" check could not recognise.
+        update_queue_item(queue_id, status="searching")
         _log_queue_event("searching", f"{expected_artist} - {expected_title} → searching Soulseek", queue_id)
 
         from helpers.config_helpers import (
@@ -1153,6 +1225,8 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
         used_low_quality_fallback = False
         results: list[dict[str, Any]] = []
         _misses: list[dict[str, Any]] = []
+        _qualifying: list[dict[str, Any]] = []
+        _rejected_dropped = 0
 
         bitrate_tiers: list[tuple[int, bool]] = [(floor_bitrate, True)]
         if allow_low_quality_fallback and fallback_bitrate < floor_bitrate:
@@ -1184,6 +1258,10 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                     search_disconnected(item, queue_id, expected_artist, expected_title)
                     return {"success": False, "status": "slskd_disconnected", "skipped": True}
                 results = _filter_blocked_peers(results)
+                # Files already rejected for THIS row (survives restarts and
+                # does not expire): never select them again.
+                results, _dropped = _filter_rejected_for_item(results, item)
+                _rejected_dropped += _dropped
                 all_results.extend(results)
                 consecutive_empty = consecutive_empty + 1 if not results else 0
 
@@ -1196,6 +1274,7 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                     expected_duration=expected_duration,
                     expected_year=expected_year,
                     miss_sink=_misses,
+                    qualifying_sink=_qualifying,
                 )
                 if best:
                     used_low_quality_fallback = tier_index > 0
@@ -1204,6 +1283,13 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                 break
 
         elapsed = round(time.time() - started_at, 1)
+
+        if _rejected_dropped:
+            logger.info(
+                "Skipped candidates already rejected for this queue item",
+                queue_id=queue_id,
+                skipped=_rejected_dropped,
+            )
 
         if not all_results:
             _log_search_event(
@@ -1250,12 +1336,16 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
             return {"success": False, "status": "item_removed"}
 
         update_queue_item(queue_id, status="downloading")
-
+        # Fallback candidates are ONLY other results that met ``min_score``.
+        # The old code took the next raw search results UNSCORED, so when the
+        # best peer failed it could download a different song, a remix or
+        # another artist — which then failed verification and was deleted.
         candidates: list[dict[str, Any]] = [best]
-        for r in results:
+        _best_key = _peer_key(best.get("username"), best.get("filename"))
+        for r in _qualifying:
             if len(candidates) >= 3:
                 break
-            if r.get("username") != best.get("username") or r.get("filename") != best.get("filename"):
+            if _peer_key(r.get("username"), r.get("filename")) != _best_key and r not in candidates:
                 candidates.append(r)
 
         success, chosen, fail_reason = _attempt_candidate_downloads(
