@@ -552,14 +552,28 @@ class MusicBrainzHttpClient:
         payload = self.get("release", params={"fmt": "json", "release-group": release_group_mbid, "inc": inc, "limit": limit})
         return payload.get("releases", []) if isinstance(payload.get("releases"), list) else []
 
-    def browse_work_recordings(self, work_mbid: str, inc: str = "artist-credits", limit: int = 100) -> list[dict[str, Any]]:
+    def browse_work_recordings(
+        self,
+        work_mbid: str,
+        inc: str = "artist-credits",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """One page of a work's recordings, cached per page.
+
+        ``offset`` pages past the first 100: a famous song has hundreds of
+        recordings in no fixed order, so the original is often not on page 1.
+        """
         if not self.enabled or not work_mbid:
             return []
-        cache_key = f"{work_mbid}::{inc}::{min(limit, 100)}"
+        offset = max(0, int(offset or 0))
+        cache_key = f"{work_mbid}::{inc}::{min(limit, 100)}::{offset}"
         cached = _WORK_RECORDINGS_CACHE.get(cache_key)
         if cached is not None:
             return cached
         params = {"fmt": "json", "work": work_mbid, "limit": min(limit, 100)}
+        if offset:
+            params["offset"] = offset
         if inc:
             params["inc"] = inc
         payload = self.get("recording", params=params)
