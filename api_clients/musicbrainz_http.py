@@ -66,7 +66,28 @@ _LAST_MB_REQUEST_TIME = 0.0
 _CIRCUIT_LOCK = threading.Lock()
 _CIRCUIT_OPEN_UNTIL = 0.0
 
-_RECORDING_INC_SUPERSET = "artist-credits+releases+release-groups+work-rels+recording-rels+artist-rels+genres+tags"
+#: ONE include set for every recording lookup. ``get_recording`` fetches this
+#: superset for any request it covers and caches it under the MBID alone, so
+#: the metadata scan, the album batch and the cover pass share ONE request per
+#: recording instead of each paying ~1.2 s for its own include variant.
+#: ``work-level-rels`` brings each work's composer/lyricist into the
+#: recording's work relation (writers for the cover detector's writer step).
+_RECORDING_INC_SUPERSET = (
+    "artist-credits+releases+release-groups+work-rels+work-level-rels"
+    "+recording-rels+artist-rels+genres+tags"
+)
+_RECORDING_INC_TOKENS = frozenset(_RECORDING_INC_SUPERSET.split("+"))
+
+#: Include set for the ALBUM relation lookup in ``get_recordings_bulk``: every
+#: track's recording-level relations (incl. "cover recording of" and "remix
+#: of") and each work's writers, for the whole release in ONE request.
+_RELEASE_RELATIONS_INC = (
+    "recordings+artist-credits+recording-level-rels+work-rels"
+    "+work-level-rels+artist-rels+recording-rels"
+)
+
+#: Include set for work lookups (composer/lyricist/writer relations).
+_WORK_INC_DEFAULT = "artist-rels"
 _ISRC_INC_SUPERSET = "artist-credits+releases+work-rels"
 _RELEASE_INC_SUPERSET = "recordings+artist-credits+media+release-groups+labels+work-rels+recording-rels+genres"
 
@@ -102,6 +123,10 @@ class _LruCache:
 _RECORDING_DETAIL_CACHE = _LruCache(max_size=4000)
 _ISRC_LOOKUP_CACHE = _LruCache(max_size=2000)
 _RELEASE_DETAIL_CACHE = _LruCache(max_size=2000)
+_WORK_DETAIL_CACHE = _LruCache(max_size=4000)
+#: A work's recordings (the cover detector's candidate set for the original).
+#: Several covers of one song in one scan used to browse it once each.
+_WORK_RECORDINGS_CACHE = _LruCache(max_size=2000)
 #: Conditional-GET layer (audit G7): endpoint+params -> [etag, payload].
 #: MusicBrainz honours If-None-Match, so an identical request revalidates
 #: with a ~300-byte exchange instead of re-downloading the body. The key
@@ -152,6 +177,8 @@ class MusicBrainzHttpClient:
         _RECORDING_DETAIL_CACHE.clear()
         _ISRC_LOOKUP_CACHE.clear()
         _RELEASE_DETAIL_CACHE.clear()
+        _WORK_DETAIL_CACHE.clear()
+        _WORK_RECORDINGS_CACHE.clear()
         _ETAG_CACHE.clear()
 
     def is_available(self) -> bool:
@@ -348,42 +375,143 @@ class MusicBrainzHttpClient:
         return self.get(f"release-group/{release_group_mbid}", params=params, timeout=timeout)
 
     def get_recording(self, recording_mbid: str, inc: str | None = None, timeout: float = 30.0) -> dict[str, Any]:
+        """One recording, fetched ONCE per process for every covered include.
+
+        Any ``inc`` whose parts all lie inside ``_RECORDING_INC_SUPERSET`` is
+        answered from a single superset fetch cached under the MBID — callers
+        asking for "work-rels+recording-rels+…" and "artist-credits+…+genres"
+        used to each cost their own rate-limited request for the same
+        recording. An ``inc`` outside the superset is fetched as asked.
+        """
         if not _is_valid_mbid(recording_mbid):
             return {}
-
-        actual_inc = _RECORDING_INC_SUPERSET if inc is None else inc
+        requested = _RECORDING_INC_SUPERSET if inc is None else str(inc or "")
+        tokens = {t for t in requested.split("+") if t}
+        actual_inc = (
+            _RECORDING_INC_SUPERSET if tokens <= _RECORDING_INC_TOKENS else requested
+        )
         cache_key = f"{recording_mbid}::{actual_inc}"
-
         cached = _RECORDING_DETAIL_CACHE.get(cache_key)
         if cached is not None:
             return cached
-
         params = {"fmt": "json"}
         if actual_inc:
             params["inc"] = actual_inc
-            
         data = self.get(f"recording/{recording_mbid}", params=params, timeout=timeout)
         if data:
             _RECORDING_DETAIL_CACHE.set(cache_key, data)
         return data
 
-    def get_recordings_bulk(self, recording_mbids: list[str], inc: str = "", timeout: float = 30.0) -> dict[str, Any]:
+    def get_work(self, work_mbid: str, inc: str = _WORK_INC_DEFAULT, timeout: float = 30.0) -> dict[str, Any]:
+        """One work (song), cached. Used for writer credits.
+
+        Did not exist on this client, so the cover detector's writer fallback
+        (``self.mb.get_work``) raised AttributeError and silently did nothing.
+        """
+        if not _is_valid_mbid(work_mbid):
+            return {}
+        actual_inc = inc if inc is not None else _WORK_INC_DEFAULT
+        cache_key = f"{work_mbid}::{actual_inc}"
+        cached = _WORK_DETAIL_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        params = {"fmt": "json"}
+        if actual_inc:
+            params["inc"] = actual_inc
+        data = self.get(f"work/{work_mbid}", params=params, timeout=timeout)
+        if data:
+            _WORK_DETAIL_CACHE.set(cache_key, data)
+        return data
+
+    def get_recordings_bulk(
+        self,
+        recording_mbids: list[str],
+        inc: str = "",
+        timeout: float = 30.0,
+        *,
+        release_mbid: str | None = None,
+    ) -> dict[str, Any]:
+        """Many recordings in (usually) TWO requests, WITH their relations.
+
+        1. One search (``rid:(… OR …)``) for titles, credits and releases.
+        2. ⭐ One RELEASE lookup with recording- and work-level relations,
+           merged into each matching recording.
+
+        Step 2 is new. A search result carries NO relations, so the album
+        batch never had a work id, a "cover recording of" marker or a writer
+        — the cover detector's work step (one request, settles a track
+        outright) had nothing to use, and every track fell through to
+        per-recording fetches at ~1.2 s each. The release is ``release_mbid``
+        when the caller knows it, otherwise the release most of the found
+        recordings appear on. When step 2 fails, step 1's results are
+        returned exactly as before.
+        """
         valid_ids = [m for m in recording_mbids if _is_valid_mbid(m)]
         if not valid_ids:
             return {}
-
         mbid_string = " OR ".join(valid_ids)
         params = {
-            "fmt": "json", 
-            "query": f"rid:({mbid_string})", 
-            "limit": min(100, len(valid_ids))
+            "fmt": "json",
+            "query": f"rid:({mbid_string})",
+            "limit": min(100, len(valid_ids)),
         }
-        
         if inc:
             params["inc"] = inc
-
         data = self.get("recording/", params=params, timeout=timeout)
-        return {"recordings": data.get("recordings", []) if data else []}
+        recordings = [r for r in (data.get("recordings", []) if data else []) if isinstance(r, dict)]
+
+        try:
+            target_release = str(release_mbid or "").strip() or self._dominant_release(recordings)
+            if target_release:
+                relations = self._release_recording_relations(target_release, timeout=timeout)
+                if relations:
+                    merged = 0
+                    for rec in recordings:
+                        rels = relations.get(str(rec.get("id") or ""))
+                        if rels and not rec.get("relations"):
+                            rec["relations"] = rels
+                            merged += 1
+                    logger.debug(
+                        "MusicBrainz bulk relations merged from release",
+                        release_mbid=target_release,
+                        merged=merged,
+                        recordings=len(recordings),
+                    )
+        except Exception as exc:
+            logger.debug("MusicBrainz bulk relation merge failed", error=str(exc))
+
+        return {"recordings": recordings}
+
+    @staticmethod
+    def _dominant_release(recordings: list[dict[str, Any]]) -> str:
+        """The release that the most of these recordings appear on."""
+        counts: dict[str, int] = {}
+        for rec in recordings or []:
+            seen: set[str] = set()
+            for rel in rec.get("releases") or []:
+                rid = str((rel or {}).get("id") or "").strip()
+                if rid and rid not in seen:
+                    seen.add(rid)
+                    counts[rid] = counts.get(rid, 0) + 1
+        if not counts:
+            return ""
+        # Most recordings first, then the id for a stable choice.
+        return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+    def _release_recording_relations(
+        self, release_mbid: str, timeout: float = 30.0
+    ) -> dict[str, list[dict[str, Any]]]:
+        """``{recording_id: relations}`` for every track of one release."""
+        release = self.get_release(release_mbid, inc=_RELEASE_RELATIONS_INC, timeout=timeout)
+        out: dict[str, list[dict[str, Any]]] = {}
+        for medium in (release or {}).get("media") or []:
+            for track in (medium or {}).get("tracks") or []:
+                rec = (track or {}).get("recording") or {}
+                rid = str(rec.get("id") or "").strip()
+                rels = rec.get("relations")
+                if rid and isinstance(rels, list) and rels:
+                    out[rid] = rels
+        return out
 
     def get_artist(self, artist_mbid: str, inc: str = "", timeout: float = 30.0) -> dict[str, Any]:
         if not _is_valid_mbid(artist_mbid):
@@ -427,11 +555,19 @@ class MusicBrainzHttpClient:
     def browse_work_recordings(self, work_mbid: str, inc: str = "artist-credits", limit: int = 100) -> list[dict[str, Any]]:
         if not self.enabled or not work_mbid:
             return []
+        cache_key = f"{work_mbid}::{inc}::{min(limit, 100)}"
+        cached = _WORK_RECORDINGS_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         params = {"fmt": "json", "work": work_mbid, "limit": min(limit, 100)}
         if inc:
             params["inc"] = inc
         payload = self.get("recording", params=params)
-        return payload.get("recordings", []) if isinstance(payload.get("recordings"), list) else []
+        recordings = payload.get("recordings", []) if isinstance(payload.get("recordings"), list) else []
+        # Only a real answer is cached; an empty one may be a failed request.
+        if payload:
+            _WORK_RECORDINGS_CACHE.set(cache_key, recordings)
+        return recordings
 
     def browse_artist_releases(self, artist_mbid: str, inc: str = "", limit: int = 25, offset: int = 0) -> dict[str, Any]:
         params = {"fmt": "json", "artist": artist_mbid, "limit": min(limit, 100), "offset": offset}
