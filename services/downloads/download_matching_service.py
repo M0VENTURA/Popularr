@@ -92,7 +92,14 @@ def match_folder_group_with_musicbrainz(
                     "source": "musicbrainz",
                     "title": group.get("title"),
                     "artist": artist,
-                    "date": None,
+                    # The release group's first release date, when the
+                    # search returns it — without it ``release_year`` was
+                    # never set by the auto-search below.
+                    "date": (
+                        group.get("first-release-date")
+                        or group.get("first_release_date")
+                        or group.get("date")
+                    ),
                     "match_score": group.get("match_score"),
                 }
             )
@@ -181,8 +188,14 @@ except ImportError:
 # Optional Discogs track fetcher
 # =============================================================================
 
+# ⚠️ Imported UNDER the name the code uses. It was imported as
+# ``_fetch_discogs_tracks`` while ``get_release_tracks`` reads
+# ``fetch_discogs_tracks`` — which only existed when the import FAILED. So a
+# working install raised NameError on every Discogs release lookup.
 try:
-    from services.queue.queue_matching_service import _fetch_discogs_tracks
+    from services.queue.queue_matching_service import (
+        _fetch_discogs_tracks as fetch_discogs_tracks,
+    )
 except ImportError:
     fetch_discogs_tracks = None
 
@@ -591,10 +604,15 @@ def get_release_tracks_with_status(
         elif current_folder_files:
             track_title_norm = normalize_match_text(track.get("title") or "")
             for filename in current_folder_files:
-                filename_norm = normalize_match_text(filename)
+                # The extension is not part of the title ("intro.mp3" must not
+                # match a track called "Intro to the Outro" via "mp3").
+                filename_norm = normalize_match_text(os.path.splitext(filename)[0])
+                # "filename inside title" only counts for a filename long
+                # enough to mean something: a file called "01" or "intro"
+                # matched every track whose title contained it.
                 if track_title_norm and (
                     track_title_norm in filename_norm
-                    or filename_norm in track_title_norm
+                    or (len(filename_norm) >= 6 and filename_norm in track_title_norm)
                 ):
                     status = "in_folder"
                     status_details = {"filename": filename}
