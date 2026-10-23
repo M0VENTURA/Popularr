@@ -1020,13 +1020,31 @@ class MusicBrainzService:
             "original_release_year": original_release_year,
         }
         try:
-            payload = _call_with_heartbeat(
-                "recording.bulk_get",
-                self.http.get_recordings_bulk,
-                mbids,
-                inc="artist-credits+releases+release-groups+work-rels+genres",
-                Log_context=context,
-            ) or {}
+            # The album's release MBID, when the caller knows it, pins the
+            # relation lookup to the right edition; otherwise the HTTP client
+            # picks the release most of these recordings appear on.
+            _bulk_kwargs: dict[str, Any] = {}
+            _release_mbid = str(kwargs.get("release_mbid") or "").strip()
+            if _release_mbid:
+                _bulk_kwargs["release_mbid"] = _release_mbid
+            try:
+                payload = _call_with_heartbeat(
+                    "recording.bulk_get",
+                    self.http.get_recordings_bulk,
+                    mbids,
+                    inc="artist-credits+releases+release-groups+work-rels+genres",
+                    Log_context=context,
+                    **_bulk_kwargs,
+                ) or {}
+            except TypeError:
+                # An HTTP client that predates ``release_mbid``.
+                payload = _call_with_heartbeat(
+                    "recording.bulk_get",
+                    self.http.get_recordings_bulk,
+                    mbids,
+                    inc="artist-credits+releases+release-groups+work-rels+genres",
+                    Log_context=context,
+                ) or {}
             results: dict[str, dict[str, Any]] = {}
             for recording in payload.get("recordings", []) or []:
                 if not isinstance(recording, dict):
