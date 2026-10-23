@@ -148,6 +148,127 @@ def _cached_release(release_mbid: str) -> dict[str, Any] | None:
         return release
 
 
+_REL_LIST_KEY = {
+    "recording": "recording-relation-list",
+    "work": "work-relation-list",
+    "artist": "artist-relation-list",
+    "release": "release-relation-list",
+    "release_group": "release_group-relation-list",
+}
+
+
+def _ngs_relations(entity: Any, _depth: int = 0) -> Any:
+    """Give a MusicBrainz JSON entity the relation keys this module reads.
+
+    ⚠️⚠️ THE REASON COVER DETECTION FOUND NOTHING. This module was written
+    against the musicbrainzngs XML shape (``recording-relation-list``,
+    ``work-relation-list``, ``artist-relation-list``, ``attribute-list``), but
+    the shared client returns the JSON web service, which puts EVERY relation
+    in one ``relations`` list tagged with ``target-type`` (see
+    ``musicbrainz_service``, which reads ``recording.get("relations")``). So
+    every relation lookup here read an empty list: no "cover of" recording
+    relation, no work relation, no writers — the reported "0/20 settled" after
+    every step, even for Feuerschwanz's "Gangnam Style", which MusicBrainz
+    states is a "cover recording of 강남스타일".
+
+    Builds the ngs-style lists from ``relations`` (keeping ``relations``
+    intact) and recurses into the nested work/recording/artist, so both shapes
+    and both helper styles work. Entities already in ngs shape pass through.
+    Returns a COPY; the input is never mutated (it may be a cached object).
+    """
+    if not isinstance(entity, dict) or _depth > 3:
+        return entity
+    out = dict(entity)
+    relations = out.get("relations")
+    if not isinstance(relations, list):
+        return out
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    normalised: list[dict[str, Any]] = []
+    for rel in relations:
+        if not isinstance(rel, dict):
+            continue
+        rel = dict(rel)
+        attrs = rel.get("attributes")
+        if isinstance(attrs, list) and "attribute-list" not in rel:
+            rel["attribute-list"] = list(attrs)
+        target_type = str(rel.get("target-type") or "").strip().replace("-", "_")
+        if not target_type:
+            for candidate in ("recording", "work", "artist", "release"):
+                if isinstance(rel.get(candidate), dict):
+                    target_type = candidate
+                    break
+        nested = rel.get(target_type.replace("_", "-")) if target_type else None
+        if isinstance(nested, dict):
+            rel[target_type.replace("_", "-")] = _ngs_relations(nested, _depth + 1)
+        key = _REL_LIST_KEY.get(target_type)
+        if key:
+            buckets.setdefault(key, []).append(rel)
+        normalised.append(rel)
+    out["relations"] = normalised
+    for key, rels in buckets.items():
+        if not out.get(key):
+            out[key] = rels
+    return out
+
+
+def _rel_attributes(rel: dict[str, Any]) -> set[str]:
+    raw = rel.get("attribute-list") or rel.get("attributes") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    return {str(a).strip().casefold() for a in raw if str(a).strip()}
+
+
+def _cover_work_ids_local(recording: dict[str, Any]) -> set[str]:
+    """Works this recording is a COVER performance of ("cover recording of").
+
+    Read directly from the relation attributes, in either shape, so the
+    verdict never depends on which shape ``extract_cover_work_ids`` expects.
+    """
+    found: set[str] = set()
+    rec = _ngs_relations(recording)
+    for rel in (rec or {}).get("work-relation-list") or []:
+        if not isinstance(rel, dict):
+            continue
+        if str(rel.get("type") or "").strip().casefold() not in {"performance", "recording of"}:
+            continue
+        if "cover" not in _rel_attributes(rel):
+            continue
+        work_id = str((rel.get("work") or {}).get("id") or "").strip()
+        if work_id:
+            found.add(work_id)
+    return found
+
+
+def _work_ids_local(recording: dict[str, Any]) -> set[str]:
+    found: set[str] = set()
+    rec = _ngs_relations(recording)
+    for rel in (rec or {}).get("work-relation-list") or []:
+        if not isinstance(rel, dict):
+            continue
+        work_id = str((rel.get("work") or {}).get("id") or "").strip()
+        if work_id:
+            found.add(work_id)
+    return found
+
+
+def _all_cover_work_ids(recording: dict[str, Any]) -> set[str]:
+    ids = _cover_work_ids_local(recording)
+    try:
+        ids |= set(extract_cover_work_ids(recording) or ())
+    except Exception:
+        pass
+    return ids
+
+
+def _all_work_ids(recording: dict[str, Any]) -> set[str]:
+    ids = _work_ids_local(recording)
+    try:
+        ids |= set(extract_work_ids(recording) or ())
+    except Exception:
+        pass
+    return ids
+
+
 def _has_cover_annotation(title: str) -> bool:
     return bool(_COVER_SUFFIX_RE.search(title or ""))
 
@@ -244,7 +365,7 @@ class CoverDetector:
 
     def _get_recording(self, mbid: str, inc: str) -> dict[str, Any]:
         try:
-            return self.mb.get_recording(mbid, inc=inc) or {}
+            return _ngs_relations(self.mb.get_recording(mbid, inc=inc) or {})
         except Exception as exc:
             logger.debug("Recording fetch failed", mbid=mbid, error=str(exc))
             return {}
@@ -1196,6 +1317,7 @@ class CoverDetector:
             )
             if not recordings:
                 return None
+            recordings = [_ngs_relations(r) for r in recordings if isinstance(r, dict)]
 
             earliest: dict[str, Any] | None = None
             earliest_year = 9999
@@ -1360,7 +1482,7 @@ class CoverDetector:
         """
         for work_id in sorted(work_ids or ()):
             try:
-                work = self.mb.get_work(work_id, inc="artist-rels") or {}
+                work = _ngs_relations(self.mb.get_work(work_id, inc="artist-rels") or {})
             except Exception as exc:
                 logger.debug("Cover-work writer lookup failed", work_mbid=work_id, error=str(exc))
                 continue
@@ -1398,7 +1520,7 @@ class CoverDetector:
                 recording_mbid, album_artist, seed_recording=seed
             )
 
-            cover_work_ids = extract_cover_work_ids(seed)
+            cover_work_ids = _all_cover_work_ids(seed)
             if chain_result and not cover_work_ids:
                 return chain_result
 
@@ -1492,10 +1614,10 @@ class CoverDetector:
             if not details:
                 continue
 
-            if not (extract_work_ids(details) & work_ids):
+            if not (_all_work_ids(details) & work_ids):
                 continue
             # Exclude candidates that are themselves covers of this work.
-            if extract_cover_work_ids(details) & work_ids:
+            if _all_cover_work_ids(details) & work_ids:
                 logger.debug("Skipping candidate: Already marked as cover of this work", mbid=rid)
                 continue
             if _has_cover_annotation(str(details.get("title") or rec.get("title") or "")):
@@ -1829,7 +1951,7 @@ class CoverDetector:
                     # Previously called get_release() with a work id, which
                     # queries the wrong entity and never returns writers.
                     try:
-                        work_details = self.mb.get_work(wid, inc="artist-rels") or {}
+                        work_details = _ngs_relations(self.mb.get_work(wid, inc="artist-rels") or {})
                         work_rels = work_details.get("artist-relation-list", [])
                     except Exception as exc:
                         logger.debug("Work lookup failed", work_id=wid, error=str(exc))
@@ -1947,7 +2069,7 @@ class CoverDetector:
                 artist_mbid = result.get("id")
                 if not artist_mbid:
                     continue
-                details = self.mb.get_artist(artist_mbid, inc="artist-rels") or {}
+                details = _ngs_relations(self.mb.get_artist(artist_mbid, inc="artist-rels") or {})
                 for rel in details.get("artist-relation-list", []) or []:
                     if str(rel.get("type", "")).lower() == "member of band":
                         name = (rel.get("artist") or {}).get("name")
