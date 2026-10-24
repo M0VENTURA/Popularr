@@ -261,34 +261,78 @@ async def setup() -> Any:
     cfg = get_config()
     nav_users = cfg.get("navidrome_users", [])
     nav_first = nav_users[0] if nav_users else {}
+    nav_cfg = cfg.get("navidrome") if isinstance(cfg.get("navidrome"), dict) else {}
     api = cfg.get("api_integrations", {})
     dl = cfg.get("downloads", {})
+    dl_quality = dl.get("quality") or {}
     watcher_cfg = cfg.get("watcher", {})
     features_cfg = cfg.get("features", {})
     playlists_cfg = cfg.get("playlists", {})
     tagging_cfg = cfg.get("tagging", {})
+    tag_opts = tagging_cfg.get("write_options", {}) or {}
+    metadata_update_cfg = cfg.get("metadata_update", {}) or {}
+    popularity_cfg = cfg.get("popularity", {}) or {}
+    pop_weights = popularity_cfg.get("weights", {}) or {}
+    genres_cfg = cfg.get("genres", {}) or {}
+    genres_selection = genres_cfg.get("selection", {}) or {}
     slskd_cfg = cfg.get("slskd", {})
+    essentia_cfg = cfg.get("essentia", {}) or {}
+
+    allowed_formats_raw = dl_quality.get("allowed_formats", ["flac", "mp3"])
+    allowed_formats = [str(f).strip().lower().lstrip(".") for f in (allowed_formats_raw or []) if str(f).strip()]
 
     setup_defaults = {
         "nav_url": nav_first.get("base_url", ""),
         "nav_user": nav_first.get("user", ""),
         "nav_pass": nav_first.get("pass", ""),
+        "nav_display_name": nav_first.get("display_name", ""),
+        "lfm_username": nav_first.get("lastfm_username", ""),
+        "nav_auto_public_playlists": bool(nav_cfg.get("auto_public_playlists", False)),
+        "nav_playlist_cover_art": bool(nav_cfg.get("playlist_cover_art", False)),
         "lfm_enabled": api.get("lastfm", {}).get("enabled", False),
         "lfm_api_key": api.get("lastfm", {}).get("api_key", ""),
         "dg_enabled": api.get("discogs", {}).get("enabled", False),
         "dg_token": api.get("discogs", {}).get("token", ""),
         "lb_enabled": api.get("listenbrainz", {}).get("enabled", True),
-        "lb_token": nav_first.get("listenbrainz_user_token", ""),
+        "lb_token": nav_first.get("listenbrainz_user_token", "") or api.get("listenbrainz", {}).get("token", ""),
+        "mb_enabled": bool(api.get("musicbrainz", {}).get("enabled", True)),
+        "audiodb_api_key": api.get("audiodb", {}).get("api_key", ""),
+        "gemini_api_key": api.get("gemini", {}).get("api_key", ""),
+        "gemini_model": api.get("gemini", {}).get("model", "gemini-2.5-flash-image"),
         "slskd_enabled": bool(slskd_cfg.get("enabled", False)),
         "slskd_url": slskd_cfg.get("web_url", ""),
         "slskd_api_key": slskd_cfg.get("api_key", ""),
-        "essentia_enabled": bool(cfg.get("essentia", {}).get("script_path")),
-        "essentia_tag_moods": cfg.get("essentia", {}).get("tag_moods", True),
-        "essentia_tag_genres": cfg.get("essentia", {}).get("tag_genres", False),
+        "essentia_enabled": bool(essentia_cfg.get("script_path")),
+        "essentia_tag_moods": essentia_cfg.get("tag_moods", True),
+        "essentia_tag_genres": essentia_cfg.get("tag_genres", False),
+        "essentia_parse_json_features": essentia_cfg.get("parse_json_features", True),
+        "essentia_num_genres": essentia_cfg.get("num_genres", 3),
+        "essentia_genre_format": essentia_cfg.get("genre_format", "parent_child"),
+        "downloads_folder": dl.get("folder", "/downloads/Music"),
         "file_name_format": dl.get("file_name_format", ""),
         "conversion_enabled": bool(dl.get("conversion", {}).get("enabled", False)),
         "conversion_mode": dl.get("conversion", {}).get("mode", "flac_to_mp3"),
         "conversion_bitrate": dl.get("conversion", {}).get("mp3_bitrate_kbps", 320),
+        "conversion_original_handling": dl.get("conversion", {}).get("original_handling", "move_to_original"),
+        "quality_filter_enabled": bool((dl.get("quality_filter") or {}).get("enabled", False)),
+        "min_bitrate": dl_quality.get("min_bitrate", 192),
+        "allowed_formats": allowed_formats,
+        "write_tags_to_file": tagging_cfg.get("write_tags_to_file", True),
+        "ratings_only": bool(tag_opts.get("ratings_only", False)),
+        "fill_missing_only": bool(tag_opts.get("fill_missing_only", False)),
+        "sync_album_tags_on_scan": bool(tagging_cfg.get("sync_album_tags_on_scan", True)),
+        "skip_unchanged_ratings": bool(tagging_cfg.get("skip_unchanged_ratings", True)),
+        "apply_metadata_during_scan": bool(metadata_update_cfg.get("apply_during_scan", True)),
+        "album_name_source": metadata_update_cfg.get("album_name_source", "dedupe"),
+        "album_name_update_target": metadata_update_cfg.get("album_name_update_target", "db"),
+        "pop_weight_lastfm": pop_weights.get("lastfm", 0.55),
+        "pop_weight_listenbrainz": pop_weights.get("listenbrainz", 0.35),
+        "pop_weight_age": pop_weights.get("age", 0.10),
+        "scan_threads": popularity_cfg.get("scan_threads", 4),
+        "track_timeout_seconds": popularity_cfg.get("track_timeout_seconds", 30),
+        "album_skip_days": features_cfg.get("album_skip_days", 7),
+        "deep_genre_search": bool(features_cfg.get("deep_genre_search", False)),
+        "canonical_genres_enabled": bool(genres_selection.get("enabled", True)),
         "auto_import_enabled": watcher_cfg.get("auto_import_enabled", True),
         "auto_popularity_scan": watcher_cfg.get("auto_popularity_scan", True),
         "downloads_watcher_enabled": watcher_cfg.get("downloads_watcher_enabled", True),
@@ -296,10 +340,19 @@ async def setup() -> Any:
         "upcoming_releases_scan_enabled": features_cfg.get("upcoming_releases_scan_enabled", True),
         "sync_ratings_to_all_users": features_cfg.get("sync_ratings_to_all_users", False),
         "essential_playlists_enabled": playlists_cfg.get("essential_playlists_enabled", True),
+        "essential_include_featured": playlists_cfg.get("essential_include_featured", True),
         "genre_playlists_enabled": playlists_cfg.get("genre_playlists_enabled", True),
         "new_music_playlist_enabled": playlists_cfg.get("new_music_playlist_enabled", True),
-        "write_tags_to_file": tagging_cfg.get("write_tags_to_file", True),
-        "quality_filter_enabled": bool((dl.get("quality_filter") or {}).get("enabled", False)),
+        "favourite_playlists_enabled": playlists_cfg.get("favourite_playlists_enabled", True),
+        "decade_playlists_enabled": playlists_cfg.get("decade_playlists_enabled", False),
+        "hit_singles_playlist_enabled": playlists_cfg.get("hit_singles_playlist_enabled", False),
+        "hidden_gems_playlist_enabled": playlists_cfg.get("hidden_gems_playlist_enabled", False),
+        "new_releases_playlist_enabled": playlists_cfg.get("new_releases_playlist_enabled", False),
+        "covers_playlist_enabled": playlists_cfg.get("covers_playlist_enabled", False),
+        "acoustic_playlist_enabled": playlists_cfg.get("acoustic_playlist_enabled", False),
+        "high_energy_playlist_enabled": playlists_cfg.get("high_energy_playlist_enabled", False),
+        "mood_playlists_enabled": playlists_cfg.get("mood_playlists_enabled", False),
+        "exclude_christmas_from_playlists": playlists_cfg.get("exclude_christmas_from_playlists", True),
     }
 
     pg_defaults = {
@@ -423,9 +476,22 @@ async def api_setup_save() -> Any:
         os.environ["PG_PASSWORD"] = data["database"]["password"]
         os.environ["PG_DATABASE"] = data["database"]["name"]
 
-    success = save_config(data)
+    # Preserve any secondary Navidrome users already configured on disk if the
+    # wizard was opened from the Config page on an existing multi-user setup.
+    existing_disk = read_config_from_disk()
+    existing_users = existing_disk.get("navidrome_users", [])
+    if isinstance(existing_users, list) and len(existing_users) > 1 and len(nav_users) == 1:
+        merged_first = dict(existing_users[0]) if isinstance(existing_users[0], dict) else {}
+        merged_first.update(nav_users[0])
+        data["navidrome_users"] = [merged_first] + existing_users[1:]
+
+    success = save_partial_config(data)
     if success:
         session["username"] = nav_users[0].get("user", "")
+        try:
+            reschedule_jobs_from_config(get_config())
+        except Exception:
+            pass
         return jsonify({"success": True, "message": "Configuration saved"})
         
     return jsonify({"success": False, "error": "Failed to save config file"}), 500
@@ -445,6 +511,12 @@ async def api_setup_save_partial() -> Any:
     nav_users = data.get("navidrome_users", [])
     if nav_users and nav_users[0].get("user"):
         session["username"] = nav_users[0]["user"]
+        existing_disk = read_config_from_disk()
+        existing_users = existing_disk.get("navidrome_users", [])
+        if isinstance(existing_users, list) and len(existing_users) > 1 and len(nav_users) == 1:
+            merged_first = dict(existing_users[0]) if isinstance(existing_users[0], dict) else {}
+            merged_first.update(nav_users[0])
+            data["navidrome_users"] = [merged_first] + existing_users[1:]
 
     pg_host = (data.pop("PG_HOST", "") or "").strip()
     if pg_host:

@@ -589,7 +589,7 @@ _PRE_SCAN_BATCH_SIZE = 50
 # Maximum seconds to wait for a Soulseek search to complete.  Polling stops as
 # soon as slskd reports is_complete=True, so this is only a safety ceiling for
 # searches that never finish (e.g. slskd unreachable mid-search).
-_SLSKD_SEARCH_MAX_WAIT_SECONDS = 150
+_SLSKD_SEARCH_MAX_WAIT_SECONDS = 60
 
 # Reduced maximum wait for fallback queries.  Fallback searches are lower-
 # specificity alternatives tried when the primary query found nothing; a
@@ -605,9 +605,9 @@ def get_queue_search_tuning() -> dict[str, Any]:
 
     Keys (all under ``queue`` in config.yaml):
 
-    - ``search_max_wait_seconds`` (150): ceiling for the PRIMARY query.
+    - ``search_max_wait_seconds`` (60): ceiling for the PRIMARY query.
     - ``fallback_search_max_wait_seconds`` (20): ceiling for fallback queries.
-    - ``search_empty_abort_seconds`` (90): a search that has streamed ZERO
+    - ``search_empty_abort_seconds`` (30): a search that has streamed ZERO
       results for this long is CANCELLED early instead of being waited out —
       slskd keeps empty searches ``InProgress`` until they time out, and the
       full ceiling on every query is what made a hopeless track burn ~9
@@ -632,7 +632,7 @@ def get_queue_search_tuning() -> dict[str, Any]:
             or _SLSKD_FALLBACK_SEARCH_MAX_WAIT_SECONDS
         ),
         "search_empty_abort_seconds": float(
-            queue.get("search_empty_abort_seconds", 90) or 0
+            queue.get("search_empty_abort_seconds", 30) or 0
         ),
         "search_empty_shrink_after": int(queue.get("search_empty_shrink_after", 4) or 0),
         "search_shrunken_wait_seconds": int(queue.get("search_shrunken_wait_seconds", 8) or 0),
@@ -1421,6 +1421,18 @@ def get_playlists_config() -> dict[str, Any]:
         _genre_max_tracks = int(p.get("genre_playlists_max_tracks", 300))
     except (TypeError, ValueError):
         _genre_max_tracks = 300
+    try:
+        _decade_max_tracks = int(p.get("decade_playlists_max_tracks", 200))
+    except (TypeError, ValueError):
+        _decade_max_tracks = 200
+    try:
+        _mood_max_tracks = int(p.get("mood_playlists_max_tracks", 150))
+    except (TypeError, ValueError):
+        _mood_max_tracks = 150
+    try:
+        _max_per_artist = int(p.get("genre_playlists_max_per_artist", 25))
+    except (TypeError, ValueError):
+        _max_per_artist = 25
     return {
         "essential_playlists_enabled": bool(p.get("essential_playlists_enabled", True)),
         "essential_max_tracks": max(1, int(p.get("essential_max_tracks", 50) or 50)),
@@ -1442,7 +1454,68 @@ def get_playlists_config() -> dict[str, Any]:
             1, int(p.get("genre_playlists_delete_threshold", 80) or 80)
         ),
         "genre_playlists_max_tracks": max(0, _genre_max_tracks),
+        "genre_playlists_max_per_artist": max(0, _max_per_artist),
+        "playlist_order_mode": str(p.get("playlist_order_mode") or "prominence").strip().lower(),
+        "playlist_interleave_artists": bool(p.get("playlist_interleave_artists", True)),
         "new_music_playlist_enabled": bool(p.get("new_music_playlist_enabled", True)),
+        "decade_playlists_enabled": bool(p.get("decade_playlists_enabled", True)),
+        "decade_playlists_name_template": str(
+            p.get("decade_playlists_name_template") or "{decade}s - Top Tracks"
+        ).strip() or "{decade}s - Top Tracks",
+        "decade_playlists_min_tracks": max(
+            1, int(p.get("decade_playlists_min_tracks", 50) or 50)
+        ),
+        "decade_playlists_max_tracks": max(0, _decade_max_tracks),
+        "hit_singles_playlist_enabled": bool(p.get("hit_singles_playlist_enabled", True)),
+        "hit_singles_playlist_name": str(
+            p.get("hit_singles_playlist_name") or "Hit Singles"
+        ).strip() or "Hit Singles",
+        "hit_singles_max_tracks": max(
+            1, int(p.get("hit_singles_max_tracks", 250) or 250)
+        ),
+        "hidden_gems_playlist_enabled": bool(p.get("hidden_gems_playlist_enabled", False)),
+        "hidden_gems_playlist_name": str(
+            p.get("hidden_gems_playlist_name") or "Hidden Gems"
+        ).strip() or "Hidden Gems",
+        "hidden_gems_max_tracks": max(
+            1, int(p.get("hidden_gems_max_tracks", 200) or 200)
+        ),
+        "new_releases_playlist_enabled": bool(p.get("new_releases_playlist_enabled", False)),
+        "new_releases_playlist_name": str(
+            p.get("new_releases_playlist_name") or "New Releases"
+        ).strip() or "New Releases",
+        "new_releases_max_tracks": max(
+            1, int(p.get("new_releases_max_tracks", 100) or 100)
+        ),
+        "covers_playlist_enabled": bool(p.get("covers_playlist_enabled", False)),
+        "covers_playlist_name": str(
+            p.get("covers_playlist_name") or "Great Covers"
+        ).strip() or "Great Covers",
+        "covers_max_tracks": max(
+            1, int(p.get("covers_max_tracks", 150) or 150)
+        ),
+        "acoustic_playlist_enabled": bool(p.get("acoustic_playlist_enabled", False)),
+        "acoustic_playlist_name": str(
+            p.get("acoustic_playlist_name") or "Acoustic Essentials"
+        ).strip() or "Acoustic Essentials",
+        "acoustic_max_tracks": max(
+            1, int(p.get("acoustic_max_tracks", 150) or 150)
+        ),
+        "high_energy_playlist_enabled": bool(p.get("high_energy_playlist_enabled", False)),
+        "high_energy_playlist_name": str(
+            p.get("high_energy_playlist_name") or "High Energy & Upbeat"
+        ).strip() or "High Energy & Upbeat",
+        "high_energy_max_tracks": max(
+            1, int(p.get("high_energy_max_tracks", 200) or 200)
+        ),
+        "mood_playlists_enabled": bool(p.get("mood_playlists_enabled", False)),
+        "mood_playlists_name_template": str(
+            p.get("mood_playlists_name_template") or "{mood} - Mix"
+        ).strip() or "{mood} - Mix",
+        "mood_playlists_min_tracks": max(
+            1, int(p.get("mood_playlists_min_tracks", 40) or 40)
+        ),
+        "mood_playlists_max_tracks": max(0, _mood_max_tracks),
         "exclude_christmas_from_playlists": bool(
             p.get("exclude_christmas_from_playlists", True)
         ),
@@ -1494,7 +1567,7 @@ def get_favourite_playlists_config() -> dict[str, Any]:
             p.get("favourite_albums_name") or "Favourite Albums"
         ).strip() or "Favourite Albums",
         "sync_favourites_from_navidrome": bool(
-            p.get("sync_favourites_from_navidrome", False)
+            p.get("sync_favourites_from_navidrome", True)
         ),
     }
 
@@ -2985,7 +3058,7 @@ def get_search_quality_config() -> dict[str, Any]:
     """
     cfg = get_config()
     quality = cfg.get("downloads", {}).get("quality", {})
-    _raw_formats = quality.get("allowed_formats", ["flac", "mp3"])
+    _raw_formats = quality.get("allowed_formats", ["flac", "mp3", "m4a"])
     # Normalise to bare lowercase extensions so ".FLAC", "FLAC" and "flac"
     # all mean the same type (the config page and a hand-edited config.yaml
     # can spell it either way).

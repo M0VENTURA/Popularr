@@ -1283,10 +1283,40 @@ def extract_edition_annotation(title: str) -> str | None:
     return re.sub(r"[^a-z0-9]+", " ", inner).strip()
 
 
+_NEUTRAL_STUDIO_ANNOTATIONS = frozenset({
+    "album version",
+    "main version",
+    "original version",
+    "single version",
+    "standard version",
+    "standard edition",
+    "explicit",
+    "explicit version",
+    "clean",
+    "clean version",
+    "kr ver",
+    "kr version",
+    "korean version",
+    "korean ver",
+    "jp ver",
+    "jp version",
+    "japanese version",
+    "japanese ver",
+    "en ver",
+    "eng ver",
+    "english version",
+    "english ver",
+})
+
+
 def edition_annotations_compatible(title_a: str, title_b: str) -> bool:
     """True when the edition annotations on two titles are compatible."""
     ann_a = extract_edition_annotation(title_a)
     ann_b = extract_edition_annotation(title_b)
+    if ann_a in _NEUTRAL_STUDIO_ANNOTATIONS:
+        ann_a = None
+    if ann_b in _NEUTRAL_STUDIO_ANNOTATIONS:
+        ann_b = None
     if ann_a is None and ann_b is None:
         return True
     if ann_a is None or ann_b is None:

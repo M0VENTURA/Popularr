@@ -35,7 +35,6 @@ from routes.navidrome import navidrome_bp
 from routes.scan_routes import scans_bp
 from routes.scan_routes.library_routes import library_bp
 from routes.ui_routes import ui_bp
-from routes.preview_routes import preview_bp
 from routes.queue import (
     queue_processing_bp,
     queue_matching_bp,
@@ -69,11 +68,6 @@ def register_all_blueprints(app: Any) -> None:
         (maintenance_bp, None),
         (api_v1_bp, None),
         (ui_bp, None),
-        # /new — preview of the rebuilt templates under New/. Registered last of
-        # the UI blueprints and behind its own prefix, so it cannot shadow a
-        # live route. Delete this line together with routes/preview_routes.py at
-        # cutover (see New/MIGRATION.md).
-        (preview_bp, None),
         (navidrome_bp, None),
         (scans_bp, None),
         (library_bp, None),

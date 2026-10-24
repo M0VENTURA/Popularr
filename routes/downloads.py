@@ -546,14 +546,6 @@ async def api_queue_upcoming() -> Any:
         if not artist or not album:
             return jsonify({"success": False, "error": "release has no artist/album"}), 400
 
-        today = datetime.now().date().isoformat()
-        if not rel_date or rel_date > today:
-            return jsonify({
-                "success": False,
-                "error": "release not out yet" if rel_date else "release date unknown",
-                "release_date": rel_date,
-            }), 400
-
         year = int(rel_date[:4]) if len(rel_date) >= 4 and rel_date[:4].isdigit() else None
         release_mbid = (release.get("release_group_mbid") or "").strip() or None
 
@@ -645,6 +637,11 @@ async def api_queue_upcoming() -> Any:
                 text("UPDATE upcoming_releases SET status = 'queued' WHERE id = :id"),
                 {"id": release_id},
             )
+
+        try:
+            signal_new_item()
+        except Exception:
+            pass
 
         return jsonify({
             "success": True,
