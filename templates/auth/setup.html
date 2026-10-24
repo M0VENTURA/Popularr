@@ -9,64 +9,70 @@
   <link href="{{ dist }}/vendor/bootstrap.min.css" rel="stylesheet">
   <link href="{{ dist }}/vendor/bootstrap-icons.css" rel="stylesheet">
   {% else %}
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
   {% endif %}
-  <style>
-    :root { --primary-bg: #121212; --secondary-bg: #1e1e1e; --tertiary-bg: #282828; --text-primary: #e0e0e0; --text-secondary: #b0b0b0; --border-color: #333; --spotify-green: #1db954; }
-    body { background: var(--primary-bg); color: var(--text-primary); min-height: 100vh; }
-    .setup-container { max-width: 720px; margin: 0 auto; padding: 2rem 1rem; }
-    .step-card { background: var(--secondary-bg); border: 1px solid var(--border-color); border-radius: 12px; padding: 2rem; margin-bottom: 1.5rem; }
-    .step-indicator { display: flex; gap: 0.5rem; justify-content: center; margin-bottom: 2rem; }
-    .step-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--tertiary-bg); transition: all 0.3s; }
-    .step-dot.active { background: var(--spotify-green); box-shadow: 0 0 8px rgba(29,185,84,0.5); }
-    .step-dot.done { background: var(--spotify-green); }
-    .form-control, .form-select { background: var(--primary-bg); border: 1px solid var(--border-color); color: var(--text-primary); }
-    /* Restore the dropdown chevron wiped by the flat background override */
-    .form-select {
-      background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23adb5bd' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
-      background-repeat: no-repeat;
-      background-position: right 0.75rem center;
-      background-size: 16px 12px;
-      padding-right: 2.5rem;
-    }
-    .form-control:focus, .form-select:focus { border-color: var(--spotify-green); box-shadow: 0 0 0 0.2rem rgba(29,185,84,0.25); }
-    .btn-primary { background: var(--spotify-green); border: none; color: #000; font-weight: 600; }
-    .btn-primary:hover { background: #1ed760; }
-  </style>
+  <link rel="stylesheet" href="{{ versioned_static('css/setup.css') }}">
 </head>
 <body>
 <div class="setup-container">
   <div class="text-center mb-4">
     <i class="bi bi-music-note-beamed" style="font-size: 2.5rem; color: var(--spotify-green);"></i>
     <h1 class="h3 mt-2">Welcome to Popularr</h1>
-    <p class="text-muted">Let's get you set up in a few steps</p>
+    <p class="text-muted mb-0">Configure your library, APIs, tagging rules, and scan preferences before your first scan</p>
   </div>
   <div class="step-indicator" id="stepIndicator">
-    <div class="step-dot active" data-step="1"></div>
-    <div class="step-dot" data-step="2"></div>
-    <div class="step-dot" data-step="3"></div>
-    <div class="step-dot" data-step="4"></div>
-    <div class="step-dot" data-step="5"></div>
-    <div class="step-dot" data-step="6"></div>
+    <div class="step-dot active" data-action="go-step" data-step="1" title="1. Navidrome &amp; Database"></div>
+    <div class="step-dot" data-action="go-step" data-step="2" title="2. APIs &amp; Integrations"></div>
+    <div class="step-dot" data-action="go-step" data-step="3" title="3. Mood &amp; Genre Analysis"></div>
+    <div class="step-dot" data-action="go-step" data-step="4" title="4. File Management &amp; Tag Writing"></div>
+    <div class="step-dot" data-action="go-step" data-step="5" title="5. Scan Scoring, Playlists &amp; Automation"></div>
+    <div class="step-dot" data-action="go-step" data-step="6" title="6. Summary &amp; Finish"></div>
   </div>
 
   <!-- Step 1: Navidrome + Database -->
   <div class="step-card" id="step1">
-    <div class="d-flex align-items-center gap-2 mb-3">
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
       <span class="badge bg-success rounded-pill">1</span>
       <h5 class="mb-0">Connect to Navidrome</h5>
       <span class="text-muted small">(required)</span>
     </div>
-    <p class="text-muted small mb-3">Popularr reads your library from Navidrome and sends star ratings back. Your password is stored in <code>config.yaml</code> only.</p>
-    <div class="mb-3">
-      <label class="form-label" for="navUrl">Navidrome URL</label>
-      <input type="url" class="form-control" id="navUrl" placeholder="https://music.yourdomain.com" value="{{ defaults.get('nav_url', 'http://navidrome:4533') }}">
-      <small class="form-text text-muted">Full URL including the scheme — no trailing slash required. Example: <code>https://music.yourdomain.com</code></small>
+    <p class="text-muted small mb-3">Popularr reads your library from Navidrome and sends star ratings and playlists back. Your credentials are stored in <code>config.yaml</code> only.</p>
+    <div class="row g-3 mb-3">
+      <div class="col-sm-8">
+        <label class="form-label" for="navUrl">Navidrome URL</label>
+        <input type="url" class="form-control" id="navUrl" placeholder="https://music.yourdomain.com" value="{{ defaults.get('nav_url', 'http://navidrome:4533') }}">
+        <small class="form-text text-muted">Full URL including scheme — e.g. <code>http://navidrome:4533</code> or <code>https://music.yourdomain.com</code></small>
+      </div>
+      <div class="col-sm-4">
+        <label class="form-label" for="navDisplayName">Display Name <span class="text-muted small">(optional)</span></label>
+        <input type="text" class="form-control" id="navDisplayName" placeholder="My Library" value="{{ defaults.get('nav_display_name', '') }}">
+        <small class="form-text text-muted">Friendly account label in UI</small>
+      </div>
     </div>
     <div class="row g-3 mb-3">
       <div class="col-sm-6"><label class="form-label" for="navUser">Username</label><input type="text" class="form-control" id="navUser" placeholder="admin" value="{{ defaults.get('nav_user', '') }}"></div>
       <div class="col-sm-6"><label class="form-label" for="navPass">Password</label><input type="password" class="form-control" id="navPass" placeholder="••••••••" value="{{ defaults.get('nav_pass', '') }}"></div>
+    </div>
+
+    <div class="border rounded p-3 mb-3">
+      <h6 class="mb-2 small fw-semibold"><i class="bi bi-music-note-list text-success"></i> Navidrome Playlist Sync Options</h6>
+      <div class="row g-2">
+        <div class="col-sm-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_nav_public_playlists"{% if defaults.get('nav_auto_public_playlists', False) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_nav_public_playlists"><strong>Auto-make playlists public</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Switch imported/generated playlists to public visibility automatically.</small>
+        </div>
+        <div class="col-sm-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_nav_playlist_covers"{% if defaults.get('nav_playlist_cover_art', False) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_nav_playlist_covers"><strong>Upload playlist cover art</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Upload artist/genre cover images to Navidrome playlists during sync.</small>
+        </div>
+      </div>
     </div>
 
     <!-- Database (pre-filled from env if available) -->
@@ -83,114 +89,270 @@
       </div>
     </details>
 
-    <div class="d-flex justify-content-between align-items-center">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
       <div>
-        <button class="btn btn-outline-primary btn-sm" onclick="testConnection()"><i class="bi bi-plug"></i> Test Connection</button>
-        <span id="connectionStatus" class="ms-2 small"></span>
+        <button type="button" class="btn btn-outline-primary btn-sm" data-action="test-connection"><i class="bi bi-plug"></i> Test Connection</button>
+        <span id="connectionStatus" class="ms-2 small" role="status"></span>
       </div>
-      <button class="btn btn-primary" onclick="goToNextStep(2,this)">Continue <i class="bi bi-arrow-right"></i></button>
+      <button type="button" class="btn btn-primary" data-action="next-step" data-next-step="2">Continue <i class="bi bi-arrow-right"></i></button>
     </div>
   </div>
 
-  <!-- Step 2: API Keys (optional) -->
+  <!-- Step 2: API Keys & Integrations -->
   <div class="step-card d-none" id="step2">
-    <div class="d-flex align-items-center gap-2 mb-3">
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
       <span class="badge bg-secondary rounded-pill">2</span>
-      <h5 class="mb-0">API Keys</h5>
-      <span class="text-muted small">(optional — skip if unsure)</span>
+      <h5 class="mb-0">API Keys &amp; Integrations</h5>
+      <span class="text-muted small">(recommended before first scan)</span>
     </div>
-    <p class="text-muted small mb-3">Enable popularity scoring and recommendations. You can add these later from Config.</p>
+    <p class="text-muted small mb-3">Configure external providers used during popularity, singles, and metadata scans. Services with an API key are enabled automatically when a key is entered.</p>
+
     <div class="border rounded p-3 mb-3">
-      <h6 class="mb-2"><i class="bi bi-database-fill text-info"></i> Last.fm</h6>
-      <input type="text" class="form-control form-control-sm" id="lfmApiKey" placeholder="API Key" value="{{ defaults.get('lfm_api_key', '') }}">
-      <small class="form-text text-muted">Get your API account at <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api/account/create</a></small>
-    </div>
-    <div class="border rounded p-3 mb-3">
-      <h6 class="mb-2"><i class="bi bi-vinyl"></i> Discogs</h6>
-      <input type="text" class="form-control form-control-sm" id="dgToken" placeholder="Personal Access Token" value="{{ defaults.get('dg_token', '') }}">
-      <small class="form-text text-muted">Generate a token at <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener">discogs.com/settings/developers</a></small>
-    </div>
-    <div class="border rounded p-3 mb-3">
-      <h6 class="mb-2"><i class="bi bi-headphones text-secondary"></i> ListenBrainz</h6>
-      <input type="text" class="form-control form-control-sm" id="lbToken" placeholder="User Token" value="{{ defaults.get('lb_token', '') }}">
-      <small class="form-text text-muted">Get your token from <a href="https://listenbrainz.org/settings/" target="_blank" rel="noopener">listenbrainz.org/settings</a></small>
+      <h6 class="mb-2"><i class="bi bi-database-fill text-info"></i> Last.fm <span class="badge bg-info bg-opacity-10 text-info ms-1">Popularity &amp; Recommendations</span></h6>
+      <div class="row g-2">
+        <div class="col-sm-7">
+          <label class="form-label form-label-sm" for="lfmApiKey">API Key</label>
+          <input type="text" class="form-control form-control-sm" id="lfmApiKey" placeholder="Last.fm API Key" value="{{ defaults.get('lfm_api_key', '') }}">
+        </div>
+        <div class="col-sm-5">
+          <label class="form-label form-label-sm" for="lfmUsername">Last.fm Username <span class="text-muted fw-normal">(optional)</span></label>
+          <input type="text" class="form-control form-control-sm" id="lfmUsername" placeholder="Your Last.fm username" value="{{ defaults.get('lfm_username', '') }}">
+        </div>
+      </div>
+      <small class="form-text text-muted">Primary listener/playcount source for popularity scoring (<a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api/account/create</a>). Username enables personalized recommendations.</small>
     </div>
 
-    <!-- Soulseek / slskd -->
     <div class="border rounded p-3 mb-3">
-      <h6 class="mb-2"><i class="bi bi-music-note-beamed text-warning"></i> Soulseek (slskd)</h6>
-      <div class="row g-2">
-        <div class="col-sm-6"><input type="url" class="form-control form-control-sm" id="slskdUrl" placeholder="http://slskd:5030" value="{{ defaults.get('slskd_url', 'http://slskd:5030') }}"></div>
-        <div class="col-sm-6"><input type="password" class="form-control form-control-sm" id="slskdApiKey" placeholder="API Key" value="{{ defaults.get('slskd_api_key', '') }}"></div>
+      <h6 class="mb-2"><i class="bi bi-headphones text-secondary"></i> ListenBrainz <span class="badge bg-secondary bg-opacity-25 text-light ms-1">Popularity &amp; Weekly Playlists</span></h6>
+      <input type="text" class="form-control form-control-sm" id="lbToken" placeholder="ListenBrainz User Token" value="{{ defaults.get('lb_token', '') }}">
+      <small class="form-text text-muted">Used for ListenBrainz popularity scoring and personalized playlists (<a href="https://listenbrainz.org/settings/" target="_blank" rel="noopener">listenbrainz.org/settings</a>).</small>
+    </div>
+
+    <div class="border rounded p-3 mb-3">
+      <h6 class="mb-2"><i class="bi bi-vinyl"></i> Discogs <span class="badge bg-secondary bg-opacity-25 text-light ms-1">Singles &amp; Genres</span></h6>
+      <input type="text" class="form-control form-control-sm" id="dgToken" placeholder="Personal Access Token" value="{{ defaults.get('dg_token', '') }}">
+      <small class="form-text text-muted">Powers single/EP release confirmation, official video detection, and release genres (<a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener">discogs.com/settings/developers</a>).</small>
+    </div>
+
+    <div class="row g-3 mb-3">
+      <div class="col-sm-6">
+        <div class="border rounded p-3 h-100">
+          <div class="d-flex justify-content-between align-items-center mb-1">
+            <h6 class="mb-0"><i class="bi bi-disc"></i> MusicBrainz</h6>
+            <div class="form-check form-switch mb-0">
+              <input class="form-check-input" type="checkbox" id="mbEnabled"{% if defaults.get('mb_enabled', True) %} checked{% endif %}>
+              <label class="form-check-label small" for="mbEnabled">Enabled</label>
+            </div>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">No API key required. Powers MBID resolution, singles &amp; cover detection, and release lookups.</small>
+        </div>
       </div>
-      <small class="form-text text-muted">slskd is a modern Soulseek client. Provide its web UI URL and API key for downloading music.</small>
+      <div class="col-sm-6">
+        <div class="border rounded p-3 h-100">
+          <h6 class="mb-1"><i class="bi bi-music-note"></i> TheAudioDB <span class="text-muted small fw-normal">(optional)</span></h6>
+          <input type="text" class="form-control form-control-sm" id="audiodbApiKey" placeholder="API Key (optional)" value="{{ defaults.get('audiodb_api_key', '') }}">
+          <small class="text-muted d-block mt-1" style="font-size:0.78rem;">Fetches artist/album metadata and genre tags (<a href="https://www.theaudiodb.com/api_apply.php" target="_blank" rel="noopener">theaudiodb.com</a>).</small>
+        </div>
+      </div>
+    </div>
+
+    <div class="row g-3 mb-3">
+      <div class="col-sm-6">
+        <div class="border rounded p-3 h-100">
+          <h6 class="mb-2"><i class="bi bi-music-note-beamed text-warning"></i> Soulseek (slskd) <span class="text-muted small fw-normal">(optional)</span></h6>
+          <input type="url" class="form-control form-control-sm mb-2" id="slskdUrl" placeholder="http://slskd:5030" value="{{ defaults.get('slskd_url', 'http://slskd:5030') }}">
+          <input type="password" class="form-control form-control-sm" id="slskdApiKey" placeholder="slskd API Key" value="{{ defaults.get('slskd_api_key', '') }}">
+          <small class="form-text text-muted d-block mt-1" style="font-size:0.78rem;">Web URL and API key for P2P music downloads.</small>
+        </div>
+      </div>
+      <div class="col-sm-6">
+        <div class="border rounded p-3 h-100">
+          <h6 class="mb-2"><i class="bi bi-stars text-info"></i> Google Gemini <span class="text-muted small fw-normal">(optional)</span></h6>
+          <input type="password" class="form-control form-control-sm mb-2" id="geminiApiKey" placeholder="AI Studio API Key" value="{{ defaults.get('gemini_api_key', '') }}">
+          <input type="text" class="form-control form-control-sm" id="geminiModel" placeholder="gemini-2.5-flash-image" value="{{ defaults.get('gemini_model', 'gemini-2.5-flash-image') }}">
+          <small class="form-text text-muted d-block mt-1" style="font-size:0.78rem;">Used only to generate AI cover art for Top Genre playlists.</small>
+        </div>
+      </div>
     </div>
 
     <div class="d-flex justify-content-between">
-      <button class="btn btn-outline-secondary" onclick="goToStep(1)"><i class="bi bi-arrow-left"></i> Back</button>
-      <button class="btn btn-primary wizard-next-btn" onclick="goToNextStep(3,this)">Skip Step <i class="bi bi-arrow-right"></i></button>
+      <button type="button" class="btn btn-outline-secondary" data-action="go-step" data-step="1"><i class="bi bi-arrow-left"></i> Back</button>
+      <button type="button" class="btn btn-primary wizard-next-btn" data-action="next-step" data-next-step="3">Skip Step <i class="bi bi-arrow-right"></i></button>
     </div>
   </div>
 
   <!-- Step 3: Essentia (opt-in) -->
   <div class="step-card d-none" id="step3">
-    <div class="d-flex align-items-center gap-2 mb-3">
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
       <span class="badge bg-secondary rounded-pill">3</span>
-      <h5 class="mb-0">Mood & Genre Analysis</h5>
+      <h5 class="mb-0">Mood &amp; Genre Analysis</h5>
       <span class="text-muted small">(optional — off by default)</span>
     </div>
-    <p class="text-muted small mb-3">Essentia runs ML models locally to detect <strong>mood</strong> and <strong>genre</strong> tags. Downloads ~87 MB of model files.</p>
+    <p class="text-muted small mb-3">Essentia runs ML models locally on your server to detect <strong>mood</strong>, <strong>BPM/danceability</strong>, and <strong>genre</strong> tags. Downloads ~87 MB of model files.</p>
     <div class="border rounded p-3 mb-3">
       <div class="form-check form-switch mb-2">
-        <input class="form-check-input" type="checkbox" id="essentiaEnabled" onchange="toggleEssentiaOptions()"{% if defaults.get('essentia_enabled') %} checked{% endif %}>
+        <input class="form-check-input" type="checkbox" id="essentiaEnabled"{% if defaults.get('essentia_enabled') %} checked{% endif %}>
         <label class="form-check-label" for="essentiaEnabled"><strong>Enable Essentia Analysis</strong></label>
       </div>
       <div id="essentiaOptions" class="d-none mt-3">
-        <div class="d-flex align-items-center flex-wrap gap-2 mb-2">
-          <button class="btn btn-sm btn-outline-primary" id="essentiaDownloadBtn" onclick="downloadEssentiaModels()"><i class="bi bi-cloud-download"></i> Download Models (~87 MB)</button>
-          <span id="essentiaDownloadStatus" class="small text-muted"></span>
+        <div class="d-flex align-items-center flex-wrap gap-2 mb-3">
+          <button type="button" class="btn btn-sm btn-outline-primary" id="essentiaDownloadBtn" data-action="download-essentia"><i class="bi bi-cloud-download"></i> Download Models (~87 MB)</button>
+          <span id="essentiaDownloadStatus" class="small text-muted" role="status"></span>
           <div class="progress d-none flex-grow-1" id="essentiaProgress" style="height:6px;min-width:120px"><div class="progress-bar" id="essentiaProgressBar" style="width:0%"></div></div>
         </div>
         <div class="row g-2">
-          <div class="col-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="essentiaMoods"{% if defaults.get('essentia_tag_moods', True) %} checked{% endif %}><label class="form-check-label small" for="essentiaMoods">Detect Moods</label></div></div>
-          <div class="col-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="essentiaGenres"{% if defaults.get('essentia_tag_genres') %} checked{% endif %}><label class="form-check-label small" for="essentiaGenres">Detect Genres</label></div></div>
+          <div class="col-sm-4">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="essentiaMoods"{% if defaults.get('essentia_tag_moods', True) %} checked{% endif %}>
+              <label class="form-check-label small" for="essentiaMoods">Detect Moods</label>
+            </div>
+          </div>
+          <div class="col-sm-4">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="essentiaJsonFeatures"{% if defaults.get('essentia_parse_json_features', True) %} checked{% endif %}>
+              <label class="form-check-label small" for="essentiaJsonFeatures">Import BPM &amp; Danceability</label>
+            </div>
+          </div>
+          <div class="col-sm-4">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="essentiaGenres"{% if defaults.get('essentia_tag_genres') %} checked{% endif %}>
+              <label class="form-check-label small" for="essentiaGenres">Detect Genres</label>
+            </div>
+          </div>
+        </div>
+        <div id="essentiaGenreOptions" class="row g-2 mt-2 d-none">
+          <div class="col-sm-6">
+            <label class="form-label form-label-sm" for="essentiaNumGenres">Max Genres per Track</label>
+            <input type="number" class="form-control form-control-sm" id="essentiaNumGenres" min="1" max="10" value="{{ defaults.get('essentia_num_genres', 3) }}">
+          </div>
+          <div class="col-sm-6">
+            <label class="form-label form-label-sm" for="essentiaGenreFormat">Genre Tag Format</label>
+            {% set gfmt = defaults.get('essentia_genre_format', 'parent_child') %}
+            <select class="form-select form-select-sm" id="essentiaGenreFormat">
+              <option value="parent_child" {% if gfmt == 'parent_child' %}selected{% endif %}>Rock - Alternative Rock (parent_child)</option>
+              <option value="child_parent" {% if gfmt == 'child_parent' %}selected{% endif %}>Alternative Rock - Rock (child_parent)</option>
+              <option value="child_only" {% if gfmt == 'child_only' %}selected{% endif %}>Alternative Rock (child_only)</option>
+              <option value="raw" {% if gfmt == 'raw' %}selected{% endif %}>Rock---Alternative Rock (raw)</option>
+            </select>
+          </div>
         </div>
       </div>
     </div>
     <div class="d-flex justify-content-between">
-      <button class="btn btn-outline-secondary" onclick="goToStep(2)"><i class="bi bi-arrow-left"></i> Back</button>
-      <button class="btn btn-primary wizard-next-btn" onclick="goToNextStep(4,this)">Skip Step <i class="bi bi-arrow-right"></i></button>
+      <button type="button" class="btn btn-outline-secondary" data-action="go-step" data-step="2"><i class="bi bi-arrow-left"></i> Back</button>
+      <button type="button" class="btn btn-primary wizard-next-btn" data-action="next-step" data-next-step="4">Skip Step <i class="bi bi-arrow-right"></i></button>
     </div>
   </div>
 
-  <!-- Step 4: File Management (optional) -->
+  <!-- Step 4: File Management, Tag Writing & Downloads -->
   <div class="step-card d-none" id="step4">
-    <div class="d-flex align-items-center gap-2 mb-3">
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
       <span class="badge bg-secondary rounded-pill">4</span>
-      <h5 class="mb-0">File Management</h5>
-      <span class="text-muted small">(optional — sensible defaults provided)</span>
+      <h5 class="mb-0">File Management, Tag Writing &amp; Downloads</h5>
+      <span class="text-muted small">(important before first scan)</span>
     </div>
-    <p class="text-muted small mb-3">How files are organized into your music library when downloaded or renamed. You can change this later in Settings → File Management.</p>
+    <p class="text-muted small mb-3">Choose whether scans may modify your audio files or stay read-only in the database, and configure how downloaded files are organized and filtered.</p>
+
+    <!-- File Tag Writing & Metadata Rules -->
     <div class="border rounded p-3 mb-3">
-      <label class="form-label" for="setupFileNameFormat"><strong>Default Naming Convention</strong></label>
-      <input type="text" class="form-control font-monospace" id="setupFileNameFormat" placeholder="{album_artist}/{year} - {album}/{track_number}. {artist} - {title}" value="{{ defaults.get('file_name_format', '{album_artist}/{year} - {album}/{track_number}. {artist} - {title}') }}">
-      <div class="row g-2 mt-1">
-        <div class="col-sm-6 small text-muted"><code>{track_number}</code> — 2-digit track number</div>
-        <div class="col-sm-6 small text-muted"><code>{album_artist}</code> — album artist name</div>
-        <div class="col-sm-6 small text-muted"><code>{artist}</code> — track artist name</div>
-        <div class="col-sm-6 small text-muted"><code>{title}</code> — track title</div>
-        <div class="col-sm-6 small text-muted"><code>{album}</code> — album title</div>
-        <div class="col-sm-6 small text-muted"><code>{year}</code> — release year</div>
+      <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+        <h6 class="mb-0"><i class="bi bi-pencil-square text-warning"></i> Audio File Tag Writing &amp; Metadata</h6>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="setup_write_tags"{% if defaults.get('write_tags_to_file', True) %} checked{% endif %}>
+          <label class="form-check-label small" for="setup_write_tags"><strong>Write Tags to Audio Files</strong></label>
+        </div>
+      </div>
+      <small class="text-muted d-block mb-3">Turn off if you manage tags externally (Beets, Picard) or mount your music library read-only — scans will save to the database only.</small>
+
+      <div id="setupTagWritingOptions">
+        <div class="row g-2 mb-3">
+          <div class="col-sm-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="setup_ratings_only"{% if defaults.get('ratings_only', False) %} checked{% endif %}>
+              <label class="form-check-label small" for="setup_ratings_only"><strong>Ratings Only</strong></label>
+            </div>
+            <small class="text-muted d-block" style="font-size:0.78rem;">Write POPM/RATING star ratings only — never touch text tags, genres, or cover art.</small>
+          </div>
+          <div class="col-sm-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="setup_fill_missing_only"{% if defaults.get('fill_missing_only', False) %} checked{% endif %}>
+              <label class="form-check-label small" for="setup_fill_missing_only"><strong>Fill Missing Tags Only</strong></label>
+            </div>
+            <small class="text-muted d-block" style="font-size:0.78rem;">Only write empty ID3/Vorbis fields — never overwrite existing file tags.</small>
+          </div>
+          <div class="col-sm-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="setup_sync_album_scan"{% if defaults.get('sync_album_tags_on_scan', True) %} checked{% endif %}>
+              <label class="form-check-label small" for="setup_sync_album_scan"><strong>Fill Missing Tags After Metadata Scan</strong></label>
+            </div>
+            <small class="text-muted d-block" style="font-size:0.78rem;">Write missing genres, year, ISRC, composer &amp; MBIDs after each album metadata scan.</small>
+          </div>
+          <div class="col-sm-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="setup_skip_unchanged_ratings"{% if defaults.get('skip_unchanged_ratings', True) %} checked{% endif %}>
+              <label class="form-check-label small" for="setup_skip_unchanged_ratings"><strong>Skip Unchanged Ratings</strong></label>
+            </div>
+            <small class="text-muted d-block" style="font-size:0.78rem;">Avoid rewriting audio files when a scan assigns the same star rating already stored.</small>
+          </div>
+        </div>
+      </div>
+
+      <div class="row g-2 pt-2 border-top">
+        <div class="col-sm-4">
+          <label class="form-label form-label-sm" for="setup_apply_metadata_during_scan">Scan Metadata Mode</label>
+          <select class="form-select form-select-sm" id="setup_apply_metadata_during_scan">
+            <option value="true" {% if defaults.get('apply_metadata_during_scan', True) %}selected{% endif %}>Apply automatically</option>
+            <option value="false" {% if not defaults.get('apply_metadata_during_scan', True) %}selected{% endif %}>Recommend only (review later)</option>
+          </select>
+        </div>
+        <div class="col-sm-4">
+          <label class="form-label form-label-sm" for="setup_album_name_source">Album Name Cleanup</label>
+          {% set ans = defaults.get('album_name_source', 'dedupe') %}
+          <select class="form-select form-select-sm" id="setup_album_name_source">
+            <option value="dedupe" {% if ans == 'dedupe' %}selected{% endif %}>Repair only (keep edition)</option>
+            <option value="release_group" {% if ans in ('release_group', 'release') %}selected{% endif %}>Release Group (MusicBrainz)</option>
+            <option value="album" {% if ans == 'album' %}selected{% endif %}>Clean &amp; strip edition</option>
+          </select>
+        </div>
+        <div class="col-sm-4">
+          <label class="form-label form-label-sm" for="setup_album_name_target">Album Name Target</label>
+          {% set ant = defaults.get('album_name_update_target', 'db') %}
+          <select class="form-select form-select-sm" id="setup_album_name_target">
+            <option value="db" {% if ant == 'db' %}selected{% endif %}>Database only</option>
+            <option value="files" {% if ant == 'files' %}selected{% endif %}>Database + Audio Files</option>
+          </select>
+        </div>
       </div>
     </div>
+
+    <!-- Library Organization & Downloads Folder -->
+    <div class="border rounded p-3 mb-3">
+      <h6 class="mb-2"><i class="bi bi-folder-symlink text-info"></i> Library Organization &amp; Downloads</h6>
+      <div class="row g-2 mb-2">
+        <div class="col-sm-5">
+          <label class="form-label form-label-sm" for="setupDownloadsFolder">Downloads Watch Folder</label>
+          <input type="text" class="form-control form-control-sm" id="setupDownloadsFolder" placeholder="/downloads/Music" value="{{ defaults.get('downloads_folder', '/downloads/Music') }}">
+        </div>
+        <div class="col-sm-7">
+          <label class="form-label form-label-sm" for="setupFileNameFormat">Library Naming Convention</label>
+          <input type="text" class="form-control form-control-sm font-monospace" id="setupFileNameFormat" placeholder="{album_artist}/{year} - {album}/{track_number}. {artist} - {title}" value="{{ defaults.get('file_name_format') or '{album_artist}/{year} - {album}/{track_number}. {artist} - {title}' }}">
+        </div>
+      </div>
+      <small class="text-muted d-block">Placeholders: <code>{album_artist}</code>, <code>{artist}</code>, <code>{album}</code>, <code>{year}</code>, <code>{track_number}</code>, <code>{title}</code></small>
+    </div>
+
+    <!-- Conversion & Quality Filter -->
     <div class="border rounded p-3 mb-3">
       <div class="d-flex justify-content-between align-items-center mb-2">
-        <h6 class="mb-0"><i class="bi bi-arrow-repeat"></i> File Conversion</h6>
-        <div class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" id="setupConversionEnabled" onchange="toggleConversionOptions()"{% if defaults.get('conversion_enabled') %} checked{% endif %}><label class="form-check-label small" for="setupConversionEnabled">Enable</label></div>
+        <h6 class="mb-0"><i class="bi bi-arrow-repeat"></i> File Conversion &amp; Download Quality</h6>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="setupConversionEnabled"{% if defaults.get('conversion_enabled') %} checked{% endif %}>
+          <label class="form-check-label small" for="setupConversionEnabled">Convert FLAC on Import</label>
+        </div>
       </div>
-      <div id="setupConversionOptions" class="d-none">
+      <div id="setupConversionOptions" class="d-none mb-3">
         <div class="row g-2">
-          <div class="col-sm-6">
+          <div class="col-sm-4">
             <label class="form-label form-label-sm" for="setupConversionMode">Mode</label>
             <select class="form-select form-select-sm" id="setupConversionMode">
               <option value="flac_to_mp3" {% if defaults.get('conversion_mode', 'flac_to_mp3') == 'flac_to_mp3' %}selected{% endif %}>FLAC to MP3</option>
@@ -198,118 +360,263 @@
               <option value="none" {% if defaults.get('conversion_mode', 'flac_to_mp3') == 'none' %}selected{% endif %}>Disabled (Move as-is)</option>
             </select>
           </div>
-          <div class="col-sm-6">
-            <label class="form-label form-label-sm" for="setupConversionBitrate">MP3 Bitrate (kbps)</label>
+          <div class="col-sm-4">
+            <label class="form-label form-label-sm" for="setupConversionBitrate">Bitrate (kbps)</label>
             <input type="number" class="form-control form-control-sm" id="setupConversionBitrate" min="96" max="320" step="1" value="{{ defaults.get('conversion_bitrate', 320) }}">
           </div>
+          <div class="col-sm-4">
+            <label class="form-label form-label-sm" for="setupConversionOriginalHandling">Original FLAC File</label>
+            {% set orig_h = defaults.get('conversion_original_handling', 'move_to_original') %}
+            <select class="form-select form-select-sm" id="setupConversionOriginalHandling">
+              <option value="move_to_original" {% if orig_h == 'move_to_original' %}selected{% endif %}>Move to Downloads/Original</option>
+              <option value="delete" {% if orig_h == 'delete' %}selected{% endif %}>Delete after conversion</option>
+            </select>
+          </div>
         </div>
-        <small class="form-text text-muted mt-2 d-block">FLAC files are converted to MP3 when imported or renamed. Metadata and cover art are carried over during conversion.</small>
+      </div>
+
+      <div class="row g-2 align-items-center pt-2 border-top">
+        <div class="col-sm-4">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_quality_filter"{% if defaults.get('quality_filter_enabled') %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_quality_filter"><strong>Strict Quality Filter</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.75rem;">Only accept FLAC / 320 kbps MP3</small>
+        </div>
+        <div class="col-sm-3">
+          <label class="form-label form-label-sm mb-1" for="setupMinBitrate">Search Floor (kbps)</label>
+          <input type="number" class="form-control form-control-sm" id="setupMinBitrate" min="96" max="320" step="16" value="{{ defaults.get('min_bitrate', 192) }}">
+        </div>
+        <div class="col-sm-5">
+          <label class="form-label form-label-sm mb-1 d-block">Allowed Download Formats</label>
+          {% set af_list = defaults.get('allowed_formats', ['flac', 'mp3']) %}
+          <div class="d-flex flex-wrap gap-2">
+            {% for fmt, lbl in [('flac','FLAC'),('mp3','MP3'),('m4a','M4A'),('ogg','OGG'),('opus','OPUS')] %}
+            <div class="form-check form-check-inline mb-0">
+              <input class="form-check-input setup-format-check" type="checkbox" id="setup_fmt_{{ fmt }}" value="{{ fmt }}"{% if fmt in af_list %} checked{% endif %}>
+              <label class="form-check-label small" for="setup_fmt_{{ fmt }}">{{ lbl }}</label>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
       </div>
     </div>
+
     <div class="d-flex justify-content-between">
-      <button class="btn btn-outline-secondary" onclick="goToStep(3)"><i class="bi bi-arrow-left"></i> Back</button>
-      <button class="btn btn-primary wizard-next-btn" onclick="goToNextStep(5,this)">Skip Step <i class="bi bi-arrow-right"></i></button>
+      <button type="button" class="btn btn-outline-secondary" data-action="go-step" data-step="3"><i class="bi bi-arrow-left"></i> Back</button>
+      <button type="button" class="btn btn-primary wizard-next-btn" data-action="next-step" data-next-step="5">Skip Step <i class="bi bi-arrow-right"></i></button>
     </div>
   </div>
 
-  <!-- Step 5: Automation & Extras (recommended defaults) -->
+  <!-- Step 5: Scan Scoring, Playlists & Automation -->
   <div class="step-card d-none" id="step5">
-    <div class="d-flex align-items-center gap-2 mb-3">
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
       <span class="badge bg-secondary rounded-pill">5</span>
-      <h5 class="mb-0">Automation & Extras</h5>
+      <h5 class="mb-0">Scan Scoring, Playlists &amp; Automation</h5>
       <span class="text-muted small">(recommended defaults — change anytime in Config)</span>
     </div>
-    <p class="text-muted small mb-3">Popularr runs several background jobs automatically. Switch them on or off now — everything here can be changed later from <strong>Config → Automation Services</strong>.</p>
+    <p class="text-muted small mb-3">Tune how your first scan scores tracks, resolves genres, and builds playlists across your library.</p>
+
+    <!-- Scan Scoring & Behaviour -->
     <div class="border rounded p-3 mb-3">
-      <h6 class="mb-2"><i class="bi bi-arrow-repeat text-success"></i> Background Services</h6>
-      <div class="row g-3">
-        <div class="col-md-6">
-          <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" id="setup_auto_import"{% if defaults.get('auto_import_enabled', True) %} checked{% endif %}>
-            <label class="form-check-label" for="setup_auto_import"><strong>Auto Import</strong></label>
-          </div>
-          <small class="text-muted d-block mt-1">Automatically import newly detected songs from Navidrome.</small>
+      <h6 class="mb-2"><i class="bi bi-graph-up text-info"></i> Popularity Weights &amp; Scan Behaviour</h6>
+      <div class="row g-2 mb-3">
+        <div class="col-4 col-sm-2">
+          <label class="form-label form-label-sm" for="setupPopWeightLastfm">Last.fm</label>
+          <input type="number" step="0.05" min="0" max="1" class="form-control form-control-sm" id="setupPopWeightLastfm" value="{{ defaults.get('pop_weight_lastfm', 0.55) }}">
         </div>
-        <div class="col-md-6">
-          <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" id="setup_auto_popularity"{% if defaults.get('auto_popularity_scan', True) %} checked{% endif %}>
-            <label class="form-check-label" for="setup_auto_popularity"><strong>Auto Popularity Scan</strong></label>
-          </div>
-          <small class="text-muted d-block mt-1">Score popularity for tracks automatically after each import.</small>
+        <div class="col-4 col-sm-2">
+          <label class="form-label form-label-sm" for="setupPopWeightListenbrainz">ListenBrainz</label>
+          <input type="number" step="0.05" min="0" max="1" class="form-control form-control-sm" id="setupPopWeightListenbrainz" value="{{ defaults.get('pop_weight_listenbrainz', 0.35) }}">
         </div>
-        <div class="col-md-6">
-          <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" id="setup_downloads_watcher"{% if defaults.get('downloads_watcher_enabled', True) %} checked{% endif %}>
-            <label class="form-check-label" for="setup_downloads_watcher"><strong>Downloads Watcher</strong></label>
-          </div>
-          <small class="text-muted d-block mt-1">Monitor the downloads folder and process completed files automatically.</small>
+        <div class="col-4 col-sm-2">
+          <label class="form-label form-label-sm" for="setupPopWeightAge">Age Weight</label>
+          <input type="number" step="0.05" min="0" max="1" class="form-control form-control-sm" id="setupPopWeightAge" value="{{ defaults.get('pop_weight_age', 0.10) }}">
         </div>
-        <div class="col-md-6">
+        <div class="col-6 col-sm-3">
+          <label class="form-label form-label-sm" for="setupScanThreads">Scan Threads</label>
+          <input type="number" step="1" min="1" max="8" class="form-control form-control-sm" id="setupScanThreads" value="{{ defaults.get('scan_threads', 4) }}">
+        </div>
+        <div class="col-6 col-sm-3">
+          <label class="form-label form-label-sm" for="setupAlbumSkipDays">Rescan Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm" id="setupAlbumSkipDays" value="{{ defaults.get('album_skip_days', 7) }}">
+        </div>
+      </div>
+      <div class="row g-2">
+        <div class="col-md-4">
           <div class="form-check form-switch">
             <input class="form-check-input" type="checkbox" id="setup_cover_detection"{% if defaults.get('cover_detection_enabled', True) %} checked{% endif %}>
-            <label class="form-check-label" for="setup_cover_detection"><strong>Cover Song Detection</strong></label>
+            <label class="form-check-label small" for="setup_cover_detection"><strong>Cover Song Detection</strong></label>
           </div>
-          <small class="text-muted d-block mt-1">Flag cover songs during scans (uses MusicBrainz lookups).</small>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Flag cover recordings via MusicBrainz work lookups.</small>
         </div>
-        <div class="col-md-6">
+        <div class="col-md-4">
           <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" id="setup_upcoming_scans"{% if defaults.get('upcoming_releases_scan_enabled', True) %} checked{% endif %}>
-            <label class="form-check-label" for="setup_upcoming_scans"><strong>Upcoming Releases Scans</strong></label>
+            <input class="form-check-input" type="checkbox" id="setup_deep_genre_search"{% if defaults.get('deep_genre_search', False) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_deep_genre_search"><strong>Deep Genre Search</strong></label>
           </div>
-          <small class="text-muted d-block mt-1">Daily Wikipedia + weekly MusicBrainz scan for new releases of your artists.</small>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Query Discogs &amp; MB text search when tracks lack MBIDs.</small>
+        </div>
+        <div class="col-md-4">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_canonical_genres"{% if defaults.get('canonical_genres_enabled', True) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_canonical_genres"><strong>Canonical Genre Engine</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Filter moods/noise and rank genres by entity specificity.</small>
         </div>
       </div>
     </div>
+
+    <!-- Auto-Generated Playlists -->
     <div class="border rounded p-3 mb-3">
-      <h6 class="mb-2"><i class="bi bi-stars text-warning"></i> Scan Outputs & Extras</h6>
-      <div class="row g-3">
+      <h6 class="mb-2"><i class="bi bi-music-note-beamed text-warning"></i> Auto-Generated Playlists</h6>
+      <div class="row g-2">
         <div class="col-md-6">
           <div class="form-check form-switch">
             <input class="form-check-input" type="checkbox" id="setup_essential_playlists"{% if defaults.get('essential_playlists_enabled', True) %} checked{% endif %}>
-            <label class="form-check-label" for="setup_essential_playlists"><strong>Essential Playlists</strong></label>
+            <label class="form-check-label small" for="setup_essential_playlists"><strong>Artist Essential Collections</strong></label>
           </div>
-          <small class="text-muted d-block mt-1">Generate "{artist} - Essential Collection.m3u" playlists from 4★/5★ tracks.</small>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Per-artist 4★/5★ highlight playlists.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_essential_include_featured"{% if defaults.get('essential_include_featured', True) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_essential_include_featured"><strong>Include Featured Appearances</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Include 4★/5★ guest features on the featured artist's playlist.</small>
         </div>
         <div class="col-md-6">
           <div class="form-check form-switch">
             <input class="form-check-input" type="checkbox" id="setup_genre_playlists"{% if defaults.get('genre_playlists_enabled', True) %} checked{% endif %}>
-            <label class="form-check-label" for="setup_genre_playlists"><strong>Genre Top-Tracks Playlists</strong></label>
+            <label class="form-check-label small" for="setup_genre_playlists"><strong>Genre Top-Tracks Playlists</strong></label>
           </div>
-          <small class="text-muted d-block mt-1">Generate "{genre} - Top Tracks.m3u" playlists across the whole library.</small>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Library-wide <code>{Genre} - Top Tracks</code> playlists.</small>
         </div>
         <div class="col-md-6">
           <div class="form-check form-switch">
             <input class="form-check-input" type="checkbox" id="setup_new_music_playlist"{% if defaults.get('new_music_playlist_enabled', True) %} checked{% endif %}>
-            <label class="form-check-label" for="setup_new_music_playlist"><strong>New Music Playlist</strong></label>
+            <label class="form-check-label small" for="setup_new_music_playlist"><strong>New Music Playlist</strong></label>
           </div>
-          <small class="text-muted d-block mt-1">Rolling "New Music.m3u" of your most recently added 4★/5★ tracks — created once 100 qualify, newest additions push older ones out.</small>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Rolling 100 most recently imported 4★/5★ tracks.</small>
         </div>
         <div class="col-md-6">
           <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" id="setup_write_tags"{% if defaults.get('write_tags_to_file', True) %} checked{% endif %}>
-            <label class="form-check-label" for="setup_write_tags"><strong>Write Tags to Audio Files</strong></label>
+            <input class="form-check-input" type="checkbox" id="setup_favourite_playlists"{% if defaults.get('favourite_playlists_enabled', True) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_favourite_playlists"><strong>Favourite Artists &amp; Albums Playlists</strong></label>
           </div>
-          <small class="text-muted d-block mt-1">Embed ratings, genres and cover art into your audio files. Turn off for a read-only library.</small>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Per-user playlists built from favourited artists and albums.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_decade_playlists"{% if defaults.get('decade_playlists_enabled', False) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_decade_playlists"><strong>Decade Top-Tracks Playlists</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;"><code>1980s - Top Tracks</code>, <code>1990s - Top Tracks</code>, etc.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_hit_singles_playlist"{% if defaults.get('hit_singles_playlist_enabled', False) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_hit_singles_playlist"><strong>Hit Singles Playlist</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Verified 4★/5★ singles across your collection.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_hidden_gems_playlist"{% if defaults.get('hidden_gems_playlist_enabled', False) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_hidden_gems_playlist"><strong>Hidden Gems &amp; Deep Cuts Playlist</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">4★/5★ non-single studio album tracks.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_new_releases_playlist"{% if defaults.get('new_releases_playlist_enabled', False) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_new_releases_playlist"><strong>New Releases Playlist</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">4★/5★ tracks released in the current or previous calendar year.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_covers_playlist"{% if defaults.get('covers_playlist_enabled', False) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_covers_playlist"><strong>Great Covers Playlist</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">3★–5★ cover recordings across your library.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_acoustic_playlist"{% if defaults.get('acoustic_playlist_enabled', False) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_acoustic_playlist"><strong>Acoustic &amp; Unplugged Playlist</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">4★/5★ acoustic and unplugged recordings.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_high_energy_playlist"{% if defaults.get('high_energy_playlist_enabled', False) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_high_energy_playlist"><strong>High Energy &amp; Upbeat Playlist</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">4★/5★ high-BPM / high-danceability and upbeat tracks.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_mood_playlists"{% if defaults.get('mood_playlists_enabled', False) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_mood_playlists"><strong>Mood Mix Playlists</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Auto-generated <code>{Mood} - Mix</code> playlists from mood tags.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_exclude_christmas"{% if defaults.get('exclude_christmas_from_playlists', True) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_exclude_christmas"><strong>Exclude Christmas From Playlists</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Keep seasonal tracks out of non-Christmas playlists.</small>
+        </div>
+      </div>
+    </div>
+
+    <!-- Background Services -->
+    <div class="border rounded p-3 mb-3">
+      <h6 class="mb-2"><i class="bi bi-arrow-repeat text-success"></i> Background Services</h6>
+      <div class="row g-2">
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_auto_import"{% if defaults.get('auto_import_enabled', True) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_auto_import"><strong>Auto Import</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Automatically import newly detected songs from Navidrome.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_auto_popularity"{% if defaults.get('auto_popularity_scan', True) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_auto_popularity"><strong>Auto Popularity Scan</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Score popularity for tracks automatically after each import.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_downloads_watcher"{% if defaults.get('downloads_watcher_enabled', True) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_downloads_watcher"><strong>Downloads Watcher</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Monitor the downloads folder and process completed files automatically.</small>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="setup_upcoming_scans"{% if defaults.get('upcoming_releases_scan_enabled', True) %} checked{% endif %}>
+            <label class="form-check-label small" for="setup_upcoming_scans"><strong>Upcoming Releases Scans</strong></label>
+          </div>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Daily Wikipedia + weekly MusicBrainz scan for new releases of your artists.</small>
         </div>
         <div class="col-md-6">
           <div class="form-check form-switch">
             <input class="form-check-input" type="checkbox" id="setup_sync_all_users"{% if defaults.get('sync_ratings_to_all_users') %} checked{% endif %}>
-            <label class="form-check-label" for="setup_sync_all_users"><strong>Sync Ratings to All Users</strong></label>
+            <label class="form-check-label small" for="setup_sync_all_users"><strong>Sync Ratings to All Users</strong></label>
           </div>
-          <small class="text-muted d-block mt-1">Push star ratings to every Navidrome user after each scan (not just the primary user).</small>
-        </div>
-        <div class="col-md-6">
-          <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" id="setup_quality_filter"{% if defaults.get('quality_filter_enabled') %} checked{% endif %}>
-            <label class="form-check-label" for="setup_quality_filter"><strong>Download Quality Filter</strong></label>
-          </div>
-          <small class="text-muted d-block mt-1">Only accept FLAC / 320 kbps MP3 downloads and reject lower-quality matches.</small>
+          <small class="text-muted d-block" style="font-size:0.78rem;">Push star ratings to every configured Navidrome user after each scan.</small>
         </div>
       </div>
     </div>
+
     <div class="d-flex justify-content-between">
-      <button class="btn btn-outline-secondary" onclick="goToStep(4)"><i class="bi bi-arrow-left"></i> Back</button>
-      <button class="btn btn-primary" data-restore-label='Finish Setup <i class="bi bi-arrow-right"></i>' onclick="goToNextStep(6,this)">Finish Setup <i class="bi bi-arrow-right"></i></button>
+      <button type="button" class="btn btn-outline-secondary" data-action="go-step" data-step="4"><i class="bi bi-arrow-left"></i> Back</button>
+      <button type="button" class="btn btn-primary" data-action="next-step" data-next-step="6">Review Summary <i class="bi bi-arrow-right"></i></button>
     </div>
   </div>
 
@@ -318,185 +625,39 @@
     <div class="text-center mb-4">
       <i class="bi bi-check-circle" style="font-size:3rem;color:var(--spotify-green);"></i>
       <h4 class="mt-2">You're All Set!</h4>
+      <p class="text-muted small mb-0">Review your configuration below before saving.</p>
     </div>
     <div class="border rounded p-3 mb-2"><h6><i class="bi bi-server"></i> Navidrome</h6><p class="mb-0 small" id="summaryNavidrome">-</p></div>
     <div class="border rounded p-3 mb-2"><h6><i class="bi bi-database"></i> Database</h6><p class="mb-0 small text-muted" id="summaryDatabase">PostgreSQL (container defaults)</p></div>
-    <div class="border rounded p-3 mb-2"><h6><i class="bi bi-plug"></i> APIs</h6><p class="mb-0 small text-muted" id="summaryApis">None enabled</p></div>
-    <div class="border rounded p-3 mb-2"><h6><i class="bi bi-cpu"></i> Essentia</h6><p class="mb-0 small text-muted" id="summaryEssentia">Not enabled</p></div>
-    <div class="border rounded p-3 mb-3"><h6><i class="bi bi-folder-symlink"></i> File Management</h6><p class="mb-0 small text-muted" id="summaryFiles">-</p></div>
-    <div class="border rounded p-3 mb-3"><h6><i class="bi bi-lightning-charge-fill"></i> Automation</h6><p class="mb-0 small text-muted" id="summaryAutomation">-</p></div>
-    <div class="d-flex justify-content-between">
-      <button class="btn btn-outline-secondary" onclick="goToStep(5)"><i class="bi bi-arrow-left"></i> Back</button>
-      <button class="btn btn-primary btn-lg" onclick="saveSetup()"><i class="bi bi-check-circle"></i> Save & Go to Dashboard</button>
+    <div class="border rounded p-3 mb-2"><h6><i class="bi bi-plug"></i> APIs &amp; Integrations</h6><p class="mb-0 small text-muted" id="summaryApis">None enabled</p></div>
+    <div class="border rounded p-3 mb-2"><h6><i class="bi bi-cpu"></i> Mood &amp; Genre Analysis</h6><p class="mb-0 small text-muted" id="summaryEssentia">Not enabled</p></div>
+    <div class="border rounded p-3 mb-2"><h6><i class="bi bi-folder-symlink"></i> File Management &amp; Tag Writing</h6><p class="mb-0 small text-muted" id="summaryFiles">-</p></div>
+    <div class="border rounded p-3 mb-3"><h6><i class="bi bi-lightning-charge-fill"></i> Scoring, Playlists &amp; Automation</h6><p class="mb-0 small text-muted" id="summaryAutomation">-</p></div>
+
+    <div class="border rounded p-3 mb-3">
+      <div class="form-check form-switch mb-0">
+        <input class="form-check-input" type="checkbox" id="setupStartImportOnSave" checked>
+        <label class="form-check-label small" for="setupStartImportOnSave">
+          <strong>Start initial Navidrome library import immediately after saving</strong>
+          <span class="text-muted d-block" style="font-size:0.78rem;">Imports your tracks from Navidrome into Popularr in the background so you can run your first scan right away.</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <button type="button" class="btn btn-outline-secondary" data-action="go-step" data-step="5"><i class="bi bi-arrow-left"></i> Back</button>
+      <button type="button" class="btn btn-primary btn-lg" data-action="save-setup"><i class="bi bi-check-circle"></i> Save &amp; Go to Dashboard</button>
     </div>
   </div>
 </div>
 
-<div class="position-fixed bottom-0 end-0 p-3" style="z-index:11"><div id="setupToast" class="toast"><div class="toast-header"><strong class="me-auto" id="toastTitle">Status</strong><button type="button" class="btn-close" data-bs-dismiss="toast"></button></div><div class="toast-body" id="toastMessage"></div></div></div>
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:11"><div id="setupToast" class="toast"><div class="toast-header"><strong class="me-auto" id="toastTitle">Status</strong><button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button></div><div class="toast-body" id="toastMessage"></div></div></div>
 
 {% if config.get('features', {}).get('use_local_assets', False) %}
 <script src="{{ url_for('static', filename='dist/vendor/bootstrap.bundle.min.js') }}"></script>
 {% else %}
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 {% endif %}
-<script>
-async function testConnection() {
-  const btn=event.target, status=document.getElementById('connectionStatus');
-  btn.disabled=true; status.textContent='Testing...'; status.className='ms-2 small text-muted';
-  try {
-    const r=await fetch('/api/test-navidrome-connection',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url:document.getElementById('navUrl').value,username:document.getElementById('navUser').value,password:document.getElementById('navPass').value})});
-    const d=await r.json();
-    if(d.success){status.textContent=d.message;status.className='ms-2 small text-success';showToast(d.message||'Connection successful','success');}else{
-      let msg=d.error;
-      if(d.detail) msg+=' ('+d.detail+')';
-      status.textContent=msg;status.className='ms-2 small text-danger';showToast(msg,'error');
-    }
-  }catch(e){status.textContent='Network error: '+e.message;status.className='ms-2 small text-danger';showToast('Network error: '+e.message,'error');}
-  btn.disabled=false;
-}
-function goToStep(n) { for(let i=1;i<=6;i++){const card=document.getElementById('step'+i);card.classList.toggle('d-none',i!==n);if(i===n) refreshStepButton(card);} document.querySelectorAll('.step-dot').forEach(d=>{const s=parseInt(d.dataset.step);d.classList.toggle('active',s===n);d.classList.toggle('done',s<n);}); if(n===6) updateSummary(); }
-
-/** True when the user has entered anything on this step (vs. the pre-filled defaults). */
-function stepButtonDirty(card) {
-  let dirty=false;
-  card.querySelectorAll('input,select,textarea').forEach(el=>{
-    if(el.type==='checkbox'||el.type==='radio'){if(el.checked!==el.defaultChecked)dirty=true;}
-    else if(el.value!==el.defaultValue)dirty=true;
-  });
-  return dirty;
-}
-
-/** Dynamic label: "Skip Step" until the user types/flips a toggle → "Save & Continue". */
-function refreshStepButton(card) {
-  const btn=card&&card.querySelector('.wizard-next-btn');
-  if(!btn)return;
-  btn.innerHTML=stepButtonDirty(card)?'Save & Continue <i class="bi bi-arrow-right"></i>':'Skip Step <i class="bi bi-arrow-right"></i>';
-}
-
-/** Build a config object from the current form state (all steps). */
-function buildSetupConfig() {
-  const pgHost=document.getElementById('pgHost').value.trim();
-  const lfmKey=document.getElementById('lfmApiKey').value.trim();
-  const dgToken=document.getElementById('dgToken').value.trim();
-  const lbToken=document.getElementById('lbToken').value.trim();
-  const slskdKey=document.getElementById('slskdApiKey').value.trim();
-  // Services are enabled by the presence of a key/token — no separate toggles.
-  const config={navidrome_users:[{user:document.getElementById('navUser').value,display_name:document.getElementById('navUser').value,base_url:document.getElementById('navUrl').value,pass:document.getElementById('navPass').value,listenbrainz_user_token:lbToken}],api_integrations:{lastfm:{enabled:!!lfmKey,api_key:lfmKey},discogs:{enabled:!!dgToken,token:dgToken},musicbrainz:{enabled:true},listenbrainz:{enabled:!!lbToken},audiodb:{enabled:false}},slskd:{enabled:!!slskdKey,web_url:document.getElementById('slskdUrl').value,api_key:slskdKey}};
-  if(pgHost){config.PG_HOST=pgHost;config.PG_PORT=document.getElementById('pgPort').value.trim()||'5432';config.PG_USER=document.getElementById('pgUser').value.trim()||'popularr';config.PG_PASSWORD=document.getElementById('pgPass').value;config.PG_DATABASE=document.getElementById('pgDb').value.trim()||'popularr';}
-  if(document.getElementById('essentiaEnabled').checked) config.essentia={script_path:'/opt/Essentia-to-Metadata/tag_music.py',models_dir:'/opt/essentia_models',mood_threshold:0.005,per_file_timeout:300,tag_moods:document.getElementById('essentiaMoods').checked,tag_genres:document.getElementById('essentiaGenres').checked,parse_json_features:true,delete_json_after_import:true};
-  config.downloads={file_name_format:document.getElementById('setupFileNameFormat').value.trim()||'{album_artist}/{year} - {album}/{track_number}. {artist} - {title}',conversion:{enabled:document.getElementById('setupConversionEnabled').checked,mode:document.getElementById('setupConversionMode').value,mp3_bitrate_kbps:parseInt(document.getElementById('setupConversionBitrate').value)||320,original_handling:'move_to_original',original_subfolder:'Original'},quality_filter:{enabled:document.getElementById('setup_quality_filter').checked,reject_others:true,bitrate_tolerance:5,priorities:[{format:'flac',bitrate_kbps:null},{format:'mp3',bitrate_kbps:320}]}};
-  config.watcher={auto_import_enabled:document.getElementById('setup_auto_import').checked,auto_popularity_scan:document.getElementById('setup_auto_popularity').checked,downloads_watcher_enabled:document.getElementById('setup_downloads_watcher').checked};
-  config.features={cover_detection_enabled:document.getElementById('setup_cover_detection').checked,upcoming_releases_scan_enabled:document.getElementById('setup_upcoming_scans').checked,sync_ratings_to_all_users:document.getElementById('setup_sync_all_users').checked};
-  config.playlists={essential_playlists_enabled:document.getElementById('setup_essential_playlists').checked,genre_playlists_enabled:document.getElementById('setup_genre_playlists').checked,new_music_playlist_enabled:document.getElementById('setup_new_music_playlist').checked};
-  config.tagging={write_tags_to_file:document.getElementById('setup_write_tags').checked};
-  return config;
-}
-
-/** Save whatever the user has filled in so far (non-blocking, fires & forgets). */
-async function savePartialConfig() {
-  try {
-    await fetch('/api/setup/save-partial',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildSetupConfig())});
-  } catch(e) { /* partial saves are best-effort */ }
-}
-
-/** Navigate to the next step, saving current progress first. */
-async function goToNextStep(n, btn) {
-  btn.disabled=true;
-  btn.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>Saving…';
-  await savePartialConfig();
-  goToStep(n);
-  btn.disabled=false;
-  if(btn.classList.contains('wizard-next-btn')) refreshStepButton(btn.closest('.step-card'));
-  else btn.innerHTML=btn.dataset.restoreLabel||'<i class="bi bi-arrow-right"></i> Next';
-}
-function toggleEssentiaOptions() { const e=document.getElementById('essentiaEnabled').checked; document.getElementById('essentiaOptions').classList.toggle('d-none',!e); if(e) checkEssentiaModels(); }
-function toggleConversionOptions() { document.getElementById('setupConversionOptions').classList.toggle('d-none',!document.getElementById('setupConversionEnabled').checked); }
-async function checkEssentiaModels() { try{const r=await fetch('/api/essentia/download-status');const d=await r.json();const btn=document.getElementById('essentiaDownloadBtn');const status=document.getElementById('essentiaDownloadStatus');if(d.status==='installed'){if(btn){btn.disabled=true;btn.innerHTML='<i class=\"bi bi-check-circle\"></i> Models Installed';btn.classList.remove('btn-outline-primary');btn.classList.add('btn-outline-success');}if(status)status.textContent='✅ '+d.file_count+' model files ready';}else{if(btn){btn.disabled=false;btn.innerHTML='<i class=\"bi bi-cloud-download\"></i> Download Models (~87 MB)';btn.classList.remove('btn-outline-success');btn.classList.add('btn-outline-primary');}}}catch(e){}}
-async function downloadEssentiaModels() {
-  const btn=document.getElementById('essentiaDownloadBtn'), status=document.getElementById('essentiaDownloadStatus'), prog=document.getElementById('essentiaProgress'), bar=document.getElementById('essentiaProgressBar');
-  // Fade the button to a disabled state instead of removing it — the layout
-  // never shifts while the download is running.
-  btn.disabled=true; btn.classList.add('opacity-50'); btn.innerHTML='<span class=\"spinner-border spinner-border-sm me-1\"></span>Downloading…';
-  prog.classList.remove('d-none');
-  const restoreBtn=()=>{btn.disabled=false;btn.classList.remove('opacity-50');btn.innerHTML='<i class=\"bi bi-cloud-download\"></i> Download Models (~87 MB)';};
-
-  // Check if models are already installed before downloading
-  try {
-    const pre=await(await fetch('/api/essentia/download-status')).json();
-    if(pre.status==='installed'){status.textContent='✅ Already installed ('+pre.file_count+' files)';bar.style.width='100%';bar.classList.add('bg-success');restoreBtn();checkEssentiaModels();return;}
-  } catch(e){}
-
-  status.textContent='Starting download...'; bar.style.width='10%';
-  try {
-    await fetch('/api/essentia/download-models',{method:'POST'});
-    status.textContent='Downloading...'; bar.style.width='50%';
-    for(let i=0;i<60;i++){await new Promise(r=>setTimeout(r,5000));try{const r=await(await fetch('/api/essentia/download-status')).json();if(r.status==='installed'||r.status==='complete'){status.textContent='✅ Ready';bar.style.width='100%';bar.classList.add('bg-success');restoreBtn();checkEssentiaModels();return;}if(r.status==='idle'){status.textContent='✅ Ready';bar.style.width='100%';bar.classList.add('bg-success');restoreBtn();checkEssentiaModels();return;}}catch(e){}}
-    status.textContent='Timed out — may continue in background.'; restoreBtn();
-  } catch(e) { status.textContent='Failed: '+e.message; bar.classList.add('bg-danger'); restoreBtn(); }
-}
-
-// Check Essentia model status on page load if Essentia is enabled
-document.addEventListener('DOMContentLoaded', function() {
-  if(document.getElementById('essentiaEnabled').checked) toggleEssentiaOptions();
-  if(document.getElementById('setupConversionEnabled').checked) toggleConversionOptions();
-  // Dynamic "Skip Step" → "Save & Continue" labels (steps 2-4)
-  document.querySelectorAll('.step-card').forEach(card=>{
-    if(!card.querySelector('.wizard-next-btn'))return;
-    const refresh=()=>refreshStepButton(card);
-    card.addEventListener('input',refresh);
-    card.addEventListener('change',refresh);
-    refreshStepButton(card);
-  });
-});
-function updateSummary() {
-  document.getElementById('summaryNavidrome').innerHTML='<strong>'+(document.getElementById('navUser').value||'username')+'</strong> @ '+(document.getElementById('navUrl').value||'not set');
-  const pgHost=document.getElementById('pgHost').value.trim();
-  document.getElementById('summaryDatabase').innerHTML=pgHost?'<strong>PostgreSQL</strong> @ '+pgHost+'/'+(document.getElementById('pgDb').value||'popularr'):'<span class="text-muted">PostgreSQL (container defaults)</span>';
-  const apis=[]; if(document.getElementById('lfmApiKey').value.trim()) apis.push('Last.fm'); if(document.getElementById('dgToken').value.trim()) apis.push('Discogs'); if(document.getElementById('lbToken').value.trim()) apis.push('ListenBrainz'); if(document.getElementById('slskdApiKey').value.trim()) apis.push('Soulseek');
-  document.getElementById('summaryApis').textContent=apis.length?apis.join(', '):'None enabled';
-  document.getElementById('summaryEssentia').textContent=document.getElementById('essentiaEnabled').checked?'Will be enabled':'Not enabled';
-  const fmt=document.getElementById('setupFileNameFormat').value.trim()||'{album_artist}/{year} - {album}/{track_number}. {artist} - {title}';
-  document.getElementById('summaryFiles').innerHTML='<code>'+fmt+'</code> — '+(document.getElementById('setupConversionEnabled').checked?'converts FLAC → MP3 ('+document.getElementById('setupConversionBitrate').value+'kbps)':'no conversion');
-  const automation=[];
-  if(document.getElementById('setup_auto_import').checked) automation.push('Auto Import');
-  if(document.getElementById('setup_auto_popularity').checked) automation.push('Auto Popularity Scan');
-  if(document.getElementById('setup_downloads_watcher').checked) automation.push('Downloads Watcher');
-  if(document.getElementById('setup_cover_detection').checked) automation.push('Cover Detection');
-  if(document.getElementById('setup_upcoming_scans').checked) automation.push('Upcoming Releases');
-  if(document.getElementById('setup_essential_playlists').checked) automation.push('Essential Playlists');
-  if(document.getElementById('setup_genre_playlists').checked) automation.push('Genre Playlists');
-  if(document.getElementById('setup_new_music_playlist').checked) automation.push('New Music Playlist');
-  if(document.getElementById('setup_write_tags').checked) automation.push('Tag Writing');
-  if(document.getElementById('setup_sync_all_users').checked) automation.push('Sync All Users');
-  if(document.getElementById('setup_quality_filter').checked) automation.push('Quality Filter');
-  document.getElementById('summaryAutomation').textContent=automation.length?automation.join(', '):'All automation off';
-}
-async function saveSetup() {
-  const btn=document.querySelector('#step6 .btn-primary'); btn.disabled=true; btn.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>Saving...';
-  const config=buildSetupConfig();
-  try {
-    const r=await fetch('/api/setup/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)});
-    const d=await r.json();
-    if(!d.success){showToast(d.error||'Failed','error');btn.disabled=false;btn.innerHTML='<i class="bi bi-check-circle"></i> Save & Go to Dashboard';return;}
-
-    showToast('Config saved! Starting Navidrome import...','success');
-
-    // Trigger a full Navidrome import
-    const importResp=await fetch('/api/navidrome/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'all'})});
-    const importData=await importResp.json();
-    if(importData.success) {
-      showToast('Navidrome import started — redirecting to dashboard...','success');
-    } else {
-      showToast('Config saved but import could not start: '+(importData.error||'unknown'),'warning');
-    }
-    setTimeout(()=>window.location.href='/',1500);
-  }catch(e){
-    showToast('Network error: '+e.message,'error');
-    btn.disabled=false;
-    btn.innerHTML='<i class="bi bi-check-circle"></i> Save & Go to Dashboard';
-  }
-}
-function showToast(msg,type){const t=new bootstrap.Toast(document.getElementById('setupToast'));document.getElementById('toastMessage').textContent=msg;const e=document.getElementById('setupToast');e.classList.remove('bg-success','bg-danger','text-white');if(type==='success')e.classList.add('bg-success','text-white');else if(type==='error')e.classList.add('bg-danger','text-white');t.show();}
-</script>
+<script src="{{ versioned_static('js/pages/setup.js') }}"></script>
 </body>
 </html>

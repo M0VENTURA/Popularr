@@ -1024,3 +1024,186 @@ form .form-check-input[name="force"] + .form-check-label {
         flex: 0 0 44px;
     }
 }
+
+
+/* ==========================================================================
+   MOBILE PLAYER PROGRESS BAR, CONFIG CARDS & SEGMENTED TABS
+   ========================================================================== */
+
+@media (max-width: 991.98px) {
+    body.player-visible {
+        padding-bottom: calc(var(--bottom-nav-height) + var(--player-bar-height) + env(safe-area-inset-bottom, 0px));
+    }
+    #globalPlayerBar {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom, 0px));
+    }
+    .config-save-bar {
+        bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom, 0px)) !important;
+    }
+    body.player-visible .config-save-bar {
+        bottom: calc(var(--bottom-nav-height) + var(--player-bar-height) + env(safe-area-inset-bottom, 0px)) !important;
+    }
+}
+
+@media (max-width: 767.98px) {
+    #globalPlayerBar .player-progress-wrap {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        margin: 0 !important;
+        padding: 0;
+        height: 3px;
+    }
+    #globalPlayerBar #playerProgress {
+        height: 3px !important;
+        border-radius: 0 !important;
+    }
+    #configTabs {
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        gap: 0.35rem;
+        top: var(--navbar-height, 56px) !important;
+        background: var(--primary-bg);
+        padding: 0.5rem 0;
+        scrollbar-width: none;
+    }
+    #configTabs::-webkit-scrollbar {
+        display: none;
+    }
+    #configTabs .nav-item {
+        flex: 0 0 auto;
+    }
+    #configTabs .nav-link {
+        white-space: nowrap;
+        width: auto !important;
+        padding: 0.45rem 0.75rem;
+        font-size: 0.85rem;
+    }
+}
+
+@media (max-width: 575.98px) {
+    .nav-pills.nav-segmented {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        justify-content: flex-start;
+        scrollbar-width: none;
+    }
+    .nav-pills.nav-segmented::-webkit-scrollbar {
+        display: none;
+    }
+    .nav-pills.nav-segmented > .nav-item,
+    .nav-pills.nav-segmented > .nav-link {
+        flex: 0 0 auto;
+        white-space: nowrap;
+    }
+}
+
+/* Config Playlists tab cards & grids */
+.config-section {
+    background: var(--secondary-bg);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-card);
+    padding: 1.25rem;
+}
+
+.config-section .section-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+    padding-bottom: 0.65rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.config-section .section-title {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.setting-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.85rem 1rem;
+    background: var(--primary-bg);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-control);
+}
+
+.setting-info {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.setting-label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.15rem;
+    color: var(--text-primary);
+}
+
+.setting-description,
+.help-text {
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.setting-control {
+    flex: 0 0 auto;
+}
+
+.thresholds-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 0.75rem;
+}
+
+.threshold-item,
+.input-card,
+.naming-card {
+    background: var(--primary-bg);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-control);
+    padding: 0.85rem 1rem;
+}
+
+.threshold-header,
+.input-header,
+.naming-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.threshold-stars {
+    color: #f59e0b;
+    font-weight: 600;
+}
+
+.threshold-label,
+.input-label,
+.naming-label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.naming-examples {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8rem;
+}

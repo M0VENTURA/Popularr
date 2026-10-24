@@ -181,21 +181,7 @@ document.addEventListener('keydown', function(e) {
 });
 
 // ===== FIELD READERS =====
-//
-// ⚠️ FILE SCOPE ON PURPOSE — do NOT move these back inside
-// buildConfigObject().
-//
-// `collectGenreSelectionConfig()` is a SIBLING of buildConfigObject, not a
-// nested helper: it is defined further down (GENRE SELECTION ENGINE) and called
-// from *inside* buildConfigObject as ``selection: collectGenreSelectionConfig()``. 
-// JavaScript resolves a free variable against where the function is DEFINED, not
-// where it is CALLED — so while these lived inside buildConfigObject the
-// collector could not see them, and EVERY Config save died with
-//
-//     Could not collect config: getValue is not defined
-//
-// Declaring them once, here, makes them visible to every collector in this
-// file including buildConfigObject itself, which needs no other change.
+
 function getValue(id, defaultValue) {
   const el = document.getElementById(id);
   return el ? el.value : (defaultValue || '');
@@ -216,10 +202,6 @@ function parseNumber(id, defaultValue) {
 // ===== BUILD CONFIG OBJECT =====
 
 function collectFeatureFieldOverrides() {
-  // Reads the Features & Weights card's ``.feature-field`` inputs (rendered
-  // by config.html from config.features).  Merged into the saved config so a
-  // change there survives EITHER save button — before this, the main Save
-  // Configuration button silently discarded feature-card edits.
   const overrides = {};
   document.querySelectorAll('.feature-field').forEach(input => {
     const key = input.name.replace('feature_', '');
@@ -236,9 +218,7 @@ function collectFeatureFieldOverrides() {
   return overrides;
 }
 
-// Features keys inherited from the old system — hidden from the UI and
-// dropped from the saved config so they stop accumulating in config.yaml.
-const LEGACY_FEATURE_KEYS = ['dry_run', 'sync', 'force', 'verbose', 'perpetual', 'batchrate', 'full_scan', 'auto_boot_navidrome_scan', 'artist'];
+const LEGACY_FEATURE_KEYS = ['dry_run', 'sync', 'force', 'verbose', 'perpetual', 'batchrate', 'full_scan', 'auto_boot_navidrome_scan', 'artist', 'use_test_site'];
 
 function buildConfigObject() {
   const navidrome_users = [];
@@ -276,9 +256,6 @@ function buildConfigObject() {
         enabled: getChecked('slskd_enabled'),
         web_url: getValue('slskd_web_url'),
         api_key: getValue('slskd_api_key'),
-        // Stale-search cleanup cadence: run it once every N searches rather
-        // than before every one.  0 DISABLES it ("never"), which is why this
-        // is NOT guarded with `|| 10` — that would turn 0 back into 10.
         search_cleanup_interval: (() => {
           const raw = parseInt(getValue('slskd_search_cleanup_interval', '10'), 10);
           return Number.isFinite(raw) ? Math.max(0, raw) : 10;
@@ -330,14 +307,11 @@ function buildConfigObject() {
         pre_release_retry_weekday: parseInt(getValue('queue_pre_release_retry_weekday', '4')) || 4,
         miss_retry_weekday: parseInt(getValue('queue_miss_retry_weekday', '3')) || 3,
         miss_retry_time: getValue('queue_miss_retry_time', '18:00'),
-        search_max_wait_seconds: parseNumber('queue_search_max_wait_seconds', 150),
+        search_max_wait_seconds: parseNumber('queue_search_max_wait_seconds', 60),
         fallback_search_max_wait_seconds: parseNumber('queue_fallback_search_max_wait_seconds', 20),
-        search_empty_abort_seconds: parseNumber('queue_search_empty_abort_seconds', 90),
+        search_empty_abort_seconds: parseNumber('queue_search_empty_abort_seconds', 30),
         search_empty_shrink_after: parseNumber('queue_search_empty_shrink_after', 4),
         search_shrunken_wait_seconds: parseNumber('queue_search_shrunken_wait_seconds', 8),
-        // Auto-restart of a STOPPED queue processor. Cooldown is floored here
-        // as well as server-side, so a typed 0 cannot be saved as "restart in
-        // a tight loop" and then be silently clamped on load.
         auto_restart: Object.assign(
           {},
           ((window.pageConfig && window.pageConfig.queue && window.pageConfig.queue.auto_restart) || {}),
@@ -384,40 +358,28 @@ function buildConfigObject() {
       genre_playlists_delete_threshold: parseInt(getValue('playlists_genre_delete_threshold', '80'), 10) || 80,
       genre_playlists_min_stars: parseInt(getValue('playlists_genre_min_stars', '4'), 10) || 4,
       genre_playlists_max_genres: parseInt(getValue('playlists_genre_max_genres', '3'), 10) || 3,
-      // ⚠️ 0 means "no cap", so a `|| 300` guard would make it impossible to
-      // express — mirror the max_per_artist collector below.
       genre_playlists_max_tracks: (() => {
         const raw = parseInt(getValue('playlists_genre_max_tracks', '300'), 10);
         return Number.isFinite(raw) && raw >= 0 ? raw : 300;
       })(),
-      // Per-user favourite playlists (Favourite Artists / Favourite Albums).
       favourite_playlists_enabled: getChecked('playlists_favourite_enabled', true),
       favourite_min_stars: parseInt(getValue('playlists_favourite_min_stars', '4'), 10) || 4,
       favourite_artists_name: getValue('playlists_favourite_artists_name', 'Favourite Artists') || 'Favourite Artists',
       favourite_albums_name: getValue('playlists_favourite_albums_name', 'Favourite Albums') || 'Favourite Albums',
-      sync_favourites_from_navidrome: getChecked('playlists_favourite_sync', false),
-      // AI cover art for the Top Genre playlists (Gemini). Key lives in
-      // api_integrations.gemini below.
+      sync_favourites_from_navidrome: getChecked('playlists_favourite_sync', true),
       genre_playlist_ai_cover_enabled: getChecked('playlists_genre_ai_cover_enabled', true),
       genre_playlist_ai_cover_regenerate: getChecked('playlists_genre_ai_cover_regenerate', false),
       genre_playlist_ai_cover_prompt: getValue('playlists_genre_ai_cover_prompt', ''),
       playlist_order_mode: getValue('playlists_order_mode', 'prominence') || 'prominence',
-      // ⚠️ Math.max(0, raw), NOT `|| 25`: 0 means "no per-artist cap", so a
-      // `|| default` guard would make that impossible to express.
       genre_playlists_max_per_artist: (() => {
         const raw = parseInt(getValue('playlists_max_per_artist', '25'), 10);
         return Number.isFinite(raw) ? Math.max(0, raw) : 25;
       })(),
       playlist_interleave_artists: getChecked('playlists_interleave_artists', true),
-      // Nested block: ``_sanitize_config_sections`` must list it under
-      // ``playlists`` or the dict is coerced to {} on save.
       genre_exclusions: {
         enabled: getChecked('playlists_genre_exclusions_enabled', true),
         own_tags_win: getChecked('playlists_genre_own_tags_win', true),
         use_family_tiebreak: getChecked('playlists_genre_use_family_tiebreak', true),
-        // ⚠️ Split on commas and DROP empties: an empty field means "no
-        // playlists are protected", which is a real choice, but it must not
-        // become a list containing one empty string.
         metal_excluded_from: (getValue('playlists_genre_metal_excluded_from', 'alternative rock') || '')
           .split(',')
           .map((g) => g.trim().toLowerCase())
@@ -426,14 +388,38 @@ function buildConfigObject() {
       exclude_christmas_from_playlists: getChecked('playlists_exclude_christmas', true),
       christmas_playlist_marker: getValue('playlists_christmas_marker', 'christmas') || 'christmas',
       genre_playlists_name_template: getValue('playlists_genre_name_template', '{genre} - Top Tracks'),
+      decade_playlists_enabled: getChecked('playlists_decade_enabled', true),
+      decade_playlists_name_template: getValue('playlists_decade_name_template', '{decade}s - Top Tracks') || '{decade}s - Top Tracks',
+      decade_playlists_min_tracks: parseInt(getValue('playlists_decade_min_tracks', '50'), 10) || 50,
+      decade_playlists_max_tracks: parseInt(getValue('playlists_decade_max_tracks', '200'), 10) || 200,
+      hit_singles_playlist_enabled: getChecked('playlists_hit_singles_enabled', true),
+      hit_singles_playlist_name: getValue('playlists_hit_singles_name', 'Hit Singles') || 'Hit Singles',
+      hit_singles_max_tracks: parseInt(getValue('playlists_hit_singles_max_tracks', '250'), 10) || 250,
+      hidden_gems_playlist_enabled: getChecked('playlists_hidden_gems_enabled', false),
+      hidden_gems_playlist_name: getValue('playlists_hidden_gems_name', 'Hidden Gems') || 'Hidden Gems',
+      hidden_gems_max_tracks: parseInt(getValue('playlists_hidden_gems_max_tracks', '200'), 10) || 200,
+      new_releases_playlist_enabled: getChecked('playlists_new_releases_enabled', false),
+      new_releases_playlist_name: getValue('playlists_new_releases_name', 'New Releases') || 'New Releases',
+      new_releases_max_tracks: parseInt(getValue('playlists_new_releases_max_tracks', '100'), 10) || 100,
+      covers_playlist_enabled: getChecked('playlists_covers_enabled', false),
+      covers_playlist_name: getValue('playlists_covers_name', 'Great Covers') || 'Great Covers',
+      covers_max_tracks: parseInt(getValue('playlists_covers_max_tracks', '150'), 10) || 150,
+      acoustic_playlist_enabled: getChecked('playlists_acoustic_enabled', false),
+      acoustic_playlist_name: getValue('playlists_acoustic_name', 'Acoustic Essentials') || 'Acoustic Essentials',
+      acoustic_max_tracks: parseInt(getValue('playlists_acoustic_max_tracks', '150'), 10) || 150,
+      high_energy_playlist_enabled: getChecked('playlists_high_energy_enabled', false),
+      high_energy_playlist_name: getValue('playlists_high_energy_name', 'High Energy & Upbeat') || 'High Energy & Upbeat',
+      high_energy_max_tracks: parseInt(getValue('playlists_high_energy_max_tracks', '200'), 10) || 200,
+      mood_playlists_enabled: getChecked('playlists_mood_enabled', false),
+      mood_playlists_name_template: getValue('playlists_mood_name_template', '{mood} - Mix') || '{mood} - Mix',
+      mood_playlists_min_tracks: parseInt(getValue('playlists_mood_min_tracks', '40'), 10) || 40,
+      mood_playlists_max_tracks: parseInt(getValue('playlists_mood_max_tracks', '150'), 10) || 150,
       excluded_artists: [...configExcludedArtists],
     },
     navidrome: {
       auto_public_playlists: getChecked('api_navidrome_auto_public_playlists', false),
       playlist_cover_art: getChecked('api_navidrome_playlist_cover_art', false)
     },
-    // Safe shutdown for database maintenance. The auto-resume value exists so a
-    // forgotten shutdown cannot leave the app dormant forever.
     maintenance: {
       safe_shutdown: {
         enabled: getChecked('safe_shutdown_enabled', true),
@@ -442,9 +428,6 @@ function buildConfigObject() {
         release_connections: getChecked('safe_shutdown_release_connections', true)
       }
     },
-    // Large album saves: past this track count the file-tagging half runs in a
-    // background service, so the response is not held past Cloudflare's 100s
-    // origin timeout (the reported 524).
     album_save: {
       background: {
         enabled: getChecked('album_save_background_enabled', true),
@@ -466,17 +449,11 @@ function buildConfigObject() {
           priorities: priorities
         };
       })(),
-      // Re-align imported downloads with the release their queue row names.
-      // The `limit` is a cap on QUEUE ROWS examined per run: each release needs
-      // a MusicBrainz lookup and that client is rate-limited, so an unbounded
-      // first run would crawl. 0 = no cap.
       metadata_heal: {
         enabled: getChecked('downloads_heal_enabled'),
         run_on_startup: getChecked('downloads_heal_on_startup', true),
         limit: parseInt(getValue('downloads_heal_limit', '200')) || 0
       },
-      // Soulseek search quality: bitrate floor for the first pass + optional
-      // low-quality fallback tier (rare releases only exist as 128kbps MP3s).
       quality: Object.assign(
         {},
         (window.pageConfig && window.pageConfig.downloads && window.pageConfig.downloads.quality) || {},
@@ -486,9 +463,6 @@ function buildConfigObject() {
           min_length_seconds: parseInt(getValue('downloads_search_min_length', '30')) || 30,
           allow_low_quality_fallback: getChecked('downloads_search_quality_fallback'),
           fallback_min_bitrate: parseInt(getValue('downloads_search_fallback_bitrate', '128')) || 128,
-          // Container types a download may be accepted in. Only these are
-          // offered as matches; anything else is rejected from the queue.
-          // An empty array disables the check (accept any type).
           allowed_formats: Array.from(
             document.querySelectorAll('.download-format-check:checked')
           ).map((el) => el.value)
@@ -508,13 +482,6 @@ function buildConfigObject() {
       auto_popularity_scan: getChecked('watcher_auto_popularity', true),
       downloads_watcher_enabled: getChecked('watcher_downloads_enabled', true)
     },
-    // Scheduled background jobs (APScheduler).
-    //
-    // ⚠️ THIS SECTION MUST BE IN THE PAYLOAD. save_config() REPLACES config.yaml
-    // wholesale, so a payload without `scheduler:` deletes every interval and
-    // the timezone on the next save — silently resetting the scheduled library
-    // sync / popularity scan / Navidrome import to their defaults. Everything
-    // this page does not collect is carried across untouched.
     scheduler: Object.assign(
       {},
       (window.pageConfig && window.pageConfig.scheduler) || {},
@@ -523,8 +490,6 @@ function buildConfigObject() {
           {},
           ((window.pageConfig && window.pageConfig.scheduler && window.pageConfig.scheduler.jobs) || {}),
           {
-            // 0 is legal ("never run on a schedule"), so parseNumber and NOT
-            // `parseInt(...) || default` — `||` would turn "off" back on.
             library_sync: Object.assign(
               {},
               (((window.pageConfig || {}).scheduler || {}).jobs || {}).library_sync || {},
@@ -561,9 +526,6 @@ function buildConfigObject() {
           prune_empty_folders: getChecked('downloads_prune_empty_folders', true)
         },
         mature_track_min_age_years: parseInt(getValue('mature_track_min_age_years', '2')) || 2,
-        // How many abandoned artists may still be winding down before the
-        // full scan waits for them. 0 = never wait, so it is NOT guarded
-        // with `|| 1` (that would turn "never wait" back into "wait for 1").
         full_scan_max_abandoned_workers: (() => {
           const raw = parseInt(getValue('pop_max_abandoned_workers', '1'), 10);
           return Number.isFinite(raw) ? Math.max(0, raw) : 1;
@@ -576,9 +538,6 @@ function buildConfigObject() {
         daily_musicbrainz_release_global_limit: parseInt(getValue('daily_musicbrainz_release_global_limit', '50')) || 0,
         upcoming_releases_scan_enabled: getChecked('upcoming_releases_scan_enabled', true),
         upcoming_releases_purge_days: parseInt(getValue('upcoming_releases_purge_days', '30')) || 30,
-        // parseNumber, NOT `parseInt(...) || 28`: 0 is a legitimate value here
-        // ("show nothing older / nothing future-dated") and `||` would replace
-        // it with the default. parseNumber only falls back on NaN.
         upcoming_releases_lookback_days: parseNumber('upcoming_releases_lookback_days', 28),
         upcoming_releases_lookahead_days: parseNumber('upcoming_releases_lookahead_days', 14)
       },
@@ -614,9 +573,6 @@ function buildConfigObject() {
         interlude_lb_max_duration_s: parseInt(getValue('interlude_lb_max_duration_s', '180'), 10) || 180,
         interlude_lb_ratio_factor: parseFloat(getValue('interlude_lb_ratio_factor', '3.0')) || 3.0,
         interlude_lb_min_count: parseInt(getValue('interlude_lb_min_count', '500'), 10) || 500,
-        // Various Artists compilation guard. Without these two the checkboxes
-        // would appear to save and then silently revert on reload — the same
-        // class of bug as every other field omitted from this object.
         compilation_tracklist_guard: getChecked('compilation_tracklist_guard', true),
         compilation_tracklist_floor: parseFloat(getValue('compilation_tracklist_floor', '0.6')) || 0.6,
         star_5: {
@@ -646,10 +602,6 @@ function buildConfigObject() {
           peak_era_min_ratio: parseFloat(getValue('peak_era_min_ratio', '0.75')) || 0.75,
           solid_era_min_ratio: parseFloat(getValue('solid_era_min_ratio', '0.40')) || 0.40
         },
-        // The album RATIO standout gate — the "shape of popularity" 5★ test.
-        // Every field must be listed or it saves, appears to work, then
-        // silently reverts on reload (the same bug class as omitting a field
-        // from any other payload object here).
         album_ratio_standout: {
           enabled: getChecked('album_ratio_standout_enabled', true),
           runner_up_min: parseFloat(getValue('album_ratio_runner_up_min', '1.5')) || 1.5,
@@ -661,10 +613,6 @@ function buildConfigObject() {
           live_floor_min: parseFloat(getValue('album_ratio_live_floor_min', '5.0')) || 5.0,
           live_min_passed: parseInt(getValue('album_ratio_live_min_passed', '2'), 10) || 2
         },
-        // Compilation rating against the artist's ONLINE catalogue. Used only
-        // when the local library is too thin to rank a credited artist's
-        // tracks (the soundtrack / Various Artists case), where an artist's
-        // global #1 otherwise cannot be told apart from filler.
         compilation_online_catalogue: {
           enabled: getChecked('compilation_online_catalogue_enabled', true),
           min_local_catalogue: parseInt(getValue('compilation_online_min_local_catalogue', '5'), 10) || 5,
@@ -673,10 +621,6 @@ function buildConfigObject() {
           rank_percentile_4star: parseFloat(getValue('compilation_online_rank_percentile_4star', '0.10')) || 0.10,
           rank_percentile_3star: parseFloat(getValue('compilation_online_rank_percentile_3star', '0.35')) || 0.35,
           rank_percentile_2star: parseFloat(getValue('compilation_online_rank_percentile_2star', '0.65')) || 0.65,
-          // The two absolute guards. Read with an explicit finite check rather
-          // than ``|| default``: 0 is a MEANINGFUL value here (it disables the
-          // guard), and ``0 || 55`` would silently restore the default the user
-          // just turned off.
           top_tier_min_score: (function () { var v = parseFloat(getValue('compilation_online_top_tier_min_score', '55')); return isFinite(v) ? v : 55; })(),
           top_tier_min_listeners: (function () { var v = parseInt(getValue('compilation_online_top_tier_min_listeners', '250000'), 10); return isFinite(v) ? v : 250000; })(),
           standout_floor_percentile: (function () { var v = parseFloat(getValue('compilation_online_standout_floor_percentile', '0.10')); return isFinite(v) ? v : 0.10; })(),
@@ -687,32 +631,38 @@ function buildConfigObject() {
     metadata_update: Object.assign(
       {},
       (window.pageConfig && window.pageConfig.metadata_update) || {},
-      {
-        album_name_source: getValue('metadata_update_album_name_source', 'dedupe'),
-        album_name_update_target: getValue('metadata_update_album_name_target', 'db'),
-        apply_during_scan: getValue('metadata_update_apply_during_scan', 'true') !== 'false',
-        album_mbid_guard: Object.assign(
-          {},
-          ((window.pageConfig && window.pageConfig.metadata_update && window.pageConfig.metadata_update.album_mbid_guard) || {}),
-          {
-            enabled: getValue('metadata_update_mbid_guard_enabled', 'true') !== 'false',
-            min_similarity: parseFloat(getValue('metadata_update_mbid_guard_min_similarity', '0.65')) || 0.65,
-            allow_disc_folders: getValue('metadata_update_mbid_guard_allow_disc_folders', 'true') !== 'false'
-          }
-        ),
-        update_on_files: Object.assign(
-          {},
-          ((window.pageConfig && window.pageConfig.metadata_update && window.pageConfig.metadata_update.update_on_files) || {}),
-          {
-            album_name: getChecked('metadata_update_field_album_name', false),
-            year: getChecked('metadata_update_field_year', false),
-            album_artist: getChecked('metadata_update_field_album_artist', false),
-            genres: getChecked('metadata_update_field_genres', false),
-            cover_art: getChecked('metadata_update_field_cover_art', false),
-            lyrics: getChecked('metadata_update_field_lyrics', false)
-          }
-        )
-      }
+      (() => {
+        const rawTarget = getValue('metadata_update_album_name_target', 'db');
+        const fieldChecked = getChecked('metadata_update_field_album_name', false);
+        const effectiveTarget = (fieldChecked && rawTarget === 'db') ? 'files' : rawTarget;
+        const effectiveFieldChecked = effectiveTarget === 'files' ? true : (effectiveTarget === 'off' ? false : fieldChecked);
+        return {
+          album_name_source: getValue('metadata_update_album_name_source', 'dedupe'),
+          album_name_update_target: effectiveTarget,
+          apply_during_scan: getValue('metadata_update_apply_during_scan', 'true') !== 'false',
+          album_mbid_guard: Object.assign(
+            {},
+            ((window.pageConfig && window.pageConfig.metadata_update && window.pageConfig.metadata_update.album_mbid_guard) || {}),
+            {
+              enabled: getValue('metadata_update_mbid_guard_enabled', 'true') !== 'false',
+              min_similarity: parseFloat(getValue('metadata_update_mbid_guard_min_similarity', '0.65')) || 0.65,
+              allow_disc_folders: getValue('metadata_update_mbid_guard_allow_disc_folders', 'true') !== 'false'
+            }
+          ),
+          update_on_files: Object.assign(
+            {},
+            ((window.pageConfig && window.pageConfig.metadata_update && window.pageConfig.metadata_update.update_on_files) || {}),
+            {
+              album_name: effectiveFieldChecked,
+              year: getChecked('metadata_update_field_year', false),
+              album_artist: getChecked('metadata_update_field_album_artist', false),
+              genres: getChecked('metadata_update_field_genres', false),
+              cover_art: getChecked('metadata_update_field_cover_art', false),
+              lyrics: getChecked('metadata_update_field_lyrics', false)
+            }
+          )
+        };
+      })()
     ),
     popularity: Object.assign(
       {},
@@ -723,11 +673,6 @@ function buildConfigObject() {
           listenbrainz: parseFloat(getValue('pop_weight_listenbrainz', '0.35')) || 0.35,
           age: parseFloat(getValue('pop_weight_age', '0.10')) || 0.10
         },
-        // THE single scan-timeout knob: the per-album and per-artist budgets
-        // are derived from it (track_timeout * track count, plus fixed
-        // overhead for the artist). 0 DISABLES the whole safety net, so this
-        // is NOT guarded with `|| 30` — that would turn the "disabled" value
-        // back into the default.
         track_timeout_seconds: (() => {
           const raw = parseInt(getValue('pop_track_timeout_seconds', '30'), 10);
           return Number.isFinite(raw) ? Math.max(0, raw) : 30;
@@ -800,10 +745,6 @@ function buildConfigObject() {
           });
           return synonyms;
         })(),
-        // The canonical selection engine. Carried through Object.assign so any
-        // key the page does not render (keep_together / conditional_keep, which
-        // are list-shaped and awkward in a form) survives a save instead of
-        // being dropped.
         selection: collectGenreSelectionConfig()
       }
     ),
@@ -822,11 +763,9 @@ function buildConfigObject() {
       },
       musicbrainz: { enabled: getChecked('api_musicbrainz_enabled', true) },
       audiodb: {
-        enabled: getChecked('api_audiodb_enabled'),
-        api_key: getValue('api_audiodb_api_key')
+        enabled: getChecked('api_audiodb_enabled', true),
+        api_key: getValue('api_audiodb_api_key', '195003') || '195003'
       },
-      // Billable third-party image API. Only used by the Top Genre playlist
-      // covers (playlists.genre_playlist_ai_cover_enabled).
       gemini: {
         enabled: getChecked('api_gemini_enabled'),
         api_key: getValue('api_gemini_api_key'),
@@ -853,8 +792,6 @@ function buildConfigObject() {
     }
   };
 
-  // Legacy feature keys have no readers in the current codebase — never
-  // persist them (they were previously re-saved from pageConfig on every save).
   LEGACY_FEATURE_KEYS.forEach(key => delete config.features[key]);
   return config;
 }
@@ -912,7 +849,6 @@ function updateFileNameFormatPreview() {
     rendered = fmt;
   }
 
-  // Sanitize each path segment, mirroring the backend's _build_target_path.
   const parts = rendered
     .replace(/\\/g, '/')
     .replace(/^\/+/, '')
@@ -936,14 +872,16 @@ const SECTION_LABELS = {
   queue: 'Queue Matching',
   lastfm: 'Last.fm Advanced',
   filesystem: 'File System',
-  playlists: 'Essential Playlists',
+  playlists: 'Playlists',
   downloads: 'Downloads',
   watcher: 'Automation Services',
+  scheduler: 'Scheduled Scans',
   features: 'Features & Schedulers',
   single_detection: 'Single Detection & Star Ratings',
-  popularity: 'Popularity Weights',
+  popularity: 'Popularity & Scan Parallelism',
   tagging: 'File Metadata (Tag Writing)',
-  genres: 'Genre Aggregation',
+  metadata_update: 'Updating Metadata',
+  genres: 'Genre Selection & Aggregation',
   api_integrations: 'API Integrations',
   strip_parentheses_filters: 'Search Filters',
   upcoming_releases: 'Upcoming Releases Sources',
@@ -969,7 +907,7 @@ function validateNumericBounds() {
     if (Number.isNaN(val)) return;
     const min = input.min !== '' && input.min != null ? parseFloat(input.min) : null;
     const max = input.max !== '' && input.max != null ? parseFloat(input.max) : null;
-    const labelEl = input.closest('.col-12, .col-md-3, .col-md-4, .col-md-6, .col-sm-6, .col-lg-3, .col-lg-4, .col-6')?.querySelector('label');
+    const labelEl = input.closest('.col-12, .col-md-3, .col-md-4, .col-md-6, .col-sm-6, .col-lg-3, .col-lg-4, .col-6, .input-card')?.querySelector('label');
     const label = (labelEl ? labelEl.textContent.trim() : input.id || 'field').replace(/\s+/g, ' ');
     if (min != null && val < min) problems.push(`${label}: ${val} is below the minimum ${min}`);
     if (max != null && val > max) problems.push(`${label}: ${val} exceeds the maximum ${max}`);
@@ -979,23 +917,19 @@ function validateNumericBounds() {
 
 function saveConfig() {
   const saveBtn = document.getElementById('saveBtn');
-  
+
   if (!saveBtn) {
     console.error('[saveConfig] Save button not found!');
     showToast('Error', 'Save button not found in DOM', 'error');
     return;
   }
-  
-  // Capture original state before any modifications
+
   const originalDisabled = saveBtn.disabled;
   const originalHTML = saveBtn.innerHTML;
-  
-  // Set button to loading state
+
   saveBtn.disabled = true;
   saveBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Saving...';
-  
-  // Safety timeout to force reset button after 60 seconds (longer than fetch timeout)
-  // This prevents the button from being stuck forever if the promise chain breaks
+
   const safetyReset = setTimeout(() => {
     console.warn('[saveConfig] Safety timeout reached - forcing button reset');
     saveBtn.disabled = originalDisabled;
@@ -1003,9 +937,6 @@ function saveConfig() {
     showToast('Error', 'Save operation timed out. Please check the application logs and try again.', 'error');
   }, 60000);
 
-  // The button must ALWAYS be restored — if config collection throws (a
-  // missing input, malformed field) the request never starts and without
-  // this guard the page would sit on "Saving..." forever.
   let config;
   try {
     config = buildConfigObject();
@@ -1018,9 +949,6 @@ function saveConfig() {
     return;
   }
 
-  // Client-side bounds check before the payload hits the server — an
-  // out-of-range value (e.g. a retry interval over the max) would otherwise
-  // be silently clamped by the backend or reject the whole save.
   const numericProblems = validateNumericBounds();
   if (numericProblems.length > 0) {
     clearTimeout(safetyReset);
@@ -1032,11 +960,6 @@ function saveConfig() {
 
   const urlElement = document.querySelector('form#configForm')?.dataset?.saveUrl || '/config/save-json';
 
-  console.log('[saveConfig] Sending request to:', urlElement);
-
-  // Give the server a hard deadline so a hung request (e.g. a background
-  // task blocking the worker) surfaces as an error instead of an eternal
-  // spinner.
   const controller = new AbortController();
   const saveTimeout = setTimeout(() => controller.abort(), 45000);
 
@@ -1047,25 +970,17 @@ function saveConfig() {
     signal: controller.signal
   })
   .then(async response => {
-    console.log('[saveConfig] Response status:', response.status);
     const contentType = response.headers.get('content-type') || '';
-    console.log('[saveConfig] Response content-type:', contentType);
-    
     if (!contentType.includes('application/json')) {
       const text = await response.text().catch(() => '');
-      console.error('[saveConfig] Non-JSON response:', text.substring(0, 200));
       throw new Error('Server returned non-JSON response: ' + text.substring(0, 100));
     }
-    
-    const data = await response.json().catch(err => {
-      console.error('[saveConfig] JSON parse failed:', err);
+    const data = await response.json().catch(() => {
       throw new Error('Failed to parse server response');
     });
-    
     return { status: response.status, data };
   })
   .then(result => {
-    console.log('[saveConfig] Result:', result);
     if (result.status !== 200) {
       showToast('Error', result.data.error || 'Failed to save configuration', 'error');
     } else if (result.data.success) {
@@ -1080,7 +995,6 @@ function saveConfig() {
     }
   })
   .catch(error => {
-    console.error('[saveConfig] Fetch error:', error);
     if (error && error.name === 'AbortError') {
       showToast('Error', 'Save timed out after 45s — the server did not respond. Check the app logs.', 'error');
     } else {
@@ -1088,10 +1002,8 @@ function saveConfig() {
     }
   })
   .finally(() => {
-    console.log('[saveConfig] Resetting button state');
     clearTimeout(saveTimeout);
     clearTimeout(safetyReset);
-    // Always reset button to its original state
     saveBtn.disabled = originalDisabled;
     saveBtn.innerHTML = originalHTML;
   });
@@ -1115,7 +1027,11 @@ function saveRawYaml() {
     method: 'POST',
     body: formData
   })
-  .then(() => {
+  .then(async response => {
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new Error(text.slice(0, 200) || `Save failed (HTTP ${response.status})`);
+    }
     showToast('Success', 'Configuration saved successfully', 'success');
     const modalEl = document.getElementById('rawYamlModal');
     if (modalEl) bootstrap.Modal.getInstance(modalEl)?.hide();
@@ -1379,7 +1295,6 @@ function _essentiaSetStatusText(msg) {
 
 let upcomingSources = [];
 
-// Valid Wikipedia column types (order matters: position in the table).
 const UPCOMING_COLUMN_TYPES = ['day', 'artist', 'album', 'genre'];
 
 function buildColumnSelects(prefix, values) {
@@ -1703,8 +1618,6 @@ function stopRetryScheduler() {
 
 // ===== QUEUE METADATA HEAL =====
 
-// Re-aligns imported downloads with the release their queue entry names.
-// Preview is a dry run and writes nothing, so it is always safe to press.
 function runMetadataHeal(dryRun) {
   const out = document.getElementById('downloads_heal_result');
   const btn = document.getElementById(dryRun ? 'downloads_heal_preview' : 'downloads_heal_run');
@@ -1759,7 +1672,6 @@ function runMetadataHeal(dryRun) {
     if (out) out.textContent = text;
 
     if (found) {
-      // Name what changed: "3 albums corrected" is not actionable on its own.
       const detail = (data.albums || []).slice(0, 10).map(a =>
         `${a.artist || '?'} - ${a.album || '?'} (${(a.fields || []).join(', ')})`
       );
@@ -1792,9 +1704,6 @@ function runMetadataHeal(dryRun) {
 
 // ===== SAFE SHUTDOWN =====
 
-// Quiesces the app so PostgreSQL can be stopped cleanly. Closing the pool is the
-// part that makes `docker compose stop db` a clean stop instead of a force-kill:
-// PostgreSQL's SIGTERM shutdown waits for clients, and pooled connections count.
 function renderSafeShutdownStatus(data) {
   const box = document.getElementById('safe_shutdown_status');
   if (!box) return;
@@ -1929,9 +1838,6 @@ function cancelSafeShutdown() {
 
 // ===== GENRE SELECTION ENGINE =====
 
-// The canonical-vocabulary engine's settings. Kept separate from the legacy
-// "Source Weights" block because the two engines use different models: the
-// legacy values were tuned for vote counting, these follow provider TRUST.
 function collectGenreSelectionConfig() {
   const entityWeights = {
     track: parseFloat(getValue('genre_entity_track', '1.00')) || 0,
@@ -1949,7 +1855,7 @@ function collectGenreSelectionConfig() {
   return {
     enabled: getChecked('genre_selection_enabled', true),
     max_genres: parseInt(getValue('genre_selection_max', '3')) || 3,
-    family_slot_limit: parseInt(getValue('genre_selection_family_limit', '3')) || 3,
+    family_slot_limit: parseInt(getValue('genre_selection_family_limit', '2')) || 2,
     entity_weights: entityWeights,
     source_weights: sourceWeights,
     thresholds: {
@@ -1961,12 +1867,68 @@ function collectGenreSelectionConfig() {
   };
 }
 
+// ===== SYNCHRONIZED UI CONTROLS =====
+
+function syncAlbumNameTargetFields(source) {
+  const targetEl = document.getElementById('metadata_update_album_name_target');
+  const checkEl = document.getElementById('metadata_update_field_album_name');
+  if (!targetEl || !checkEl) return;
+  if (source === 'target') {
+    if (targetEl.value === 'files') {
+      checkEl.checked = true;
+    } else if (targetEl.value === 'off' || targetEl.value === 'db') {
+      checkEl.checked = false;
+    }
+  } else if (source === 'checkbox') {
+    if (checkEl.checked && targetEl.value !== 'files') {
+      targetEl.value = 'files';
+    } else if (!checkEl.checked && targetEl.value === 'files') {
+      targetEl.value = 'db';
+    }
+  }
+}
+
+function syncConversionControls(source) {
+  const enabledEl = document.getElementById('downloads_conversion_enabled');
+  const modeEl = document.getElementById('downloads_conversion_mode');
+  const groupEl = document.getElementById('conversionOptionsGroup');
+  if (!enabledEl || !modeEl) return;
+  if (source === 'switch') {
+    if (enabledEl.checked && modeEl.value === 'none') {
+      modeEl.value = 'flac_to_mp3';
+    }
+  } else if (source === 'mode') {
+    if (modeEl.value === 'none') {
+      enabledEl.checked = false;
+    } else {
+      enabledEl.checked = true;
+    }
+  }
+  if (groupEl) {
+    groupEl.style.opacity = enabledEl.checked ? '1' : '0.55';
+  }
+}
+
+function toggleGenreEngineMode() {
+  const enabledEl = document.getElementById('genre_selection_enabled');
+  const isCanonical = !enabledEl || enabledEl.checked;
+  const badgeEl = document.getElementById('legacyGenreEngineStatusBadge');
+  const canonicalBody = document.getElementById('canonicalGenreEngineFields');
+  const legacyDetails = document.getElementById('legacyGenreWeightsDetails');
+  if (badgeEl) {
+    badgeEl.className = isCanonical ? 'badge bg-secondary ms-2' : 'badge bg-success ms-2';
+    badgeEl.textContent = isCanonical ? 'Fallback Only (Canonical Engine Active)' : 'Active Engine';
+  }
+  if (canonicalBody) {
+    canonicalBody.style.opacity = isCanonical ? '1' : '0.55';
+  }
+  if (legacyDetails && !isCanonical) {
+    legacyDetails.open = true;
+  }
+}
+
 // ===== GENRE VOCABULARY =====
 
-// The vocabulary is a JSON DATA FILE in the config volume, not part of
-// config.yaml, so it has its own load/save/validate/reset endpoints. A save is
-// refused by the server when the JSON is invalid — a broken vocabulary would
-// silently produce no genres at all during a scan.
 function setGenreVocabStatus(message, kind) {
   const el = document.getElementById('genre_vocab_status');
   if (!el) return;
@@ -2036,7 +1998,6 @@ function validateGenreVocabulary() {
     else ids.add(g.id);
     if (!g.display) problems.push(`genre '${g.id || i}' has no display`);
   });
-  // Parent references need a second pass — a parent may be defined later.
   genres.forEach(g => {
     if (g && g.parent && !ids.has(g.parent)) {
       problems.push(`genre '${g.id}' has parent '${g.parent}', which is not a genre id`);
@@ -2123,8 +2084,6 @@ document.addEventListener('DOMContentLoaded', function() {
     updateFileNameFormatPreview();
   }
   if (document.getElementById('btn-essentia-download')) {
-    // Reflect the Essentia install state on page load (hide/enable the
-    // download button when models are already present).
     pollEssentiaDownloadStatus();
   }
   const healPreview = document.getElementById('downloads_heal_preview');
@@ -2134,8 +2093,6 @@ document.addEventListener('DOMContentLoaded', function() {
   const ssPrepare = document.getElementById('safe_shutdown_prepare');
   if (ssPrepare) {
     ssPrepare.addEventListener('click', prepareSafeShutdown);
-    // Reflect the CURRENT quiesced state on load — landing on the page and
-    // seeing a stale "not checked" box would hide that the app is dormant.
     getSafeShutdownStatus();
   }
   const ssCancel = document.getElementById('safe_shutdown_cancel');
@@ -2156,5 +2113,7 @@ document.addEventListener('DOMContentLoaded', function() {
   if (document.getElementById('excludedArtistsList')) {
     loadExcludedArtists();
   }
+  syncConversionControls('init');
+  toggleGenreEngineMode();
   getRetrySchedulerStatus();
 });

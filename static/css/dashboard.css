@@ -1,26 +1,28 @@
 /* ==========================================================================
    Dashboard Page Styles
+   Loaded after popularr.css on the dashboard route only.
    ========================================================================== */
 
 /* ── Upcoming Releases Source Chips ──────────────────────────────────────── */
 .upcoming-source-chip {
     font-size: 0.70rem;
     padding: 0.15rem 0.4rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     font-weight: 600;
     display: inline-flex;
     align-items: center;
     gap: 0.2rem;
-}
-.upcoming-source-musicbrainz {
-    background: rgba(240, 106, 52, 0.2);
-    color: #ff9e73;
-    border: 1px solid rgba(240, 106, 52, 0.45);
-}
-.upcoming-source-wikipedia {
-    background: rgba(120, 135, 160, 0.2);
-    color: #c7d2e6;
-    border: 1px solid rgba(120, 135, 160, 0.45);
+
+    &.upcoming-source-musicbrainz {
+        background: color-mix(in srgb, var(--brand-musicbrainz) 20%, transparent);
+        color: color-mix(in srgb, var(--brand-musicbrainz) 80%, white);
+        border: 1px solid color-mix(in srgb, var(--brand-musicbrainz) 45%, transparent);
+    }
+    &.upcoming-source-wikipedia {
+        background: color-mix(in srgb, var(--brand-wikipedia) 20%, transparent);
+        color: color-mix(in srgb, var(--brand-wikipedia) 80%, white);
+        border: 1px solid color-mix(in srgb, var(--brand-wikipedia) 45%, transparent);
+    }
 }
 
 /* ── Library Stats Tiles (Right Rail) ────────────────────────────────────── */
@@ -28,65 +30,70 @@
     font-size: 1.15rem;
     font-weight: 700;
     line-height: 1.1;
-    color: var(--text-primary, #e8e8e8);
+    color: var(--text-primary);
 }
 .stat-tile-label {
     font-size: 0.68rem;
     text-transform: uppercase;
     letter-spacing: 0.4px;
-    color: var(--text-muted, #9aa0a6);
+    color: var(--text-muted);
     margin-top: 0.15rem;
 }
 
-/* ── Desktop (xl) Viewport-Fill Layout ───────────────────────────────────────
-   On big screens the dashboard row stretches to fill the space between
-   the navbar and the footer stack. The tables scroll INSIDE their cards.
-
-   NOTE ON --navbar-height: the fallback here used to be 112px while
-   popularr.css declared the token as 68px and base.html hard-coded 6rem
-   (96px) inline — three different numbers describing one measurement.
-   Because this rule only ever applies at >=1200px, where the navbar does
-   NOT wrap, a 112px fallback overshot by 44px and left a dead band under
-   the navbar.  The fallback is now 68px to match the token's desktop
-   value, so the var and its fallback can never disagree.  popularr.css
-   owns the responsive values; nothing here should redefine them.
-   ------------------------------------------------------------------------ */
+/* ── Desktop (xl) Viewport-Fill Layout ───────────────────────────────────── */
 @media (min-width: 1200px) {
     #dashboardRow {
-        min-height: calc(100vh - var(--navbar-height, 68px) - var(--footer-stack-height, 2.4rem) - 5.2rem);
-        min-height: calc(100dvh - var(--navbar-height, 68px) - var(--footer-stack-height, 2.4rem) - 5.2rem);
+        min-height: calc(100dvh - var(--navbar-height) - var(--footer-stack-height) - 5.2rem);
         align-items: stretch !important;
+
+        > [class*="col-"] {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        > .col-12.col-lg-7.col-xl-8 > .card:last-child {
+            flex: 1 1 auto;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
     }
-    #dashboardRow > [class*="col-"] {
-        display: flex;
-        flex-direction: column;
-        min-height: 0;
-    }
-    #scannerControlsCard {
-        flex-shrink: 0;
-    }
-    /* Upcoming card stretches to fill the left column */
-    #dashboardRow > .col-12.col-lg-7.col-xl-8 > .card:last-child {
-        flex: 1 1 auto;
-        display: flex;
-        flex-direction: column;
-        min-height: 0;
-    }
+
+    #scannerControlsCard { flex-shrink: 0; }
+
     #upcomingTableWrap {
         flex: 1 1 auto;
         min-height: 120px;
         height: auto !important;
     }
-    /* Recent Scans grows to fill the right rail */
-    #recentScansCard {
+
+    #recentHistoryCard {
         flex: 1 1 auto;
         display: flex;
         flex-direction: column;
         min-height: 0;
-    }
-    #recentScansCard .card-body {
-        flex: 1 1 auto;
-        max-height: none !important;
+
+        > .tab-content {
+            flex: 1 1 auto;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        > .tab-content > .tab-pane.active {
+            flex: 1 1 auto;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        > .tab-content > .tab-pane.active > .list-group,
+        > .tab-content > .tab-pane.active > .card-body {
+            flex: 1 1 auto;
+            min-height: 0;
+            max-height: none !important;
+        }
     }
 }
 
@@ -97,70 +104,268 @@
     padding: 0.5rem 0.75rem !important;
     margin-bottom: 0.4rem !important;
     font-size: 0.85rem;
-    border-radius: 0.5rem;
-}
-.upcoming-card .upcoming-card-title {
-    font-size: 0.85rem;
-    line-height: 1.3;
-}
-.upcoming-card .upcoming-card-album {
-    font-size: 0.75rem;
-    line-height: 1.3;
-}
-.upcoming-card .min-w-0 {
-    min-width: 0;
-}
-.upcoming-card .upcoming-source-chip {
-    font-size: 0.65rem;
-    flex-shrink: 0;
-}
-/* Single-line date + badges row */
-.upcoming-card .upcoming-card-meta {
-    flex-wrap: nowrap;
-    min-width: 0;
-    font-size: 0.72rem;
-    gap: 0.35rem;
-}
-.upcoming-card .upcoming-card-meta > .text-truncate {
-    min-width: 0;
-    flex-shrink: 1;
-}
-.upcoming-card .upcoming-card-meta .badge {
-    flex-shrink: 0;
-    font-size: 0.72em;
-    padding: 0.3em 0.5em;
-}
-/* Square 32px touch targets for card actions */
-.upcoming-card .btn {
-    min-width: 32px;
-    min-height: 32px;
-}
+    border-radius: var(--radius-card);
 
-/* Cover-art thumbnail (local /api/album art when owned, Cover Art Archive when
-   MusicBrainz-matched).  The BASE rule is injected by js/upcoming_releases.js,
-   not declared here: this stylesheet is linked by the dashboard only, while the
-   service renders rows on three pages, and the other two were left emitting an
-   unsized full-size image.  Only the dashboard's own card variant lives here.
-   The element removes itself on error, so a release group with no art in the
-   archive degrades to plain text instead of a broken-image glyph. */
-.upcoming-thumb-card {
-    width: 2.4em;
-    height: 2.4em;
-    margin-right: 0;
-    flex-shrink: 0;
+    .upcoming-card-title { font-size: 0.85rem; line-height: 1.3; }
+    .upcoming-card-album { font-size: 0.75rem; line-height: 1.3; }
+    .min-w-0 { min-width: 0; }
+    .upcoming-source-chip { font-size: 0.65rem; flex-shrink: 0; }
+
+    .upcoming-card-meta {
+        flex-wrap: nowrap;
+        min-width: 0;
+        font-size: 0.72rem;
+        gap: 0.35rem;
+
+        > .text-truncate { min-width: 0; flex-shrink: 1; }
+        .badge { flex-shrink: 0; font-size: 0.72em; padding: 0.3em 0.5em; }
+    }
+
+    .btn { min-width: 32px; min-height: 32px; }
 }
 
 /* ── Mobile Layout Fixes ─────────────────────────────────────────────────── */
 @media (max-width: 575.98px) {
-    /* 44px+ touch targets for the scanning-log toolbar */
     .log-toolbar {
         flex-wrap: wrap;
+
+        .btn {
+            min-height: 44px;
+            min-width: 44px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
     }
-    .log-toolbar .btn {
-        min-height: 44px;
-        min-width: 44px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
+}
+
+/* ==========================================================================
+   MOBILE REDESIGN — Library bento, slim scanner, releases carousel
+   ========================================================================== */
+.library-bento {
+    display: flex;
+    align-items: stretch;
+    background: var(--tertiary-bg, #282828);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-control);
+    overflow: hidden;
+}
+
+.library-bento-item {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.05rem;
+    padding: 0.4rem 0.25rem;
+    text-align: center;
+    border-left: 1px solid var(--border-color);
+
+    &:first-child { border-left: 0; }
+}
+
+.library-bento-value {
+    font-size: 1.1rem;
+    font-weight: 700;
+    line-height: 1.15;
+    color: var(--text-primary);
+}
+
+.library-bento-label {
+    font-size: 0.6rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+@media (max-width: 575.98px) {
+    #libraryStatsCard > .card-header {
+        padding-top: 0.3rem;
+        padding-bottom: 0.3rem;
+
+        h6 { font-size: 0.78rem; }
     }
+
+    #libraryStatsCard > .card-body { padding: 0.4rem !important; }
+    .library-bento-value { font-size: 1rem; }
+}
+
+.scanner-mode-tabs {
+    margin-bottom: 0.5rem !important;
+
+    .nav-link {
+        padding-top: 0.2rem;
+        padding-bottom: 0.2rem;
+        font-size: 0.82rem;
+    }
+}
+
+#scannerControlsCard .card-body { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+
+.scanner-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 52px;
+    padding: 0.25rem 0.75rem;
+    border-radius: calc(var(--radius-card, 8px) - 1px);
+}
+
+.scanner-bar-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-weight: 600;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.scanner-progress {
+    padding: 0 0.75rem 0.75rem;
+    border-top: 1px solid var(--border-color);
+    padding-top: 0.75rem;
+}
+
+.scan-toolbar { row-gap: 0.4rem; }
+
+#scannerControlsCard .scan-mode-key { margin-top: 0.35rem !important; }
+#scannerControlsCard .scan-mode-key > summary { font-size: 0.72rem; }
+
+.ur-carousel {
+    display: flex;
+    gap: 0.6rem;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    padding: 0.15rem 0.15rem 0.5rem;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar { display: none; }
+}
+
+.ur-card {
+    flex: 0 0 auto;
+    width: 62%;
+    max-width: 230px;
+    scroll-snap-align: start;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.5rem;
+    background: var(--secondary-bg);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-card);
+}
+
+.ur-card-art {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    border-radius: var(--radius-control);
+    overflow: hidden;
+    background: var(--tertiary-bg, #282828);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    img { width: 100%; height: 100%; object-fit: cover; }
+    .ur-card-flag {
+        position: absolute;
+        top: 0.3rem;
+        left: 0.3rem;
+        font-size: 0.62rem;
+        backdrop-filter: blur(4px);
+    }
+}
+
+.ur-card-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    line-height: 1.25;
+    color: var(--text-primary);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.ur-card-artist {
+    font-size: 0.75rem;
+    line-height: 1.2;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ur-card-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex-wrap: nowrap;
+    min-width: 0;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+
+    > .ur-card-date { flex-shrink: 0; }
+}
+
+.ur-card-actions {
+    margin-top: auto;
+    display: flex;
+    gap: 0.3rem;
+
+    .btn { flex: 1 1 auto; font-size: 0.75rem; padding: 0.25rem 0.4rem; }
+}
+
+.ur-card-quick {
+    position: absolute;
+    right: 0.35rem;
+    bottom: 0.35rem;
+    width: 34px;
+    height: 34px;
+    min-height: 0;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    font-size: 1rem;
+    box-shadow: 0 0 0 2px var(--secondary-bg), 0 2px 6px rgba(0, 0, 0, 0.45);
+}
+
+.ur-card-quick:hover,
+.ur-card-quick:focus-visible {
+    box-shadow: 0 0 0 2px var(--spotify-green, #1ed760), 0 2px 8px rgba(0, 0, 0, 0.55);
+}
+
+@media (min-width: 992px) {
+    .ur-card { width: 180px; }
+}
+
+#recentHistoryTabs {
+    .nav-link {
+        padding: 0.15rem 0.5rem;
+        font-size: 0.8rem;
+        white-space: nowrap;
+    }
+}
+
+@media (max-width: 575.98px) {
+    #recentHistoryTabs .nav-link {
+        padding: 0.15rem 0.4rem;
+        font-size: 0.74rem;
+
+        i { display: none; }
+    }
+
+    #recentHistoryHint { font-size: 0.68rem; }
 }

@@ -291,6 +291,14 @@
 }
 .queue-toast .queue-toast-close { cursor: pointer; opacity: 0.7; }
 .queue-toast .queue-toast-close:hover { opacity: 1; }
+@media (max-width: 991.98px) {
+  .queue-toast {
+    bottom: calc(var(--bottom-nav-height, 3.5rem) + env(safe-area-inset-bottom, 0px) + 0.75rem);
+  }
+  body.player-visible .queue-toast {
+    bottom: calc(var(--bottom-nav-height, 3.5rem) + var(--player-bar-height, 4.25rem) + env(safe-area-inset-bottom, 0px) + 0.75rem);
+  }
+}
 
 /* ── Quick Queue button ──────────────────────────────────────────────────────
    Also used by templates/components/_album_category_section.html.
@@ -434,6 +442,7 @@
   /* One scrolling row instead of wrapping into three lines of chips. */
   .release-jump-bar { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 0.25rem; }
   .release-section-controls { width: 100%; }
+  .release-filter-group { overflow-x: auto; flex-wrap: nowrap; max-width: 100%; }
 }
 
 /* ── Release jump bar: a fade so a clipped chip is discoverable ────────────
