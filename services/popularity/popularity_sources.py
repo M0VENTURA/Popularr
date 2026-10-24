@@ -1,24 +1,25 @@
-"""Popularity provider source wrappers.
+# Rebuilt provider wrappers, revision 2.
+# Exported under a distinct filename to distinguish this replacement.
+"""Popularity provider acquisition and conservative recording matching.
 
-This module performs provider data acquisition and light provider-specific
-normalization. It should not decide star ratings or single status.
+This module does not decide star ratings or single status. Release recording
+identity is preserved: a remaster label or a later release date is not evidence
+that a recording MBID should be replaced by one from an earlier edition.
+
+Aggregated user/listener counts are sums of provider buckets, NOT deduplicated
+people. Public function names and existing positional arguments are preserved.
+New optional alternate-rendition arguments are appended for compatibility.
 """
-
 from __future__ import annotations
 
+import math
 import re
 import threading
+import time
 from collections import Counter
-from typing import Any
+from typing import Any, TypedDict
 
 import structlog
-
-try:  # C-speed fuzzy matching -- see _token_similarity
-    from rapidfuzz import fuzz as _fuzz  # type: ignore[import-untyped]
-    _HAVE_RAPIDFUZZ = True
-except ImportError:  # pragma: no cover -- stdlib fallback keeps matching working
-    from difflib import SequenceMatcher as _difflib_matcher
-    _HAVE_RAPIDFUZZ = False
 
 from api_clients.lastfm import LastFmClient
 from api_clients.listenbrainz import (
@@ -32,8 +33,6 @@ from helpers.normalization_service import (
     strip_cover_attribution,
     strip_diacritics,
     strip_featured_artist,
-    strip_remaster_qualifier,
-    has_remaster_marker,
     REMASTER_MARKER_RE,
     titles_match_for_review,
 )
@@ -48,2084 +47,1129 @@ from services.popularity.popularity_matching import (
 )
 
 logger = structlog.get_logger(__name__)
-
 DEFAULT_LISTENBRAINZ_BATCH_SIZE = 100
-
-# =============================================================================
-# THREAD-SAFE MEMORY CACHES
-# =============================================================================
-
+_CACHE_TTL = 3600.0
+_NEGATIVE_CACHE_TTL = 60.0
+_CACHE_MAX_ENTRIES = 2048
 _CACHE_LOCK = threading.Lock()
-_lastfm_artist_catalog_cache: dict[str, list[dict[str, Any]]] = {}
-_lastfm_artist_max_cache: dict[str, int] = {}
+# Values are (expiry, payload). Network calls never run under _CACHE_LOCK.
+_lastfm_artist_catalog_cache: dict[Any, tuple[float, Any]] = {}
+_lastfm_artist_max_cache: dict[Any, tuple[float, Any]] = {}
+_ONLINE_CATALOGUE_CACHE: dict[Any, tuple[float, Any]] = {}
+_work_recordings_cache: dict[Any, tuple[float, Any]] = {}
+
+
+class AlbumRecordingMatch(TypedDict, total=False):
+    listenbrainz_listens: int
+    listenbrainz_users: int
+    recording_mbid: str | None
+    release_track_title: str
+    local_disc_number: int
+    local_track_number: int
+    length_verified: bool
+    title_is_unique: bool
+    matched_by: str
+
+
+def _cache_get(cache: dict, key: Any) -> Any:
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        item = cache.get(key)
+        if item is None:
+            return None
+        expiry, value = item
+        if expiry <= now:
+            cache.pop(key, None)
+            return None
+        return value
+
+
+def _cache_put(cache: dict, key: Any, value: Any) -> None:
+    ttl = _CACHE_TTL if value else _NEGATIVE_CACHE_TTL
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        if len(cache) >= _CACHE_MAX_ENTRIES:
+            for expired in [k for k, (expiry, _) in cache.items() if expiry <= now]:
+                cache.pop(expired, None)
+            if len(cache) >= _CACHE_MAX_ENTRIES:
+                cache.pop(next(iter(cache)))
+        cache[key] = (now + ttl, value)
+
+
+def clear_provider_memory_caches() -> None:
+    """Clear this module's caches, for example after provider configuration changes."""
+    with _CACHE_LOCK:
+        for cache in (_lastfm_artist_catalog_cache, _lastfm_artist_max_cache,
+                      _ONLINE_CATALOGUE_CACHE, _work_recordings_cache):
+            cache.clear()
+
+
+def _parse_number(value: Any, default: int = 0) -> int:
+    try:
+        return int(str(value if value not in (None, "") else default)
+                   .split("/", 1)[0].strip() or default)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _count(value: Any) -> int:
+    return max(0, _parse_number(value))
+
+
+def _duration(value: Any) -> float:
+    try:
+        result = float(value or 0)
+        return result if math.isfinite(result) and result > 0 else 0.0
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def _length_agreement(local_seconds: Any, release_ms: Any) -> bool | None:
+    local = _duration(local_seconds)
+    remote = _duration(release_ms)
+    if not local or not remote:
+        return None
+    return abs(local * 1000 - remote) <= 5000
+
+
+def _artist_cache_key(value: str) -> str:
+    # Do not strip diacritics here: different artist names must not share a
+    # bucket merely because transliteration makes their spellings identical.
+    return normalize_unicode_punctuation(str(value or "")).casefold().strip()
 
 
 def _token_similarity(a: str, b: str) -> float:
-    """Title similarity on a 0-1 scale (shared ``fuzzy_match_score``)."""
     from services.popularity.popularity_math import fuzzy_match_score
-    return fuzzy_match_score(a, b)
+    return float(fuzzy_match_score(a, b))
+
+
+def _shared_mb(client: Any = None) -> Any:
+    if client is not None:
+        return client
+    try:
+        from services.enrichment.musicbrainz_service import get_shared_mb_client
+        return get_shared_mb_client()
+    except Exception as exc:
+        logger.debug("MusicBrainz client unavailable", error=str(exc))
+        return None
+
+
+def _unique_ids(values: Any) -> list[str]:
+    return list(dict.fromkeys(str(v).strip() for v in values if v and str(v).strip()))
+
+
+def _lb_batch(mbids: Any) -> dict[str, dict[str, Any]]:
+    """Deduplicate, chunk, and retain successful chunks after partial failures."""
+    ids = _unique_ids(mbids)
+    output: dict[str, dict[str, Any]] = {}
+    for index in range(0, len(ids), DEFAULT_LISTENBRAINZ_BATCH_SIZE):
+        chunk = ids[index:index + DEFAULT_LISTENBRAINZ_BATCH_SIZE]
+        try:
+            result = lb_get_recording_popularity_batch(chunk) or {}
+            if isinstance(result, dict):
+                output.update({k: v for k, v in result.items() if isinstance(v, dict)})
+        except Exception as exc:
+            logger.debug("ListenBrainz batch lookup failed", size=len(chunk), error=str(exc))
+    return output
+
+
+def _sum_counts(counts: dict, mbids: Any) -> tuple[int, int]:
+    entries = [counts.get(mbid) or {} for mbid in _unique_ids(mbids)]
+    return (sum(_count(e.get("total_listen_count")) for e in entries),
+            sum(_count(e.get("total_user_count")) for e in entries))
 
 
 _FEATURED_ARTIST_RE = re.compile(
-    r"^(.*?)\s+(?:feat\.?|ft\.?|featuring)\s+(.*)$",
-    re.IGNORECASE,
+    r"^(.*?)\s+(?:feat\.?|ft\.?|featuring)\s+(.*)$", re.IGNORECASE,
 )
 
 
 def invert_featured_artist(artist_name: str) -> str:
-    """Swap a "Primary feat. Guest" credit to "Guest feat. Primary"."""
     match = _FEATURED_ARTIST_RE.match(artist_name or "")
     if not match:
         return artist_name or ""
-    primary, featured = match.group(1).strip(), match.group(2).strip()
-    if not primary or not featured:
-        return artist_name
-    return f"{featured} feat. {primary}"
+    primary, featured = (part.strip() for part in match.groups())
+    return f"{featured} feat. {primary}" if primary and featured else artist_name
 
 
 def _is_featured_artist(artist_name: str) -> bool:
     return bool(_FEATURED_ARTIST_RE.match(artist_name or ""))
 
 
+# Restrict markers to version annotations, not arbitrary words in song titles.
+_ANNOTATION_RE = re.compile(r"[\[(]([^\])]+)[\])]|\s+[-\u2013\u2014]\s+(.+)$")
+_PERFORMANCE_PATTERNS = {
+    "live": r"\blive\b",
+    "acoustic": r"\b(?:acoustic|unplugged|stripped)\b",
+    "orchestral": r"\b(?:orchestral|orchestra|symphonic)\b",
+    "demo": r"\bdemo\b",
+    "instrumental": r"\binstrumental\b",
+    "karaoke": r"\bkaraoke\b",
+    "remix": r"\b(?:remix|club mix|extended mix|dub mix)\b",
+    "edit": r"\b(?:radio edit|single edit|extended edit|edit)\b",
+    "alternate": r"\b(?:alternate|alternative take|alt|take)\b",
+    "session": r"\b(?:session|rehearsal|jam[- ]along)\b",
+    "rerecording": r"\bre[- ]?record(?:ed|ing)\b",
+    "piano": r"\bpiano version\b",
+}
+_PERFORMANCE_RES = {key: re.compile(value, re.I)
+                    for key, value in _PERFORMANCE_PATTERNS.items()}
 _ALTERNATE_PERFORMANCE_RE = re.compile(
-    # Both bracket styles: parentheses are what Last.fm/ListenBrainz titles
-    # normally use, but MusicBrainz's own release tracklists use SQUARE
-    # brackets ("Farewell [Unplugged Version]"). Matching only parentheses
-    # meant a release title taken straight from MusicBrainz never registered as
-    # an alternate performance, so a plainly titled unplugged track could still
-    # merge with its identically titled studio namesake.
-    r"[([][^)\]]*\b(?:live|unplugged|acoustic|orchestral|symphonic|demo|instrumental|"
-    r"karaoke|remix|alternate|alt|take|session|rehearsal|jam[- ]along)\b[^)\]]*[)\]]"
-    r"|\s+-\s*(?:live|unplugged|acoustic|orchestral|symphonic|demo|instrumental|"
-    r"karaoke|remix|alternate|alt|take|session|rehearsal|jam[- ]along)\s*$",
-    re.IGNORECASE,
+    r"[\[(][^\])]*\b(?:live|unplugged|acoustic|orchestral|symphonic|demo|"
+    r"instrumental|karaoke|remix|alternate|alt|take|session|rehearsal|jam[- ]along)"
+    r"\b[^\])]*[\])]|\s+-\s*(?:live|unplugged|acoustic|orchestral|symphonic|"
+    r"demo|instrumental|karaoke|remix|alternate|alt|take|session|rehearsal|jam[- ]along)\s*$",
+    re.I,
 )
+
+
+def _performance_types(title: str) -> frozenset[str]:
+    annotations = " ".join((m.group(1) or m.group(2) or "")
+                           for m in _ANNOTATION_RE.finditer(str(title or "")))
+    return frozenset(key for key, pattern in _PERFORMANCE_RES.items()
+                     if pattern.search(annotations))
 
 
 def _is_alternate_performance_title(rec_title: str) -> bool:
-    return bool(_ALTERNATE_PERFORMANCE_RE.search(rec_title or ""))
+    return bool(_performance_types(rec_title))
 
 
 def _alt_status_matches(target_title: str, candidate_title: str) -> bool:
-    """True only if target and candidate agree on being a live/remix/alternate
-    performance (or agree on *not* being one).
-
-    Without this check, popularity data for a plain studio release can get
-    inflated by summing in live/remix/alternate recordings, and conversely a
-    live/remix/alternate track can silently inherit the original studio
-    release's popularity numbers because a fuzzy/normalized title match
-    doesn't distinguish "Song" from "Song (Live)" / "Song (Remix)".
-
-    IMPORTANT: this is a TITLE-ONLY test. Live releases routinely ship plainly
-    titled tracks -- every track on Metallica's "S&M" is titled exactly as its
-    studio original -- so on those releases this returns True for the studio
-    recording and lets its listener count merge in. Prefer
-    ``_alt_status_matches_ctx`` and pass the release-level liveness whenever
-    the caller knows it.
-    """
-    return _is_alternate_performance_title(target_title) == _is_alternate_performance_title(candidate_title)
+    return _alt_status_matches_ctx(target_title, candidate_title)
 
 
 def _alt_status_matches_ctx(
-    target_title: str,
-    candidate_title: str,
-    *,
-    target_is_live: bool = False,
+    target_title: str, candidate_title: str, *, target_is_live: bool = False,
+    target_is_alt_rendition: bool = False,
 ) -> bool:
-    """Alt-performance agreement with RELEASE-level liveness folded in.
-
-    Liveness is a property of the RELEASE, not necessarily of the title. When
-    ``target_is_live`` is set, the target is treated as an alternate
-    performance regardless of how it is titled, so a plainly titled live track
-    no longer matches -- and no longer absorbs the listener count of -- the
-    identically titled studio recording.
-    """
-    target_alt = _is_alternate_performance_title(target_title) or bool(target_is_live)
-    return target_alt == _is_alternate_performance_title(candidate_title)
-
-
-def resolve_isrc_recording(
-    isrc: str,
-    *,
-    mb_client: Any = None,
-    title: str = "",
-    artist: str = "",
-    is_live_release: bool = False,
-) -> dict[str, str | None] | None:
-    """Resolve an ISRC to its MusicBrainz recording (MBID + title + artist)."""
-    isrc = str(isrc or "").strip()
-    if not isrc:
-        return None
-
-    if isrc.startswith("[") and isrc.endswith("]"):
-        from helpers.normalization_service import normalize_isrc
-        isrc = normalize_isrc(isrc)
-        import re as _re
-        if not _re.fullmatch(r"[A-Z]{2}[0-9A-Z]{3}[0-9]{7}", isrc):
-            return None
-
-    try:
-        if mb_client is None:
-            from services.enrichment.musicbrainz_service import get_shared_mb_client
-            mb_client = get_shared_mb_client()
-
-        recordings = mb_client.lookup_by_isrc(isrc) or []
-        if not recordings:
-            return None
-
-        if not title and not artist:
-            first = recordings[0]
-            return {
-                "recording_mbid": str(first.get("id") or "").strip() or None,
-                "title": str(first.get("title") or "").strip(),
-                "artist": _first_credit_name(first),
-            }
-
-        target_title = normalize_for_aggregation(title)
-        target_artist = str(artist or "").casefold().strip()
-        best = None
-        best_score = 0.0
-
-        for rec in recordings:
-            rec_title_raw = str(rec.get("title") or "")
-            # Don't let a live/remix/alternate recording win the match for a
-            # studio-title lookup, or vice versa.
-            if title and not _alt_status_matches_ctx(
-                title, rec_title_raw, target_is_live=is_live_release
-            ):
-                continue
-
-            rec_title = normalize_for_aggregation(rec_title_raw)
-            rec_artist = str(_first_credit_name(rec) or "").casefold().strip()
-            score = _token_similarity(target_title, rec_title)
-
-            if target_artist and rec_artist:
-                artist_hit = (
-                    target_artist == rec_artist
-                    or target_artist == get_primary_artist_preserve_case(rec_artist).casefold()
-                )
-                score = score * 0.7 + (1.0 if artist_hit else 0.0) * 0.3
-
-            if score > best_score:
-                best_score = score
-                best = rec
-
-        if best is None:
-            return None
-
-        return {
-            "recording_mbid": str(best.get("id") or "").strip() or None,
-            "title": str(best.get("title") or "").strip(),
-            "artist": _first_credit_name(best),
-        }
-    except Exception as exc:
-        logger.debug("ISRC lookup failed", isrc=isrc, error=str(exc))
-        return None
+    target = set(_performance_types(target_title))
+    candidate = set(_performance_types(candidate_title))
+    if target_is_live:
+        target.add("live")
+    if target:
+        return target == candidate
+    if target_is_alt_rendition:
+        # A boolean says the version is alternate, but not WHICH alternate.
+        # Refuse speculative aggregation until a version-bearing title is supplied.
+        return False
+    return not candidate
 
 
-def _first_credit_name(recording: dict[str, Any]) -> str:
-    """Primary artist name from a recording's artist-credit."""
-    credits = recording.get("artist-credit") or []
-    for credit in credits:
-        if isinstance(credit, dict):
-            name = credit.get("name") or ""
-            if name:
-                return str(name)
-        elif credit:
-            return str(credit)
-    return ""
+def _recording_title(recording: dict[str, Any]) -> str:
+    """Include recording disambiguation, where MB can store live information."""
+    title = str(recording.get("title") or "").strip()
+    comment = str(recording.get("disambiguation") or "").strip()
+    return f"{title} ({comment})" if comment else title
 
 
-def extract_recording_mbid(track: dict[str, Any]) -> str | None:
-    return track.get("recording_mbid") or track.get("musicbrainz_recording_mbid") or track.get("mbid")
-
-
-def get_listenbrainz_batch_for_tracks(tracks: list[dict[str, Any]]) -> dict[str, dict[str, int | None]]:
-    mbids = [extract_recording_mbid(track) for track in tracks]
-    mbids = [mbid for mbid in mbids if mbid]
-    output: dict[str, dict[str, int | None]] = {}
-
-    for index in range(0, len(mbids), DEFAULT_LISTENBRAINZ_BATCH_SIZE):
-        chunk = mbids[index:index + DEFAULT_LISTENBRAINZ_BATCH_SIZE]
-        try:
-            output.update(lb_get_recording_popularity_batch(chunk))
-        except Exception as exc:
-            logger.debug("ListenBrainz batch lookup failed", error=str(exc))
-    return output
-
-
-def _resolve_release_mbid(artist: str, album: str, tracks: list[dict[str, Any]]) -> str:
-    for t in tracks:
-        mbid = str(t.get("musicbrainz_albumid") or t.get("musicbrainz_album_mbid") or "").strip()
-        if mbid:
-            return mbid
-
-    try:
-        from api_clients.musicbrainz_http import escape_lucene_special_chars
-        from services.enrichment.musicbrainz_service import get_shared_mb_client
-        client = get_shared_mb_client()
-        query = (
-            f'artist:"{escape_lucene_special_chars(artist)}" '
-            f'AND release:"{escape_lucene_special_chars(album)}"'
-        )
-        releases = client.search_releases(query, limit=5) or []
-        artist_norm = _normalize_artist(artist)
-        best_mbid = ""
-        best_score = 0.0
-
-        for rel in releases:
-            if not isinstance(rel, dict):
-                continue
-            title = str(rel.get("title") or "").strip()
-            credits = rel.get("artist-credit") or []
-            names = []
-
-            for credit in credits:
-                if isinstance(credit, dict):
-                    art = credit.get("artist") or {}
-                    names.append(art.get("name") or credit.get("name") or "")
-
-            if names and not any(_normalize_artist(n) == artist_norm for n in names):
-                continue
-
-            score = _token_similarity(title.lower(), album.lower())
-            if score > best_score:
-                best_score = score
-                best_mbid = str(rel.get("id") or "").strip()
-
-        if best_mbid and best_score >= 0.8:
-            logger.debug("Resolved release via MB search", artist=artist, album=album, release_mbid=best_mbid)
-            return best_mbid
-
-    except Exception as exc:
-        logger.debug("Release search failed", artist=artist, album=album, error=str(exc))
-    return ""
-
-
-def _normalize_artist(name: str) -> str:
-    return get_primary_artist_preserve_case(name).casefold().strip()
-
-
-def track_identity_key(local_title_key: str, disc: Any = None, position: Any = None) -> str:
-    """Position-qualified alias for a title-keyed album-tracklist entry.
-
-    A normalised TITLE cannot identify a row: dArtagnan's "Helden X Hymnen"
-    files both the album's title track AND its "(Unplugged Version)" rendition
-    under the same title "Helden X Hymnen", and those are two different
-    recordings on the release (positions 1 and 15). Keyed by title alone the
-    loop collapsed them onto whichever row it reached last, so one of the two
-    ended up with the other's recording — the reported "both rows report the
-    same score" duplication.
-
-    The release's own tracklist settles it by POSITION, so the position-matched
-    identity is also published under this alias while the plain title key keeps
-    its existing meaning for every current consumer.
-    """
-    try:
-        disc_i = int(str(disc if disc not in (None, "") else 1).split("/")[0].strip() or 1)
-    except (TypeError, ValueError):
-        disc_i = 1
-    try:
-        pos_i = int(str(position or "").split("/")[0].strip() or 0)
-    except (TypeError, ValueError):
-        pos_i = 0
-    if pos_i <= 0:
-        return str(local_title_key or "")
-    return f"{local_title_key}#{disc_i}:{pos_i}"
-
-
-def album_recording_batch_key(
-    artist: str,
-    title: str,
-    disc: Any = None,
-    track_number: Any = None,
-) -> str:
-    """Key for the per-album recording-identity batch ``track_stage`` consumes.
-
-    ``"<artist>::<title>"`` is the legacy title-only form; appending
-    ``"::<disc>::<track>"`` makes the key ROW-specific, which is what keeps two
-    same-titled rows of one album apart (see ``track_identity_key``). Both the
-    producer (``scan_stage_runner._build_album_recording_batch``) and the
-    consumer (``track_stage._resolve_track_mb_metadata``) build it through this
-    one function so the two formats cannot drift apart.
-    """
-    base = f"{str(artist or '').strip().lower()}::{str(title or '').strip().lower()}"
-    try:
-        disc_i = int(str(disc if disc not in (None, "") else 1).split("/")[0].strip() or 1)
-    except (TypeError, ValueError):
-        disc_i = 1
-    try:
-        track_i = int(str(track_number or "").split("/")[0].strip() or 0)
-    except (TypeError, ValueError):
-        track_i = 0
-    if track_i <= 0:
-        return base
-    return f"{base}::{disc_i}::{track_i}"
-
-
-#: Join words inside an artist credit ("A feat. B", "A & B", "A with B").
-#: They say "another artist is here", not WHO that artist is, so they are
-#: removed before two credits are compared.
-_CREDIT_JOIN_TOKENS = frozenset({
-    "feat", "feats", "featured", "featuring", "ft", "with", "vs", "versus",
-    "and", "the", "x",
-})
-
-#: Separators between the artists of one credit. ``ARTIST_JOIN_RE`` (the
-#: provider-lookup splitter) covers "&/and/x/+/×"; MusicBrainz also joins
-#: credits with commas and the "feat." family, and those spellings must
-#: compare EQUAL ("Electric Callboy feat. Sasha" == "Electric Callboy, Sasha").
 _CREDIT_SPLIT_RE = re.compile(
-    r"\s*(?:,|&|/|\+|×|\band\b|\bwith\b|\bvs\.?\b|\bversus\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b)\s*",
-    re.IGNORECASE,
+    r"\s*(?:,|&|/|\+|\u00d7|\band\b|\bwith\b|\bvs\b\.?|\bversus\b|"
+    r"\bfeat(?:uring)?\b\.?|\bft\b\.?)\s*", re.I,
 )
+_CREDIT_JOIN_TOKENS = frozenset({"feat", "feats", "featured", "featuring", "ft",
+                                  "with", "vs", "versus", "and"})
 
 
 def _resolve_credit_alias(part: str) -> str:
-    """Resolve one credit part through the artist-alias map; NEVER raise.
-
-    A credit under a band's FORMER name ("Eskimo Callboy") and the current
-    one ("Electric Callboy") are the same artist, and the alias map is where
-    the app records that. Failures degrade to the input, so a broken alias
-    map can only cost a match, never break the scan.
-    """
     if not part:
         return part
     try:
         from services.metadata.artist_alias_service import resolve_artist_alias
-
-        return resolve_artist_alias(part) or part
+        return str(resolve_artist_alias(part) or part)
     except Exception:
         return part
 
 
-def _release_credit_text(track: dict[str, Any]) -> str:
-    """The release row's artist credit as ONE display string.
-
-    MusicBrainz/LB spell a multi-artist credit as a list of names plus
-    ``joinphrase`` separators, so joining them reproduces exactly what the
-    release shows: "Electric Callboy, Saltatio Mortis".
-    """
-    parts: list[str] = []
-    for credit in track.get("artist-credit") or []:
-        if not isinstance(credit, dict):
-            continue
-        name = str(credit.get("name") or "").strip()
-        if not name:
-            artist = credit.get("artist")
-            if isinstance(artist, dict):
-                name = str(artist.get("name") or "").strip()
-        if name:
-            parts.append(name + str(credit.get("joinphrase") or ""))
-    return "".join(parts).strip()
-
-
 def _credit_identity_tokens(value: str) -> frozenset[str]:
-    """Identity tokens of an artist credit, alias-resolved.
-
-    Splits a multi-artist credit on its join separators, resolves EVERY part
-    through the artist-alias map (so a credit under a band's former name
-    compares equal to the current one), then drops the join words.
-
-    Two credits name the same artists exactly when their token sets are
-    EQUAL. ``names_match``'s subset logic is deliberately NOT used here:
-    "Electric Callboy" IS a subset of "Electric Callboy, Saltatio Mortis",
-    and treating those as the same artist is precisely the ambiguity the
-    artist pass exists to resolve.
-    """
+    # Preserve Unicode and single-character names. Do not drop 'the' or 'x'.
     tokens: set[str] = set()
     for part in _CREDIT_SPLIT_RE.split(str(value or "")):
-        part = _resolve_credit_alias(part.strip())
-        if not part:
-            continue
-        for token in re.split(r"[^0-9a-z]+", part.casefold()):
-            if len(token) > 1 and token not in _CREDIT_JOIN_TOKENS:
-                tokens.add(token)
+        part = normalize_unicode_punctuation(_resolve_credit_alias(part.strip()))
+        tokens.update(token for token in re.findall(r"[^\W_]+", part.casefold())
+                      if token not in _CREDIT_JOIN_TOKENS)
     return frozenset(tokens)
 
 
-def _index_release_tracklist(
-    media: list[Any],
-    titles_to_mbids: dict[str, dict[str, Any]],
-    position_index: dict[tuple[int, int], dict[str, Any]],
-    recording_mbids: list[str],
-) -> None:
-    for medium in media:
-        if not isinstance(medium, dict):
-            continue
-        disc = medium.get("position")
-
-        for trk in medium.get("tracks") or []:
-            if not isinstance(trk, dict):
-                continue
-            title = str(trk.get("title") or "").strip()
-            if not title:
-                continue
-
-            rec = trk.get("recording") or {}
-            rec_mbid = str(rec.get("id") or trk.get("recording_mbid") or "").strip()
-            key = normalize_for_aggregation(title)
-            credit = _release_credit_text(trk)
-
-            try:
-                pos = int(trk.get("position") or trk.get("number") or 0)
-            except (TypeError, ValueError):
-                pos = 0
-
-            try:
-                disc_i = int(disc) if disc not in (None, "") else 1
-            except (TypeError, ValueError):
-                disc_i = 1
-
-            entry = titles_to_mbids.setdefault(key, {
-                "title": title,
-                "mbids": [],
-                "position": trk.get("position") or trk.get("number"),
-                "disc": disc,
-                "length_ms": trk.get("length"),
-            })
-
-            if rec_mbid:
-                entry["mbids"].append(rec_mbid)
-                recording_mbids.append(rec_mbid)
-
-            # Per-ROW detail for a title the release lists more than once.
-            # The artist credit is the release's OWN way of telling those rows
-            # apart — "MMXX - Hypa Hypa Edition" lists eight "Hypa Hypa"
-            # tracks (seven sharing the plain title), separated only by who
-            # performs each one — and the local library carries the
-            # same credit in the track's ``artist`` field, so the two can be
-            # compared directly instead of guessing by position.
-            entry.setdefault("rows", []).append({
-                "title": title,
-                "mbid": rec_mbid,
-                "credit": credit,
-                "length_ms": trk.get("length"),
-                "disc": disc_i,
-                "position": pos,
-            })
-
-            if pos > 0:
-                pos_key = (disc_i, pos)
-                pos_entry = position_index.setdefault(pos_key, {
-                    "key": key,
-                    # The release's OWN title for this position. It is the only
-                    # place a version marker survives when the local file is
-                    # titled plainly ("Farewell [Unplugged Version]" on the
-                    # release vs "Farewell (feat. Patty Gurdy)" in the library).
-                    "title": title,
-                    "length_ms": trk.get("length"),
-                    "mbids": [],
-                })
-                if rec_mbid:
-                    pos_entry["mbids"].append(rec_mbid)
-                if credit:
-                    pos_entry.setdefault("credit", credit)
-
-
-def _position_title_corroborates(local_title: str, release_title: str) -> bool:
-    """Whether the release's title at a position plausibly names the SAME song
-    as the local title.
-
-    The position alias exists for a local title that lost its version marker —
-    dArtagnan's "Farewell (feat. Patty Gurdy)" against the release's
-    "Farewell [Unplugged Version]": the release's title at that position is
-    then the same song with a marker, and the marker-tolerant comparison below
-    (feat. credits stripped, then version/cover annotations ignored) still
-    equates the two ("farewell" == "farewell").
-
-    When the cores are DIFFERENT songs the numbering is a COINCIDENCE, not an
-    identity. A different EDITION of an album (a 46-track single disc against
-    an 80-track local folder) numbers its tracks differently, so local#N is a
-    DIFFERENT song than release#N. Reported: an 80-track "Alternative 90s"
-    folder carried a stored release MBID for the 46-track edition and the
-    position pass aliased local#10 "Where Is My Mind?" to release#10 "Happy"
-    (Ned's Atomic Dustbin), #8 "Song 2" to "What You Do to Me" (Teenage
-    Fanclub) and #18 "Buddy Holly" to "She Know's She's Wrong" (Jellyfish) —
-    three wrong recordings, whose ListenBrainz counts were then scored as the
-    local songs'.
-
-    Deliberately conservative: a cover marker on either side is a DIFFERENT
-    recording (not the same song with a marker), and a title that normalises
-    away to nothing cannot corroborate anything — both fall back to the
-    per-track search rather than silently receiving a stranger's identity.
-    """
-    if not local_title or not release_title:
-        return False
-    _local = strip_featured_artist(str(local_title)) or str(local_title)
-    _release = strip_featured_artist(str(release_title)) or str(release_title)
-    return titles_match_for_review(_local, _release)
-
-
-def _position_alias_allowed(
-    local_title: str,
-    release_title: str | None,
-    *,
-    local_track_count: int,
-    release_track_count: int,
-) -> bool:
-    """Whether a position alias may claim an identity for ``local_title``.
-
-    Two independent paths admit an alias:
-
-    1. **Title corroboration** — the release's title at that position is the
-       SAME song with a marker/feat difference (``_position_title_corroborates``).
-       This is the version-marker case the alias exists for.
-
-    2. **Exact same-album count** — the release holds EXACTLY as many tracks
-       as the local album. That is the translated-title case: the local
-       spelling and the release spelling are genuinely incomparable (Stray
-       Kids' release lists "삐처리" where the library stores the English
-       "BLEEP"), so title cannot corroborate — but a release with the same
-       track count IS the same album, and disc+position+length is the
-       designed answer (the motivating regression test).
-
-    When BOTH fail, the numbering is a coincidence of a DIFFERENT edition:
-    an 80-track "Alternative 90s" folder carrying a stored release MBID for
-    the 46-track single disc aliased local#10 "Where Is My Mind?" to
-    release#10 "Happy" — position+duration alone cannot tell that apart, so
-    no alias is emitted and the track falls back to the per-track search.
-    """
-    if _position_title_corroborates(local_title, release_title):
-        return True
-    return int(local_track_count) == int(release_track_count)
-
-
-def _release_year(value: Any) -> int | None:
-    """The year of a MusicBrainz date string ("1999-09-20" → 1999)."""
-    match = re.search(r"(?<!\d)(\d{4})(?!\d)", str(value or ""))
-    return int(match.group(1)) if match else None
-
-
-def _release_is_remaster_edition(release: dict[str, Any]) -> bool:
-    """True when this release is a REMASTER / reissue of an older release group.
-
-    ⭐⭐ A REMASTER IS NOT A NEW RECORDING. MusicBrainz mints a brand-new
-    Recording MBID whenever an engineer remasters an album — the audio
-    fingerprint (AcoustID) and the mastering credits changed — but the
-    PERFORMANCE is the same studio performance and the AUDIENCE is the same
-    audience.
-
-    ListenBrainz counts plays per RECORDING MBID, so the split is brutal: the
-    1999 original of "Higher" carries hundreds of thousands of lifetime plays,
-    while the 2024 remaster's fresh Recording MBID carries a few hundred (only
-    the listeners who tagged their files with the new Deluxe MBID). Locking
-    onto the release's Recording MBID therefore paired a huge Last.fm count
-    with a tiny ListenBrainz count for the same song.
-
-    Two triggers:
-    * the RELEASE TITLE says so ("Human Clay (Remastered 2024)");
-    * the release is more than two years newer than its release GROUP's
-      original release — the gap that separates a remaster from a same-year
-      reissue, which reuses the original recordings anyway.
-    """
-    if REMASTER_MARKER_RE.search(str(release.get("title") or "")):
-        return True
-    group = release.get("release-group") or {}
-    if not isinstance(group, dict):
-        return False
-    group_year = _release_year(group.get("first-release-date"))
-    release_year = _release_year(release.get("date") or release.get("first-release-date"))
-    if not group_year or not release_year:
-        return False
-    return (release_year - group_year) > 2
-
-
-def _original_release_of_group(
-    release: dict[str, Any],
-    mb_client: Any,
-) -> dict[str, Any] | None:
-    """The release group's ORIGINAL release — the canonical recordings.
-
-    The original release holds the recordings the audience actually scrobbled:
-    the remaster's Recording MBIDs are new, empty ones. One extra MusicBrainz
-    call returns the whole original tracklist, so every track of the album is
-    corrected at once instead of one search per track.
-    """
-    group = release.get("release-group") or {}
-    if not isinstance(group, dict):
-        return None
-    group_mbid = str(group.get("id") or "").strip()
-    if not group_mbid:
-        return None
-
-    try:
-        releases = mb_client.browse_releases_for_group(group_mbid, inc="media", limit=50) or []
-    except Exception as exc:
-        logger.debug("Release-group browse failed", group=group_mbid, error=str(exc))
-        return None
-
-    group_year = _release_year(group.get("first-release-date"))
-    best = None
-    best_year = None
-    for rel in releases:
-        if not isinstance(rel, dict):
-            continue
-        year = _release_year(rel.get("date") or rel.get("first-release-date"))
-        if year is None:
-            continue
-        if group_year is not None and year == group_year:
-            return rel
-        if best_year is None or year < best_year:
-            best, best_year = rel, year
-    return best
-
-
-def get_listenbrainz_album_tracklist_with_release(
-    artist: str,
-    album: str,
-    tracks: list[dict[str, Any]],
-) -> tuple[dict[str, dict[str, int | None]], str]:
-    if not tracks:
-        return {}, ""
-
-    release_mbid = _resolve_release_mbid(artist, album, tracks)
-    if not release_mbid:
-        return {}, ""
-
-    titles_to_mbids: dict[str, dict[str, Any]] = {}
-    recording_mbids: list[str] = []
-    position_index: dict[tuple[int, int], dict[str, Any]] = {}
-    _tracklist_source = ""
-
-    release: dict[str, Any] = {}
-    try:
-        _lb_rel = lb_get_release_metadata_batch([release_mbid]) or {}
-        if isinstance(_lb_rel, dict):
-            _rel_container = _lb_rel.get("releases") if isinstance(_lb_rel.get("releases"), dict) else _lb_rel
-            _rel_entry = (_rel_container or {}).get(release_mbid) or {}
-            _media = _rel_entry.get("media") or []
-            if _media:
-                _index_release_tracklist(_media, titles_to_mbids, position_index, recording_mbids)
-                _tracklist_source = "listenbrainz"
-    except Exception as exc:
-        logger.debug("LB release metadata failed", release_mbid=release_mbid, error=str(exc))
-
-    if not recording_mbids:
-        try:
-            from services.enrichment.musicbrainz_service import get_shared_mb_client
-            mb = get_shared_mb_client()
-            # ``artist-credits`` is REQUIRED, not decoration: the release's own
-            # credit is what separates same-titled rows (eight "Hypa Hypa"
-            # versions on one album), and this MB path is the one that actually
-            # answers — the LB release metadata endpoint 404s, so the fallback
-            # below is the NORMAL path, not the exception.
-            release = mb.get_release(release_mbid, inc="recordings+artist-credits")
-            _index_release_tracklist(release.get("media") or [], titles_to_mbids, position_index, recording_mbids)
-            _tracklist_source = "musicbrainz"
-        except Exception as exc:
-            logger.debug("MB release tracklist failed", release_mbid=release_mbid, error=str(exc))
-            return {}, release_mbid
-
-    if not recording_mbids:
-        return {}, release_mbid
-
-    # ⭐⭐ THE CANONICAL RECORDINGS FOR A REMASTER EDITION.
-    #
-    # A remastered release names NEW Recording MBIDs, and those carry almost
-    # no ListenBrainz plays. The original release of the same release group
-    # holds the recordings the audience actually scrobbled. So when the
-    # resolved release is a remaster/reissue, the ORIGINAL release's tracklist
-    # is indexed too and its recordings win — one extra MusicBrainz call
-    # corrects every track of the album.
-    canonical_titles: dict[str, dict[str, Any]] = {}
-    canonical_mbids: list[str] = []
-    if release and _release_is_remaster_edition(release):
-        try:
-            from services.enrichment.musicbrainz_service import get_shared_mb_client
-            mb = get_shared_mb_client()
-            _original = _original_release_of_group(release, mb)
-            if _original:
-                _index_release_tracklist(
-                    _original.get("media") or [], canonical_titles, {}, canonical_mbids,
-                )
-                logger.info(
-                    "Remastered release — canonical recordings taken from the "
-                    "release group's original",
-                    release_mbid=release_mbid,
-                    original_release_mbid=_original.get("id"),
-                    canonical_tracks=len(canonical_titles),
-                )
-        except Exception as exc:
-            logger.debug("Canonical release lookup failed", release_mbid=release_mbid, error=str(exc))
-
-    try:
-        counts = lb_get_recording_popularity_batch(recording_mbids + canonical_mbids) or {}
-    except Exception as exc:
-        # A failed COUNT lookup must not cost us the IDENTITY: the release
-        # tracklist above already established which recording each position is,
-        # and that is what the caller uses to stop resolving the track with an
-        # ambiguous title+artist search. Counts simply come out as zero.
-        logger.debug("Recording popularity batch failed", release_mbid=release_mbid, error=str(exc))
-        counts = {}
-
-    def _sum_counts(mbids: list[str]) -> tuple[int, int]:
-        total = 0
-        users = 0
-        for m in mbids:
-            entry = counts.get(m) or {}
-            total += int(entry.get("total_listen_count") or 0)
-            users += int(entry.get("total_user_count") or 0)
-        return total, users
-
-    out: dict[str, dict[str, int | None]] = {}
-    for key, entry in titles_to_mbids.items():
-        # ⭐ The CANONICAL recording wins when the release is a remaster: it
-        # is the same performance, and it carries the playcount. The release's
-        # own recording is kept only for a title the original release does not
-        # have (a bonus track that really is new).
-        _mbids = entry["mbids"]
-        _canonical = canonical_titles.get(key)
-        if _canonical and len(_canonical["mbids"]) == 1 and len(_mbids) == 1:
-            _mbids = _canonical["mbids"]
-        total, users = _sum_counts(_mbids)
-        # IDENTITY is emitted even at ZERO listens, provided the release puts
-        # this title at exactly one position. The count is not what identifies
-        # the track — the album's own release is — and requiring ``total > 0``
-        # is what left five of the twelve "Little Nicky" tracks (Cave, Take a
-        # Picture, Natural High, Nothing, When Worlds Collide) still reading
-        # "Various Artists". Their release recordings have no ListenBrainz
-        # scrobbles, so they received no identity, so ``track_stage`` fell
-        # through to the ambiguous per-track search, which asked MusicBrainz
-        # for ``artist:"Various Artists" AND recording:"<title>"`` and matched
-        # nothing at all (the scan log's ``candidate_count=0`` / ``mbid=None``).
-        # The release already answered which recording each position is.
-        #
-        # ⚠️ Uniqueness is load-bearing. When several release tracks share a
-        # normalised title (dArtagnan's "Helden X Hymnen" is positions 1 AND
-        # 15) ``entry["mbids"][0]`` is merely whichever row the index reached
-        # first, so a title-keyed identity would pin BOTH local rows to the
-        # same recording — the exact coin flip the position alias exists to
-        # avoid. Those rows are answered by the position-qualified alias
-        # emitted below, and by the alias-first read in the consumer.
-        _title_is_unique = len(entry["mbids"]) == 1
-        if total > 0 or _title_is_unique:
-            out[key] = {
-                "listenbrainz_listens": total,
-                "listenbrainz_users": users,
-                # The CANONICAL recording (the original release's), so the
-                # track's ListenBrainz figures and its release set belong to
-                # the performance the audience actually played.
-                "recording_mbid": _mbids[0] if _mbids else None,
-                # Consumed by the POSITION pass below, so it can tell a
-                # title-derived identity it must not overwrite from an
-                # arbitrary mbids[0] pick on a same-titled pair.
-                "title_is_unique": _title_is_unique,
-            }
-
-    used_pos_keys: set[tuple[int, int]] = set()
-    # # of LOCAL rows with a title vs # of positions on the release tracklist.
-    # A DIFFERENT edition of an album (an 80-track local folder against a
-    # 46-track stored release) never matches; the SAME album does. Equal
-    # counts are the only evidence a position alias can rely on when the
-    # title itself is incomparable (a translated/alternate-script title).
-    _local_track_count = sum(1 for _t in tracks if str(_t.get("title") or "").strip())
-    _release_track_count = len(position_index)
-    # How many LOCAL rows share each normalised title. A title-keyed identity is
-    # only authoritative when it can name ONE row — two local rows titled
-    # identically (dArtagnan's "Helden X Hymnen" at positions 1 and 15, the
-    # unplugged rendition having lost its marker) still need their position
-    # aliases, because title alone cannot separate them.
-    _local_title_counts: Counter = Counter()
-    for _t in tracks:
-        _k = normalize_for_aggregation(_t.get("title") or "")
-        if _k:
-            _local_title_counts[_k] += 1
-
-    # ------------------------------------------------------------------
-    # Artist disambiguation: WHICH of several same-titled release rows is
-    # this local row?
-    #
-    # A normalised title cannot separate the release's eight "Hypa Hypa"
-    # tracks — seven share the plain title (the original, then Saltatio
-    # Mortis, The BossHoss, 257ers, Sasha, We Butter the Bread With Butter
-    # and Axel One), the eighth carries the Gestört aber GeiL remix title.
-    # The RELEASE tells them apart by artist credit —
-    # and the library carries the same credit in the track's own ``artist``
-    # field — so an unambiguous artist match identifies the row outright,
-    # before position is consulted at all.
-    #
-    # Deliberately conservative, in three ways:
-    #   * fires ONLY for a title the release lists more than once (a unique
-    #     title is already answered, better, by the title pass);
-    #   * requires EXACT credit-token equality — the subset logic
-    #     ``names_match`` uses would call a plain "Electric Callboy" credit a
-    #     match for every featured version;
-    #   * refuses when the local credit is a strict SUBSET of a candidate it
-    #     did NOT match: a plainly tagged "Electric Callboy" is a prefix of
-    #     "Electric Callboy, Saltatio Mortis", so it could be that row's short
-    #     form. That ambiguity is left to position + duration.
-    # ------------------------------------------------------------------
-    _artist_identified: set[str] = set()
-    for t in tracks:
-        local_title = t.get("title")
-        if not local_title:
-            continue
-        local_key = normalize_for_aggregation(local_title)
-        if not local_key:
-            continue
-
-        candidates = (titles_to_mbids.get(local_key) or {}).get("rows") or []
-        if len(candidates) < 2:
-            continue
-
-        local_artist = str(t.get("artist") or "").strip()
-        if not local_artist:
-            continue
-        local_tokens = _credit_identity_tokens(local_artist)
-        if not local_tokens:
-            continue
-
-        matches = [
-            row for row in candidates
-            if _credit_identity_tokens(row.get("credit")) == local_tokens
-        ]
-        if len(matches) != 1:
-            continue
-        if any(
-            local_tokens < _credit_identity_tokens(row.get("credit"))
-            for row in candidates
-            if row is not matches[0]
-        ):
-            continue
-
-        row = matches[0]
-        row_mbid = str(row.get("mbid") or "").strip()
-        if not row_mbid:
-            continue
-
-        try:
-            row_disc = int(str(t.get("disc_number") or 1).split("/")[0].strip() or 1)
-        except (TypeError, ValueError):
-            row_disc = 1
-        try:
-            row_pos = int(str(t.get("track_number") or "").split("/")[0].strip() or 0)
-        except (TypeError, ValueError):
-            row_pos = 0
-        # Without a position the alias IS the plain title key, and writing that
-        # would hand this row's answer to every same-titled sibling.
-        if row_pos <= 0:
-            continue
-
-        row_total, row_users = _sum_counts([row_mbid])
-        row_len_ms = row.get("length_ms")
-        try:
-            local_dur = float(t.get("duration") or 0)
-        except (TypeError, ValueError):
-            local_dur = 0.0
-        # Same MEANING as the position pass's flag: True only when BOTH
-        # lengths were known AND agreed. The credit identified the row, but
-        # the release TITLE it carries may only be auto-applied when the
-        # length corroborates it too.
-        _length_agrees = bool(
-            row_len_ms and local_dur > 0
-            and abs(int(row_len_ms) - local_dur * 1000) <= 5000
-        )
-
-        _alias_key = track_identity_key(local_key, row_disc, row_pos)
-        out[_alias_key] = {
-            "listenbrainz_listens": row_total,
-            "listenbrainz_users": row_users,
-            "recording_mbid": row_mbid,
-            "release_track_title": str(row.get("title") or "").strip(),
-            "local_disc_number": row_disc,
-            "local_track_number": row_pos,
-            "length_verified": _length_agrees,
-            "matched_by": "artist",
-        }
-        _artist_identified.add(_alias_key)
-        logger.info(
-            "Artist-matched track to release row",
-            local_title=local_title,
-            artist=local_artist,
-            release_credit=str(row.get("credit") or ""),
-            disc=row_disc,
-            track=row_pos,
-            listens=row_total,
-        )
-
-    for t in tracks:
-        local_title = t.get("title")
-        if not local_title:
-            continue
-
-        local_key = normalize_for_aggregation(local_title)
-        if not local_key:
-            continue
-
-        # A title match already answered for this key, so leave it alone — this
-        # pass only fills the gap for a track whose TITLE is not on the release
-        # at all (a plainly tagged rendition, whose release title carries the
-        # marker). The per-ROW identity is published separately below, under a
-        # position-qualified alias, and that is what disambiguates two rows of
-        # one album that share a title.
-        #
-        # ⚠️ The guard is on the IDENTITY, not the listen count. Gating it on
-        # ``listenbrainz_listens`` let this pass overwrite a correct
-        # title-derived identity with a positional guess for every
-        # zero-listen track, and position is exactly what cannot be trusted
-        # here: a library holding a 12-track SUBSET of a 16-track release
-        # numbers its files 1..12 while those recordings sit at release
-        # positions 2..13, so local#N is a DIFFERENT song than release#N
-        # ("Little Nicky: Cave/Take a Picture/Natural High/Nothing/When Worlds
-        # Collide still read Various Artists"). Only a title-derived identity
-        # that is itself UNIQUE is protected — a same-titled pair still falls
-        # through to the position pass, which is the only thing that can tell
-        # those two rows apart.
-        _existing = out.get(local_key) or {}
-        if _existing.get("recording_mbid") and _existing.get("title_is_unique"):
-            continue
-
-        try:
-            local_pos = int(t.get("track_number") or 0)
-        except (TypeError, ValueError):
-            continue
-
-        if local_pos <= 0:
-            continue
-
-        try:
-            local_disc = int(t.get("disc_number") or 1)
-        except (TypeError, ValueError):
-            local_disc = 1
-
-        pos_key = (local_disc, local_pos)
-        if pos_key in used_pos_keys:
-            continue
-        # An artist-identified row is DONE: the release's own credit named it,
-        # which is stronger evidence than a position guess.
-        if track_identity_key(local_key, local_disc, local_pos) in _artist_identified:
-            continue
-
-        pos_entry = position_index.get(pos_key)
-        if not pos_entry or not pos_entry["mbids"]:
-            continue
-
-        if not _position_alias_allowed(
-            local_title,
-            pos_entry.get("title"),
-            local_track_count=_local_track_count,
-            release_track_count=_release_track_count,
-        ):
-            logger.debug(
-                "Position match rejected — release title is a different song",
-                local_title=local_title,
-                release_track_title=pos_entry.get("title"),
-                disc=local_disc,
-                track=local_pos,
-            )
-            continue
-
-        mb_len_ms = pos_entry.get("length_ms")
-        try:
-            local_dur = float(t.get("duration") or 0)
-        except (TypeError, ValueError):
-            local_dur = 0.0
-
-        if mb_len_ms and local_dur > 0:
-            if abs(int(mb_len_ms) - local_dur * 1000) > 5000:
-                continue
-
-        # ``total`` is 0 for any recording nobody has scrobbled yet, which is
-        # NOT a reason to throw the match away: the POSITION (with the duration
-        # guard above) already established WHICH recording this track is, and
-        # that identity is what the caller needs in order to stop resolving the
-        # track with an ambiguous title+artist search. Emitting the entry with a
-        # zero count is safe — every consumer reads the counts under a
-        # truthiness guard — whereas emitting it only when ``total > 0`` is the
-        # reported dArtagnan "Helden X Hymnen" defect: the three unplugged
-        # tracks that have no ListenBrainz listens kept the STUDIO recording's
-        # MBID, so their Last.fm listeners came from the studio recording (7.5k
-        # on an album whose other tracks sit at 300-500) and they scored as the
-        # album's top tracks.
-        total, users = _sum_counts(pos_entry["mbids"])
-
-        _position_entry = {
-            "listenbrainz_listens": total,
-            "listenbrainz_users": users,
-            "recording_mbid": pos_entry["mbids"][0],
-            "release_track_title": str(pos_entry.get("title") or ""),
-            # True ONLY when BOTH lengths were known and within the 5s guard.
-            # The guard SKIPS when either side is missing, so a position
-            # match with unknown lengths is weaker — the caller must not treat
-            # its release title as confirmed.
-            "length_verified": bool(mb_len_ms and local_dur > 0),
-        }
-        # ⭐ A SHARED local title cannot hold one row's answer. Eight local
-        # rows called "Hypa Hypa" each overwrote this slot, so the LAST one
-        # processed spoke for all of them — measured as every version
-        # reporting the same 186 listens and the same recording. The
-        # position-qualified alias emitted below answers those rows; the
-        # title key keeps whatever the TITLE pass resolved (the release's
-        # first row with that title), which stays the deterministic answer
-        # for a caller that has no position.
-        if _local_title_counts.get(local_key, 0) <= 1:
-            out[local_key] = _position_entry
-        used_pos_keys.add(pos_key)
-        logger.info(
-            "Position-matched track to release",
-            local_title=local_title,
-            disc=local_disc,
-            track=local_pos,
-            duration=local_dur,
-            matched_key=pos_entry.get("key"),
-            release_track_title=pos_entry.get("title"),
-            listens=total,
-        )
-
-    # ------------------------------------------------------------------
-    # Per-ROW identity: the release's own tracklist, position matched.
-    #
-    # ``out`` above is keyed by normalised TITLE and therefore cannot identify a
-    # row — dArtagnan's "Helden X Hymnen" files the album's title track AND its
-    # "(Unplugged Version)" rendition under the same title "Helden X Hymnen",
-    # and those are two DIFFERENT recordings on the release (positions 1 and 15).
-    # Keyed by title alone whichever row the loop reached last won, which is why
-    # both rows reported an identical score in the scan results.
-    #
-    # The release settles it by POSITION, so every row that has a usable track
-    # number and passes the duration guard also publishes its own recording under
-    # a position-qualified alias. The title-keyed entries are left EXACTLY as
-    # they were, so listen-count behaviour is unchanged for every existing
-    # consumer; only a caller that knows the row's position can see (and prefer)
-    # the alias.
-    # ------------------------------------------------------------------
-    for t in tracks:
-        local_title = t.get("title")
-        if not local_title:
-            continue
-        local_key = normalize_for_aggregation(local_title)
-        if not local_key:
-            continue
-
-        # ⚠️ A title-keyed identity is authoritative ONLY when it can name a
-        # single row. Skip the position alias when the local title is unique
-        # (one local row) AND the release resolves that title uniquely.
-        #
-        # This loop was written for the SAME-TITLED LOCAL pair case
-        # (dArtagnan's two "Helden X Hymnen" rows at positions 1 and 15 — the
-        # unplugged rendition lost its marker — where title alone cannot
-        # separate them), but it emitted a position alias for EVERY row. On
-        # a sparse library that is wrong by construction: when the local
-        # folder is MISSING tracks (queued/downloading, so the files are
-        # numbered 1..M while those recordings sit at release positions
-        # k..k+M-1), the LOCAL position no longer equals the RELEASE position.
-        # Reported: "The Power of Love" sat at local#5 (Love Shack, release#5,
-        # was still queued), so this loop aliased it to Love Shack's recording
-        # and the batch proposed changing the title to "Love Shack".
-        #
-        # Two local rows sharing one title still fall through
-        # (``_local_title_counts[local_key] > 1``), and titles absent from the
-        # release (the version-marker case) get no title-keyed identity at
-        # all, so their position aliases are still emitted.
-        _existing_title = out.get(local_key) or {}
-        if (
-            _existing_title.get("recording_mbid")
-            and _existing_title.get("title_is_unique")
-            and _local_title_counts.get(local_key, 0) <= 1
-        ):
-            continue
-
-        try:
-            row_pos = int(str(t.get("track_number") or "").split("/")[0].strip() or 0)
-        except (TypeError, ValueError):
-            continue
-        if row_pos <= 0:
-            continue
-
-        try:
-            row_disc = int(str(t.get("disc_number") or 1).split("/")[0].strip() or 1)
-        except (TypeError, ValueError):
-            row_disc = 1
-
-        # An artist-identified row already has its answer (see the artist pass
-        # above) — a position guess must not overwrite the release's own
-        # credit match.
-        if track_identity_key(local_key, row_disc, row_pos) in _artist_identified:
-            continue
-
-        row_pos_entry = position_index.get((row_disc, row_pos))
-        if not row_pos_entry or not row_pos_entry["mbids"]:
-            continue
-
-        if not _position_alias_allowed(
-            local_title,
-            row_pos_entry.get("title"),
-            local_track_count=_local_track_count,
-            release_track_count=_release_track_count,
-        ):
-            logger.debug(
-                "Per-row position alias rejected — release title is a different song",
-                local_title=local_title,
-                release_track_title=row_pos_entry.get("title"),
-                disc=row_disc,
-                track=row_pos,
-            )
-            continue
-
-        row_len_ms = row_pos_entry.get("length_ms")
-        try:
-            row_dur = float(t.get("duration") or 0)
-        except (TypeError, ValueError):
-            row_dur = 0.0
-        if row_len_ms and row_dur > 0:
-            if abs(int(row_len_ms) - row_dur * 1000) > 5000:
-                continue
-
-        # ⭐ The CANONICAL recording wins here too, for the same reason: a
-        # remastered release's own Recording MBID is the empty one.
-        _row_mbids = row_pos_entry["mbids"]
-        _row_canonical = canonical_titles.get(str(row_pos_entry.get("key") or ""))
-        if _row_canonical and len(_row_canonical["mbids"]) == 1 and len(_row_mbids) == 1:
-            _row_mbids = _row_canonical["mbids"]
-        row_total, row_users = _sum_counts(_row_mbids)
-        out[track_identity_key(local_key, row_disc, row_pos)] = {
-            "listenbrainz_listens": row_total,
-            "listenbrainz_users": row_users,
-            "recording_mbid": _row_mbids[0] if _row_mbids else None,
-            "release_track_title": str(row_pos_entry.get("title") or ""),
-            "local_disc_number": row_disc,
-            "local_track_number": row_pos,
-            # True ONLY when BOTH lengths were known and within the 5s guard
-            # (the guard is SKIPPED when either side is missing). A position
-            # match whose length was never verified cannot confirm the release
-            # title for auto-application.
-            "length_verified": bool(row_len_ms and row_dur > 0),
-        }
-
-    if out:
-        logger.info(
-            "Preloaded ListenBrainz album tracklist",
-            count=len(out),
-            artist=artist,
-            album=album,
-            release_mbid=release_mbid,
-            source=_tracklist_source,
-        )
-    else:
-        logger.debug("No ListenBrainz data found for album", artist=artist, album=album)
-
-    return out, release_mbid
-
-
-def get_listenbrainz_album_tracklist(
-    artist: str,
-    album: str,
-    tracks: list[dict[str, Any]],
-) -> dict[str, dict[str, int | None]]:
-    return get_listenbrainz_album_tracklist_with_release(artist, album, tracks)[0]
-
-
-def get_listenbrainz_popularity_for_track(track: dict[str, Any]) -> dict[str, int | None]:
-    mbid = extract_recording_mbid(track)
-    if not mbid:
-        return {"total_listen_count": None, "total_user_count": None}
-    try:
-        return lb_get_listenbrainz_popularity(mbid)
-    except Exception:
-        return {"total_listen_count": None, "total_user_count": None}
-
-
-def get_listenbrainz_score_for_track(track: dict[str, Any]) -> int:
-    mbid = extract_recording_mbid(track)
-    if not mbid:
-        return 0
-    try:
-        return int(lb_get_listenbrainz_score(mbid) or 0)
-    except Exception:
-        return 0
-
-
-def get_lastfm_track_info(
-    artist: str,
-    title: str,
-    track_mbid: str | None = None,
-    album_artist: str | None = None,
-    lastfm_client: LastFmClient | None = None,
-) -> dict[str, Any]:
-    if lastfm_client is None:
-        return {"track_play": 0, "listeners": 0}
-
-    results = []
-    for candidate in get_artist_lookup_candidates(artist, album_artist=album_artist):
-        try:
-            results.append(lastfm_client.get_track_info(candidate, title, track_mbid=track_mbid))
-        except Exception:
-            continue
-
-    return choose_best_provider_counts(results) if results else {"track_play": 0, "listeners": 0}
-
-
-def get_lastfm_artist_max_listeners(
-    artist: str,
-    api_key: str | None = None,
-) -> int:
-    if not api_key:
-        from helpers.config_helpers import get_config
-        cfg = get_config()
-        api_key = cfg.get("api_integrations", {}).get("lastfm", {}).get("api_key", "")
-    if not api_key:
-        return 0
-
-    artist_key = artist.casefold().strip()
-
-    with _CACHE_LOCK:
-        cached = _lastfm_artist_max_cache.get(artist_key)
-    if cached is not None:
-        return cached
-
-    from api_clients.lastfm_http import LastFmHttpClient
-    client = LastFmHttpClient(api_key=api_key)
-
-    try:
-        from api_clients.lastfm import LastFmClient as _FacadeLastFmClient
-        from services.popularity.popularity_cache_service import get_artist_top_tracks_map
-        _map = get_artist_top_tracks_map(_FacadeLastFmClient(api_key=api_key), artist) or {}
-        _peak = max((int(e.get("lastfm_listeners") or 0) for e in _map.values()), default=0)
-        if _peak > 0:
-            with _CACHE_LOCK:
-                _lastfm_artist_max_cache[artist_key] = _peak
-            return _peak
-    except Exception:
-        pass
-
-    try:
-        data = client.get_json(
-            "artist.getTopTracks",
-            timeout=10,
-            artist=artist,
-            limit=100,
-        )
-        if not data or "error" in data:
-            with _CACHE_LOCK:
-                _lastfm_artist_max_cache[artist_key] = 0
-            return 0
-
-        tracks = data.get("toptracks", {}).get("track", [])
-        if isinstance(tracks, dict):
-            tracks = [tracks]
-
-        max_listeners = 0
-        for track in tracks:
-            if isinstance(track, dict):
-                try:
-                    listeners = int(track.get("listeners", 0) or 0)
-                    if listeners > max_listeners:
-                        max_listeners = listeners
-                except (ValueError, TypeError):
-                    continue
-
-        with _CACHE_LOCK:
-            _lastfm_artist_max_cache[artist_key] = max_listeners
-        return max_listeners
-
-    except Exception as exc:
-        logger.debug("Failed to get Last.fm top tracks", artist=artist, error=str(exc))
-        with _CACHE_LOCK:
-            _lastfm_artist_max_cache[artist_key] = 0
-        return 0
-
-
-_ONLINE_CATALOGUE_CACHE: dict[str, list[tuple[str, int]]] = {}
-
-
-def get_online_artist_catalogue(
-    artist: str,
-    lastfm_client: Any = None,
-    limit: int = 200,
-) -> list[tuple[str, int]]:
-    """Return ``[(normalized_title, listeners)]`` for an artist's GLOBAL catalogue.
-
-    This is the ONLINE counterpart to ``finalise_stage.compute_track_artist_scores``,
-    which can only read the LOCAL database. For an artist the library holds one
-    or two songs by (the common compilation/soundtrack case) the local DB has no
-    catalogue to rank against at all, so a genuinely huge song can never be
-    recognised as such.
-
-    ``artist.getTopTracks`` returns the artist's discography ordered by global
-    playcount, so the returned position IS the artist's real-world popularity
-    ranking for that song.  ``listeners`` is the same metric the scan already
-    records on each track as ``lastfm_listeners``, which means a track can be
-    compared against this list directly -- no scale conversion, no inference.
-
-    Results are cached per artist for the process lifetime (mirroring
-    ``_lastfm_artist_max_cache``) so a multi-disc compilation only ever pays for
-    one request per credited artist.
-    """
-    artist_key = str(artist or "").casefold().strip()
-    if not artist_key:
-        return []
-
-    with _CACHE_LOCK:
-        cached = _ONLINE_CATALOGUE_CACHE.get(artist_key)
-    if cached is not None:
-        return cached
-
-    entries: list[tuple[str, int]] = []
-    try:
-        if lastfm_client is None:
-            from helpers.config_helpers import get_config
-            api_key = (get_config().get("api_integrations", {}) or {}).get("lastfm", {}).get("api_key", "")
-            if api_key:
-                from api_clients.lastfm import LastFmClient
-                lastfm_client = LastFmClient(api_key=api_key)
-
-        if lastfm_client is not None:
-            from services.popularity.popularity_cache_service import get_artist_top_tracks_map
-            _map = get_artist_top_tracks_map(lastfm_client, artist) or {}
-            for norm_title, counts in _map.items():
-                listeners = int((counts or {}).get("lastfm_listeners") or 0)
-                if norm_title and listeners > 0:
-                    entries.append((str(norm_title), listeners))
-    except Exception as exc:
-        logger.debug("Online artist catalogue fetch failed", artist=artist, error=str(exc))
-        entries = []
-
-    entries.sort(key=lambda item: item[1], reverse=True)
-
-    with _CACHE_LOCK:
-        _ONLINE_CATALOGUE_CACHE[artist_key] = entries
-    return entries
-
-
-def get_online_artist_track_rank(
-    artist: str,
-    track_title: str,
-    lastfm_client: Any = None,
-) -> dict[str, Any]:
-    """Locate ``track_title`` in the artist's GLOBAL catalogue.
-
-    Returns ``{"rank", "total", "percentile", "listeners", "top_listeners",
-    "source"}`` where ``rank`` is 1-based (1 = the artist's most popular song
-    worldwide) and ``percentile`` is ``rank / total`` (0.02 = top 2%).
-
-    ``rank`` is ``0`` when the artist has no online catalogue
-    (``source="none"``) or the title is not charted in it
-    (``source="lastfm_artist_top_tracks_beyond"``; ``total`` still reports the
-    catalogue size so the miss stays diagnosable) -- callers must treat
-    ``rank == 0`` as "unknown", never as "unpopular", so a lookup miss cannot
-    demote a track.
-    """
-    empty = {
-        "rank": 0, "total": 0, "percentile": 0.0,
-        "listeners": 0, "top_listeners": 0, "source": "none",
-    }
-    target = normalize_for_aggregation(track_title)
-    if not target:
-        return empty
-
-    catalogue = get_online_artist_catalogue(artist, lastfm_client=lastfm_client)
-    if not catalogue:
-        return empty
-
-    for index, (norm_title, listeners) in enumerate(catalogue, start=1):
-        if norm_title == target:
-            return {
-                "rank": index,
-                "total": len(catalogue),
-                # MID-RANK percentile. A plain ``rank / total`` would put the
-                # artist's #1 song at 1/47 = 2.1%, just OUTSIDE a 2% 5★ cut-off
-                # -- so the most popular song the artist ever released could
-                # never reach the top band on a catalogue of more than 50
-                # entries. The midpoint of the rank's interval keeps rank #1
-                # inside the top band for any catalogue size while preserving
-                # the ordering for every other rank.
-                "percentile": (index - 0.5) / len(catalogue),
-                "listeners": listeners,
-                "top_listeners": int(catalogue[0][1]),
-                "source": "lastfm_artist_top_tracks",
-            }
-
-    # Not found: the artist HAS a catalogue but this title is not charted in
-    # it. Report rank 0 ("unknown") -- the contract in this function's
-    # docstring -- so the rating layer falls back to score-based thresholds
-    # instead of pinning the track to a fake last place. A list-membership
-    # miss alone must never demote a track (soundtrack cues are routinely
-    # absent from an artist's top-tracks chart while still being popular).
-    return {
-        "rank": 0,
-        "total": len(catalogue),
-        "percentile": 1.0,
-        "listeners": 0,
-        "top_listeners": int(catalogue[0][1]),
-        "source": "lastfm_artist_top_tracks_beyond",
-    }
-
-
-def get_aggregated_lastfm_popularity(
-    artist: str,
-    track_title: str,
-    lastfm_client: Any = None,
-    isrc: str | None = None,
-    recording_mbid: str | None = None,
-    is_live_release: bool = False,
-    target_is_alt_rendition: bool = False,
-) -> dict[str, Any]:
-    """Aggregate Last.fm listener counts for one track.
-
-    ``is_live_release`` must be set when the track belongs to a LIVE release.
-    Last.fm resolves by title+artist, so a plainly titled live track (e.g.
-    every track on "S&M") otherwise matches the studio recording of the same
-    name and absorbs its catalogue-wide listener count.
-
-    ``target_is_alt_rendition`` is the same guard for an alternate RENDITION
-    that is not a live recording -- an unplugged/acoustic/remix take whose own
-    library title does not say so. The caller learns it from the album's
-    MusicBrainz release tracklist (see
-    ``scan_stage_runner._build_album_recording_batch``), which is the only place
-    the marker survives once a library title has lost it. Both flags mean the
-    same thing to the lookup below -- "the target is an alternate performance,
-    so a differently-typed candidate must not be merged into it" -- and they are
-    kept separate because liveness ALSO drives the live weight penalty and the
-    live star caps, which a studio unplugged take must not incur.
-    """
-    if lastfm_client is None:
-        return {"listeners": 0, "track_play": 0, "matched_tracks": []}
-
-    # The target is an alternate performance -> a plain studio namesake (and a
-    # differently-typed take) must not be summed into it.
-    target_is_alt = bool(is_live_release) or bool(target_is_alt_rendition)
-
-    # ⭐ Fold Unicode punctuation BEFORE the provider sees it. Last.fm indexes
-    # the ASCII spelling, so the U+2010 hyphen MusicBrainz uses in
-    # "The All‐American Rejects" and the U+2019 apostrophe in "Plain White T’s"
-    # queried as-is return NOTHING — the reported "Jack's Lament LF 99 vs LB
-    # 44.2k" and "Poor Jack LF 58 vs LB 23.3k". The fold also keeps the artist
-    # catalogue cache key aligned with the spelling the provider knows.
-    artist = normalize_unicode_punctuation(artist)
-    track_title = normalize_unicode_punctuation(track_title)
-
-    track_title = strip_cover_attribution(track_title) or track_title
-    is_featured = (
-        "feat" in str(artist or "").casefold()
-        or "feat" in str(track_title or "").casefold()
-    )
-
-    primary_artist = get_primary_artist_preserve_case(artist)
-    # Fold the cache key so "Lïve" and "Live" share ONE catalogue bucket
-    # instead of splitting it — the provider indexes only one of them, so two
-    # buckets would mean one spelling silently reads an empty catalogue.
-    artist_key = strip_diacritics(primary_artist).casefold().strip()
-    catalog = []
-
-    try:
-        from services.popularity.popularity_cache_service import get_artist_top_tracks_map
-        _map = get_artist_top_tracks_map(lastfm_client, primary_artist) or {}
-        catalog = [
-            {
-                "name": key,
-                "listeners": int(e.get("lastfm_listeners") or 0),
-                "playcount": int(e.get("lastfm_playcount") or 0),
-            }
-            for key, e in _map.items()
-            if e.get("lastfm_listeners")
-        ]
-    except Exception:
-        catalog = []
-
-    with _CACHE_LOCK:
-        in_cache = artist_key in _lastfm_artist_catalog_cache
-        if in_cache and not catalog:
-            catalog = _lastfm_artist_catalog_cache[artist_key]
-
-    if not catalog and not in_cache and hasattr(lastfm_client, "get_artist_top_tracks"):
-        try:
-            fetched_catalog = lastfm_client.get_artist_top_tracks(primary_artist)
-            with _CACHE_LOCK:
-                _lastfm_artist_catalog_cache[artist_key] = fetched_catalog
-                catalog = fetched_catalog
-        except Exception:
-            catalog = []
-
-    target = normalize_for_aggregation(track_title)
-    matched = []
-    listeners = 0
-    playcount = 0
-
-    for item in catalog or []:
-        item_title = item.get("name") or item.get("title") or ""
-        if normalize_for_aggregation(item_title) != target:
-            continue
-        # Same normalized title can still be a live/remix/alternate take
-        # (normalization strips punctuation, not performance-type markers) -
-        # don't let it merge with a differently-typed target. Release-level
-        # liveness and the album release's own version marker are folded in so a
-        # plainly titled live/unplugged track does not match its studio
-        # namesake.
-        if not _alt_status_matches_ctx(track_title, item_title, target_is_live=target_is_alt):
-            continue
-        matched.append(item)
-        listeners += int(item.get("listeners", 0) or 0)
-        playcount += int(item.get("playcount", item.get("track_play", 0)) or 0)
-
-    if not matched and ARTIST_JOIN_RE.search(artist or ""):
-        collab_parts = [p.strip() for p in ARTIST_JOIN_RE.split(artist or "") if p.strip()]
-        if len(collab_parts) >= 2:
-            for part in collab_parts:
-                try:
-                    from services.popularity.popularity_cache_service import get_artist_top_tracks_map
-                    _part_map = get_artist_top_tracks_map(lastfm_client, part) or {}
-                    _part_catalog = [
-                        {
-                            "name": key,
-                            "listeners": int(e.get("lastfm_listeners") or 0),
-                            "playcount": int(e.get("lastfm_playcount") or 0),
-                        }
-                        for key, e in _part_map.items()
-                        if e.get("lastfm_listeners")
-                    ]
-
-                    _key = part.casefold().strip()
-                    with _CACHE_LOCK:
-                        part_in_cache = _key in _lastfm_artist_catalog_cache
-
-                    if not _part_catalog and not part_in_cache and hasattr(lastfm_client, "get_artist_top_tracks"):
-                        _fetched = lastfm_client.get_artist_top_tracks(part)
-                        with _CACHE_LOCK:
-                            _lastfm_artist_catalog_cache[_key] = _fetched
-                        _part_catalog = _fetched
-
-                    for item in _part_catalog or []:
-                        item_title = item.get("name") or item.get("title") or ""
-                        if normalize_for_aggregation(item_title) != target:
-                            continue
-                        if not _alt_status_matches_ctx(
-                            track_title, item_title, target_is_live=target_is_alt
-                        ):
-                            continue
-                        matched.append(item)
-                        listeners += int(item.get("listeners", 0) or 0)
-                        playcount += int(item.get("playcount", item.get("track_play", 0)) or 0)
-                except Exception:
-                    continue
-
-    if is_featured or not matched:
-        search = get_search_aggregated_lastfm_popularity(
-            artist,
-            track_title,
-            lastfm_client=lastfm_client,
-            is_live_release=is_live_release,
-            target_is_alt_rendition=target_is_alt_rendition,
-        )
-        search_listeners = int(search.get("listeners") or 0)
-        if search_listeners > listeners:
-            listeners = search_listeners
-            playcount = int(search.get("track_play") or 0)
-            matched = search.get("matched_tracks") or matched
-
-    if matched:
-        return {"listeners": listeners, "track_play": playcount, "matched_tracks": matched}
-
-    # Final fallback: a bare title+artist lookup. This CANNOT distinguish a
-    # live/unplugged/remix take from its studio namesake, so it is skipped
-    # entirely on a live release or a known alternate rendition rather than
-    # returning a known-contaminated count.
-    if target_is_alt:
-        logger.debug(
-            "Skipping Last.fm title+artist fallback on alternate rendition",
-            artist=artist,
-            track=track_title,
-            live=bool(is_live_release),
-            alt_rendition=bool(target_is_alt_rendition),
-        )
-        return {"listeners": 0, "track_play": 0, "matched_tracks": []}
-
-    try:
-        info = lastfm_client.get_track_info(artist, track_title)
-        primary = {
-            "listeners": int(info.get("listeners", 0) or 0),
-            "track_play": int(info.get("track_play", 0) or 0),
-            "matched_tracks": [],
-        }
-    except Exception:
-        primary = {"listeners": 0, "track_play": 0, "matched_tracks": []}
-
-    variants: dict[str, tuple[int, int]] = {"Primary": (primary["listeners"], primary["track_play"])}
-    best = primary
-    best_key = "Primary"
-
-    def _consider(arm: str, stats: dict[str, Any]) -> None:
-        nonlocal best, best_key
-        _listeners = int((stats or {}).get("listeners") or 0)
-        _playcount = int((stats or {}).get("track_play") or (stats or {}).get("playcount") or 0)
-        variants[arm] = (_listeners, _playcount)
-        if _listeners > best["listeners"] or (_listeners == best["listeners"] and _playcount > best["track_play"]):
-            best = {"listeners": _listeners, "track_play": _playcount, "matched_tracks": []}
-            best_key = arm
-
-    need_fallback = (best["listeners"] == 0 and best["track_play"] == 0) or _is_featured_artist(artist)
-
-    if need_fallback:
-        if isrc or recording_mbid:
-            try:
-                _isrc_rec = None
-                if isrc:
-                    _isrc_rec = resolve_isrc_recording(
-                        isrc,
-                        title=track_title,
-                        artist=artist,
-                        # ``target_is_alt``, not ``is_live_release``: the ISRC
-                        # arm must not resolve a plain studio ISRC for an
-                        # unplugged/acoustic take either.
-                        is_live_release=target_is_alt,
-                    )
-                _arm_mbid = ((_isrc_rec or {}).get("recording_mbid") or recording_mbid)
-                _arm_artist = (_isrc_rec or {}).get("artist") or artist
-                _arm_title = (_isrc_rec or {}).get("title") or track_title
-
-                if _arm_mbid:
-                    _isrc_stats = lastfm_client.get_track_info(_arm_artist, _arm_title, track_mbid=_arm_mbid)
-                    _consider("ISRC", _isrc_stats)
-            except Exception as exc:
-                logger.debug("Last.fm ISRC fallback arm failed", error=str(exc))
-
-        if _is_featured_artist(artist):
-            try:
-                inverted = invert_featured_artist(artist)
-                if inverted != artist:
-                    _inv_stats = lastfm_client.get_track_info(inverted, track_title)
-                    _consider("Inverted", _inv_stats)
-            except Exception as exc:
-                logger.debug("Last.fm inverted arm failed", artist=artist, error=str(exc))
-
-    if best_key != "Primary":
-        _detail = {k: v[0] for k, v in variants.items() if v[0] > 0}
-        logger.info(
-            "Last.fm multi-arm lookup completed",
-            variants_queried=len(variants),
-            max_listeners=best["listeners"],
-            details=_detail,
-        )
-        return {
-            "listeners": best["listeners"],
-            "track_play": best["track_play"],
-            "matched_tracks": best["matched_tracks"],
-            "sources_queried": len(variants),
-            "variant_detail": _detail,
-        }
-    return best
-
-
-def get_search_aggregated_lastfm_popularity(
-    artist: str,
-    track_title: str,
-    lastfm_client: Any = None,
-    is_live_release: bool = False,
-    target_is_alt_rendition: bool = False,
-) -> dict[str, Any]:
-    """Sum Last.fm listener counts across compatible title variants.
-
-    ``is_live_release`` gates the alt-performance check the same way it does in
-    ``get_aggregated_lastfm_popularity`` -- without it this function sums the
-    studio recording into a live track's total, which is the single largest
-    source of cross-version contamination. ``target_is_alt_rendition`` closes
-    the same hole for an unplugged/acoustic/remix take whose library title lost
-    its marker.
-    """
-    if lastfm_client is None:
-        return {"listeners": 0, "track_play": 0, "matched_tracks": []}
-
-    target_is_alt = bool(is_live_release) or bool(target_is_alt_rendition)
-
-    # Fold Unicode punctuation before the SEARCH too — the provider indexes the
-    # ASCII spelling, so a U+2010 hyphen or a U+2019 apostrophe queried as-is
-    # matches nothing (see ``get_aggregated_lastfm_popularity``).
-    artist = normalize_unicode_punctuation(artist)
-    track_title = normalize_unicode_punctuation(track_title)
-
-    track_title = strip_cover_attribution(track_title) or track_title
-    target = normalize_for_aggregation(track_title)
-    if not target:
-        return {"listeners": 0, "track_play": 0, "matched_tracks": []}
-
-    matched: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    def _collect(candidate: str) -> None:
-        try:
-            results = lastfm_client.search_track(candidate, track_title, limit=20)
-        except Exception:
-            results = []
-
-        for item in results or []:
-            if not isinstance(item, dict):
-                continue
-            item_title = str(item.get("name") or item.get("title") or "")
-            if not item_title:
-                continue
-
-            if not title_variants_compatible(track_title, item_title):
-                continue
-
-            # A "compatible" title (e.g. same base song, different
-            # bracketed suffix) can still be a live/remix/alternate take -
-            # reject it unless it agrees with the target on that, with
-            # release-level liveness and the album release's own version
-            # marker folded in.
-            if not _alt_status_matches_ctx(track_title, item_title, target_is_live=target_is_alt):
-                continue
-
-            _item_key = normalize_for_aggregation(item_title)
-            # ⭐ NOT a bare fuzzy threshold. ``_token_similarity`` is
-            # token_set_ratio, which scores 1.0 for any strict SUBSET — so the
-            # old ``< 0.90`` test accepted "Fucked With an Anchor" as a version
-            # of "Fucked With an Anchor for Dogs" and summed the studio track's
-            # listeners into its novelty re-recording. See
-            # ``aggregation_keys_compatible`` for the rule that replaced it.
-            if not aggregation_keys_compatible(_item_key, target):
-                continue
-
-            url = str(item.get("url") or "").strip()
-            key = url or f"{str(item.get('artist') or '').casefold()}::{item_title.casefold()}"
-
-            if key in seen:
-                continue
-
-            seen.add(key)
-            matched.append(item)
-
-    primary = get_primary_artist_preserve_case(artist)
-    ordered_candidates = [primary] + [
-        c for c in get_artist_lookup_candidates(artist)
-        if c.casefold() != primary.casefold()
-    ]
-
-    for candidate in ordered_candidates:
-        _collect(candidate)
-
-    listeners = sum(int(item.get("listeners") or 0) for item in matched)
-    playcount = sum(int(item.get("playcount") or item.get("track_play") or 0) for item in matched)
-
-    if matched:
-        logger.info(
-            "Aggregated Last.fm versions",
-            count=len(matched),
-            artist=artist,
-            track=track_title,
-            listeners=listeners,
-            plays=playcount,
-            live_release=bool(is_live_release),
-        )
-        return {"listeners": listeners, "track_play": playcount, "matched_tracks": matched}
-
-    # As above: the bare lookup cannot tell a live take from its studio
-    # namesake, so it is not used on live releases.
-    if is_live_release:
-        return {"listeners": 0, "track_play": 0, "matched_tracks": []}
-
-    try:
-        info = lastfm_client.get_track_info(artist, track_title)
-        return {
-            "listeners": int(info.get("listeners") or 0),
-            "track_play": int(info.get("track_play") or 0),
-            "matched_tracks": [],
-        }
-    except Exception:
-        return {"listeners": 0, "track_play": 0, "matched_tracks": []}
-
-
-def get_aggregated_listenbrainz_popularity(
-    title: str,
-    artist: str,
-    primary_mbid: str | None = None,
-    isrc: str | None = None,
-    lb_client: Any = None,
-    mb_client: Any = None,
-    is_live_release: bool = False,
-) -> dict[str, Any]:
-    logger.debug("Fetching aggregated ListenBrainz popularity")
-    mbids: set[str] = set()
-
-    if primary_mbid:
-        mbids.add(primary_mbid)
-
-    if isrc and not primary_mbid:
-        try:
-            _isrc_rec = resolve_isrc_recording(
-                isrc, title=title, artist=artist, is_live_release=is_live_release
-            )
-            _isrc_mbid = (_isrc_rec or {}).get("recording_mbid")
-            if _isrc_mbid:
-                mbids.add(_isrc_mbid)
-                logger.debug("LB aggregation resolved ISRC to recording", isrc=isrc, recording_mbid=_isrc_mbid)
-        except Exception:
-            pass
-
-    if mb_client is None:
-        try:
-            from services.enrichment.musicbrainz_service import get_shared_mb_client
-            mb_client = get_shared_mb_client()
-        except Exception:
-            mb_client = None
-
-    if mb_client and hasattr(mb_client, "search_recordings"):
-        try:
-            from helpers.normalization_service import (
-                normalize_title_for_lucene_query,
-                normalize_title_for_lookup,
-                strip_single_release_suffix,
-            )
-            from api_clients.musicbrainz_http import escape_lucene_special_chars
-
-            query = (
-                f'recording:"{escape_lucene_special_chars(normalize_title_for_lucene_query(title))}" '
-                f'AND artist:"{escape_lucene_special_chars(artist)}"'
-            )
-            norm_target = normalize_title_for_lookup(strip_single_release_suffix(title) or title)
-
-            for rec in mb_client.search_recordings(query, limit=20):
-                rec_id = rec.get("id")
-                rec_title = str(rec.get("title") or "")
-                if not rec_id or not rec_title:
-                    continue
-
-                # Only reject a candidate recording when it *disagrees* with
-                # the target on being a live/remix/alternate performance.
-                # A blanket exclusion of every alt-performance title would
-                # also exclude the correct match when the target track
-                # itself is a live/remix/alternate version.
-                if not _alt_status_matches_ctx(title, rec_title, target_is_live=is_live_release):
-                    continue
-
-                norm_rec = normalize_title_for_lookup(strip_single_release_suffix(rec_title) or rec_title)
-                if norm_rec == norm_target or _token_similarity(norm_rec, norm_target) >= 0.85:
-                    mbids.add(rec_id)
-        except Exception:
-            pass
-
-    if not mbids:
-        return {"total_listen_count": 0, "total_user_count": 0, "mbids": []}
-
-    try:
-        batch = lb_get_recording_popularity_batch(list(mbids))
-        listen_count = sum(int((batch.get(mbid) or {}).get("total_listen_count") or 0) for mbid in mbids)
-        user_count = sum(int((batch.get(mbid) or {}).get("total_user_count") or 0) for mbid in mbids)
-
-        logger.debug(
-            "Aggregated LB recordings",
-            artist=artist,
-            track=title,
-            listens=listen_count,
-            users=user_count,
-            recordings_count=len(mbids),
-        )
-        return {"total_listen_count": listen_count, "total_user_count": user_count, "mbids": sorted(mbids)}
-    except Exception as exc:
-        logger.debug("Aggregated LB failed", artist=artist, track=title, error=str(exc))
-        return {"total_listen_count": 0, "total_user_count": 0, "mbids": sorted(mbids)}
-
-
-def _recording_work_mbid(recording: dict[str, Any]) -> str:
-    for rel in recording.get("relations") or []:
-        if not isinstance(rel, dict):
-            continue
-        if str(rel.get("type") or "").lower() != "performance":
-            continue
-        work = rel.get("work") or {}
-        wid = str(work.get("id") or "").strip()
-        if wid:
-            return wid
-    return ""
-
-
-def _recording_artist_mbids(recording: dict[str, Any]) -> set[str]:
-    out: set[str] = set()
+def _credit_name(credit: Any) -> str:
+    if not isinstance(credit, dict):
+        return ""
+    artist = credit.get("artist") or {}
+    return str(credit.get("name") or
+               (artist.get("name") if isinstance(artist, dict) else "") or "").strip()
+
+
+def _release_credit_text(track: dict[str, Any]) -> str:
+    credits = track.get("artist-credit") or []
+    if not credits and isinstance(track.get("recording"), dict):
+        credits = track["recording"].get("artist-credit") or []
+    return "".join(_credit_name(c) + str(c.get("joinphrase") or "")
+                   for c in credits if isinstance(c, dict) and _credit_name(c)).strip()
+
+
+def _first_credit_name(recording: dict[str, Any]) -> str:
     for credit in recording.get("artist-credit") or []:
-        if not isinstance(credit, dict):
-            continue
-        art = credit.get("artist") or {}
-        aid = str(art.get("id") or "").strip()
-        if aid:
-            out.add(aid)
-    return out
-
-
-def _recording_primary_artist(recording: dict[str, Any]) -> str:
-    for credit in recording.get("artist-credit") or []:
-        if not isinstance(credit, dict):
-            continue
-        art = credit.get("artist") or {}
-        name = str(art.get("name") or credit.get("name") or "").strip()
+        name = _credit_name(credit)
         if name:
             return name
     return ""
 
 
+def _normalize_artist(name: str) -> str:
+    return _artist_cache_key(get_primary_artist_preserve_case(name))
+
+
+def _artist_matches(target: str, candidate: str) -> bool:
+    left = _credit_identity_tokens(target)
+    right = _credit_identity_tokens(candidate)
+    return bool(left and right and left == right)
+
+
+def _search_item_artist(item: dict[str, Any]) -> str:
+    artist = item.get("artist")
+    if isinstance(artist, dict):
+        return str(artist.get("name") or "").strip()
+    return str(artist or "").strip()
+
+
+def resolve_isrc_recording(
+    isrc: str, *, mb_client: Any = None, title: str = "", artist: str = "",
+    is_live_release: bool = False, target_is_alt_rendition: bool = False,
+) -> dict[str, str | None] | None:
+    from helpers.normalization_service import normalize_isrc
+    try:
+        normalized = str(normalize_isrc(str(isrc or "")) or "").strip().upper()
+        normalized = normalized.replace("-", "").replace(" ", "")
+        if not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}[0-9]{7}", normalized):
+            return None
+        client = _shared_mb(mb_client)
+        if client is None:
+            return None
+        recordings = client.lookup_by_isrc(normalized) or []
+        candidates: list[tuple[float, dict[str, Any]]] = []
+        for rec in recordings:
+            if not isinstance(rec, dict) or not rec.get("id"):
+                continue
+            if artist and not _artist_matches(artist, _release_credit_text(rec)):
+                continue
+            if (title or is_live_release or target_is_alt_rendition) and not _alt_status_matches_ctx(
+                title, _recording_title(rec), target_is_live=is_live_release,
+                target_is_alt_rendition=target_is_alt_rendition,
+            ):
+                continue
+            score = 1.0
+            if title:
+                left = normalize_for_aggregation(title)
+                right = normalize_for_aggregation(str(rec.get("title") or ""))
+                if not left or not right or not aggregation_keys_compatible(left, right):
+                    continue
+                score = _token_similarity(left, right)
+                if score < 0.90:
+                    continue
+            candidates.append((score, rec))
+        candidates.sort(key=lambda pair: (-pair[0], str(pair[1].get("id"))))
+        if not candidates:
+            return None
+        # ISRCs can be attached to multiple recordings. Do not resolve a tie by order.
+        best_score, best = candidates[0]
+        if any(abs(score - best_score) < 0.02 and rec["id"] != best["id"]
+               for score, rec in candidates[1:]):
+            return None
+        return {"recording_mbid": str(best["id"]),
+                "title": str(best.get("title") or "").strip(),
+                "artist": _first_credit_name(best)}
+    except Exception as exc:
+        logger.debug("ISRC lookup failed", isrc=isrc, error=str(exc))
+        return None
+
+
+def extract_recording_mbid(track: dict[str, Any]) -> str | None:
+    for key in ("recording_mbid", "musicbrainz_recording_mbid", "mbid"):
+        value = track.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def get_listenbrainz_batch_for_tracks(tracks: list[dict[str, Any]]) -> dict[str, dict[str, int | None]]:
+    return _lb_batch(extract_recording_mbid(track) for track in tracks)
+
+
+def _resolve_release_mbid(artist: str, album: str, tracks: list[dict[str, Any]]) -> str:
+    stored = _unique_ids(t.get("musicbrainz_albumid") or t.get("musicbrainz_album_mbid")
+                         for t in tracks)
+    if len(stored) == 1:
+        return stored[0]
+    if len(stored) > 1:
+        logger.warning("Conflicting release MBIDs in local album", artist=artist, album=album)
+        return ""
+    try:
+        from api_clients.musicbrainz_http import escape_lucene_special_chars
+        client = _shared_mb()
+        if client is None:
+            return ""
+        query = (f'artist:"{escape_lucene_special_chars(artist)}" '
+                 f'AND release:"{escape_lucene_special_chars(album)}"')
+        candidates = []
+        for rel in client.search_releases(query, limit=10) or []:
+            if not isinstance(rel, dict) or not rel.get("id"):
+                continue
+            if not _artist_matches(artist, _release_credit_text(rel)):
+                continue
+            left = normalize_for_aggregation(album)
+            right = normalize_for_aggregation(str(rel.get("title") or ""))
+            if not left or not right or not aggregation_keys_compatible(left, right):
+                continue
+            if not _alt_status_matches(album, str(rel.get("title") or "")):
+                continue
+            score = _token_similarity(left, right)
+            if score >= 0.95:
+                candidates.append((score, str(rel["id"])))
+        candidates.sort(key=lambda pair: (-pair[0], pair[1]))
+        # Edition ties are not broken arbitrarily. Per-track lookup is safer.
+        if candidates and (len(candidates) == 1 or candidates[0][0] - candidates[1][0] >= 0.03):
+            return candidates[0][1]
+    except Exception as exc:
+        logger.debug("Release search failed", artist=artist, album=album, error=str(exc))
+    return ""
+
+
+def track_identity_key(local_title_key: str, disc: Any = None, position: Any = None) -> str:
+    disc_i = max(1, _parse_number(disc, 1))
+    pos_i = _parse_number(position)
+    return f"{local_title_key}#{disc_i}:{pos_i}" if pos_i > 0 else str(local_title_key or "")
+
+
+def album_recording_batch_key(
+    artist: str, title: str, disc: Any = None, track_number: Any = None,
+) -> str:
+    base = f"{str(artist or '').strip().lower()}::{str(title or '').strip().lower()}"
+    pos = _parse_number(track_number)
+    return f"{base}::{max(1, _parse_number(disc, 1))}::{pos}" if pos > 0 else base
+
+
+def _index_release_tracklist(
+    media: list[Any], titles_to_mbids: dict[str, dict[str, Any]],
+    position_index: dict[tuple[int, int], dict[str, Any]], recording_mbids: list[str],
+) -> None:
+    for medium in media:
+        if not isinstance(medium, dict):
+            continue
+        disc = max(1, _parse_number(medium.get("position"), 1))
+        for trk in medium.get("tracks") or []:
+            if not isinstance(trk, dict):
+                continue
+            rec = trk.get("recording") or {}
+            if not isinstance(rec, dict):
+                rec = {}
+            title = str(trk.get("title") or rec.get("title") or "").strip()
+            key = normalize_for_aggregation(title)
+            if not key:
+                continue
+            mbid = str(rec.get("id") or trk.get("recording_mbid") or "").strip()
+            pos = _parse_number(trk.get("position") or trk.get("number"))
+            row = {"title": title, "mbid": mbid, "credit": _release_credit_text(trk),
+                   "length_ms": trk.get("length") or rec.get("length"),
+                   "disc": disc, "position": pos,
+                   "recording_title": _recording_title(rec)}
+            entry = titles_to_mbids.setdefault(key, {
+                "title": title, "mbids": [], "rows": [], "position": pos,
+                "disc": disc, "length_ms": row["length_ms"],
+            })
+            entry["rows"].append(row)
+            if mbid:
+                entry["mbids"].append(mbid)
+                recording_mbids.append(mbid)
+            if pos > 0:
+                existing = position_index.get((disc, pos))
+                if existing is not None:
+                    existing["ambiguous"] = True
+                else:
+                    position_index[(disc, pos)] = dict(
+                        row, key=key, mbids=[mbid] if mbid else [], ambiguous=False,
+                    )
+
+
+def _position_title_corroborates(local_title: str, release_title: str) -> bool:
+    if not local_title or not release_title:
+        return False
+    # A cover annotation is not evidence that two recordings are identical.
+    if strip_cover_attribution(local_title) != local_title or strip_cover_attribution(release_title) != release_title:
+        return False
+    left = strip_featured_artist(local_title) or local_title
+    right = strip_featured_artist(release_title) or release_title
+    return bool(titles_match_for_review(left, right))
+
+
+def _position_alias_allowed(
+    local_title: str, release_title: str | None, *, local_track_count: int,
+    release_track_count: int, layout_verified: bool = False,
+    length_verified: bool = False, artist_verified: bool = False,
+) -> bool:
+    # Equal totals alone never establish an edition or a translated title.
+    if _position_title_corroborates(local_title, release_title or ""):
+        return True
+    return bool(local_track_count > 0 and local_track_count == release_track_count
+                and layout_verified and length_verified and artist_verified)
+
+
+def _release_year(value: Any) -> int | None:
+    match = re.search(r"(?<!\d)(\d{4})(?!\d)", str(value or ""))
+    return int(match.group(1)) if match else None
+
+
+def _release_is_remaster_edition(release: dict[str, Any]) -> bool:
+    """Explicit label only. Release age does not establish remaster status."""
+    return bool(REMASTER_MARKER_RE.search(str(release.get("title") or "")))
+
+
+def _original_release_of_group(release: dict[str, Any], mb_client: Any) -> dict[str, Any] | None:
+    """Legacy helper retained; never used to substitute recording identities.
+
+    Returns the earliest dated release in the fetched page, not a guarantee of
+    the original edition. The browse wrapper's pagination contract is unknown.
+    """
+    group = release.get("release-group") or {}
+    if not isinstance(group, dict) or not group.get("id"):
+        return None
+    try:
+        releases = mb_client.browse_releases_for_group(group["id"], inc="media", limit=50) or []
+        dated = [r for r in releases if isinstance(r, dict) and _release_year(r.get("date"))]
+        return min(dated, key=lambda r: (str(r.get("date")), str(r.get("id")))) if dated else None
+    except Exception as exc:
+        logger.debug("Release-group browse failed", error=str(exc))
+        return None
+
+
+def get_listenbrainz_album_tracklist_with_release(
+    artist: str, album: str, tracks: list[dict[str, Any]],
+) -> tuple[dict[str, AlbumRecordingMatch], str]:
+    if not tracks:
+        return {}, ""
+    release_mbid = _resolve_release_mbid(artist, album, tracks)
+    if not release_mbid:
+        return {}, ""
+    titles: dict[str, dict[str, Any]] = {}
+    positions: dict[tuple[int, int], dict[str, Any]] = {}
+    ids: list[str] = []
+    source = ""
+    # Prefer authoritative MB track rows and artist credits. LB is a fallback.
+    client = _shared_mb()
+    if client is not None:
+        try:
+            release = client.get_release(release_mbid, inc="recordings+artist-credits") or {}
+            if isinstance(release, dict):
+                _index_release_tracklist(release.get("media") or [], titles, positions, ids)
+                if ids:
+                    source = "musicbrainz"
+        except Exception as exc:
+            logger.debug("MB release tracklist failed", release_mbid=release_mbid, error=str(exc))
+    if not ids:
+        # Discard partial indices before trying a different source.
+        titles.clear()
+        positions.clear()
+        try:
+            response = lb_get_release_metadata_batch([release_mbid]) or {}
+            container = response.get("releases", response) if isinstance(response, dict) else {}
+            release = container.get(release_mbid) or {} if isinstance(container, dict) else {}
+            if isinstance(release, dict):
+                _index_release_tracklist(release.get("media") or [], titles, positions, ids)
+                if ids:
+                    source = "listenbrainz"
+        except Exception as exc:
+            logger.debug("LB release metadata failed", release_mbid=release_mbid, error=str(exc))
+    if not ids:
+        return {}, release_mbid
+    counts = _lb_batch(ids)
+    local_rows = [t for t in tracks if normalize_for_aggregation(str(t.get("title") or ""))]
+    local_title_counts = Counter(normalize_for_aggregation(str(t.get("title") or "")) for t in local_rows)
+    local_positions = [(max(1, _parse_number(t.get("disc_number"), 1)),
+                        _parse_number(t.get("track_number"))) for t in local_rows]
+    local_layout = Counter(disc for disc, pos in local_positions if pos > 0)
+    release_layout = Counter(disc for disc, pos in positions)
+    layout_verified = bool(
+        len(local_positions) == len(set(local_positions))
+        and all(pos > 0 for _, pos in local_positions)
+        and set(local_positions) == set(positions)
+        and local_layout == release_layout
+        and not any(row.get("ambiguous") for row in positions.values())
+    )
+    out: dict[str, AlbumRecordingMatch] = {}
+
+    def payload(row: dict[str, Any], track: dict[str, Any], method: str,
+                unique: bool = False) -> AlbumRecordingMatch:
+        total, users = _sum_counts(counts, [row.get("mbid")])
+        return {"listenbrainz_listens": total, "listenbrainz_users": users,
+                "recording_mbid": row.get("mbid") or None,
+                "release_track_title": str(row.get("title") or ""),
+                "local_disc_number": max(1, _parse_number(track.get("disc_number"), 1)),
+                "local_track_number": _parse_number(track.get("track_number")),
+                "length_verified": _length_agreement(track.get("duration"), row.get("length_ms")) is True,
+                "title_is_unique": unique, "matched_by": method}
+
+    def row_compatible(track: dict[str, Any], row: dict[str, Any]) -> bool:
+        if not row.get("mbid"):
+            return False
+        if _length_agreement(track.get("duration"), row.get("length_ms")) is False:
+            return False
+        local_artist = str(track.get("artist") or "").strip()
+        credit = str(row.get("credit") or "").strip()
+        # Missing or generic compilation credits cannot corroborate a row,
+        # but must not prevent a unique release-title identity being returned.
+        generic = {"various artists", "various", "va", "[unknown]", "unknown"}
+        if local_artist.casefold() not in generic and local_artist and credit:
+            if not _artist_matches(local_artist, credit):
+                return False
+        local_types = _performance_types(str(track.get("title") or ""))
+        release_types = _performance_types(str(row.get("title") or ""))
+        if local_types and local_types != release_types:
+            return False
+        return True
+
+    # Publish only unambiguous title identities. No first-MBID picks or sums
+    # across different performances sharing a normalised title.
+    for key, entry in titles.items():
+        rows = entry["rows"]
+        if len(rows) != 1 or not rows[0].get("mbid") or local_title_counts[key] != 1:
+            continue
+        track = next(t for t in local_rows if normalize_for_aggregation(str(t.get("title") or "")) == key)
+        if row_compatible(track, rows[0]):
+            out[key] = payload(rows[0], track, "title", unique=True)
+
+    for track in local_rows:
+        title = str(track.get("title") or "")
+        key = normalize_for_aggregation(title)
+        disc = max(1, _parse_number(track.get("disc_number"), 1))
+        pos = _parse_number(track.get("track_number"))
+        if pos <= 0 or (out.get(key) or {}).get("title_is_unique"):
+            continue
+        alias = track_identity_key(key, disc, pos)
+        candidates = (titles.get(key) or {}).get("rows") or []
+        local_artist = str(track.get("artist") or "")
+        local_tokens = _credit_identity_tokens(local_artist)
+        matches = [row for row in candidates if local_tokens
+                   and _credit_identity_tokens(str(row.get("credit") or "")) == local_tokens
+                   and row_compatible(track, row)]
+        # A short credit can be an abbreviated featured credit; do not guess.
+        abbreviated = any(local_tokens < _credit_identity_tokens(str(row.get("credit") or ""))
+                          for row in candidates) if local_tokens else False
+        if len(candidates) > 1 and len(matches) == 1 and not abbreviated:
+            out[alias] = payload(matches[0], track, "artist")
+            continue
+        row = positions.get((disc, pos))
+        if not row or row.get("ambiguous") or not row_compatible(track, row):
+            continue
+        length_verified = _length_agreement(track.get("duration"), row.get("length_ms")) is True
+        artist_verified = _artist_matches(local_artist, str(row.get("credit") or ""))
+        if not _position_alias_allowed(
+            title, row.get("title"), local_track_count=len(local_rows),
+            release_track_count=len(positions), layout_verified=layout_verified,
+            length_verified=length_verified, artist_verified=artist_verified,
+        ):
+            continue
+        # For a missing marker or a duplicate title, require actual duration
+        # corroboration before letting position choose the recording.
+        if not length_verified:
+            continue
+        out[alias] = payload(row, track, "position")
+        if local_title_counts[key] == 1:
+            out[key] = dict(out[alias])
+    logger.info("Preloaded ListenBrainz album tracklist", count=len(out), artist=artist,
+                album=album, release_mbid=release_mbid, source=source)
+    return out, release_mbid
+
+
+def get_listenbrainz_album_tracklist(
+    artist: str, album: str, tracks: list[dict[str, Any]],
+) -> dict[str, AlbumRecordingMatch]:
+    return get_listenbrainz_album_tracklist_with_release(artist, album, tracks)[0]
+
+
+def get_listenbrainz_popularity_for_track(track: dict[str, Any]) -> dict[str, int | None]:
+    mbid = extract_recording_mbid(track)
+    if mbid:
+        try:
+            result = lb_get_listenbrainz_popularity(mbid)
+            if isinstance(result, dict):
+                return result
+        except Exception as exc:
+            logger.debug("LB track lookup failed", recording_mbid=mbid, error=str(exc))
+    return {"total_listen_count": None, "total_user_count": None}
+
+
+def get_listenbrainz_score_for_track(track: dict[str, Any]) -> int:
+    mbid = extract_recording_mbid(track)
+    if mbid:
+        try:
+            return _count(lb_get_listenbrainz_score(mbid))
+        except Exception:
+            pass
+    return 0
+
+
+def get_lastfm_track_info(
+    artist: str, title: str, track_mbid: str | None = None,
+    album_artist: str | None = None, lastfm_client: LastFmClient | None = None,
+) -> dict[str, Any]:
+    if lastfm_client is None:
+        return {"track_play": 0, "listeners": 0}
+    results = []
+    for candidate in _unique_ids(get_artist_lookup_candidates(artist, album_artist=album_artist)):
+        try:
+            result = lastfm_client.get_track_info(candidate, title, track_mbid=track_mbid)
+            if isinstance(result, dict):
+                results.append(result)
+        except Exception:
+            continue
+    return choose_best_provider_counts(results) if results else {"track_play": 0, "listeners": 0}
+
+
+def _configured_lastfm_client(client: Any = None, api_key: str | None = None) -> Any:
+    if client is not None:
+        return client
+    try:
+        if not api_key:
+            from helpers.config_helpers import get_config
+            integrations = (get_config() or {}).get("api_integrations") or {}
+            api_key = (integrations.get("lastfm") or {}).get("api_key")
+        return LastFmClient(api_key=api_key) if api_key else None
+    except Exception as exc:
+        logger.debug("Last.fm client unavailable", error=str(exc))
+        return None
+
+
+def _artist_catalogue(artist: str, client: Any) -> list[dict[str, Any]]:
+    key = _artist_cache_key(artist)
+    if not key or client is None:
+        return []
+    cached = _cache_get(_lastfm_artist_catalog_cache, key)
+    if cached is not None:
+        return [dict(item) for item in cached]
+    catalogue: list[dict[str, Any]] = []
+    try:
+        from services.popularity.popularity_cache_service import get_artist_top_tracks_map
+        mapping = get_artist_top_tracks_map(client, artist) or {}
+        for title, entry in mapping.items():
+            if not isinstance(entry, dict):
+                continue
+            # Prefer a raw provider title when the map retains one. A map
+            # whose keys discarded version markers cannot prove an alt match.
+            raw_title = str(entry.get("name") or entry.get("title") or title)
+            catalogue.append({"name": raw_title,
+                              "listeners": _count(entry.get("lastfm_listeners")),
+                              "playcount": _count(entry.get("lastfm_playcount")),
+                              "artist": artist,
+                              "_raw_title_verified": bool(entry.get("name") or entry.get("title"))})
+    except Exception as exc:
+        logger.debug("Last.fm catalogue map failed", artist=artist, error=str(exc))
+    if not catalogue and hasattr(client, "get_artist_top_tracks"):
+        try:
+            raw = client.get_artist_top_tracks(artist) or []
+            if isinstance(raw, dict):
+                raw = (raw.get("toptracks") or {}).get("track", [])
+            if isinstance(raw, dict):
+                raw = [raw]
+            for entry in raw:
+                if isinstance(entry, dict):
+                    item = dict(entry)
+                    item.setdefault("artist", artist)
+                    catalogue.append(item)
+        except Exception as exc:
+            logger.debug("Last.fm catalogue fetch failed", artist=artist, error=str(exc))
+    _cache_put(_lastfm_artist_catalog_cache, key, catalogue)
+    return [dict(item) for item in catalogue]
+
+
+def get_lastfm_artist_max_listeners(artist: str, api_key: str | None = None) -> int:
+    key = _artist_cache_key(artist)
+    if not key:
+        return 0
+    cached = _cache_get(_lastfm_artist_max_cache, key)
+    if cached is not None:
+        return int(cached)
+    client = _configured_lastfm_client(api_key=api_key)
+    catalogue = _artist_catalogue(artist, client)
+    peak = max((_count(item.get("listeners")) for item in catalogue), default=0)
+    if not peak:
+        try:
+            if not api_key:
+                from helpers.config_helpers import get_config
+                api_key = (((get_config() or {}).get("api_integrations") or {}).get("lastfm") or {}).get("api_key")
+            if api_key:
+                from api_clients.lastfm_http import LastFmHttpClient
+                data = LastFmHttpClient(api_key=api_key).get_json(
+                    "artist.getTopTracks", timeout=10, artist=artist, limit=100,
+                ) or {}
+                raw = (data.get("toptracks") or {}).get("track") or []
+                if isinstance(raw, dict):
+                    raw = [raw]
+                peak = max((_count(item.get("listeners")) for item in raw
+                            if isinstance(item, dict)), default=0)
+        except Exception as exc:
+            logger.debug("Last.fm artist peak lookup failed", artist=artist, error=str(exc))
+    _cache_put(_lastfm_artist_max_cache, key, peak)
+    return peak
+
+
+def get_online_artist_catalogue(
+    artist: str, lastfm_client: Any = None, limit: int = 200,
+) -> list[tuple[str, int]]:
+    """Observed top-track sample, sorted by listeners, not a full discography."""
+    limit = max(0, _parse_number(limit, 200))
+    key = _artist_cache_key(artist)
+    if not key or limit == 0:
+        return []
+    cached = _cache_get(_ONLINE_CATALOGUE_CACHE, key)
+    if cached is None:
+        catalogue = _artist_catalogue(artist, _configured_lastfm_client(lastfm_client))
+        by_title: dict[str, int] = {}
+        for item in catalogue:
+            title = normalize_for_aggregation(str(item.get("name") or item.get("title") or ""))
+            listeners = _count(item.get("listeners"))
+            if title and listeners:
+                by_title[title] = max(by_title.get(title, 0), listeners)
+        cached = sorted(by_title.items(), key=lambda pair: (-pair[1], pair[0]))
+        _cache_put(_ONLINE_CATALOGUE_CACHE, key, cached)
+    return list(cached[:limit])
+
+
+def get_online_artist_track_rank(
+    artist: str, track_title: str, lastfm_client: Any = None,
+) -> dict[str, Any]:
+    """Rank within the observed catalogue sample. A missing rank is unknown.
+
+    Percentile is the midpoint (rank - 0.5) / sample size; it does not guarantee
+    that rank 1 falls inside any particular rating band for small samples.
+    """
+    empty = {"rank": 0, "total": 0, "percentile": 0.0, "listeners": 0,
+             "top_listeners": 0, "source": "none"}
+    target = normalize_for_aggregation(track_title)
+    if not target:
+        return empty
+    catalogue = get_online_artist_catalogue(artist, lastfm_client=lastfm_client)
+    if not catalogue:
+        return empty
+    for index, (title, listeners) in enumerate(catalogue, 1):
+        if title == target:
+            return {"rank": index, "total": len(catalogue),
+                    "percentile": (index - 0.5) / len(catalogue),
+                    "listeners": listeners, "top_listeners": catalogue[0][1],
+                    "source": "lastfm_artist_top_tracks"}
+    return {"rank": 0, "total": len(catalogue), "percentile": 1.0,
+            "listeners": 0, "top_listeners": catalogue[0][1],
+            "source": "lastfm_artist_top_tracks_beyond"}
+
+
+def _empty_lastfm() -> dict[str, Any]:
+    return {"listeners": 0, "track_play": 0, "matched_tracks": []}
+
+
+def _lastfm_result(items: list[dict[str, Any]]) -> dict[str, Any]:
+    # Different provider buckets may contain overlapping listeners.
+    return {"listeners": sum(_count(i.get("listeners")) for i in items),
+            "track_play": sum(_count(i.get("playcount") or i.get("track_play")) for i in items),
+            "matched_tracks": items}
+
+
+def _lastfm_item_key(item: dict[str, Any]) -> str:
+    url = str(item.get("url") or "").strip()
+    if url:
+        return url.casefold()
+    return (_artist_cache_key(_search_item_artist(item)) + "::" +
+            normalize_unicode_punctuation(str(item.get("name") or item.get("title") or "")).casefold().strip())
+
+
+def _lastfm_candidate_ok(
+    item: dict[str, Any], artist: str, title: str, *, is_live: bool, is_alt: bool,
+    require_artist: bool = True,
+) -> bool:
+    item_title = str(item.get("name") or item.get("title") or "")
+    if item.get("_raw_title_verified") is False:
+        return False
+    if not item_title:
+        return False
+    if require_artist and not _artist_matches(artist, _search_item_artist(item)):
+        return False
+    if not _alt_status_matches_ctx(title, item_title, target_is_live=is_live,
+                                   target_is_alt_rendition=is_alt):
+        return False
+    left, right = normalize_for_aggregation(title), normalize_for_aggregation(item_title)
+    return bool(left and right and title_variants_compatible(title, item_title)
+                and aggregation_keys_compatible(left, right))
+
+
+def _lastfm_direct(client: Any, artist: str, title: str, mbid: str | None = None) -> dict[str, Any]:
+    try:
+        info = (client.get_track_info(artist, title, track_mbid=mbid) if mbid
+                else client.get_track_info(artist, title)) or {}
+        if not isinstance(info, dict):
+            return _empty_lastfm()
+        returned_artist = _search_item_artist(info)
+        if returned_artist and not _artist_matches(artist, returned_artist):
+            return _empty_lastfm()
+        returned_title = str(info.get("name") or info.get("title") or "")
+        if returned_title and not _lastfm_candidate_ok(
+            dict(info, artist=returned_artist or artist), artist, title,
+            is_live=False, is_alt=False,
+        ):
+            return _empty_lastfm()
+        return {"listeners": _count(info.get("listeners")),
+                "track_play": _count(info.get("track_play") or info.get("playcount")),
+                "matched_tracks": []}
+    except Exception as exc:
+        logger.debug("Last.fm direct lookup failed", artist=artist, track=title, error=str(exc))
+        return _empty_lastfm()
+
+
+def get_search_aggregated_lastfm_popularity(
+    artist: str, track_title: str, lastfm_client: Any = None,
+    is_live_release: bool = False, target_is_alt_rendition: bool = False,
+) -> dict[str, Any]:
+    if lastfm_client is None:
+        return _empty_lastfm()
+    artist = normalize_unicode_punctuation(artist)
+    track_title = normalize_unicode_punctuation(track_title)
+    track_title = strip_cover_attribution(track_title) or track_title
+    if not normalize_for_aggregation(track_title):
+        return _empty_lastfm()
+    matched: dict[str, dict[str, Any]] = {}
+    primary = get_primary_artist_preserve_case(artist)
+    candidates = _unique_ids([artist, primary] + list(get_artist_lookup_candidates(artist)))
+    for candidate in candidates:
+        try:
+            results = lastfm_client.search_track(candidate, track_title, limit=20) or []
+        except Exception as exc:
+            logger.debug("Last.fm search failed", artist=candidate, error=str(exc))
+            continue
+        for item in results:
+            if not isinstance(item, dict) or not _lastfm_candidate_ok(
+                item, artist, track_title, is_live=is_live_release,
+                is_alt=target_is_alt_rendition,
+            ):
+                continue
+            key = _lastfm_item_key(item)
+            previous = matched.get(key)
+            if previous is None or _count(item.get("listeners")) > _count(previous.get("listeners")):
+                matched[key] = dict(item)
+    if matched:
+        return _lastfm_result(list(matched.values()))
+    # Guard explicit title markers as well as release-derived flags.
+    if is_live_release or target_is_alt_rendition or _is_alternate_performance_title(track_title):
+        return _empty_lastfm()
+    return _lastfm_direct(lastfm_client, artist, track_title)
+
+
+def get_aggregated_lastfm_popularity(
+    artist: str, track_title: str, lastfm_client: Any = None,
+    isrc: str | None = None, recording_mbid: str | None = None,
+    is_live_release: bool = False, target_is_alt_rendition: bool = False,
+) -> dict[str, Any]:
+    if lastfm_client is None:
+        return _empty_lastfm()
+    artist = normalize_unicode_punctuation(artist)
+    track_title = normalize_unicode_punctuation(track_title)
+    track_title = strip_cover_attribution(track_title) or track_title
+    if not normalize_for_aggregation(track_title):
+        return _empty_lastfm()
+    matched: dict[str, dict[str, Any]] = {}
+    # A collaboration is not automatically identical to each contributor's
+    # solo catalogue. Search can still find the full credited collaboration.
+    for item in _artist_catalogue(artist, lastfm_client):
+        if _lastfm_candidate_ok(item, artist, track_title, is_live=is_live_release,
+                               is_alt=target_is_alt_rendition):
+            matched[_lastfm_item_key(item)] = item
+    best = _lastfm_result(list(matched.values())) if matched else _empty_lastfm()
+    if not matched or _is_featured_artist(artist) or ARTIST_JOIN_RE.search(artist):
+        search = get_search_aggregated_lastfm_popularity(
+            artist, track_title, lastfm_client, is_live_release, target_is_alt_rendition,
+        )
+        if (search["listeners"], search["track_play"]) > (best["listeners"], best["track_play"]):
+            best = search
+    if best["listeners"] or best["track_play"]:
+        return best
+    if is_live_release or target_is_alt_rendition or _is_alternate_performance_title(track_title):
+        return _empty_lastfm()
+    variants: dict[str, dict[str, Any]] = {"Primary": _lastfm_direct(lastfm_client, artist, track_title)}
+    if isrc or recording_mbid:
+        resolved = resolve_isrc_recording(isrc, title=track_title, artist=artist) if isrc else None
+        mbid = (resolved or {}).get("recording_mbid") or recording_mbid
+        if mbid:
+            variants["ISRC"] = _lastfm_direct(
+                lastfm_client, str((resolved or {}).get("artist") or artist),
+                str((resolved or {}).get("title") or track_title), str(mbid),
+            )
+    if _is_featured_artist(artist):
+        inverted = invert_featured_artist(artist)
+        if inverted != artist:
+            variants["Inverted"] = _lastfm_direct(lastfm_client, inverted, track_title)
+    best_key = max(variants, key=lambda key: (variants[key]["listeners"], variants[key]["track_play"]))
+    result = dict(variants[best_key])
+    if len(variants) > 1:
+        result.update(sources_queried=len(variants), variant_detail={
+            key: value["listeners"] for key, value in variants.items() if value["listeners"] > 0
+        })
+    return result
+
+
+def _recording_artist_mbids(recording: dict[str, Any]) -> set[str]:
+    output = set()
+    for credit in recording.get("artist-credit") or []:
+        if isinstance(credit, dict):
+            artist = credit.get("artist") or {}
+            if isinstance(artist, dict) and artist.get("id"):
+                output.add(str(artist["id"]))
+    return output
+
+
+def _recording_primary_artist(recording: dict[str, Any]) -> str:
+    return _first_credit_name(recording)
+
+
+def _recording_work_mbids(recording: dict[str, Any]) -> set[str]:
+    output = set()
+    for relation in recording.get("relations") or []:
+        if not isinstance(relation, dict) or str(relation.get("type") or "").casefold() != "performance":
+            continue
+        work = relation.get("work") or {}
+        if isinstance(work, dict) and work.get("id"):
+            output.add(str(work["id"]).strip())
+    return output
+
+
+def _recording_work_mbid(recording: dict[str, Any]) -> str:
+    ids = _recording_work_mbids(recording)
+    return next(iter(ids)) if len(ids) == 1 else ""
+
+
+def _lb_result(mbids: Any, **extra: Any) -> dict[str, Any]:
+    ids = sorted(_unique_ids(mbids))
+    counts = _lb_batch(ids)
+    total, users = _sum_counts(counts, ids)
+    return {"total_listen_count": total, "total_user_count": users, "mbids": ids, **extra}
+
+
+def get_aggregated_listenbrainz_popularity(
+    title: str, artist: str, primary_mbid: str | None = None,
+    isrc: str | None = None, lb_client: Any = None, mb_client: Any = None,
+    is_live_release: bool = False, target_is_alt_rendition: bool = False,
+) -> dict[str, Any]:
+    # lb_client remains accepted for compatibility; counts use the established
+    # module-level LB batch wrapper, whose contract is known to this module.
+    mbids: set[str] = set(_unique_ids([primary_mbid]))
+    client = _shared_mb(mb_client)
+    if isrc and not primary_mbid:
+        resolved = resolve_isrc_recording(
+            isrc, mb_client=client, title=title, artist=artist,
+            is_live_release=is_live_release, target_is_alt_rendition=target_is_alt_rendition,
+        )
+        if resolved and resolved.get("recording_mbid"):
+            mbids.add(str(resolved["recording_mbid"]))
+    if client is not None and hasattr(client, "search_recordings"):
+        try:
+            from helpers.normalization_service import normalize_title_for_lucene_query
+            from api_clients.musicbrainz_http import escape_lucene_special_chars
+            query = (f'recording:"{escape_lucene_special_chars(normalize_title_for_lucene_query(title))}" '
+                     f'AND artist:"{escape_lucene_special_chars(artist)}"')
+            target = normalize_for_aggregation(title)
+            for rec in client.search_recordings(query, limit=20) or []:
+                if not isinstance(rec, dict) or not rec.get("id"):
+                    continue
+                if not _artist_matches(artist, _release_credit_text(rec)):
+                    continue
+                if not _alt_status_matches_ctx(
+                    title, _recording_title(rec), target_is_live=is_live_release,
+                    target_is_alt_rendition=target_is_alt_rendition,
+                ):
+                    continue
+                candidate = normalize_for_aggregation(str(rec.get("title") or ""))
+                if target and candidate and aggregation_keys_compatible(target, candidate) and _token_similarity(target, candidate) >= 0.90:
+                    mbids.add(str(rec["id"]))
+        except Exception as exc:
+            logger.debug("LB recording candidate search failed", artist=artist, track=title, error=str(exc))
+    return _lb_result(mbids)
+
+
 def _empty_work_lb_result() -> dict[str, Any]:
-    return {
-        "total_listen_count": 0,
-        "total_user_count": 0,
-        "mbids": [],
-        "work_mbid": "",
-        "source": "work",
-    }
+    return {"total_listen_count": 0, "total_user_count": 0, "mbids": [],
+            "work_mbid": "", "source": "work"}
 
 
 def get_work_level_listenbrainz_popularity(
-    title: str,
-    artist: str,
-    artist_mbid: str = "",
-    primary_mbid: str = "",
-    isrc: str = "",
-    lb_client: Any = None,
-    mb_client: Any = None,
-    work_mbid_hint: str = "",
-    is_live_release: bool = False,
+    title: str, artist: str, artist_mbid: str = "", primary_mbid: str = "",
+    isrc: str = "", lb_client: Any = None, mb_client: Any = None,
+    work_mbid_hint: str = "", is_live_release: bool = False,
+    target_is_alt_rendition: bool = False,
 ) -> dict[str, Any]:
-    """Work-level aggregated ListenBrainz popularity.
-
-    Division of labour (intentional): MusicBrainz supplies the WORK GRAPH
-    (which recording -> which work, all recordings of the work) and
-    ListenBrainz supplies the LISTEN COUNTS -- MusicBrainz has no listening
-    data, so the play counts must always come from ListenBrainz.
-
-    ``work_mbid_hint`` lets a caller that already resolved the work MBID
-    (e.g. from the release metadata's embedded work-rels) skip the per-track
-    ``get_recording(work-rels)`` MusicBrainz request -- the 1 req/s bottleneck.
-
-    ``is_live_release`` matters especially here: a work groups EVERY recording
-    of a song, studio and live alike, so without release-level liveness a live
-    track aggregates the whole work's listen counts.
-    """
-    logger.debug("Fetching Work-level aggregated ListenBrainz popularity")
-    if mb_client is None:
-        try:
-            from services.enrichment.musicbrainz_service import get_shared_mb_client
-            mb_client = get_shared_mb_client()
-        except Exception:
-            mb_client = None
-
-    if mb_client is None:
+    client = _shared_mb(mb_client)
+    if client is None:
         return _empty_work_lb_result()
-
+    seeds = set(_unique_ids([primary_mbid]))
+    if not seeds and isrc:
+        resolved = resolve_isrc_recording(
+            isrc, mb_client=client, title=title, artist=artist,
+            is_live_release=is_live_release, target_is_alt_rendition=target_is_alt_rendition,
+        )
+        if resolved and resolved.get("recording_mbid"):
+            seeds.add(str(resolved["recording_mbid"]))
     work_mbid = str(work_mbid_hint or "").strip()
-    seed_mbids: set[str] = set()
-    if primary_mbid:
-        seed_mbids.add(primary_mbid)
-    elif isrc:
-        try:
-            _isrc_rec = resolve_isrc_recording(
-                isrc,
-                title=title,
-                artist=artist,
-                mb_client=mb_client,
-                is_live_release=is_live_release,
-            )
-            if _isrc_rec and _isrc_rec.get("recording_mbid"):
-                seed_mbids.add(_isrc_rec["recording_mbid"])
-        except Exception:
-            pass
-
     if not work_mbid:
-        for seed_mbid in seed_mbids:
+        for seed in sorted(seeds):
             try:
-                rec = mb_client.get_recording(seed_mbid, inc="work-rels+artist-credits")
-                if not rec or not rec.get("id"):
-                    continue
+                rec = client.get_recording(seed, inc="work-rels+artist-credits") or {}
                 work_mbid = _recording_work_mbid(rec)
                 if work_mbid:
                     break
             except Exception as exc:
-                logger.debug("Recording work-rels fetch failed", seed_mbid=seed_mbid, error=str(exc))
-
+                logger.debug("Recording work lookup failed", recording_mbid=seed, error=str(exc))
     if not work_mbid:
-        logger.debug("No Work resolvable for track", artist=artist, track=title)
         return _empty_work_lb_result()
-
-    recordings: list[dict[str, Any]] = []
-    try:
-        recordings = mb_client.browse_work_recordings(work_mbid, inc="artist-credits", limit=100) or []
-    except Exception as exc:
-        logger.debug("Work recording browse failed", work_mbid=work_mbid, error=str(exc))
-
-    mbids: set[str] = set(seed_mbids)
-
-    from helpers.normalization_service import strip_featured_artist
-    target_artist = normalize_for_aggregation(strip_featured_artist(artist) or artist)
-
+    # Include client identity so injected clients cannot share stale graph data.
+    cache_key = (id(client), work_mbid)
+    recordings = _cache_get(_work_recordings_cache, cache_key)
+    if recordings is None:
+        try:
+            recordings = client.browse_work_recordings(work_mbid, inc="artist-credits", limit=100) or []
+            if not isinstance(recordings, list):
+                recordings = []
+        except Exception as exc:
+            logger.debug("Work recording browse failed", work_mbid=work_mbid, error=str(exc))
+            recordings = []
+        _cache_put(_work_recordings_cache, cache_key, recordings)
+    mbids = set(seeds)
     for rec in recordings:
-        if not isinstance(rec, dict):
+        if not isinstance(rec, dict) or not rec.get("id"):
             continue
-        rec_id = str(rec.get("id") or "").strip()
-        rec_title = str(rec.get("title") or "")
-
-        if not rec_id or not rec_title:
+        if not _alt_status_matches_ctx(
+            title, _recording_title(rec), target_is_live=is_live_release,
+            target_is_alt_rendition=target_is_alt_rendition,
+        ):
             continue
-        # Same reasoning as get_aggregated_listenbrainz_popularity above:
-        # only reject recordings that *disagree* with the target track on
-        # alt-performance status, so a live/remix/alternate target can still
-        # match its own recordings within the work, without pulling in a
-        # different studio release's counts (or vice versa).
-        if not _alt_status_matches_ctx(title, rec_title, target_is_live=is_live_release):
-            continue
-
-        rec_artist_mbids = _recording_artist_mbids(rec)
         if artist_mbid:
-            if artist_mbid not in rec_artist_mbids:
+            # Presence anywhere in a multi-artist credit does not prove the
+            # same credited performance. Require the full credit as well.
+            if artist_mbid not in _recording_artist_mbids(rec):
                 continue
-        else:
-            rec_artist = _recording_primary_artist(rec)
-            if not rec_artist or normalize_for_aggregation(rec_artist) != target_artist:
-                continue
-
-        mbids.add(rec_id)
-
-    if not mbids:
-        return _empty_work_lb_result()
-
-    try:
-        batch = lb_get_recording_popularity_batch(list(mbids))
-        listen_count = sum(int((batch.get(mbid) or {}).get("total_listen_count") or 0) for mbid in mbids)
-        user_count = sum(int((batch.get(mbid) or {}).get("total_user_count") or 0) for mbid in mbids)
-
-        logger.debug(
-            "Aggregated Work-level LB",
-            artist=artist,
-            track=title,
-            work_mbid=work_mbid,
-            listens=listen_count,
-            users=user_count,
-            recordings_count=len(mbids),
-        )
-        return {
-            "total_listen_count": listen_count,
-            "total_user_count": user_count,
-            "mbids": sorted(mbids),
-            "work_mbid": work_mbid,
-            "source": "work",
-        }
-    except Exception as exc:
-        logger.debug("Work-level LB aggregation failed", artist=artist, track=title, error=str(exc))
-        return _empty_work_lb_result()
+        if not _artist_matches(artist, _release_credit_text(rec)):
+            continue
+        # A work can have edits, medleys, translations, or alternate titles.
+        # Prefer under-aggregation over accepting a different recording by name.
+        left = normalize_for_aggregation(title)
+        right = normalize_for_aggregation(str(rec.get("title") or ""))
+        if not left or not right or not aggregation_keys_compatible(left, right):
+            continue
+        mbids.add(str(rec["id"]))
+    return _lb_result(mbids, work_mbid=work_mbid, source="work")
 
 
 def get_metadata_sources_info(single_sources: list[str]) -> dict[str, Any]:
-    has_discogs = "discogs" in single_sources or "discogs_video" in single_sources
-    has_spotify = "spotify" in single_sources
-    has_musicbrainz = "musicbrainz" in single_sources
-    has_lastfm = "lastfm" in single_sources
-    has_version_count = "version_count" in single_sources
-
-    has_metadata = has_discogs or has_spotify or has_musicbrainz or has_lastfm
-
-    sources_list: list[str] = []
-    if has_discogs:
-        sources_list.append("Discogs")
-    if has_spotify:
-        sources_list.append("Spotify")
-    if has_musicbrainz:
-        sources_list.append("MusicBrainz")
-    if has_lastfm:
-        sources_list.append("Last.fm")
-    if has_version_count:
-        sources_list.append("Version Count")
-
-    return {
-        "has_discogs": has_discogs,
-        "has_spotify": has_spotify,
-        "has_musicbrainz": has_musicbrainz,
-        "has_lastfm": has_lastfm,
-        "has_version_count": has_version_count,
-        "has_metadata": has_metadata,
-        "sources_list": sources_list,
-    }
+    sources = set(single_sources or [])
+    flags = {"has_discogs": bool(sources & {"discogs", "discogs_video"}),
+             "has_spotify": "spotify" in sources,
+             "has_musicbrainz": "musicbrainz" in sources,
+             "has_lastfm": "lastfm" in sources,
+             "has_version_count": "version_count" in sources}
+    labels = [("has_discogs", "Discogs"), ("has_spotify", "Spotify"),
+              ("has_musicbrainz", "MusicBrainz"), ("has_lastfm", "Last.fm"),
+              ("has_version_count", "Version Count")]
+    return {**flags,
+            "has_metadata": any(flags[key] for key, _ in labels if key != "has_version_count"),
+            "sources_list": [label for key, label in labels if flags[key]]}
