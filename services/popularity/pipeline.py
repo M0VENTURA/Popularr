@@ -211,9 +211,14 @@ def run_popularity_scan(
 ):
     """Run the popularity scan pipeline. Entry point for CLI, WebUI, and scheduler."""
     from helpers.logging_config import log_unified
-    _reload_config_before_scan()
-    log_unified(f"[POPULARITY_PIPELINE] Starting scan (artist={artist_filter or 'ALL'}, verbose={verbose}, force={force}) — config.yaml reloaded")
-    _log_scan_config()
+    from services.popularity.scan_scope import global_playlists_deferred
+
+    if not global_playlists_deferred():
+        _reload_config_before_scan()
+        log_unified(f"[POPULARITY_PIPELINE] Starting scan (artist={artist_filter or 'ALL'}, verbose={verbose}, force={force}) — config.yaml reloaded")
+        _log_scan_config()
+    else:
+        log_unified(f"[POPULARITY_PIPELINE] Starting scan (artist={artist_filter or 'ALL'}, verbose={verbose}, force={force})")
 
     # ✅ CLEAR STALE STOP FLAGS
     if progress_file:

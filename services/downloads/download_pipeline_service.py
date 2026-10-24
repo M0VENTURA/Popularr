@@ -56,7 +56,13 @@ logger = structlog.get_logger(__name__)
 _BLOCKED_PEER_TTL_SECONDS = int(
     os.environ.get("SLSKD_BLOCKED_PEER_TTL_SECONDS", "86400")
 )
+_PEER_STALL_COOLDOWN_SECONDS = int(
+    os.environ.get("SLSKD_PEER_STALL_COOLDOWN_SECONDS", "7200")
+)
+_PEER_STALL_THRESHOLD = 2
 _blocked_peers: dict[tuple[str, str], float] = {}
+_peer_stall_timestamps: dict[str, list[float]] = {}
+_blocked_usernames: dict[str, float] = {}
 
 
 def _peer_key(username: str | None, filename: str | None) -> tuple[str, str]:
@@ -89,14 +95,50 @@ def _block_peer(username: str | None, filename: str | None) -> None:
             _blocked_peers.pop(key, None)
 
 
+def _record_peer_stall(username: str | None, filename: str | None = None) -> None:
+    """Record a stalled transfer for *username* and cooldown the peer after repeated stalls."""
+    if not username:
+        return
+    if filename:
+        _block_peer(username, filename)
+    uname = str(username).strip().casefold()
+    if not uname:
+        return
+    now = time.time()
+    recent = [
+        ts for ts in _peer_stall_timestamps.get(uname, [])
+        if now - ts < _PEER_STALL_COOLDOWN_SECONDS
+    ]
+    recent.append(now)
+    _peer_stall_timestamps[uname] = recent
+    if len(recent) >= _PEER_STALL_THRESHOLD:
+        _blocked_usernames[uname] = now + _PEER_STALL_COOLDOWN_SECONDS
+        logger.warning(
+            "Placed peer on stall cooldown after repeated stalled transfers",
+            username=username,
+            stall_count=len(recent),
+            cooldown_seconds=_PEER_STALL_COOLDOWN_SECONDS,
+        )
+
+
 def _is_peer_blocked(username: str | None, filename: str | None) -> bool:
-    if not username or not filename:
+    if not username:
+        return False
+    now = time.time()
+    uname = str(username).strip().casefold()
+    user_until = _blocked_usernames.get(uname)
+    if user_until is not None:
+        if user_until < now:
+            _blocked_usernames.pop(uname, None)
+        else:
+            return True
+    if not filename:
         return False
     key = _peer_key(username, filename)
     blocked_until = _blocked_peers.get(key)
     if blocked_until is None:
         return False
-    if blocked_until < time.time():
+    if blocked_until < now:
         _blocked_peers.pop(key, None)
         return False
     return True
@@ -104,7 +146,7 @@ def _is_peer_blocked(username: str | None, filename: str | None) -> bool:
 
 def _filter_blocked_peers(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop search results from peers that recently failed this download."""
-    if not _blocked_peers:
+    if not _blocked_peers and not _blocked_usernames:
         return results
     return [
         r for r in results
@@ -144,8 +186,8 @@ def _filter_rejected_for_item(
 # =============================================================================
 
 def _normalise(text_val: str) -> str:
-    """Lower-case, strip, and collapse whitespace for comparison."""
-    return re.sub(r"\s+", " ", text_val.lower()).strip()
+    """Lower-case, strip, replace underscores, and collapse whitespace for comparison."""
+    return re.sub(r"\s+", " ", re.sub(r"_+", " ", text_val.lower())).strip()
 
 
 def _similarity(a: str, b: str) -> float:
@@ -167,12 +209,18 @@ def _length_tolerance_seconds() -> float:
 
 _TRACK_NUMBER_PREFIX_RE = re.compile(r"^\s*\d{1,3}(?:\s*-\s*\d{1,3})?\s*(?:[-\.\)]\s*|\s+)")
 _UNICODE_DASH_SEPARATOR_RE = re.compile(r"\s+[\u2010\u2011\u2012\u2013\u2014\u2015]+\s+")
+_SCENE_CRC32_SUFFIX_RE = re.compile(r"-[0-9a-fA-F]{8}$")
+
+
+def _clean_filename_segment(segment: str) -> str:
+    return re.sub(r"\s+", " ", segment.replace("_", " ")).strip()
 
 
 def _parse_filename_parts(filename: str) -> dict[str, str | None]:
     """Try to extract artist, album, title, bitrate, and format from a Soulseek filename."""
     name = filename.replace("\\", "/").rsplit("/", 1)[-1]
     name = name.rsplit(".", 1)[0] if "." in name else name
+    name = _SCENE_CRC32_SUFFIX_RE.sub("", name)
     name = _UNICODE_DASH_SEPARATOR_RE.sub(" - ", name)
 
     result: dict[str, str | None] = {
@@ -193,35 +241,41 @@ def _parse_filename_parts(filename: str) -> dict[str, str | None]:
     if len(parts) >= 3:
         track_match = re.match(r"^(\d{1,3})(?:\s|$)", parts[-2])
         if track_match:
-            result["artist"] = parts[0]
-            result["album"] = parts[1] if len(parts) >= 4 else None
-            result["title"] = parts[-1]
+            result["artist"] = _clean_filename_segment(parts[0])
+            result["album"] = _clean_filename_segment(parts[1]) if len(parts) >= 4 else None
+            result["title"] = _clean_filename_segment(parts[-1])
+            result["has_track_number"] = True
+        elif re.match(r"^\d{1,3}$", parts[0]):
+            # Scene / ripper naming: "14-delilah_bon-dead_men_dont_rape"
+            result["artist"] = _clean_filename_segment(parts[1])
+            result["album"] = _clean_filename_segment(parts[2]) if len(parts) >= 4 else None
+            result["title"] = _clean_filename_segment(parts[-1])
             result["has_track_number"] = True
         else:
-            result["artist"] = parts[0]
-            result["title"] = parts[-1]
+            result["artist"] = _clean_filename_segment(parts[0])
+            result["title"] = _clean_filename_segment(parts[-1])
     elif len(parts) == 2:
         first = parts[0]
         if re.match(r"^\d{1,3}$", first):
-            result["title"] = parts[1]
+            result["title"] = _clean_filename_segment(parts[1])
             result["has_track_number"] = True
         else:
-            result["artist"] = parts[0]
-            result["title"] = parts[1]
+            result["artist"] = _clean_filename_segment(parts[0])
+            result["title"] = _clean_filename_segment(parts[1])
 
     if not result["artist"] and not result["title"]:
         fallback = re.match(r"^(\d{1,3})\s+(.+)", name)
         if fallback:
-            result["title"] = fallback.group(2).strip()
+            result["title"] = _clean_filename_segment(fallback.group(2))
             result["has_track_number"] = True
 
     if not result["title"]:
         _tail = _TRACK_NUMBER_PREFIX_RE.sub("", name).strip()
         if _tail and _tail != name.strip():
-            result["title"] = _tail
+            result["title"] = _clean_filename_segment(_tail)
             result["has_track_number"] = True
         else:
-            result["title"] = name.strip() or None
+            result["title"] = _clean_filename_segment(name) or None
 
     if not result["album"]:
         try:
@@ -230,7 +284,7 @@ def _parse_filename_parts(filename: str) -> dict[str, str | None]:
             if _folder and not re.match(r"^\d{1,3}$", _folder):
                 _lower_folder = _folder.lower()
                 if _lower_folder not in ("downloads", "music", "inbox", "completed", "torrents", "original"):
-                    result["album"] = _folder
+                    result["album"] = _clean_filename_segment(_folder)
         except Exception:
             pass
 
@@ -543,26 +597,15 @@ def _build_fallback_search_queries(item: dict, primary_query: str) -> list[str]:
     artist_words = [w for w in effective_artist.split() if w.lower() not in _ARTICLE_WORDS]
     title_words = [w for w in title.split()]
 
-    _MAX_FALLBACKS = 20
+    _MAX_FALLBACKS = 8
 
     if len(artist_words) > 1:
-        for a_phrase in _drop_words(artist_words)[:_MAX_FALLBACKS]:
+        for a_phrase in _drop_words(artist_words)[:4]:
             _add(f"{a_phrase} - {title}")
 
     if len(title_words) > 1:
-        for t_phrase in _drop_words(title_words)[:_MAX_FALLBACKS]:
+        for t_phrase in _drop_words(title_words)[:4]:
             _add(f"{effective_artist} - {t_phrase}")
-
-    if len(artist_words) > 1 and len(title_words) > 1 and len(title_words) <= 3:
-        a_drops = _drop_words(artist_words)[:_MAX_FALLBACKS]
-        t_drops = _drop_words(title_words)[:6]
-        for a_phrase in a_drops:
-            for t_phrase in t_drops:
-                _add(f"{a_phrase} - {t_phrase}")
-                if len(fallbacks) >= _MAX_FALLBACKS:
-                    break
-            if len(fallbacks) >= _MAX_FALLBACKS:
-                break
 
     _add(title)
 
@@ -657,6 +700,54 @@ def _score_result(
 
     parsed_artist = str(parts.get("artist") or "")
     parsed_title = str(parts.get("title") or "")
+    parsed_album_raw = str(parts.get("album") or "")
+
+    try:
+        from helpers.normalization_service import (
+            edition_annotations_compatible,
+            extract_version_info,
+        )
+
+        if parsed_title and expected_title and not edition_annotations_compatible(parsed_title, expected_title):
+            logger.debug(
+                "Rejected candidate — edition annotation mismatch",
+                filename=filename[:180],
+                expected_title=expected_title,
+                parsed_title=parsed_title,
+            )
+            _note_reject(rejects, "edition_mismatch")
+            return 0.0
+
+        _HARD_VARIANT_TOKENS = frozenset({
+            "live", "remix", "instrumental", "acoustic", "demo", "karaoke", "unplugged",
+        })
+        _, _exp_title_v = extract_version_info(expected_title or "")
+        _, _exp_album_v = extract_version_info(expected_album or "")
+        _exp_variants = (_exp_title_v | _exp_album_v) & _HARD_VARIANT_TOKENS
+
+        _, _cand_title_v = extract_version_info(parsed_title)
+        _, _cand_album_v = extract_version_info(parsed_album_raw)
+        # Only inherit album-level hard variants that describe performance form
+        # (e.g. "Live At 25", "MTV Unplugged") so a remix/acoustic track on a
+        # studio album isn't misclassified, while tracks inside a Live album folder
+        # are rejected when a studio version was requested.
+        _ALBUM_FORM_VARIANTS = frozenset({"live", "unplugged", "karaoke", "instrumental"})
+        _cand_variants = (_cand_title_v & _HARD_VARIANT_TOKENS) | (_cand_album_v & _ALBUM_FORM_VARIANTS)
+
+        _unrequested_variants = _cand_variants - _exp_variants
+        if _unrequested_variants:
+            logger.debug(
+                "Rejected candidate — unrequested variant",
+                filename=filename[:180],
+                expected_title=expected_title,
+                parsed_title=parsed_title,
+                unrequested_variants=sorted(_unrequested_variants),
+            )
+            _note_reject(rejects, "variant_mismatch")
+            return 0.0
+    except Exception:
+        pass
+
     _HANGUL_CJK_RE = re.compile(r"[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F\u4E00-\u9FFF\u3040-\u30FF]")
     _artist_script_ambiguous = bool(
         _HANGUL_CJK_RE.search(expected_artist or "")
@@ -697,6 +788,10 @@ def _score_result(
             w for w in re.findall(r"[a-z0-9]+", norm_gate)
             if len(w) >= 4
         ]
+        artist_words_3plus = [
+            w for w in re.findall(r"[a-z0-9]+", norm_gate)
+            if len(w) >= 3
+        ]
 
         if _artist_script_ambiguous:
             artist_evidenced = (
@@ -714,6 +809,12 @@ def _score_result(
                 art_score >= 0.6
                 or norm_gate in _normalise(artist_scope)
                 or (len(significant_words) >= 2 and all(w in artist_scope_tokens for w in significant_words))
+                or (len(artist_words_3plus) >= 2 and all(w in artist_scope_tokens for w in artist_words_3plus))
+                or (
+                    len(significant_words) == 1
+                    and len(artist_words_3plus) == 1
+                    and significant_words[0] in artist_scope_tokens
+                )
             )
         
     if not artist_evidenced:
@@ -734,13 +835,33 @@ def _score_result(
         score += _artist_credit
 
     title_score = _similarity(str(parts.get("title") or ""), expected_title)
-    exp_word_count = len(re.findall(r"[a-z0-9]+", _normalise(expected_title)))
+    exp_title_words = re.findall(r"[a-z0-9]+", _normalise(expected_title))
+    exp_word_count = len(exp_title_words)
     cand_title_words = re.findall(r"[a-z0-9]+", _normalise(str(parts.get("title") or "")))
     
     if title_score >= 0.95 and cand_title_words and len(cand_title_words) > 2 * max(1, exp_word_count):
         title_score = 0.6
 
     title_ok = title_score >= 0.35
+
+    # Guard against low-similarity SequenceMatcher false positives (e.g.
+    # "i could give you (a mirror)" vs "would i lie to you" scoring 0.49 with
+    # only stop-words in common). When similarity is below 0.72 and core titles
+    # do not match, require at least one shared meaningful word.
+    if title_ok and title_score < 0.72 and not _title_core_match:
+        _TITLE_STOP_WORDS = {
+            "the", "and", "for", "with", "you", "your", "from", "that", "this",
+            "are", "was", "not", "but", "out", "all", "can", "who", "how",
+            "why", "what", "when", "where", "into", "over",
+        }
+        _exp_meaningful = {w for w in exp_title_words if len(w) >= 3 and w not in _TITLE_STOP_WORDS}
+        _cand_meaningful = {w for w in cand_title_words if len(w) >= 3 and w not in _TITLE_STOP_WORDS}
+        if _exp_meaningful:
+            if not (_exp_meaningful & _cand_meaningful):
+                title_ok = False
+        elif exp_title_words:
+            if not (set(exp_title_words) & set(cand_title_words)):
+                title_ok = False
 
     if not title_ok:
         if _title_core_match:
@@ -780,9 +901,11 @@ def _score_result(
             )
             if (
                 album_mismatch
-                and title_score < 0.85
                 and not _title_core_match
-                and not compilation_context
+                and (
+                    (not compilation_context and title_score < 0.85)
+                    or (compilation_context and title_score < 0.75)
+                )
             ):
                 logger.debug(
                     "Rejected candidate — album mismatch",

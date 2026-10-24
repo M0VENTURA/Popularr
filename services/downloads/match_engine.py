@@ -248,16 +248,25 @@ def filename_matches_queue_item(
     if not title_norm or not path_norm:
         return False
 
+    _contraction_re = re.compile(r"\b([a-z]+)\s+(s|t|m|re|ve|ll|d)\b")
+    title_norm_col = _contraction_re.sub(r"\1\2", title_norm)
+    path_norm_col = _contraction_re.sub(r"\1\2", path_norm)
+
     artist_candidates = [
         value for value in (artist_norm, album_artist_norm)
         if value
     ]
 
-    title_in_path = title_norm in path_norm
+    title_in_path = (
+        title_norm in path_norm
+        or (bool(title_norm_col) and title_norm_col in path_norm_col)
+    )
 
     title_score = max(
         _seq_ratio(title_norm, path_norm),
+        _seq_ratio(title_norm_col, path_norm_col),
         _token_overlap_score(title_norm, path_norm),
+        _token_overlap_score(title_norm_col, path_norm_col),
         1.0 if title_in_path else 0.0,
     )
 

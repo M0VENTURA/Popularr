@@ -13,6 +13,12 @@ Configuration: All thresholds configurable via config.yaml under queue.matching.
 """
 
 from __future__ import annotations
+
+from difflib import SequenceMatcher
+import os
+import re
+from typing import Any
+
 from helpers.types_queue import QueueItem
 from helpers.metadata_reader import read_mp3_metadata
 from helpers.normalization_service import (
@@ -36,6 +42,12 @@ PARTIAL_MATCH = _config["partial_match"]
 STRICT_DURATION_SEC = _config["strict_duration_sec"]
 TOLERANCE_DURATION_SEC = _config["tolerance_duration_sec"]
 
+_SPLIT_CONTRACTION_RE = re.compile(r"\b([a-z]+)\s+(s|t|m|re|ve|ll|d)\b")
+_LEADING_TRACK_NUM_RE = re.compile(r"^\s*\d{1,3}\s+(?=[a-z])")
+_NON_LATIN_SCRIPT_RE = re.compile(
+    r"[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F\u4E00-\u9FFF\u3040-\u30FF\u0400-\u04FF]"
+)
+
 
 def _length_tolerance_seconds() -> float:
     """The shared configured length tolerance (see ``get_length_tolerance_seconds``).
@@ -57,6 +69,21 @@ def _length_tolerance_seconds() -> float:
 # ✅ SIMILARITY
 # =============================================================================
 
+def _collapse_for_compare(text: str) -> str:
+    """Collapse split English contractions and strip leading track numbers.
+
+    ``normalize_string`` turns ``"Can't"`` into ``"can t"`` while files tagged
+    without an apostrophe normalize to ``"cant"``. Likewise embedded TITLE tags
+    occasionally carry a leading track number (``"01 The Hollow"``). Collapsing
+    both before comparison prevents false ``title_mismatch`` rejections.
+    """
+    if not text:
+        return ""
+    collapsed = _LEADING_TRACK_NUM_RE.sub("", text).strip()
+    collapsed = _SPLIT_CONTRACTION_RE.sub(r"\1\2", collapsed)
+    return re.sub(r"\s+", " ", collapsed).strip()
+
+
 def _simple_similarity(a: str, b: str) -> float:
     if not a or not b:
         return 0.0
@@ -64,8 +91,20 @@ def _simple_similarity(a: str, b: str) -> float:
     if a == b:
         return 1.0
 
+    a_col = _collapse_for_compare(a)
+    b_col = _collapse_for_compare(b)
+    if a_col and b_col and a_col == b_col:
+        return 1.0
+
     if a in b or b in a:
         return PARTIAL_MATCH
+
+    if a_col and b_col and (a_col in b_col or b_col in a_col):
+        return PARTIAL_MATCH
+
+    ratio = SequenceMatcher(None, a_col or a, b_col or b).ratio()
+    if ratio >= 0.85:
+        return round(ratio, 3)
 
     return 0.0
 
@@ -128,7 +167,8 @@ def _metadata_matches_queue_item(
     file_artist = (metadata.get("artist") or "").strip()
     file_album_artist = (metadata.get("album_artist") or "").strip()
     file_title = (metadata.get("title") or "").strip()
-    
+    file_album = (metadata.get("album") or "").strip()
+
     file_duration_ms = metadata.get("duration_ms")
     file_duration = (file_duration_ms / 1000.0) if file_duration_ms else None
 
@@ -207,7 +247,24 @@ def _metadata_matches_queue_item(
 
     variant_penalty = 0.0
     if _variant_conflict(queue_variants, file_variants):
-        variant_penalty = 0.2
+        # When the queue item explicitly requests a variant (e.g. "Living Dead Girl (remix)")
+        # and the embedded TITLE tag omits the suffix because the file comes from a
+        # dedicated remix album or carries the remix credit in its filename, check
+        # the filename and album tag before applying the conflict penalty.
+        if queue_variants:
+            _, path_variants = extract_version_info(os.path.basename(file_path))
+            _, album_variants = extract_version_info(file_album)
+            supplemented = (
+                file_variants
+                | (path_variants & queue_variants)
+                | (album_variants & queue_variants)
+            )
+            if not _variant_conflict(queue_variants, supplemented):
+                file_variants = supplemented
+            else:
+                variant_penalty = 0.2
+        else:
+            variant_penalty = 0.2
 
     # ------------------------------------------------------------------
     # Artist match (multi-source)
@@ -253,6 +310,14 @@ def _metadata_matches_queue_item(
     # ------------------------------------------------------------------
 
     if title_score == 0.0:
+        # When one side uses non-Latin script (e.g. Hangul "에라 모르겠다") and the
+        # other uses an English/romanised title ("FXXK IT (KR ver.)"), embedded
+        # tags cannot string-match even when the filename clearly contains the
+        # expected title. Defer to filename matching instead of hard-rejecting.
+        file_has_non_latin = bool(_NON_LATIN_SCRIPT_RE.search(file_title))
+        queue_has_non_latin = bool(_NON_LATIN_SCRIPT_RE.search(queue_title))
+        if file_has_non_latin != queue_has_non_latin:
+            return None
         _reject("title_mismatch")
         return False
 

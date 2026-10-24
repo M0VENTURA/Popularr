@@ -304,12 +304,23 @@ def create_or_update_playlist_for_artist(artist_name: str, tracks: list):
 def refresh_all_playlists_from_db():
     """Rebuild the legacy per-artist NSP files from current DB ratings."""
     with db_session() as session:
-        result = session.execute(text("SELECT DISTINCT COALESCE(NULLIF(album_artist, ''), artist) AS artist FROM tracks WHERE rating >= 4"))
+        result = session.execute(text(
+            "SELECT DISTINCT COALESCE(NULLIF(album_artist, ''), artist) AS artist "
+            "FROM tracks WHERE COALESCE(stars, star_rating, 0) >= 4"
+        ))
         artists = [str(row[0]) for row in result.fetchall() or [] if row[0]]
         count = 0
         for artist in artists:
-            result = session.execute(text("SELECT id, title, rating FROM tracks WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist AND rating >= 4"), {"artist": artist})
-            tracks = [{"id": str(row[0]), "title": str(row[1]), "rating": int(row[2])} for row in result.fetchall() or []]
+            result = session.execute(
+                text(
+                    "SELECT id, title, COALESCE(stars, star_rating, 0) AS rating "
+                    "FROM tracks "
+                    "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
+                    "  AND COALESCE(stars, star_rating, 0) >= 4"
+                ),
+                {"artist": artist},
+            )
+            tracks = [{"id": str(row[0]), "title": str(row[1]), "rating": int(row[2] or 0)} for row in result.fetchall() or []]
             if create_or_update_playlist_for_artist(artist, tracks):
                 count += 1
         return count
@@ -347,7 +358,7 @@ def create_or_update_loved_tracks_playlist() -> dict:
             rows = session.execute(
                 text("""
                     SELECT id, title, artist FROM tracks
-                    WHERE CAST(id AS TEXT) IN :ids
+                    WHERE id IN :ids
                     ORDER BY title
                 """).bindparams(bindparam("ids", expanding=True)),
                 {"ids": [str(t) for t in hearted]},
@@ -514,7 +525,40 @@ def _fetch_artist_image_bytes(artist_name: str) -> bytes | None:
     return _album_art_bytes_for_artist(artist_name)
 
 
-def attach_playlist_cover(playlist_name: str, artist_name: str) -> dict:
+def _essential_cover_state_path() -> str:
+    from helpers.config_helpers import get_state_directory
+
+    return os.path.join(get_state_directory(), "essential_playlist_covers.json")
+
+
+def _load_essential_cover_state() -> dict:
+    try:
+        path = _essential_cover_state_path()
+        if not os.path.exists(path):
+            return {}
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_essential_cover_state(state: dict) -> None:
+    try:
+        path = _essential_cover_state_path()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2, sort_keys=True)
+    except Exception:
+        pass
+
+
+def attach_playlist_cover(
+    playlist_name: str,
+    artist_name: str,
+    *,
+    playlist_id: str | None = None,
+) -> dict:
     """Give a playlist the ARTIST's image as its cover art.
 
     Gated by ``navidrome.playlist_cover_art`` (default false). Resolves the
@@ -561,6 +605,16 @@ def attach_playlist_cover(playlist_name: str, artist_name: str) -> dict:
         if not nav_users and nav_cfg.get("base_url"):
             nav_users = [nav_cfg]
 
+        state_key = str(playlist_name or "").strip().casefold()
+        state = _load_essential_cover_state()
+        prev_entry = state.get(state_key) if isinstance(state.get(state_key), dict) else {}
+        if (
+            playlist_id
+            and prev_entry.get("playlist_id") == str(playlist_id)
+            and prev_entry.get("artist") == str(artist_name or "").strip().casefold()
+        ):
+            return {"ok": True, "method": "navidrome_native", "reason": "cached"}
+
         image_bytes = _fetch_artist_image_bytes(artist_name)
         if not image_bytes:
             return {"ok": False, "method": "none", "reason": "no image"}
@@ -573,20 +627,38 @@ def attach_playlist_cover(playlist_name: str, artist_name: str) -> dict:
         # candidate silently and the log blamed playlist-name matching — sending
         # the operator to inspect names that were never looked up.
         contacted = False
+        seen_urls: set[str] = set()
         for user in nav_users:
-            base_url = user.get("base_url")
+            base_url = str(user.get("base_url") or "").rstrip("/")
             username = user.get("user")
             password = user.get("pass")
             if not (base_url and username and password):
                 continue
+            url_key = base_url.lower()
+            if url_key in seen_urls:
+                continue
+            seen_urls.add(url_key)
             contacted = True
             try:
                 client = NavidromeClient(base_url, username, password)
-                playlist = client.find_playlist_by_name(playlist_name)
-                if not playlist or not playlist.get("id"):
-                    continue
-                ok, reason = client.upload_playlist_cover(str(playlist["id"]), image_bytes)
+                resolved_id = str(playlist_id or "").strip()
+                if not resolved_id:
+                    playlist = client.find_playlist_by_name(playlist_name)
+                    if not playlist or not playlist.get("id"):
+                        continue
+                    resolved_id = str(playlist["id"])
+                if (
+                    prev_entry.get("playlist_id") == resolved_id
+                    and prev_entry.get("artist") == str(artist_name or "").strip().casefold()
+                ):
+                    return {"ok": True, "method": "navidrome_native", "reason": "cached"}
+                ok, reason = client.upload_playlist_cover(resolved_id, image_bytes)
                 if ok:
+                    state[state_key] = {
+                        "playlist_id": resolved_id,
+                        "artist": str(artist_name or "").strip().casefold(),
+                    }
+                    _save_essential_cover_state(state)
                     logger.info("[PLAYLISTS] Cover set for %s (%s)", playlist_name, artist_name)
                     return {"ok": True, "method": "navidrome_native", "reason": "ok"}
                 # Map the server's answer to something an operator can act on.

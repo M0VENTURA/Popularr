@@ -945,8 +945,9 @@ def compute_track_artist_scores(
         with db_session() as session:
             rows = session.execute(
                 text(
-                    "SELECT title, album, final_score FROM tracks "
-                    "WHERE LOWER(TRIM(artist)) = LOWER(TRIM(:artist)) AND final_score > 0"
+                    "SELECT title, album, COALESCE(NULLIF(raw_score, 0), final_score) AS final_score FROM tracks "
+                    "WHERE LOWER(TRIM(artist)) = LOWER(TRIM(:artist)) "
+                    "AND COALESCE(NULLIF(raw_score, 0), final_score) > 0"
                 ),
                 {"artist": track_artist},
             ).fetchall() or []
@@ -954,7 +955,7 @@ def compute_track_artist_scores(
         for row in rows:
             title = str(row_get(row, "title") or "").strip()
             album = str(row_get(row, "album") or "").strip()
-            score = float(row_get(row, "final_score") or 0)
+            score = float(row_get(row, "raw_score") or row_get(row, "final_score") or 0)
 
             if score <= 0 or is_bonus_track_title(title):
                 continue
@@ -1466,11 +1467,12 @@ def _build_album_model(
         with db_session() as session:
             rows = session.execute(
                 text(
-                    "SELECT title, album, final_score, year, "
+                    "SELECT title, album, COALESCE(NULLIF(raw_score, 0), final_score) AS final_score, year, "
                     "COALESCE(lastfm_listeners, 0) AS lastfm_listeners, "
                     "COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens "
                     "FROM tracks "
-                    "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist AND final_score > 0"
+                    "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
+                    "AND COALESCE(NULLIF(raw_score, 0), final_score) > 0"
                 ),
                 {"artist": artist},
             ).fetchall() or []
@@ -1486,7 +1488,7 @@ def _build_album_model(
             if r_key in scanned_keys:
                 continue
 
-            _score = float(row_get(row, "final_score") or 0)
+            _score = float(row_get(row, "raw_score") or row_get(row, "final_score") or 0)
             if _score > 0:
                 by_album.setdefault(_t_album, []).append(_score)
 
@@ -1502,7 +1504,13 @@ def _build_album_model(
                 album_years.setdefault(_t_album, _year)
 
         for r in album_results:
-            _score = float(r.get("popularity_score") or r.get("final_score") or 0)
+            _score = float(
+                r.get("_raw_combined")
+                or r.get("raw_score")
+                or r.get("popularity_score")
+                or r.get("final_score")
+                or 0
+            )
             if _score > 0 and not bool(r.get("exclude_from_stats")):
                 by_album.setdefault(current_album, []).append(_score)
 
@@ -1535,10 +1543,7 @@ def _build_album_model(
             for _album, _scores in by_album.items():
                 if not _scores:
                     continue
-                _reanchored = [
-                    apply_album_relative_popularity(s, _scores) for s in _scores
-                ]
-                medians[_album] = median(_reanchored)
+                medians[_album] = median(_scores)
             if not medians:
                 return {}
             m_peak = max(medians.values())
@@ -1696,13 +1701,23 @@ def _ordered_by_percentile_then_prominence(
     winners: list[dict[str, Any]],
     mode: str = "prominence",
 ) -> list[dict[str, Any]]:
-    """Essential-Collection ordering: star tier, then catalogue percentile."""
+    """Essential-Collection ordering: star tier, then prominence (or percentile in stored mode)."""
+    if str(mode or "prominence").strip().lower() == "stored":
+        return sorted(
+            winners,
+            key=lambda r: (
+                -int(r.get("stars") or 0),
+                -float(r.get("percentile") or 0.0),
+                -float(_effective_order_score(r, mode)),
+                str(r.get("title") or "").casefold(),
+            ),
+        )
     return sorted(
         winners,
         key=lambda r: (
             -int(r.get("stars") or 0),
-            -float(r.get("percentile") or 0.0),
             -float(_effective_order_score(r, mode)),
+            -float(r.get("percentile") or 0.0),
             str(r.get("title") or "").casefold(),
         ),
     )
@@ -1973,12 +1988,18 @@ def _create_new_music_playlist() -> int:
                     SELECT id, title, album, file_path, duration,
                            COALESCE(NULLIF(album_artist, ''), artist) AS artist,
                            COALESCE(stars, star_rating) AS stars,
+                           COALESCE(is_live, 0) AS is_live,
+                           COALESCE(is_compilation, 0) AS is_compilation,
+                           COALESCE(popularity, final_score, 0) AS popularity_score,
+                           COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
+                           COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
                            genres,
+                           COALESCE(navidrome_added_at, updated_at) AS added_at,
                            updated_at
                     FROM tracks
                     WHERE COALESCE(stars, star_rating) >= 4
                       AND file_path IS NOT NULL AND TRIM(file_path) <> ''
-                    ORDER BY updated_at DESC NULLS LAST
+                    ORDER BY COALESCE(navidrome_added_at, updated_at) DESC NULLS LAST
                     LIMIT :max_rows
                 """),
                 {"max_rows": _NEW_MUSIC_MAX_TRACKS * 5},
@@ -1987,6 +2008,20 @@ def _create_new_music_playlist() -> int:
     except Exception as exc:
         logger.debug("New Music fetch failed", error=str(exc))
         return 0
+
+    try:
+        from helpers.config_helpers import get_excluded_playlist_artists, get_playlists_config
+        excluded_artists = get_excluded_playlist_artists()
+        pl_cfg = get_playlists_config()
+    except Exception:
+        excluded_artists = set()
+        pl_cfg = {}
+
+    if excluded_artists:
+        rows = [
+            r for r in rows
+            if str(r.get("artist") or "").strip().casefold() not in excluded_artists
+        ]
 
     rows = _filter_christmas_rows(rows, "New Music")
 
@@ -2000,7 +2035,23 @@ def _create_new_music_playlist() -> int:
             continue
         grouped.setdefault(key, []).append(row)
 
-    winners = [group[0] for group in grouped.values()]
+    winners: list[dict[str, Any]] = []
+    for group in grouped.values():
+        group.sort(
+            key=lambda r: (
+                int(r.get("is_live") or 0),
+                int(r.get("is_compilation") or 0),
+                -int(r.get("stars") or 0),
+                -float(r.get("popularity_score") or 0.0),
+            )
+        )
+        winners.append(group[0])
+
+    max_per_artist = _resolve_max_per_artist(pl_cfg)
+    winners = _apply_artist_cap(winners, max_per_artist)
+    if pl_cfg.get("playlist_interleave_artists", True):
+        winners = _interleave_artists(winners)
+
     if len(winners) < _NEW_MUSIC_MIN_TRACKS:
         _delete_playlist_from_navidrome("New Music")
         return 0
@@ -2051,12 +2102,14 @@ def _fetch_essential_featured_rows() -> list[dict[str, Any]]:
         with db_session() as session:
             result = session.execute(
                 text("""
-                    SELECT id, title, file_path, duration,
+                    SELECT id, title, album, file_path, duration,
                            COALESCE(stars, star_rating) AS stars,
                            COALESCE(is_live, 0) AS is_live,
                            COALESCE(is_compilation, 0) AS is_compilation,
                            COALESCE(popularity, final_score, 0) AS popularity_score,
-                           year, release_year, artist
+                           COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
+                           COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
+                           year, release_year, artist, genres
                     FROM tracks
                     WHERE COALESCE(stars, star_rating) >= 4
                       AND (
@@ -2102,10 +2155,10 @@ def _sync_essential_playlist(
             with db_session() as session:
                 res = session.execute(
                     text(
-                        "SELECT final_score FROM tracks "
+                        "SELECT COALESCE(NULLIF(raw_score, 0), final_score) FROM tracks "
                         "WHERE LOWER(TRIM(COALESCE(NULLIF(album_artist, ''), artist))) "
                         "      = LOWER(TRIM(:artist)) "
-                        "  AND final_score > 0"
+                        "  AND COALESCE(NULLIF(raw_score, 0), final_score, 0) > 0"
                     ),
                     {"artist": artist},
                 )
@@ -2224,7 +2277,11 @@ def _sync_essential_playlist(
         log_unified(f"📄 Playlist: Synced '{playlist_name}' to Navidrome ({len(_song_ids)} tracks)")
         try:
             from services.playlists.playlist_service import attach_playlist_cover
-            attach_playlist_cover(playlist_name, artist)
+            attach_playlist_cover(
+                playlist_name,
+                artist,
+                playlist_id=str(sync_res.get("playlist_id") or "") or None,
+            )
         except Exception as cover_exc:
             logger.debug("Playlist cover attach failed", playlist=playlist_name, error=str(cover_exc))
         return True
@@ -2502,8 +2559,9 @@ def _sync_playlist_to_navidrome(
     playlist_name: str,
     song_ids: list[str],
     rows: list[dict[str, Any]] | None = None,
-) -> dict[str, int]:
-    synced = {
+    existing_playlist_id: str | None = None,
+) -> dict[str, Any]:
+    synced: dict[str, Any] = {
         "updated": 0,
         "created": 0,
         "unchanged": 0,
@@ -2511,6 +2569,7 @@ def _sync_playlist_to_navidrome(
         "failed": 0,
         "clients": 0,
         "skipped": 0,
+        "playlist_id": str(existing_playlist_id or ""),
     }
 
     song_ids = list(song_ids or [])
@@ -2539,9 +2598,12 @@ def _sync_playlist_to_navidrome(
                     client,
                     playlist_name,
                     list(song_ids),
+                    existing_playlist_id=existing_playlist_id,
                 )
                 or {}
             )
+            if result.get("playlist_id") and not synced.get("playlist_id"):
+                synced["playlist_id"] = str(result.get("playlist_id"))
             if result.get("updated"):
                 synced["updated"] += 1
             if result.get("created"):
@@ -3210,7 +3272,13 @@ def _create_genre_top_track_playlists(
             continue
 
         try:
-            sync_res = _sync_playlist_to_navidrome(playlist_name, _song_ids, rows=winners)
+            _known_pl_id = existing_playlist_ids.get(playlist_name.casefold())
+            sync_res = _sync_playlist_to_navidrome(
+                playlist_name,
+                _song_ids,
+                rows=winners,
+                existing_playlist_id=_known_pl_id,
+            )
             if not _playlist_sync_succeeded(sync_res):
                 logger.warning(
                     "Genre playlist sync failed — Navidrome keeps its previous contents",
@@ -3221,6 +3289,9 @@ def _create_genre_top_track_playlists(
                 )
                 continue
             keep_playlist_names.add(playlist_name)
+            _resolved_pl_id = str(sync_res.get("playlist_id") or "") or _known_pl_id
+            if _resolved_pl_id:
+                existing_playlist_ids[playlist_name.casefold()] = _resolved_pl_id
             if sync_res.get("skipped"):
                 skipped_unchanged += 1
             else:
@@ -3248,7 +3319,7 @@ def _create_genre_top_track_playlists(
                             playlist_name,
                             _cover_client,
                             regenerate=_genre_cover_cfg["regenerate"],
-                            playlist_id=existing_playlist_ids.get(playlist_name.casefold()),
+                            playlist_id=_resolved_pl_id,
                         )
                         if _cover.get("ok"):
                             if _cover.get("status") == "generated":
@@ -3314,6 +3385,10 @@ def _create_genre_top_track_playlists(
 def prune_genre_playlists_for_deletion() -> None:
     """Delete genre playlists whose qualifying pool dropped below the delete threshold."""
     try:
+        from services.popularity.scan_scope import global_playlists_deferred
+
+        if global_playlists_deferred():
+            return
         if not _genre_playlists_delete_enabled():
             return
         _create_genre_top_track_playlists(prune_only=True)
@@ -3341,13 +3416,14 @@ def compute_artist_scores(
         with db_session() as session:
             result = session.execute(
                 text(
-                    "SELECT title, album, final_score FROM tracks "
-                    "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist AND final_score > 0"
+                    "SELECT title, album, COALESCE(NULLIF(raw_score, 0), final_score) AS final_score FROM tracks "
+                    "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
+                    "AND COALESCE(NULLIF(raw_score, 0), final_score) > 0"
                 ),
                 {"artist": artist},
             )
             for row in result.fetchall() or []:
-                score_val = float(row_get(row, "final_score") or 0)
+                score_val = float(row_get(row, "raw_score") or row_get(row, "final_score") or 0)
                 if not score_val:
                     continue
                 t_title = str(row_get(row, "title") or "").strip()
@@ -4257,6 +4333,335 @@ def post_album_star_ratings(
 
 
 # ---------------------------------------------------------------------------
+# Curated smart playlists (Decades, Hit Singles, Hidden Gems, New Releases,
+# Covers, Acoustic, High Energy, Mood Mixes)
+# ---------------------------------------------------------------------------
+
+_CURATED_ROWS_SQL = """
+    SELECT id, title, album, file_path, duration, artist, album_artist,
+           year, release_year, originalyear,
+           COALESCE(stars, star_rating, 0) AS stars,
+           COALESCE(popularity, final_score, 0) AS popularity_score,
+           COALESCE(is_live, 0) AS is_live,
+           COALESCE(is_compilation, 0) AS is_compilation,
+           COALESCE(is_single, FALSE) AS is_single,
+           COALESCE(is_cover, 0) AS is_cover,
+           COALESCE(is_acoustic, 0) AS is_acoustic,
+           COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
+           COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
+           COALESCE(danceability, 0) AS danceability,
+           COALESCE(bpm, 0) AS bpm,
+           mood, genres, lastfm_tags, musicbrainz_genres, essentia_genres
+    FROM tracks
+    WHERE COALESCE(stars, star_rating, 0) >= :min_stars
+"""
+
+
+def _fetch_curated_playlist_rows(min_stars: int = 4) -> list[dict[str, Any]]:
+    try:
+        with db_session() as session:
+            result = session.execute(text(_CURATED_ROWS_SQL), {"min_stars": min_stars})
+            rows = [dict(r._mapping) for r in result.fetchall() or []]
+    except Exception as exc:
+        logger.warning("Curated playlist row fetch failed", min_stars=min_stars, error=str(exc))
+        return []
+
+    if not rows:
+        return []
+
+    try:
+        from helpers.config_helpers import get_excluded_playlist_artists
+        excluded_artists = get_excluded_playlist_artists()
+    except Exception:
+        excluded_artists = set()
+
+    filtered: list[dict[str, Any]] = []
+    for r in rows:
+        who = str(r.get("album_artist") or r.get("artist") or "").strip().casefold()
+        if excluded_artists and who in excluded_artists:
+            continue
+        if is_christmas_track(
+            title=str(r.get("title") or ""),
+            album=str(r.get("album") or ""),
+            genres=r.get("genres"),
+        ):
+            continue
+        r["score"] = float(r.get("popularity_score") or 0)
+        filtered.append(r)
+    return filtered
+
+
+def _dedupe_curated_pool(tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for t in tracks:
+        artist_val = str(t.get("artist") or t.get("album_artist") or "")
+        title_val = str(t.get("title") or "")
+        key = (_normalise_artist_key(artist_val), _normalise_essential_title(title_val))
+        grouped[key].append(t)
+
+    def _tiebreak(item: dict[str, Any]) -> tuple:
+        return (
+            int(item.get("is_live") or 0),
+            int(item.get("is_compilation") or 0),
+            -int(item.get("stars") or 0),
+            -float(item.get("popularity_score") or item.get("score") or 0),
+            str(item.get("title") or "").casefold(),
+        )
+
+    return [min(group, key=_tiebreak) for group in grouped.values()]
+
+
+def _extract_track_year(row: dict[str, Any]) -> int | None:
+    for col in ("originalyear", "release_year", "year"):
+        raw = row.get(col)
+        if raw is None:
+            continue
+        m = re.search(r"\b(19\d{2}|20\d{2})\b", str(raw))
+        if m:
+            yr = int(m.group(1))
+            if 1900 <= yr <= 2100:
+                return yr
+    return None
+
+
+def _sync_single_curated_playlist(
+    playlist_name: str,
+    pool: list[dict[str, Any]],
+    *,
+    max_tracks: int,
+    cfg: dict[str, Any],
+) -> bool:
+    order_mode = str(cfg.get("playlist_order_mode", "prominence") or "prominence").strip().lower()
+    if order_mode not in ("prominence", "stored"):
+        order_mode = "prominence"
+    max_per_artist = _resolve_max_per_artist(cfg)
+    interleave_artists = bool(cfg.get("playlist_interleave_artists", True))
+
+    winners = _dedupe_curated_pool(pool)
+    if not winners:
+        return False
+
+    winners = _ordered_playlist_rows(
+        winners,
+        order_mode=order_mode,
+        max_per_artist=max_per_artist,
+        interleave=interleave_artists,
+    )
+    if max_tracks and max_tracks > 0:
+        winners = winners[:max_tracks]
+
+    song_ids = [str(r.get("id") or "").strip() for r in winners if str(r.get("id") or "").strip()]
+    if not song_ids:
+        return False
+
+    sync_res = _sync_playlist_to_navidrome(playlist_name, song_ids, rows=winners)
+    if not _playlist_sync_succeeded(sync_res):
+        return False
+    if not sync_res.get("skipped"):
+        log_unified(f"📄 Playlist: Synced '{playlist_name}' to Navidrome ({len(song_ids)} tracks)")
+    return True
+
+
+def _create_decade_playlists(cfg: dict[str, Any]) -> int:
+    if not bool(cfg.get("decade_playlists_enabled", False)):
+        return 0
+    template = str(cfg.get("decade_playlists_name_template") or "{decade}s - Top Tracks").strip()
+    if "{decade}" not in template:
+        template = "{decade}s - Top Tracks"
+    min_tracks = max(5, int(cfg.get("decade_playlists_min_tracks", 50) or 50))
+    max_tracks = max(10, int(cfg.get("decade_playlists_max_tracks", 200) or 200))
+
+    rows = _fetch_curated_playlist_rows(min_stars=4)
+    if not rows:
+        return 0
+
+    pools: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        yr = _extract_track_year(r)
+        if yr and 1950 <= yr <= 2099:
+            decade = (yr // 10) * 10
+            pools[decade].append(r)
+
+    written = 0
+    for decade in sorted(pools.keys()):
+        deduped = _dedupe_curated_pool(pools[decade])
+        if len(deduped) < min_tracks:
+            continue
+        pl_name = template.replace("{decade}", str(decade)).strip()
+        if _sync_single_curated_playlist(pl_name, deduped, max_tracks=max_tracks, cfg=cfg):
+            written += 1
+    return written
+
+
+def _create_hit_singles_playlist(cfg: dict[str, Any]) -> bool:
+    if not bool(cfg.get("hit_singles_playlist_enabled", False)):
+        return False
+    pl_name = str(cfg.get("hit_singles_playlist_name") or "Hit Singles").strip() or "Hit Singles"
+    max_tracks = max(10, int(cfg.get("hit_singles_max_tracks", 250) or 250))
+    rows = _fetch_curated_playlist_rows(min_stars=4)
+    pool = [r for r in rows if bool(r.get("is_single"))]
+    return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
+
+
+def _create_hidden_gems_playlist(cfg: dict[str, Any]) -> bool:
+    if not bool(cfg.get("hidden_gems_playlist_enabled", False)):
+        return False
+    pl_name = str(cfg.get("hidden_gems_playlist_name") or "Hidden Gems").strip() or "Hidden Gems"
+    max_tracks = max(10, int(cfg.get("hidden_gems_max_tracks", 200) or 200))
+    rows = _fetch_curated_playlist_rows(min_stars=4)
+    pool = [
+        r for r in rows
+        if not bool(r.get("is_single"))
+        and int(r.get("is_live") or 0) == 0
+        and int(r.get("is_compilation") or 0) == 0
+    ]
+    return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
+
+
+def _create_new_releases_playlist(cfg: dict[str, Any]) -> bool:
+    if not bool(cfg.get("new_releases_playlist_enabled", False)):
+        return False
+    pl_name = str(cfg.get("new_releases_playlist_name") or "New Releases").strip() or "New Releases"
+    max_tracks = max(10, int(cfg.get("new_releases_max_tracks", 100) or 100))
+    current_year = datetime.now().year
+    cutoff_year = current_year - 1
+    rows = _fetch_curated_playlist_rows(min_stars=4)
+    pool = []
+    for r in rows:
+        yr = _extract_track_year(r)
+        if yr and yr >= cutoff_year:
+            pool.append(r)
+    return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
+
+
+def _create_covers_playlist(cfg: dict[str, Any]) -> bool:
+    if not bool(cfg.get("covers_playlist_enabled", False)):
+        return False
+    pl_name = str(cfg.get("covers_playlist_name") or "Great Covers").strip() or "Great Covers"
+    max_tracks = max(10, int(cfg.get("covers_max_tracks", 150) or 150))
+    rows = _fetch_curated_playlist_rows(min_stars=3)
+    pool = [r for r in rows if int(r.get("is_cover") or 0) == 1]
+    return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
+
+
+_ACOUSTIC_RE = re.compile(r"\b(acoustic|unplugged|stripped)\b", re.IGNORECASE)
+
+
+def _create_acoustic_playlist(cfg: dict[str, Any]) -> bool:
+    if not bool(cfg.get("acoustic_playlist_enabled", False)):
+        return False
+    pl_name = str(cfg.get("acoustic_playlist_name") or "Acoustic Essentials").strip() or "Acoustic Essentials"
+    max_tracks = max(10, int(cfg.get("acoustic_max_tracks", 150) or 150))
+    rows = _fetch_curated_playlist_rows(min_stars=4)
+    pool = []
+    for r in rows:
+        if int(r.get("is_acoustic") or 0) == 1:
+            pool.append(r)
+            continue
+        blob = " ".join(
+            str(r.get(k) or "")
+            for k in ("title", "album", "genres", "lastfm_tags", "musicbrainz_genres")
+        )
+        if _ACOUSTIC_RE.search(blob):
+            pool.append(r)
+    return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
+
+
+_HIGH_ENERGY_RE = re.compile(
+    r"\b(energetic|upbeat|party|dance|club|workout|high[- ]energy|driving|anthem)\b",
+    re.IGNORECASE,
+)
+
+
+def _create_high_energy_playlist(cfg: dict[str, Any]) -> bool:
+    if not bool(cfg.get("high_energy_playlist_enabled", False)):
+        return False
+    pl_name = str(cfg.get("high_energy_playlist_name") or "High Energy & Upbeat").strip() or "High Energy & Upbeat"
+    max_tracks = max(10, int(cfg.get("high_energy_max_tracks", 200) or 200))
+    rows = _fetch_curated_playlist_rows(min_stars=4)
+    pool = []
+    for r in rows:
+        dance = float(r.get("danceability") or 0)
+        bpm = float(r.get("bpm") or 0)
+        if dance >= 0.65 and bpm >= 115:
+            pool.append(r)
+            continue
+        mood_blob = " ".join(str(r.get(k) or "") for k in ("mood", "genres", "lastfm_tags", "essentia_genres"))
+        if _HIGH_ENERGY_RE.search(mood_blob):
+            pool.append(r)
+    return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
+
+
+def _create_mood_playlists(cfg: dict[str, Any]) -> int:
+    if not bool(cfg.get("mood_playlists_enabled", False)):
+        return 0
+    template = str(cfg.get("mood_playlists_name_template") or "{mood} - Mix").strip()
+    if "{mood}" not in template:
+        template = "{mood} - Mix"
+    min_tracks = max(5, int(cfg.get("mood_playlists_min_tracks", 40) or 40))
+    max_tracks = max(10, int(cfg.get("mood_playlists_max_tracks", 150) or 150))
+
+    rows = _fetch_curated_playlist_rows(min_stars=4)
+    if not rows:
+        return 0
+
+    pools: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        raw_mood = str(r.get("mood") or "").strip()
+        if not raw_mood or raw_mood.lower() in ("null", "none", "[]", "{}"):
+            continue
+        tokens: list[str] = []
+        if raw_mood.startswith("["):
+            try:
+                parsed = json.loads(raw_mood)
+                if isinstance(parsed, list):
+                    tokens = [str(m).strip() for m in parsed if str(m).strip()]
+            except Exception:
+                pass
+        if not tokens:
+            tokens = [m.strip() for m in re.split(r"[,;/\\|]+", raw_mood) if m.strip()]
+        for tok in tokens[:3]:
+            norm = re.sub(r"[^\w\s-]", "", tok.lower()).strip()
+            if norm and len(norm) >= 3:
+                pools[norm].append(r)
+
+    written = 0
+    for mood_key in sorted(pools.keys()):
+        deduped = _dedupe_curated_pool(pools[mood_key])
+        if len(deduped) < min_tracks:
+            continue
+        display_mood = _display_genre(mood_key)
+        pl_name = template.replace("{mood}", display_mood).strip()
+        if _sync_single_curated_playlist(pl_name, deduped, max_tracks=max_tracks, cfg=cfg):
+            written += 1
+    return written
+
+
+def _run_curated_playlists() -> None:
+    try:
+        from helpers.config_helpers import get_playlists_config
+        cfg = get_playlists_config()
+    except Exception as exc:
+        logger.debug("Curated playlists config read failed", error=str(exc))
+        return
+
+    for fn_name, fn in (
+        ("Decade playlists", _create_decade_playlists),
+        ("Hit Singles playlist", _create_hit_singles_playlist),
+        ("Hidden Gems playlist", _create_hidden_gems_playlist),
+        ("New Releases playlist", _create_new_releases_playlist),
+        ("Covers playlist", _create_covers_playlist),
+        ("Acoustic playlist", _create_acoustic_playlist),
+        ("High Energy playlist", _create_high_energy_playlist),
+        ("Mood playlists", _create_mood_playlists),
+    ):
+        try:
+            fn(cfg)
+        except Exception as exc:
+            logger.warning(f"{fn_name} generation failed", error=str(exc))
+
+
+# ---------------------------------------------------------------------------
 # Global playlist rebuild coalescing
 # ---------------------------------------------------------------------------
 
@@ -4300,6 +4705,11 @@ def _run_global_playlist_rebuild(
                 _create_new_music_playlist()
         except Exception as exc:
             logger.warning("New Music playlist generation failed", error=str(exc))
+
+        try:
+            _run_curated_playlists()
+        except Exception as exc:
+            logger.warning("Curated playlists generation failed", error=str(exc))
 
         try:
             from helpers.config_helpers import get_favourite_playlists_config
@@ -4347,20 +4757,44 @@ def _run_global_playlist_rebuild(
 # ---------------------------------------------------------------------------
 
 def _sync_isrc_popularity() -> int:
-    """Sync popularity stats across tracks sharing the same ISRC **and title**."""
+    """Sync popularity stats across tracks sharing the same ISRC **and title**.
+
+    Preserves existing album-relative ``final_score`` / ``popularity`` on already
+    scored albums (only backfilling unscored rows) while syncing recording-level
+    raw signals (``raw_score``, ``lastfm_listeners``, ``listenbrainz_listens``,
+    and ``is_single``).
+    """
     try:
         with db_session() as session:
             result = session.execute(
                 text("""
                     UPDATE tracks AS target
-                    SET popularity = source.max_score,
-                        final_score = source.max_score,
+                    SET popularity = CASE
+                            WHEN COALESCE(target.popularity, target.final_score, 0) <= 0
+                            THEN source.max_score
+                            ELSE target.popularity
+                        END,
+                        final_score = CASE
+                            WHEN COALESCE(target.final_score, target.popularity, 0) <= 0
+                            THEN source.max_score
+                            ELSE target.final_score
+                        END,
+                        raw_score = CASE
+                            WHEN COALESCE(target.raw_score, 0) <= 0 AND source.max_raw_score > 0
+                            THEN source.max_raw_score
+                            ELSE target.raw_score
+                        END,
+                        lastfm_listeners = GREATEST(COALESCE(target.lastfm_listeners, 0), source.max_lf),
+                        listenbrainz_listens = GREATEST(COALESCE(target.listenbrainz_listens, 0), source.max_lb),
                         is_single = source.max_single_status
                     FROM (
                         SELECT
                             isrc,
                             LOWER(TRIM(title)) AS title_key,
                             MAX(COALESCE(popularity, final_score, 0)) AS max_score,
+                            MAX(COALESCE(raw_score, 0)) AS max_raw_score,
+                            MAX(COALESCE(lastfm_listeners, 0)) AS max_lf,
+                            MAX(COALESCE(listenbrainz_listens, 0)) AS max_lb,
                             BOOL_OR(COALESCE(is_single, FALSE)) AS max_single_status
                         FROM tracks
                         WHERE isrc IS NOT NULL
@@ -4370,8 +4804,10 @@ def _sync_isrc_popularity() -> int:
                     WHERE target.isrc = source.isrc
                       AND LOWER(TRIM(target.title)) = source.title_key
                       AND (
-                          COALESCE(target.popularity, target.final_score, 0)
-                              IS DISTINCT FROM source.max_score
+                          (COALESCE(target.final_score, target.popularity, 0) <= 0 AND source.max_score > 0)
+                          OR (COALESCE(target.raw_score, 0) <= 0 AND source.max_raw_score > 0)
+                          OR COALESCE(target.lastfm_listeners, 0) < source.max_lf
+                          OR COALESCE(target.listenbrainz_listens, 0) < source.max_lb
                           OR COALESCE(target.is_single, FALSE)
                               IS DISTINCT FROM source.max_single_status
                       )
@@ -4567,13 +5003,16 @@ def finalise_scan(*, results: list[dict[str, Any]], options: dict[str, Any]) -> 
                     )
 
         try:
-            _isrc_updated = _sync_isrc_popularity()
-            if _isrc_updated:
-                invalidate_genre_playlist_rows()
-                log_unified(
-                    f"[FINALISE_STAGE] ISRC sync: {_isrc_updated} track(s) updated; "
-                    f"affected star ratings will be recalculated during the next rating pass"
-                )
+            from services.popularity.scan_scope import global_playlists_deferred
+
+            if not global_playlists_deferred():
+                _isrc_updated = _sync_isrc_popularity()
+                if _isrc_updated:
+                    invalidate_genre_playlist_rows()
+                    log_unified(
+                        f"[FINALISE_STAGE] ISRC sync: {_isrc_updated} track(s) updated; "
+                        f"affected star ratings will be recalculated during the next rating pass"
+                    )
         except Exception as exc:
             logger.warning("ISRC sync commit failed", error=str(exc))
 

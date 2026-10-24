@@ -45,6 +45,26 @@ _STAGE_LABELS = {
     "singles": "Singles Detection",
 }
 
+_ARTIST_INDEX_CACHE_LOCK = threading.Lock()
+_ARTIST_INDEX_CACHE: dict[str, Any] = {"ts": 0.0, "index": None}
+_ARTIST_INDEX_CACHE_TTL_SECONDS = 300.0
+
+
+def _get_cached_artist_index() -> dict[str, Any]:
+    """Return the Navidrome artist index with a short TTL cache to avoid repeated full fetches."""
+    now = time.monotonic()
+    with _ARTIST_INDEX_CACHE_LOCK:
+        cached = _ARTIST_INDEX_CACHE.get("index")
+        ts = float(_ARTIST_INDEX_CACHE.get("ts") or 0.0)
+        if isinstance(cached, dict) and cached and (now - ts) < _ARTIST_INDEX_CACHE_TTL_SECONDS:
+            return cached
+    index = build_artist_index() or {}
+    if index:
+        with _ARTIST_INDEX_CACHE_LOCK:
+            _ARTIST_INDEX_CACHE["index"] = index
+            _ARTIST_INDEX_CACHE["ts"] = time.monotonic()
+    return index
+
 
 def stage_for_album_index(album_index: int, total_albums: int) -> str:
     """Map an album's position in the loop to its stage band.
@@ -160,7 +180,7 @@ def _run_artist_scan_pipeline_inner(
         if not artist_id:
             try:
                 from helpers.text_utils import normalize_artist_key as _norm_key
-                index = build_artist_index() or {}
+                index = _get_cached_artist_index()
                 target_key = _norm_key(artist_name)
                 for _name, _info in index.items():
                     if _info.get("id") and _norm_key(_name) == target_key:

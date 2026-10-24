@@ -400,6 +400,35 @@ def _run_full_scan_as_artist_pipeline(
         defer_global_playlists()
     except Exception as exc:
         logger.debug("[FULL_SCAN] Could not defer global playlists", error=str(exc))
+
+    try:
+        from services.popularity.pipeline import _log_scan_config, _reload_config_before_scan
+
+        _reload_config_before_scan()
+        _log_scan_config()
+    except Exception as exc:
+        logger.debug("[FULL_SCAN] Initial config reload/log skipped", error=str(exc))
+
+    _track_budget = 0
+    try:
+        from helpers.config_helpers import get_track_timeout_seconds
+
+        _track_budget = int(get_track_timeout_seconds())
+    except Exception:
+        _track_budget = 0
+
+    _all_counts: dict[str, int] = {}
+    if _track_budget > 0:
+        try:
+            from db.repositories.library import get_track_counts_by_artist
+
+            _all_counts = get_track_counts_by_artist() or {}
+        except Exception as _count_exc:
+            logger.debug(
+                "[FULL_SCAN] Track-count preload failed; using the fixed-overhead artist budget",
+                error=str(_count_exc),
+            )
+            _all_counts = {}
     # Stage bands for the overall percentage.  Each artist contributes an
     # equal share; within an artist the four stages (Metadata, Popularity,
     # Singles Detection, Essentia) each take a quarter of that share.  The
@@ -539,28 +568,14 @@ def _run_full_scan_as_artist_pipeline(
             # album and keeps the rest.
             _artist_budget: float | None = _ARTIST_FIXED_OVERHEAD_SECONDS
             try:
-                from helpers.config_helpers import get_track_timeout_seconds
-
-                _track_budget = int(get_track_timeout_seconds())
                 if _track_budget <= 0:
                     _artist_budget = None
                 else:
-                    _artist_track_count = 0
-                    try:
-                        from db.repositories.library import get_track_counts_by_artist
-
-                        _all_counts = get_track_counts_by_artist() or {}
-                        _artist_track_count = int(
-                            _all_counts.get(artist)
-                            or _all_counts.get(str(artist).strip())
-                            or 0
-                        )
-                    except Exception as _count_exc:
-                        logger.debug(
-                            "[FULL_SCAN] Track-count lookup failed; using the "
-                            "fixed-overhead artist budget",
-                            artist=artist, error=str(_count_exc),
-                        )
+                    _artist_track_count = int(
+                        _all_counts.get(artist)
+                        or _all_counts.get(str(artist).strip())
+                        or 0
+                    )
                     _artist_budget = float(
                         _ARTIST_FIXED_OVERHEAD_SECONDS
                         + _track_budget * _artist_track_count
@@ -726,7 +741,19 @@ def _run_full_scan_as_artist_pipeline(
             if status == "complete":
                 from services.popularity.stages.finalise_stage import (
                     _run_global_playlist_rebuild,
+                    _sync_isrc_popularity,
+                    invalidate_genre_playlist_rows,
                 )
+
+                try:
+                    _isrc_updated = _sync_isrc_popularity()
+                    if _isrc_updated:
+                        invalidate_genre_playlist_rows()
+                        log_unified(
+                            f"[FULL_SCAN] ISRC sync: {_isrc_updated} track(s) updated across library"
+                        )
+                except Exception as _isrc_exc:
+                    logger.debug("[FULL_SCAN] End-of-scan ISRC sync failed", error=str(_isrc_exc))
 
                 _run_global_playlist_rebuild({}, force=True)
         except Exception as exc:

@@ -164,6 +164,8 @@ def sync_playlist_by_name(
     song_ids: list[str],
     *,
     force: bool = False,
+    existing_playlist_id: str | None = None,
+    all_playlists: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create or update (IN PLACE) a Navidrome playlist by name.
 
@@ -237,23 +239,31 @@ def sync_playlist_by_name(
     song_ids = cleaned
     result["song_count"] = len(song_ids)
 
-    try:
-        all_playlists = client.fetch_all_playlists() or []
-        wanted = str(name or "").strip().lower()
-        matches = [
-            p for p in all_playlists
-            if str(p.get("name") or "").strip().lower() == wanted
-        ]
-        # Smart playlists (from .nsp files) carry the same name — leave them
-        # alone; only sync the REGULAR (file-imported) playlists.
-        matches = [p for p in matches if not _is_smart(p)]
-    except Exception as exc:
-        logger.warning(
-            "[PLAYLISTS] playlist lookup failed",
-            name=name,
-            error=str(exc),
-        )
-        return result
+    matches: list[dict[str, Any]] = []
+    if existing_playlist_id and all_playlists is None:
+        matches = [{"id": str(existing_playlist_id).strip(), "name": name}]
+    else:
+        try:
+            playlist_list = (
+                all_playlists
+                if all_playlists is not None
+                else (client.fetch_all_playlists() or [])
+            )
+            wanted = str(name or "").strip().lower()
+            matches = [
+                p for p in playlist_list
+                if str(p.get("name") or "").strip().lower() == wanted
+            ]
+            # Smart playlists (from .nsp files) carry the same name — leave them
+            # alone; only sync the REGULAR (file-imported) playlists.
+            matches = [p for p in matches if not _is_smart(p)]
+        except Exception as exc:
+            logger.warning(
+                "[PLAYLISTS] playlist lookup failed",
+                name=name,
+                error=str(exc),
+            )
+            return result
 
     # Dedupe: keep the first regular playlist, delete the rest.
     primary = matches[0] if matches else None

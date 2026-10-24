@@ -70,7 +70,8 @@ def reap_stalled_transfers() -> dict[str, int]:
     stats = {"checked": 0, "cancelled_transfers": 0, "requeued_items": 0}
     try:
         from api_clients.slskd_http import get_slskd_client
-        from services.downloads.download_pipeline_service import _block_peer
+        from db.repositories.queue import record_rejected_candidate
+        from services.downloads.download_pipeline_service import _record_peer_stall
         from services.downloads.slskd_service import SlskdService
 
         client = get_slskd_client()
@@ -125,7 +126,7 @@ def reap_stalled_transfers() -> dict[str, int]:
             # next cycle either selects a different file or reports
             # ``no_results`` and backs off, instead of burning another stall.
             if username and filename:
-                _block_peer(username, filename)
+                _record_peer_stall(username, filename)
                 logger.warning(
                     "Blocked peer after stalled transfer",
                     username=username,
@@ -135,6 +136,16 @@ def reap_stalled_transfers() -> dict[str, int]:
 
             item = _find_owning_item(transfer, active_items)
             if item:
+                if username and filename:
+                    try:
+                        record_rejected_candidate(
+                            int(item["id"]),
+                            username,
+                            filename,
+                            reason="stalled_transfer",
+                        )
+                    except Exception:
+                        pass
                 mark_failed(
                     int(item["id"]),
                     "stalled_transfer",

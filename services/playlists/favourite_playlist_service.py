@@ -88,13 +88,27 @@ def build_favourite_artist_song_ids(client: Any, artist_ids: list[str]) -> list[
     return _dedupe(song_ids)
 
 
-def _qualifying_tracks(song_ids: list[str], min_stars: int) -> list[str]:
+def _qualifying_tracks(
+    song_ids: list[str],
+    min_stars: int,
+    *,
+    dedupe_titles: bool = False,
+    interleave_artists: bool = False,
+    playlist_name: str = "",
+) -> list[str]:
     """Keep only the song ids whose LOCAL ``tracks.stars`` meets the floor.
 
     Order follows *song_ids* (the playlist's intended order), and ids with no
     local row are dropped — a starred album can hold tracks this library never
     imported, and such an id would make the pushed playlist differ from the
     requested one forever.
+
+    When *dedupe_titles* is True (used for ``Favourite Artists``), duplicate
+    versions of the same song by the same artist (live / compilation / greatest
+    hits re-recordings) are collapsed to the best studio version, Christmas
+    tracks are filtered according to ``exclude_christmas_from_playlists``, and
+    when *interleave_artists* is True, tracks are interleaved across artists so
+    one artist does not play in a single contiguous block.
 
     ⚠️ An expanding bindparam, never a JSON array deconstructor inside the IN
     list: ``json_each`` is SQLite's, and PostgreSQL's same-named function
@@ -104,21 +118,92 @@ def _qualifying_tracks(song_ids: list[str], min_stars: int) -> list[str]:
     """
     if not song_ids:
         return []
+    rows: list[Any] = []
     try:
         with db_session() as session:
             rows = session.execute(
                 text("""
-                    SELECT CAST(id AS TEXT) AS id, COALESCE(stars, 0) AS stars
+                    SELECT CAST(id AS TEXT) AS id,
+                           COALESCE(stars, star_rating, 0) AS stars,
+                           title,
+                           artist,
+                           album_artist,
+                           album,
+                           genres,
+                           is_live,
+                           is_compilation,
+                           COALESCE(popularity, final_score, 0) AS popularity_score,
+                           COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
+                           COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens
                     FROM tracks
-                    WHERE CAST(id AS TEXT) IN :ids
+                    WHERE id IN :ids
                 """).bindparams(bindparam("ids", expanding=True)),
                 {"ids": [str(s) for s in song_ids]},
             ).fetchall() or []
     except Exception as exc:
         logger.warning("[FAVOURITES] track star filter failed: %s", exc)
         return []
-    star_by_id = {str(r[0]): int(r[1] or 0) for r in rows}
-    return [sid for sid in song_ids if star_by_id.get(str(sid), 0) >= int(min_stars)]
+
+    if not rows:
+        return []
+
+    first = rows[0]
+    has_rich_cols = hasattr(first, "_mapping") and "title" in first._mapping
+    if not has_rich_cols or (not dedupe_titles and not interleave_artists and not playlist_name):
+        star_by_id = {str(r[0]): int(r[1] or 0) for r in rows}
+        return [sid for sid in song_ids if star_by_id.get(str(sid), 0) >= int(min_stars)]
+
+    row_by_id: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        d = dict(r._mapping)
+        tid = str(d.get("id") or "")
+        if tid and int(d.get("stars") or 0) >= int(min_stars):
+            row_by_id[tid] = d
+
+    ordered_rows = [row_by_id[str(sid)] for sid in song_ids if str(sid) in row_by_id]
+    if not ordered_rows:
+        return []
+
+    try:
+        from helpers.config_helpers import get_playlists_config
+        from services.popularity.stages.finalise_stage import (
+            _filter_christmas_rows,
+            _interleave_artists,
+            _normalise_essential_title,
+        )
+
+        if playlist_name:
+            ordered_rows = _filter_christmas_rows(ordered_rows, playlist_name=playlist_name)
+
+        if dedupe_titles:
+            best_by_artist_title: dict[tuple[str, str], dict[str, Any]] = {}
+            order_keys: list[tuple[str, str]] = []
+            for row in ordered_rows:
+                artist_key = str(row.get("album_artist") or row.get("artist") or "").strip().casefold()
+                title_key = _normalise_essential_title(str(row.get("title") or ""))
+                if not title_key:
+                    title_key = str(row.get("id") or "")
+                compound_key = (artist_key, title_key)
+                rank = (
+                    0 if bool(row.get("is_live")) else 1,
+                    0 if bool(row.get("is_compilation")) else 1,
+                    int(row.get("stars") or 0),
+                    float(row.get("popularity_score") or 0.0),
+                )
+                prev = best_by_artist_title.get(compound_key)
+                if prev is None:
+                    best_by_artist_title[compound_key] = {**row, "_fav_rank": rank}
+                    order_keys.append(compound_key)
+                elif rank > prev["_fav_rank"]:
+                    best_by_artist_title[compound_key] = {**row, "_fav_rank": rank}
+            ordered_rows = [best_by_artist_title[k] for k in order_keys]
+
+        if interleave_artists and get_playlists_config().get("playlist_interleave_artists", True):
+            ordered_rows = _interleave_artists(ordered_rows)
+    except Exception as exc:
+        logger.debug("[FAVOURITES] post-filter fallback: %s", exc)
+
+    return [str(r.get("id")) for r in ordered_rows if r.get("id")]
 
 
 def sync_favourite_playlists_for_user(username: str, *, force: bool = False) -> dict[str, Any]:
@@ -165,8 +250,18 @@ def sync_favourite_playlists_for_user(username: str, *, force: bool = False) -> 
         result["error"] = f"Navidrome expansion failed: {exc}"
         return result
 
-    artist_kept = _qualifying_tracks(artist_songs, min_stars)
-    album_kept = _qualifying_tracks(album_songs, min_stars)
+    artist_kept = _qualifying_tracks(
+        artist_songs,
+        min_stars,
+        dedupe_titles=True,
+        interleave_artists=True,
+        playlist_name=cfg["favourite_artists_name"],
+    )
+    album_kept = _qualifying_tracks(
+        album_songs,
+        min_stars,
+        playlist_name=cfg["favourite_albums_name"],
+    )
 
     # ⚠️ An EMPTY push is skipped, never written: ``sync_playlist_by_name``
     # would otherwise replace a populated playlist with nothing every time the
