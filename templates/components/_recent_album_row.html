@@ -1,0 +1,37 @@
+{% macro recent_album_row(al) %}
+                    <div class="list-group-item bg-transparent border-secondary p-2 d-flex align-items-center gap-2">
+                      <a href="{{ url_for('ui.album_detail', album_path=al.artist ~ '/' ~ al.album ~ (('/' ~ al.album_year) if al.album_year else '')) }}"
+                         class="d-flex align-items-center gap-2 min-w-0 flex-grow-1 text-decoration-none">
+                        <img src="/api/album/{{ al.artist|path_segment }}/{{ al.album|path_segment }}/art?s=80"
+                             alt="" loading="lazy" width="40" height="40"
+                             class="flex-shrink-0 rounded"
+                             style="object-fit: cover; background-color: var(--tertiary-bg); border: 1px solid var(--border-color);"
+                             onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                        <span class="flex-shrink-0 align-items-center justify-content-center rounded"
+                              style="display: none; width: 40px; height: 40px; background-color: var(--tertiary-bg); border: 1px solid var(--border-color);">
+                          <i class="bi bi-disc text-muted fs-5"></i>
+                        </span>
+                        <span class="min-w-0">
+                          <span class="d-block fw-bold text-truncate text-light" style="font-size: 0.9rem;">{{ al.album }}</span>
+                          <span class="d-flex align-items-center gap-1" style="font-size: 0.8rem;">
+                            <span class="text-muted text-truncate">{{ al.artist }}</span>
+                            {% if al.album_year %}<span class="text-muted flex-shrink-0">· {{ al.album_year }}</span>{% endif %}
+                            {% if al.album_type %}<span class="badge bg-secondary-subtle text-secondary-emphasis extra-small flex-shrink-0">{{ al.album_type }}</span>{% endif %}
+                          </span>
+                        </span>
+                      </a>
+                      <div class="flex-shrink-0 d-flex align-items-center gap-2">
+                        <span class="badge bg-dark border border-secondary text-muted extra-small fw-normal d-none d-sm-inline">
+                            {% if al.added_at %}{{ al.added_at.strftime('%d %b') }}{% else %}—{% endif %}
+                        </span>
+                        <a href="{{ url_for('ui.album_detail', album_path=al.artist ~ '/' ~ al.album ~ (('/' ~ al.album_year) if al.album_year else '')) }}"
+                           class="btn btn-sm btn-outline-secondary py-0 px-2"
+                           aria-label="Open {{ al.album }} by {{ al.artist }}">Open</a>
+                        <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1 js-play-album"
+                                data-artist="{{ al.artist }}" data-album="{{ al.album }}"
+                                title="Play this album" aria-label="Play {{ al.album }} by {{ al.artist }}">
+                          <i class="bi bi-play-fill" aria-hidden="true"></i>
+                        </button>
+                      </div>
+                    </div>
+{% endmacro %}

@@ -1,0 +1,118 @@
+/* ==========================================================================
+   static/css/track.css
+   Track detail page.
+   ========================================================================== */
+
+.hero-cover {
+  width: 80px;
+  height: 80px;
+}
+
+#trackPageTabs .nav-link {
+  color: #adb5bd !important;
+  border-color: transparent !important;
+}
+
+#trackPageTabs .nav-link:hover {
+  color: #ffffff !important;
+}
+
+#trackPageTabs .nav-link.active {
+  background-color: var(--spotify-green, #1db954) !important;
+  color: #000 !important;
+}
+
+@media (max-width: 991.98px) {
+  .track-sticky-tabs {
+    top: var(--navbar-height, 56px) !important;
+  }
+
+  .track-mobile-group:not(.mobile-tab-active) {
+    display: none !important;
+  }
+
+  .mobile-tab-bar {
+    display: flex;
+    gap: 0.35rem;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .mobile-tab-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mobile-tab-bar .tab-btn {
+    flex: 1 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    min-height: 38px;
+    padding: 0.35rem 0.65rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-control, 0.375rem);
+    background: var(--primary-bg);
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .mobile-tab-bar .tab-btn.active {
+    background: var(--spotify-green, #1db954);
+    border-color: var(--spotify-green, #1db954);
+    color: #000;
+  }
+
+  .tab-content > .tab-pane {
+    display: none !important;
+    opacity: 1 !important;
+  }
+
+  .tab-content > .tab-pane.mobile-tab-active {
+    display: block !important;
+  }
+}
+
+.track-quick-bar {
+  position: fixed;
+  bottom: calc(var(--bottom-nav-height, 3.5rem) + env(safe-area-inset-bottom, 0px));
+  left: 0;
+  right: 0;
+  z-index: 1990;
+  background: rgba(18, 18, 18, 0.97);
+  border-top: 1px solid var(--border-color);
+  backdrop-filter: blur(10px);
+  padding: 0.6rem 1rem;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.5);
+}
+
+body.player-visible .track-quick-bar {
+  bottom: calc(var(--bottom-nav-height, 3.5rem) + var(--player-bar-height, 4.25rem) + env(safe-area-inset-bottom, 0px));
+}
+
+.similar-artist-card {
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.similar-artist-card:hover,
+.similar-artist-card:focus-visible {
+  transform: scale(1.05);
+}
+
+.similar-artist-img {
+  aspect-ratio: 1;
+  object-fit: cover;
+}
+
+.similar-artist-name {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.2;
+}

@@ -1,0 +1,2082 @@
+/* ==========================================================================
+   static/js/pages/config.js
+   Config page — config collection, save, raw YAML editor, multi-user
+   management, Essentia model download, upcoming-release sources, retry
+   scheduler.
+
+   Load order:
+       utils/dom.js  →  utils/api.js  →  utils/poller.js
+       ui/toast.js  →  ui/modal.js  →  ui/confirm.js  →  ui/button-state.js
+       config.js
+   ========================================================================== */
+
+(function (global) {
+  'use strict';
+
+  const ESSENTIA_POLL_MS = 2000;
+  const ESSENTIA_MAX_POLLS = 600;      // ~20 minutes
+  const SAVE_TIMEOUT_MS = 45000;
+
+  let essentiaPoller = null;
+
+  function esc(value) {
+    return (global.escapeHtml || ((v) => String(v == null ? '' : v)))(value);
+  }
+
+  // ── Excluded playlist artists ───────────────────────────────────────────
+
+  let configExcludedArtists = [];
+
+  function normaliseExcludedArtist(name) {
+    return String(name || '').trim().toLowerCase();
+  }
+
+  function loadExcludedArtists() {
+    const playlists = (global.pageConfig && global.pageConfig.playlists) || {};
+    const fromConfig = playlists.excluded_artists || [];
+    configExcludedArtists = Array.from(fromConfig)
+      .map((a) => String(a).trim())
+      .filter(Boolean);
+    renderExcludedArtists();
+  }
+
+  function renderExcludedArtists() {
+    const list = document.getElementById('excludedArtistsList');
+    if (!list) return;
+    list.innerHTML = '';
+    if (configExcludedArtists.length === 0) {
+      list.innerHTML = '<span class="text-muted small">No artists excluded.</span>';
+      return;
+    }
+    configExcludedArtists.forEach((artist) => {
+      const badge = document.createElement('span');
+      badge.className = 'badge bg-secondary d-flex align-items-center gap-2';
+      badge.innerHTML = `
+        ${esc(artist)}
+        <button type="button" class="btn-close btn-close-white" aria-label="Remove" onclick="removeExcludedArtist('${esc(String(artist).replace(/'/g, "\\'"))}')"></button>
+      `;
+      list.appendChild(badge);
+    });
+  }
+
+  function addExcludedArtist() {
+    const input = document.getElementById('newExcludedArtistInput');
+    if (!input) return;
+    const name = input.value.trim();
+    if (!name) {
+      showToast('Warning', 'Please enter an artist name', 'warning');
+      return;
+    }
+    const key = normaliseExcludedArtist(name);
+    if (configExcludedArtists.some((a) => normaliseExcludedArtist(a) === key)) {
+      showToast('Warning', 'This artist is already excluded', 'warning');
+      return;
+    }
+    configExcludedArtists.push(name);
+    input.value = '';
+    input.focus();
+    renderExcludedArtists();
+  }
+
+  function removeExcludedArtist(name) {
+    configExcludedArtists = configExcludedArtists.filter((a) => a !== name);
+    renderExcludedArtists();
+  }
+
+  // ── Utility functions (preserved) ───────────────────────────────────────
+
+  const DEFAULT_STRIP_KEYWORDS = [
+    'remastered', 'remaster', 'remastered 2022', 'remastered 2023', 'remastered 2024',
+    'remastered 2025', 'remastered 2021', 'remastered 2020', 'remastered 2019',
+    'remastered 2018', 'remastered 2017', 'remastered 2016', 'remastered 2015',
+    'remastered 2014', 'remastered 2013', 'remastered 2012', 'remastered 2011',
+    'remastered 2010', 'remastered 2009', 'remastered 2008', 'remastered 2007',
+    'remastered 2006', 'remastered 2005', 'remastered 2004', 'remastered 2003',
+    'remastered 2002', 'remastered 2001', 'remastered 2000', 'remastered 1999',
+    'remastered 1998', 'remastered 1997', 'remastered 1996', 'remastered 1995',
+    'remastered 1994', 'remastered 1993', 'remastered 1992', 'remastered 1991',
+    'remastered 1990', 'remastered 1989', 'remastered 1988', 'remastered 1987',
+    'remastered 1986', 'remastered 1985', 'remastered 1984', 'remastered 1983',
+    'remastered 1982', 'remastered 1981', 'remastered 1980',
+    'radio edit', 'radio version', 'single edit', 'album version',
+    'extended version', 'extended mix', 'club mix', 'dub mix',
+    'instrumental', 'a cappella', 'karaoke version', 'backing track',
+    'explicit', 'clean', 'bonus track', 'bonus', 'edit'
+  ];
+
+  // ── User context ─────────────────────────────────────────────────────────
+
+  function setActiveUserContext(userIndex) {
+    localStorage.setItem('selectedNavidromeUser', userIndex);
+    const notice = document.getElementById('userContextNotice');
+    if (notice) {
+      notice.textContent = 'User context updated for this browser.';
+      notice.classList.remove('d-none');
+    }
+  }
+
+  // ── Search filter keywords ───────────────────────────────────────────────
+
+  function initializeStripKeywords() {
+    const config = global.pageConfig || {};
+    const keywords = config.strip_parentheses_filters || [];
+    const keywordsList = document.getElementById('stripKeywordsList');
+    if (!keywordsList) return;
+    const displayKeywords = keywords.length > 0 ? keywords : DEFAULT_STRIP_KEYWORDS;
+    displayKeywords.forEach((keyword) => addKeywordBadge(keyword));
+  }
+
+  function addKeywordBadge(keyword) {
+    const list = document.getElementById('stripKeywordsList');
+    if (!list) return;
+    const badge = document.createElement('span');
+    badge.className = 'badge bg-primary d-flex align-items-center gap-2';
+    badge.innerHTML = `
+      ${esc(keyword)}
+      <button type="button" class="btn-close btn-close-white" aria-label="Remove" onclick="removeKeywordBadge(this)"></button>
+    `;
+    list.appendChild(badge);
+  }
+
+  function removeKeywordBadge(btn) {
+    const badge = btn.closest('.badge');
+    if (badge) badge.remove();
+  }
+
+  function addStripKeyword() {
+    const input = document.getElementById('newKeywordInput');
+    if (!input) return;
+    const keyword = input.value.trim().toLowerCase();
+    if (!keyword) {
+      showToast('Error', 'Please enter a keyword', 'warning');
+      return;
+    }
+    const existingKeywords = Array.from(document.querySelectorAll('#stripKeywordsList .badge'))
+      .map((el) => {
+        const text = el.textContent.trim();
+        return text.substring(0, text.length - 1).trim();
+      });
+    if (existingKeywords.map((k) => k.toLowerCase()).includes(keyword.toLowerCase())) {
+      showToast('Warning', 'This keyword already exists', 'warning');
+      return;
+    }
+    addKeywordBadge(keyword);
+    input.value = '';
+    input.focus();
+  }
+
+  function resetStripKeywords() {
+    if (!confirm('Reset search filter keywords to system defaults?')) return;
+    const list = document.getElementById('stripKeywordsList');
+    if (!list) return;
+    list.innerHTML = '';
+    DEFAULT_STRIP_KEYWORDS.forEach((keyword) => addKeywordBadge(keyword));
+    showToast('Success', 'Keywords reset to defaults', 'success');
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && document.activeElement && document.activeElement.id === 'newKeywordInput') {
+      e.preventDefault();
+      addStripKeyword();
+    }
+  });
+
+  // ── Field readers ────────────────────────────────────────────────────────
+
+  function getValue(id, defaultValue) {
+    const el = document.getElementById(id);
+    return el ? el.value : (defaultValue || '');
+  }
+
+  function getChecked(id, defaultValue) {
+    const el = document.getElementById(id);
+    return el ? el.checked : (defaultValue || false);
+  }
+
+  function parseNumber(id, defaultValue) {
+    const el = document.getElementById(id);
+    if (!el) return defaultValue;
+    const v = parseFloat(el.value);
+    return Number.isNaN(v) ? defaultValue : v;
+  }
+
+  // ── Build config object ─────────────────────────────────────────────────
+
+  function collectFeatureFieldOverrides() {
+    const overrides = {};
+    document.querySelectorAll('.feature-field').forEach((input) => {
+      const key = input.name.replace('feature_', '');
+      let val = input.value;
+      if (input.tagName === 'SELECT') {
+        if (val === 'true' || val === 'false') val = (val === 'true');
+      } else if (global.pageConfig && global.pageConfig.features && Array.isArray(global.pageConfig.features[key])) {
+        val = val.split(',').map((s) => s.trim()).filter(Boolean);
+      } else if (!isNaN(val) && val !== '') {
+        val = Number(val);
+      }
+      overrides[key] = val;
+    });
+    return overrides;
+  }
+
+  // Features keys inherited from the old system — hidden from the UI and
+  // dropped from the saved config so they stop accumulating in config.yaml.
+  const LEGACY_FEATURE_KEYS = ['dry_run', 'sync', 'force', 'verbose', 'perpetual', 'batchrate', 'full_scan', 'auto_boot_navidrome_scan', 'artist', 'use_test_site'];
+
+  function buildConfigObject() {
+    const _sched = (global.pageConfig && global.pageConfig.scheduler) || {};
+    const _schedJobs = _sched.jobs || {};
+
+    const navidrome_users = [];
+    document.querySelectorAll('.user-card').forEach((card) => {
+      const user = {
+        user: card.querySelector('.user-nav-username').value,
+        display_name: card.querySelector('.user-display-name').value,
+        base_url: card.querySelector('.user-nav-url').value,
+        pass: card.querySelector('.user-nav-password').value,
+        lastfm_username: card.querySelector('.user-lastfm-username').value,
+        listenbrainz_user_token: card.querySelector('.user-listenbrainz-token').value
+      };
+      if (user.user && user.base_url) {
+        navidrome_users.push(user);
+      }
+    });
+
+    const config = {
+      navidrome_users: navidrome_users,
+      matching: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.matching) || {},
+        {
+          fuzzy_threshold: parseFloat(getValue('matching_fuzzy_threshold', '0.80')) || 0.80,
+          score_threshold: parseFloat(getValue('matching_score_threshold', '0.60')) || 0.60
+        }
+      ),
+      logging: {
+        level: getValue('log_level', 'info').toLowerCase()
+      },
+      slskd: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.slskd) || {},
+        {
+          enabled: getChecked('slskd_enabled'),
+          web_url: getValue('slskd_web_url'),
+          api_key: getValue('slskd_api_key'),
+          search_cleanup_interval: (() => {
+            const raw = parseInt(getValue('slskd_search_cleanup_interval', '10'), 10);
+            return Number.isFinite(raw) ? Math.max(0, raw) : 10;
+          })(),
+          timeouts: Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.slskd && global.pageConfig.slskd.timeouts) || {}),
+            {
+              min_retry_delay_minutes: parseInt(getValue('slskd_min_retry_delay', '60')) || 60,
+              long_retry_delay_minutes: parseInt(getValue('slskd_long_retry_delay', '1440')) || 1440,
+              remotely_queued_timeout_minutes: parseInt(getValue('slskd_remotely_queued_timeout', '60')) || 60,
+              active_state_timeout_minutes: parseInt(getValue('slskd_active_timeout', '240')) || 240,
+              inter_item_delay_seconds: parseInt(getValue('slskd_inter_item_delay', '5')) || 5
+            }
+          )
+        }
+      ),
+      wikidata: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.wikidata) || {},
+        {
+          musician_terms: getValue('wikidata_musician_terms', '')
+            .split(',')
+            .map((term) => term.trim())
+            .filter(Boolean)
+        }
+      ),
+      queue: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.queue) || {},
+        {
+          matching: Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.queue && global.pageConfig.queue.matching) || {}),
+            {
+              threshold: parseFloat(getValue('queue_match_threshold', '0.65')) || 0.65,
+              partial_match: parseFloat(getValue('queue_match_partial', '0.7')) || 0.7,
+              strict_duration_sec: parseInt(getValue('queue_strict_duration', '2')) || 2,
+              tolerance_duration_sec: parseInt(getValue('queue_tolerance_duration', '5')) || 5,
+              detect_live_tracks: getChecked('queue_detect_live', true),
+              detect_remix_tracks: getChecked('queue_detect_remix', true),
+              detect_compilations: getChecked('queue_detect_compilations', true)
+            }
+          ),
+          search_backoff_hours: getValue('queue_search_backoff_hours', '4, 12, 24')
+            .split(',').map((s) => parseInt(s.trim(), 10))
+            .filter((n) => !isNaN(n) && n > 0),
+          failure_retry_delay_minutes: parseInt(getValue('queue_failure_retry_delay_minutes', '30')) || 30,
+          pre_release_retry_weekday: parseInt(getValue('queue_pre_release_retry_weekday', '4')) || 4,
+          miss_retry_weekday: parseInt(getValue('queue_miss_retry_weekday', '3')) || 3,
+          miss_retry_time: getValue('queue_miss_retry_time', '18:00'),
+          search_max_wait_seconds: parseNumber('queue_search_max_wait_seconds', 60),
+          fallback_search_max_wait_seconds: parseNumber('queue_fallback_search_max_wait_seconds', 20),
+          search_empty_abort_seconds: parseNumber('queue_search_empty_abort_seconds', 30),
+          search_empty_shrink_after: parseNumber('queue_search_empty_shrink_after', 4),
+          search_shrunken_wait_seconds: parseNumber('queue_search_shrunken_wait_seconds', 8),
+          auto_restart: Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.queue && global.pageConfig.queue.auto_restart) || {}),
+            {
+              enabled: getChecked('queue_auto_restart_enabled', true),
+              cooldown_seconds: Math.max(30, parseInt(getValue('queue_auto_restart_cooldown_seconds', '300'), 10) || 300)
+            }
+          )
+        }
+      ),
+      lastfm: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.lastfm) || {},
+        {
+          min_artist_plays: parseInt(getValue('lastfm_min_artist_plays', '20')) || 20,
+          min_similarity_score: parseFloat(getValue('lastfm_min_similarity', '0.46')) || 0.46,
+          max_similar_per_artist: parseInt(getValue('lastfm_max_similar', '5')) || 5,
+          max_albums_per_artist: parseInt(getValue('lastfm_max_albums', '5')) || 5,
+          recent_months: parseInt(getValue('lastfm_recent_months', '3')) || 3,
+          cache_ttl_hours: parseInt(getValue('lastfm_cache_ttl', '24')) || 24,
+          max_retries: parseInt(getValue('lastfm_max_retries', '3')) || 3,
+          retry_backoff: parseFloat(getValue('lastfm_retry_backoff', '1.5')) || 1.5,
+          rate_limit_delay: parseFloat(getValue('lastfm_rate_limit', '0.5')) || 0.5
+        }
+      ),
+      filesystem: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.filesystem) || {},
+        {
+          audio_formats: getValue('filesystem_audio_formats', '.mp3, .flac, .m4a, .ogg, .wav, .aac, .wma')
+            .split(',')
+            .map((ext) => ext.trim())
+            .filter(Boolean)
+        }
+      ),
+      playlists: {
+        essential_playlists_enabled: getChecked('playlists_essential_enabled', true),
+        essential_include_featured: getChecked('playlists_essential_include_featured', true),
+        essential_name_template: getValue('playlists_essential_name_template', '{artist} - Essential Collection'),
+        genre_playlists_enabled: getChecked('playlists_genre_playlists_enabled', true),
+        new_music_playlist_enabled: getChecked('playlists_new_music_enabled', true),
+        genre_playlists_delete_enabled: getChecked('playlists_genre_delete_enabled', true),
+        genre_playlists_create_threshold: parseInt(getValue('playlists_genre_create_threshold', '100'), 10) || 100,
+        genre_playlists_delete_threshold: parseInt(getValue('playlists_genre_delete_threshold', '80'), 10) || 80,
+        genre_playlists_min_stars: parseInt(getValue('playlists_genre_min_stars', '4'), 10) || 4,
+        genre_playlists_max_genres: parseInt(getValue('playlists_genre_max_genres', '3'), 10) || 3,
+        genre_playlists_max_tracks: (() => {
+          const raw = parseInt(getValue('playlists_genre_max_tracks', '300'), 10);
+          return Number.isFinite(raw) && raw >= 0 ? raw : 300;
+        })(),
+        favourite_playlists_enabled: getChecked('playlists_favourite_enabled', true),
+        favourite_min_stars: parseInt(getValue('playlists_favourite_min_stars', '4'), 10) || 4,
+        favourite_artists_name: getValue('playlists_favourite_artists_name', 'Favourite Artists') || 'Favourite Artists',
+        favourite_albums_name: getValue('playlists_favourite_albums_name', 'Favourite Albums') || 'Favourite Albums',
+        sync_favourites_from_navidrome: getChecked('playlists_favourite_sync', true),
+        genre_playlist_ai_cover_enabled: getChecked('playlists_genre_ai_cover_enabled', true),
+        genre_playlist_ai_cover_regenerate: getChecked('playlists_genre_ai_cover_regenerate', false),
+        genre_playlist_ai_cover_prompt: getValue('playlists_genre_ai_cover_prompt', ''),
+        playlist_order_mode: getValue('playlists_order_mode', 'prominence') || 'prominence',
+        genre_playlists_max_per_artist: (() => {
+          const raw = parseInt(getValue('playlists_max_per_artist', '25'), 10);
+          return Number.isFinite(raw) ? Math.max(0, raw) : 25;
+        })(),
+        playlist_interleave_artists: getChecked('playlists_interleave_artists', true),
+        genre_exclusions: {
+          enabled: getChecked('playlists_genre_exclusions_enabled', true),
+          own_tags_win: getChecked('playlists_genre_own_tags_win', true),
+          use_family_tiebreak: getChecked('playlists_genre_use_family_tiebreak', true),
+          metal_excluded_from: (getValue('playlists_genre_metal_excluded_from', 'alternative rock') || '')
+            .split(',')
+            .map((g) => g.trim().toLowerCase())
+            .filter((g) => g.length > 0),
+        },
+        exclude_christmas_from_playlists: getChecked('playlists_exclude_christmas', true),
+        christmas_playlist_marker: getValue('playlists_christmas_marker', 'christmas') || 'christmas',
+        genre_playlists_name_template: getValue('playlists_genre_name_template', '{genre} - Top Tracks'),
+        decade_playlists_enabled: getChecked('playlists_decade_enabled', true),
+        decade_playlists_name_template: getValue('playlists_decade_name_template', '{decade}s - Top Tracks') || '{decade}s - Top Tracks',
+        decade_playlists_min_tracks: parseInt(getValue('playlists_decade_min_tracks', '50'), 10) || 50,
+        decade_playlists_max_tracks: parseInt(getValue('playlists_decade_max_tracks', '200'), 10) || 200,
+        hit_singles_playlist_enabled: getChecked('playlists_hit_singles_enabled', true),
+        hit_singles_playlist_name: getValue('playlists_hit_singles_name', 'Hit Singles') || 'Hit Singles',
+        hit_singles_max_tracks: parseInt(getValue('playlists_hit_singles_max_tracks', '250'), 10) || 250,
+        hidden_gems_playlist_enabled: getChecked('playlists_hidden_gems_enabled', false),
+        hidden_gems_playlist_name: getValue('playlists_hidden_gems_name', 'Hidden Gems') || 'Hidden Gems',
+        hidden_gems_max_tracks: parseInt(getValue('playlists_hidden_gems_max_tracks', '200'), 10) || 200,
+        new_releases_playlist_enabled: getChecked('playlists_new_releases_enabled', false),
+        new_releases_playlist_name: getValue('playlists_new_releases_name', 'New Releases') || 'New Releases',
+        new_releases_max_tracks: parseInt(getValue('playlists_new_releases_max_tracks', '100'), 10) || 100,
+        covers_playlist_enabled: getChecked('playlists_covers_enabled', false),
+        covers_playlist_name: getValue('playlists_covers_name', 'Great Covers') || 'Great Covers',
+        covers_max_tracks: parseInt(getValue('playlists_covers_max_tracks', '150'), 10) || 150,
+        acoustic_playlist_enabled: getChecked('playlists_acoustic_enabled', false),
+        acoustic_playlist_name: getValue('playlists_acoustic_name', 'Acoustic Essentials') || 'Acoustic Essentials',
+        acoustic_max_tracks: parseInt(getValue('playlists_acoustic_max_tracks', '150'), 10) || 150,
+        high_energy_playlist_enabled: getChecked('playlists_high_energy_enabled', false),
+        high_energy_playlist_name: getValue('playlists_high_energy_name', 'High Energy & Upbeat') || 'High Energy & Upbeat',
+        high_energy_max_tracks: parseInt(getValue('playlists_high_energy_max_tracks', '200'), 10) || 200,
+        mood_playlists_enabled: getChecked('playlists_mood_enabled', false),
+        mood_playlists_name_template: getValue('playlists_mood_name_template', '{mood} - Mix') || '{mood} - Mix',
+        mood_playlists_min_tracks: parseInt(getValue('playlists_mood_min_tracks', '40'), 10) || 40,
+        mood_playlists_max_tracks: parseInt(getValue('playlists_mood_max_tracks', '150'), 10) || 150,
+        excluded_artists: [...configExcludedArtists],
+      },
+      navidrome: {
+        auto_public_playlists: getChecked('api_navidrome_auto_public_playlists', false),
+        playlist_cover_art: getChecked('api_navidrome_playlist_cover_art', false)
+      },
+      maintenance: {
+        safe_shutdown: {
+          enabled: getChecked('safe_shutdown_enabled', true),
+          drain_timeout_seconds: parseInt(getValue('safe_shutdown_drain_timeout', '60')) || 0,
+          auto_cancel_after_minutes: parseInt(getValue('safe_shutdown_auto_cancel', '120')) || 0,
+          release_connections: getChecked('safe_shutdown_release_connections', true)
+        }
+      },
+      album_save: {
+        background: {
+          enabled: getChecked('album_save_background_enabled', true),
+          track_threshold: parseInt(getValue('album_save_background_threshold', '40')) || 0
+        }
+      },
+      downloads: {
+        folder: getValue('downloads_folder'),
+        external_export_path: getValue('external_export_path'),
+        file_name_format: getValue('downloads_file_name_format', '{album_artist}/{year} - {album}/{track_number}. {artist} - {title}'),
+        quality_filter: (() => {
+          const priorities = [];
+          if (getChecked('downloads_quality_allow_mp3_320', true)) priorities.push({ format: 'mp3', bitrate_kbps: 320 });
+          if (getChecked('downloads_quality_allow_flac', true)) priorities.push({ format: 'flac', bitrate_kbps: null });
+          return {
+            enabled: getChecked('downloads_quality_enabled'),
+            reject_others: getChecked('downloads_quality_reject_others', true),
+            bitrate_tolerance: parseInt(getValue('downloads_quality_bitrate_tolerance', '5')) || 5,
+            priorities: priorities
+          };
+        })(),
+        metadata_heal: {
+          enabled: getChecked('downloads_heal_enabled'),
+          run_on_startup: getChecked('downloads_heal_on_startup', true),
+          limit: parseInt(getValue('downloads_heal_limit', '200')) || 0
+        },
+        quality: Object.assign(
+          {},
+          (global.pageConfig && global.pageConfig.downloads && global.pageConfig.downloads.quality) || {},
+          {
+            min_bitrate: parseInt(getValue('downloads_search_min_bitrate', '192')) || 192,
+            min_sample_rate: parseInt(getValue('downloads_search_min_sample_rate', '44100')) || 44100,
+            min_length_seconds: parseInt(getValue('downloads_search_min_length', '30')) || 30,
+            allow_low_quality_fallback: getChecked('downloads_search_quality_fallback'),
+            fallback_min_bitrate: parseInt(getValue('downloads_search_fallback_bitrate', '128')) || 128,
+            allowed_formats: Array.from(
+              document.querySelectorAll('.download-format-check:checked')
+            ).map((el) => el.value)
+          }
+        ),
+        conversion: {
+          enabled: getChecked('downloads_conversion_enabled'),
+          mode: getValue('downloads_conversion_mode', 'flac_to_mp3'),
+          mp3_bitrate_kbps: parseInt(getValue('downloads_conversion_mp3_bitrate', '320')) || 320,
+          original_handling: getValue('downloads_conversion_original_handling', 'move_to_original'),
+          original_subfolder: getValue('downloads_conversion_original_subfolder', 'Original')
+        }
+      },
+      watcher: {
+        scan_interval: parseInt(getValue('watcher_scan_interval', '30')) || 30,
+        auto_import_enabled: getChecked('watcher_auto_import', true),
+        auto_popularity_scan: getChecked('watcher_auto_popularity', true),
+        downloads_watcher_enabled: getChecked('watcher_downloads_enabled', true)
+      },
+      scheduler: Object.assign(
+        {},
+        _sched,
+        {
+          jobs: Object.assign(
+            {},
+            _schedJobs,
+            {
+              library_sync: Object.assign(
+                {},
+                _schedJobs.library_sync || {},
+                { interval_minutes: parseNumber('scheduler_library_sync_interval_minutes', 360) }
+              ),
+              popularity_scan: Object.assign(
+                {},
+                _schedJobs.popularity_scan || {},
+                { interval_minutes: parseNumber('scheduler_popularity_scan_interval_minutes', 1440) }
+              ),
+              navidrome_import: Object.assign(
+                {},
+                _schedJobs.navidrome_import || {},
+                { interval_minutes: parseNumber('scheduler_navidrome_import_interval_minutes', 240) }
+              )
+            }
+          )
+        }
+      ),
+      features: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.features) || {},
+        {
+          retry_scheduler: {
+            interval_seconds: parseInt(getValue('retry_scheduler_interval', '60')) || 60,
+            auto_start: getChecked('retry_scheduler_enabled', true)
+          },
+          download_queue_cleanup_scheduler: {
+            enabled: getChecked('queue_cleanup_scheduler_enabled', true),
+            interval_minutes: parseInt(getValue('queue_cleanup_scheduler_interval_minutes', '60')) || 60
+          },
+          downloads_duplicate_cleanup: {
+            delete_duplicate_files: getChecked('downloads_delete_duplicate_files', true),
+            prune_empty_folders: getChecked('downloads_prune_empty_folders', true)
+          },
+          mature_track_min_age_years: parseInt(getValue('mature_track_min_age_years', '2')) || 2,
+          full_scan_max_abandoned_workers: (() => {
+            const raw = parseInt(getValue('pop_max_abandoned_workers', '1'), 10);
+            return Number.isFinite(raw) ? Math.max(0, raw) : 1;
+          })(),
+          daily_musicbrainz_release_scan_enabled: getChecked('daily_musicbrainz_release_scan_enabled', true),
+          daily_musicbrainz_release_lookback_days: parseInt(getValue('daily_musicbrainz_release_lookback_days', '42')) || 42,
+          daily_musicbrainz_release_lookahead_days: parseInt(getValue('daily_musicbrainz_release_lookahead_days', '120')) || 120,
+          daily_musicbrainz_release_max_artists: parseInt(getValue('daily_musicbrainz_release_max_artists', '5000')) || 5000,
+          daily_musicbrainz_release_per_artist_limit: parseInt(getValue('daily_musicbrainz_release_per_artist_limit', '100')) || 100,
+          daily_musicbrainz_release_global_limit: parseInt(getValue('daily_musicbrainz_release_global_limit', '50')) || 0,
+          upcoming_releases_scan_enabled: getChecked('upcoming_releases_scan_enabled', true),
+          upcoming_releases_purge_days: parseInt(getValue('upcoming_releases_purge_days', '30')) || 30,
+          upcoming_releases_lookback_days: parseNumber('upcoming_releases_lookback_days', 28),
+          upcoming_releases_lookahead_days: parseNumber('upcoming_releases_lookahead_days', 14)
+        },
+        collectFeatureFieldOverrides()
+      ),
+      single_detection: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.single_detection) || {},
+        {
+          zscore_high_threshold: parseFloat(getValue('zscore_high_threshold', '1.0')) || 1.0,
+          zscore_medium_threshold: parseFloat(getValue('zscore_medium_threshold', '0.6')) || 0.6,
+          star_epsilon_score_points: parseFloat(getValue('star_epsilon_score_points', '0.5')) || 0.5,
+          artist_top_percentile: parseFloat(getValue('sd_artist_pct', '0.10')) || 0.10,
+          artist_top_percentile_large: parseFloat(getValue('sd_artist_pct_large', '0.25')) || 0.25,
+          artist_catalog_large_threshold: parseInt(getValue('sd_artist_pct_large_threshold', '30'), 10) || 30,
+          artist_medium_bump_percentile: parseFloat(getValue('sd_artist_medium_pct', '0.20')) || 0.20,
+          artist_top_percentile_force_5_star: parseFloat(getValue('sd_force_5star_pct', '0.03')) || 0,
+          artist_top_percentile_force_4_star: parseFloat(getValue('sd_force_4star_pct', '0.10')) || 0,
+          listener_5star_z_threshold: parseFloat(getValue('listener_5star_z_threshold', '1.0')) || 1.0,
+          always_check_discogs_video: getChecked('always_check_discogs_video', false),
+          single_boost: parseFloat(getValue('single_boost', '1.15')) || 1.15,
+          metadata_score_floor: parseFloat(getValue('metadata_score_floor', '5.0')) || 5.0,
+          live_weight_penalty: parseFloat(getValue('live_weight_penalty', '0.5')) || 0.5,
+          instrumental_weight_penalty: parseFloat(getValue('instrumental_weight_penalty', '0.8')) || 0.8,
+          live_4star_requires_single: getChecked('live_4star_requires_single', true),
+          single_organic_floor_score: parseFloat(getValue('single_organic_floor_score', '45.0')) || 45.0,
+          single_organic_floor_listeners: parseFloat(getValue('single_organic_floor_listeners', '1000')) || 1000,
+          log_ratio_enabled: getChecked('log_ratio_enabled', true),
+          log_ratio_divergence_threshold: parseFloat(getValue('log_ratio_divergence_threshold', '0.85')) || 0.85,
+          log_ratio_reject_lf_min_lb: parseInt(getValue('log_ratio_reject_lf_min_lb', '50'), 10) || 50,
+          log_ratio_reject_lb_min_lf: parseInt(getValue('log_ratio_reject_lb_min_lf', '100'), 10) || 100,
+          interlude_lb_outlier_enabled: getChecked('interlude_lb_outlier_enabled', true),
+          interlude_lb_max_duration_s: parseInt(getValue('interlude_lb_max_duration_s', '180'), 10) || 180,
+          interlude_lb_ratio_factor: parseFloat(getValue('interlude_lb_ratio_factor', '3.0')) || 3.0,
+          interlude_lb_min_count: parseInt(getValue('interlude_lb_min_count', '500'), 10) || 500,
+          compilation_tracklist_guard: getChecked('compilation_tracklist_guard', true),
+          compilation_tracklist_floor: parseFloat(getValue('compilation_tracklist_floor', '0.6')) || 0.6,
+          star_5: {
+            album_z: parseNumber('star5_album_z', 1.0),
+            artist_z: parseNumber('star5_artist_z', 1.2)
+          },
+          star_4: {
+            album_z: parseNumber('star4_album_z', 0.5),
+            artist_z: parseNumber('star4_artist_z', 1.0)
+          },
+          star_3: {
+            album_z: parseNumber('star3_album_z', -0.5)
+          },
+          star_2: {
+            album_z: parseNumber('star2_album_z', -1.2)
+          },
+          album_scaling: {
+            peak_catalog_top_pct: parseFloat(getValue('era_peak_catalog_top_pct', '0.20')) || 0.20,
+            peak_album_top_n: parseInt(getValue('era_peak_album_top_n', '3')) || 3,
+            peak_max_5star_slots: parseInt(getValue('era_peak_max_5star_slots', '4')) || 4,
+            solid_catalog_top_pct: parseFloat(getValue('era_solid_catalog_top_pct', '0.15')) || 0.15,
+            solid_album_top_n: parseInt(getValue('era_solid_album_top_n', '3')) || 3,
+            solid_max_5star_slots: parseInt(getValue('era_solid_max_5star_slots', '3')) || 3,
+            minor_catalog_top_pct: parseFloat(getValue('era_minor_catalog_top_pct', '0.10')) || 0.10,
+            minor_album_top_n: parseInt(getValue('era_minor_album_top_n', '3')) || 3,
+            minor_max_5star_slots: parseInt(getValue('era_minor_max_5star_slots', '2')) || 2,
+            peak_era_min_ratio: parseFloat(getValue('peak_era_min_ratio', '0.75')) || 0.75,
+            solid_era_min_ratio: parseFloat(getValue('solid_era_min_ratio', '0.40')) || 0.40
+          },
+          album_ratio_standout: {
+            enabled: getChecked('album_ratio_standout_enabled', true),
+            runner_up_min: parseFloat(getValue('album_ratio_runner_up_min', '1.5')) || 1.5,
+            median_min: parseFloat(getValue('album_ratio_median_min', '3.0')) || 3.0,
+            floor_min: parseFloat(getValue('album_ratio_floor_min', '10.0')) || 10.0,
+            min_passed: parseInt(getValue('album_ratio_min_passed', '3'), 10) || 3,
+            live_runner_up_min: parseFloat(getValue('album_ratio_live_runner_up_min', '1.5')) || 1.5,
+            live_median_min: parseFloat(getValue('album_ratio_live_median_min', '2.0')) || 2.0,
+            live_floor_min: parseFloat(getValue('album_ratio_live_floor_min', '5.0')) || 5.0,
+            live_min_passed: parseInt(getValue('album_ratio_live_min_passed', '2'), 10) || 2
+          },
+          compilation_online_catalogue: {
+            enabled: getChecked('compilation_online_catalogue_enabled', true),
+            min_local_catalogue: parseInt(getValue('compilation_online_min_local_catalogue', '5'), 10) || 5,
+            min_catalogue_size: parseInt(getValue('compilation_online_min_catalogue_size', '5'), 10) || 5,
+            rank_percentile_5star: parseFloat(getValue('compilation_online_rank_percentile_5star', '0.02')) || 0.02,
+            rank_percentile_4star: parseFloat(getValue('compilation_online_rank_percentile_4star', '0.10')) || 0.10,
+            rank_percentile_3star: parseFloat(getValue('compilation_online_rank_percentile_3star', '0.35')) || 0.35,
+            rank_percentile_2star: parseFloat(getValue('compilation_online_rank_percentile_2star', '0.65')) || 0.65,
+            top_tier_min_score: (function () { var v = parseFloat(getValue('compilation_online_top_tier_min_score', '55')); return isFinite(v) ? v : 55; })(),
+            top_tier_min_listeners: (function () { var v = parseInt(getValue('compilation_online_top_tier_min_listeners', '250000'), 10); return isFinite(v) ? v : 250000; })(),
+            standout_floor_percentile: (function () { var v = parseFloat(getValue('compilation_online_standout_floor_percentile', '0.10')); return isFinite(v) ? v : 0.10; })(),
+            standout_floor_stars: (function () { var v = parseInt(getValue('compilation_online_standout_floor_stars', '4'), 10); return isFinite(v) ? v : 4; })()
+          }
+        }
+      ),
+      metadata_update: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.metadata_update) || {},
+        (() => {
+          const rawTarget = getValue('metadata_update_album_name_target', 'db');
+          const fieldChecked = getChecked('metadata_update_field_album_name', false);
+          const effectiveTarget = (fieldChecked && rawTarget === 'db') ? 'files' : rawTarget;
+          const effectiveFieldChecked = effectiveTarget === 'files' ? true : (effectiveTarget === 'off' ? false : fieldChecked);
+          return {
+            album_name_source: getValue('metadata_update_album_name_source', 'dedupe'),
+            album_name_update_target: effectiveTarget,
+            apply_during_scan: getValue('metadata_update_apply_during_scan', 'true') !== 'false',
+            album_mbid_guard: Object.assign(
+              {},
+              ((global.pageConfig && global.pageConfig.metadata_update && global.pageConfig.metadata_update.album_mbid_guard) || {}),
+              {
+                enabled: getValue('metadata_update_mbid_guard_enabled', 'true') !== 'false',
+                min_similarity: parseFloat(getValue('metadata_update_mbid_guard_min_similarity', '0.65')) || 0.65,
+                allow_disc_folders: getValue('metadata_update_mbid_guard_allow_disc_folders', 'true') !== 'false'
+              }
+            ),
+            update_on_files: Object.assign(
+              {},
+              ((global.pageConfig && global.pageConfig.metadata_update && global.pageConfig.metadata_update.update_on_files) || {}),
+              {
+                album_name: effectiveFieldChecked,
+                year: getChecked('metadata_update_field_year', false),
+                album_artist: getChecked('metadata_update_field_album_artist', false),
+                genres: getChecked('metadata_update_field_genres', false),
+                cover_art: getChecked('metadata_update_field_cover_art', false),
+                lyrics: getChecked('metadata_update_field_lyrics', false)
+              }
+            )
+          };
+        })()
+      ),
+      popularity: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.popularity) || {},
+        {
+          weights: {
+            lastfm: parseFloat(getValue('pop_weight_lastfm', '0.55')) || 0.55,
+            listenbrainz: parseFloat(getValue('pop_weight_listenbrainz', '0.35')) || 0.35,
+            age: parseFloat(getValue('pop_weight_age', '0.10')) || 0.10
+          },
+          track_timeout_seconds: (() => {
+            const raw = parseInt(getValue('pop_track_timeout_seconds', '30'), 10);
+            return Number.isFinite(raw) ? Math.max(0, raw) : 30;
+          })(),
+          scan_threads: parseInt(getValue('pop_scan_threads', '4'), 10) || 4,
+          prefetch_budget_seconds: parseInt(getValue('pop_prefetch_budget_seconds', '360'), 10) || 360
+        }
+      ),
+      statistics: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.statistics) || {},
+        {
+          exclude_from_median_below_seconds: parseFloat(getValue('statistics_exclude_below_seconds', '60')) || 0,
+          short_track_star_cap: {
+            enabled: getChecked('short_track_star_cap_enabled', true),
+            max_duration_seconds: parseFloat(getValue('short_track_star_cap_max_duration_seconds', '70')) || 0,
+            max_stars: parseInt(getValue('short_track_star_cap_max_stars', '2'), 10) || 2
+          }
+        }
+      ),
+      filters: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.filters) || {},
+        {
+          exclude_title_regex: getValue('statistics_exclude_title_regex', '')
+        }
+      ),
+      tagging: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.tagging) || {},
+        {
+          write_tags_to_file: getChecked('tagging_write_enabled', true),
+          skip_unchanged_ratings: getChecked('tagging_skip_unchanged', true),
+          sync_album_tags_on_scan: getChecked('tagging_sync_album_scan', true),
+          write_options: {
+            ratings_only: getChecked('tagging_ratings_only', false),
+            fill_missing_only: getChecked('tagging_fill_missing_only', false),
+            embed_lyrics: getChecked('tagging_embed_lyrics', false)
+          },
+          preserve_file_timestamps: getChecked('tagging_preserve_timestamps', true)
+        }
+      ),
+      genres: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.genres) || {},
+        {
+          min_weight: parseFloat(getValue('genre_min_weight', '0.25')) ?? 0.25,
+          junk_filter: getChecked('genre_junk_filter', true),
+          weights: {
+            musicbrainz: parseFloat(getValue('genre_weight_musicbrainz', '0.40')) || 0.40,
+            discogs: parseFloat(getValue('genre_weight_discogs', '0.25')) || 0.25,
+            audiodb: parseFloat(getValue('genre_weight_audiodb', '0.20')) || 0.20,
+            essentia: parseFloat(getValue('genre_weight_essentia', '0.20')) || 0.20,
+            lastfm: parseFloat(getValue('genre_weight_lastfm', '0.10')) || 0.10,
+            listenbrainz: parseFloat(getValue('genre_weight_listenbrainz', '0.15')) || 0.15,
+            navidrome: parseFloat(getValue('genre_weight_navidrome', '0.30')) || 0.30,
+            manual: parseFloat(getValue('genre_weight_manual', '0.30')) || 0.30
+          },
+          synonyms: (() => {
+            const synonyms = {};
+            getValue('genre_synonyms', '').split('\n').forEach((line) => {
+              const colonIndex = line.indexOf(':');
+              if (colonIndex > 0) {
+                const from = line.slice(0, colonIndex).trim().toLowerCase();
+                const to = line.slice(colonIndex + 1).trim().toLowerCase();
+                if (from && to) {
+                  synonyms[from] = to;
+                }
+              }
+            });
+            return synonyms;
+          })(),
+          selection: collectGenreSelectionConfig()
+        }
+      ),
+      api_integrations: {
+        lastfm: {
+          enabled: getChecked('api_lastfm_enabled'),
+          api_key: getValue('api_lastfm_api_key')
+        },
+        listenbrainz: {
+          enabled: getChecked('api_listenbrainz_enabled'),
+          token: getValue('api_listenbrainz_token')
+        },
+        discogs: {
+          enabled: getChecked('api_discogs_enabled'),
+          token: getValue('api_discogs_token')
+        },
+        musicbrainz: { enabled: getChecked('api_musicbrainz_enabled', true) },
+        audiodb: {
+          enabled: getChecked('api_audiodb_enabled', true),
+          api_key: getValue('api_audiodb_api_key', '195003') || '195003'
+        },
+        gemini: {
+          enabled: getChecked('api_gemini_enabled'),
+          api_key: getValue('api_gemini_api_key'),
+          model: getValue('api_gemini_model', 'gemini-2.5-flash-image') || 'gemini-2.5-flash-image'
+        }
+      },
+      strip_parentheses_filters: Array.from(document.querySelectorAll('#stripKeywordsList .badge'))
+        .map((badge) => badge.childNodes[0].textContent.trim())
+        .filter(Boolean),
+      upcoming_releases: { sources: getUpcomingSourcesForSave() },
+      essentia: {
+        script_path: getValue('essentia_script_path'),
+        models_dir: getValue('essentia_models_dir'),
+        mood_threshold: parseFloat(getValue('essentia_mood_threshold', '0.005')) || 0.005,
+        per_file_timeout: parseInt(getValue('essentia_per_file_timeout', '300')) || 300,
+        json_output_dir: getValue('essentia_json_output_dir'),
+        tag_moods: getChecked('essentia_tag_moods', true),
+        parse_json_features: getChecked('essentia_parse_json_features', true),
+        delete_json_after_import: getChecked('essentia_delete_json_after_import', true),
+        tag_genres: getChecked('essentia_tag_genres'),
+        num_genres: parseInt(getValue('essentia_num_genres', '3')) || 3,
+        genre_threshold: parseFloat(getValue('essentia_genre_threshold', '15')) || 15.0,
+        genre_format: getValue('essentia_genre_format', 'parent_child')
+      }
+    };
+    LEGACY_FEATURE_KEYS.forEach((key) => delete config.features[key]);
+    return config;
+  }
+
+  // ── File name format preview (preserved) ────────────────────────────────
+
+  const FORMAT_PREVIEW_TRACK = {
+    album_artist: 'Imagine Dragons',
+    year: '2015',
+    album: 'Smoke + Mirrors',
+    track_number: '4',
+    disc_number: '1',
+    artist: 'Imagine Dragons',
+    title: 'Radioactive',
+  };
+
+  function _formatTrackNumberPreview(trackNumber, discNumber) {
+    const disc = discNumber ? parseInt(String(discNumber).split('/')[0], 10) : 1;
+    const track = trackNumber ? parseInt(String(trackNumber).split('/')[0], 10) : 0;
+    if (Number.isNaN(track)) return '00';
+    if (disc > 1) return `${disc}${String(track).padStart(2, '0')}`;
+    return String(track).padStart(2, '0');
+  }
+
+  function _extractYearPreview(value) {
+    const m = String(value || '').match(/(19|20)\d{2}/);
+    return m ? m[0] : 'Unknown';
+  }
+
+  function _sanitizeSegmentPreview(value) {
+    return String(value || '').replace(/[<>:"|?*\\]/g, '_').trim().replace(/^\.+|\.+$/g, '');
+  }
+
+  function updateFileNameFormatPreview() {
+    const input = document.getElementById('downloads_file_name_format');
+    const panel = document.getElementById('fileNameFormatPreview');
+    const pathEl = document.getElementById('fileNameFormatPreviewPath');
+    if (!input || !panel || !pathEl) return;
+    const fmt = input.value.trim() || '{album_artist}/{year} - {album}/{track_number}. {artist} - {title}';
+    const t = FORMAT_PREVIEW_TRACK;
+    const vars = {
+      album_artist: _sanitizeSegmentPreview(t.album_artist),
+      year: _extractYearPreview(t.year),
+      album: _sanitizeSegmentPreview(t.album),
+      track_number: _formatTrackNumberPreview(t.track_number, t.disc_number),
+      artist: _sanitizeSegmentPreview(t.artist),
+      title: _sanitizeSegmentPreview(t.title),
+    };
+    let rendered;
+    try {
+      rendered = fmt.replace(/\{(\w+)\}/g, (_, key) => (key in vars ? vars[key] : `{${key}}`));
+    } catch (err) {
+      rendered = fmt;
+    }
+    const parts = rendered
+      .replace(/\\/g, '/')
+      .replace(/^\/+/, '')
+      .split('/')
+      .map((seg) => _sanitizeSegmentPreview(seg))
+      .filter((seg) => seg && seg !== '.' && seg !== '..');
+    const relativePath = parts.join('/') || 'Unknown Artist';
+    pathEl.textContent = '/music/' + relativePath + '.flac';
+    panel.classList.remove('d-none');
+  }
+
+  // ── Save (preserved section labels, rebuilt save flow) ──────────────────
+
+  const SECTION_LABELS = {
+    navidrome_users: 'Music Users',
+    matching: 'Track Matching',
+    logging: 'Logging',
+    slskd: 'slskd / Soulseek',
+    wikidata: 'Artist Biography',
+    queue: 'Queue Matching',
+    lastfm: 'Last.fm Advanced',
+    filesystem: 'File System',
+    playlists: 'Playlists',
+    downloads: 'Downloads',
+    watcher: 'Automation Services',
+    scheduler: 'Scheduled Scans',
+    features: 'Features & Schedulers',
+    single_detection: 'Single Detection & Star Ratings',
+    popularity: 'Popularity & Scan Parallelism',
+    tagging: 'File Metadata (Tag Writing)',
+    metadata_update: 'Updating Metadata',
+    genres: 'Genre Selection & Aggregation',
+    api_integrations: 'API Integrations',
+    strip_parentheses_filters: 'Search Filters',
+    upcoming_releases: 'Upcoming Releases Sources',
+    essentia: 'Essentia Mood & Genre Scan',
+  };
+
+  function summarizeChangedSections(nextConfig, prevConfig) {
+    const changed = [];
+    const prev = prevConfig || {};
+    Object.keys(nextConfig || {}).forEach((key) => {
+      if (JSON.stringify(nextConfig[key] ?? null) !== JSON.stringify(prev[key] ?? null)) {
+        changed.push(SECTION_LABELS[key] || key);
+      }
+    });
+    return changed;
+  }
+
+  function validateNumericBounds() {
+    const problems = [];
+    document.querySelectorAll('#configForm input[type="number"]').forEach((input) => {
+      if (!input.value && !input.required) return;
+      const val = parseFloat(input.value);
+      if (Number.isNaN(val)) return;
+      const min = input.min !== '' && input.min != null ? parseFloat(input.min) : null;
+      const max = input.max !== '' && input.max != null ? parseFloat(input.max) : null;
+      const labelEl = input.closest('.col-12, .col-md-3, .col-md-4, .col-md-6, .col-sm-6, .col-lg-3, .col-lg-4, .col-6, .input-card')?.querySelector('label');
+      const label = (labelEl ? labelEl.textContent.trim() : input.id || 'field').replace(/\s+/g, ' ');
+      if (min != null && val < min) problems.push(`${label}: ${val} is below the minimum ${min}`);
+      if (max != null && val > max) problems.push(`${label}: ${val} exceeds the maximum ${max}`);
+    });
+    return problems;
+  }
+
+  function saveConfig() {
+    const saveBtn = document.getElementById('saveBtn');
+    if (!saveBtn) {
+      showToast('Error', 'Save button not found in DOM', 'error');
+      return;
+    }
+
+    let config;
+    try {
+      config = buildConfigObject();
+    } catch (err) {
+      console.error('[saveConfig] buildConfigObject failed:', err);
+      showToast('Error', 'Could not collect config: ' + (err && err.message ? err.message : err), 'error');
+      return;
+    }
+
+    const numericProblems = validateNumericBounds();
+    if (numericProblems.length > 0) {
+      showToast('Error', 'Please fix these values: ' + numericProblems.join(' • '), 'error');
+      return;
+    }
+
+    const url = document.querySelector('form#configForm')?.dataset?.saveUrl || '/config/save-json';
+
+    return global.buttonState.withBusy(saveBtn, 'Saving…', async () => {
+      try {
+        const data = await global.api.postJson(url, config, { timeoutMs: SAVE_TIMEOUT_MS });
+
+        if (!data.success) {
+          showToast('Error', data.error || 'Failed to save configuration', 'error');
+          return;
+        }
+
+        const changed = summarizeChangedSections(config, global.pageConfig);
+        showToast('Success', changed.length
+          ? 'Configuration saved — updated: ' + changed.join(', ')
+          : 'Configuration saved (no sections changed)', 'success');
+
+        global.pageConfig = config;
+      } catch (error) {
+        showToast('Error', error.message || 'Unknown error', 'error');
+      }
+    });
+  }
+
+  // ── Raw YAML editor ───────────────────────────────────────────────────
+
+  async function saveRawYaml() {
+    const saveBtn = document.querySelector('#rawYamlModal .btn-primary');
+    const content = document.getElementById('config_content').value;
+    const url = document.querySelector('#rawYamlModal')?.dataset?.saveUrl || '/config/editor';
+
+    return global.buttonState.withBusy(saveBtn, 'Saving…', async () => {
+      try {
+        const formData = new FormData();
+        formData.append('config_content', content);
+
+        const response = await fetch(url, { method: 'POST', body: formData });
+
+        if (!response.ok) {
+          const text = await response.text().catch(() => '');
+          throw new Error(text.slice(0, 200) || `Save failed (HTTP ${response.status})`);
+        }
+
+        showToast('Success', 'Configuration saved successfully', 'success');
+        const modalEl = document.getElementById('rawYamlModal');
+        if (modalEl && global.modal) global.modal.hide(modalEl);
+      } catch (error) {
+        showToast('Error', error.message, 'error');
+      }
+    });
+  }
+
+  // ── Ratings sync ──────────────────────────────────────────────────────
+
+  async function syncRatingsNow() {
+    const btn = document.getElementById('syncRatingsNowBtn');
+    if (!btn) return;
+
+    return global.buttonState.withBusy(btn, 'Syncing…', async () => {
+      try {
+        const data = await global.api.postJson('/api/navidrome/ratings/sync-now', {});
+        if (data.success === false) {
+          showToast('Sync Failed', data.error || 'Failed to sync ratings', 'error');
+          return;
+        }
+
+        const users = Array.isArray(data.users) ? data.users : [];
+        const withErrors = users.filter((u) => (u.failed || 0) > 0);
+        const summary = `Synced ${data.synced_total || 0}/${data.attempted_total || 0} ` +
+          `rating updates across ${data.users_total || 0} user(s)`;
+
+        if (withErrors.length > 0) {
+          const names = withErrors
+            .map((u) => u.display_name || u.username || 'Unknown user')
+            .join(', ');
+          showToast('Partial Sync Complete', `${summary}. Issues: ${names}`, 'warning');
+        } else {
+          showToast('Sync Complete', summary, 'success');
+        }
+      } catch (error) {
+        showToast('Sync Failed', error.message || 'Network error while syncing ratings', 'error');
+      }
+    });
+  }
+
+  async function toggleSyncRatingsToAllUsers(enabled) {
+    const revert = () => {
+      const toggle = document.getElementById('syncRatingsToAllUsersToggle');
+      if (toggle) toggle.checked = !enabled;
+    };
+
+    try {
+      const data = await global.api.postJson('/api/features/update', {
+        sync_ratings_to_all_users: enabled,
+      });
+      if (data.success === false) {
+        showToast('Error', data.error || 'Failed to update setting', 'error');
+        revert();
+        return;
+      }
+      showToast('Setting Saved', enabled
+        ? 'Star ratings will be synced to all Navidrome users after each scan and for individual track ratings.'
+        : 'Star ratings will only be synced to the primary Navidrome user.', 'success');
+    } catch (error) {
+      showToast('Error', error.message || 'Network error', 'error');
+      revert();
+    }
+  }
+
+  // ── Multi-user management (preserved) ───────────────────────────────────
+
+  function addNewUser() {
+    const container = document.getElementById('usersContainer');
+    const emptyMessage = document.getElementById('emptyUsersMessage');
+    if (emptyMessage) emptyMessage.remove();
+    const existingCards = container.querySelectorAll('.user-card');
+    const userIndex = existingCards.length;
+
+    const userCard = document.createElement('div');
+    userCard.className = 'user-card mb-4 p-3 border rounded';
+    userCard.setAttribute('data-user-index', userIndex);
+    userCard.innerHTML = `
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h6 class="mb-0">User ${userIndex + 1}: <span class="user-display-value">New User</span></h6>
+        <button type="button" class="btn btn-sm btn-outline-danger" onclick="removeUser(${userIndex})">
+          <i class="bi bi-trash"></i> Remove
+        </button>
+      </div>
+      <div class="mb-3">
+        <h6 class="text-primary mb-2"><i class="bi bi-music-note-beamed"></i> Navidrome</h6>
+        <div class="row g-2">
+          <div class="col-12">
+            <label class="form-label form-label-sm">Display Name</label>
+            <input type="text" class="form-control form-control-sm user-display-name" placeholder="My Name" onchange="updateUserTitle(this)">
+          </div>
+          <div class="col-12">
+            <label class="form-label form-label-sm">Navidrome Base URL</label>
+            <input type="text" class="form-control form-control-sm user-nav-url" placeholder="http://localhost:4533">
+          </div>
+          <div class="col-12 col-sm-6">
+            <label class="form-label form-label-sm">Username</label>
+            <input type="text" class="form-control form-control-sm user-nav-username" placeholder="username">
+          </div>
+          <div class="col-12 col-sm-6">
+            <label class="form-label form-label-sm">Password</label>
+            <input type="password" class="form-control form-control-sm user-nav-password" placeholder="••••••••">
+          </div>
+        </div>
+      </div>
+      <div class="mb-3">
+        <h6 class="text-info mb-2"><i class="bi bi-database-fill"></i> Last.fm</h6>
+        <div class="row g-2">
+          <div class="col-12">
+            <label class="form-label form-label-sm">Last.fm Username</label>
+            <input type="text" class="form-control form-control-sm user-lastfm-username" placeholder="lastfm_username">
+            <small class="form-text text-muted">Your Last.fm username (for personalized recommendations)</small>
+          </div>
+        </div>
+      </div>
+      <div class="mb-3">
+        <h6 class="text-secondary mb-2"><i class="bi bi-headphones"></i> ListenBrainz</h6>
+        <div class="row g-2">
+          <div class="col-12">
+            <label class="form-label form-label-sm">ListenBrainz User Token</label>
+            <input type="text" class="form-control form-control-sm user-listenbrainz-token" placeholder="listenbrainz_user_token">
+            <small class="form-text text-muted">Your ListenBrainz personal token from <a href="https://listenbrainz.org/settings/" target="_blank">listenbrainz.org/settings/</a></small>
+          </div>
+        </div>
+      </div>
+    `;
+    container.appendChild(userCard);
+  }
+
+  function removeUser(idx) {
+    const userCards = document.querySelectorAll('.user-card');
+    if (userCards[idx]) userCards[idx].remove();
+  }
+
+  function updateUserTitle(displayNameInput) {
+    const userCard = displayNameInput.closest('.user-card');
+    if (!userCard) return;
+    const displayValue = userCard.querySelector('.user-display-value');
+    if (displayValue) displayValue.textContent = displayNameInput.value.trim() || 'New User';
+  }
+
+  // ── Essentia model download ───────────────────────────────────────────
+
+  function essentiaSetStatusText(msg) {
+    const el = document.getElementById('essentia-download-status-text');
+    if (el) el.textContent = msg;
+  }
+
+  function toggleEssentiaGenreSettings() {
+    const cb = document.getElementById('essentia_tag_genres');
+    const panel = document.getElementById('essentia-genre-settings');
+    if (panel) panel.classList.toggle('d-none', !cb || !cb.checked);
+  }
+
+  function stopEssentiaPoll() {
+    if (essentiaPoller) {
+      essentiaPoller.stop();
+      essentiaPoller = null;
+    }
+  }
+
+  async function startEssentiaDownload() {
+    const btn = document.getElementById('btn-essentia-download');
+
+    await global.buttonState.withBusy(btn, 'Starting…', async () => {
+      try {
+        const data = await global.api.postJson('/api/essentia/download-models', {});
+        if (data.status === 'already_running') {
+          essentiaSetStatusText('Download already in progress…');
+          document.getElementById('essentia-download-status')?.classList.remove('d-none');
+        }
+      } catch (error) {
+        showToast('Error', 'Could not start Essentia download: ' + error.message, 'error');
+        return;
+      }
+    });
+    pollEssentiaDownloadStatus();
+  }
+
+  function renderEssentiaStatus(data) {
+    const CLONE_PCT = 10;
+    const DOWNLOAD_RANGE_PCT = 85;
+    const EXPECTED_FILES = 5;
+
+    const statusDiv = document.getElementById('essentia-download-status');
+    const bar = document.getElementById('essentia-download-bar');
+    const btn = document.getElementById('btn-essentia-download');
+    if (!bar || !btn) return true;
+
+    if (!data || data.status === 'idle') {
+      if (statusDiv) statusDiv.classList.add('d-none');
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-cloud-download"></i> Download Models &amp; Script';
+      return true;
+    }
+
+    if (statusDiv) statusDiv.classList.remove('d-none');
+    const total = data.files_total || EXPECTED_FILES;
+    const done = data.files_done || 0;
+    bar.classList.remove('bg-success', 'bg-danger');
+    bar.classList.add('progress-bar-striped', 'progress-bar-animated');
+
+    if (data.status === 'complete' || data.status === 'installed') {
+      bar.style.width = '100%';
+      bar.classList.remove('progress-bar-animated');
+      bar.classList.add('bg-success');
+      const where = data.models_dir ? ' — models saved to ' + data.models_dir : '';
+      essentiaSetStatusText((data.status === 'installed'
+        ? 'Models already installed'
+        : 'Download complete') + where);
+      btn.disabled = true;
+      btn.innerHTML = '<i class="bi bi-check-circle"></i> Models Installed';
+      return true;
+    }
+
+    if (data.status === 'error') {
+      bar.classList.remove('progress-bar-animated');
+      bar.classList.add('bg-danger');
+      bar.style.width = '100%';
+      essentiaSetStatusText('Error: ' + (data.error || 'unknown error'));
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-cloud-download"></i> Retry Download';
+      return true;
+    }
+
+    const pct = data.status === 'cloning_script'
+      ? CLONE_PCT
+      : Math.max(CLONE_PCT, Math.round(CLONE_PCT + (done / total) * DOWNLOAD_RANGE_PCT));
+    bar.style.width = pct + '%';
+    essentiaSetStatusText(data.current_step || 'Downloading…');
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span> Downloading…';
+    return false;
+  }
+
+  function pollEssentiaDownloadStatus() {
+    stopEssentiaPoll();
+
+    essentiaPoller = global.poller.create({
+      interval: ESSENTIA_POLL_MS,
+      maxAttempts: ESSENTIA_MAX_POLLS,
+      pauseWhenHidden: false,
+      onTick: async (ctx) => {
+        const data = await global.api.getJson('/api/essentia/download-status');
+        if (renderEssentiaStatus(data)) ctx.stop();
+      },
+      onTimeout: () => {
+        essentiaSetStatusText('Timed out waiting for the download to finish.');
+        const btn = document.getElementById('btn-essentia-download');
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="bi bi-cloud-download"></i> Retry Download';
+        }
+      },
+    });
+    essentiaPoller.start();
+  }
+
+  // ── Upcoming releases sources (preserved) ───────────────────────────────
+
+  let upcomingSources = [];
+
+  const UPCOMING_COLUMN_TYPES = ['day', 'artist', 'album', 'genre'];
+
+  function buildColumnSelects(prefix, values) {
+    const current = Array.isArray(values) && values.length ? values : ['day', 'artist', 'album'];
+    let html = '<div class="row g-2">';
+    for (let i = 0; i < 4; i++) {
+      html += `<div class="col-6 col-md-3">
+        <label class="form-label small fw-normal text-muted">Column ${i + 1}</label>
+        <select class="form-select form-select-sm" id="${prefix}col${i}">
+          <option value="">— none —</option>`;
+      UPCOMING_COLUMN_TYPES.forEach((t) => {
+        const sel = current[i] === t ? ' selected' : '';
+        html += `<option value="${t}"${sel}>${t}</option>`;
+      });
+      html += '</select></div>';
+    }
+    return html + '</div>';
+  }
+
+  function readColumnSelects(prefix) {
+    const cols = [];
+    for (let i = 0; i < 4; i++) {
+      const el = document.getElementById(prefix + 'col' + i);
+      if (el && el.value) cols.push(el.value);
+    }
+    return cols;
+  }
+
+  function validateSourceKey(key, existingKeys) {
+    if (!key) return 'Source key is required';
+    if (!/^[a-zA-Z0-9_-]+$/.test(key)) return 'Source key may only contain letters, numbers, underscores and dashes';
+    if (!/(19|20)\d{2}/.test(key)) return 'Source key must include a 4-digit year (e.g. 2026_jazz) for date parsing';
+    if (existingKeys && existingKeys.includes(key)) return `Source key "${key}" already exists`;
+    return null;
+  }
+
+  function initUpcomingSourcesUI() {
+    const config = global.pageConfig || {};
+    const savedSources = ((config.upcoming_releases || {}).sources || []);
+    if (Array.isArray(savedSources) && savedSources.length > 0) {
+      upcomingSources = savedSources.map((s) => Object.assign({}, s));
+    } else {
+      const y = new Date().getFullYear();
+      upcomingSources = [
+        { key: `${y}_albums`,      name: `General ${y} Albums`,        url: `https://en.wikipedia.org/wiki/List_of_${y}_albums`,            columns: ['day','artist','album','genre'], enabled: true },
+        { key: `${y}_heavy_metal`, name: `Heavy Metal ${y}`,           url: `https://en.wikipedia.org/wiki/${y}_in_heavy_metal_music`,      columns: ['day','artist','album'],         enabled: true },
+        { key: `${y}_rock`,        name: `Rock Music ${y}`,            url: `https://en.wikipedia.org/wiki/${y}_in_rock_music`,             columns: ['day','artist','album'],         enabled: true },
+        { key: `${y}_kpop`,        name: `K-Pop/Korean Music ${y}`,    url: `https://en.wikipedia.org/wiki/${y}_in_South_Korean_music`,     columns: ['day','album','artist'],         enabled: true },
+        { key: `${y}_american`,    name: `American Music ${y}`,        url: `https://en.wikipedia.org/wiki/${y}_in_American_music`,         columns: ['day','album','artist'],         enabled: true },
+      ];
+    }
+    renderUpcomingSourcesList();
+  }
+
+  function renderUpcomingSourcesList() {
+    const container = document.getElementById('upcomingSourcesList');
+    if (!container) return;
+    if (upcomingSources.length === 0) {
+      container.innerHTML = '<p class="text-muted fst-italic">No sources configured. Add a source below.</p>';
+      return;
+    }
+    container.innerHTML = upcomingSources.map((src, idx) => buildUpcomingSourceRow(src, idx)).join('');
+  }
+
+  function buildUpcomingSourceRow(src, idx) {
+    const enabled = src.enabled !== false;
+    const cols = Array.isArray(src.columns) ? src.columns : ['day','artist','album'];
+    const colBadges = cols.map((c) => {
+      if (c === 'genre') {
+        return `<span class="badge bg-secondary" title="Skipped during parsing" style="text-decoration:line-through;">${esc(c)}</span>`;
+      }
+      return `<span class="badge bg-primary">${esc(c)}</span>`;
+    }).join(' <i class="bi bi-arrow-right-short text-muted"></i> ');
+    return `<div class="border rounded p-3 mb-2" id="srcRow_${idx}" style="background: var(--secondary-bg, #1e1e1e);">
+      <div class="d-flex flex-column flex-md-row align-items-md-start gap-3">
+        <div class="form-check form-switch pt-1 flex-shrink-0">
+          <input class="form-check-input" type="checkbox" role="switch" id="srcEnabled_${idx}"
+                 ${enabled ? 'checked' : ''} onchange="toggleUpcomingSourceEnabled(${idx})">
+        </div>
+        <div class="flex-grow-1 overflow-hidden">
+          <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+            <strong>${esc(src.name)}</strong>
+            <code class="text-muted small">${esc(src.key)}</code>
+            ${!enabled ? '<span class="badge bg-secondary">Disabled</span>' : ''}
+          </div>
+          <div class="text-muted small mb-2 text-truncate">
+            <i class="bi bi-link-45deg"></i>
+            <a href="${esc(src.url)}" target="_blank" rel="noopener noreferrer" class="text-muted">${esc(src.url)}</a>
+          </div>
+          <div class="d-flex flex-wrap align-items-center gap-1">
+            <small class="text-muted me-1">Column order:</small>
+            ${colBadges}
+          </div>
+        </div>
+        <div class="d-flex gap-2 flex-shrink-0">
+          <button type="button" class="btn btn-outline-secondary btn-sm" onclick="editUpcomingSource(${idx})" title="Edit source">
+            <i class="bi bi-pencil"></i>
+          </button>
+          <button type="button" class="btn btn-outline-danger btn-sm" onclick="removeUpcomingSource(${idx})" title="Remove source">
+            <i class="bi bi-trash"></i>
+          </button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function toggleUpcomingSourceEnabled(idx) {
+    const cb = document.getElementById('srcEnabled_' + idx);
+    if (cb && upcomingSources[idx]) upcomingSources[idx].enabled = cb.checked;
+  }
+
+  function editUpcomingSource(idx) {
+    const src = upcomingSources[idx];
+    if (!src) return;
+    const row = document.getElementById('srcRow_' + idx);
+    if (!row) return;
+    const cols = Array.isArray(src.columns) ? src.columns : ['day', 'artist', 'album'];
+    row.innerHTML = `<div class="row g-2 mb-2">
+      <div class="col-12 col-md-4">
+        <label class="form-label small fw-bold">Source Key</label>
+        <input type="text" class="form-control form-control-sm" id="editSrcKey_${idx}" value="${esc(src.key)}" placeholder="e.g. 2026_jazz">
+        <div class="form-text">Must include a 4-digit year</div>
+      </div>
+      <div class="col-12 col-md-4">
+        <label class="form-label small fw-bold">Display Name</label>
+        <input type="text" class="form-control form-control-sm" id="editSrcName_${idx}" value="${esc(src.name)}">
+      </div>
+      <div class="col-12 col-md-4">
+        <label class="form-label small fw-bold">Column Order</label>
+        ${buildColumnSelects('editSrcCols_' + idx + '_', cols)}
+      </div>
+      <div class="col-12">
+        <label class="form-label small fw-bold">Wikipedia URL</label>
+        <input type="url" class="form-control form-control-sm" id="editSrcUrl_${idx}" value="${esc(src.url)}">
+      </div>
+    </div>
+    <div class="d-flex gap-2">
+      <button type="button" class="btn btn-primary btn-sm" onclick="saveUpcomingSourceEdit(${idx})">
+        <i class="bi bi-check-circle"></i> Save
+      </button>
+      <button type="button" class="btn btn-outline-secondary btn-sm" onclick="renderUpcomingSourcesList()">Cancel</button>
+    </div>`;
+  }
+
+  function saveUpcomingSourceEdit(idx) {
+    const key  = (document.getElementById('editSrcKey_' + idx)?.value  || '').trim();
+    const name = (document.getElementById('editSrcName_' + idx)?.value || '').trim();
+    const url  = (document.getElementById('editSrcUrl_' + idx)?.value  || '').trim();
+    if (!key || !name || !url) { showToast('Error', 'Key, name, and URL are required', 'warning'); return; }
+    const keyErr = validateSourceKey(key, upcomingSources.map((s) => s.key).filter((_, i) => i !== idx));
+    if (keyErr) { showToast('Error', keyErr, 'warning'); return; }
+    const cols = readColumnSelects('editSrcCols_' + idx + '_');
+    if (!cols.includes('artist') || !cols.includes('album')) {
+      showToast('Error', 'Column order must include both "artist" and "album"', 'warning'); return;
+    }
+    upcomingSources[idx] = { ...upcomingSources[idx], key, name, url, columns: cols };
+    renderUpcomingSourcesList();
+  }
+
+  function removeUpcomingSource(idx) {
+    const src = upcomingSources[idx];
+    if (!src) return;
+    if (!confirm('Remove source "' + src.name + '"?')) return;
+    upcomingSources.splice(idx, 1);
+    renderUpcomingSourcesList();
+  }
+
+  function toggleAddUpcomingSourceForm() {
+    const form = document.getElementById('addUpcomingSourceForm');
+    if (!form) return;
+    const willShow = form.classList.contains('d-none');
+    form.classList.toggle('d-none');
+    if (willShow) {
+      const container = document.getElementById('newSrcColumns');
+      if (container) container.innerHTML = buildColumnSelects('newSrcCol', ['day', 'artist', 'album']);
+    }
+  }
+
+  function addUpcomingSource() {
+    const key     = (document.getElementById('newSrcKey')?.value     || '').trim();
+    const name    = (document.getElementById('newSrcName')?.value    || '').trim();
+    const url     = (document.getElementById('newSrcUrl')?.value     || '').trim();
+    if (!key || !name || !url) { showToast('Error', 'Key, name, and URL are required', 'warning'); return; }
+    const keyErr = validateSourceKey(key, upcomingSources.map((s) => s.key));
+    if (keyErr) { showToast('Error', keyErr, 'warning'); return; }
+    const cols = readColumnSelects('newSrcCol');
+    if (!cols.includes('artist') || !cols.includes('album')) {
+      showToast('Error', 'Column order must include both "artist" and "album"', 'warning'); return;
+    }
+    upcomingSources.push({ key, name, url, columns: cols, enabled: true });
+    document.getElementById('newSrcKey').value = '';
+    document.getElementById('newSrcName').value = '';
+    document.getElementById('newSrcUrl').value = '';
+    const container = document.getElementById('newSrcColumns');
+    if (container) container.innerHTML = buildColumnSelects('newSrcCol', ['day', 'artist', 'album']);
+    toggleAddUpcomingSourceForm();
+    renderUpcomingSourcesList();
+  }
+
+  function getUpcomingSourcesForSave() {
+    upcomingSources.forEach((src, idx) => {
+      const cb = document.getElementById('srcEnabled_' + idx);
+      if (cb) src.enabled = cb.checked;
+    });
+    return upcomingSources.map((s) => ({
+      key: s.key,
+      name: s.name,
+      url: s.url,
+      columns: Array.isArray(s.columns) ? s.columns : ['day','artist','album'],
+      enabled: s.enabled !== false,
+    }));
+  }
+
+  // ── Retry scheduler ───────────────────────────────────────────────────
+
+  async function getRetrySchedulerStatus() {
+    const statusIcon = document.getElementById('schedulerStatusIcon');
+    const statusText = document.getElementById('schedulerStatusText');
+    const statusDetail = document.getElementById('schedulerStatusDetail');
+    const startBtn = document.getElementById('startSchedulerBtn');
+    const stopBtn = document.getElementById('stopSchedulerBtn');
+
+    if (!statusIcon && !statusText && !statusDetail && !startBtn && !stopBtn) return;
+
+    let data;
+    try {
+      data = await global.api.getJson('/api/downloads/scheduler/status');
+    } catch (error) {
+      console.error('Error getting scheduler status:', error);
+      if (statusDetail) statusDetail.textContent = 'Unable to load status';
+      return;
+    }
+
+    const isRunning = !!data.running;
+
+    if (statusIcon) {
+      statusIcon.className = isRunning
+        ? 'bi bi-circle-fill text-success'
+        : 'bi bi-circle-fill text-muted';
+      statusIcon.title = isRunning ? 'Running' : 'Stopped';
+    }
+
+    if (statusText) statusText.textContent = isRunning ? 'Running' : 'Stopped';
+
+    if (statusDetail) {
+      statusDetail.innerHTML = isRunning
+        ? '<span class="badge bg-success"><i class="bi bi-play-circle"></i> Running</span>' +
+          ' - Retry scheduler is actively monitoring and retrying failed downloads' +
+          ' every configured interval.'
+        : '<span class="badge bg-secondary"><i class="bi bi-stop-circle"></i> Stopped</span>' +
+          ' - Retry scheduler is not running. Click "Start" to begin automatic' +
+          ' retry management.';
+    }
+
+    if (startBtn) startBtn.disabled = isRunning;
+    if (stopBtn) stopBtn.disabled = !isRunning;
+  }
+
+  async function startRetryScheduler() {
+    const btn = document.getElementById('startSchedulerBtn');
+
+    await global.buttonState.withBusy(btn, 'Starting…', async () => {
+      try {
+        const data = await global.api.postJson('/api/downloads/scheduler/start', {});
+        if (!data.success) {
+          showToast('Error', data.error || 'Failed to start scheduler', 'error');
+          return;
+        }
+        showToast('Success', 'Retry scheduler started', 'success');
+      } catch (error) {
+        showToast('Error', 'Network error: ' + error.message, 'error');
+      }
+    });
+
+    setTimeout(getRetrySchedulerStatus, 500);
+  }
+
+  async function stopRetryScheduler() {
+    const btn = document.getElementById('stopSchedulerBtn');
+
+    await global.buttonState.withBusy(btn, 'Stopping…', async () => {
+      try {
+        const data = await global.api.postJson('/api/downloads/scheduler/stop', {});
+        if (!data.success) {
+          showToast('Error', data.error || 'Failed to stop scheduler', 'error');
+          return;
+        }
+        showToast('Warning', 'Retry scheduler stopped', 'warning');
+      } catch (error) {
+        showToast('Error', 'Network error: ' + error.message, 'error');
+      }
+    });
+
+    setTimeout(getRetrySchedulerStatus, 500);
+  }
+
+  // ── Queue metadata heal ───────────────────────────────────────────────
+
+  function runMetadataHeal(dryRun) {
+    const out = document.getElementById('downloads_heal_result');
+    const btn = document.getElementById(dryRun ? 'downloads_heal_preview' : 'downloads_heal_run');
+    const original = btn ? btn.innerHTML : '';
+
+    if (dryRun && !confirm(
+      'Preview checks each queue entry that names a release against the tracks it '
+      + 'produced. Nothing is written and this can take a while on a large library '
+      + '(one MusicBrainz lookup per release). Continue?'
+    )) {
+      return;
+    }
+    if (!dryRun && !confirm(
+      'Heal now will REWRITE the database rows AND the file tags of any track whose '
+      + 'album identity does not match the release its queue entry names. Continue?'
+    )) {
+      return;
+    }
+
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Working...';
+    }
+    if (out) out.textContent = dryRun ? 'Checking...' : 'Healing...';
+
+    const limitField = document.getElementById('downloads_heal_limit');
+    const limit = limitField ? parseInt(limitField.value || '0', 10) || 0 : 0;
+
+    fetch('/api/downloads/metadata-heal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dry_run: dryRun, limit: limit })
+    })
+    .then(r => {
+      const contentType = r.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error('Server returned non-JSON response (HTML or plain text)');
+      }
+      return r.json();
+    })
+    .then(data => {
+      if (data.error) throw new Error(data.error);
+
+      const found = (data.albums || []).length;
+      const verb = dryRun ? 'would be corrected' : 'corrected';
+      let text = `${data.examined} queue entry(s) checked across ${data.releases} release(s); `
+        + `${found} album(s) ${verb}`;
+      if (!dryRun) {
+        text += ` — ${data.tracks_updated} track row(s), ${data.files_written} file(s) written`;
+        if (data.files_failed) text += `, ${data.files_failed} FAILED`;
+      }
+      if (out) out.textContent = text;
+
+      if (found) {
+        const detail = (data.albums || []).slice(0, 10).map(a =>
+          `${a.artist || '?'} - ${a.album || '?'} (${(a.fields || []).join(', ')})`
+        );
+        if (found > detail.length) detail.push(`... and ${found - detail.length} more`);
+        console.log('[metadata-heal]', data);
+        showToast(
+          dryRun ? 'Heal Preview' : 'Metadata Heal',
+          `${found} album(s) ${verb}:\n` + detail.join('\n'),
+          dryRun ? 'info' : 'success'
+        );
+      } else {
+        showToast(
+          dryRun ? 'Heal Preview' : 'Metadata Heal',
+          'Nothing to correct — every checked track already matches the release its queue entry names.',
+          'success'
+        );
+      }
+    })
+    .catch(e => {
+      if (out) out.textContent = 'Failed: ' + e.message;
+      showToast('Error', 'Metadata heal failed: ' + e.message, 'error');
+    })
+    .finally(() => {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = original;
+      }
+    });
+  }
+
+  // ── Safe shutdown ─────────────────────────────────────────────────────
+
+  function renderSafeShutdownStatus(data) {
+    const box = document.getElementById('safe_shutdown_status');
+    if (!box) return;
+
+    if (data.error) {
+      box.textContent = 'Error: ' + data.error;
+      return;
+    }
+
+    const lines = [];
+    if (!data.requested) {
+      lines.push('● NORMAL OPERATION — not quiesced.');
+      lines.push('  Run "Prepare for Database Stop" before stopping PostgreSQL.');
+    } else if (data.safe_to_stop) {
+      lines.push('✔ SAFE TO STOP — no scans running, queue idle, connections released.');
+      lines.push('  On the host:  docker compose stop db');
+      lines.push('  Then update PostgreSQL and:  docker compose start db');
+    } else {
+      lines.push('● STILL BUSY — do not stop the database yet.');
+      lines.push('  Scans running:  ' + ((data.active_scans || []).join(', ') || 'none'));
+      lines.push('  Queue items:    ' + (data.queue_items || 0));
+    }
+    lines.push('');
+    lines.push('  Scheduler:      ' + (data.scheduler || 'unknown') + (data.scheduler_paused ? ' (paused)' : ''));
+    lines.push('  Quiesced since: ' + (data.requested_at || '—'));
+    if (data.seconds_until_expiry !== undefined && data.seconds_until_expiry !== null) {
+      const mins = Math.floor(data.seconds_until_expiry / 60);
+      lines.push('  Auto-resume in: ' + mins + ' min');
+    }
+    box.textContent = lines.join('\n');
+    box.className = data.safe_to_stop
+      ? 'border rounded p-2 small bg-body-tertiary border-success'
+      : 'border rounded p-2 small bg-body-tertiary';
+  }
+
+  function getSafeShutdownStatus() {
+    fetch('/api/maintenance/safe-shutdown')
+      .then(r => {
+        const ct = r.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) {
+          throw new Error('Server returned non-JSON response');
+        }
+        return r.json();
+      })
+      .then(renderSafeShutdownStatus)
+      .catch(e => renderSafeShutdownStatus({ error: e.message }));
+  }
+
+  function prepareSafeShutdown() {
+    const btn = document.getElementById('safe_shutdown_prepare');
+    const original = btn ? btn.innerHTML : '';
+    if (!confirm(
+      'Prepare for a database stop?\n\n'
+      + 'This pauses the scheduler, stops running scans, idles the queue worker and '
+      + 'closes the connection pool. It is reversible — use "Resume Normal Operation" '
+      + 'afterwards, and it also resumes by itself after the configured timeout.'
+    )) {
+      return;
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Draining...';
+    }
+
+    fetch('/api/maintenance/safe-shutdown', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ drain: true, reason: 'config page' })
+    })
+    .then(r => {
+      const ct = r.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) {
+        throw new Error('Server returned non-JSON response');
+      }
+      return r.json();
+    })
+    .then(data => {
+      if (data.error) throw new Error(data.error);
+      renderSafeShutdownStatus(data);
+      if (data.safe_to_stop) {
+        showToast('Safe Shutdown', 'Ready. You can now stop the database.', 'success');
+      } else {
+        showToast(
+          'Safe Shutdown',
+          'Quiesced, but work is still finishing: '
+          + ((data.active_scans || []).join(', ') || 'none')
+          + ' scan(s), ' + (data.queue_items || 0) + ' queue item(s). Re-check before stopping.',
+          'warning'
+        );
+      }
+    })
+    .catch(e => showToast('Error', 'Safe shutdown failed: ' + e.message, 'error'))
+    .finally(() => {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = original;
+      }
+    });
+  }
+
+  function cancelSafeShutdown() {
+    const btn = document.getElementById('safe_shutdown_cancel');
+    const original = btn ? btn.innerHTML : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Resuming...';
+    }
+    fetch('/api/maintenance/safe-shutdown/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    .then(r => {
+      const ct = r.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) {
+        throw new Error('Server returned non-JSON response');
+      }
+      return r.json();
+    })
+    .then(data => {
+      if (data.error) throw new Error(data.error);
+      renderSafeShutdownStatus(data);
+      showToast('Safe Shutdown', 'Normal operation resumed.', 'success');
+    })
+    .catch(e => showToast('Error', 'Could not resume: ' + e.message, 'error'))
+    .finally(() => {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = original;
+      }
+    });
+  }
+
+  // ── Genre selection engine ────────────────────────────────────────────
+
+  function collectGenreSelectionConfig() {
+    const entityWeights = {
+      track: parseFloat(getValue('genre_entity_track', '1.00')) || 0,
+      album: parseFloat(getValue('genre_entity_album', '0.70')) || 0,
+      artist: parseFloat(getValue('genre_entity_artist', '0.35')) || 0
+    };
+
+    const sourceWeights = {};
+    document.querySelectorAll('[id^="genre_sel_weight_"]').forEach(el => {
+      const key = el.id.replace('genre_sel_weight_', '');
+      const value = parseFloat(el.value);
+      if (key && !Number.isNaN(value)) sourceWeights[key] = value;
+    });
+
+    return {
+      enabled: getChecked('genre_selection_enabled', true),
+      max_genres: parseInt(getValue('genre_selection_max', '3')) || 3,
+      family_slot_limit: parseInt(getValue('genre_selection_family_limit', '2')) || 2,
+      entity_weights: entityWeights,
+      source_weights: sourceWeights,
+      thresholds: {
+        first: parseFloat(getValue('genre_threshold_first', '0.60')) || 0,
+        second: parseFloat(getValue('genre_threshold_second', '0.45')) || 0,
+        third: parseFloat(getValue('genre_threshold_third', '0.35')) || 0
+      },
+      relative_floor: parseFloat(getValue('genre_selection_relative', '0.45')) || 0
+    };
+  }
+
+  // ── Synchronized UI controls ──────────────────────────────────────────
+
+  function syncAlbumNameTargetFields(source) {
+    const targetEl = document.getElementById('metadata_update_album_name_target');
+    const checkEl = document.getElementById('metadata_update_field_album_name');
+    if (!targetEl || !checkEl) return;
+    if (source === 'target') {
+      if (targetEl.value === 'files') {
+        checkEl.checked = true;
+      } else if (targetEl.value === 'off' || targetEl.value === 'db') {
+        checkEl.checked = false;
+      }
+    } else if (source === 'checkbox') {
+      if (checkEl.checked && targetEl.value !== 'files') {
+        targetEl.value = 'files';
+      } else if (!checkEl.checked && targetEl.value === 'files') {
+        targetEl.value = 'db';
+      }
+    }
+  }
+
+  function syncConversionControls(source) {
+    const enabledEl = document.getElementById('downloads_conversion_enabled');
+    const modeEl = document.getElementById('downloads_conversion_mode');
+    const groupEl = document.getElementById('conversionOptionsGroup');
+    if (!enabledEl || !modeEl) return;
+    if (source === 'switch') {
+      if (enabledEl.checked && modeEl.value === 'none') {
+        modeEl.value = 'flac_to_mp3';
+      }
+    } else if (source === 'mode') {
+      if (modeEl.value === 'none') {
+        enabledEl.checked = false;
+      } else {
+        enabledEl.checked = true;
+      }
+    }
+    if (groupEl) {
+      groupEl.style.opacity = enabledEl.checked ? '1' : '0.55';
+    }
+  }
+
+  function toggleGenreEngineMode() {
+    const enabledEl = document.getElementById('genre_selection_enabled');
+    const isCanonical = !enabledEl || enabledEl.checked;
+    const badgeEl = document.getElementById('legacyGenreEngineStatusBadge');
+    const canonicalBody = document.getElementById('canonicalGenreEngineFields');
+    const legacyDetails = document.getElementById('legacyGenreWeightsDetails');
+    if (badgeEl) {
+      badgeEl.className = isCanonical ? 'badge bg-secondary ms-2' : 'badge bg-success ms-2';
+      badgeEl.textContent = isCanonical ? 'Fallback Only (Canonical Engine Active)' : 'Active Engine';
+    }
+    if (canonicalBody) {
+      canonicalBody.style.opacity = isCanonical ? '1' : '0.55';
+    }
+    if (legacyDetails && !isCanonical) {
+      legacyDetails.open = true;
+    }
+  }
+
+  // ── Genre vocabulary ──────────────────────────────────────────────────
+
+  function setGenreVocabStatus(message, kind) {
+    const el = document.getElementById('genre_vocab_status');
+    if (!el) return;
+    el.textContent = message || '';
+    el.className = kind === 'error' ? 'text-danger'
+      : kind === 'success' ? 'text-success'
+      : 'text-muted';
+  }
+
+  function renderGenreVocabProblems(data) {
+    const box = document.getElementById('genre_vocab_problems');
+    if (!box) return;
+    const problems = (data && data.problems) || [];
+    if (!problems.length) {
+      box.innerHTML = '';
+      return;
+    }
+    const items = problems.map(p => `<li>${String(p).replace(/</g, '&lt;')}</li>`).join('');
+    const more = (data.problem_count || problems.length) > problems.length
+      ? `<div class="small text-muted">…and ${data.problem_count - problems.length} more</div>`
+      : '';
+    box.innerHTML = `<div class="alert alert-danger py-2 mb-0"><strong>Not saved — the vocabulary is invalid:</strong>`
+      + `<ul class="mb-0 ps-3 mt-1 small">${items}</ul>${more}</div>`;
+  }
+
+  function loadGenreVocabulary() {
+    setGenreVocabStatus('Loading…');
+    renderGenreVocabProblems({ problems: [] });
+    fetch('/api/maintenance/genre-vocabulary')
+      .then(r => {
+        const ct = r.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) throw new Error('Server returned non-JSON response');
+        return r.json();
+      })
+      .then(data => {
+        if (data.error) throw new Error(data.error);
+        const text = document.getElementById('genre_vocab_text');
+        if (text) text.value = data.text || '';
+        const source = document.getElementById('genre_vocab_source');
+        if (source) {
+          source.textContent = `${data.genres} genres, ${data.moods} moods, ${data.countries} countries, `
+            + `${data.regions} regions — from ${data.is_override ? 'your edited copy' : 'the shipped default'} (${data.source_path})`;
+        }
+        setGenreVocabStatus('Loaded', 'success');
+      })
+      .catch(e => setGenreVocabStatus('Load failed: ' + e.message, 'error'));
+  }
+
+  function validateGenreVocabulary() {
+    const text = (document.getElementById('genre_vocab_text') || {}).value || '';
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      renderGenreVocabProblems({ problems: ['invalid JSON: ' + e.message], problem_count: 1 });
+      setGenreVocabStatus('Invalid JSON', 'error');
+      return;
+    }
+    const genres = Array.isArray(parsed.genres) ? parsed.genres : [];
+    const ids = new Set();
+    const problems = [];
+    if (!genres.length) problems.push("'genres' must be a non-empty list");
+    genres.forEach((g, i) => {
+      if (!g || typeof g !== 'object') { problems.push(`genres[${i}] is not an object`); return; }
+      if (!g.id) problems.push(`genres[${i}] has no id`);
+      else if (ids.has(g.id)) problems.push(`duplicate id '${g.id}'`);
+      else ids.add(g.id);
+      if (!g.display) problems.push(`genre '${g.id || i}' has no display`);
+    });
+    genres.forEach(g => {
+      if (g && g.parent && !ids.has(g.parent)) {
+        problems.push(`genre '${g.id}' has parent '${g.parent}', which is not a genre id`);
+      }
+    });
+
+    if (problems.length) {
+      renderGenreVocabProblems({ problems, problem_count: problems.length });
+      setGenreVocabStatus(`${problems.length} problem(s)`, 'error');
+    } else {
+      renderGenreVocabProblems({ problems: [] });
+      setGenreVocabStatus(`${genres.length} genres — looks valid`, 'success');
+    }
+  }
+
+  function saveGenreVocabulary() {
+    const text = (document.getElementById('genre_vocab_text') || {}).value || '';
+    const btn = document.getElementById('genre_vocab_save');
+    const original = btn ? btn.innerHTML : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Saving…';
+    }
+    fetch('/api/maintenance/genre-vocabulary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text })
+    })
+    .then(r => r.json().then(body => ({ ok: r.ok, body })))
+    .then(({ ok, body }) => {
+      if (body.error) throw new Error(body.error);
+      renderGenreVocabProblems(body);
+      if (ok && body.success) {
+        setGenreVocabStatus(`Saved — ${body.genres} genres, ${body.moods} moods`, 'success');
+        showToast('Genre Vocabulary', `Saved ${body.genres} genres and ${body.moods} moods.`, 'success');
+        loadGenreVocabulary();
+      } else {
+        setGenreVocabStatus('Not saved — see the problems above', 'error');
+      }
+    })
+    .catch(e => {
+      setGenreVocabStatus('Save failed: ' + e.message, 'error');
+      showToast('Error', 'Could not save the vocabulary: ' + e.message, 'error');
+    })
+    .finally(() => {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = original;
+      }
+    });
+  }
+
+  function resetGenreVocabulary() {
+    if (!confirm(
+      'Reset the genre vocabulary to the shipped default?\n\n'
+      + 'This DELETES your edited copy. The shipped default is restored, and future '
+      + 'updates to it are picked up again.'
+    )) {
+      return;
+    }
+    fetch('/api/maintenance/genre-vocabulary/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) throw new Error(data.error);
+        showToast('Genre Vocabulary', 'Reset to the shipped default.', 'success');
+        loadGenreVocabulary();
+      })
+      .catch(e => showToast('Error', 'Could not reset the vocabulary: ' + e.message, 'error'));
+  }
+
+  // ── Init ──────────────────────────────────────────────────────────────
+
+  document.addEventListener('DOMContentLoaded', function () {
+    if (document.getElementById('stripKeywordsList')) {
+      initializeStripKeywords();
+    }
+    if (document.getElementById('upcomingSourcesList')) {
+      initUpcomingSourcesUI();
+    }
+    if (document.getElementById('downloads_file_name_format')) {
+      updateFileNameFormatPreview();
+    }
+    if (document.getElementById('btn-essentia-download')) {
+      pollEssentiaDownloadStatus();
+    }
+    const healPreview = document.getElementById('downloads_heal_preview');
+    if (healPreview) healPreview.addEventListener('click', () => runMetadataHeal(true));
+    const healRun = document.getElementById('downloads_heal_run');
+    if (healRun) healRun.addEventListener('click', () => runMetadataHeal(false));
+    const ssPrepare = document.getElementById('safe_shutdown_prepare');
+    if (ssPrepare) {
+      ssPrepare.addEventListener('click', prepareSafeShutdown);
+      getSafeShutdownStatus();
+    }
+    const ssCancel = document.getElementById('safe_shutdown_cancel');
+    if (ssCancel) ssCancel.addEventListener('click', cancelSafeShutdown);
+    const ssRefresh = document.getElementById('safe_shutdown_refresh');
+    if (ssRefresh) ssRefresh.addEventListener('click', getSafeShutdownStatus);
+    const vocabLoad = document.getElementById('genre_vocab_load');
+    if (vocabLoad) {
+      vocabLoad.addEventListener('click', loadGenreVocabulary);
+      loadGenreVocabulary();
+    }
+    const vocabValidate = document.getElementById('genre_vocab_validate');
+    if (vocabValidate) vocabValidate.addEventListener('click', validateGenreVocabulary);
+    const vocabSave = document.getElementById('genre_vocab_save');
+    if (vocabSave) vocabSave.addEventListener('click', saveGenreVocabulary);
+    const vocabReset = document.getElementById('genre_vocab_reset');
+    if (vocabReset) vocabReset.addEventListener('click', resetGenreVocabulary);
+    if (document.getElementById('excludedArtistsList')) {
+      loadExcludedArtists();
+    }
+    syncConversionControls('init');
+    toggleGenreEngineMode();
+    getRetrySchedulerStatus();
+  });
+
+  global.config = {
+    buildConfigObject,
+    saveConfig,
+    validateNumericBounds,
+    summarizeChangedSections,
+  };
+
+  // Globals for the inline onclick / onchange handlers in config.html.
+  global.saveConfig = saveConfig;
+  global.saveRawYaml = saveRawYaml;
+  global.setActiveUserContext = setActiveUserContext;
+  global.addStripKeyword = addStripKeyword;
+  global.removeKeywordBadge = removeKeywordBadge;
+  global.resetStripKeywords = resetStripKeywords;
+  global.updateFileNameFormatPreview = updateFileNameFormatPreview;
+  global.runMetadataHeal = runMetadataHeal;
+  global.syncRatingsNow = syncRatingsNow;
+  global.toggleSyncRatingsToAllUsers = toggleSyncRatingsToAllUsers;
+  global.addNewUser = addNewUser;
+  global.removeUser = removeUser;
+  global.updateUserTitle = updateUserTitle;
+  global.toggleEssentiaGenreSettings = toggleEssentiaGenreSettings;
+  global.startEssentiaDownload = startEssentiaDownload;
+  global.getRetrySchedulerStatus = getRetrySchedulerStatus;
+  global.startRetryScheduler = startRetryScheduler;
+  global.stopRetryScheduler = stopRetryScheduler;
+  global.toggleUpcomingSourceEnabled = toggleUpcomingSourceEnabled;
+  global.editUpcomingSource = editUpcomingSource;
+  global.saveUpcomingSourceEdit = saveUpcomingSourceEdit;
+  global.removeUpcomingSource = removeUpcomingSource;
+  global.toggleAddUpcomingSourceForm = toggleAddUpcomingSourceForm;
+  global.addUpcomingSource = addUpcomingSource;
+  global.renderUpcomingSourcesList = renderUpcomingSourcesList;
+  global.addExcludedArtist = addExcludedArtist;
+  global.removeExcludedArtist = removeExcludedArtist;
+  global.loadExcludedArtists = loadExcludedArtists;
+  global.syncAlbumNameTargetFields = syncAlbumNameTargetFields;
+  global.syncConversionControls = syncConversionControls;
+  global.toggleGenreEngineMode = toggleGenreEngineMode;
+})(window);

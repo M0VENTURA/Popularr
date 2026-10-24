@@ -273,13 +273,16 @@
 
     if (release.in_queue) {
       actions.push('<span class="badge bg-info text-dark align-middle">In Queue</span>');
-    } else if (isReleased(release)) {
+    } else {
+      var qTitle = isReleased(release)
+        ? 'Queue download (release is out)'
+        : 'Queue download (searches now for early tracks, falls back to release date if not found)';
       actions.push(
         '<button type="button" class="btn btn-sm btn-success" ' +
         'onclick="UpcomingReleasesService.queueFromRow(' + releaseId + ', ' +
         JSON.stringify(release.release_group_mbid || '') + ', ' +
-        artistEnc + ', ' + albumEnc + ', this)" ' +
-        'title="Queue download (release is out)"><i class="bi bi-download"></i> Queue</button>'
+        '\'' + artistEnc + '\', \'' + albumEnc + '\', this)" ' +
+        'title="' + escapeHtml(qTitle) + '"><i class="bi bi-download"></i> Queue</button>'
       );
     }
 
