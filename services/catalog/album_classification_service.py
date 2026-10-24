@@ -1,721 +1,353 @@
 """Album and track classification helpers for scan/stat eligibility."""
-
-from __future__ import annotations
-
-import json
+​from future import annotations
+​import json
 import re
 from collections import defaultdict
 from collections.abc import Mapping
 from typing import Any
-
-import structlog
-
-from helpers.normalization_service import normalize_title_for_lookup
-
-logger = structlog.get_logger(__name__)
-
-
-# --------------------------------------------------------------------
-# Constants
-# --------------------------------------------------------------------
-
-COMPILATION_TYPES = {"compilation", "soundtrack", "various artists"}
-
-#: Every key that can carry an album's release TYPE, in a stable read order.
-#:
-#: ⭐ ONE list, because two readers disagreeing about the same album is what
-#: produced the reported "marked as album+compilation but stuck with the star
-#: ratings". The live rating path read exactly two keys with an ``or``-chain
-#: while ``_resolve_compilation_flags`` (the end-of-run fallback) joined five, so
-#: the scan and a later re-finalise could reach opposite verdicts.
-#:
-#: Both spellings of the MusicBrainz key are present on purpose: the DB column is
-#: ``musicbrainz_albumtype`` while the in-memory album row built by ``load_stage``
-#: uses ``musicbrainz_album_type``. ``releasetype`` is the file-tag column a
-#: Navidrome import fills, so it is real evidence too.
-ALBUM_TYPE_KEYS: tuple[str, ...] = (
-    "musicbrainz_album_type",
-    "musicbrainz_albumtype",
-    "spotify_album_type",
-    "album_type",
-    "detected_album_type",
-    "releasetype",
+​import structlog
+​from helpers.normalization_service import normalize_title_for_lookup
+​logger = structlog.get_logger(name)
+​COMPILATION_TYPES = {"compilation", "soundtrack", "various artists"}
+​ALBUM_TYPE_KEYS: tuple[str, ...] = (
+"musicbrainz_album_type",
+"musicbrainz_albumtype",
+"spotify_album_type",
+"album_type",
+"detected_album_type",
+"releasetype",
 )
-
-
-def joined_album_type(row: Any) -> str:
-    """Every type column on *row*, joined with spaces.
-
-    ⚠️ A JOIN, never an ``or``-chain. The chain stops at the first non-empty
-    value, so an album whose sources DISAGREE silently loses whichever marking
-    comes second. Measured: ``{"spotify_album_type": "album",
-    "musicbrainz_album_type": "album+compilation"}`` chained to plain ``album``
-    and the album was then rated as a studio release.
-
-    Returns ``""`` for a row that carries no type at all, so a caller can
-    distinguish "nothing declares a type" from "a type was supplied".
-    """
-    if not isinstance(row, Mapping):
-        return ""
-    return " ".join(
-        str(row.get(key) or "").strip() for key in ALBUM_TYPE_KEYS
-    ).strip()
-
-
-def joined_album_type_from_rows(rows: Any) -> str:
-    """Union of every :data:`ALBUM_TYPE_KEYS` value found on any row in *rows*.
-
-    A SCAN holds the album's type as TRACK rows, not one album row:
-    ``musicbrainz_albumtype`` / ``spotify_album_type`` / ``releasetype`` are
-    per-track columns. Reducing them here lets the LIVE rating path
-    (``prepare_album_context``) read the same evidence set the end-of-run
-    fallback reads, instead of only the two keys the scan happened to pass on.
-
-    Values are deduped in first-seen order, so the joined string is stable and
-    short. Substring matching does not care about repetition, but the value is
-    handed to a classifier and can be logged, so duplicates are noise.
-    """
-    seen: dict[str, None] = {}
-    for row in rows or ():
-        if not isinstance(row, Mapping):
-            continue
-        for key in ALBUM_TYPE_KEYS:
-            value = str(row.get(key) or "").strip()
-            if value:
-                seen.setdefault(value, None)
-    return " ".join(seen)
-
-
-LIVE_ALBUM_PATTERNS = [
-    r"\(live\)\s*$",
-    r"\[live\]\s*$",
-    r"-\s*live\s*$",
-    r",\s*live\s*$",
-    r"\+\s*live\s*$",
-    r"\s+live\s*$",
-    r"\s+live\s*[\)\]]\s*$",
-    r"live\s+at\b",
-    r"live\s+in\b",
-    r"live\s+from\b",
-    r"live\s+session\b",
-    r"live\s+recording\b",
-    r"live\s+tour\b",
-    r"\bconcert\b",
-    r"\bin\s+concert\b",
-    r"\bunplugged\b",
-    r"\bacoustic\b",
-    r"\borchestral\b",
+​def joined_album_type(row: Any) -> str:
+if not isinstance(row, Mapping):
+return ""
+return " ".join(
+str(row.get(key) or "").strip() for key in ALBUM_TYPE_KEYS
+).strip()
+​def joined_album_type_from_rows(rows: Any) -> str:
+seen: dict[str, None] = {}
+for row in rows or ():
+if not isinstance(row, Mapping):
+continue
+for key in ALBUM_TYPE_KEYS:
+value = str(row.get(key) or "").strip()
+if value:
+seen.setdefault(value, None)
+return " ".join(seen)
+​LIVE_ALBUM_PATTERNS = [
+r"(live)\s*",
+r"[live]\s*",
+r"-\slive\s",
+r",\s*live\s*",
+r"+\slive\s",
+r"\s+live\s*",
+r"\s+live\s*[)]]\s*$",
+r"live\s+at\b",
+r"live\s+in\b",
+r"live\s+from\b",
+r"live\s+session\b",
+r"live\s+recording\b",
+r"live\s+tour\b",
+r"\bconcert\b",
+r"\bin\s+concert\b",
+r"\bunplugged\b",
+r"\bacoustic\b",
+r"\borchestral\b",
 ]
-
-ALT_TRACK_PATTERNS = [
-    r"\blive\b",
-    r"\bunplugged\b",
-    r"\bacoustic\b",
-    r"\borchestral\b",
-    r"\bremix\b",
-    r"\bdemo\b",
-    r"\binstrumental\b",
-    r"\bkaraoke\b",
-    r"\bjam[- ]along\b",
-    r"\balternate\b",
-    r"\balt\.\b",
-    r"\b(?:single|radio|album)\s+edit\b",
-    # ── Novelty re-recordings ────────────────────────────────────────────
-    # ⭐ A whole bonus disc of re-recorded takes under a GIMMICK suffix rather
-    # than a version marker.  Alestorm's "No Grave but the Sea" deluxe edition
-    # ships a second disc in which Christopher Bowes replaced every vocal with
-    # dog barks, and retitled each track "<original title> for Dogs" (the
-    # German-language track became "Bar ünd Imbiss für Hunde").  None of those
-    # titles carries a marker this list recognised, so the ten novelty takes
-    # were treated as ordinary studio tracks: they were never linked as
-    # alternate takes, never capped, and — with the version aggregator summing
-    # the original's listeners into them (see
-    # ``popularity_matching.aggregation_keys_compatible``) — scored 4-5★ and
-    # took a GLOBAL 5★ slot from the real recordings.
-    #
-    # ⚠️ Deliberately NOT generalised to "<preposition> <noun>".  "for the
-    # Dead", "for Sinners" and "to the End of the World" are ordinary song
-    # titles, and widening this to a bare ``\bfor\b`` would misclassify real
-    # album tracks as novelty takes — a much worse error than the one being
-    # fixed.  Only the observed, unambiguous gimmick suffixes are listed.
-    r"\bfor dogs\b",
-    r"\bfür hunde\b",
+​ALT_TRACK_PATTERNS = [
+r"\blive\b",
+r"\bunplugged\b",
+r"\bacoustic\b",
+r"\borchestral\b",
+r"\bremix\b",
+r"\bdemo\b",
+r"\binstrumental\b",
+r"\bkaraoke\b",
+r"\bjam[- ]along\b",
+r"\balternate\b",
+r"\balt.\b",
+r"\b(?:single|radio|album)\s+edit\b",
+r"\bfor dogs\b",
+r"\bfür hunde\b",
 ]
-
-
-# --------------------------------------------------------------------
-# Album classification
-# --------------------------------------------------------------------
-
-def is_compilation_type(album_type: str) -> bool:
-    return any(token in (album_type or "").lower() for token in COMPILATION_TYPES)
-
-
-def normalize_primary_release_type(album_type: str) -> str:
-    value = (album_type or "").lower()
-
-    if "single" in value:
-        return "single"
-    if "ep" in value:
-        return "ep"
-    if "album" in value:
-        return "album"
-    if "compilation" in value:
-        return "compilation"
-
-    return value.strip()
-
-
-def guess_album_type_from_track_count(track_count: int | None) -> str:
-    """Provisional ``Album`` / ``EP`` / ``Single`` from how many tracks there are.
-
-    Used ONLY when nothing else knows: a Navidrome import assigns no album
-    type of its own, and until the metadata scan runs the album page and the
-    artist page's sections show nothing at all.
-
-    ⚠️ This is deliberately a GUESS, written to ``releasetype`` rather than
-    ``musicbrainz_albumtype`` (see ``build_track_payload``). A local track
-    count is famously unreliable — an album with a flattened multi-disc
-    folder, bonus tracks or a partial rip reads long — which is exactly why
-    ``fa34e0b7`` stopped MusicBrainz's own ``ep``/``single`` being DEMOTED by
-    it. Demoting an authoritative answer and guessing at a blank one are
-    different questions: this only ever fills a blank, and the metadata scan
-    keeps the final word through ``musicbrainz_albumtype``.
-
-    Returns ``""`` when the count is unknown — an empty guess is never better
-    than no guess.
-    """
-    try:
-        count = int(track_count or 0)
-    except (TypeError, ValueError):
-        return ""
-    if count <= 0:
-        return ""
-    if count <= 2:
-        return "single"
-    if count <= 6:
-        return "ep"
-    return "album"
-
-
-def classify_album_type(album_row: dict[str, Any]) -> str:
-    """Classify an album into the artist-page discography buckets.
-
-    Delegates to ``services.catalog.release_categories`` — the single source of
-    truth for this decision.
-
-    This function used to carry its own rule list, and it had a bug that the
-    shared registry fixes: an early ``if "album" in raw_type …: return "album"``
-    matched every composite type the album-type pipeline writes
-    (``album+remix``, ``album+soundtrack``, ``album+fieldrecording``, …) and
-    returned the STUDIO bucket, making its own ``soundtrack`` and ``remix``
-    branches below unreachable.  A remix album that was IN the library therefore
-    filed under Studio Albums while the identical missing release filed under
-    Remix — the same release in two different sections depending on ownership.
-    """
-    from services.catalog.release_categories import category_for_album_row
-
-    return category_for_album_row(album_row)
-
-
-def is_live_or_alternate_album(album: str) -> bool:
-    album_lower = (album or "").lower()
-    # Explicitly bypass strings containing 'how to live' to prevent false positives
-    if "how to live" in album_lower:
-        return False
-    return any(re.search(pattern, album or "", re.IGNORECASE) for pattern in LIVE_ALBUM_PATTERNS)
-
-
-def detect_live_album_type(album: str, album_type_from_field: str = "") -> str:
-    field_text = (album_type_from_field or "").lower()
-    if field_text:
-        if "acoustic" in field_text or "unplugged" in field_text:
-            return "acoustic"
-        if "live" in field_text:
-            return "live"
-        if "album" in field_text and "live" not in field_text:
-            return ""
-
-    title = album or ""
-    title_text = title.lower()
-    if "how to live" in title_text:
-        return ""
-
-    if "acoustic" in title_text or "unplugged" in title_text:
-        return "acoustic"
-        
-    if is_live_album_enhanced(title):
-        return "live"
-
-    return ""
-
-
-# --------------------------------------------------------------------
-# Track-level classification
-# --------------------------------------------------------------------
-
-def is_live_or_unplugged_track_title(title: str) -> bool:
-    return any(re.search(p, title or "", re.IGNORECASE) for p in [r"\blive\b", r"\bunplugged\b"])
-
-
-_LIVE_ALTERNATE_TRACK_MARKERS = [
-    r"\((?:live|unplugged|acoustic|orchestral|demo|jam[- ]along|alternate)[^)]*\)",
-    r"[-–—]\s*(?:live|unplugged|acoustic|orchestral|demo|jam[- ]along|alternate)\s*$",
+​def is_compilation_type(album_type: str) -> bool:
+return any(token in (album_type or "").lower() for token in COMPILATION_TYPES)
+​def normalize_primary_release_type(album_type: str) -> str:
+value = (album_type or "").lower()
+if "single" in value:
+return "single"
+if "ep" in value:
+return "ep"
+if "album" in value:
+return "album"
+if "compilation" in value:
+return "compilation"
+return value.strip()
+​def guess_album_type_from_track_count(track_count: int | None) -> str:
+try:
+count = int(track_count or 0)
+except (TypeError, ValueError):
+return ""
+if count <= 0:
+return ""
+if count <= 2:
+return "single"
+if count <= 6:
+return "ep"
+return "album"
+​def classify_album_type(album_row: dict[str, Any]) -> str:
+from services.catalog.release_categories import category_for_album_row
+return category_for_album_row(album_row)
+​def is_live_or_alternate_album(album: str) -> bool:
+album_lower = (album or "").lower()
+if "how to live" in album_lower:
+return False
+return any(re.search(pattern, album or "", re.IGNORECASE) for pattern in LIVE_ALBUM_PATTERNS)
+​def detect_live_album_type(album: str, album_type_from_field: str = "") -> str:
+field_text = (album_type_from_field or "").lower()
+if field_text:
+if "acoustic" in field_text or "unplugged" in field_text:
+return "acoustic"
+if "live" in field_text:
+return "live"
+if "album" in field_text and "live" not in field_text:
+return ""
+​title = album or ""
+title_text = title.lower()
+if "how to live" in title_text:
+return ""
+​if "acoustic" in title_text or "unplugged" in title_text:
+return "acoustic"
+​if is_live_album_enhanced(title):
+return "live"
+​return ""
+​def is_live_or_unplugged_track_title(title: str) -> bool:
+return any(re.search(p, title or "", re.IGNORECASE) for p in [r"\blive\b", r"\bunplugged\b"])
+​_LIVE_ALTERNATE_TRACK_MARKERS = [
+r"((?:live\vert{}unplugged\vert{}acoustic\vert{}orchestral\vert{}demo\vert{}jam[- ]along\vert{}alternate)[^)])",
+r"[-–—]\s(?:live|unplugged|acoustic|orchestral|demo|jam[- ]along|alternate)\s*$",
 ]
-
-
-def is_live_or_alternate_track_title(title: str) -> bool:
-    """Return True when a track TITLE flags a live/acoustic alternate version."""
-    return any(
-        re.search(pattern, title or "", re.IGNORECASE)
-        for pattern in _LIVE_ALTERNATE_TRACK_MARKERS
-    )
-
-
-_INSTRUMENTAL_TITLE_RE = re.compile(r"\binstrumental\b", re.IGNORECASE)
-
-
-def is_instrumental_track_title(title: str) -> bool:
-    """Return True when a track TITLE flags an instrumental version."""
-    return bool(_INSTRUMENTAL_TITLE_RE.search(title or ""))
-
-
-def is_bonus_track_title(title: str) -> bool:
-    """Return True when a track TITLE indicates a bonus / alternate version."""
-    return any(re.search(pattern, title or "", re.IGNORECASE) for pattern in ALT_TRACK_PATTERNS)
-
-
-def should_exclude_track_from_stats(
-    title: str,
-    album: str = "",
-    is_live: int = 0,
-    album_context_live: int = 0,
-    album_type: str = "",
-    duration: float | None = None,
-    exclude_below_seconds: float | None = None,
-    exclude_title_regex: str | None = None,
+​def is_live_or_alternate_track_title(title: str) -> bool:
+return any(
+re.search(pattern, title or "", re.IGNORECASE)
+for pattern in _LIVE_ALTERNATE_TRACK_MARKERS
+)
+​_INSTRUMENTAL_TITLE_RE = re.compile(r"\binstrumental\b", re.IGNORECASE)
+​def is_instrumental_track_title(title: str) -> bool:
+return bool(_INSTRUMENTAL_TITLE_RE.search(title or ""))
+​def is_bonus_track_title(title: str) -> bool:
+return any(re.search(pattern, title or "", re.IGNORECASE) for pattern in ALT_TRACK_PATTERNS)
+​def should_exclude_track_from_stats(
+title: str,
+album: str = "",
+is_live: int = 0,
+album_context_live: int = 0,
+album_type: str = "",
+duration: float | None = None,
+exclude_below_seconds: float | None = None,
+exclude_title_regex: str | None = None,
 ) -> bool:
-    """True when a track must not anchor the album/artist stats baseline."""
-    if is_live or album_context_live:
-        return True
-
-    if duration is not None:
-        try:
-            if exclude_below_seconds is None:
-                from services.popularity.popularity_config import (
-                    get_exclude_from_median_below_seconds,
-                )
-                exclude_below_seconds = get_exclude_from_median_below_seconds()
-            if float(exclude_below_seconds) > 0 and float(duration) < float(exclude_below_seconds):
-                return True
-        except Exception:
-            pass
-
-    if title:
-        try:
-            if exclude_title_regex is None:
-                from services.popularity.popularity_config import (
-                    get_exclude_title_regex,
-                )
-                exclude_title_regex = get_exclude_title_regex()
-            if exclude_title_regex:
-                if re.search(exclude_title_regex, title, re.IGNORECASE):
-                    return True
-        except Exception:
-            pass
-
-    if not (album_type or "").strip():
-        if is_live_or_alternate_album(album):
-            return True
-
-    return any(re.search(pattern, title or "", re.IGNORECASE) for pattern in ALT_TRACK_PATTERNS)
-
-
-# --------------------------------------------------------------------
-# Advanced helpers
-# --------------------------------------------------------------------
-
-#: Unbracketed version/novelty suffixes that must fold into their base title so
-#: a re-recording groups with the track it re-records.
-#:
-#: ⚠️ Phrase-level and ANCHORED AT THE END, deliberately. A bare ``\blive\b``
-#: sweep would strip the marker out of "Live Forever" and group it with an
-#: unrelated "Forever" — turning a grouping helper into a source of false
-#: links. Every pattern here only matches in trailing position, where a
-#: version marker actually lives.
-_TRAILING_ALTERNATE_PHRASES = (
-    r"\s*[-–—]\s*(?:live|acoustic|unplugged|demo|instrumental|orchestral|remix|karaoke|alternate)\s*$",
-    r"\s+(?:live|acoustic|unplugged|demo|instrumental|orchestral|karaoke)\s*$",
-    r"\s+for\s+dogs\s*$",
-    r"\s+für\s+hunde\s*$",
+if is_live or album_context_live:
+return True
+​if duration is not None:
+try:
+if exclude_below_seconds is None:
+from services.popularity.popularity_config import (
+get_exclude_from_median_below_seconds,
 )
-
-
-def alternate_take_group_key(title: str) -> str:
-    """Group key that folds a trailing version/novelty suffix into its base.
-
-    "Mexico", "Mexico (Live)" and "Mexico for Dogs" all key to ``mexico``.
-
-    Falls back to the plain normalisation when stripping would empty the title.
-    An empty key is SHARED, so every track that stripped to nothing would land
-    in one group and then be linked as alternate takes of each other. The
-    emptying shape is a title that is nothing but a marker plus its separator
-    (" - Live", " - Acoustic") — a BARE "Live" is not stripped at all, since
-    every trailing pattern requires a leading space or dash.
-    """
-    stripped = str(title or "")
-    for pattern in _TRAILING_ALTERNATE_PHRASES:
-        stripped = re.sub(pattern, "", stripped, flags=re.IGNORECASE)
-    key = normalize_title_for_lookup(stripped)
-    return key or normalize_title_for_lookup(title)
-
-
-def is_alternate_or_bonus_title(title: str) -> bool:
-    """True when a title flags ANY non-canonical take of a song.
-
-    The union of the three title-level classifiers, so "is this the original
-    recording?" has one answer rather than three that can disagree.
-    """
-    return bool(
-        is_bonus_track_title(title)
-        or is_live_or_alternate_track_title(title)
-        or is_instrumental_track_title(title)
-    )
-
-
-def detect_alternate_takes(tracks: list[Any]) -> dict[str, list[Any]]:
-    """Group each track with the alternate/novelty re-recordings of it.
-
-    ⚠️ The group key used to be ``normalize_title_for_lookup(title)`` on its
-    own, and that normaliser strips BRACKETED annotations but not unbracketed
-    ones.  So "Mexico (Live)" correctly folded into "Mexico" while "Mexico for
-    Dogs" did NOT: Alestorm's deluxe second disc — ten novelty takes, each
-    retitled "<original> for Dogs" — produced ``groups_seen=0`` and none of
-    them was ever linked to the track it re-records.  A bracketed suffix
-    grouped; the same suffix written without brackets did not, which is an
-    accident of punctuation rather than a rule.
-
-    ``alternate_take_group_key`` closes that by folding the recognised
-    trailing version/novelty phrases before normalising.
-
-    CONTRACT: the canonical (unmarked) take sorts FIRST, so ``variants[0]`` is
-    the original recording.  Callers must still not rely on that silently —
-    ``_persist_alternate_takes`` selects the base explicitly, because choosing
-    the wrong one would mark the real studio track as the alternate.
-    """
-    groups: dict[str, list[Any]] = defaultdict(list)
-
-    for track in tracks or []:
-        title = track.get("title") if isinstance(track, dict) else str(track)
-        groups[alternate_take_group_key(title)].append(track)
-
-
-    grouped: dict[str, list[Any]] = {}
-    for key, variants in groups.items():
-        if len(variants) < 2:
-            continue
-        # Stable sort, so tracks that are equally canonical keep tracklist
-        # order (disc 1 before disc 2 for a deluxe edition).
-        variants.sort(key=lambda t: is_alternate_or_bonus_title(
-            t.get("title") if isinstance(t, dict) else str(t)
-        ))
-        grouped[key] = variants
-    return grouped
-
-
-_VA_ALBUM_ARTIST_NAMES = frozenset(
-    {
-        "various artists", "various artists -", "various",
-        "va", "v/a", "compilation", "soundtrack",
-    }
+exclude_below_seconds = get_exclude_from_median_below_seconds()
+if float(exclude_below_seconds) > 0 and float(duration) < float(exclude_below_seconds):
+return True
+except Exception:
+pass
+​if title:
+try:
+if exclude_title_regex is None:
+from services.popularity.popularity_config import (
+get_exclude_title_regex,
 )
-
-
-def classify_compilation_category(
-    artist: str,
-    album: str,
-    tracks: list[Any],
-    album_artist: str | None = None,
-    spotify_album_type: str | None = None,
-    musicbrainz_album_type: str | None = None,
-    type_text: str | None = None,
+exclude_title_regex = get_exclude_title_regex()
+if exclude_title_regex:
+if re.search(exclude_title_regex, title, re.IGNORECASE):
+return True
+except Exception:
+pass
+​if not (album_type or "").strip():
+if is_live_or_alternate_album(album):
+return True
+​return any(re.search(pattern, title or "", re.IGNORECASE) for pattern in ALT_TRACK_PATTERNS)
+​_TRAILING_ALTERNATE_PHRASES = (
+r"\s*[-–—]\s*(?:live|acoustic|unplugged|demo|instrumental|orchestral|remix|karaoke|alternate)\s*",
+r"\s+(?:live|acoustic|unplugged|demo|instrumental|orchestral|karaoke)\s*",
+r"\s+for\s+dogs\s*",
+r"\s+für\s+hunde\s*",
+)
+​def alternate_take_group_key(title: str) -> str:
+stripped = str(title or "")
+for pattern in _TRAILING_ALTERNATE_PHRASES:
+stripped = re.sub(pattern, "", stripped, flags=re.IGNORECASE)
+key = normalize_title_for_lookup(stripped)
+return key or normalize_title_for_lookup(title)
+​def is_alternate_or_bonus_title(title: str) -> bool:
+return bool(
+is_bonus_track_title(title)
+or is_live_or_alternate_track_title(title)
+or is_instrumental_track_title(title)
+)
+​def detect_alternate_takes(tracks: list[Any]) -> dict[str, list[Any]]:
+groups: dict[str, list[Any]] = defaultdict(list)
+​for track in tracks or []:
+title = track.get("title") if isinstance(track, dict) else str(track)
+groups[alternate_take_group_key(title)].append(track)
+​grouped: dict[str, list[Any]] = {}
+for key, variants in groups.items():
+if len(variants) < 2:
+continue
+variants.sort(key=lambda t: is_alternate_or_bonus_title(
+t.get("title") if isinstance(t, dict) else str(t)
+))
+grouped[key] = variants
+return grouped
+​_VA_ALBUM_ARTIST_NAMES = frozenset(
+{
+"various artists", "various artists -", "various",
+"va", "v/a", "compilation", "soundtrack",
+}
+)
+​def classify_compilation_category(
+artist: str,
+album: str,
+tracks: list[Any],
+album_artist: str | None = None,
+spotify_album_type: str | None = None,
+musicbrainz_album_type: str | None = None,
+type_text: str | None = None,
 ) -> str:
-    """Classify a compilation candidate as ``"va"``, ``"single_artist"`` or ``""``.
-
-    ``type_text`` is a PRE-JOINED type string for a caller that already holds
-    every column -- see :func:`joined_album_type`. When given it REPLACES
-    ``spotify_album_type``/``musicbrainz_album_type`` rather than adding to them,
-    so a caller cannot pass both and produce a doubled join.
-    """
-    joined = (
-        type_text
-        if type_text is not None
-        else " ".join(
-            filter(None, (spotify_album_type or "", musicbrainz_album_type or ""))
-        )
-    )
-    type_text_lower = joined.lower()
-    is_compilation_type_tag = any(
-        token in type_text_lower for token in COMPILATION_TYPES
-    )
-
-    if (album_artist or "").strip().lower() in _VA_ALBUM_ARTIST_NAMES:
-        return "va"
-
-    artists = {
-        str(t.get("artist", "")).strip().lower()
-        for t in tracks or []
-        if isinstance(t, dict) and t.get("artist")
-    }
-    if len(artists) >= 4 and (artist or "").lower() not in artists:
-        return "va"
-
-    if is_compilation_type_tag:
-        return "single_artist"
-
-    return ""
-
-
-def detect_compilation_album(
-    artist: str,
-    album: str,
-    tracks: list[Any],
-    album_artist: str | None = None,
-    spotify_album_type: str | None = None,
-) -> bool:
-    """Return True when the album is ANY kind of compilation."""
-    return (
-        classify_compilation_category(
-            artist=artist,
-            album=album,
-            tracks=tracks,
-            album_artist=album_artist,
-            spotify_album_type=spotify_album_type,
-        )
-        != ""
-    )
-
-
-#: Substring tokens that mean "this is a best-of". Loose on purpose: they read
-#: an album TITLE, where "Best of Feuerschwanz" and "The Collection" are the
-#: ordinary spellings.
-_GREATEST_HITS_TOKENS = (
-    "greatest hits", "best of", "anthology", "collection", "singles",
+joined = (
+type_text
+if type_text is not None
+else " ".join(
+filter(None, (spotify_album_type or "", musicbrainz_album_type or ""))
 )
-
-#: A BARE "Hits" title -- Billy Talent's compilation is called exactly that.
-#:
-#: ⭐ Why this needed its own pattern rather than one more substring token:
-#: ``"singles" in "the singles"`` is why Ash's "'94 - '04: The Singles" routed to
-#: the artist-catalogue branch, and NOTHING in the token list above matches the
-#: word "hits" alone ("greatest hits" needs both words). Billy Talent's "Hits"
-#: therefore rated as a studio album -- its own median band, the album-rank gate
-#: and the 5★ slot cap -- which is what stripped eleven GLOBAL 5★ locks to 4★.
-#:
-#: ⚠️ ANCHORED TO THE WHOLE TITLE, and deliberately NOT a substring.
-#: ``"hits" in text`` would also match "Hitsville UK" and "Hits and Misses", and
-#: this function is ALSO called with a TRACK title (``release_categories``
-#: classifies a title to decide a release category), where "Hits Different" is an
-#: ordinary song. The word has to BE the title, optionally with an edition
-#: suffix:
-#:
-#:     "Hits"           -> True      "Hits Different"  -> False
-#:     "The Hits"       -> True      "Hitsville UK"    -> False
-#:     "Hits (Deluxe)"  -> True      "Hits and Misses" -> False
-#:
-#: NOTE: a qualifier BEFORE the word ("Big Hits of the 80s", "Dance Hits") is NOT
-#: matched. Each is a real compilation shape, but widening to a bare
-#: ``\bhits\b`` would also catch "Hits Different" on the track-title path, and a
-#: false positive there re-files an ordinary song's album. Missing a compilation
-#: leaves the album rated exactly as it was before this change, which is the
-#: smaller error and the one to prefer.
-_GREATEST_HITS_TITLE_RE = re.compile(r"^\s*(?:the\s+)?hits\s*(?:[([].*)?$")
-
-
-def detect_greatest_hits_album(album: str, artist: str) -> bool:
-    text = (album or "").lower()
-
-    if any(token in text for token in _GREATEST_HITS_TOKENS):
-        return True
-    return bool(_GREATEST_HITS_TITLE_RE.match(text))
-
-
-# --------------------------------------------------------------------
-# Christmas detection
-# --------------------------------------------------------------------
-
-_CHRISTMAS_PATTERNS = [
-    r"\bchristmas\b", r"\bxmas\b", r"\bx-mas\b", r"\bholiday",
-    r"\bnoel\b", r"\bsanta\b", r"\bsleigh\b", r"\bjingle\b",
-    r"\bsilent night\b", r"\bholy night\b", r"\bwinter wonderland\b",
-    r"\bwhite christmas\b", r"\bjingle bells\b", r"\blast christmas\b",
-    r"\byule\b", r"\byuletide\b", r"\badvent\b",
-]
-
-
-def detect_christmas_song(track_title: str, album_title: str) -> bool:
-    """Detect if a song is Christmas-related based on track or album title."""
-    combined = f"{track_title or ''} {album_title or ''}".lower()
-    return any(re.search(pattern, combined) for pattern in _CHRISTMAS_PATTERNS)
-
-
-#: Genre tokens that mean "this is Christmas music", beyond the literal word.
-#:
-#: The genre aggregation service intercepts these as filter tags and stores
-#: whichever spelling the source used, so a track can legitimately carry
-#: "Holiday" or "Xmas" in ``tracks.genres`` and be Christmas music. A check for
-#: the literal string "christmas" misses all of them.
-CHRISTMAS_GENRE_TOKENS = frozenset({
-    "christmas", "xmas", "x mas", "x-mas", "holiday", "holidays",
-    "noel", "yule", "yuletide", "advent", "hanukkah", "chanukah",
-})
-
-
-# ---------------------------------------------------------------------------
-# Genre-token vocabulary
-#
-# ONE parser for every DB genre form, and ONE place that answers "is this
-# token part of family X?". Both tests live here rather than in the caller
-# because a substring test written per-caller is exactly how "Holiday Rock"
-# ends up treated as Christmas music.
-# ---------------------------------------------------------------------------
-
-def iter_genre_tokens(genres: Any) -> list[str]:
-    """Normalise ANY stored genre form into whole, comparable tokens.
-
-    Accepts every shape the DB hands a caller: a real list/tuple/set, a JSON
-    list string, or a delimiter-separated plain string (``,`` ``;`` ``/``
-    ``\\`` ``|``).
-
-    Normalisation strips punctuation (keeping word characters, spaces and
-    hyphens) and lower-cases, so "Alternative-Metal" and "alternative metal"
-    compare equal. It deliberately does NOT split on the hyphen: "nu-metal"
-    and "nu metal" are one genre, and "progressive-metal" must not become
-    two tokens.
-    """
-    if not genres:
-        return []
-
-    tokens: list[str] = []
-    if isinstance(genres, (list, tuple, set)):
-        tokens = [str(g) for g in genres]
-    else:
-        raw = str(genres).strip()
-        if raw.startswith("["):
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, list):
-                    tokens = [str(g) for g in parsed]
-            except Exception:
-                tokens = []
-        if not tokens:
-            tokens = [g for g in re.split(r"[,;/\\|]+", raw) if g]
-
-    out: list[str] = []
-    for token in tokens:
-        norm = re.sub(r"[^\w\s-]", "", str(token).strip().lower()).strip()
-        if norm:
-            out.append(norm)
-    return out
-
-
-#: A genre belongs to the METAL family when the word appears anywhere in the
-#: token: "alternative metal", "nu metal", "heavy metal", "progressive metal",
-#: "industrial metal", "sludge metal", "death metal", "metalcore",
-#: "post-metal", "nu-metal"…
-#:
-#: SUBSTRING, not a fixed list, on purpose — the vocabulary is unbounded (any
-#: new subgenre is "something metal") and every known spelling contains the
-#: word itself. A closed set would silently stop matching the moment a source
-#: returns "groove metal".
-METAL_GENRE_SUBSTRING = "metal"
-
-#: The FAMILY name the genre vocabulary uses for the metal branch.
-#:
-#: Sits beside ``METAL_GENRE_SUBSTRING`` because the two are the two ways of
-#: asking the same question, and a caller choosing between them should see both.
-#: Declared by the ``metal`` entry in ``genre_vocabulary.json`` (family "metal"
-#: on the ``metal`` node, which is what keeps metal out of the rock family
-#: despite descending from it) — so this string must match that file.
-METAL_GENRE_FAMILY = "metal"
-
-
-def genre_tokens_contain(genres: Any, needle: str) -> bool:
-    """True when any of ``genres`` carries ``needle`` as part of the word.
-
-    ``needle`` is normalised the same way the tokens are, so a caller may pass
-    "Metal" or "metal".
-    """
-    wanted = re.sub(r"[^\w\s-]", "", str(needle or "").strip().lower()).strip()
-    if not wanted:
-        return False
-    return any(wanted in token for token in iter_genre_tokens(genres))
-
-
-def is_metal_genre(genres: Any) -> bool:
-    """Is any of these tokens a metal genre? See ``METAL_GENRE_SUBSTRING``."""
-    return genre_tokens_contain(genres, METAL_GENRE_SUBSTRING)
-
-
-def is_christmas_genre(genres: Any) -> bool:
-    """True when any genre token marks the track as Christmas music.
-
-    Tokens are matched WHOLE (after light normalisation) so "holiday" matches
-    but a genre such as "Holiday Rock" — a real genre — does not.
-    """
-    return any(token in CHRISTMAS_GENRE_TOKENS for token in iter_genre_tokens(genres))
-
-
-def is_christmas_track(
-    *,
-    title: str = "",
-    album: str = "",
-    genres: Any = None,
+)
+type_text_lower = joined.lower()
+is_compilation_type_tag = any(
+token in type_text_lower for token in COMPILATION_TYPES
+)
+​if (album_artist or "").strip().lower() in _VA_ALBUM_ARTIST_NAMES:
+return "va"
+​artists = {
+str(t.get("artist", "")).strip().lower()
+for t in tracks or []
+if isinstance(t, dict) and t.get("artist")
+}
+if len(artists) >= 4 and (artist or "").lower() not in artists:
+return "va"
+​if is_compilation_type_tag or detect_greatest_hits_album(album, artist):
+return "single_artist"
+​return ""
+​def detect_compilation_album(
+artist: str,
+album: str,
+tracks: list[Any],
+album_artist: str | None = None,
+spotify_album_type: str | None = None,
 ) -> bool:
-    """Canonical "is this Christmas music?" test across title, album and genres.
-
-    Every caller that filters Christmas out of a playlist should use this rather
-    than testing one signal. A track qualifies when its title/album matches the
-    Christmas patterns OR its genres carry a Christmas token — a track on a
-    Christmas album and a track whose only Christmas signal is a "Holiday" tag
-    are both Christmas music.
-
-    WHY IT LIVES HERE: this module already owns ``detect_christmas_song`` and is
-    imported by the popularity stage, so there is one definition rather than a
-    per-caller substring check that silently drifts.
-    """
-    if detect_christmas_song(title, album):
-        return True
-    return is_christmas_genre(genres)
-
-
-# --------------------------------------------------------------------
-# Enhanced live-album detection
-# --------------------------------------------------------------------
-
-_LIVE_ALBUM_ENHANCED_PATTERNS = [
-    r"\(live\)\s*$",
-    r"\[live\]\s*$",
-    r"-\s*live\s*$",
-    r",\s*live\s*$",
-    r"\+\s*live\s*$",
-    r"\s+live\s*$",
-    r"\s+live\s*[\)\]]\s*$",
-    r"live\s+at\b",
-    r"live\s+in\b",
-    r"live\s+from\b",
-    r"live\s+session",
-    r"live\s+recording",
-    r"live\s+tour\b",
-    r"\bin\s+concert\b",
+return (
+classify_compilation_category(
+artist=artist,
+album=album,
+tracks=tracks,
+album_artist=album_artist,
+spotify_album_type=spotify_album_type,
+)
+!= ""
+)
+​_GREATEST_HITS_TOKENS = (
+"greatest hits", "best of", "anthology", "collection", "singles",
+)
+​_GREATEST_HITS_TITLE_RE = re.compile(r"^\s*(?:the\s+)?hits\s*(?:[([].*)?$")
+​def detect_greatest_hits_album(album: str, artist: str) -> bool:
+text = (album or "").lower()
+if any(token in text for token in _GREATEST_HITS_TOKENS):
+return True
+return bool(_GREATEST_HITS_TITLE_RE.match(text))
+​_CHRISTMAS_PATTERNS = [
+r"\bchristmas\b", r"\bxmas\b", r"\bx-mas\b", r"\bholiday",
+r"\bnoel\b", r"\bsanta\b", r"\bsleigh\b", r"\bjingle\b",
+r"\bsilent night\b", r"\bholy night\b", r"\bwinter wonderland\b",
+r"\bwhite christmas\b", r"\bjingle bells\b", r"\blast christmas\b",
+r"\byule\b", r"\byuletide\b", r"\badvent\b",
 ]
-
-
-def is_live_album_enhanced(album_title: str) -> bool:
-    """Enhanced live-album detection — only matches unambiguous format tags."""
-    if not album_title:
-        return False
-    text = album_title.lower()
-    if "how to live" in text:
-        return False
-    return any(re.search(pattern, text) for pattern in _LIVE_ALBUM_ENHANCED_PATTERNS)
+​def detect_christmas_song(track_title: str, album_title: str) -> bool:
+combined = f"{track_title or ''} {album_title or ''}".lower()
+return any(re.search(pattern, combined) for pattern in _CHRISTMAS_PATTERNS)
+​CHRISTMAS_GENRE_TOKENS = frozenset({
+"christmas", "xmas", "x mas", "x-mas", "holiday", "holidays",
+"noel", "yule", "yuletide", "advent", "hanukkah", "chanukah",
+})
+​def iter_genre_tokens(genres: Any) -> list[str]:
+if not genres:
+return []
+tokens: list[str] = []
+if isinstance(genres, (list, tuple, set)):
+tokens = [str(g) for g in genres]
+else:
+raw = str(genres).strip()
+if raw.startswith("["):
+try:
+parsed = json.loads(raw)
+if isinstance(parsed, list):
+tokens = [str(g) for g in parsed]
+except Exception:
+tokens = []
+if not tokens:
+tokens = [g for g in re.split(r"[,;/\|]+", raw) if g]
+​out: list[str] = []
+for token in tokens:
+norm = re.sub(r"[^\w\s-]", "", str(token).strip().lower()).strip()
+if norm:
+out.append(norm)
+return out
+​METAL_GENRE_SUBSTRING = "metal"
+METAL_GENRE_FAMILY = "metal"
+​def genre_tokens_contain(genres: Any, needle: str) -> bool:
+wanted = re.sub(r"[^\w\s-]", "", str(needle or "").strip().lower()).strip()
+if not wanted:
+return False
+return any(wanted in token for token in iter_genre_tokens(genres))
+​def is_metal_genre(genres: Any) -> bool:
+return genre_tokens_contain(genres, METAL_GENRE_SUBSTRING)
+​def is_christmas_genre(genres: Any) -> bool:
+return any(token in CHRISTMAS_GENRE_TOKENS for token in iter_genre_tokens(genres))
+​def is_christmas_track(
+*,
+title: str = "",
+album: str = "",
+genres: Any = None,
+) -> bool:
+if detect_christmas_song(title, album):
+return True
+return is_christmas_genre(genres)
+​_LIVE_ALBUM_ENHANCED_PATTERNS = [
+r"(live)\s*",
+r"[live]\s*",
+r"-\slive\s",
+r",\s*live\s*",
+r"+\slive\s",
+r"\s+live\s*",
+r"\s+live\s*[)]]\s*$",
+r"live\s+at\b",
+r"live\s+in\b",
+r"live\s+from\b",
+r"live\s+session",
+r"live\s+recording",
+r"live\s+tour\b",
+r"\bin\s+concert\b",
+]
+​def is_live_album_enhanced(album_title: str) -> bool:
+if not album_title:
+return False
+text = album_title.lower()
+if "how to live" in text:
+return False
+return any(re.search(pattern, text) for pattern in _LIVE_ALBUM_ENHANCED_PATTERNS)
