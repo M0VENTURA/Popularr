@@ -439,6 +439,68 @@ def playlist_popularity_score(
     return max(lf_score, lb_score)
 
 
+def cross_album_track_score(row: Any) -> float:
+    """The cross-album popularity a row SORTS on: listeners, else stored score.
+
+    ``playlist_popularity_score`` answers "how popular is this recording in the
+    wider world?" and returns 0.0 when neither provider has a count. 0.0 is not
+    a score — it means NO MEASUREMENT — so it must fall through to the stored
+    score rather than sink the track to the bottom of its star tier. The stored
+    chain mirrors ``finalise_stage._effective_order_score``'s fallback so the
+    artist page and the generated playlists cannot disagree about it.
+    """
+    prominence = playlist_popularity_score(
+        int(_as_number(row_get(row, "lastfm_listeners"))),
+        int(_as_number(row_get(row, "listenbrainz_listens"))),
+    )
+    if prominence > 0:
+        return prominence
+    return max(
+        _as_number(row_get(row, "popularity_score")),
+        _as_number(row_get(row, "final_score")),
+        _as_number(row_get(row, "score")),
+    )
+
+
+def star_then_popularity_order_key(row: Any) -> tuple[Any, ...]:
+    """Sort key ranking a track list ACROSS albums, most preferred first.
+
+    Star tier LEADS, then cross-album popularity, then the stored score, then
+    the title (so the order is deterministic and repeatable).
+
+    ⭐ WHY THE TIER LEADS — the same reason ``finalise_stage._playlist_order_key``
+    puts it first: stars are the signal the user curated and the number every
+    surface displays, so the artist page's "Top 20" and a generated playlist
+    must not disagree about what "top" means.
+
+    ⭐⭐ WHY NOT ``artist_z_score`` (the previous key). A z-score is measured
+    against the ALBUM's own spread, so a 3-track live album with uniformly
+    small counts produces a perfectly respectable z for a track nobody has
+    listened to. That is the documented defect behind "the live album's peak
+    ranked #1 above the artist's actual global hit" — the ordering has to be
+    cross-album, which ``playlist_popularity_score`` is and a z-score is not.
+
+    ⭐⭐ WHY NOT RAW LISTENER TOTALS. Last.fm reports unique LISTENERS and
+    ListenBrainz reports LISTENS — different units roughly 30x apart for the
+    same recording — so summing them makes the rank ≈97% a ListenBrainz
+    metric. Live coverage is also ListenBrainz-only (measured on the Anti-Flag
+    report: 29 of 29 LB-only rows are live takes), so a summed rank would put
+    every live cut above the studio recording it covers. Taking the MAX of the
+    two log scores, as ``playlist_popularity_score`` does, keeps one provider
+    per track and cannot be won by a missing signal.
+    """
+    return (
+        -int(_as_number(row_get(row, "stars"))),
+        -cross_album_track_score(row),
+        -max(
+            _as_number(row_get(row, "popularity_score")),
+            _as_number(row_get(row, "final_score")),
+            _as_number(row_get(row, "score")),
+        ),
+        str(row_get(row, "title") or "").casefold(),
+    )
+
+
 def album_prominence_median(track_rows: list[dict[str, Any]]) -> float:
     """Median album-prominence score across a set of track rows."""
     scores = [
@@ -454,19 +516,42 @@ def album_prominence_median(track_rows: list[dict[str, Any]]) -> float:
     return median(valid)
 
 
-def row_get_lf(row: Any) -> Any:
-    """Best-effort ``lastfm_listeners`` read from a dict/SQLAlchemy row."""
+def row_get(row: Any, key: str, default: Any = None) -> Any:
+    """Best-effort column read from a dict, a mapping or a SQLAlchemy ``Row``.
+
+    One reader for every shape, so an ordering helper cannot silently see
+    ``None`` for a column the caller did supply (a ``Row`` answers ``_mapping``
+    only; a plain dict does not).
+    """
     if row is None:
-        return 0
+        return default
     mapping = getattr(row, "_mapping", None)
     if mapping is not None:
         try:
-            return mapping["lastfm_listeners"]
+            return mapping[key]
         except Exception:
-            return 0
+            return default
     if isinstance(row, dict):
-        return row.get("lastfm_listeners", 0)
-    return 0
+        return row.get(key, default)
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
+def _as_number(value: Any) -> float:
+    """Coerce a possibly-text column value to float (DB rows are loosely typed)."""
+    try:
+        if value in (None, ""):
+            return 0.0
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def row_get_lf(row: Any) -> Any:
+    """Best-effort ``lastfm_listeners`` read from a dict/SQLAlchemy row."""
+    return row_get(row, "lastfm_listeners", 0)
 
 
 def row_get_lb(row: Any) -> Any:

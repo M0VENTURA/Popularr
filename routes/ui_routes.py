@@ -71,6 +71,10 @@ from services.metadata.tag_file_service import (
     update_file_tags,
     write_tags_to_file,
 )
+from services.popularity.popularity_math import (
+    cross_album_track_score,
+    star_then_popularity_order_key,
+)
 from services.popularity.stages.album_stage import (
     revert_track_live_state,
     track_carries_live_state,
@@ -1177,19 +1181,19 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
         "discogs_artist_id": first_value(tracks, "discogs_artist_id", "discogs_artistid"),
     }
 
-    top_tracks = sorted(
-        tracks,
-        key=lambda track: (
-            safe_float(track.get("artist_z_score"))
-            if safe_float(track.get("artist_z_score")) is not None
-            else safe_float(track.get("final_score"))
-            if safe_float(track.get("final_score")) is not None
-            else safe_float(track.get("stars"))
-            if safe_float(track.get("stars")) is not None
-            else 0
-        ),
-        reverse=True,
-    )[:20]
+    # ⭐⭐ TOP TRACKS ARE ORDERED ACROSS ALBUMS, STAR TIER FIRST.
+    #
+    # The previous key led with ``artist_z_score``, which is measured against
+    # the ALBUM's own spread — so on a 3-track live album (uniformly small
+    # counts, so a small spread) a track nobody has listened to earns a
+    # respectable z and outranks the artist's global single. That is the same
+    # defect class as "the album-relative score ranked a live cut #1".
+    #
+    # ``star_then_popularity_order_key`` is the SHARED rule: stars, then the
+    # cross-album ``playlist_popularity_score``, then the stored score, then
+    # the title. It is deliberately the same shape as the generated playlists'
+    # ``_playlist_order_key`` so "top" cannot mean two things in one app.
+    top_tracks = sorted(tracks, key=star_then_popularity_order_key)[:20]
 
     for track in top_tracks:
         if track.get("artist_z_score") is None:
@@ -1197,6 +1201,11 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
 
         if track.get("popularity_score") is None:
             track["popularity_score"] = track.get("final_score") or 0
+
+        # The number the row is ACTUALLY ranked by, so the page can show what
+        # it sorts on. Displaying ``popularity_score`` here while ordering by
+        # something else is how a table ends up looking unsorted.
+        track["rank_score"] = cross_album_track_score(track)
 
         if track.get("is_single") is None:
             track["is_single"] = 0

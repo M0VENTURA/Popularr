@@ -480,7 +480,8 @@
                 <th style="width: 40px;">#</th>
                 <th>Track</th>
                 <th>Album</th>
-                <th class="text-center">Score</th>
+                <th class="text-center">Stars</th>
+                <th class="text-center">Popularity</th>
               </tr>
             </thead>
             <tbody>
@@ -493,11 +494,21 @@
                     </a>
                   </td>
                   <td class="text-muted small" data-label="Album">{{ track.album }}</td>
-                  <td class="text-center" data-label="Score"><span class="badge bg-info">{{ '%.1f'|format(track.popularity_score or 0) }}</span></td>
+                  {#
+                    ⭐ THE TIER LEADS THE ORDER, so it must be VISIBLE. The old
+                    single "Score" column showed the album-relative
+                    popularity_score while the list was ranked by
+                    artist_z_score, which made a correctly-ordered table look
+                    unsorted. These two columns are exactly the two keys
+                    (stars, then cross-album popularity), and the title
+                    explains the second one.
+                  #}
+                  <td class="text-center" data-label="Stars"><span class="badge bg-warning text-dark">{{ track.stars or 0 }}&#9733;</span></td>
+                  <td class="text-center" data-label="Popularity"><span class="badge bg-info" title="Cross-album popularity from Last.fm listeners / ListenBrainz listens. The star tier ranks first; this orders tracks inside a tier.">{{ '%.1f'|format(track.rank_score or 0) }}</span></td>
                 </tr>
               {% else %}
                 <tr>
-                  <td colspan="4" class="text-center text-muted py-4" data-label="Tracks">
+                  <td colspan="5" class="text-center text-muted py-4" data-label="Tracks">
                     <i class="bi bi-info-circle"></i> No tracks available for ranking
                   </td>
                 </tr>
