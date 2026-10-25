@@ -11,7 +11,9 @@ compatibility.
 from __future__ import annotations
 
 import datetime
+import ipaddress
 import logging
+import math
 import ssl
 import time
 import threading
@@ -38,6 +40,143 @@ _POOL_TIMEOUT = 30.0
 _CONNECT_TIMEOUT_SECONDS = 10.0
 _MAX_RETRY_AFTER = 60.0
 _TOTAL_RETRY_WAIT_BUDGET = 40.0
+
+
+# ---------------------------------------------------------------------------
+# Private / loopback host detection
+# ---------------------------------------------------------------------------
+
+def is_private_host(host: str | None) -> bool:
+    """True when *host* is a private, loopback or link-local address.
+
+    ⭐⭐ THE OLD TEST WAS A STRING PREFIX AND IT WAS WRONG IN BOTH DIRECTIONS:
+
+    * ``host.startswith("172.")`` matches PUBLIC space. ``172.16.0.0/12`` is the
+      private range, but ``172.217.x.x`` is Google and ``172.64.x.x`` is
+      Cloudflare — every request to those skipped rate limiting entirely.
+    * ``host.startswith("10.")`` matches any hostname beginning with the
+      DIGITS "10", and misses nothing only by luck.
+    * ``192.168.`` is correct but by coincidence.
+
+    ``ipaddress`` decides it properly, and it also refuses to guess: a hostname
+    (``localhost``, ``navidrome.local``) is NOT parsed as an IP, so the small
+    explicit name list covers the cases a string check was actually for.
+    """
+    name = str(host or "").strip().lower().rstrip(".")
+    if not name:
+        return False
+    if name in ("localhost", "localhost.localdomain", "ip6-localhost"):
+        return True
+
+    # Strip an IPv6 zone index (``fe80::1%eth0``) and brackets.
+    candidate = name.split("%", 1)[0].strip("[]")
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+
+    return bool(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+    )
+
+
+def _is_internal_host(host: str | None) -> bool:
+    """Backwards-compatible alias for :func:`is_private_host`."""
+    return is_private_host(host)
+
+
+def _throttle_shared(provider: str) -> None:
+    """Reserve a slot on the DEPLOYMENT-WIDE rate limiter, or quietly skip.
+
+    The limiter is imported lazily: ``services.infrastructure`` is a higher
+    layer than ``api_clients``, and importing it at module scope would make this
+    low-level module depend on the service layer at import time.
+
+    ⚠️ NEVER RAISES. This runs inside the retry transport, where an exception
+    would replace a retryable network failure with a limiter failure — turning
+    a recoverable 503 into a hard error. A broken limiter degrades to the
+    in-process per-domain pacing, which is what the module already had.
+    """
+    try:
+        from services.infrastructure.api_rate_limiter import get_rate_limiter
+
+        limiter = get_rate_limiter()
+        throttle = getattr(limiter, f"throttle_{provider}", None)
+        if callable(throttle):
+            throttle()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug(
+            "Shared rate limiter unavailable, relying on in-process pacing",
+            provider=provider,
+            error=str(exc),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Retry-After parsing
+# ---------------------------------------------------------------------------
+
+def parse_retry_after(value: Any, *, default: float | None = None) -> float | None:
+    """Seconds to wait from a ``Retry-After`` header, or *default*.
+
+    Accepts both RFC 9110 forms: delta-seconds (``"120"``) and an HTTP-date.
+
+    ⭐⭐ WHY THIS IS A FUNCTION AND NOT ``float(...)`` INLINE. The old code did
+    ``min(float(retry_after), 60)``, which passes through anything ``float()``
+    accepts:
+
+    * ``"-5"`` → ``-5.0`` → ``time.sleep(-5)`` raises ``ValueError``;
+    * ``"nan"`` → ``nan`` (``min(nan, 60)`` is ``nan``) → ``time.sleep(nan)``
+      raises ``ValueError``;
+    * ``"inf"`` → clamped, fine, but ``"-inf"`` is not.
+
+    A malformed header must never raise: the caller is inside a retry loop and
+    the only thing worse than waiting too little is crashing the retry policy.
+    """
+    if value is None:
+        return default
+
+    raw = str(value).strip()
+    if not raw:
+        return default
+
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        seconds = None
+
+    if seconds is not None:
+        if not math.isfinite(seconds):
+            # nan / inf / -inf carry no wait information.
+            return default
+        if seconds < 0:
+            # ⚠️ A negative delta is MALFORMED, not "wait zero". Returning 0
+            # here would retry immediately — the opposite of what a Retry-After
+            # is for — so it falls back to the backoff schedule instead.
+            return default
+        return min(seconds, _MAX_RETRY_AFTER)
+
+    # HTTP-date form.
+    try:
+        from email.utils import parsedate_to_datetime
+
+        when = parsedate_to_datetime(raw)
+    except Exception:
+        return default
+
+    if when is None:
+        return default
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+
+    delta = (when - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+    if not math.isfinite(delta):
+        return default
+    return max(0.0, min(delta, _MAX_RETRY_AFTER))
 
 #: ── Per-host timeout cooldown ────────────────────────────────────────────────
 #:
@@ -217,8 +356,24 @@ class _RetryTransport(httpx.BaseTransport):
             attempt_no += 1
             
             host = request.url.host
-            is_internal = host in ("127.0.0.1", "localhost") or host.startswith("192.168.") or host.startswith("10.") or host.startswith("172.")
+            # ⭐ Proper private-network detection — see ``is_private_host``.
+            is_internal = is_private_host(host)
             thread_name = threading.current_thread().name
+
+            # ⭐⭐ DEPLOYMENT-WIDE THROTTLE ON EVERY RETRY ATTEMPT.
+            #
+            # MusicBrainz's terms are about REQUESTS, not about successful
+            # calls: a retry is another request and counts against the same
+            # 1 req/s budget. ``musicbrainz_http.get()`` reserves a slot once
+            # per CALL (before its own attempt loop), so attempt 1 is already
+            # accounted for and must NOT be charged twice — charging it here
+            # as well would halve throughput for every scan. Attempts 2+ were
+            # the gap: they reached the wire having reserved nothing.
+            #
+            # In-process only: the shared limiter's own flock spans the whole
+            # deployment, so this is not a second budget.
+            if attempt_no > 1 and (host or "").lower() == "musicbrainz.org":
+                _throttle_shared("musicbrainz")
 
             if not is_internal:
                 with _GLOBAL_LOCK:
@@ -317,24 +472,14 @@ class _RetryTransport(httpx.BaseTransport):
                 response = getattr(exc, "response", None)
                 if response is not None:
                     retry_after = response.headers.get("Retry-After")
-            if retry_after:
-                try:
-                    wait = min(float(retry_after), _MAX_RETRY_AFTER)
-                except ValueError:
-                    from email.utils import parsedate_to_datetime
-                    try:
-                        when = parsedate_to_datetime(retry_after)
-                        if when.tzinfo is None:
-                            when = when.replace(tzinfo=datetime.timezone.utc)
-                        wait = min(
-                            max(0.0, (when - datetime.now(datetime.timezone.utc)).total_seconds()),
-                            _MAX_RETRY_AFTER,
-                        )
-                    except Exception:
-                        wait = min(self._backoff * (2 ** (retry_state.attempt_number - 1)), 60.0)
-            else:
-                n = retry_state.attempt_number
-                wait = min(self._backoff * (2 ** (n - 1)), 60.0)
+
+            # ⭐ A validated delay: a negative, NaN, infinite or unparseable
+            # header falls back to the backoff schedule instead of raising
+            # inside the retry policy (see ``parse_retry_after``).
+            backoff = min(self._backoff * (2 ** (retry_state.attempt_number - 1)), 60.0)
+            wait = parse_retry_after(retry_after, default=backoff)
+            if wait is None:
+                wait = backoff
 
             if _retry_waits["total"] + wait > _TOTAL_RETRY_WAIT_BUDGET:
                 raise _RetryBudgetExceeded()

@@ -94,6 +94,35 @@ def _release_advisory_lock(conn_or_session: Any, key: int | str) -> None:
     except Exception: 
         pass
 
+
+def _ddl_savepoint(session: Any, statement: str, params: dict[str, Any] | None = None) -> bool:
+    """Run one DDL statement inside its OWN savepoint; return True on success.
+
+    ⭐⭐ WHY A SAVEPOINT AND NOT A BARE ``try/except``. On PostgreSQL a failed
+    statement ABORTS THE WHOLE TRANSACTION: the ``except`` swallows the error,
+    and then the NEXT statement fails with "current transaction is aborted,
+    commands ignored until end of transaction block" — so one tolerated failure
+    took every statement after it with it, and the function reported only the
+    first error. ``begin_nested()`` rolls back to the savepoint, leaving the
+    transaction usable, which is the same fix already applied per row in
+    ``wikipedia_scraper_service._sanitize_stored_rows``.
+
+    Returns False (and logs) when the statement failed, so a caller can decide
+    whether the failure is tolerable — rather than the old behaviour of
+    silently continuing with a broken transaction.
+    """
+    try:
+        with session.begin_nested():
+            session.execute(text(statement), params or {})
+        return True
+    except Exception as exc:
+        logger.warning(
+            "Tolerated DDL failure",
+            statement=" ".join(statement.split())[:90],
+            error=str(exc),
+        )
+        return False
+
 # =============================================================================
 # DATA FIXUPS & MIGRATION LOGIC
 # =============================================================================
@@ -128,7 +157,11 @@ def ensure_album_artist_column_data() -> bool:
                 try: session.execute(text("ROLLBACK TO SAVEPOINT popularr_backfill_album_artist"))
                 except Exception: pass
                 logger.debug("Album-artist backfill skipped (columns still bootstrapping)", error=str(e))
-            _release_advisory_lock(session, _ALBUM_ART_DATA_LOCK_KEY)
+            finally:
+                # ⭐ In a ``finally``: the old code released only on the success
+                # path, so a failure left the session-level lock held for the
+                # life of the pooled connection.
+                _release_advisory_lock(session, _ALBUM_ART_DATA_LOCK_KEY)
         return True
     except Exception as e:
         logger.error("Backfill failed", error=str(e))
@@ -149,43 +182,137 @@ def ensure_album_art_schema() -> bool:
     try:
         with db_session() as session:
             if not _try_advisory_lock(session, _ALBUM_ART_SCHEMA_LOCK_KEY, attempts=5): return False
-            _ensure_table(session, "album_art", TABLES_TO_ENSURE["album_art"])
-            session.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_album_art_artist_album ON album_art (artist_name, album_name)"))
-            _release_advisory_lock(session, _ALBUM_ART_SCHEMA_LOCK_KEY)
+            try:
+                _ensure_table(session, "album_art", TABLES_TO_ENSURE["album_art"])
+                session.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_album_art_artist_album ON album_art (artist_name, album_name)"))
+            finally:
+                _release_advisory_lock(session, _ALBUM_ART_SCHEMA_LOCK_KEY)
         return True
     except Exception as e:
         logger.error("Album art schema error", error=str(e))
         return False
 
+#: Rank of a row when choosing which duplicate to KEEP. Higher wins, so a
+#: manually-confirmed MBID is never discarded in favour of a scrape.
+#:
+#: ⭐⭐ WHY THIS EXISTS. The dedupe DELETEs used to key on
+#: ``(artist_name, album_name)`` alone and keep whichever row had the LOWER
+#: ``id``. That is a data-loss rule, not a reconciliation rule:
+#:
+#: * a row carrying a resolved ``release_group_mbid`` lost to a scraped row
+#:   that had none, silently undoing MBID matching;
+#: * a row the user had confirmed by hand (``mbid_manual_override``) was
+#:   deletable, silently undoing a manual correction;
+#: * the FIRST delete had no ``primary_type`` term at all, so a distinct
+#:   single could be removed because an album with the same artist/title
+#:   existed — two different releases, one deleted.
+#:
+#: All three run on EVERY BOOT, so the damage repeated.
+_DEDUPE_RANK_SQL = """(
+    CASE WHEN COALESCE({t}.mbid_manual_override, FALSE) THEN 2 ELSE 0 END
+  + CASE WHEN COALESCE({t}.release_group_mbid, '') <> '' THEN 1 ELSE 0 END
+)"""
+
+#: Common "these two rows are the same release" predicate. ``primary_type`` is
+#: part of the identity because the unique index is declared on it.
+_SAME_RELEASE_SQL = """
+      AND a.artist_name = b.artist_name
+      AND a.album_name = b.album_name
+      AND COALESCE(a.primary_type, '') = COALESCE(b.primary_type, '')
+"""
+
+
+def _dedupe_upcoming_releases(session: Any) -> None:
+    """Reconcile duplicate ``upcoming_releases`` rows WITHOUT losing information.
+
+    Order of preference, best first:
+      1. ``mbid_manual_override`` — a human confirmed it;
+      2. a resolved ``release_group_mbid``;
+      3. ``MusicBrainz Daily Collection`` provenance over a Wikipedia scrape;
+      4. the lower ``id`` (deterministic, and only as a last resort).
+
+    A row with ``mbid_manual_override`` is NEVER the one deleted.
+    """
+    rank_a = _DEDUPE_RANK_SQL.format(t="a")
+    rank_b = _DEDUPE_RANK_SQL.format(t="b")
+    protected = "COALESCE(a.mbid_manual_override, FALSE) = FALSE"
+
+    # (1) b is strictly richer than a → drop a.
+    session.execute(
+        text(
+            f"""
+            DELETE FROM upcoming_releases a
+            USING upcoming_releases b
+            WHERE a.id <> b.id
+            {_SAME_RELEASE_SQL}
+              AND {protected}
+              AND (
+                    {rank_a} < {rank_b}
+                 OR (
+                        {rank_a} = {rank_b}
+                    AND a.source <> 'MusicBrainz Daily Collection'
+                    AND b.source =  'MusicBrainz Daily Collection'
+                 )
+              )
+            """
+        )
+    )
+
+    # (2) equally rich → keep the lowest id, the same tie-break as before, but
+    #     now only among rows that carry the SAME amount of identity.
+    session.execute(
+        text(
+            f"""
+            DELETE FROM upcoming_releases a
+            USING upcoming_releases b
+            WHERE a.id > b.id
+            {_SAME_RELEASE_SQL}
+              AND {protected}
+              AND {rank_a} = {rank_b}
+              AND COALESCE(a.source, '') = COALESCE(b.source, '')
+            """
+        )
+    )
+
+
 def ensure_upcoming_releases_schema() -> bool:
     try:
         with db_session() as session:
             if not table_exists(session, "upcoming_releases"): return True
-            
-            session.execute(text("""
-                DELETE FROM upcoming_releases a
-                USING upcoming_releases b
-                WHERE a.id <> b.id
-                  AND a.artist_name = b.artist_name
-                  AND a.album_name = b.album_name
-                  AND a.source <> 'MusicBrainz Daily Collection'
-                  AND b.source = 'MusicBrainz Daily Collection'
-            """))
-            session.execute(text("""
-                DELETE FROM upcoming_releases a
-                USING upcoming_releases b
-                WHERE a.id > b.id
-                  AND a.artist_name = b.artist_name
-                  AND a.album_name = b.album_name
-                  AND COALESCE(a.primary_type, '') = COALESCE(b.primary_type, '')
-                  AND a.source = b.source
-            """))
-            try: session.execute(text("ALTER TABLE upcoming_releases DROP CONSTRAINT IF EXISTS uq_upcoming_artist_album_source"))
-            except Exception: pass
 
-            session.execute(text("DROP INDEX IF EXISTS uq_upcoming_artist_album"))
-            session.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_upcoming_artist_album_type ON upcoming_releases (artist_name, album_name, primary_type)"))
-            session.execute(text("UPDATE upcoming_releases SET last_seen_at = COALESCE(last_seen_at, updated_at, created_at, CURRENT_TIMESTAMP)"))
+            _dedupe_upcoming_releases(session)
+
+            # ⚠️ Every DDL statement goes through ``_ddl_savepoint``. The old
+            # code wrapped ONLY the ALTER in ``try/except: pass``, so any
+            # failure there aborted the transaction and the following
+            # DROP/CREATE INDEX failed with "current transaction is aborted"
+            # — the function then returned False having applied nothing.
+            _ddl_savepoint(session, "ALTER TABLE upcoming_releases DROP CONSTRAINT IF EXISTS uq_upcoming_artist_album_source")
+            _ddl_savepoint(session, "DROP INDEX IF EXISTS uq_upcoming_artist_album")
+
+            # ⭐ The unique index is created LAST and its failure is REPORTED,
+            # not fatal. If two genuinely distinct rows still collide (e.g. a
+            # manually-overridden duplicate we deliberately kept), refusing to
+            # delete either is the correct outcome — the table keeps working
+            # without the index, and the log says why.
+            index_ok = _ddl_savepoint(
+                session,
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_upcoming_artist_album_type "
+                "ON upcoming_releases (artist_name, album_name, primary_type)",
+            )
+            if not index_ok:
+                logger.warning(
+                    "Upcoming-releases unique index NOT created — duplicate "
+                    "artist/album/type rows remain (protected by "
+                    "mbid_manual_override or a differing MBID). Nothing was "
+                    "deleted to force it."
+                )
+
+            _ddl_savepoint(
+                session,
+                "UPDATE upcoming_releases SET last_seen_at = "
+                "COALESCE(last_seen_at, updated_at, created_at, CURRENT_TIMESTAMP)",
+            )
         return True
     except Exception as e:
         logger.error("Upcoming releases schema error", error=str(e))
@@ -241,26 +368,58 @@ def migrate_single_confidence_type() -> bool:
 # =============================================================================
 
 def ensure_full_schema() -> bool:
+    """Create/upgrade every table, column and index this app needs.
+
+    ⭐⭐ THE ADVISORY LOCK IS RELEASED ON THE SESSION THAT TOOK IT.
+
+    ``pg_try_advisory_lock`` is **session-scoped**: PostgreSQL ties the lock to
+    the physical CONNECTION, and ``pg_advisory_unlock`` from a different
+    connection returns ``false`` and releases nothing. The previous code took
+    the lock inside one ``with db_session() as session:`` block and released it
+    in a ``finally`` that opened a SECOND ``db_session()`` — a different
+    checkout. It appeared to work only because SQLAlchemy's pool is LIFO and
+    usually hands the same connection back; whenever it did not, the unlock was
+    a silent no-op and the lock stayed held until that connection died, so a
+    crashed bootstrap could wedge every later one.
+
+    The release now happens in a ``finally`` INSIDE the acquiring block, after
+    an explicit commit so no other process can acquire the lock and see
+    uncommitted DDL.
+
+    ⚠️ The lock therefore covers the schema work only. The data fixups below
+    each own their idempotency (their own advisory lock, or statements that are
+    safe to repeat), and keeping one session open across them would need a
+    second pooled connection while the first is still checked out — which is
+    fatal for the in-memory SQLite test harness (``StaticPool`` has exactly one).
+    """
     lock_acquired = False
     try:
         with db_session() as session:
             lock_acquired = _try_advisory_lock(session, _SCHEMA_BOOTSTRAP_LOCK_NAME)
-            if not lock_acquired: return False
-            
-            # 1. Base Tables
-            for table, ddl in TABLES_TO_ENSURE.items(): 
-                _ensure_table(session, table, ddl)
-            
-            # 2. Base Columns
-            for table, cols in COLUMN_REGISTRY.items(): 
-                _ensure_columns(session, table, cols)
-            
-            # 3. Triggers, Constraints & Indexes
-            ensure_status_changed_trigger(session)
-            ensure_musicbrainz_release_unique_constraint(session)
-            for ddl in INDEXES_TO_ENSURE: 
-                _ensure_index(session, ddl)
-                
+            if not lock_acquired:
+                return False
+
+            try:
+                # 1. Base Tables
+                for table, ddl in TABLES_TO_ENSURE.items():
+                    _ensure_table(session, table, ddl)
+
+                # 2. Base Columns
+                for table, cols in COLUMN_REGISTRY.items():
+                    _ensure_columns(session, table, cols)
+
+                # 3. Triggers, Constraints & Indexes
+                ensure_status_changed_trigger(session)
+                ensure_musicbrainz_release_unique_constraint(session)
+                for ddl in INDEXES_TO_ENSURE:
+                    _ensure_index(session, ddl)
+
+                # Commit BEFORE unlocking: another process must never take the
+                # lock and then see a half-applied schema.
+                session.commit()
+            finally:
+                _release_advisory_lock(session, _SCHEMA_BOOTSTRAP_LOCK_NAME)
+
         # 4. Independent Data Fixups & Migrations
         ensure_album_artist_column_data()
         ensure_artists_name_unique_constraint()
@@ -287,9 +446,10 @@ def ensure_full_schema() -> bool:
         if is_transient_pg_startup_error(exc): return False
         logger.error("Bootstrap failed", exc_info=True)
         raise
-    finally:
-        if lock_acquired:
-            with db_session() as session: _release_advisory_lock(session, _SCHEMA_BOOTSTRAP_LOCK_NAME)
+    # ⚠️ NO unlock here any more: the ``finally`` above releases the lock on the
+    # connection that took it. A second ``db_session()`` here is a DIFFERENT
+    # checkout, and ``pg_advisory_unlock`` from it is a no-op — which is exactly
+    # the bug this function used to have.
 
 def verify_all_tables_exist() -> dict[str, Any]:
     expected = set(TABLES_TO_ENSURE.keys())

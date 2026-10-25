@@ -870,6 +870,44 @@ class WikipediaReleaseScraper:
         return new_count, updated_count
 
 
+#: Text fragments that identify a UNIQUE-constraint violation across drivers.
+#:
+#: PostgreSQL raises ``psycopg2.errors.UniqueViolation`` (SQLSTATE 23505) with
+#: the message "duplicate key value violates unique constraint …"; SQLite (the
+#: test harness) raises ``sqlite3.IntegrityError: UNIQUE constraint failed: …``.
+#: Both are matched by message so no driver import is needed here.
+_UNIQUE_VIOLATION_MARKERS: tuple[str, ...] = (
+    "duplicate key value",
+    "unique constraint failed",
+    "unique violation",
+    "unique constraint",
+)
+
+_UNIQUE_VIOLATION_SQLSTATE = "23505"
+
+
+def _is_unique_violation(exc: BaseException) -> bool:
+    """True only when *exc* is a UNIQUE violation, not any other failure.
+
+    ⭐⭐ WHY THIS EXISTS. ``_sanitize_stored_rows`` used to treat EVERY exception
+    from the rename as "a clean duplicate exists" and DELETE the row. A lock
+    timeout, a serialization failure, a dropped connection or a read-only
+    replica therefore destroyed data — the failure had nothing to do with
+    duplication, and the row was perfectly valid.
+    """
+    orig = getattr(exc, "orig", None)
+    code = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
+    if code and str(code) == _UNIQUE_VIOLATION_SQLSTATE:
+        return True
+
+    haystack = " ".join(
+        str(part).lower()
+        for part in (exc, getattr(exc, "orig", None))
+        if part is not None
+    )
+    return any(marker in haystack for marker in _UNIQUE_VIOLATION_MARKERS)
+
+
 def _sanitize_stored_rows() -> int:
     """Self-heal pass: re-sanitize artist/album names stored before the
     sanitization existed (e.g. "Ann Wilsonand Tripsitter" →
@@ -878,17 +916,45 @@ def _sanitize_stored_rows() -> int:
     Fixes the name in place when the cleaned key is free; deletes the
     malformed row when a clean duplicate already exists (the unique
     (artist_name, album_name) index prevents the UPDATE).
+
+    ⭐⭐ TWO SAFETY RULES, both added after review:
+
+    1. **Only a UNIQUE violation may delete.** Every other exception (lock
+       timeout, serialization failure, dropped connection) leaves the row
+       alone — the rename can be retried on the next pass, and a valid row is
+       never destroyed to "fix" an unrelated error.
+
+    2. **MusicBrainz-sourced and manually-overridden rows are never touched.**
+       This pass exists to repair names a WIKIPEDIA SCRAPE mangled. A row whose
+       identity came from MusicBrainz — or that a human confirmed — has an
+       authoritative name already, so running the Wikipedia word-splitter over
+       it can only corrupt it. That is the reported "sanitisation renamed data
+       it does not own".
     """
     from services.upcoming_releases.matching_service import sanitize_wiki_entry
 
     fixed = 0
+    skipped_protected = 0
     try:
         with db_session() as session:
             rows = session.execute(
-                text("SELECT id, artist_name, album_name FROM upcoming_releases")
+                text(
+                    "SELECT id, artist_name, album_name, source, "
+                    "release_group_mbid, mbid_manual_override "
+                    "FROM upcoming_releases"
+                )
             ).fetchall()
             for row in rows:
                 row_id = row[0]
+                source = str(row[3] or "")
+                has_mbid = bool(str(row[4] or "").strip())
+                overridden = bool(row[5])
+
+                # ⚠️ Protected identity: leave the name exactly as stored.
+                if overridden or has_mbid or source.strip().lower().startswith("musicbrainz"):
+                    skipped_protected += 1
+                    continue
+
                 artist, album = sanitize_wiki_entry(row[1] or "", row[2] or "")
                 if artist == (row[1] or "") and album == (row[2] or ""):
                     continue
@@ -898,30 +964,48 @@ def _sanitize_stored_rows() -> int:
                 # "current transaction is aborted" and roll back the entire
                 # sanitize pass.  ``begin_nested`` scopes the failure to the
                 # row so the DELETE (and the rest of the pass) still works.
+                rename_error: BaseException | None = None
                 try:
                     with session.begin_nested():
                         session.execute(
                             text("UPDATE upcoming_releases SET artist_name = :a, album_name = :b WHERE id = :id"),
                             {"a": artist, "b": album, "id": row_id},
                         )
-                except Exception:
-                    # Clean duplicate exists → drop the malformed row.  The
-                    # savepoint already rolled back the failed UPDATE, so the
-                    # transaction is still usable.
-                    try:
-                        with session.begin_nested():
-                            session.execute(
-                                text("DELETE FROM upcoming_releases WHERE id = :id"),
-                                {"id": row_id},
-                            )
-                    except Exception as exc:
-                        logger.debug("[SCRAPER] Sanitize delete failed for row %s: %s", row_id, exc)
-                        continue
-                fixed += 1
+                except Exception as exc:
+                    rename_error = exc
+
+                if rename_error is None:
+                    fixed += 1
+                    continue
+
+                # ⭐ Only a genuine duplicate justifies a delete.
+                if not _is_unique_violation(rename_error):
+                    logger.warning(
+                        "[SCRAPER] Sanitize rename failed for row %s (%s) — row "
+                        "kept, will retry next pass",
+                        row_id,
+                        rename_error,
+                    )
+                    continue
+
+                # The savepoint rolled the failed UPDATE back, so the
+                # transaction is still usable for the DELETE.
+                try:
+                    with session.begin_nested():
+                        session.execute(
+                            text("DELETE FROM upcoming_releases WHERE id = :id"),
+                            {"id": row_id},
+                        )
+                    fixed += 1
+                except Exception as exc:
+                    logger.debug("[SCRAPER] Sanitize delete failed for row %s: %s", row_id, exc)
+                    continue
     except Exception as exc:
         logger.warning("[SCRAPER] Stored-row sanitize pass failed: %s", exc)
     if fixed:
         logger.info("[SCRAPER] Sanitized %s stored release name(s)", fixed)
+    if skipped_protected:
+        logger.debug("[SCRAPER] Sanitize skipped %s protected row(s)", skipped_protected)
     return fixed
 
 
