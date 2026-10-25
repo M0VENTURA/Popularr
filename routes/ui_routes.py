@@ -622,19 +622,15 @@ async def activity() -> Any:
     destination that does not show any of the three feeds. This is the page that
     link should have pointed at all along.
 
-    ⚠️ REBUILT-TREE ONLY, AND IT SAYS SO BY REDIRECTING. The page's template and
-    its script live in `test_site/`; the live tree has no equivalent. Rather than
-    render an empty shell or 500 for a user on the live UI, it redirects to the
-    dashboard — the same content the card already shows them. `status()` is the
-    cutover's own accessor, so this cannot disagree with what is actually served
-    (reading the config key directly would still say "true" if the tree were
-    missing and the cutover had declined).
+    ⭐ MIGRATED TO THE LIVE TREE (2026-10-26). This route used to REDIRECT to
+    the dashboard whenever the test_site cutover was off, which is the default —
+    so the feature existed only for anyone who had switched UIs. The template
+    and both scripts now exist here too, so the page renders for everyone.
+
+    ⚠️ The redirect is GONE rather than kept as a fallback: a redirect that
+    silently swaps the destination makes the feature look like it is missing,
+    which is exactly how it was reported.
     """
-    from helpers.test_site_mode import status as _test_site_status
-
-    if not _test_site_status().get("active"):
-        return redirect(url_for("ui.dashboard"))
-
     # Wider window and a longer list than the card: this page exists to show what
     # the card had to cut off, so a matching cap would defeat it.
     recent_albums = _fetch_recent_albums(days=30, limit=50)

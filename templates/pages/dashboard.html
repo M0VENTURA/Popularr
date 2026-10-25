@@ -276,10 +276,28 @@
 
 <script src="{{ versioned_static('js/ui/status-badge.js') }}"></script>
 <script src="{{ versioned_static('js/ui/scan-modal.js') }}"></script>
-<script src="{{ versioned_static('js/services/scan-preflight.js') }}"></script>
-<script src="{{ versioned_static('js/services/scan-resume-picker.js') }}"></script>
-<script src="{{ versioned_static('js/services/musicbrainz-queue.js') }}"></script>
-<script src="{{ versioned_static('js/services/upcoming-releases.js') }}"></script>
-<script src="{{ versioned_static('js/services/activity-feed.js') }}"></script>
+{#
+  ⭐ THESE FOUR PATHS POINTED AT THE REBUILT TREE AND 404'd (corrected 2026-10-26).
+
+  The live tree keeps its scripts FLAT (`js/<name>.js`); the rebuilt tree nests
+  them under `js/services/` and `js/pages/`. This block had been copied from the
+  rebuilt template, so five of its six scripts did not exist on this tree and
+  the dashboard silently lost, in order: the scan pre-flight "a scan is running"
+  gate, the resume-artist picker, the upcoming-releases service, the status
+  badges, and the shared activity feed. A 404 on a <script> is invisible — no
+  console error the user sees, no page failure — which is why it read as
+  "these features are missing" rather than "these files are missing".
+
+  ⚠️ `js/services/musicbrainz-queue.js` was REMOVED rather than repointed: the
+  live tree has no equivalent module, and the rebuilt one calls `global.api`,
+  `global.modal`, `global.toast` and `global.buttonState`, none of which exist
+  here. Pointing at a module that throws on load would replace a silent 404 with
+  a loud one. The dashboard's upcoming-releases "Find releases" search still
+  needs it; that is recorded in tests/test_live_tree_migration_parity.py.
+#}
+<script src="{{ versioned_static('js/scan-preflight.js') }}"></script>
+<script src="{{ versioned_static('js/scan-resume-picker.js') }}"></script>
+<script src="{{ versioned_static('js/upcoming_releases.js') }}"></script>
+<script src="{{ versioned_static('js/activity-feed.js') }}"></script>
 <script src="{{ versioned_static('js/pages/dashboard.js') }}"></script>
 {% endblock %}

@@ -1,0 +1,53 @@
+/*
+  Metadata Comparison (/metadata-compare).
+
+  Replaces the tiny inline <style> in templates/pages/metadata_compare.html,
+  which contained only a `.badge` margin — a rule that leaked into EVERY badge
+  on the page (and the modal) rather than scoping to the comparison rows.
+
+  The comparison pairs a Navidrome column against a Beets one, so the two are
+  tinted with the shared status tokens to make the "which side wins" choice
+  readable at a glance.
+*/
+
+/* Scope the badge spacing to the comparison tables only. */
+.metadata-compare-table .badge {
+  margin-right: 0.25rem;
+}
+
+.metadata-compare-table .badge:last-child {
+  margin-right: 0;
+}
+
+/* The expanded comparison panel. */
+.metadata-compare-panel {
+  background: var(--tertiary-bg);
+  border-radius: var(--radius-control, 0.5rem);
+}
+
+/* Navidrome (authoritative) vs Beets (candidate) — colour-coded via the
+   border so the distinction survives without reading the headings. */
+.metadata-source-card {
+  height: 100%;
+}
+
+.metadata-source-card .card-header {
+  font-weight: 600;
+}
+
+.metadata-source-card--navidrome {
+  border-color: var(--accent-info, #22d3ee);
+}
+
+.metadata-source-card--beets {
+  border-color: var(--status-warning, #f59e0b);
+}
+
+/* MusicBrainz result rows in the modal. */
+.mb-result-title {
+  overflow-wrap: anywhere;
+}
+
+.mb-result-genres .badge {
+  margin-right: 0.25rem;
+}

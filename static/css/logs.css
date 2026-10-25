@@ -1,0 +1,182 @@
+/* ==========================================================================
+   static/css/logs.css
+   Application log viewer (templates/Pages/logs.html).
+
+   ── WHY THIS FILE EXISTS AT ALL ───────────────────────────────────────────
+   The viewer's script has always wrapped log output in these classes:
+
+       .log-line            .log-line.log-level-<level>
+       .log-ts              .log-level.log-level-<level>
+       .log-tag
+
+   ...and NOTHING defined them. Grepping popularr.css and every other
+   stylesheet in the project returns zero matches. So the level colour-coding
+   the markup was written for has never appeared — the viewer rendered flat
+   monochrome text.
+
+   These are new definitions, not a move. Colours use the theme's semantic
+   tones (danger / warning / info / secondary) so they follow the palette
+   rather than hard-coding hex values.
+
+   The tag badge styling stays inline in the markup (it uses Bootstrap utility
+   classes: bg-secondary-subtle, text-secondary-emphasis, border-secondary-subtle).
+   ========================================================================== */
+
+/* One row per log line. The wrapper carries the level so a line's whole row
+   can be tinted without touching every span inside it.
+
+   ⚠️ The counter scope lives on #logOutput — the `<pre>` in the template — NOT
+   on a `.log-output` class, because no such class exists in the markup. */
+#logOutput {
+  counter-reset: logline;
+}
+
+.log-line {
+  display: block;
+  counter-increment: logline;
+  position: relative;
+  padding: 0 0.25rem 0 3.2rem;
+  border-radius: 2px;
+}
+
+/* ── Line gutter + row readability ───────────────────────────────────────
+   The counter is the LINE INDEX WITHIN THE CURRENTLY RENDERED VIEW, not the
+   line's position in the file. That is a deliberate choice: `render()` filters
+   and re-renders, so a file-position number would contradict what is on screen
+   (showing "412, 913, 1502" down a filtered list reads as a rendering bug). A
+   view-local number matches what the user can see and count.
+
+   ⚠️ The counter is `increment`ed for every `.log-line`. Nothing needs to
+   reset it per render: `output.innerHTML = …` builds a fresh element tree, and
+   the counter belongs to that tree. */
+.log-line::before {
+  content: counter(logline);
+  position: absolute;
+  left: 0;
+  width: 2.6rem;
+  text-align: right;
+  color: var(--text-tertiary, #8a8a8a);
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+  user-select: none;          /* never let a line number land in a copy */
+  pointer-events: none;
+}
+
+/* Zebra striping for long, wrapped stack traces, plus a hover so the row under
+   the cursor is identifiable across its full width.
+
+   ⚠️ Uses the `odd` keyword rather than :nth-child, because the wrapper may or
+   may not be a direct child depending on how a line was wrapped. `odd` counts
+   only elements carrying the class, which is what "alternating log row" means.
+   ⚠️ Level tinting wins over striping on error rows: the .log-line.log-level-*
+   rules below come LATER in the file, so their background-color overrides this
+   one for the rows that matter most. */
+.log-line:nth-of-type(odd) {
+  background-color: rgba(255, 255, 255, 0.02);
+}
+
+.log-line:hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Scroll-to-bottom affordance ─────────────────────────────────────────
+   Absolutely positioned INSIDE the viewer card (which is position-relative).
+   `bottom`/`right` are in rem so the button clears the native scrollbar
+   without needing to know its width. */
+.log-jump-btn {
+  position: absolute;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 3;
+  width: 44px;                /* app-wide minimum touch target */
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.log-jump-badge {
+  position: absolute;
+  top: -0.35rem;
+  right: -0.35rem;
+  font-size: 0.62rem;
+  line-height: 1;
+  padding: 0.2em 0.4em;
+}
+
+/* ── Filter mode toggles ─────────────────────────────────────────────────
+   The `.*` / `Aa` glyphs sit in `<code>`, which is monospace by default — the
+   two buttons are the same width because both glyphs are two characters. */
+.log-filter-mode code {
+  font-size: 0.8rem;
+  line-height: 1;
+  pointer-events: none;       /* the whole button is the target */
+}
+
+.log-filter-mode[aria-pressed="true"] {
+  color: var(--text-primary, #fff);
+  border-color: var(--accent-info, #0dcaf0);
+}
+
+.log-ts {
+  font-variant-numeric: tabular-nums;
+}
+
+.log-level {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+/* ── Level colours ───────────────────────────────────────────────────────
+   Applied to both the line and its level token, so a filtered view stays
+   scannable — the level is the thing the user is looking for.
+
+   THE FALLBACK VALUES MATCH popularr.css ON PURPOSE. A `var(--token, fallback)`
+   fallback only fires when the token is missing — and popularr.css WAS missing
+   (its path was mis-cased, so every stylesheet 404'd), which meant these
+   fallbacks were live and the viewer rendered #e0e0e0/#b0b0b0 where the rest of
+   the app uses #ffffff/#d0d0d0. The fallbacks were faithful copies of the
+   original inline styles, so this is a wiring fix, not a design change: if the
+   token ever goes missing again, the page should degrade to the app's own
+   colours rather than to a slightly different grey. */
+
+.log-level-debug {
+  color: var(--text-secondary, #d0d0d0);
+}
+
+.log-line.log-level-debug {
+  opacity: 0.75;
+}
+
+.log-level-info {
+  color: var(--text-primary, #ffffff);
+}
+
+.log-line.log-level-info {
+  color: var(--text-primary, #ffffff);
+}
+
+.log-level-warning {
+  color: #ffc107;
+}
+
+.log-line.log-level-warning {
+  color: #ffd75e;
+}
+
+.log-level-error,
+.log-level-critical {
+  color: #f86b6b;
+}
+
+.log-line.log-level-error,
+.log-line.log-level-critical {
+  color: #ffb3b3;
+  background-color: rgba(220, 53, 69, 0.12);
+}
+
+.log-level-critical {
+  font-weight: 800;
+}

@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% from "components/_recent_album_row.html" import recent_album_row %}
+
+{#
+  ==========================================================================
+  Activity page — the full view behind the dashboard card's "View all".
+
+  ⭐ WHY THIS PAGE EXISTS. The dashboard's activity card holds three feeds in
+  tabs, each capped to fit a card (12 albums, 25 scans, 50 reviews), and its
+  "View all" link pointed at `/downloads/monitor` — a DOWNLOADS page, which
+  shows none of the three. This is the destination that link should have had.
+
+  MIGRATED FROM THE REBUILT TREE (2026-10-26). The route used to redirect to the
+  dashboard whenever the cutover was off, i.e. on the DEFAULT UI this feature
+  simply did not exist. The template is unchanged in structure; only the script
+  paths differ, because the live tree keeps its scripts flat (`js/…`) rather
+  than under `js/services/` + `js/pages/`.
+
+  WHAT IS DIFFERENT FROM THE CARD, DELIBERATELY
+  ---------------------------------------------
+  The card TABS the three feeds because it has room for one. This page STACKS
+  them, because "view all" means the user wants to scan everything at once
+  rather than click through three tabs to see what changed. The headers carry
+  the counts so the page is scannable without scrolling each section.
+
+  The two feeds that need a request (scans, reviews) render into their own
+  containers via `js/activity-feed.js` — the SAME module the dashboard card
+  uses, so a scan cannot render one way here and another way there. Recently
+  Added is server-rendered, because it already arrives in the payload.
+#}
+
+{% block title %}Activity - Popularr{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-3">
+
+  <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+    <h1 class="h4 mb-0 d-flex align-items-center gap-2">
+      <i class="bi bi-clock-history text-info" aria-hidden="true"></i> Activity
+    </h1>
+    <a href="{{ url_for('ui.dashboard') }}" class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-arrow-left" aria-hidden="true"></i> Dashboard
+    </a>
+  </div>
+
+  {# ── Recently Added ──────────────────────────────────────────────────── #}
+  <section class="card shadow-sm mb-3" id="activityRecentSection">
+    <div class="card-header py-2 border-secondary d-flex justify-content-between align-items-center">
+      <h2 class="h6 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-music-note-beamed text-primary" aria-hidden="true"></i>
+        Recently Added
+        <span class="badge bg-secondary" id="activityRecentCount">{{ recent_albums|length }}</span>
+      </h2>
+      <small class="text-muted">Last 30 days</small>
+    </div>
+    {% if recent_albums %}
+    <div class="list-group list-group-flush" id="activityRecentList">
+      {% for al in recent_albums %}
+        {{ recent_album_row(al) }}
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="card-body text-center text-muted py-4 small">
+      <i class="bi bi-inbox fs-3 d-block mb-2"></i>
+      No albums added in the last 30 days.
+    </div>
+    {% endif %}
+  </section>
+
+  {# ── Recent Scans ────────────────────────────────────────────────────── #}
+  <section class="card shadow-sm mb-3" id="activityScansSection">
+    <div class="card-header py-2 border-secondary d-flex justify-content-between align-items-center">
+      <h2 class="h6 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-clock-history text-warning" aria-hidden="true"></i>
+        Recent Scans
+        <span class="badge bg-secondary" id="activityScansCount">...</span>
+      </h2>
+      <small class="text-muted">Latest first - one row per album</small>
+    </div>
+    <div class="card-body p-0">
+      <div id="activity-scans-body">
+        <div class="text-center py-3 text-muted small">
+          <span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>
+          Loading scan history...
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {# ── Needs Review ────────────────────────────────────────────────────── #}
+  {#
+    ⚠️ THIS SECTION ALWAYS RENDERS, unlike the dashboard's tab which hides at
+    zero. A tab that appears and disappears on a page the user opened to see
+    everything would make the page change shape as they read it, and here an
+    empty review list is a fact worth stating ("nothing needs your attention")
+    rather than a nag to suppress.
+
+    The list is a WORK QUEUE, not a log: an album leaves it on its own once its
+    review is saved or discarded, because both paths clear the stash the scan
+    wrote. Nothing here keeps "approved" bookkeeping in sync.
+  #}
+  <section class="card shadow-sm mb-3" id="activityReviewSection">
+    <div class="card-header py-2 border-secondary d-flex justify-content-between align-items-center">
+      <h2 class="h6 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-clipboard-check text-info" aria-hidden="true"></i>
+        Needs Review
+        <span class="badge bg-secondary" id="activityReviewCount">...</span>
+      </h2>
+      <small class="text-muted">Scan recommendations awaiting a decision</small>
+    </div>
+    <div class="card-body p-0">
+      <div id="activity-review-body">
+        <div class="text-center py-3 text-muted small">
+          <span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>
+          Loading recommendations...
+        </div>
+      </div>
+    </div>
+  </section>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ versioned_static('js/activity-feed.js') }}"></script>
+<script src="{{ versioned_static('js/pages/activity.js') }}"></script>
+{% endblock %}

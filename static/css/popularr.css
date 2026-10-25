@@ -62,6 +62,41 @@
     --z-navbar: 1030;
     --z-player-bar: 1029;
     --z-search-backdrop: 1028;
+
+    /* ── Tokens migrated from test_site (2026-10-26) ────────────────────────
+       The rebuilt tree consolidated these and its page stylesheets reference
+       them by name, so migrating those stylesheets without these would leave
+       every `var(--radius-card)` / `var(--status-*)` resolving to nothing —
+       i.e. square cards and colourless badges, which looks like a broken port
+       rather than a missing token.
+
+       ⚠️ `--status-warning` IS NOT redefined here: the live theme already
+       declares it above (#ff6b00, matching `.btn-warning`), and a second
+       declaration in the same block would silently win or lose depending on
+       source order. The test_site value is deliberately NOT adopted — changing
+       it would restyle existing warnings.
+       -------------------------------------------------------------------- */
+    --brand-wikipedia: #7887a0;
+
+    /* Queue/scan state, independent of any brand colour. */
+    --status-failed: #f87171;
+    --status-downloading: #60a5fa;
+    --status-queued: #facc15;
+    --status-complete: #4ade80;
+    --status-pending: #94a3b8;
+    --status-info: #3498db;
+    --status-danger: #e74c3c;
+
+    /* One corner-radius scale. Four values instead of the per-rule literals
+       that had drifted between pages (0.75 / 0.5 / 0.375 / 0.25 rem). */
+    --radius-card: 0.75rem;
+    --radius-control: 0.5rem;
+    --radius-sm: 0.25rem;
+    --radius-pill: 999px;
+
+    /* Height reserved by the mobile bottom navigation bar. 0 on desktop; the
+       media query below sets the mobile value. */
+    --bottom-nav-height: 0px;
 }
 
 /* The navbar wraps its search row below the lg breakpoint, making it

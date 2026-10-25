@@ -17,6 +17,14 @@
   <link rel="stylesheet" href="{{ versioned_static('css/popularr.css') }}">
 
   {#
+    Per-page stylesheets. Until now every page carried its own inline <style>
+    block, so a page whose rules were MISSING had no way to request them — the
+    log viewer emitted .log-line/.log-level-* and rendered monochrome because
+    nothing anywhere defined them. A child template links its own sheet here.
+  #}
+  {% block styles %}{% endblock %}
+
+  {#
     The navbar layout rules that used to live in an inline <style> block here
     now sit in popularr.css under "Navbar Layout". They were tightly coupled
     to --navbar-height (which popularr.css owns), so splitting them across two
