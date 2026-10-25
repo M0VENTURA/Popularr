@@ -910,7 +910,7 @@ def refresh_similar_artists(artist: str, options: dict[str, Any]) -> dict[str, l
                                 VALUES (:artist, :artist, :lf, :lb, :updated)
                                 ON CONFLICT (name) DO UPDATE SET
                                     similar_artists_lastfm = :lf,
-                                    similar_artists_listenz = :lb,
+                                    similar_artists_listenbrainz = :lb,
                                     similar_artists_last_updated = :updated
                             """),
                             {
@@ -1390,8 +1390,7 @@ def _lookup_musicbrainz_album_type(
             resolved = primary if primary in {"single", "ep"} else "album"
 
         return resolved, release_group_mbid
-    except Exception as exc:
-        Logger.exception("[ENRICH] MusicBrainz album-type lookup failed safely", error=_safe_error(exc), **context)
+    except Exception:
         return None, None
 
 
@@ -1445,13 +1444,7 @@ def _needs_release_mbid(artist: str, album: str) -> bool:
                 {"artist": artist, "album": album},
             ).first()
         return bool(row)
-    except Exception as exc:
-        Logger.warning(
-            "[ENRICH] release MBID requirement check failed",
-            error=_safe_error(exc),
-            artist=artist,
-            album=album,
-        )
+    except Exception:
         return True
 
 
@@ -1468,7 +1461,6 @@ def _persist_album_type_to_tracks(
 
     primary = normalize_primary_release_type(album_type)
     
-    # Allow filling empty rows OR upgrading a stale plain 'album' if album_type is rich (e.g. 'album+compilation')
     is_rich = "+" in album_type
     pending = [
         str(track.get("id"))
@@ -1478,40 +1470,35 @@ def _persist_album_type_to_tracks(
             or (is_rich and str(track.get("musicbrainz_albumtype") or "").strip().lower() == "album")
         )
     ]
-    updated = 0
     if pending:
-        with _log_section("album_type.track_persist", track_count=len(pending), **context):
-            try:
-                with db_session() as session:
-                    result = session.execute(
-                        text("""
-                            UPDATE tracks
-                            SET spotify_album_type = :album_type,
-                                releasetype = :primary,
-                                musicbrainz_albumtype = :album_type
-                            WHERE CAST(id AS TEXT) IN :track_ids
-                              AND (
-                                  COALESCE(NULLIF(TRIM(musicbrainz_albumtype), ''), '') = ''
-                                  OR (:is_rich = TRUE AND LOWER(TRIM(musicbrainz_albumtype)) = 'album')
-                              )
-                        """).bindparams(bindparam("track_ids", expanding=True)),
-                        {
-                            "album_type": album_type,
-                            "primary": primary,
-                            "track_ids": pending,
-                            "is_rich": is_rich,
-                        },
-                    )
-                    updated = result.rowcount or 0
-                
-                for track in tracks or []:
-                    if str(track.get("id")) in pending:
-                        track["spotify_album_type"] = album_type
-                        track["releasetype"] = primary
-                        track["musicbrainz_albumtype"] = album_type
-                        
-            except Exception as exc:
-                Logger.exception("[ENRICH] album type track update failed", error=_safe_error(exc), **context)
+        try:
+            with db_session() as session:
+                session.execute(
+                    text("""
+                        UPDATE tracks
+                        SET spotify_album_type = :album_type,
+                            releasetype = :primary,
+                            musicbrainz_albumtype = :album_type
+                        WHERE CAST(id AS TEXT) IN :track_ids
+                          AND (
+                              COALESCE(NULLIF(TRIM(musicbrainz_albumtype), ''), '') = ''
+                              OR (:is_rich = TRUE AND LOWER(TRIM(musicbrainz_albumtype)) = 'album')
+                          )
+                    """).bindparams(bindparam("track_ids", expanding=True)),
+                    {
+                        "album_type": album_type,
+                        "primary": primary,
+                        "track_ids": pending,
+                        "is_rich": is_rich,
+                    },
+                )
+            for track in tracks or []:
+                if str(track.get("id")) in pending:
+                    track["spotify_album_type"] = album_type
+                    track["releasetype"] = primary
+                    track["musicbrainz_albumtype"] = album_type
+        except Exception:
+            pass
 
     if release_group_mbid:
         try:
@@ -1529,8 +1516,8 @@ def _persist_album_type_to_tracks(
             for track in tracks or []:
                 if not track.get("musicbrainz_releasegroupid"):
                     track["musicbrainz_releasegroupid"] = release_group_mbid
-        except Exception as exc:
-            Logger.exception("[ENRICH] release-group MBID propagation failed", error=_safe_error(exc), **context)
+        except Exception:
+            pass
 
     if _needs_release_mbid(artist, album):
         release_mbid = ""
@@ -1559,8 +1546,8 @@ def _persist_album_type_to_tracks(
                     if not track.get("musicbrainz_album_mbid"):
                         track["musicbrainz_album_mbid"] = release_mbid
                         track["musicbrainz_albumid"] = release_mbid
-            except Exception as exc:
-                Logger.exception("[ENRICH] release MBID propagation failed", error=_safe_error(exc), **context)
+            except Exception:
+                pass
 
 
 def _resolve_album_release_mbid(artist: str, album: str) -> str:
@@ -2043,9 +2030,6 @@ def _run_full_enrichment(
     album_artist: str | None = None,
     release_group_mbid: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, list[Any]]]:
-    start = time.monotonic()
-    context = {"artist": artist, "album": album, "detected_type": detected_type}
-    
     art_source = _fetch_album_art_with_fallback(artist, album, discogs_token)
     metadata = _read_artist_metadata(artist)
     _fetch_artist_lastfm_tags(artist)
@@ -2197,6 +2181,102 @@ def enrich_album_extras(
     return extra_context, similar, metadata
 
 
+def revert_track_live_state(track_id: str) -> bool:
+    """Undo live/acoustic tagging for one track. Returns True when it changed something."""
+    context = {"track_id": str(track_id)}
+    try:
+        with db_session() as session:
+            row = session.execute(
+                text(
+                    "SELECT title, file_path, genres, musicbrainz_genres, "
+                    "COALESCE(is_live, 0) AS is_live, "
+                    "COALESCE(is_acoustic, 0) AS is_acoustic, "
+                    "COALESCE(album_context_live, 0) AS album_context_live "
+                    "FROM tracks WHERE CAST(id AS TEXT) = :track_id"
+                ),
+                {"track_id": str(track_id)},
+            ).mappings().first()
+            if not row:
+                return False
+
+            old_title = str(row_get(row, "title") or "")
+            new_title = strip_live_acoustic_suffix(old_title)
+            new_mb = _drop_live_genres_from_json(row_get(row, "musicbrainz_genres"))
+            new_genres = _drop_live_genres_from_csv(row_get(row, "genres"))
+            flags_set = bool(
+                row_get(row, "is_live")
+                or row_get(row, "is_acoustic")
+                or row_get(row, "album_context_live")
+            )
+
+            if (
+                new_title == old_title
+                and new_mb is None
+                and new_genres is None
+                and not flags_set
+            ):
+                return False
+
+            session.execute(
+                text("""
+                    UPDATE tracks
+                    SET title = :title,
+                        is_live = 0,
+                        is_acoustic = 0,
+                        album_context_live = 0,
+                        musicbrainz_genres = COALESCE(CAST(:mb AS JSONB), musicbrainz_genres),
+                        genres = COALESCE(:genres, genres)
+                    WHERE CAST(id AS TEXT) = :track_id
+                """),
+                {
+                    "track_id": str(track_id),
+                    "title": new_title or old_title,
+                    "mb": new_mb,
+                    "genres": new_genres,
+                },
+            )
+            file_path = row_get(row, "file_path")
+
+        if new_title != old_title and file_path:
+            try:
+                from services.metadata.tag_file_service import update_file_tags
+                resolved = str(file_path)
+                if not os.path.isabs(resolved):
+                    from helpers.config_helpers import get_config
+                    music_root = (
+                        (get_config().get("music", {}) or {}).get("root")
+                        or os.environ.get("MUSIC_ROOT", "/music")
+                    )
+                    resolved = os.path.join(music_root, resolved)
+                if os.path.exists(resolved):
+                    tags: dict[str, Any] = {"title": new_title or old_title}
+                    if new_genres is not None:
+                        tags["genres"] = [value.strip() for value in new_genres.split(",") if value.strip()]
+                    update_file_tags(resolved, tags)
+            except Exception:
+                pass
+
+        return True
+    except Exception:
+        return False
+
+
+def _drop_live_genres_from_json(raw: Any) -> str | None:
+    if not raw:
+        return None
+    parsed = _json_list(raw)
+    kept = [value for value in parsed if str(value).strip().casefold() not in {"live", "acoustic"}]
+    return json.dumps(kept, ensure_ascii=False) if kept != parsed else None
+
+
+def _drop_live_genres_from_csv(raw: Any) -> str | None:
+    if not raw:
+        return None
+    parts = [value.strip() for value in str(raw).split(",") if value.strip()]
+    kept = [value for value in parts if value.casefold() not in {"live", "acoustic"}]
+    return ", ".join(kept) if kept != parts else None
+
+
 def enrich_album(
     *,
     album_row: dict[str, Any],
@@ -2286,7 +2366,7 @@ def enrich_album(
                     artist, album, album_context, album_tracks, detected_type, options, discogs_token,
                     album_artist=album_artist or None, release_group_mbid=release_group_mbid
                 )
-        except Exception as exc:
-            Logger.exception("[ENRICH] album scan failed", error=_safe_error(exc), **context)
+        except Exception:
+            pass
 
         return _result(detected_type, is_heterogeneous)
