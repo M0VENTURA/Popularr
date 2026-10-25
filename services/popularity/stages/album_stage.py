@@ -710,6 +710,141 @@ def _fetch_album_art_with_fallback(
     return None
 
 
+def _fetch_artist_metadata(artist: str) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "country": None, "bio": None, "image_url": None,
+        "members": None, "members_last_updated": None,
+    }
+    context = {"artist": artist}
+
+    with _log_section("artist_metadata.database_read", **context):
+        with db_session() as session:
+            existing = session.execute(
+                text(
+                    "SELECT country, bio, image_url, members, members_last_updated "
+                    "FROM artists WHERE name = :artist"
+                ),
+                {"artist": artist},
+            ).mappings().first()
+        if existing:
+            result.update(
+                country=existing.get("country") or None,
+                bio=existing.get("bio") or None,
+                image_url=existing.get("image_url") or None,
+                members=existing.get("members") or None,
+                members_last_updated=existing.get("members_last_updated") or None,
+            )
+
+    if result["bio"]:
+        Logger.info("[ENRICH] artist biography lookup skipped", reason="already cached", **context)
+    else:
+        try:
+            bio = _call_with_heartbeat(
+                "artist_metadata.biography",
+                get_artist_biography,
+                artist,
+                log_context=context,
+            )
+            result["bio"] = str(bio) if bio else None
+        except Exception as exc:
+            Logger.warning("[ENRICH] biography lookup failed", error=_safe_error(exc), **context)
+
+    if result["country"]:
+        Logger.info("[ENRICH] artist country lookup skipped", reason="already cached", **context)
+    else:
+        try:
+            mb_client = get_shared_mb_client()
+            country = _call_with_heartbeat(
+                "artist_metadata.country",
+                mb_client.get_artist_country,
+                artist,
+                log_context=context,
+            )
+            result["country"] = str(country) if country else None
+        except Exception as exc:
+            Logger.warning("[ENRICH] country lookup failed", error=_safe_error(exc), **context)
+
+    if result["image_url"]:
+        Logger.info("[ENRICH] artist image lookup skipped", reason="already cached", **context)
+    else:
+        try:
+            from api_clients.audiodb import get_artist_fanart
+            image = _call_with_heartbeat(
+                "artist_metadata.image",
+                get_artist_fanart,
+                artist,
+                enabled=True,
+                log_context=context,
+            )
+            result["image_url"] = str(image) if image else None
+        except Exception as exc:
+            Logger.warning("[ENRICH] artist image lookup failed", error=_safe_error(exc), **context)
+
+    _members_fresh = False
+    if result.get("members") and result.get("members_last_updated"):
+        try:
+            _updated = datetime.fromisoformat(
+                str(result["members_last_updated"]).replace("Z", "+00:00")
+            )
+            if _updated.tzinfo is None:
+                _updated = _updated.replace(tzinfo=timezone.utc)
+            _members_fresh = (datetime.now(timezone.utc) - _updated) < timedelta(
+                days=max(1, _ARTIST_MEMBERS_TTL_DAYS)
+            )
+        except Exception:
+            _members_fresh = False
+
+    if _members_fresh:
+        Logger.info("[ENRICH] artist members lookup skipped", reason="fresh cache", **context)
+    else:
+        try:
+            members = _call_with_heartbeat(
+                "artist_metadata.members",
+                _lookup_artist_members,
+                artist,
+                get_shared_mb_client(),
+                log_context=context,
+            )
+            if members:
+                result["members"] = json.dumps(members, ensure_ascii=False)
+                result["members_last_updated"] = datetime.now(timezone.utc).isoformat()
+            else:
+                Logger.info("[ENRICH] artist members lookup returned nothing", **context)
+        except Exception as exc:
+            Logger.warning("[ENRICH] artist members lookup failed", error=_safe_error(exc), **context)
+
+    if not any(result.values()):
+        Logger.info("[ENRICH] artist metadata persistence skipped", reason="no values resolved", **context)
+    else:
+        try:
+            with _log_section("artist_metadata.database_write", **context):
+                with db_session() as session:
+                    session.execute(
+                        text("""
+                            INSERT INTO artists (id, name, country, bio, image_url, members, members_last_updated)
+                            VALUES (:artist, :artist, :country, :bio, :image_url, :members, :members_last_updated)
+                            ON CONFLICT (name) DO UPDATE SET
+                                country = COALESCE(excluded.country, artists.country),
+                                bio = COALESCE(excluded.bio, artists.bio),
+                                image_url = COALESCE(excluded.image_url, artists.image_url),
+                                members = COALESCE(excluded.members, artists.members),
+                                members_last_updated = COALESCE(excluded.members_last_updated, artists.members_last_updated)
+                        """),
+                        {"artist": artist, **result},
+                    )
+        except Exception as exc:
+            Logger.warning("[ENRICH] artist metadata persistence failed", error=_safe_error(exc), **context)
+
+    Logger.info(
+        "[ENRICH] artist metadata result",
+        country=result["country"],
+        has_bio=bool(result["bio"]),
+        has_image=bool(result["image_url"]),
+        **context,
+    )
+    return result
+
+
 def _read_artist_metadata(artist: str) -> dict[str, Any]:
     result: dict[str, Any] = {
         "country": None, "bio": None, "image_url": None,
@@ -1997,6 +2132,7 @@ def _correct_soundtrack_album_artist(
                 
         from services.metadata.tag_file_service import update_file_tags
         from helpers.config_helpers import get_config
+        import os
         
         music_root = ((get_config().get("music", {}) or {}).get("root") or os.environ.get("MUSIC_ROOT", "/music"))
         
