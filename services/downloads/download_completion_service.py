@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata as _ud
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -52,6 +53,7 @@ from helpers.normalization_service import normalize_string, queue_duration_secon
 logger = structlog.get_logger(__name__)
 
 _MUSIC_ROOT = os.environ.get("MUSIC_ROOT", "/music")
+_AUDIO_EXTENSIONS = (".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac", ".wma", ".opus")
 
 
 def _length_tolerance_seconds() -> float:
@@ -90,7 +92,7 @@ def _refresh_downloading_item(queue_id: int) -> dict[str, Any] | None:
 
 
 # =============================================================================
-# TRANSFER KEY NORMALISATION
+# TRANSFER KEY NORMALISATION & DIRECTORY ROOTS
 # =============================================================================
 
 def _normalize_transfer_key(value: str) -> Optional[str]:
@@ -124,14 +126,7 @@ def _record_rejected_for_row(
     filename: Any,
     reason: str = "",
 ) -> None:
-    """Remember this candidate as rejected FOR THIS QUEUE ROW.
-
-    The peer block below is global and lives in the pipeline; this record is
-    per row and survives restarts, so the next search for the row skips the
-    exact file that already failed. The log shows why it is needed: queue row
-    6667 downloaded, rejected and deleted the same file from the same peer
-    about 20 times while the block was logged every time.
-    """
+    """Remember this candidate as rejected FOR THIS QUEUE ROW."""
     if not queue_id or not (username or filename):
         return
     try:
@@ -152,11 +147,7 @@ def _remember_failed_peer(
     queue_id: Any = None,
     reason: str = "",
 ) -> None:
-    """Persist peer block into the DB/pipeline blocklist so it isn't retried.
-
-    With a ``queue_id`` the exact candidate is also recorded on the row, so a
-    peer that rejected or stalled THIS file is not chosen for it again.
-    """
+    """Persist peer block into the DB/pipeline blocklist so it isn't retried."""
     try:
         from services.downloads.download_pipeline_service import _block_peer
         _block_peer(transfer.get("username"), transfer.get("filename"))
@@ -176,11 +167,76 @@ def _monitored_downloads_dir() -> str:
         return "?"
 
 
-#: ⚠️ ONE look, no sleeping. This used to poll 3 × 10 s for EVERY transfer
-#: slskd reported as succeeded but whose file was not visible yet — inside the
-#: queue cycle lock, so a handful of slow landings froze the whole queue for
-#: minutes. The completion check runs again next cycle anyway, and
-#: ``_SLSKD_SUCCEEDED_NOT_FOUND_MAX_CYCLES`` already gives the file its grace.
+def _resolve_walk_roots(downloads_dir: str) -> set[str]:
+    """Return the set of valid download/torrent root directories to scan."""
+    roots: set[str] = set()
+    if downloads_dir and downloads_dir != "?" and os.path.isdir(downloads_dir):
+        roots.add(downloads_dir)
+        try:
+            from services.downloads.download_scan_service import resolve_torrents_dir
+            t_dir = resolve_torrents_dir()
+            if t_dir and os.path.isdir(t_dir):
+                roots.add(t_dir)
+        except Exception:
+            pass
+        _parent = os.path.dirname(os.path.normpath(downloads_dir))
+        for _cand in ("torrents", "Torrents", "TORRENTS"):
+            _sibling = os.path.join(_parent, _cand)
+            if os.path.isdir(_sibling):
+                roots.add(_sibling)
+    return roots
+
+
+def _allowed_delete_roots() -> set[str]:
+    """Return resolved realpaths of directories where mismatched file deletion is permitted."""
+    monitored = _monitored_downloads_dir()
+    roots = _resolve_walk_roots(monitored)
+    try:
+        from services.infrastructure.filesystem_service import resolve_original_archive_dir
+        archive_dir = resolve_original_archive_dir()
+        if archive_dir and os.path.isdir(archive_dir):
+            roots.add(archive_dir)
+    except Exception:
+        pass
+    return {os.path.realpath(r) for r in roots if r and r != "?"}
+
+
+def _is_safe_to_delete(file_path: str) -> bool:
+    """Ensure ``file_path`` is a regular file strictly inside an allowed download root.
+
+    Prevents path traversal attacks (e.g. ``../../etc/passwd``) or accidental
+    deletion of library files in ``_MUSIC_ROOT``.
+    """
+    if not file_path:
+        return False
+    try:
+        real_target = os.path.realpath(file_path)
+        if not os.path.isfile(real_target):
+            return False
+
+        # Never allow deleting anything inside _MUSIC_ROOT
+        if _MUSIC_ROOT:
+            real_music = os.path.realpath(_MUSIC_ROOT)
+            try:
+                if os.path.commonpath([real_target, real_music]) == real_music:
+                    return False
+            except ValueError:
+                pass
+
+        for allowed_root in _allowed_delete_roots():
+            try:
+                if (
+                    os.path.commonpath([real_target, allowed_root]) == allowed_root
+                    and real_target != allowed_root
+                ):
+                    return True
+            except ValueError:
+                continue
+    except Exception:
+        return False
+    return False
+
+
 _FILE_ARRIVAL_POLLS = 1
 _FILE_ARRIVAL_POLL_SECONDS = 0
 
@@ -192,7 +248,7 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
     candidates = []
     _found = str(found_filename or "").replace("\\", "/").strip()
     base = os.path.basename(_found)
-    
+
     if monitored and monitored != "?":
         if base:
             candidates.append(os.path.join(monitored, base))
@@ -200,7 +256,7 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
             candidates.append(os.path.join(monitored, _found))
     if local_file_path:
         candidates.append(str(local_file_path).replace("\\", "/"))
-        
+
     try:
         from services.infrastructure.filesystem_service import resolve_original_archive_dir
         _archive_root = resolve_original_archive_dir()
@@ -212,8 +268,6 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
     except Exception:
         pass
 
-    import unicodedata as _ud
-
     def _norm_key(name: str) -> str:
         n = _ud.normalize("NFC", name)
         stripped = _ud.normalize("NFKD", n)
@@ -223,28 +277,15 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
     _base_key = _norm_key(base)
     _base_punct = _punctuation_stripped_key(base)
     _base_pfx = _track_prefix_stripped_key(base)
-    search_roots: set[str] = set()
-    if monitored and os.path.isdir(monitored) and monitored != "?":
-        search_roots.add(monitored)
-        try:
-            from services.downloads.download_scan_service import resolve_torrents_dir
-            search_roots.add(resolve_torrents_dir())
-        except Exception:
-            pass
-        _parent = os.path.dirname(os.path.normpath(monitored))
-        for _cand in ("torrents", "Torrents", "TORRENTS"):
-            _sibling = os.path.join(_parent, _cand)
-            if os.path.isdir(_sibling):
-                search_roots.add(_sibling)
+    search_roots = _resolve_walk_roots(monitored)
 
     if search_roots and base:
         _DEPTH_LIMIT = 8
         for _root_dir in search_roots:
             try:
-                _depth_limit = _DEPTH_LIMIT
                 for _root, _dirs, _files in os.walk(_root_dir):
                     _rel_depth = _root.count(os.sep) - _root_dir.count(os.sep)
-                    if _rel_depth >= _depth_limit:
+                    if _rel_depth >= _DEPTH_LIMIT:
                         _dirs[:] = []
                         continue
                     _dirs[:] = [
@@ -280,7 +321,6 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
 
 def _accent_stripped_key(name: str) -> str:
     try:
-        import unicodedata as _ud
         nfc = _ud.normalize("NFC", str(name or ""))
         stripped = "".join(c for c in _ud.normalize("NFKD", nfc) if not _ud.combining(c))
         return stripped.lower().strip()
@@ -290,7 +330,6 @@ def _accent_stripped_key(name: str) -> str:
 
 def _punctuation_stripped_key(name: str) -> str:
     try:
-        import unicodedata as _ud
         nfc = _ud.normalize("NFC", str(name or ""))
         stripped = "".join(c for c in _ud.normalize("NFKD", nfc) if not _ud.combining(c))
         return "".join(c for c in stripped.lower() if c.isalnum())
@@ -306,13 +345,11 @@ def _basename_without_track_prefix(name: str) -> str:
         base = str(name or "").strip()
     except Exception:
         return str(name or "")
-    base = _TRACK_NUM_PREFIX_RE.sub("", base)
-    return base
+    return _TRACK_NUM_PREFIX_RE.sub("", base)
 
 
 def _track_prefix_stripped_key(name: str) -> str:
     try:
-        import unicodedata as _ud
         stripped = _basename_without_track_prefix(name)
         nfc = _ud.normalize("NFC", stripped)
         stripped = "".join(c for c in _ud.normalize("NFKD", nfc) if not _ud.combining(c))
@@ -331,10 +368,7 @@ def _bump_cycle_counter(counter: dict[int, int], queue_id: int) -> int:
 
 
 def _clear_cycle_counter(counter: dict[int, int], queue_id: int) -> None:
-    try:
-        counter.pop(int(queue_id), None)
-    except Exception:
-        pass
+    counter.pop(int(queue_id), None)
 
 
 def _is_stale_queue_item(
@@ -358,7 +392,7 @@ def _is_stale_queue_item(
 
 
 # =============================================================================
-# FILE MATCHING
+# FILE MATCHING & INDEXING
 # =============================================================================
 
 def _build_download_index(fs_files: list[dict[str, Any]]) -> dict[str, Any]:
@@ -429,9 +463,7 @@ def _fuzzy_candidates(
         for f in punct_index.get(title_key, []):
             seen.setdefault(f["full_path"], f)
 
-    if seen:
-        return list(seen.values())
-    return []
+    return list(seen.values()) if seen else []
 
 
 def _file_matches_queue_item(
@@ -487,7 +519,6 @@ def _matching_file_exists_unconfirmed(
     downloads_dir: str,
 ) -> Optional[str]:
     try:
-        from helpers.normalization_service import normalize_artist
         from services.queue.queue_scoring import (
             _tokenize_meaningful,
             normalize_core_title,
@@ -498,7 +529,7 @@ def _matching_file_exists_unconfirmed(
     item_title = normalize_core_title(item.get("title") or "")
     if not item_title:
         return None
-        
+
     title_tokens = set(_tokenize_meaningful(item_title))
     if not title_tokens:
         return None
@@ -596,7 +627,7 @@ def _queue_row_references_file(local_path: str, downloads_dir: str) -> bool:
             norm = _normalize_transfer_key(str(p))
             if norm:
                 variants.add(norm)
-                
+
         base = os.path.basename(str(local_path))
         if downloads_dir:
             try:
@@ -608,11 +639,11 @@ def _queue_row_references_file(local_path: str, downloads_dir: str) -> bool:
                     variants.add(rel_norm)
             except Exception:
                 pass
-                
+
         variants = {v for v in variants if v}
         if not variants:
             return False
-            
+
         with db_session() as session:
             for v in variants:
                 if session.execute(
@@ -631,10 +662,18 @@ def _queue_row_references_file(local_path: str, downloads_dir: str) -> bool:
 
 
 def _delete_mismatched_download(file_path: str, queue_id: int, reason: str) -> None:
+    """Safely delete a mismatched file only if it resides within allowed download roots."""
     try:
-        if os.path.isfile(file_path):
-            os.remove(file_path)
-            logger.warning("Deleted mismatched download", queue_id=queue_id, path=file_path, reason=reason)
+        if not _is_safe_to_delete(file_path):
+            logger.warning(
+                "Refused to delete file outside allowed download roots",
+                queue_id=queue_id,
+                path=file_path,
+                reason=reason,
+            )
+            return
+        os.remove(os.path.realpath(file_path))
+        logger.warning("Deleted mismatched download", queue_id=queue_id, path=file_path, reason=reason)
     except Exception as exc:
         logger.warning("Could not delete mismatched file", queue_id=queue_id, path=file_path, error=str(exc))
 
@@ -747,14 +786,7 @@ def _block_peer_for_queue_item(
     found_filename: str | None = None,
     reason: str = "rejected download",
 ) -> None:
-    """Block the peer that served a rejected file, and record the candidate on the row.
-
-    The peer is looked up in slskd's completed transfers. The candidate is
-    recorded on the queue row EVEN WHEN that lookup fails (slskd unreachable,
-    or the transfer already removed): the old version returned early in those
-    cases, so nothing at all stopped the next search choosing the same file.
-    Without a username the record matches that filename from ANY peer.
-    """
+    """Block the peer that served a rejected file, and record the candidate on the row."""
     _remote = str(found_filename or "").replace("\\", "/").strip()
     _blocked_user = ""
     try:
@@ -815,14 +847,6 @@ def _extract_duration_seconds(file_path: str) -> Optional[int]:
 # MOVE / IMPORT
 # =============================================================================
 
-#: The album-scoped release columns a download import carries and applies.
-#: Every name here must be a real ``tracks`` COLUMN — the list builds the
-#: sibling-inheritance ``SELECT``, so a non-column breaks that query.
-#: ``release_title`` (the edition, "Release Name") and ``release_year`` (this
-#: edition's year) were the two missing ones: the release payload has carried
-#: both since ``_flatten_release``, but the download path dropped them, so a
-#: downloaded album arrived with no edition name/year while the album page's
-#: Lookup MBID proposed both.
 _ALBUM_LEVEL_COLUMNS: tuple[str, ...] = (
     "musicbrainz_albumtype",
     "musicbrainz_albumstatus",
@@ -846,12 +870,6 @@ _SOURCE_MAP_LOGGED_KEY = "_album_source_map_logged"
 
 
 def _album_level_mb_fields(release: dict[str, Any]) -> dict[str, Any]:
-    """Album-scoped release fields, read off a flattened MB release.
-
-    One mapping for every path that imports a release (queue time,
-    post-download, folder match, heal), so a field missing here is missing
-    everywhere.
-    """
     out: dict[str, Any] = {}
     mapping = {
         "musicbrainz_albumtype": release.get("album_type"),
@@ -862,8 +880,6 @@ def _album_level_mb_fields(release: dict[str, Any]) -> dict[str, Any]:
         "originalyear": release.get("original_year"),
         "originaldate": release.get("original_date"),
         "releasedate": release.get("releasedate"),
-        # The SPECIFIC edition name/year. The release GROUP's name is the
-        # album's own identity (``album``), so these say WHICH pressing is held.
         "release_title": (
             release.get("specific_release_title")
             or release.get("release_title")
@@ -883,9 +899,6 @@ def _album_level_mb_fields(release: dict[str, Any]) -> dict[str, Any]:
         if value is not None and str(value).strip() != "":
             out[column] = value
 
-    # The ALBUM's MusicBrainz genres travel alongside, NOT as a ``tracks``
-    # column — ``_ALBUM_LEVEL_COLUMNS`` is used to build a SELECT, so a
-    # non-column there would break that query.
     _genres = _album_level_genres(release)
     if _genres:
         out["musicbrainz_album_genres"] = _genres
@@ -893,13 +906,6 @@ def _album_level_mb_fields(release: dict[str, Any]) -> dict[str, Any]:
 
 
 def _album_level_genres(release: dict[str, Any]) -> str:
-    """The ALBUM's MusicBrainz genres: release GROUP then the RELEASE.
-
-    Not the per-recording list — that travels per track and was already
-    imported. This is a FILL for tracks with no genre evidence of their own,
-    so the per-track affiliation markers are stripped: a "Cover" here would be
-    stamped on every track of the album.
-    """
     from services.enrichment.genre_aggregation_service import (
         strip_track_affiliation_tags,
     )
@@ -1297,15 +1303,6 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
     except Exception as _stored_exc:
         logger.debug("Stored MB metadata parse failed", queue_id=item.get("id"), error=str(_stored_exc))
 
-    # ── Album-level MusicBrainz genres: a FILL for this track's ``genres`` ──
-    # The release GROUP's and RELEASE's curated genres. Applied ONLY when the
-    # track has NO genre evidence of its own — the album list is an aggregate
-    # of exactly those sources, so writing it back would flatten the track to
-    # the album blend.
-    #
-    # ⚠️ DATABASE ONLY, like the album page's own genre fill. The file's genre
-    # tag belongs to the popularity/finalise scan's DB → file sync; writing it
-    # here would make the import a second genre writer.
     _album_genre_fill = ""
     if isinstance(_stored, dict) and not str(
         _stored.get("musicbrainz_genres") or ""
@@ -1567,7 +1564,7 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
             except Exception as exc:
                 _reset_to_downloading(f"status update failed: {exc}")
                 return {"success": False, "error": str(exc)}
-                
+
             return {"success": True, "target_path": target_path}
 
         try:
@@ -1791,6 +1788,518 @@ def _reconcile_transfer_state(
 
 
 # =============================================================================
+# MODULAR HELPERS FOR check_completed_downloads (ISSUE #6)
+# =============================================================================
+
+def _collect_slskd_completed_map(slskd: Any, downloads_dir: str) -> dict[str, str]:
+    """Build a lookup map of normalized remote/local keys -> resolved on-disk path."""
+    slskd_completed: dict[str, str] = {}
+    if slskd is None:
+        return slskd_completed
+
+    search_roots = _resolve_walk_roots(downloads_dir)
+    try:
+        for transfer in slskd.get_completed_transfers():
+            local = str(transfer.get("localFilePath") or "").replace("\\", "/").strip()
+            remote = str(transfer.get("filename") or "").replace("\\", "/").strip()
+            remote_norm = _normalize_transfer_key(remote)
+            resolved_local = local
+
+            if (not resolved_local or not os.path.isfile(resolved_local)) and downloads_dir and remote_norm:
+                _candidate = os.path.join(downloads_dir, remote)
+                if os.path.isfile(_candidate):
+                    resolved_local = _candidate
+                else:
+                    _cand_base = os.path.basename(remote_norm)
+                    if _cand_base:
+                        _base_key = _ud.normalize("NFC", _cand_base).lower()
+                        _base_punct = _punctuation_stripped_key(_cand_base)
+                        _base_pfx = _track_prefix_stripped_key(_cand_base)
+                        for _sr in search_roots:
+                            for _root, _dirs, _files in os.walk(_sr):
+                                _dirs[:] = [
+                                    d for d in _dirs
+                                    if not d.startswith(".") and not d.startswith("__")
+                                    and d.lower() != "original"
+                                ]
+                                for _fname in _files:
+                                    _fn_key = _ud.normalize("NFC", _fname).lower()
+                                    if (
+                                        _fn_key == _base_key
+                                        or (_base_punct and _punctuation_stripped_key(_fname) == _base_punct)
+                                        or (_base_pfx and _track_prefix_stripped_key(_fname) == _base_pfx)
+                                    ):
+                                        resolved_local = os.path.join(_root, _fname)
+                                        break
+                                if resolved_local and os.path.isfile(resolved_local):
+                                    break
+
+            if resolved_local and os.path.isfile(resolved_local):
+                if remote_norm:
+                    slskd_completed[remote_norm] = resolved_local
+                    slskd_completed[os.path.basename(remote_norm)] = resolved_local
+                slskd_completed[os.path.basename(resolved_local).lower()] = resolved_local
+    except Exception:
+        pass
+
+    return slskd_completed
+
+
+def _scan_download_filesystem(downloads_dir: str) -> list[dict[str, Any]]:
+    """Walk all download/torrent directories and return discovered audio file records."""
+    fs_files: list[dict[str, Any]] = []
+    if not downloads_dir or not os.path.isdir(downloads_dir):
+        return fs_files
+
+    try:
+        from services.infrastructure.filesystem_service import (
+            _original_archive_subfolder_name,
+            resolve_original_archive_dir,
+        )
+        _archive_dir = resolve_original_archive_dir()
+        _archive_name = _original_archive_subfolder_name()
+        _walk_roots = _resolve_walk_roots(downloads_dir)
+
+        seen_paths: set[str] = set()
+        for _walk_root in _walk_roots:
+            for root, dirs, files in os.walk(_walk_root):
+                dirs[:] = [
+                    d for d in dirs
+                    if d != _archive_name
+                    and os.path.normpath(os.path.join(root, d)) != _archive_dir
+                    and not d.startswith(".")
+                    and not d.startswith("__")
+                    and d.lower() != "original"
+                ]
+                for filename in sorted(files):
+                    ext = os.path.splitext(filename)[1].lower()
+                    if ext not in _AUDIO_EXTENSIONS:
+                        continue
+                    full_path = os.path.join(root, filename)
+                    if full_path in seen_paths:
+                        continue
+                    seen_paths.add(full_path)
+                    fs_files.append({
+                        "full_path": full_path,
+                        "rel_path": os.path.relpath(full_path, downloads_dir),
+                    })
+    except Exception:
+        pass
+
+    return fs_files
+
+
+def _load_claimed_files() -> set[str]:
+    """Load filenames already claimed by imported/moving queue items."""
+    claimed_files: set[str] = set()
+    try:
+        with db_session() as session:
+            rows = session.execute(text("""
+                SELECT found_filename FROM download_queue
+                WHERE found_filename IS NOT NULL
+                  AND found_filename <> ''
+                  AND status NOT IN ('downloading', 'queued', 'failed', 'searching')
+            """)).fetchall() or []
+        for row in rows:
+            fn = (row[0] or "") if not hasattr(row, "_mapping") else (row._mapping.get("found_filename") or "")
+            if fn:
+                norm = _normalize_transfer_key(fn)
+                if norm:
+                    claimed_files.add(norm)
+                    claimed_files.add(os.path.basename(norm))
+    except Exception:
+        pass
+    return claimed_files
+
+
+def _try_match_slskd_completed(
+    item: dict[str, Any],
+    found_fn: str,
+    slskd_completed: dict[str, str],
+    claimed_files: set[str],
+    downloads_dir: str,
+) -> tuple[str, str | None, str | None, str]:
+    """Stage 1: Match against slskd's completed transfers API.
+
+    Returns ``(status, match_found, abs_path, match_source)`` where status is
+    ``'matched'``, ``'failed'``, or ``'none'``.
+    """
+    if not found_fn:
+        return "none", None, None, ""
+
+    found_norm = _normalize_transfer_key(found_fn)
+    abs_path = (
+        slskd_completed.get(found_norm)
+        or slskd_completed.get(os.path.basename(found_norm))
+    ) if found_norm else None
+
+    if not abs_path:
+        return "none", None, None, ""
+
+    abs_path = str(abs_path).replace("\\", "/")
+    if not os.path.isfile(abs_path) or _is_file_claimed(abs_path, claimed_files, downloads_dir):
+        return "none", None, None, ""
+
+    try:
+        _artist_ok = _file_artist_matches_queue_item(abs_path, item)
+    except Exception:
+        _artist_ok = None
+
+    if _artist_ok is False:
+        return "none", None, None, ""
+
+    queue_id = item.get("id")
+    _discard_detail: dict[str, Any] = {}
+    is_match, match_source = _file_matches_queue_item(abs_path, item, detail=_discard_detail)
+    if is_match:
+        match_found = os.path.relpath(abs_path, downloads_dir)
+        _claim_file(abs_path, claimed_files, downloads_dir)
+        return "matched", match_found, abs_path, match_source
+
+    from db.repositories.queue import mark_failed
+    _delete_mismatched_download(abs_path, queue_id, f"rejected ({match_source})")
+    _block_peer_for_queue_item(queue_id, found_fn)
+    _record_discarded_download(
+        item=item,
+        queue_id=queue_id,
+        detail=_discard_detail,
+        match_source=match_source,
+        filename=found_fn,
+    )
+    mark_failed(queue_id, _queue_reject_failure_reason(match_source))
+    return "failed", None, None, match_source
+
+
+def _try_match_exact_candidates(
+    item: dict[str, Any],
+    found_fn: str,
+    fs_index: dict[str, Any],
+    claimed_files: set[str],
+    downloads_dir: str,
+) -> tuple[str, str | None, str | None, str]:
+    """Stages 2 & 3: Exact relative path, basename, or stripped-basename match.
+
+    Note: Preserves original fallback behavior where a rejected exact filename
+    marks the item failed and still allows the caller to fall through to fuzzy
+    matching if needed, or returns ``'matched'`` on success.
+    """
+    if not found_fn:
+        return "none", None, None, ""
+
+    found_norm = _normalize_transfer_key(found_fn)
+    found_basename = os.path.basename(found_norm) if found_norm else None
+    exact_candidates: list[dict[str, Any]] = []
+
+    if found_norm:
+        hit = fs_index["by_rel_norm"].get(found_norm)
+        if hit:
+            exact_candidates.append(hit)
+    if found_basename:
+        exact_candidates.extend(fs_index["by_basename"].get(found_basename.lower(), []))
+        _stripped = _accent_stripped_key(found_basename)
+        if _stripped and _stripped != found_basename.lower():
+            exact_candidates.extend(fs_index["by_basename"].get(_stripped, []))
+        _punct = _punctuation_stripped_key(found_basename)
+        if _punct:
+            exact_candidates.extend(fs_index["by_punct"].get(_punct, []))
+
+    queue_id = item.get("id")
+    seen_paths: set[str] = set()
+    for f in exact_candidates:
+        candidate = f["full_path"]
+        if candidate in seen_paths:
+            continue
+        seen_paths.add(candidate)
+        rel = f["rel_path"].replace("\\", "/")
+        if _is_file_claimed(candidate, claimed_files, downloads_dir):
+            continue
+        try:
+            _artist_ok = _file_artist_matches_queue_item(candidate, item)
+        except Exception:
+            _artist_ok = None
+        if _artist_ok is False:
+            continue
+
+        _discard_detail: dict[str, Any] = {}
+        is_match, match_source = _file_matches_queue_item(
+            candidate, item, rel, detail=_discard_detail
+        )
+        if not is_match:
+            from db.repositories.queue import mark_failed
+            _delete_mismatched_download(candidate, queue_id, f"rejected for exact filename match ({match_source})")
+            _block_peer_for_queue_item(queue_id, found_fn)
+            _record_discarded_download(
+                item=item,
+                queue_id=queue_id,
+                detail=_discard_detail,
+                match_source=match_source,
+                filename=rel,
+            )
+            mark_failed(queue_id, _queue_reject_failure_reason(match_source))
+            return "rejected_exact", None, None, match_source
+
+        _claim_file(candidate, claimed_files, downloads_dir)
+        return "matched", f["rel_path"], candidate, match_source
+
+    return "none", None, None, ""
+
+
+def _try_match_fuzzy_candidates(
+    item: dict[str, Any],
+    found_fn: str,
+    fs_index: dict[str, Any],
+    fs_files: list[dict[str, Any]],
+    claimed_files: set[str],
+) -> tuple[str, str | None, str | None, str]:
+    """Stage 4: Fuzzy token/punctuation candidate scoring and metadata verification."""
+    queue_id = item.get("id")
+    _expected_bases: set[str] = set()
+    if found_fn:
+        _fb = os.path.basename(found_fn)
+        if _fb:
+            _expected_bases.add(_fb.lower())
+            _expected_bases.add(_fb)
+
+    from db.repositories.queue import mark_failed
+
+    for f in _fuzzy_candidates(fs_index, item, fs_files):
+        rel = f["rel_path"].replace("\\", "/")
+        fn_key = _normalize_transfer_key(rel)
+        if fn_key in claimed_files or os.path.basename(fn_key) in claimed_files:
+            continue
+        candidate = f["full_path"]
+        _cand_base = os.path.basename(candidate)
+        _is_expected_base = _cand_base.lower() in _expected_bases or _cand_base in _expected_bases
+
+        try:
+            from services.queue.queue_metadata_matcher import _metadata_matches_queue_item
+            meta_state = _metadata_matches_queue_item(candidate, item)
+        except Exception:
+            meta_state = None
+
+        if meta_state is False:
+            if _is_expected_base:
+                _delete_mismatched_download(candidate, queue_id, "metadata mismatch")
+                _block_peer_for_queue_item(queue_id, found_fn)
+                mark_failed(queue_id, "Downloaded file did not match queue item; deleted and rescheduled")
+                return "failed", None, None, ""
+            continue
+
+        if meta_state is None:
+            try:
+                from services.queue.queue_scoring import _score_soulseek_candidate
+                score = _score_soulseek_candidate(
+                    rel, item, candidate_duration=_extract_duration_seconds(candidate)
+                )
+            except Exception:
+                score = 0.0
+            if score < _SLSKD_MIN_ACCEPT_SCORE:
+                if _is_expected_base:
+                    _delete_mismatched_download(candidate, queue_id, f"below accept threshold (score={score:.2f})")
+                    _block_peer_for_queue_item(queue_id, found_fn)
+                    mark_failed(queue_id, "Downloaded file below acceptance threshold; deleted and rescheduled")
+                    return "failed", None, None, ""
+                continue
+
+        try:
+            _artist_ok = _file_artist_matches_queue_item(candidate, item)
+        except Exception:
+            _artist_ok = None
+
+        if _artist_ok is False:
+            if _is_expected_base:
+                _delete_mismatched_download(candidate, queue_id, "artist mismatch")
+                _block_peer_for_queue_item(queue_id, found_fn)
+                mark_failed(queue_id, "Downloaded file artist did not match queue item; deleted and rescheduled")
+                return "failed", None, None, ""
+            continue
+
+        if meta_state is None and _artist_ok is not True:
+            continue
+
+        match_source = "metadata" if meta_state is True else "filename"
+        claimed_files.add(fn_key)
+        claimed_files.add(os.path.basename(fn_key))
+        return "matched", rel, candidate, match_source
+
+    return "none", None, None, ""
+
+
+def _try_reconcile_active_slskd(
+    item: dict[str, Any],
+    found_fn: str,
+    slskd: Any,
+    active_transfers: list[dict[str, Any]],
+    claimed_files: set[str],
+    downloads_dir: str,
+    db_now: datetime,
+) -> tuple[str, str | None, str | None, str]:
+    """Reconcile against active slskd transfers when no local file matched initially."""
+    if slskd is None:
+        return "none", None, None, ""
+
+    queue_id = item.get("id")
+    from db.repositories.queue import mark_failed
+
+    _reconciled = _reconcile_transfer_state(item, slskd, active=active_transfers, now=db_now)
+    if _reconciled is True:
+        return "failed", None, None, ""
+
+    if isinstance(_reconciled, str) and _reconciled:
+        _landed_path = _reconciled
+        if os.path.isfile(_landed_path) and not _is_file_claimed(_landed_path, claimed_files, downloads_dir):
+            try:
+                _artist_ok = _file_artist_matches_queue_item(_landed_path, item)
+            except Exception:
+                _artist_ok = None
+            if _artist_ok is not False:
+                is_match, match_source = _file_matches_queue_item(_landed_path, item, None)
+                if is_match:
+                    match_found = (
+                        os.path.relpath(_landed_path, downloads_dir)
+                        if downloads_dir
+                        else _landed_path
+                    )
+                    _claim_file(_landed_path, claimed_files, downloads_dir)
+                    return "matched", match_found, _landed_path, match_source
+
+                _delete_mismatched_download(_landed_path, queue_id, f"landed file mismatch ({match_source})")
+                _block_peer_for_queue_item(queue_id, found_fn)
+                mark_failed(queue_id, "Downloaded file did not match queue item; deleted and rescheduled")
+                return "failed", None, None, match_source
+
+            _delete_mismatched_download(_landed_path, queue_id, "landed file artist mismatch")
+            _block_peer_for_queue_item(queue_id, found_fn)
+            mark_failed(queue_id, "Downloaded file artist did not match queue item; deleted and rescheduled")
+            return "failed", None, None, ""
+
+        _landed_cycles = _bump_cycle_counter(_LANDED_NOT_IMPORTED_CYCLES, queue_id)
+        if _landed_cycles >= _LANDED_NOT_IMPORTED_MAX_CYCLES:
+            _clear_cycle_counter(_LANDED_NOT_IMPORTED_CYCLES, queue_id)
+            mark_failed(queue_id, "Slskd file landed but could not be claimed/imported")
+            return "failed", None, None, ""
+
+    return "none", None, None, ""
+
+
+def _process_single_downloading_item(
+    item: dict[str, Any],
+    *,
+    slskd: Any,
+    slskd_completed: dict[str, str],
+    active_transfers: list[dict[str, Any]],
+    fs_files: list[dict[str, Any]],
+    fs_index: dict[str, Any],
+    claimed_files: set[str],
+    downloads_dir: str,
+    db_now: datetime,
+    stats: dict[str, Any],
+) -> None:
+    """Process a single queue item in 'downloading' state and update ``stats``."""
+    from db.repositories.queue import mark_failed, update_queue_item
+
+    queue_id = item.get("id")
+    fresh = _refresh_downloading_item(queue_id)
+    if fresh is None:
+        stats["skipped"] += 1
+        return
+    item = fresh
+
+    _item_source = str(item.get("source") or "").lower()
+    if _item_source in ("local", "discovered"):
+        stats["skipped"] += 1
+        return
+
+    existing_music = item.get("music_file_path")
+    if existing_music and os.path.isfile(existing_music):
+        update_queue_item(
+            queue_id,
+            status="imported",
+            copied_individually=1,
+            copied_individually_at=datetime.now().isoformat(),
+        )
+        stats["imported"] += 1
+        return
+
+    found_fn = (item.get("found_filename") or "").replace("\\", "/").strip()
+    match_found: str | None = None
+    abs_path: str | None = None
+    match_source = ""
+
+    # 1. slskd completed-transfers lookup
+    status, match_found, abs_path, match_source = _try_match_slskd_completed(
+        item, found_fn, slskd_completed, claimed_files, downloads_dir
+    )
+    if status == "failed":
+        stats["failed"] += 1
+        return
+
+    # 2 & 3. Exact path / basename / stripped-basename lookup
+    if match_found is None:
+        status, match_found, abs_path, match_source = _try_match_exact_candidates(
+            item, found_fn, fs_index, claimed_files, downloads_dir
+        )
+        if status == "rejected_exact":
+            stats["failed"] += 1
+
+    # 4. Fuzzy candidate lookup
+    if match_found is None:
+        status, match_found, abs_path, match_source = _try_match_fuzzy_candidates(
+            item, found_fn, fs_index, fs_files, claimed_files
+        )
+        if status == "failed":
+            stats["failed"] += 1
+            return
+
+    # 5. Reconcile active slskd transfers or stale items if still unmatched
+    if match_found is None or abs_path is None:
+        status, match_found, abs_path, match_source = _try_reconcile_active_slskd(
+            item, found_fn, slskd, active_transfers, claimed_files, downloads_dir, db_now
+        )
+        if status == "failed":
+            stats["failed"] += 1
+            return
+
+        if abs_path is None or match_found is None:
+            if _is_stale_queue_item(item, stale_minutes=_STALE_DOWNLOADING_MINUTES, now=db_now):
+                if _matching_file_exists_unconfirmed(item, fs_files, downloads_dir):
+                    stats["skipped"] += 1
+                    return
+                mark_failed(queue_id, "No file found while marked downloading")
+                stats["failed"] += 1
+                return
+            stats["skipped"] += 1
+            return
+
+    # 6. Pre-copy duration verification
+    expected_dur = item.get("duration")
+    if expected_dur:
+        expected_dur = queue_duration_seconds(expected_dur)
+    if expected_dur:
+        actual_dur = _extract_duration_seconds(abs_path)
+        if actual_dur and abs(expected_dur - actual_dur) > _length_tolerance_seconds():
+            _delete_mismatched_download(
+                abs_path, queue_id, f"duration mismatch: expected {expected_dur}s, got {actual_dur}s"
+            )
+            _block_peer_for_queue_item(queue_id, found_fn)
+            mark_failed(queue_id, f"Pre-copy duration mismatch: expected {expected_dur}s, got {actual_dur}s")
+            stats["failed"] += 1
+            return
+
+    # 7. Move to library and import
+    try:
+        update_queue_item(queue_id, found_filename=match_found, file_path=abs_path)
+    except Exception:
+        pass
+
+    move_result = _move_and_import(item, abs_path, match_source)
+    if move_result.get("success"):
+        stats["imported"] += 1
+    else:
+        stats["errors"] += 1
+
+
+# =============================================================================
 # MAIN ENTRYPOINT
 # =============================================================================
 
@@ -1823,8 +2332,6 @@ def check_completed_downloads() -> dict[str, Any]:
 
     try:
         from api_clients.slskd_http import get_slskd_client
-        from db.repositories.queue import mark_failed, update_queue_item
-        from helpers.logging_config import log_unified
         from services.downloads.download_scan_service import resolve_downloads_dir
         from services.downloads.slskd_service import SlskdService
 
@@ -1832,144 +2339,21 @@ def check_completed_downloads() -> dict[str, Any]:
         slskd = SlskdService(http_client=slskd_client) if slskd_client is not None else None
         downloads_dir = resolve_downloads_dir()
 
-        slskd_completed: dict[str, str] = {}
-        if slskd is not None:
-            try:
-                for transfer in slskd.get_completed_transfers():
-                    local = str(transfer.get("localFilePath") or "").replace("\\", "/").strip()
-                    remote = str(transfer.get("filename") or "").replace("\\", "/").strip()
-                    remote_norm = _normalize_transfer_key(remote)
-                    resolved_local = local
-                    if (not resolved_local or not os.path.isfile(resolved_local)) and downloads_dir and remote_norm:
-                        _candidate = os.path.join(downloads_dir, remote)
-                        if os.path.isfile(_candidate):
-                            resolved_local = _candidate
-                        else:
-                            _cand_base = os.path.basename(remote_norm)
-                            if _cand_base:
-                                import unicodedata as _ud
-                                _base_key = _ud.normalize("NFC", _cand_base).lower()
-                                _base_punct = _punctuation_stripped_key(_cand_base)
-                                _base_pfx = _track_prefix_stripped_key(_cand_base)
-                                _search_roots = {downloads_dir}
-                                try:
-                                    from services.downloads.download_scan_service import resolve_torrents_dir
-                                    _search_roots.add(resolve_torrents_dir())
-                                except Exception:
-                                    pass
-                                _parent = os.path.dirname(os.path.normpath(downloads_dir))
-                                for _cand_dir in ("torrents", "Torrents", "TORRENTS"):
-                                    _sib = os.path.join(_parent, _cand_dir)
-                                    if os.path.isdir(_sib):
-                                        _search_roots.add(_sib)
-                                for _sr in _search_roots:
-                                    if not os.path.isdir(_sr):
-                                        continue
-                                    for _root, _dirs, _files in os.walk(_sr):
-                                        _dirs[:] = [
-                                            d for d in _dirs
-                                            if not d.startswith(".") and not d.startswith("__")
-                                            and d.lower() != "original"
-                                        ]
-                                        for _fname in _files:
-                                            _fn_key = _ud.normalize("NFC", _fname).lower()
-                                            if (
-                                                _fn_key == _base_key
-                                                or (_base_punct and _punctuation_stripped_key(_fname) == _base_punct)
-                                                or (_base_pfx and _track_prefix_stripped_key(_fname) == _base_pfx)
-                                            ):
-                                                resolved_local = os.path.join(_root, _fname)
-                                                break
-                                        if resolved_local and os.path.isfile(resolved_local):
-                                            break
-                    if resolved_local and os.path.isfile(resolved_local):
-                        if remote_norm:
-                            slskd_completed[remote_norm] = resolved_local
-                            slskd_completed[os.path.basename(remote_norm)] = resolved_local
-                        slskd_completed[os.path.basename(resolved_local).lower()] = resolved_local
-            except Exception:
-                pass
-
-        fs_files: list[Any] = []
-        if os.path.isdir(downloads_dir):
-            try:
-                from services.infrastructure.filesystem_service import (
-                    _original_archive_subfolder_name,
-                    resolve_original_archive_dir,
-                )
-                _archive_dir = resolve_original_archive_dir()
-                _archive_name = _original_archive_subfolder_name()
-
-                _walk_roots: set[str] = {downloads_dir}
-                try:
-                    from services.downloads.download_scan_service import resolve_torrents_dir
-                    _walk_roots.add(resolve_torrents_dir())
-                except Exception:
-                    pass
-                _parent = os.path.dirname(os.path.normpath(downloads_dir))
-                for _cand_dir in ("torrents", "Torrents", "TORRENTS"):
-                    _sib = os.path.join(_parent, _cand_dir)
-                    if os.path.isdir(_sib):
-                        _walk_roots.add(_sib)
-
-                seen_paths: set[str] = set()
-                for _walk_root in _walk_roots:
-                    if not os.path.isdir(_walk_root):
-                        continue
-                    for root, dirs, files in os.walk(_walk_root):
-                        dirs[:] = [
-                            d for d in dirs
-                            if d != _archive_name
-                            and os.path.normpath(os.path.join(root, d)) != _archive_dir
-                            and not d.startswith(".")
-                            and not d.startswith("__")
-                            and d.lower() != "original"
-                        ]
-                        for filename in sorted(files):
-                            ext = os.path.splitext(filename)[1].lower()
-                            if ext not in (".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac", ".wma", ".opus"):
-                                continue
-                            full_path = os.path.join(root, filename)
-                            if full_path in seen_paths:
-                                continue
-                            seen_paths.add(full_path)
-                            fs_files.append({
-                                "full_path": full_path,
-                                "rel_path": os.path.relpath(full_path, downloads_dir),
-                            })
-            except Exception:
-                pass
-
+        slskd_completed = _collect_slskd_completed_map(slskd, downloads_dir)
+        fs_files = _scan_download_filesystem(downloads_dir)
         fs_index = _build_download_index(fs_files) if fs_files else {
             "by_rel_norm": {},
             "by_basename": {},
             "by_punct": {},
             "by_token": {},
         }
+        claimed_files = _load_claimed_files()
 
-        claimed_files: set[str] = set()
         try:
             with db_session() as session:
-                rows = session.execute(text("""
-                    SELECT found_filename FROM download_queue
-                    WHERE found_filename IS NOT NULL
-                      AND found_filename <> ''
-                      AND status NOT IN ('downloading', 'queued', 'failed', 'searching')
-                """)).fetchall() or []
-            for row in rows:
-                fn = (row[0] or "") if not hasattr(row, "_mapping") else (row._mapping.get("found_filename") or "")
-                if fn:
-                    norm = _normalize_transfer_key(fn)
-                    if norm:
-                        claimed_files.add(norm)
-                        claimed_files.add(os.path.basename(norm))
-        except Exception:
-            pass
-
-        downloading: list[dict[str, Any]] = []
-        try:
-            with db_session() as session:
-                rows = session.execute(text("SELECT * FROM download_queue WHERE status = 'downloading' ORDER BY id")).fetchall() or []
+                rows = session.execute(
+                    text("SELECT * FROM download_queue WHERE status = 'downloading' ORDER BY id")
+                ).fetchall() or []
                 downloading = [dict(r._mapping) for r in rows]
         except Exception:
             stats["errors"] += 1
@@ -1986,289 +2370,18 @@ def check_completed_downloads() -> dict[str, Any]:
 
         for item in downloading:
             try:
-                queue_id = item.get("id")
-
-                fresh = _refresh_downloading_item(queue_id)
-                if fresh is None:
-                    stats["skipped"] += 1
-                    continue
-                item = fresh
-
-                _item_source = str(item.get("source") or "").lower()
-                if _item_source in ("local", "discovered"):
-                    stats["skipped"] += 1
-                    continue
-
-                existing_music = item.get("music_file_path")
-                if existing_music and os.path.isfile(existing_music):
-                    update_queue_item(
-                        queue_id,
-                        status="imported",
-                        copied_individually=1,
-                        copied_individually_at=datetime.now().isoformat(),
-                    )
-                    stats["imported"] += 1
-                    continue
-
-                match_found: str | None = None
-                match_source = ""
-                abs_path: str | None = None
-
-                found_fn = (item.get("found_filename") or "").replace("\\", "/").strip()
-
-                if found_fn:
-                    found_norm = _normalize_transfer_key(found_fn)
-                    if found_norm:
-                        abs_path = (
-                            slskd_completed.get(found_norm)
-                            or slskd_completed.get(os.path.basename(found_norm))
-                        )
-                    if abs_path:
-                        abs_path = str(abs_path).replace("\\", "/")
-                    if abs_path and os.path.isfile(abs_path):
-                        if _is_file_claimed(abs_path, claimed_files, downloads_dir):
-                            abs_path = None
-                        else:
-                            try:
-                                _artist_ok = _file_artist_matches_queue_item(abs_path, item)
-                            except Exception:
-                                _artist_ok = None
-                                
-                            if _artist_ok is False:
-                                abs_path = None
-                            else:
-                                _discard_detail: dict[str, Any] = {}
-                                is_match, match_source = _file_matches_queue_item(
-                                    abs_path, item, detail=_discard_detail
-                                )
-                                if is_match:
-                                    match_found = os.path.relpath(abs_path, downloads_dir)
-                                    _claim_file(abs_path, claimed_files, downloads_dir)
-                                else:
-                                    _delete_mismatched_download(abs_path, queue_id, f"rejected ({match_source})")
-                                    _block_peer_for_queue_item(queue_id, found_fn)
-                                    _record_discarded_download(
-                                        item=item,
-                                        queue_id=queue_id,
-                                        detail=_discard_detail,
-                                        match_source=match_source,
-                                        filename=found_fn,
-                                    )
-                                    mark_failed(queue_id, _queue_reject_failure_reason(match_source))
-                                    stats["failed"] += 1
-                                    continue
-
-                if match_found is None and found_fn:
-                    found_norm = _normalize_transfer_key(found_fn)
-                    found_basename = os.path.basename(found_norm) if found_norm else None
-                    exact_candidates: list[dict[str, Any]] = []
-                    if found_norm:
-                        hit = fs_index["by_rel_norm"].get(found_norm)
-                        if hit:
-                            exact_candidates.append(hit)
-                    if found_basename:
-                        exact_candidates.extend(fs_index["by_basename"].get(found_basename.lower(), []))
-                        _stripped = _accent_stripped_key(found_basename)
-                        if _stripped and _stripped != found_basename.lower():
-                            exact_candidates.extend(fs_index["by_basename"].get(_stripped, []))
-                        _punct = _punctuation_stripped_key(found_basename)
-                        if _punct:
-                            exact_candidates.extend(fs_index["by_punct"].get(_punct, []))
-
-                    seen_paths: set[str] = set()
-                    for f in exact_candidates:
-                        candidate = f["full_path"]
-                        if candidate in seen_paths:
-                            continue
-                        seen_paths.add(candidate)
-                        rel = f["rel_path"].replace("\\", "/")
-                        if _is_file_claimed(candidate, claimed_files, downloads_dir):
-                            continue
-                        try:
-                            _artist_ok = _file_artist_matches_queue_item(candidate, item)
-                        except Exception:
-                            _artist_ok = None
-                        if _artist_ok is False:
-                            continue
-                        _discard_detail2: dict[str, Any] = {}
-                        is_match, match_source = _file_matches_queue_item(
-                            candidate, item, rel, detail=_discard_detail2
-                        )
-                        if not is_match:
-                            _delete_mismatched_download(candidate, queue_id, f"rejected for exact filename match ({match_source})")
-                            _block_peer_for_queue_item(queue_id, found_fn)
-                            _record_discarded_download(
-                                item=item,
-                                queue_id=queue_id,
-                                detail=_discard_detail2,
-                                match_source=match_source,
-                                filename=rel,
-                            )
-                            mark_failed(queue_id, _queue_reject_failure_reason(match_source))
-                            stats["failed"] += 1
-                            match_found = "__rejected__"
-                            break
-                        match_found = f["rel_path"]
-                        abs_path = candidate
-                        _claim_file(candidate, claimed_files, downloads_dir)
-                        break
-
-                if match_found == "__rejected__":
-                    match_found = None
-
-                if match_found is None:
-                    _expected_bases = set()
-                    if found_fn:
-                        _fb = os.path.basename(found_fn)
-                        if _fb:
-                            _expected_bases.add(_fb.lower())
-                            _expected_bases.add(_fb)
-
-                    for f in _fuzzy_candidates(fs_index, item, fs_files):
-                        rel = f["rel_path"].replace("\\", "/")
-                        fn_key = _normalize_transfer_key(rel)
-                        if fn_key in claimed_files or os.path.basename(fn_key) in claimed_files:
-                            continue
-                        candidate = f["full_path"]
-                        _cand_base = os.path.basename(candidate)
-
-                        try:
-                            from services.queue.queue_metadata_matcher import _metadata_matches_queue_item
-                            meta_state = _metadata_matches_queue_item(candidate, item)
-                        except Exception:
-                            meta_state = None
-
-                        if meta_state is False:
-                            if _cand_base.lower() in _expected_bases or _cand_base in _expected_bases:
-                                _delete_mismatched_download(candidate, queue_id, "metadata mismatch")
-                                _block_peer_for_queue_item(queue_id, found_fn)
-                                mark_failed(queue_id, "Downloaded file did not match queue item; deleted and rescheduled")
-                                stats["failed"] += 1
-                                match_found = "__rejected__"
-                                break
-                            continue
-                        if meta_state is None:
-                            try:
-                                from services.queue.queue_scoring import _score_soulseek_candidate
-                                score = _score_soulseek_candidate(rel, item, candidate_duration=_extract_duration_seconds(candidate))
-                            except Exception:
-                                score = 0.0
-                            if score < _SLSKD_MIN_ACCEPT_SCORE:
-                                if _cand_base.lower() in _expected_bases or _cand_base in _expected_bases:
-                                    _delete_mismatched_download(candidate, queue_id, f"below accept threshold (score={score:.2f})")
-                                    _block_peer_for_queue_item(queue_id, found_fn)
-                                    mark_failed(queue_id, "Downloaded file below acceptance threshold; deleted and rescheduled")
-                                    stats["failed"] += 1
-                                    match_found = "__rejected__"
-                                    break
-                                continue
-
-                        try:
-                            _artist_ok = _file_artist_matches_queue_item(candidate, item)
-                        except Exception:
-                            _artist_ok = None
-                        if _artist_ok is False:
-                            if _cand_base.lower() in _expected_bases or _cand_base in _expected_bases:
-                                _delete_mismatched_download(candidate, queue_id, "artist mismatch")
-                                _block_peer_for_queue_item(queue_id, found_fn)
-                                mark_failed(queue_id, "Downloaded file artist did not match queue item; deleted and rescheduled")
-                                stats["failed"] += 1
-                                match_found = "__rejected__"
-                                break
-                            continue
-
-                        if meta_state is None and _artist_ok is not True:
-                            continue
-
-                        match_found = rel
-                        abs_path = candidate
-                        match_source = "metadata" if meta_state is True else "filename"
-                        claimed_files.add(fn_key)
-                        claimed_files.add(os.path.basename(fn_key))
-                        break
-
-                if match_found == "__rejected__":
-                    continue
-
-                if match_found is None or abs_path is None:
-                    if slskd is not None:
-                        _reconciled = _reconcile_transfer_state(item, slskd, active=active_transfers, now=db_now)
-                        if _reconciled is True:
-                            stats["failed"] += 1
-                            continue
-                        if isinstance(_reconciled, str) and _reconciled:
-                            _landed_path = _reconciled
-                            if os.path.isfile(_landed_path) and not _is_file_claimed(_landed_path, claimed_files, downloads_dir):
-                                try:
-                                    _artist_ok = _file_artist_matches_queue_item(_landed_path, item)
-                                except Exception:
-                                    _artist_ok = None
-                                if _artist_ok is not False:
-                                    is_match, match_source = _file_matches_queue_item(_landed_path, item, None)
-                                    if is_match:
-                                        abs_path = _landed_path
-                                        match_found = os.path.relpath(_landed_path, downloads_dir) if downloads_dir else _landed_path
-                                        _claim_file(_landed_path, claimed_files, downloads_dir)
-                                    else:
-                                        _delete_mismatched_download(_landed_path, queue_id, f"landed file mismatch ({match_source})")
-                                        _block_peer_for_queue_item(queue_id, found_fn)
-                                        mark_failed(queue_id, "Downloaded file did not match queue item; deleted and rescheduled")
-                                        stats["failed"] += 1
-                                        continue
-                                else:
-                                    _delete_mismatched_download(_landed_path, queue_id, "landed file artist mismatch")
-                                    _block_peer_for_queue_item(queue_id, found_fn)
-                                    mark_failed(queue_id, "Downloaded file artist did not match queue item; deleted and rescheduled")
-                                    stats["failed"] += 1
-                                    continue
-                            else:
-                                _landed_cycles = _bump_cycle_counter(
-                                    _LANDED_NOT_IMPORTED_CYCLES, queue_id
-                                )
-                                if _landed_cycles >= _LANDED_NOT_IMPORTED_MAX_CYCLES:
-                                    _clear_cycle_counter(_LANDED_NOT_IMPORTED_CYCLES, queue_id)
-                                    mark_failed(queue_id, "Slskd file landed but could not be claimed/imported")
-                                    stats["failed"] += 1
-                                    continue
-
-                    if abs_path is not None and match_found is not None:
-                        pass
-                    elif _is_stale_queue_item(item, stale_minutes=_STALE_DOWNLOADING_MINUTES, now=db_now):
-                        _unconfirmed = _matching_file_exists_unconfirmed(item, fs_files, downloads_dir)
-                        if _unconfirmed:
-                            stats["skipped"] += 1
-                            continue
-                            
-                        mark_failed(queue_id, "No file found while marked downloading")
-                        stats["failed"] += 1
-                        continue
-                    elif abs_path is None:
-                        stats["skipped"] += 1
-                    continue
-
-                expected_dur = item.get("duration")
-                if expected_dur:
-                    expected_dur = queue_duration_seconds(expected_dur)
-                if expected_dur:
-                    actual_dur = _extract_duration_seconds(abs_path)
-                    if actual_dur and abs(expected_dur - actual_dur) > _length_tolerance_seconds():
-                        _delete_mismatched_download(abs_path, queue_id, f"duration mismatch: expected {expected_dur}s, got {actual_dur}s")
-                        _block_peer_for_queue_item(queue_id, found_fn)
-                        mark_failed(queue_id, f"Pre-copy duration mismatch: expected {expected_dur}s, got {actual_dur}s")
-                        stats["failed"] += 1
-                        continue
-
-                try:
-                    update_queue_item(queue_id, found_filename=match_found, file_path=abs_path)
-                except Exception:
-                    pass
-
-                move_result = _move_and_import(item, abs_path, match_source)
-                if move_result.get("success"):
-                    stats["imported"] += 1
-                else:
-                    stats["errors"] += 1
-
+                _process_single_downloading_item(
+                    item,
+                    slskd=slskd,
+                    slskd_completed=slskd_completed,
+                    active_transfers=active_transfers,
+                    fs_files=fs_files,
+                    fs_index=fs_index,
+                    claimed_files=claimed_files,
+                    downloads_dir=downloads_dir,
+                    db_now=db_now,
+                    stats=stats,
+                )
             except Exception:
                 stats["errors"] += 1
 
