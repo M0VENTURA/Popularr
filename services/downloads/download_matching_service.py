@@ -92,9 +92,6 @@ def match_folder_group_with_musicbrainz(
                     "source": "musicbrainz",
                     "title": group.get("title"),
                     "artist": artist,
-                    # The release group's first release date, when the
-                    # search returns it — without it ``release_year`` was
-                    # never set by the auto-search below.
                     "date": (
                         group.get("first-release-date")
                         or group.get("first_release_date")
@@ -140,7 +137,6 @@ def search_and_update_musicbrainz(queue_id: int, artist: str, title: str, album:
         if not cover_art_url:
             try:
                 from api_clients.coverartarchive import get_release_image_from_caa
-
                 cover_art_url = get_release_image_from_caa(release_mbid) or ""
             except Exception as exc:
                 logger.debug("Cover Art Archive lookup failed", queue_id=queue_id, error=str(exc))
@@ -188,10 +184,6 @@ except ImportError:
 # Optional Discogs track fetcher
 # =============================================================================
 
-# ⚠️ Imported UNDER the name the code uses. It was imported as
-# ``_fetch_discogs_tracks`` while ``get_release_tracks`` reads
-# ``fetch_discogs_tracks`` — which only existed when the import FAILED. So a
-# working install raised NameError on every Discogs release lookup.
 try:
     from services.queue.queue_matching_service import (
         _fetch_discogs_tracks as fetch_discogs_tracks,
@@ -208,13 +200,10 @@ def _row_get(row: Any, key: str, index: int, default: Any = None) -> Any:
     """Safely read either dict-like DB rows or tuple/list rows."""
     if row is None:
         return default
-
     if hasattr(row, "_mapping"):
         return row._mapping.get(key, default)
-
     if hasattr(row, "get"):
         return row.get(key, default)
-
     try:
         return row[index]
     except Exception:
@@ -225,11 +214,9 @@ def _extract_release_year(raw_year: Any) -> int | None:
     """Extract a 4-digit release year from MusicBrainz metadata."""
     if raw_year in (None, ""):
         return None
-
     match = re.search(r"(19|20)\d{2}", str(raw_year))
     if not match:
         return None
-
     try:
         return int(match.group(0))
     except Exception:
@@ -239,6 +226,10 @@ def _extract_release_year(raw_year: Any) -> int | None:
 # =============================================================================
 # MBID batch match application
 # =============================================================================
+
+_ALLOWED_RELEASE_UPDATES = {"album_artist", "album", "release_year"}
+_ALLOWED_TRACK_UPDATES = {"artist", "title"}
+
 
 def _prefetch_mbid_metadata_batch(
     mbid: str,
@@ -260,7 +251,6 @@ def _prefetch_mbid_metadata_batch(
         release_year = _extract_release_year(release_meta.get("release_year"))
 
         tracks = release_meta.get("tracks") or []
-
         tracks_by_rec_mbid = {
             (track.get("recording_mbid") or track.get("id")): track
             for track in tracks
@@ -268,24 +258,21 @@ def _prefetch_mbid_metadata_batch(
         }
 
         release_updates: Dict[str, Any] = {}
-
         if release_artist:
             release_updates["album_artist"] = release_artist
-
         if release_title:
             release_updates["album"] = release_title
-
         if release_year is not None:
             release_updates["release_year"] = release_year
 
+        # Filter strictly to prevent SQL injection via dynamic column mapping
+        safe_release_updates = {k: v for k, v in release_updates.items() if k in _ALLOWED_RELEASE_UPDATES}
+
         try:
             with db_session() as session:
-                if release_updates:
+                if safe_release_updates:
                     ids_placeholders = ", ".join(f":qid{i}" for i in range(len(queue_ids)))
-                    set_clause = ", ".join(
-                        f"{column} = :{column}"
-                        for column in release_updates.keys()
-                    )
+                    set_clause = ", ".join(f"{column} = :{column}" for column in safe_release_updates.keys())
 
                     session.execute(
                         text(f"""
@@ -295,14 +282,13 @@ def _prefetch_mbid_metadata_batch(
                             WHERE id IN ({ids_placeholders})
                         """),
                         {
-                            **{col: release_updates[col] for col in release_updates},
+                            **{col: safe_release_updates[col] for col in safe_release_updates},
                             **{f"qid{i}": qid for i, qid in enumerate(queue_ids)},
                         },
                     )
 
                 if tracks_by_rec_mbid:
                     ids_placeholders = ", ".join(f":qid{i}" for i in range(len(queue_ids)))
-
                     rows = session.execute(
                         text(f"""
                             SELECT id, recording_mbid
@@ -314,9 +300,7 @@ def _prefetch_mbid_metadata_batch(
 
                     for row in rows:
                         item_id = _row_get(row, "id", 0)
-                        recording_mbid = (
-                            _row_get(row, "recording_mbid", 1, "") or ""
-                        ).strip()
+                        recording_mbid = (_row_get(row, "recording_mbid", 1, "") or "").strip()
 
                         if not item_id or not recording_mbid:
                             continue
@@ -327,25 +311,18 @@ def _prefetch_mbid_metadata_batch(
 
                         track_updates: Dict[str, Any] = {}
                         track_artist = (track.get("artist") or "").strip()
-                        track_title = (
-                            track.get("title")
-                            or track.get("recording_title")
-                            or ""
-                        ).strip()
+                        track_title = (track.get("title") or track.get("recording_title") or "").strip()
 
                         if track_artist:
                             track_updates["artist"] = track_artist
-
                         if track_title:
                             track_updates["title"] = track_title
 
-                        if not track_updates:
+                        safe_track_updates = {k: v for k, v in track_updates.items() if k in _ALLOWED_TRACK_UPDATES}
+                        if not safe_track_updates:
                             continue
 
-                        set_clause = ", ".join(
-                            f"{column} = :{column}"
-                            for column in track_updates.keys()
-                        )
+                        set_clause = ", ".join(f"{column} = :{column}" for column in safe_track_updates.keys())
 
                         session.execute(
                             text(f"""
@@ -355,12 +332,12 @@ def _prefetch_mbid_metadata_batch(
                                 WHERE id = :item_id
                             """),
                             {
-                                **{col: track_updates[col] for col in track_updates},
+                                **{col: safe_track_updates[col] for col in safe_track_updates},
                                 "item_id": item_id,
                             },
                         )
 
-            logger.info("Prefetched MB metadata for MBID", mbid=mbid, count=len(queue_ids), fields=sorted(release_updates.keys()))
+            logger.info("Prefetched MB metadata for MBID", mbid=mbid, count=len(queue_ids), fields=sorted(safe_release_updates.keys()))
 
         except Exception:
             raise
@@ -398,17 +375,12 @@ def _expand_release_tracks(
             if not track_title:
                 continue
 
-            track_artist = (
-                track.get("artist")
-                or artist_name
-                or ""
-            ).strip() or artist_name
-
+            track_artist = (track.get("artist") or artist_name or "").strip() or artist_name
             track_duration = track.get("duration")
             if track_duration:
                 try:
                     track_duration = int(track_duration) // 1000
-                except Exception:
+                except (TypeError, ValueError):
                     track_duration = None
 
             result = add_to_queue(
@@ -550,6 +522,30 @@ def _find_matching_queue_item(
     return None
 
 
+def _get_library_tracks_for_album(artist: str, album: str) -> dict[str, dict[str, Any]]:
+    """Bulk fetch library tracks for an album to prevent N+1 queries."""
+    tracks_by_norm_title = {}
+    try:
+        with db_session() as session:
+            rows = session.execute(
+                text("""
+                    SELECT id, title, file_path, album 
+                    FROM tracks 
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) 
+                      AND LOWER(album) = LOWER(:album)
+                """),
+                {"artist": artist, "album": album}
+            ).fetchall()
+            for row in rows:
+                title = row._mapping.get("title") or ""
+                title_norm = normalize_match_text(title)
+                if title_norm:
+                    tracks_by_norm_title[title_norm] = dict(row._mapping)
+    except Exception as exc:
+        logger.debug("Failed to bulk fetch library tracks", error=str(exc))
+    return tracks_by_norm_title
+
+
 def get_release_tracks_with_status(
     artist: str,
     album: str,
@@ -573,6 +569,8 @@ def get_release_tracks_with_status(
         artist=artist,
         album=album,
     )
+
+    library_tracks_by_title = _get_library_tracks_for_album(artist, album)
 
     current_folder_files = [
         f.lower()
@@ -604,12 +602,7 @@ def get_release_tracks_with_status(
         elif current_folder_files:
             track_title_norm = normalize_match_text(track.get("title") or "")
             for filename in current_folder_files:
-                # The extension is not part of the title ("intro.mp3" must not
-                # match a track called "Intro to the Outro" via "mp3").
                 filename_norm = normalize_match_text(os.path.splitext(filename)[0])
-                # "filename inside title" only counts for a filename long
-                # enough to mean something: a file called "01" or "intro"
-                # matched every track whose title contained it.
                 if track_title_norm and (
                     track_title_norm in filename_norm
                     or (len(filename_norm) >= 6 and filename_norm in track_title_norm)
@@ -619,11 +612,8 @@ def get_release_tracks_with_status(
                     break
 
         if status == "missing":
-            library_track = find_library_track(
-                artist=artist,
-                title=track.get("title") or "",
-                album=album,
-            )
+            track_title_norm = normalize_match_text(track.get("title") or "")
+            library_track = library_tracks_by_title.get(track_title_norm)
             if library_track:
                 status = "other_folder"
                 status_details = {
@@ -692,6 +682,40 @@ def apply_musicbrainz_match(data: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "error": str(exc)}
 
 
+def _is_safe_read_folder(folder_path: str) -> bool:
+    """Validate a folder path strictly belongs to an allowed external download/torrent root."""
+    if not folder_path:
+        return False
+    try:
+        real_target = os.path.realpath(folder_path)
+        if not os.path.isdir(real_target):
+            return False
+
+        allowed_roots = set()
+        try:
+            from services.downloads.download_scan_service import resolve_downloads_dir, resolve_torrents_dir
+            d_dir = resolve_downloads_dir()
+            if d_dir and os.path.isdir(d_dir):
+                allowed_roots.add(os.path.realpath(d_dir))
+                _parent = os.path.dirname(os.path.realpath(d_dir))
+                for _cand in ("torrents", "Torrents", "TORRENTS"):
+                    _sib = os.path.join(_parent, _cand)
+                    if os.path.isdir(_sib):
+                        allowed_roots.add(os.path.realpath(_sib))
+            t_dir = resolve_torrents_dir()
+            if t_dir and os.path.isdir(t_dir):
+                allowed_roots.add(os.path.realpath(t_dir))
+        except Exception:
+            pass
+
+        for allowed in allowed_roots:
+            if os.path.commonpath([real_target, allowed]) == allowed:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def get_release_status(data: dict[str, Any]) -> dict[str, Any]:
     """Get release tracks with queue/library status for a given artist/album/release."""
     artist = (data or {}).get("artist", "").strip()
@@ -704,7 +728,7 @@ def get_release_status(data: dict[str, Any]) -> dict[str, Any]:
 
     try:
         current_folder_files: list[str] = []
-        if folder_path and os.path.isdir(folder_path):
+        if folder_path and _is_safe_read_folder(folder_path):
             current_folder_files = [
                 f for f in os.listdir(folder_path)
                 if os.path.isfile(os.path.join(folder_path, f))
