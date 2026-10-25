@@ -24,7 +24,6 @@ from db.engine import db_session
 from services.infrastructure.filesystem_service import (
     _get_files_in_folder,
     get_folder_group_details,
-    is_path_under_directory,
     resolve_downloads_dir,
     resolve_original_archive_dir,
 )
@@ -33,11 +32,86 @@ from services.metadata.release_service import get_active_releases_with_progress
 logger = structlog.get_logger(__name__)
 
 _MB_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+_MUSIC_ROOT = os.environ.get("MUSIC_ROOT", "/music")
 
 SUPPORTED_AUDIO_FORMATS = {
     ".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac", ".wma",
 }
 
+
+# =============================================================================
+# Security & Validation
+# =============================================================================
+
+def _get_safe_roots() -> tuple[set[str], set[str]]:
+    """Return (allowed_roots, forbidden_roots) as absolute real paths."""
+    allowed = set()
+    forbidden = set()
+    
+    try:
+        if _MUSIC_ROOT and os.path.isdir(_MUSIC_ROOT):
+            forbidden.add(os.path.realpath(_MUSIC_ROOT))
+            
+        d_dir = resolve_downloads_dir()
+        if d_dir and os.path.isdir(d_dir):
+            allowed.add(os.path.realpath(d_dir))
+            parent = os.path.dirname(os.path.realpath(d_dir))
+            for cand in ("torrents", "Torrents", "TORRENTS"):
+                sib = os.path.join(parent, cand)
+                if os.path.isdir(sib):
+                    allowed.add(os.path.realpath(sib))
+    except Exception as exc:
+        logger.debug("Failed to resolve safe roots", error=str(exc))
+        
+    return allowed, forbidden
+
+
+def _is_safe_to_operate(path: str) -> bool:
+    """Strictly verify a path is inside allowed directories and OUTSIDE forbidden ones."""
+    if not path:
+        return False
+    try:
+        real_target = os.path.realpath(path)
+        allowed, forbidden = _get_safe_roots()
+        
+        # 1. Must never be inside forbidden roots
+        for forb in forbidden:
+            try:
+                if os.path.commonpath([real_target, forb]) == forb:
+                    return False
+            except ValueError:
+                pass
+                
+        # 2. Must be strictly inside an allowed root (and not the root itself)
+        for allw in allowed:
+            try:
+                if os.path.commonpath([real_target, allw]) == allw and real_target != allw:
+                    return True
+            except ValueError:
+                continue
+                
+        return False
+    except Exception:
+        return False
+
+
+def _resolve_folder_abs(folder_path: str) -> tuple[str | None, str | None]:
+    """Safely resolve folder path, returning (folder_abs, downloads_abs)."""
+    try:
+        folder_abs = os.path.realpath(folder_path or "")
+        if not _is_safe_to_operate(folder_abs):
+            return None, None
+            
+        downloads_dir = resolve_downloads_dir()
+        downloads_abs = os.path.realpath(downloads_dir or "") if downloads_dir else None
+        return folder_abs, downloads_abs
+    except Exception:
+        return None, None
+
+
+# =============================================================================
+# Core folder lookups
+# =============================================================================
 
 def get_folder_groups_with_musicbrainz() -> dict[str, Any]:
     """Combined folder groups including MusicBrainz releases."""
@@ -174,25 +248,11 @@ def _is_torrents_root(name: str) -> bool:
 
 
 def _is_disc_subfolder(name: str) -> bool:
-    """True when *name* is a CD/DISC subfolder (cd1, cd2, disc1, disk2…).
-
-    These are discs of ONE album — their audio belongs to the PARENT folder
-    match, not a separate match of its own.
-    """
     lowered = str(name or "").strip().lower()
     return bool(re.match(r"^(cd|disc|disk)\s*\d+$", lowered))
 
 
 def _folder_has_album_subfolders(folder_abs: str, archive_dir: str) -> bool:
-    """True when *folder_abs* contains non-disc subfolders holding audio.
-
-    Operating on such a folder as ONE unit would MERGE multiple albums (the
-    reported "Matched Folders still merging everything under /torrents" bug):
-    a band folder like ``/torrents/Ignea - (ex - Parallax)/`` holds one
-    album subfolder per year, and matching/deleting/moving it as a whole
-    touches every album.  Such folders must be refused by the
-    match/associate/delete actions so only the per-album candidates are used.
-    """
     try:
         archive_norm = os.path.normpath(archive_dir) if archive_dir else ""
         for sub in os.listdir(folder_abs):
@@ -214,8 +274,6 @@ def _folder_has_album_subfolders(folder_abs: str, archive_dir: str) -> bool:
 
 
 def _assert_single_album_folder(folder_abs: str, downloads_dir: str, archive_dir: str) -> str | None:
-    """Return an error message when *folder_abs* must NOT be operated on as a
-    single album (it would merge multiple albums), else ``None``."""
     if _is_torrents_root(os.path.basename(folder_abs or "")):
         return "Refusing to operate on the torrents root itself — it contains multiple albums"
     if _folder_has_album_subfolders(folder_abs, archive_dir):
@@ -224,22 +282,6 @@ def _assert_single_album_folder(folder_abs: str, downloads_dir: str, archive_dir
 
 
 def _collect_album_folders(folder_abs: str, max_depth: int = 3) -> list[tuple[str, str]]:
-    """Return ``(album_abs, display_name)`` for every folder at/below
-    *folder_abs* that holds audio DIRECTLY — i.e. its own album.
-
-    CD/DISC subfolders (cd1, cd2, disc1…) belong to their parent album and
-    are NEVER separate candidates; a folder whose ONLY audio lives in
-    cd/disc subfolders is itself the album.  Hidden/dunder dirs and the FLAC
-    conversion archive are pruned at every level.
-
-    The torrents root and band folders are flattened by this same helper:
-    a band folder (``Ignea - (ex - Parallax)/``) has no direct audio, so the
-    recursion surfaces each ALBUM subfolder as its own candidate — matching
-    one album never merges the whole directory.  A folder with direct audio
-    that ALSO holds sibling album subfolders (a band folder with a stray
-    track) yields BOTH its own entry and the subfolder entries, so nothing
-    is silently merged.
-    """
     found: list[tuple[str, str]] = []
     try:
         archive_norm = os.path.normpath(resolve_original_archive_dir())
@@ -285,10 +327,6 @@ def _collect_album_folders(folder_abs: str, max_depth: int = 3) -> list[tuple[st
 
         if has_direct_audio or (disc_has_audio and not has_direct_audio):
             found.append((folder, os.path.basename(folder)))
-            # A folder with direct audio may STILL hold sibling album
-            # subfolders (a band folder with a stray track + album
-            # subfolders) — recurse so they are surfaced separately instead
-            # of being merged into this entry.
 
         for sub in sub_entries:
             if sub.startswith(".") or sub.startswith("__"):
@@ -304,8 +342,6 @@ def _collect_album_folders(folder_abs: str, max_depth: int = 3) -> list[tuple[st
 
     _recurse(folder_abs, 0)
 
-    # De-duplicate by absolute path (a folder can be reached twice when a
-    # disc-only parent also contains a nested album).
     seen: set[str] = set()
     unique: list[tuple[str, str]] = []
     for folder, name in found:
@@ -318,15 +354,6 @@ def _collect_album_folders(folder_abs: str, max_depth: int = 3) -> list[tuple[st
 
 
 def _iter_matched_folder_candidates(downloads_dir: str, archive_dir: str, max_depth: int = 3) -> list[tuple[str, str]]:
-    """Yield ``(folder_abs, display_name)`` for the Matched Folders list.
-
-    Recursively walks the downloads root so EVERY folder containing audio is
-    its own candidate (previously only top-level folders were surfaced, so
-    nested album folders like ``/downloads/Band/2024 - Album/`` were never
-    matched individually, and the torrents root merged every album under it
-    into one entry).  CD/DISC subfolders (cd1, cd2, disc1…) are NOT separate
-    candidates — their audio is part of the parent album match.
-    """
     candidates: list[tuple[str, str]] = []
     archive_norm = os.path.normpath(archive_dir)
     root_norm = os.path.normpath(downloads_dir)
@@ -356,12 +383,6 @@ def _iter_matched_folder_candidates(downloads_dir: str, archive_dir: str, max_de
 
 
 def _iter_torrent_album_candidates(downloads_dir: str, archive_dir: str, max_depth: int = 3) -> list[tuple[str, str]]:
-    """Albums under the torrents root (recursive — band folders flattened).
-
-    Uses the SAME recursion as ``_collect_album_folders`` so the Refresh
-    Matches endpoint migrates root/band-level associations down to the exact
-    per-album rows the Matched Folders list shows.
-    """
     try:
         entries = sorted(os.listdir(downloads_dir))
     except Exception as exc:
@@ -401,12 +422,6 @@ def _resolve_folder_match(
     if stored:
         return stored
 
-    # Torrent-root descendants may inherit a BAND-level (or root-level)
-    # association recorded before the flattening (``/torrents/Band`` row
-    # applies to every album subfolder below it).  Walk up the ancestors,
-    # checking each for a stored row, and stop AT the torrents root itself —
-    # never above it, and never for standalone top-level folders (they are
-    # their own matches).
     def _is_under_torrents_root(path: str) -> bool:
         parent = os.path.dirname(path)
         while parent and parent != os.path.dirname(parent):
@@ -430,21 +445,6 @@ def _resolve_folder_match(
 
 
 def get_unmatched_folders() -> dict[str, Any]:
-    """List the download folders shown by "Matched & Unmatched Folders".
-
-    ⚠️ TRACKED (matched) folders MUST be included, flagged ``status="matched"``.
-
-    They used to be ``continue``-d past, on the assumption that the
-    ``/api/downloads/folder-groups`` endpoint listed them separately. It does
-    not reach the UI: ``monitor.js`` never fetches it, and the served monitor
-    template has no ``#folderGroupsSection`` for it to render into (the live
-    page renders ``#unmatchedFoldersSection``). So a folder belonging to an
-    ACTIVE MusicBrainz release was excluded from the only list the page reads
-    and drawn nowhere else — invisible in a section whose name promises
-    matched folders. That is the reported "I downloaded a new album yesterday
-    but it's not showing it under the list": a release-tracked folder is
-    exactly what a new download becomes.
-    """
     try:
         downloads_dir = resolve_downloads_dir()
         if not os.path.isdir(downloads_dir):
@@ -454,8 +454,6 @@ def get_unmatched_folders() -> dict[str, Any]:
         tracked = _tracked_monitoring_folders()
         imported = _imported_source_paths()
 
-        # Folder -> release metadata, so a tracked folder can be described
-        # (artist/album/year) rather than only flagged.
         tracked_releases: dict[str, dict[str, Any]] = {}
         try:
             for release in get_active_releases_with_progress():
@@ -479,9 +477,6 @@ def get_unmatched_folders() -> dict[str, Any]:
         for full, entry in _iter_matched_folder_candidates(downloads_dir, archive_dir):
             _norm_full = os.path.normpath(full)
             _tracked_release = tracked_releases.get(_norm_full)
-            # Tracked means "this folder belongs to an active release". It is
-            # still a folder the user must be able to see, match and organise —
-            # only its default STATUS differs.
             _is_tracked = _norm_full in tracked
 
             files = _get_files_in_folder(full)
@@ -500,8 +495,6 @@ def get_unmatched_folders() -> dict[str, Any]:
             group = _derive_folder_group(entry, files)
             stored = _resolve_folder_match(full, match_rows=match_rows)
 
-            # A tracked folder's own release supplies artist/album when the
-            # files do not carry usable tags.
             if _tracked_release and not (group.get("artist") and group.get("album")):
                 group = {
                     "artist": str(_tracked_release.get("artist") or ""),
@@ -524,10 +517,6 @@ def get_unmatched_folders() -> dict[str, Any]:
                 "status": "matched" if (_is_tracked or matched or stored) else "unmatched",
                 "tracked": _is_tracked,
                 "match": stored,
-                # ``musicbrainz_releases.release_id`` IS a MusicBrainz release
-                # id, so a tracked folder can offer "Confirm Match" against the
-                # release it already belongs to. A stored explicit match still
-                # wins, because that is the user's own choice.
                 "release_mbid": (
                     (stored or {}).get("release_mbid")
                     or (_tracked_release or {}).get("release_id")
@@ -568,13 +557,6 @@ def _path_is_ancestor(ancestor: str, descendant: str) -> bool:
 
 
 def refresh_folder_matches() -> dict[str, Any]:
-    """Re-sync stored folder → release associations.
-
-    Migrates pre-flattening rows that point at the torrents ROOT (or a band
-    folder above the albums) down to one row per album subfolder, then
-    deletes the stale ancestor row.  Rows that are already at album level are
-    left untouched.
-    """
     try:
         from db.repositories.folder_match_repository import (
             delete_folder_match,
@@ -597,11 +579,10 @@ def refresh_folder_matches() -> dict[str, Any]:
                 continue
             if not albums:
                 continue
-            # Only rows at/above the album level (the torrents root or a
-            # band folder that holds album subfolders) are migrated.  A row
-            # that IS an album folder is already correct.
+            
             if folder_path in album_by_norm:
                 continue
+                
             migratable = any(_path_is_ancestor(folder_path, norm) for norm in album_by_norm)
             if not migratable:
                 continue
@@ -631,19 +612,21 @@ def refresh_folder_matches() -> dict[str, Any]:
         return {"success": False, "error": str(exc), "updated": 0, "details": []}
 
 
+# =============================================================================
+# Folder Operations (Delete, Move, Apply Match)
+# =============================================================================
+
 def delete_download_folder(folder_path: str) -> dict[str, Any]:
-    """Delete a folder under the downloads directory."""
+    """Delete a folder strictly under allowed downloads directories."""
     try:
-        downloads_dir = resolve_downloads_dir()
-        folder_abs = os.path.abspath(folder_path or "")
-        downloads_abs = os.path.abspath(downloads_dir or "")
-        
-        if not is_path_under_directory(folder_abs, downloads_abs) or folder_abs == downloads_abs:
+        folder_abs, downloads_abs = _resolve_folder_abs(folder_path)
+        if not folder_abs:
             return {"success": False, "error": f"Unsafe folder path for deletion: {folder_path}"}
+            
         if not os.path.isdir(folder_abs):
             return {"success": False, "error": f"Folder not found: {folder_path}"}
 
-        guard = _assert_single_album_folder(folder_abs, downloads_abs, resolve_original_archive_dir())
+        guard = _assert_single_album_folder(folder_abs, downloads_abs or "", resolve_original_archive_dir())
         if guard:
             return {"success": False, "error": guard}
 
@@ -653,18 +636,6 @@ def delete_download_folder(folder_path: str) -> dict[str, Any]:
     except Exception as exc:
         logger.error("Error deleting folder", error=str(exc), exc_info=True)
         return {"success": False, "error": str(exc)}
-
-
-def _resolve_folder_abs(folder_path: str) -> tuple[str | None, str | None]:
-    try:
-        downloads_dir = resolve_downloads_dir()
-        folder_abs = os.path.abspath(folder_path or "")
-        downloads_abs = os.path.abspath(downloads_dir or "")
-        if not is_path_under_directory(folder_abs, downloads_abs) or folder_abs == downloads_abs:
-            return None, None
-        return folder_abs, downloads_abs
-    except Exception:
-        return None, None
 
 
 def get_folder_tracks(folder_path: str) -> dict[str, Any]:
@@ -703,7 +674,7 @@ def get_folder_tracks(folder_path: str) -> dict[str, Any]:
 
 
 def delete_folder_track(folder_path: str, file_name: str) -> dict[str, Any]:
-    """Delete ONE audio file from a Matched-Folders folder."""
+    """Delete ONE audio file securely from a Matched-Folders folder."""
     folder_abs, downloads_abs = _resolve_folder_abs(folder_path)
     if not folder_abs or not os.path.isdir(folder_abs):
         return {"success": False, "error": f"Folder not found: {folder_path}"}
@@ -716,9 +687,10 @@ def delete_folder_track(folder_path: str, file_name: str) -> dict[str, Any]:
     if not base:
         return {"success": False, "error": "No file name provided"}
         
-    full = os.path.join(folder_abs, base)
-    if not is_path_under_directory(full, downloads_abs):
+    full = os.path.realpath(os.path.join(folder_abs, base))
+    if not _is_safe_to_operate(full):
         return {"success": False, "error": f"Unsafe file path for deletion: {base}"}
+        
     if not os.path.isfile(full):
         return {"success": False, "error": f"File not found: {base}"}
 
@@ -736,7 +708,7 @@ def delete_folder_track(folder_path: str, file_name: str) -> dict[str, Any]:
 
 
 def move_folder_track_to_library(folder_path: str, file_name: str) -> dict[str, Any]:
-    """Move ONE track out of a Matched-Folders folder into the library."""
+    """Move ONE track securely out of a Matched-Folders folder into the library."""
     folder_abs, downloads_abs = _resolve_folder_abs(folder_path)
     if not folder_abs or not os.path.isdir(folder_abs):
         return {"success": False, "error": f"Folder not found: {folder_path}"}
@@ -749,9 +721,10 @@ def move_folder_track_to_library(folder_path: str, file_name: str) -> dict[str, 
     if not base:
         return {"success": False, "error": "No file name provided"}
         
-    full = os.path.join(folder_abs, base)
-    if not is_path_under_directory(full, downloads_abs):
+    full = os.path.realpath(os.path.join(folder_abs, base))
+    if not _is_safe_to_operate(full):
         return {"success": False, "error": f"Unsafe file path: {base}"}
+        
     if not os.path.isfile(full):
         return {"success": False, "error": f"File not found: {base}"}
 
@@ -766,11 +739,10 @@ def move_folder_track_to_library(folder_path: str, file_name: str) -> dict[str, 
 
     try:
         from services.downloads.download_organize_helpers import move_track_to_library
-        _music_root = os.environ.get("MUSIC_ROOT", "/music")
         track = {"file_path": full, "artist": artist, "title": title}
         release_metadata = {"album_artist": artist, "album": album}
         
-        move_result = move_track_to_library(track, release_metadata, _music_root)
+        move_result = move_track_to_library(track, release_metadata, _MUSIC_ROOT)
         if not move_result.get("success"):
             return {"success": False, "error": move_result.get("error") or "move failed"}
             
@@ -789,7 +761,16 @@ def move_folder_track_to_library(folder_path: str, file_name: str) -> dict[str, 
                 import_group="manual",
             )
         except Exception as _qexc:
-            logger.debug("Queue record skipped", error=str(_qexc))
+            logger.error("Queue record failed during isolated track move", error=str(_qexc))
+            return {
+                "success": True,
+                "target_path": target_path,
+                "moved": 1,
+                "warning": f"Moved successfully, but queue record failed: {str(_qexc)}",
+                "artist": artist,
+                "album": album,
+                "title": title,
+            }
 
         return {
             "success": True,
@@ -805,7 +786,6 @@ def move_folder_track_to_library(folder_path: str, file_name: str) -> dict[str, 
 
 
 def auto_delete_imported_folders() -> int:
-    """Delete unmatched folders whose audio files have all been imported."""
     deleted = 0
     try:
         downloads_dir = resolve_downloads_dir()
@@ -874,22 +854,19 @@ def _resolve_release(client: Any, mb_id: str) -> tuple[dict | None, str]:
 
 
 def associate_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
-    """Phase 1: Record folder to release association without moving files."""
     try:
         mb_id = _extract_mb_id(mb_id)
         if not mb_id:
             return {"success": False, "error": "A MusicBrainz release/release-group URL or ID is required"}
 
-        downloads_dir = resolve_downloads_dir()
-        folder_abs = os.path.abspath(folder_path or "")
-        downloads_abs = os.path.abspath(downloads_dir or "")
-        
-        if not is_path_under_directory(folder_abs, downloads_abs) or folder_abs == downloads_abs:
+        folder_abs, downloads_abs = _resolve_folder_abs(folder_path)
+        if not folder_abs:
             return {"success": False, "error": f"Unsafe folder path: {folder_path}"}
+            
         if not os.path.isdir(folder_abs):
             return {"success": False, "error": f"Folder not found: {folder_path}"}
 
-        guard = _assert_single_album_folder(folder_abs, downloads_abs, resolve_original_archive_dir())
+        guard = _assert_single_album_folder(folder_abs, downloads_abs or "", resolve_original_archive_dir())
         if guard:
             return {"success": False, "error": guard}
 
@@ -942,12 +919,6 @@ def _release_cover_art(
     release_mbid: str,
     release_group_mbid: str = "",
 ) -> tuple[bytes | None, str]:
-    """Front cover for the release from the Cover Art Archive.
-
-    Returns ``(image_bytes, mime)``; ``(None, "")`` when nothing is available.
-    Tried against the concrete release first (the artwork is filed there),
-    then the release group — the same order the album page's own lookup uses.
-    """
     for mbid in (release_mbid, release_group_mbid):
         if not str(mbid or "").strip():
             continue
@@ -971,17 +942,6 @@ def _apply_release_metadata_to_files(
     year: str,
     release_mbid: str,
 ) -> dict[str, dict[str, Any]]:
-    """Fetch the release's MusicBrainz metadata and write it to the files.
-
-    Returns ``{file_path: matched_values}`` for the files whose tags were
-    actually written.  ``match_folder_to_release`` feeds those same values into
-    the move so the tags, the DB row and the destination filename all come from
-    ONE source and cannot disagree.
-
-    Everything here is best-effort: a MusicBrainz outage or an unwritable file
-    must never abort an import that would otherwise succeed, so failures fall
-    back to the file's own tags.
-    """
     if not release_mbid or not files:
         return {}
 
@@ -1011,17 +971,6 @@ def _apply_release_metadata_to_files(
 
     from services.metadata.tag_file_service import update_file_metadata
 
-    # ── Album-level release fields ────────────────────────────────────────
-    # ``match_mb_tracks_to_files`` yields PER-TRACK identity only (title,
-    # artist, positions, recording MBID, ISRC …).  The release's own
-    # album-scoped identity — release type/status/country, album-artist MBID,
-    # release-group MBID, original date, label, catalog number, barcode,
-    # media — was fetched by ``fetch_musicbrainz_release_metadata`` and then
-    # discarded, so a manually matched folder imported with a handful of
-    # fields while the same album arriving through the download queue got the
-    # full set (reported side by side).  This is the SAME mapping the
-    # completion import uses, so the two paths cannot disagree about what
-    # "the release's album fields" are.
     album_fields: dict[str, Any] = {}
     try:
         from services.downloads.download_completion_service import (
@@ -1032,12 +981,6 @@ def _apply_release_metadata_to_files(
     except Exception as exc:
         logger.debug("Album-level release fields unavailable", error=str(exc))
 
-    # ── Cover art ─────────────────────────────────────────────────────────
-    # ``move_track_to_library`` writes no tags and nothing else on this path
-    # fetched artwork — reported as "it also didn't attach the album art for
-    # the release".  Fetched ONCE (the Cover Art Archive is rate-limited like
-    # every other provider) and cached on the album too, so the album page
-    # shows it immediately instead of waiting for a Navidrome rescan.
     cover_bytes, cover_mime = _release_cover_art(
         release_mbid,
         str(album_fields.get("musicbrainz_releasegroupid") or ""),
@@ -1068,9 +1011,7 @@ def _apply_release_metadata_to_files(
             payload["cover_art_data"] = cover_bytes
             if cover_mime:
                 payload["cover_art_mime"] = cover_mime
-        # The resolved release/album identity wins; the caller's values are only
-        # a fallback for the fields MusicBrainz did not supply.  (``setdefault``
-        # is not enough — the mapper always emits the keys, sometimes empty.)
+                
         if not payload.get("album"):
             payload["album"] = album
         if not payload.get("album_artist"):
@@ -1079,6 +1020,7 @@ def _apply_release_metadata_to_files(
             payload["release_year"] = year
         if not payload.get("recording_mbid"):
             payload.pop("recording_mbid", None)
+            
         try:
             if update_file_metadata(path, payload):
                 applied[path] = payload
@@ -1097,27 +1039,23 @@ def _apply_release_metadata_to_files(
 
 
 def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
-    """Phase 2: Confirm match and execute migration/organization pipeline."""
     try:
         mb_id = _extract_mb_id(mb_id)
         if not mb_id:
             return {"success": False, "error": "A MusicBrainz release/release-group URL or ID is required"}
 
-        downloads_dir = resolve_downloads_dir()
-        folder_abs = os.path.abspath(folder_path or "")
-        downloads_abs = os.path.abspath(downloads_dir or "")
-        
-        if not is_path_under_directory(folder_abs, downloads_abs) or folder_abs == downloads_abs:
+        folder_abs, downloads_abs = _resolve_folder_abs(folder_path)
+        if not folder_abs:
             return {"success": False, "error": f"Unsafe folder path: {folder_path}"}
+            
         if not os.path.isdir(folder_abs):
             return {"success": False, "error": f"Folder not found: {folder_path}"}
 
-        guard = _assert_single_album_folder(folder_abs, downloads_abs, resolve_original_archive_dir())
+        guard = _assert_single_album_folder(folder_abs, downloads_abs or "", resolve_original_archive_dir())
         if guard:
             return {"success": False, "error": guard}
 
         from api_clients.musicbrainz_http import MusicBrainzHttpClient
-        from helpers.config_helpers import get_config
         from helpers.metadata_reader import read_mp3_metadata
         from services.downloads.download_organize_helpers import move_track_to_library
         from services.enrichment.musicbrainz_service import build_artist_credit_string, primary_album_artist
@@ -1136,20 +1074,8 @@ def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
 
         moved = 0
         errors: list[str] = []
-        music_root = Path(
-            (get_config().get("music", {}) or {}).get("root")
-            or os.environ.get("MUSIC_ROOT", "/music")
-        )
+        music_root_path = Path(_MUSIC_ROOT)
 
-        # ── Fetch the release's MusicBrainz tracklist and apply it ────────
-        # Deciding that this folder IS this release is the user's choice; working
-        # out which file is which track, and writing the release's metadata to
-        # the files, has to happen here — BEFORE the move.  ``move_track_to_library``
-        # only builds a path and moves the file; it writes no tags, so without
-        # this step the released was imported carrying whatever tags the files
-        # already had (and a missing title tag meant a title derived from the
-        # FILENAME).  The values applied here are reused for the move so the
-        # tags, the DB row and the filename all agree.
         audio_files: list[dict[str, Any]] = []
         for audio in _get_files_in_folder(folder_abs):
             if not audio.get("is_audio"):
@@ -1187,14 +1113,11 @@ def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
             resolved = applied_metadata.get(src) or {}
 
             if resolved:
-                # The release's values are authoritative for identity.
                 title = str(resolved.get("title") or "").strip()
                 track_artist = str(resolved.get("artist") or "").strip() or release_credit
                 number = resolved.get("track_number")
                 disc_number = resolved.get("disc_number")
             else:
-                # No MusicBrainz counterpart for this file — keep its own tags.
-                # Never apply a sibling track's metadata to it.
                 title = str(track_meta.get("title") or "").strip()
                 track_artist = str(track_meta.get("artist") or "").strip() or release_credit
                 number = track_meta.get("track_number")
@@ -1213,20 +1136,14 @@ def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
                     "year": year,
                     "album": album,
                 },
-                music_root,
+                music_root_path,
             )
+            
             if result.get("success"):
                 moved += 1
                 target_path = result.get("target_path")
                 if target_path:
-                    # Link the just-moved file back to its download_queue item
-                    # (the old system's watcher did this via
-                    # mark_queue_item_matched_from_torrent).  Without this the
-                    # file lands in the library but the queue item stays
-                    # 'downloading'/orphaned — the reported regression where a
-                    # release appears in Matched Folders but never matches the
-                    # queue entry.
-                    _link_moved_file_to_queue_item(
+                    linked, link_err = _link_moved_file_to_queue_item(
                         queue_artist=album_artist,
                         queue_album=album,
                         file_title=title or Path(src).stem,
@@ -1234,6 +1151,8 @@ def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
                         target_path=target_path,
                         release_mbid=release_mbid,
                     )
+                    if not linked and link_err:
+                        errors.append(f"{Path(src).name}: Moved successfully, but queue link failed: {link_err}")
             else:
                 errors.append(f"{Path(src).name}: {result.get('error')}")
 
@@ -1256,9 +1175,6 @@ def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
             "album_artist": album_artist,
             "album": album,
             "year": year,
-            # How many files actually received the release's MusicBrainz
-            # metadata. Surfaced so a caller can tell "matched the release but
-            # could not write the tags" apart from "everything went to plan".
             "metadata_updated": len(applied_metadata),
         }
     except Exception as exc:
@@ -1274,14 +1190,10 @@ def _link_moved_file_to_queue_item(
     track_number: Any,
     target_path: str,
     release_mbid: str,
-) -> bool:
+) -> tuple[bool, str]:
     """Associate a library-moved file with its download_queue item.
-
-    Mirrors the old system's ``mark_queue_item_matched_from_torrent``: after
-    confirming a folder match and moving a file to the library, the matching
-    queue item is marked ``imported`` with its file paths and release MBID so
-    the queue reflects the completed download (instead of staying orphaned in
-    'downloading').
+    
+    Returns (success, error_message) so failures can be surfaced to the caller.
     """
     try:
         from db.repositories.queue import get_album_queue_tracks, update_queue_item
@@ -1295,10 +1207,6 @@ def _link_moved_file_to_queue_item(
         file_title_norm = normalize_match_text(file_title)
         file_num, _ = extract_track_disc(str(track_number or ""))
 
-        # Prefer album-scoped queue items; fall back to a title-only match
-        # across ALL active queue items (a single-track download often has a
-        # different album label on the queue item than the resolved MB
-        # release, e.g. queue album "BiiiG" vs release "BiiiG (FLAC)...").
         queue_items = get_album_queue_tracks(queue_artist, queue_album)
         if not queue_items:
             try:
@@ -1314,13 +1222,13 @@ def _link_moved_file_to_queue_item(
                 ]
             except Exception:
                 queue_items = []
+                
         if not queue_items:
-            return False
+            return False, "No matching queue items found"
 
         used: set[int] = set()
         target = None
 
-        # 1) Prefer an exact track-number match.
         if file_num is not None:
             for q in queue_items:
                 if q.get("id") in used or str(q.get("status") or "").lower() in ("imported", "completed"):
@@ -1333,7 +1241,6 @@ def _link_moved_file_to_queue_item(
                     used.add(int(q["id"]))
                     break
 
-        # 2) Fall back to normalized-title equality.
         if target is None:
             for q in queue_items:
                 if q.get("id") in used or str(q.get("status") or "").lower() in ("imported", "completed"):
@@ -1349,29 +1256,35 @@ def _link_moved_file_to_queue_item(
                 "No queue item matched for moved file",
                 artist=queue_artist, album=queue_album, title=file_title,
             )
-            return False
+            return False, "No active queue item matches this track"
 
         queue_id = int(target["id"])
-        update_queue_item(
-            queue_id,
-            status="imported",
-            file_path=target_path,
-            matched_file_path=target_path,
-            music_file_path=target_path,
-            found_filename=os.path.basename(target_path),
-            release_mbid=release_mbid,
-            release_id=release_mbid,
-            release_source="musicbrainz",
-            copied_individually=1,
-        )
-        logger.info(
-            "Linked moved file to queue item",
-            queue_id=queue_id, target=target_path, release_mbid=release_mbid,
-        )
-        return True
+        
+        try:
+            update_queue_item(
+                queue_id,
+                status="imported",
+                file_path=target_path,
+                matched_file_path=target_path,
+                music_file_path=target_path,
+                found_filename=os.path.basename(target_path),
+                release_mbid=release_mbid,
+                release_id=release_mbid,
+                release_source="musicbrainz",
+                copied_individually=1,
+            )
+            logger.info(
+                "Linked moved file to queue item",
+                queue_id=queue_id, target=target_path, release_mbid=release_mbid,
+            )
+            return True, ""
+        except Exception as up_exc:
+            logger.error("Database update failed for queue item", queue_id=queue_id, error=str(up_exc))
+            return False, f"Database update failed: {str(up_exc)}"
+            
     except Exception as exc:
         logger.warning("Could not link moved file to queue item", error=str(exc))
-        return False
+        return False, str(exc)
 
 
 def retry_matching_for_release(release_id: str) -> dict[str, Any]:
@@ -1387,7 +1300,6 @@ def retry_matching_for_release(release_id: str) -> dict[str, Any]:
             if not row:
                 return {"success": False, "error": "Release not found"}
 
-            release_db_id = row[0]
             folder = row[1]
             total_tracks = row[2]
             discovered = row[3]
