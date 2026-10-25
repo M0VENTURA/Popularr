@@ -548,38 +548,91 @@ class TestTheRefreshAgreesWithTheBuilder:
     """A second bug found while wiring this up.
 
     ``refresh_genre_playlists_for_album`` computed its ``affected`` genre set
-    with ``_resolve_playlist_genres`` (own-tags-first) and carried the comment
-    *"The SAME resolver the full builder uses, so a per-album refresh re-derives
-    exactly the pools the next full pass would."* The builder pools by
-    ``_genre_playlist_track_genres`` (the album blend). Two different answers to
-    "which playlists does this album touch", on the one path whose entire job is
-    keeping them in step — so a refresh could skip a playlist that needed
-    updating.
+    with ``_resolve_playlist_genres`` (own-tags-first) while the builder pooled
+    by ``_genre_playlist_track_genres`` (the album blend): two different answers
+    to "which playlists does this album touch", on the one path whose entire job
+    is keeping them in step.
+
+    ⭐ CONTRACT REVERSAL (2026-10-26). Both now resolve from the track's FINAL
+    ``genres`` value — the three applied musical genres — so the two answers are
+    the same BY CONSTRUCTION rather than by coincidence. The previous control
+    here asserted that they DISAGREED on a sample row, which encoded the defect
+    as a property; it is inverted below.
+
+    The reason the pooling source had to change: the old resolution read the
+    per-PROVIDER columns, which keep whatever the provider returned, so a genre
+    removed from a track's metadata survived in ``lastfm_tags`` and kept the
+    track in a playlist Navidrome said it was not in ("it was adjusted to remove
+    Alternative Metal, but it's still on the Alternative Metal Playlist").
     """
 
     def test_the_refresh_uses_the_pooling_resolver(self) -> None:
         source = Path(fs.__file__).read_text(encoding="utf-8")
         idx = source.index("def refresh_genre_playlists_for_album(")
         body = source[idx: source.index("\ndef ", idx + 10)]
-        assert "_genre_playlist_track_genres(row" in body, (
+        assert "_resolve_playlist_genres(row" in body, (
             "the refresh is back on a resolver the builder does not pool by"
         )
 
-    def test_the_two_resolvers_actually_differ(self) -> None:
-        """CONTROL: if they agreed, the mismatch could not have mattered.
+    def test_the_builder_pools_through_the_same_resolver(self) -> None:
+        """The other half: the builder's ``_track_genres`` must use it too."""
+        source = Path(fs.__file__).read_text(encoding="utf-8")
+        idx = source.index("    def _track_genres(row")
+        body = source[idx: source.index("\n    try:", idx)]
+        assert "_resolve_playlist_genres(" in body
 
-        It CAN matter, which is why picking the wrong one was a bug rather than
-        a style choice — an own-tags-first answer can omit a pooled genre.
+    def test_the_two_resolvers_now_agree(self) -> None:
+        """⭐ THE INVERTED CONTROL (was ``test_the_two_resolvers_actually_differ``).
+
+        Previously: "if they agreed, the mismatch could not have mattered" —
+        and they DID disagree, which is what made the pairing a bug. They now
+        agree because both read the final ``genres`` value, so the invariant is
+        that no row can produce two different pool sets.
         """
+        rows = [
+            {
+                "genres": "alternative rock, nu metal",
+                "musicbrainz_genres": '["nu metal"]',
+                "lastfm_tags": '["nu metal"]',
+            },
+            {
+                # The reported case: the providers still say metal, the track no
+                # longer does.
+                "genres": "pop punk, alternative rock",
+                "musicbrainz_genres": '["alternative metal"]',
+                "discogs_genres": '["alternative metal"]',
+            },
+        ]
+        for row in rows:
+            blended = set(fs._genre_playlist_track_genres(row, max_genres=3))
+            resolved, _owned = fs._resolve_playlist_genres(row, max_genres=3)
+            assert {g.casefold() for g in blended} == {g.casefold() for g in resolved}, (
+                f"the two resolvers disagree on {row!r} — the refresh and the "
+                "builder would update different playlists"
+            )
+
+    def test_the_blend_helper_is_only_the_no_final_value_case(self) -> None:
+        """The one place the two answers legitimately differ, and why.
+
+        ``_genre_playlist_track_genres`` reads ONLY ``genres``; when that is
+        empty it returns nothing. ``_resolve_playlist_genres`` falls back to the
+        track's own source columns first, so a track that has never been
+        aggregated is not silently dropped from every playlist. That is a
+        deliberate asymmetry, not drift — the refresh and the builder both call
+        ``_resolve_playlist_genres``, so they still agree with each other.
+        """
+        row = {"genres": "", "musicbrainz_genres": '["nu metal"]'}
+        assert fs._genre_playlist_track_genres(row, max_genres=3) == []
+        resolved, owned = fs._resolve_playlist_genres(row, max_genres=3)
+        assert owned is True
+        assert [g.casefold() for g in resolved] == ["nu metal"]
+
+    def test_a_removed_genre_is_not_resurrected_by_a_provider_column(self) -> None:
+        """The behaviour the agreement exists to protect."""
         row = {
-            "genres": "alternative rock, nu metal",
-            "musicbrainz_genres": '["nu metal"]',
-            "lastfm_tags": '["nu metal"]',
+            "genres": "pop punk, alternative rock",
+            "musicbrainz_genres": '["alternative metal"]',
+            "lastfm_tags": '["alternative metal"]',
         }
-        pooled = set(fs._genre_playlist_track_genres(row, max_genres=3))
         resolved, _owned = fs._resolve_playlist_genres(row, max_genres=3)
-        assert pooled != set(resolved), (
-            "these two now agree on this row, so this control no longer "
-            "demonstrates the difference — pick a row where they disagree"
-        )
-        assert "alternative rock" in pooled and "alternative rock" not in resolved
+        assert "alternative metal" not in {g.casefold() for g in resolved}

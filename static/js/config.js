@@ -383,6 +383,9 @@ function buildConfigObject() {
         return Number.isFinite(raw) ? Math.max(0, raw) : 25;
       })(),
       playlist_interleave_artists: getChecked('playlists_interleave_artists', true),
+      // Reorders a finished playlist once per ISO week. Applied AFTER the cap,
+      // so membership never changes — only the sequence.
+      weekly_shuffle_enabled: getChecked('playlists_weekly_shuffle', true),
       genre_exclusions: {
         enabled: getChecked('playlists_genre_exclusions_enabled', true),
         own_tags_win: getChecked('playlists_genre_own_tags_win', true),

@@ -2866,7 +2866,7 @@
         <div class="col-6 col-md-4">
           <label class="form-label form-label-sm" for="genre_selection_max">Maximum Genres</label>
           <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="genre_selection_max" value="{{ config.get('genres', {}).get('selection', {}).get('max_genres', 3) }}">
-          <small class="form-text text-muted">A ceiling, not a target. Default: <strong>3</strong></small>
+          <small class="form-text text-muted">How many <strong>musical</strong> genres are written onto each track (default <strong>3</strong>), and therefore how many a track may pool into for the genre playlists. A ceiling, not a target. Cover / Live / Acoustic / Remaster / Christmas markers are added <em>on top</em> of this and never take one of the slots.</small>
         </div>
         <div class="col-6 col-md-4">
           <label class="form-label form-label-sm" for="genre_selection_family_limit">Family Slot Limit</label>
@@ -3372,6 +3372,13 @@
             <input class="form-check-input" type="checkbox" id="playlists_interleave_artists" {% if config.get('playlists', {}).get('playlist_interleave_artists', True) %}checked{% endif %}>
           </div>
           <span class="help-text">Avoids consecutive runs from the same artist, so a ranked list does not arrive album by album. Changes the order only — never which tracks are included. Default: <strong>on</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_weekly_shuffle">Shuffle The Order Weekly</label>
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_weekly_shuffle" {% if config.get('playlists', {}).get('weekly_shuffle_enabled', True) %}checked{% endif %}>
+          </div>
+          <span class="help-text">Reorders each generated playlist <strong>once per ISO week</strong> so it is not always the same sequence. The rotation is applied <em>after</em> the ranking and the track cap, so the SAME tracks are kept — only their order changes. Within a week the order is fixed, so an unchanged week costs no playlist rewrite. Default: <strong>on</strong></span>
         </div>
       </div>
 

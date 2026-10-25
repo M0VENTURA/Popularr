@@ -231,6 +231,20 @@ def _duration_below_floor(track: dict[str, Any]) -> bool:
     return dur < 30.0
 
 
+def _genre_track_limit() -> int:
+    """How many MUSICAL genres to write onto one track (default 3).
+
+    Reads ``config.yaml`` through the shared getter so the count is not
+    hard-coded in every call site. FAILS OPEN to 3.
+    """
+    try:
+        from helpers.config_helpers import get_genre_track_limit
+
+        return int(get_genre_track_limit())
+    except Exception:
+        return 3
+
+
 def _album_top_genres(
     album_tracks: list[dict[str, Any]] | None,
     *,
@@ -2607,7 +2621,12 @@ def process_track(
 
             aggregated = aggregate_genres(
                 source_map,
-                max_genres=2,
+                # ⭐ THREE musical genres, not two. Filter markers
+                # (Cover/Live/Acoustic/Remaster/Christmas/Holiday) are appended
+                # ON TOP of these by ``_append_extra_genres`` and never consume
+                # one of the slots, so the stored list can be longer than this.
+                # Config-driven so the count is not hard-coded here.
+                max_genres=_genre_track_limit(),
                 context_title=_as_str(effective_track.get("title")),
                 context_album=_as_str(album_context.get("album"))
             )

@@ -1295,6 +1295,70 @@ def get_album_mbid_guard_config() -> dict[str, Any]:
 # Playlist Configuration
 # -----------------------------------------------------------------------------
 
+#: How many MUSICAL genres are written onto a track's metadata.
+#:
+#: Three is the reported requirement ("select the top 3 genres from the most
+#: used across sources, then apply those to the metadata"). Filter markers —
+#: Cover / Live / Acoustic / Remaster / Christmas / Holiday — are appended ON
+#: TOP of these and never consume one of the slots, so the stored list can be
+#: longer than this number.
+GENRE_TRACK_LIMIT_DEFAULT = 3
+
+
+def get_genre_track_limit() -> int:
+    """How many MUSICAL genres to write onto one track (default 3).
+
+    Config section: ``genres`` → ``max_genres_per_track``.
+
+    Falls back to ``genres.selection.max_genres`` (the selection engine's own
+    position limit, also default 3) so an install that already tuned that value
+    does not have to set two keys, then to :data:`GENRE_TRACK_LIMIT_DEFAULT`.
+
+    ⚠️ Clamped to 1..10. A nonsense value must not silently narrow every track
+    to one genre or blow the tag frame up.
+    """
+    cfg = get_config() or {}
+    genres = cfg.get("genres") or {}
+    if not isinstance(genres, dict):
+        genres = {}
+
+    for key, container in (("max_genres_per_track", genres),):
+        if key in container:
+            try:
+                return max(1, min(10, int(container[key])))
+            except (TypeError, ValueError):
+                pass
+
+    selection = genres.get("selection") or {}
+    if isinstance(selection, dict) and "max_genres" in selection:
+        try:
+            return max(1, min(10, int(selection["max_genres"])))
+        except (TypeError, ValueError):
+            pass
+
+    return GENRE_TRACK_LIMIT_DEFAULT
+
+
+def get_playlist_shuffle_config() -> dict[str, Any]:
+    """Weekly rotation of a generated playlist's ORDER.
+
+    Config section: ``playlists`` → ``weekly_shuffle_enabled``.
+
+    The rotation is applied AFTER the playlist has been ranked and capped, so
+    it changes the ORDER ONLY — the same tracks, in a different sequence, once
+    per ISO week. That distinction is what keeps the sync quiet: membership
+    changes still drive an immediate rewrite, while the order only moves when
+    the week rolls over.
+    """
+    cfg = get_config() or {}
+    playlists = cfg.get("playlists") or {}
+    if not isinstance(playlists, dict):
+        playlists = {}
+    return {
+        "enabled": bool(playlists.get("weekly_shuffle_enabled", True)),
+    }
+
+
 #: A track carrying a metal genre is left out of these playlists by default.
 #: The crossover case is the reason: a band filed under both "alternative rock"
 #: and "alternative metal" (Tool, Deftones, Manson, Slipknot) would otherwise

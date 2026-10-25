@@ -523,6 +523,9 @@
         return Number.isFinite(raw) ? Math.max(0, raw) : 25;
       })(),
       playlist_interleave_artists: getChecked('playlists_interleave_artists', true),
+      // Reorders a finished playlist once per ISO week. Applied AFTER the cap,
+      // so membership never changes — only the sequence.
+      weekly_shuffle_enabled: getChecked('playlists_weekly_shuffle', true),
       // Nested block: ``_sanitize_config_sections`` must list it under
       // ``playlists`` or the dict is coerced to {} on save.
       genre_exclusions: {

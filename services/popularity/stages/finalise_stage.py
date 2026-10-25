@@ -79,6 +79,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 import re
 import threading
 import time
@@ -119,6 +120,10 @@ from services.popularity.popularity_math import (
     playlist_popularity_score,
 )
 from services.popularity.popularity_zscore import composite_listener_z
+from services.enrichment.genre_aggregation_service import (
+    is_playlist_pool_genre,
+    playlist_pool_genres,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -1697,6 +1702,62 @@ def _ordered_playlist_rows(
     return ordered
 
 
+def _rotation_week(when: datetime | None = None) -> str:
+    """The ISO year-week that seeds a week's rotation, e.g. ``2026-W44``."""
+    moment = when or datetime.utcnow()
+    iso = moment.isocalendar()
+    return f"{iso[0]}-W{iso[1]:02d}"
+
+
+def _weekly_shuffle(
+    rows: list[dict[str, Any]],
+    *,
+    playlist_key: str,
+    enabled: bool | None = None,
+    when: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Reorder a finished playlist ONCE PER WEEK, deterministically.
+
+    ⭐⭐ THE SAME TRACKS, A DIFFERENT SEQUENCE — never a different selection.
+
+    This runs AFTER ranking, the per-artist quota, interleaving and the
+    ``max_tracks`` slice, so membership is already settled. That is what makes
+    the rotation safe:
+
+    * the playlist's CONTENT only changes when the library does, so the
+      zero-request sync still skips an unchanged week;
+    * the rotation changes exactly once per ISO week, so it costs one rewrite a
+      week rather than one per scan.
+
+    Shuffling BEFORE the cap would be a bug: the shuffled tail is what gets
+    sliced away, so genuinely top tracks would be dropped at random.
+
+    The seed is ``<iso-week>::<playlist name>``. It is passed as a STRING to
+    ``random.Random``, which derives the state from a SHA-512 of the text — so
+    the order is identical in every process and after every restart, and two
+    playlists never share an order by accident.
+    """
+    if not rows or len(rows) < 2:
+        return rows
+
+    if enabled is None:
+        try:
+            from helpers.config_helpers import get_playlist_shuffle_config
+
+            enabled = bool(get_playlist_shuffle_config().get("enabled", True))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Playlist shuffle config unreadable — rotation off", error=str(exc))
+            enabled = False
+
+    if not enabled:
+        return rows
+
+    seed = f"{_rotation_week(when)}::{str(playlist_key or '').casefold()}"
+    shuffled = list(rows)
+    random.Random(seed).shuffle(shuffled)
+    return shuffled
+
+
 def _ordered_by_percentile_then_prominence(
     winners: list[dict[str, Any]],
     mode: str = "prominence",
@@ -2057,6 +2118,11 @@ def _create_new_music_playlist() -> int:
         return 0
 
     winners = winners[:_NEW_MUSIC_MAX_TRACKS]
+
+    # Rotation after the slice: the SAME tracks in a different sequence, once
+    # per ISO week. See ``_weekly_shuffle`` for why the order matters.
+    winners = _weekly_shuffle(winners, playlist_key=playlist_name)
+
     _song_ids = [str(r.get("id") or "").strip() for r in winners if str(r.get("id") or "").strip()]
     if not _song_ids:
         return 0
@@ -2263,6 +2329,10 @@ def _sync_essential_playlist(
 
     winners = _ordered_by_percentile_then_prominence(winners, order_mode)
     winners = winners[:max_tracks]
+
+    # Rotation after the slice: the SAME tracks in a different sequence, once
+    # per ISO week. See ``_weekly_shuffle`` for why the order matters.
+    winners = _weekly_shuffle(winners, playlist_key=playlist_name)
 
     _song_ids = [str(r.get("id") or "").strip() for r in winners if str(r.get("id") or "").strip()]
     if not _song_ids:
@@ -2679,15 +2749,43 @@ def _resolve_playlist_genres(
 
     Returns ``(genres, owned)``.
 
-    ``owned=True`` means the track carries genre tags of its own, so those
-    decide (capped to ``max_genres``) — the album blend is ignored.
-    ``owned=False`` means the track has no tags of its own and falls back
-    to the album-level blend.
+    ⭐⭐ THE POOL COMES FROM THE TRACK'S FINAL ``genres`` VALUE — the three
+    applied musical genres — and only falls back to the provider columns when
+    that value is empty.
+
+    This is the fix for the reported *"it was adjusted to remove Alternative
+    Metal, Navidrome doesn't show Alternative Metal, but it's still on the
+    Alternative Metal Playlist"*. The pool used to be built from the per-source
+    columns (``lastfm_tags``, ``musicbrainz_genres``, ``discogs_genres``…),
+    which keep whatever the provider originally returned. A genre removed from
+    the track — by the selection engine, a manual correction or a re-scan —
+    therefore survived in those columns and kept the track in a playlist the
+    metadata no longer claimed it belonged to. The displayed ``genres`` value is
+    what Navidrome shows; the playlist must agree with it.
+
+    Performance markers (Cover/Live/Acoustic/Remix/Remaster/Instrumental) and
+    the holiday family are dropped by ``playlist_pool_genres``, so they never
+    consume one of the ``max_genres`` slots — they are EXTRAS on top of the
+    three, exactly as written to the metadata.
+
+    ``owned=True`` means the track supplied its own genre evidence;
+    ``owned=False`` means the album-level blend had to stand in.
     """
-    own = _track_own_genre_tokens(row)
+    final = playlist_pool_genres(row.get("genres"), limit=max_genres)
+    if final:
+        return final, True
+
+    # No final value yet (never aggregated, or genuinely empty). Fall back to
+    # the track's own source tags so a track is not silently dropped from every
+    # playlist, then to the album blend.
+    own = [
+        g
+        for g in _track_own_genre_tokens(row)
+        if is_playlist_pool_genre(g)
+    ]
     if own:
         return own[:max_genres], True
-    return _genre_playlist_track_genres(row, max_genres=max_genres), False
+    return [], False
 
 
 def _full_genre_tokens(row: dict[str, Any]) -> list[str]:
@@ -3152,6 +3250,15 @@ def _create_genre_top_track_playlists(
             genres=row.get("genres"),
         )
 
+        # ⭐ A seasonal track with no musical genre still belongs in the holiday
+        # pool. ``playlist_pool_genres`` drops the Christmas/Holiday tokens
+        # (they are extras, not pool keys), so a track whose ONLY genre was
+        # "Christmas" would otherwise vanish from every playlist. The pool key
+        # below is the holiday key, which is where the seasonal branch would
+        # have put it anyway.
+        if not track_genres and is_christmas:
+            track_genres = [_HOLIDAY_POOL_DISPLAY]
+
         for genre in track_genres:
             norm_key = re.sub(r"[^\w\s-]", "", genre.lower()).strip()
             if not norm_key:
@@ -3266,6 +3373,11 @@ def _create_genre_top_track_playlists(
         )
         if max_tracks:
             winners = winners[:max_tracks]
+
+        # ⭐ AFTER the slice, always. Shuffling before it would let the cap drop
+        # genuinely top tracks at random; here the rotation can only reorder the
+        # tracks that already qualified.
+        winners = _weekly_shuffle(winners, playlist_key=playlist_name)
 
         _song_ids = [str(t.get("id") or "").strip() for t in winners if str(t.get("id") or "").strip()]
         if not _song_ids:

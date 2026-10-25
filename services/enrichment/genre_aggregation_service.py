@@ -31,6 +31,23 @@ from db.engine import db_session
 from helpers.config_helpers import get_genre_synonyms, get_genre_weights
 
 logger = structlog.get_logger(__name__)
+
+
+def _genre_track_limit() -> int:
+    """How many MUSICAL genres to write onto one track (default 3).
+
+    Read through ``helpers.config_helpers.get_genre_track_limit`` so the number
+    lives in ``config.yaml`` rather than in three call sites. FAILS OPEN to 3:
+    a config problem must not silently narrow every track to one genre.
+    """
+    try:
+        from helpers.config_helpers import get_genre_track_limit
+
+        return int(get_genre_track_limit())
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Genre track limit unreadable — using 3", error=str(exc))
+        return 3
+
 logging.getLogger(__name__).setLevel(logging.DEBUG)
 
 # NOTE: these module-level snapshots are kept only as a last-resort fallback
@@ -252,6 +269,74 @@ _ADMIN_GENRE_WORDS: frozenset[str] = frozenset({
     "karaoke", "instrumentals", "bootleg", "bootlegs",
     "unofficial", "promo", "promos", "sampler",
 })
+
+
+#: Markers that must NEVER become a genre playlist of their own.
+#:
+#: ⚠️ DELIBERATELY NARROWER THAN ``_TRACK_AFFILIATION_FILTER_TAGS``. That set is
+#: derived from ``_FILTER_TAGS`` and therefore also contains
+#: Comedy / Orchestral / Symphonic / Soundtrack — values that are real enough to
+#: be worth a playlist of their own, and which existing libraries may already
+#: have pools for. Only the markers that describe a PERFORMANCE (a live take, a
+#: cover, a remaster, a remix, an instrumental) are excluded from pooling, plus
+#: the holiday family, which the playlist builder places with its own logic.
+_PLAYLIST_POOL_EXCLUDED: tuple[str, ...] = (
+    "live", "acoustic", "unplugged", "cover",
+    "remix", "remixed", "remaster", "remastered", "instrumental",
+)
+
+
+def is_playlist_pool_genre(value: Any) -> bool:
+    """May ``value`` name a genre PLAYLIST?
+
+    False for performance markers (Cover/Live/Acoustic/Remix/Remaster/
+    Instrumental) and for the Christmas/Holiday family — those are appended to
+    a track's genre list as extras, never used as a pooling key of their own.
+    The seasonal playlists are built from ``is_christmas_track`` instead, so a
+    Christmas mix still exists without a "Christmas" pool.
+    """
+    cleaned = _strip_admin_genre_markers(str(value or "").strip().lower())
+    if not cleaned:
+        return False
+    if cleaned in _PLAYLIST_POOL_EXCLUDED:
+        return False
+    return not is_holiday_family_token(cleaned)
+
+
+def playlist_pool_genres(values: Any, limit: int | None = None) -> list[str]:
+    """The genres a track POOLS BY for genre playlists.
+
+    ⭐⭐ THIS IS THE FIX FOR "IT WAS REMOVED FROM THE TRACK BUT IT IS STILL ON
+    THE PLAYLIST". The pool must be built from the track's FINAL ``genres``
+    value — the three applied musical genres plus any extras — and NOT from the
+    per-provider source columns. Last.fm / MusicBrainz / Discogs keep whatever
+    they originally returned, so a genre removed from the track's metadata (by
+    the selection engine, a manual correction, or a re-scan) survives forever
+    in those columns and keeps the track in a playlist Navidrome says it is not
+    in. One value, one answer.
+
+    Performance markers are dropped so Cover/Live/Acoustic/Remaster never
+    consume a slot or name a playlist; the holiday family is dropped for the
+    same reason and placed by the seasonal branch instead.
+
+    ``limit=None`` keeps every musical genre.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in _parse_genre_input(values) or []:
+        if isinstance(raw, dict):
+            raw = raw.get("name") or ""
+        name = str(raw or "").strip()
+        if not name or not is_playlist_pool_genre(name):
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+        if limit is not None and len(out) >= max(1, int(limit)):
+            break
+    return out
 
 
 def _genre_synonyms() -> dict[str, str]:
@@ -1021,7 +1106,15 @@ def get_track_recommendations(artist: str, album: str) -> dict[str, Any]:
                 # being weighted as the most specific evidence available.
                 source_map.setdefault(f"{src_key}@album", []).extend(parsed_vals)
 
-    recommended = aggregate_genres(source_map, max_genres=2, context_album=album)
+    recommended = aggregate_genres(
+        source_map,
+        # The album blend hands the same list to every track of the album, so it
+        # uses the SAME limit the per-track path writes — otherwise a track
+        # could gain 3 genres from its own sources and then be flattened to 2
+        # by the album pass a moment later.
+        max_genres=_genre_track_limit(),
+        context_album=album,
+    )
 
     # ── Album blend must NOT carry per-track affiliation tags ──────────────
     recommended = [
@@ -1351,7 +1444,7 @@ def sync_various_artists_track_genres(
             source_map = {f"{k}@track": v for k, v in source_map.items()}
             top_genres = aggregate_genres(
                 source_map,
-                max_genres=2,
+                max_genres=_genre_track_limit(),
                 context_title=str(track.get("title") or ""),
                 context_album=str(album or ""),
                 nav_genres=None,
