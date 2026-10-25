@@ -2181,6 +2181,26 @@ def enrich_album_extras(
     return extra_context, similar, metadata
 
 
+def track_carries_live_state(track: dict[str, Any]) -> bool:
+    """True when a track row MIGHT need a live/acoustic revert."""
+    if not isinstance(track, dict):
+        return True
+
+    if row_get(track, "is_live") or row_get(track, "is_acoustic") or row_get(track, "album_context_live"):
+        return True
+
+    title = str(track.get("title") or "")
+    if title and strip_live_acoustic_suffix(title) != title:
+        return True
+
+    if _drop_live_genres_from_json(track.get("musicbrainz_genres")) is not None:
+        return True
+    if _drop_live_genres_from_csv(track.get("genres")) is not None:
+        return True
+
+    return False
+
+
 def revert_track_live_state(track_id: str) -> bool:
     """Undo live/acoustic tagging for one track. Returns True when it changed something."""
     context = {"track_id": str(track_id)}
