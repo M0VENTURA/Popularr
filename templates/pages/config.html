@@ -1791,6 +1791,32 @@
     </div>
   </div>
 
+  <!-- Popularity Data Export -->
+  <div class="card shadow-sm mb-3" id="popularity-export">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-filetype-csv"></i> Export Popularity Data</h5>
+      <small class="text-muted">Every track in the collection as a CSV, most popular first</small>
+    </div>
+    <div class="card-body">
+      <div class="d-flex align-items-start justify-content-between gap-3 flex-wrap">
+        <p class="text-muted small mb-0">
+          Downloads one row per track — Last.fm listeners/playcount, ListenBrainz
+          listens/users, both source scores, the combined score, the star rating, the
+          single-detection verdict and the live/frozen flags — so the numbers can be
+          sorted and filtered in a spreadsheet instead of read off a screen. It uses the
+          <strong>same columns and the same ordering</strong> as the per-artist and
+          per-album reports on those pages, so a track keeps its relative position
+          whichever file you open.
+        </p>
+        <a href="{{ url_for('misc_api.api_collection_popularity_report') }}"
+           class="btn btn-primary btn-sm text-nowrap"
+           title="CSV of every track in the collection: Last.fm + ListenBrainz listens, source scores, combined score and stars — most popular first">
+          <i class="bi bi-download"></i> Download Collection CSV
+        </a>
+      </div>
+    </div>
+  </div>
+
   <!-- Popularity Weights Section -->
   <div class="card shadow-sm mb-3" id="popularity-weights">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">
@@ -3046,7 +3072,7 @@
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_decade_enabled" {% if config.get('playlists', {}).get('decade_playlists_enabled', False) %}checked{% endif %}>
+            <input class="form-check-input" type="checkbox" id="playlists_decade_enabled" {% if config.get('playlists', {}).get('decade_playlists_enabled', True) %}checked{% endif %}>
           </div>
         </div>
       </div>
@@ -3058,7 +3084,7 @@
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_hit_singles_enabled" {% if config.get('playlists', {}).get('hit_singles_playlist_enabled', False) %}checked{% endif %}>
+            <input class="form-check-input" type="checkbox" id="playlists_hit_singles_enabled" {% if config.get('playlists', {}).get('hit_singles_playlist_enabled', True) %}checked{% endif %}>
           </div>
         </div>
       </div>
@@ -3193,6 +3219,11 @@
           <span class="help-text">Cap on tracks in each genre playlist after ordering. Set to <strong>0</strong> for no cap — every qualifying track is included. Default: <strong>300</strong></span>
         </div>
         <div class="input-card">
+          <label for="playlists_essential_max_tracks">Essential Playlist Max Tracks</label>
+          <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_max_tracks" placeholder="50" value="{{ config.get('playlists', {}).get('essential_max_tracks', 50) }}">
+          <span class="help-text">Cap on tracks in each artist's Essential Collection, applied after the list is ordered and spread across artists. Default: <strong>50</strong></span>
+        </div>
+        <div class="input-card">
           <label for="playlists_favourite_enabled">Favourite Playlists</label>
           <div class="form-check form-switch">
             <input class="form-check-input" type="checkbox" id="playlists_favourite_enabled" {% if config.get('playlists', {}).get('favourite_playlists_enabled', true) %}checked{% endif %}>
@@ -3260,7 +3291,7 @@
         <div class="input-card">
           <label for="playlists_max_per_artist">Max Tracks Per Artist</label>
           <input type="number" step="1" min="0" max="500" class="form-control form-control-sm" id="playlists_max_per_artist" placeholder="25" value="{{ config.get('playlists', {}).get('genre_playlists_max_per_artist', 25) }}">
-          <span class="help-text">Stops one prolific artist filling a genre playlist. Overflow tracks move to the end rather than being dropped. Set to <strong>0</strong> for no limit. Default: <strong>25</strong></span>
+          <span class="help-text">A <strong>hard quota</strong>: the strongest N tracks from each artist are kept and every other track by that artist is dropped from the playlist, so the limit still holds AFTER the list is spread across artists and capped. Set to <strong>0</strong> for no limit. Default: <strong>25</strong></span>
         </div>
         <div class="input-card">
           <label for="playlists_interleave_artists">Spread Artists Through The List</label>

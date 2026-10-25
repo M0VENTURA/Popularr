@@ -1741,6 +1741,32 @@
     </div>
   </div>
 
+  <!-- Popularity Data Export -->
+  <div class="card shadow-sm mb-3" id="popularity-export">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-filetype-csv"></i> Export Popularity Data</h5>
+      <small class="text-muted">Every track in the collection as a CSV, most popular first</small>
+    </div>
+    <div class="card-body">
+      <div class="d-flex align-items-start justify-content-between gap-3 flex-wrap">
+        <p class="text-muted small mb-0">
+          Downloads one row per track — Last.fm listeners/playcount, ListenBrainz
+          listens/users, both source scores, the combined score, the star rating, the
+          single-detection verdict and the live/frozen flags — so the numbers can be
+          sorted and filtered in a spreadsheet instead of read off a screen. It uses the
+          <strong>same columns and the same ordering</strong> as the per-artist and
+          per-album reports on those pages, so a track keeps its relative position
+          whichever file you open.
+        </p>
+        <a href="{{ url_for('misc_api.api_collection_popularity_report') }}"
+           class="btn btn-primary btn-sm text-nowrap"
+           title="CSV of every track in the collection: Last.fm + ListenBrainz listens, source scores, combined score and stars — most popular first">
+          <i class="bi bi-download"></i> Download Collection CSV
+        </a>
+      </div>
+    </div>
+  </div>
+
   <!-- Popularity Weights Section -->
   <div class="card shadow-sm mb-3" id="popularity-weights">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">
@@ -3102,6 +3128,112 @@
         </div>
       </div>
 
+      {#
+        ⚠️ THESE EIGHT FAMILIES WERE MISSING FROM THIS TREE ENTIRELY — the
+        template rendered only their numeric limits further down, so there was
+        no way to switch any of them on, and the collector had no checkbox to
+        read. Because ``save_config`` REPLACES config.yaml wholesale (only
+        TOP-LEVEL sections are carried forward), every key this page does not
+        emit is DELETED on save — so an ordinary save silently reset all eight
+        to the code defaults. The ids match ``static/js/config.js``'s
+        ``getChecked('playlists_..._enabled', ...)`` calls exactly.
+      #}
+      <div class="setting-card">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_decade_enabled">Create Decade Top-Tracks Playlists</label>
+          <p class="setting-description">Auto-generated decade playlists (e.g. <code>1980s - Top Tracks</code>, <code>1990s - Top Tracks</code>) built from 4★/5★ tracks grouped by original release year, ranked by global popularity and interleaved across artists.</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_decade_enabled" {% if config.get('playlists', {}).get('decade_playlists_enabled', True) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_hit_singles_enabled">Create Hit Singles Playlist</label>
+          <p class="setting-description">Library-wide <code>Hit Singles</code> radio mix built from verified 4★/5★ singles across your collection, deduplicated to studio recordings and interleaved across artists.</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_hit_singles_enabled" {% if config.get('playlists', {}).get('hit_singles_playlist_enabled', True) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_hidden_gems_enabled">Create Hidden Gems &amp; Deep Cuts Playlist</label>
+          <p class="setting-description">Library-wide <code>Hidden Gems</code> playlist of 4★/5★ studio album tracks that were never released as singles — surfacing standout deep cuts across your library.</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_hidden_gems_enabled" {% if config.get('playlists', {}).get('hidden_gems_playlist_enabled', False) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_new_releases_enabled">Create New Releases Playlist</label>
+          <p class="setting-description">Library-wide <code>New Releases</code> playlist of 4★/5★ tracks released in the current or previous calendar year (distinct from <em>New Music</em>, which tracks recently imported files regardless of release era).</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_new_releases_enabled" {% if config.get('playlists', {}).get('new_releases_playlist_enabled', False) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_covers_enabled">Create Great Covers Playlist</label>
+          <p class="setting-description">Library-wide <code>Great Covers</code> playlist of 3★–5★ tracks identified by cover detection (<code>is_cover = 1</code>), ranked by global popularity.</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_covers_enabled" {% if config.get('playlists', {}).get('covers_playlist_enabled', False) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_acoustic_enabled">Create Acoustic &amp; Unplugged Playlist</label>
+          <p class="setting-description">Library-wide <code>Acoustic Essentials</code> playlist of 4★/5★ acoustic, unplugged and stripped-back recordings.</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_acoustic_enabled" {% if config.get('playlists', {}).get('acoustic_playlist_enabled', False) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_high_energy_enabled">Create High Energy &amp; Upbeat Playlist</label>
+          <p class="setting-description">Library-wide <code>High Energy &amp; Upbeat</code> playlist of 4★/5★ tracks selected by high danceability &amp; BPM (<code>danceability &gt;= 0.65</code> and <code>bpm &gt;= 115</code>) or energetic/upbeat mood and genre tags.</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_high_energy_enabled" {% if config.get('playlists', {}).get('high_energy_playlist_enabled', False) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_mood_enabled">Create Mood Mix Playlists</label>
+          <p class="setting-description">Auto-generated <code>{Mood} - Mix</code> playlists built from 4★/5★ tracks grouped by their Essentia / mood tags whenever a mood reaches the minimum track count.</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_mood_enabled" {% if config.get('playlists', {}).get('mood_playlists_enabled', False) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+
       <div class="setting-card">
         <div class="setting-info">
           <label class="setting-title" for="playlists_genre_delete_enabled">Delete Genre Playlists Below Threshold</label>
@@ -3158,6 +3290,11 @@
           <label for="playlists_genre_max_tracks">Max Tracks Per Playlist</label>
           <input type="number" step="1" min="0" max="10000" class="form-control form-control-sm" id="playlists_genre_max_tracks" placeholder="300" value="{{ config.get('playlists', {}).get('genre_playlists_max_tracks', 300) }}">
           <span class="help-text">Cap on tracks in each genre playlist after ordering. Set to <strong>0</strong> for no cap — every qualifying track is included. Default: <strong>300</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_essential_max_tracks">Essential Playlist Max Tracks</label>
+          <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_max_tracks" placeholder="50" value="{{ config.get('playlists', {}).get('essential_max_tracks', 50) }}">
+          <span class="help-text">Cap on tracks in each artist's Essential Collection, applied after the list is ordered and spread across artists. Default: <strong>50</strong></span>
         </div>
         <div class="input-card">
           <label for="playlists_favourite_enabled">Favourite Playlists</label>
@@ -3227,7 +3364,7 @@
         <div class="input-card">
           <label for="playlists_max_per_artist">Max Tracks Per Artist</label>
           <input type="number" step="1" min="0" max="500" class="form-control form-control-sm" id="playlists_max_per_artist" placeholder="25" value="{{ config.get('playlists', {}).get('genre_playlists_max_per_artist', 25) }}">
-          <span class="help-text">Stops one prolific artist filling a genre playlist: no artist may contribute more than this many tracks. Set to <strong>0</strong> for no limit. Default: <strong>25</strong></span>
+          <span class="help-text">A <strong>hard quota</strong>: the strongest N tracks from each artist are kept and every other track by that artist is dropped from the playlist, so the limit still holds AFTER the list is spread across artists and capped. Set to <strong>0</strong> for no limit. Default: <strong>25</strong></span>
         </div>
         <div class="input-card">
           <label for="playlists_interleave_artists">Spread Artists Through The List</label>
@@ -3236,6 +3373,107 @@
           </div>
           <span class="help-text">Avoids consecutive runs from the same artist, so a ranked list does not arrive album by album. Changes the order only — never which tracks are included. Default: <strong>on</strong></span>
         </div>
+      </div>
+
+      {#
+        ⚠️ THE LIMITS AND NAMES FOR THE EIGHT OPTIONAL PLAYLIST FAMILIES WERE
+        ALSO MISSING HERE. Without them the toggles above could switch a
+        playlist on but there was no way to change its size or its name, and
+        because ``save_config`` replaces the whole ``playlists`` section, the
+        configured values were dropped on every save.
+      #}
+      <div class="thresholds-grid">
+        <div class="input-card">
+          <label for="playlists_decade_min_tracks">Decade Playlist Min Tracks</label>
+          <input type="number" step="1" min="5" max="1000" class="form-control form-control-sm" id="playlists_decade_min_tracks" placeholder="50" value="{{ config.get('playlists', {}).get('decade_playlists_min_tracks', 50) }}">
+          <span class="help-text">Minimum qualifying 4★/5★ tracks in a decade before creating its playlist. Default: <strong>50</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_decade_max_tracks">Decade Playlist Max Tracks</label>
+          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_decade_max_tracks" placeholder="200" value="{{ config.get('playlists', {}).get('decade_playlists_max_tracks', 200) }}">
+          <span class="help-text">Maximum tracks per decade playlist. Default: <strong>200</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_mood_min_tracks">Mood Mix Min Tracks</label>
+          <input type="number" step="1" min="5" max="1000" class="form-control form-control-sm" id="playlists_mood_min_tracks" placeholder="40" value="{{ config.get('playlists', {}).get('mood_playlists_min_tracks', 40) }}">
+          <span class="help-text">Minimum qualifying tracks in a mood before creating its mix playlist. Default: <strong>40</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_mood_max_tracks">Mood Mix Max Tracks</label>
+          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_mood_max_tracks" placeholder="150" value="{{ config.get('playlists', {}).get('mood_playlists_max_tracks', 150) }}">
+          <span class="help-text">Maximum tracks per mood mix playlist. Default: <strong>150</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_hit_singles_max_tracks">Hit Singles Max Tracks</label>
+          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_hit_singles_max_tracks" placeholder="250" value="{{ config.get('playlists', {}).get('hit_singles_max_tracks', 250) }}">
+          <span class="help-text">Maximum tracks in the Hit Singles playlist. Default: <strong>250</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_hidden_gems_max_tracks">Hidden Gems Max Tracks</label>
+          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_hidden_gems_max_tracks" placeholder="200" value="{{ config.get('playlists', {}).get('hidden_gems_max_tracks', 200) }}">
+          <span class="help-text">Maximum tracks in the Hidden Gems playlist. Default: <strong>200</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_new_releases_max_tracks">New Releases Max Tracks</label>
+          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_new_releases_max_tracks" placeholder="100" value="{{ config.get('playlists', {}).get('new_releases_max_tracks', 100) }}">
+          <span class="help-text">Maximum tracks in the New Releases playlist. Default: <strong>100</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_covers_max_tracks">Great Covers Max Tracks</label>
+          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_covers_max_tracks" placeholder="150" value="{{ config.get('playlists', {}).get('covers_max_tracks', 150) }}">
+          <span class="help-text">Maximum tracks in the Great Covers playlist. Default: <strong>150</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_acoustic_max_tracks">Acoustic Playlist Max Tracks</label>
+          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_acoustic_max_tracks" placeholder="150" value="{{ config.get('playlists', {}).get('acoustic_max_tracks', 150) }}">
+          <span class="help-text">Maximum tracks in the Acoustic Essentials playlist. Default: <strong>150</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_high_energy_max_tracks">High Energy Max Tracks</label>
+          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_high_energy_max_tracks" placeholder="200" value="{{ config.get('playlists', {}).get('high_energy_max_tracks', 200) }}">
+          <span class="help-text">Maximum tracks in the High Energy &amp; Upbeat playlist. Default: <strong>200</strong></span>
+        </div>
+      </div>
+
+      <div class="input-card naming-card">
+        <label for="playlists_decade_name_template">Decade Playlist Name Template</label>
+        <input type="text" class="form-control" id="playlists_decade_name_template" placeholder="{decade}s - Top Tracks" value="{{ config.get('playlists', {}).get('decade_playlists_name_template', '{decade}s - Top Tracks') }}">
+        <span class="help-text">Supports the <code>{decade}</code> placeholder (e.g. 1980, 1990). Default: <strong>{decade}s - Top Tracks</strong></span>
+      </div>
+      <div class="input-card naming-card">
+        <label for="playlists_mood_name_template">Mood Mix Playlist Name Template</label>
+        <input type="text" class="form-control" id="playlists_mood_name_template" placeholder="{mood} - Mix" value="{{ config.get('playlists', {}).get('mood_playlists_name_template', '{mood} - Mix') }}">
+        <span class="help-text">Supports the <code>{mood}</code> placeholder. Default: <strong>{mood} - Mix</strong></span>
+      </div>
+      <div class="input-card naming-card">
+        <label for="playlists_hit_singles_name">Hit Singles Playlist Name</label>
+        <input type="text" class="form-control" id="playlists_hit_singles_name" placeholder="Hit Singles" value="{{ config.get('playlists', {}).get('hit_singles_playlist_name', 'Hit Singles') }}">
+        <span class="help-text">Default: <strong>Hit Singles</strong></span>
+      </div>
+      <div class="input-card naming-card">
+        <label for="playlists_hidden_gems_name">Hidden Gems Playlist Name</label>
+        <input type="text" class="form-control" id="playlists_hidden_gems_name" placeholder="Hidden Gems" value="{{ config.get('playlists', {}).get('hidden_gems_playlist_name', 'Hidden Gems') }}">
+        <span class="help-text">Default: <strong>Hidden Gems</strong></span>
+      </div>
+      <div class="input-card naming-card">
+        <label for="playlists_new_releases_name">New Releases Playlist Name</label>
+        <input type="text" class="form-control" id="playlists_new_releases_name" placeholder="New Releases" value="{{ config.get('playlists', {}).get('new_releases_playlist_name', 'New Releases') }}">
+        <span class="help-text">Default: <strong>New Releases</strong></span>
+      </div>
+      <div class="input-card naming-card">
+        <label for="playlists_covers_name">Great Covers Playlist Name</label>
+        <input type="text" class="form-control" id="playlists_covers_name" placeholder="Great Covers" value="{{ config.get('playlists', {}).get('covers_playlist_name', 'Great Covers') }}">
+        <span class="help-text">Default: <strong>Great Covers</strong></span>
+      </div>
+      <div class="input-card naming-card">
+        <label for="playlists_acoustic_name">Acoustic Playlist Name</label>
+        <input type="text" class="form-control" id="playlists_acoustic_name" placeholder="Acoustic Essentials" value="{{ config.get('playlists', {}).get('acoustic_playlist_name', 'Acoustic Essentials') }}">
+        <span class="help-text">Default: <strong>Acoustic Essentials</strong></span>
+      </div>
+      <div class="input-card naming-card">
+        <label for="playlists_high_energy_name">High Energy Playlist Name</label>
+        <input type="text" class="form-control" id="playlists_high_energy_name" placeholder="High Energy &amp; Upbeat" value="{{ config.get('playlists', {}).get('high_energy_playlist_name', 'High Energy & Upbeat') }}">
+        <span class="help-text">Default: <strong>High Energy &amp; Upbeat</strong></span>
       </div>
 
       <!-- Genre exclusions — which playlists a metal track may not enter -->

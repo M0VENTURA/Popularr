@@ -1,15 +1,17 @@
-"""CSV exports of the popularity data — one artist, or one album.
+"""CSV exports of the popularity data — one artist, one album, or the library.
 
-Backs the "Download Popularity Report" actions on the artist and album pages:
-the full popularity row set — Last.fm listeners/playcount, ListenBrainz
-listens/users, both source scores, the combined score, the star rating and the
-single-detection verdict — so the numbers can be sorted and filtered in a
-spreadsheet instead of read off a screen.
+Backs the "Download Popularity Report" actions on the artist and album pages
+and the collection-wide export on the Config page: the full popularity row set
+— Last.fm listeners/playcount, ListenBrainz listens/users, both source scores,
+the combined score, the star rating and the single-detection verdict — so the
+numbers can be sorted and filtered in a spreadsheet instead of read off a
+screen.
 
-Both scopes share ONE query and ONE ordering rule. The album report is a
-subset of the artist report at the same ordering, so an album's rows appear in
-the same relative order in both files; two copies of the SQL would eventually
-disagree about a column or a sort key, which is worse than no report at all.
+All three scopes share ONE query and ONE ordering rule. The album report is a
+subset of the artist report at the same ordering, and the artist report is a
+subset of the collection report, so a row appears in the same relative order in
+every file; two copies of the SQL would eventually disagree about a column or a
+sort key, which is worse than no report at all.
 """
 
 from __future__ import annotations
@@ -87,13 +89,21 @@ _ARTIST_PREDICATE = "LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:
 _ALBUM_PREDICATE = "LOWER(COALESCE(album, '')) = LOWER(:album)"
 
 
-def _scope(*, artist: str, album: str | None) -> tuple[str, dict[str, Any]]:
+def _scope(*, artist: str | None, album: str | None) -> tuple[str, dict[str, Any]]:
     """WHERE clause + bound parameters for one scope.
+
+    ``artist=None`` means the WHOLE COLLECTION (the Config page's export). That
+    is expressed as ``1 = 1`` rather than by omitting the WHERE clause, so the
+    statement text has one shape and the ordering rule is provably the same in
+    every scope.
 
     Built as text rather than ``(:album IS NULL OR ...)`` on purpose: a bare
     untyped parameter compared against ``NULL`` makes PostgreSQL guess at the
     parameter's type, and the guess is not always ``text``.
     """
+    if not artist:
+        return "1 = 1", {}
+
     params: dict[str, Any] = {"artist": artist}
     predicate = _ARTIST_PREDICATE
     if album:
@@ -107,8 +117,13 @@ def _filename_part(value: str, fallback: str) -> str:
     return re.sub(r"[^A-Za-z0-9 _-]", "", str(value or "")).strip() or fallback
 
 
-def build_popularity_report(*, artist: str, album: str | None = None) -> str:
-    """CSV text for one artist (or one album), most popular first.
+def build_popularity_report(*, artist: str | None = None, album: str | None = None) -> str:
+    """CSV text for one artist (or one album), or the whole collection.
+
+    ``artist=None`` → every track in ``tracks``. That is what the Config page's
+    "Export Popularity Data" button downloads, and it is the only scope whose
+    size is not bounded by one artist, so it is also the one that most needs to
+    stay OFF the event loop.
 
     BLOCKING — the caller must run it OFF the event loop
     (``await asyncio.to_thread(...)``), because it reads every track in scope.
@@ -135,8 +150,20 @@ def build_popularity_report(*, artist: str, album: str | None = None) -> str:
     return buffer.getvalue()
 
 
-def popularity_report_filename(*, artist: str, album: str | None = None) -> str:
+def build_collection_popularity_report() -> str:
+    """CSV of EVERY track in the library, most popular first.
+
+    A thin wrapper rather than a second query: the collection file must sort
+    exactly like an artist file so a row keeps its relative position when the
+    two are compared side by side.
+    """
+    return build_popularity_report()
+
+
+def popularity_report_filename(*, artist: str | None = None, album: str | None = None) -> str:
     """Attachment name for one scope; the album, when given, is part of it."""
+    if not artist:
+        return "Popularr - collection popularity report.csv"
     safe_artist = _filename_part(artist, "artist")
     if album:
         safe_album = _filename_part(album, "album")

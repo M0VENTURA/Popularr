@@ -362,6 +362,13 @@ function buildConfigObject() {
         const raw = parseInt(getValue('playlists_genre_max_tracks', '300'), 10);
         return Number.isFinite(raw) && raw >= 0 ? raw : 300;
       })(),
+      //: Cap on one artist's Essential Collection. Was read by the backend
+      //: (default 50) but never collected here, so every save DELETED the key
+      //: from config.yaml and reset it — the input above now fixes that.
+      essential_max_tracks: (() => {
+        const raw = parseInt(getValue('playlists_essential_max_tracks', '50'), 10);
+        return Number.isFinite(raw) && raw > 0 ? raw : 50;
+      })(),
       favourite_playlists_enabled: getChecked('playlists_favourite_enabled', true),
       favourite_min_stars: parseInt(getValue('playlists_favourite_min_stars', '4'), 10) || 4,
       favourite_artists_name: getValue('playlists_favourite_artists_name', 'Favourite Artists') || 'Favourite Artists',

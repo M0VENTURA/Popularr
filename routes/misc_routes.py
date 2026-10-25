@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -2017,6 +2018,50 @@ def api_essentia_download_status() -> Any:
         return jsonify(progress)
 
     return jsonify({"status": "idle", "models_dir": models_dir}), 200
+
+
+# ===========================================================================
+# COLLECTION POPULARITY REPORT
+# ===========================================================================
+
+@misc_api_bp.route("/popularity/report")
+async def api_collection_popularity_report() -> Any:
+    """Download EVERY track in the collection as CSV, most popular first.
+
+    The collection-wide twin of ``artist_routes.api_artist_popularity_report``
+    and ``album_routes.api_album_popularity_report``, backing the Config page's
+    "Export Popularity Data" button. All three share one query and one ordering
+    rule (``services.popularity.popularity_report_service``), so a track keeps
+    its relative position whether it is read from the artist file or this one.
+
+    ⚠️ THIS IS THE UNBOUNDED SCOPE. The artist report reads one artist's rows;
+    this reads the whole ``tracks`` table, so it must never run on the event
+    loop — ``asyncio.to_thread`` is what keeps a large library from stalling
+    every other request in the worker (the async-route ratchet exempts a
+    handler only when it offloads).
+    """
+    from services.popularity.popularity_report_service import (
+        build_collection_popularity_report,
+        popularity_report_filename,
+    )
+
+    try:
+        report = await asyncio.to_thread(build_collection_popularity_report)
+    except Exception as exc:
+        logger.error("Collection popularity report failed", error=str(exc))
+        return jsonify({"error": str(exc)}), 500
+
+    return Response(
+        # ``\ufeff`` (UTF-8 BOM): titles carry accents, and without it Excel
+        # reads the file as the local codepage and mangles them.
+        "\ufeff" + report,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{popularity_report_filename()}"'
+            )
+        },
+    )
 
 
 # ===========================================================================

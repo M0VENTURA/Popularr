@@ -463,6 +463,47 @@
         const raw = parseInt(getValue('playlists_genre_max_tracks', '300'), 10);
         return Number.isFinite(raw) && raw >= 0 ? raw : 300;
       })(),
+      //: Cap on one artist's Essential Collection.
+      essential_max_tracks: (() => {
+        const raw = parseInt(getValue('playlists_essential_max_tracks', '50'), 10);
+        return Number.isFinite(raw) && raw > 0 ? raw : 50;
+      })(),
+      // ⚠️ THE EIGHT OPTIONAL PLAYLIST FAMILIES.
+      //
+      // These were absent from this collector while the BACKEND read every one
+      // of them, and ``save_config`` replaces the whole ``playlists`` section
+      // (only top-level sections are carried forward). So any save from this
+      // page DELETED all of these keys, resetting every family to its code
+      // default — the toggles appeared to do nothing because the value was
+      // never written. Every id below must exist in
+      // ``test_site/templates/Pages/config.html``; a collector with no input
+      // reads its default and force-writes that instead.
+      decade_playlists_enabled: getChecked('playlists_decade_enabled', false),
+      decade_playlists_name_template: getValue('playlists_decade_name_template', '{decade}s - Top Tracks') || '{decade}s - Top Tracks',
+      decade_playlists_min_tracks: parseInt(getValue('playlists_decade_min_tracks', '50'), 10) || 50,
+      decade_playlists_max_tracks: parseInt(getValue('playlists_decade_max_tracks', '200'), 10) || 200,
+      hit_singles_playlist_enabled: getChecked('playlists_hit_singles_enabled', false),
+      hit_singles_playlist_name: getValue('playlists_hit_singles_name', 'Hit Singles') || 'Hit Singles',
+      hit_singles_max_tracks: parseInt(getValue('playlists_hit_singles_max_tracks', '250'), 10) || 250,
+      hidden_gems_playlist_enabled: getChecked('playlists_hidden_gems_enabled', false),
+      hidden_gems_playlist_name: getValue('playlists_hidden_gems_name', 'Hidden Gems') || 'Hidden Gems',
+      hidden_gems_max_tracks: parseInt(getValue('playlists_hidden_gems_max_tracks', '200'), 10) || 200,
+      new_releases_playlist_enabled: getChecked('playlists_new_releases_enabled', false),
+      new_releases_playlist_name: getValue('playlists_new_releases_name', 'New Releases') || 'New Releases',
+      new_releases_max_tracks: parseInt(getValue('playlists_new_releases_max_tracks', '100'), 10) || 100,
+      covers_playlist_enabled: getChecked('playlists_covers_enabled', false),
+      covers_playlist_name: getValue('playlists_covers_name', 'Great Covers') || 'Great Covers',
+      covers_max_tracks: parseInt(getValue('playlists_covers_max_tracks', '150'), 10) || 150,
+      acoustic_playlist_enabled: getChecked('playlists_acoustic_enabled', false),
+      acoustic_playlist_name: getValue('playlists_acoustic_name', 'Acoustic Essentials') || 'Acoustic Essentials',
+      acoustic_max_tracks: parseInt(getValue('playlists_acoustic_max_tracks', '150'), 10) || 150,
+      high_energy_playlist_enabled: getChecked('playlists_high_energy_enabled', false),
+      high_energy_playlist_name: getValue('playlists_high_energy_name', 'High Energy & Upbeat') || 'High Energy & Upbeat',
+      high_energy_max_tracks: parseInt(getValue('playlists_high_energy_max_tracks', '200'), 10) || 200,
+      mood_playlists_enabled: getChecked('playlists_mood_enabled', false),
+      mood_playlists_name_template: getValue('playlists_mood_name_template', '{mood} - Mix') || '{mood} - Mix',
+      mood_playlists_min_tracks: parseInt(getValue('playlists_mood_min_tracks', '40'), 10) || 40,
+      mood_playlists_max_tracks: parseInt(getValue('playlists_mood_max_tracks', '150'), 10) || 150,
       // Per-user favourite playlists (Favourite Artists / Favourite Albums).
       favourite_playlists_enabled: getChecked('playlists_favourite_enabled', true),
       favourite_min_stars: parseInt(getValue('playlists_favourite_min_stars', '4'), 10) || 4,
