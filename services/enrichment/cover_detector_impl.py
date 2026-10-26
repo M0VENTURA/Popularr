@@ -365,6 +365,48 @@ def _same_artist(left: str, right: str) -> bool:
         return False
 
 
+#: Album-level artist values that name a COMPILATION rather than a performer.
+#: NOT redefined here — ``is_track_artist_placeholder`` owns that list, and this
+#: module already had a second copy (``_COMPILATION_ARTIST_NAMES``) that had
+#: drifted from it. One list, one source of truth.
+
+
+def comparison_artist(track: dict[str, Any], album_artist: str) -> str:
+    """The artist this row's cover verdict must be measured AGAINST.
+
+    ⭐⭐ THE BUG THIS EXISTS FOR. A cover verdict is always a statement about a
+    PERFORMER: "this recording is not by whoever wrote/released it first". On a
+    Various Artists compilation the ALBUM artist is the placeholder
+    ``"Various Artists"``, which matches no real credit — so every comparison
+    made against it is vacuous:
+
+    * ``_same_artist(candidate, "Various Artists")`` is never true, so the
+      performer's OWN recording is never excluded from the candidate set and the
+      "the performer released it first" conclusive negative can never fire;
+    * ``_performer_wrote_work(work, "Various Artists")`` returns False by its
+      own placeholder guard, so a track artist who WROTE the song is never
+      recognised as the originator.
+
+    Measured on "The Best 80's Car Songs…": Crowded House's own "Don't Dream
+    It's Over" — which they wrote and released in 1986 — was attributed to a
+    later cover by "(Denise Jannah Cover)", because the comparison artist was
+    the album's "Various Artists" and nothing about Crowded House was ever
+    consulted.
+
+    The TRACK artist is the performer. The album artist is only a fallback for
+    a single-artist release (where the two are the same anyway). Returns ``""``
+    when neither names a real performer, which callers treat as "no performer to
+    compare against" — never as a match.
+    """
+    performer = str(track.get("artist") or "").strip()
+    if performer and not is_track_artist_placeholder(performer):
+        return performer
+    fallback = str(album_artist or "").strip()
+    if fallback and not is_track_artist_placeholder(fallback):
+        return fallback
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # CoverDetector
 # ---------------------------------------------------------------------------
@@ -883,8 +925,10 @@ class CoverDetector:
             work_mbid = str(track.get("work_mbid") or "").strip()
             if not work_mbid:
                 continue
-            performer = str(track.get("artist") or "").strip() or artist
-            if not performer or is_track_artist_placeholder(performer):
+            # ⭐ ``comparison_artist`` — the TRACK artist, never a compilation's
+            # album placeholder. Returns "" when neither names a performer.
+            performer = comparison_artist(track, artist)
+            if not performer:
                 continue
             original = self._detect_via_work_id(
                 work_mbid=work_mbid,
@@ -931,8 +975,11 @@ class CoverDetector:
             core = self._detect_via_isrc(
                 isrc=isrc,
                 title=track.get("title", ""),
-                album_artist=artist,
-                track_artist=str(track.get("artist") or "").strip(),
+                # ⭐ The track artist, resolved once. ``album_artist`` is passed
+                # empty rather than the compilation placeholder it would
+                # otherwise fall back to.
+                album_artist="",
+                track_artist=comparison_artist(track, artist),
                 track_year=_extract_track_year(track),
             )
             if core:
@@ -957,10 +1004,17 @@ class CoverDetector:
                 continue
             track["mbid"] = mbid
 
+            # ⭐⭐ THE TRACK'S OWN ARTIST, not the album's. A cover verdict is
+            # about a PERFORMER, and on a compilation the album artist is the
+            # placeholder "Various Artists" — comparing against it disabled the
+            # writer check AND the "performer released it first" negative, which
+            # is how Crowded House's own "Don't Dream It's Over" was attributed
+            # to a later cover. See ``comparison_artist``.
+            _performer = comparison_artist(track, artist)
             core = self._detect_via_recording_relation(
                 recording_mbid=mbid,
                 title=track.get("title", ""),
-                album_artist=artist,
+                performer=_performer,
                 release_mbid=str(track.get("musicbrainz_album_mbid") or "").strip(),
                 track_year=_extract_track_year(track),
             )
@@ -991,7 +1045,15 @@ class CoverDetector:
                 continue
 
             source = tracks_by_id.get(tid, {})
-            performer = str(info.get("track_artist") or artist or "").strip()
+            # ⭐ The TRACK's artist. Falling back to the album artist is the bug
+            # this whole pass is being fixed for: on a compilation that fallback
+            # is "Various Artists", and every writer comparison below then
+            # answers "no" without looking at the performer at all.
+            performer = str(info.get("track_artist") or "").strip()
+            if not performer or is_track_artist_placeholder(performer):
+                performer = comparison_artist(source, artist)
+            if not performer:
+                continue
 
             if is_compilation:
                 ta = info.get("track_artist", "") or ""
@@ -1056,11 +1118,17 @@ class CoverDetector:
             if not hint:
                 continue
 
+            # ⭐ THE TRACK'S OWN ARTIST. Every test below asks "is this the
+            # performer's own song?", and on a compilation the album artist is
+            # "Various Artists" — which made all three vacuous.
+            _performer = comparison_artist(track, artist)
+
             base_title = _COVER_SUFFIX_RE.sub("", title).strip()
             if (
                 base_title
                 and base_title.lower() != title.lower()
-                and track_has_original_by_artist(self.db_conn, artist, base_title)
+                and _performer
+                and track_has_original_by_artist(self.db_conn, _performer, base_title)
             ):
                 continue
 
@@ -1070,15 +1138,15 @@ class CoverDetector:
 
             if writers_for_track and base_title:
                 for wr in writers_for_track:
-                    if self._is_writer_same_as_artist(wr, artist):
+                    if _performer and self._is_writer_same_as_artist(wr, _performer):
                         continue
                     mb_orig = self._find_original_recording(
                         base_title,
                         wr,
-                        album_artist=artist,
+                        album_artist=_performer,
                         track_year=_extract_track_year(track),
                     )
-                    if mb_orig and not _same_artist(mb_orig.get("artist", ""), artist):
+                    if mb_orig and not _same_artist(mb_orig.get("artist", ""), _performer):
                         resolved = mb_orig
                         resolved_writer = wr
                         break
@@ -1099,13 +1167,16 @@ class CoverDetector:
                 continue
 
             work_mbid = str(track.get("work_mbid") or track.get("musicbrainz_workid") or "").strip()
+            # ⭐ THE TRACK'S OWN ARTIST — see ``comparison_artist``. Both arms
+            # below phrase their answer relative to the performer.
+            _performer = comparison_artist(track, artist)
             if work_mbid:
                 logger.debug("Using pre-fetched work_mbid for cover fallback", track=track.get("title"), work_mbid=work_mbid)
                 original = self._earliest_work_recording(
                     work_ids={work_mbid},
                     search_title=canonical_track_title(track.get("title", "")) or track.get("title", ""),
                     exclude_mbid=str(track.get("mbid") or track.get("recording_mbid") or ""),
-                    album_artist=artist,
+                    album_artist=_performer,
                     confidence="medium",
                     track_year=_extract_track_year(track),
                 )
@@ -1122,7 +1193,7 @@ class CoverDetector:
                 original = self._find_original_via_work_lookup(
                     mbid,
                     track.get("title", ""),
-                    artist,
+                    _performer,
                     track_year=_extract_track_year(track),
                 )
 
@@ -1459,7 +1530,7 @@ class CoverDetector:
         self,
         recording: dict[str, Any],
         recording_mbid: str,
-        album_artist: str,
+        performer: str,
     ) -> tuple[dict[str, Any] | None, str | None]:
         """Return the recording this one is a cover *of*, if modelled."""
         for rel in recording.get("recording-relation-list", []) or []:
@@ -1488,7 +1559,9 @@ class CoverDetector:
                         orig_year = year_from_recording(details)
             if not orig_artist:
                 continue
-            if album_artist and _same_artist(orig_artist, album_artist):
+            # A relation pointing back at the performer is not a cover — it is
+            # the performer's own recording, mis-modelled upstream.
+            if performer and _same_artist(orig_artist, performer):
                 continue
             return (
                 {"artist": orig_artist, "year": orig_year, "confidence": "high"},
@@ -1499,7 +1572,7 @@ class CoverDetector:
     def _resolve_cover_chain(
         self,
         recording_mbid: str,
-        album_artist: str,
+        performer: str,
         seed_recording: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Follow cover relations to the root of the chain."""
@@ -1519,7 +1592,7 @@ class CoverDetector:
             if not recording:
                 break
             core, next_id = self._cover_relation_target(
-                recording, current_id, album_artist
+                recording, current_id, performer
             )
             if not core or not next_id or next_id in visited:
                 break
@@ -1915,11 +1988,20 @@ class CoverDetector:
         self,
         recording_mbid: str,
         title: str,
-        album_artist: str,
+        performer: str,
         release_mbid: str = "",
         track_year: int | None = None,
         _depth: int = 0,
     ) -> dict[str, Any] | None:
+        """Cover verdict for one recording, from its MusicBrainz relations.
+
+        ⚠️ ``performer`` is the TRACK's artist, NOT the album's. Every decision
+        below is phrased relative to it ("is the candidate the performer?",
+        "did the performer write the work?"), so handing it a compilation's
+        album artist ("Various Artists") makes all of them vacuously false —
+        which is exactly the reported "cover detection is not based on the track
+        artist". Callers must resolve it through :func:`comparison_artist`.
+        """
         try:
             seed = self._get_recording(
                 recording_mbid, "work-rels+recording-rels+artist-credits+releases"
@@ -1930,7 +2012,7 @@ class CoverDetector:
             # Modelled cover relations are the most reliable signal. Follow the
             # chain so a cover of a cover resolves to the true original.
             chain_result = self._resolve_cover_chain(
-                recording_mbid, album_artist, seed_recording=seed
+                recording_mbid, performer, seed_recording=seed
             )
 
             cover_work_ids = _all_cover_work_ids(seed)
@@ -1942,7 +2024,7 @@ class CoverDetector:
                     release_mbid,
                     title,
                     recording_mbid,
-                    album_artist,
+                    performer,
                     track_year=track_year,
                     _depth=_depth + 1,
                 )
@@ -1954,7 +2036,7 @@ class CoverDetector:
 
             from_work = self._original_from_cover_work(
                 cover_work_ids,
-                performer=album_artist,
+                performer=performer,
                 exclude_mbid=recording_mbid,
                 track_year=track_year,
             )
@@ -1962,7 +2044,7 @@ class CoverDetector:
                 return from_work
             by_writer = self._original_by_writer(
                 cover_work_ids,
-                performer=album_artist,
+                performer=performer,
                 exclude_mbid=recording_mbid,
                 title_hint=title,
             )
@@ -1975,7 +2057,7 @@ class CoverDetector:
                 work_ids=cover_work_ids,
                 search_title=search_title,
                 exclude_mbid=recording_mbid,
-                album_artist=album_artist,
+                album_artist=performer,
                 confidence="medium",
                 track_year=track_year,
             )
@@ -1985,12 +2067,13 @@ class CoverDetector:
                 return chain_result
             deep = self._earliest_across_pages(
                 cover_work_ids,
-                performer=album_artist,
+                performer=performer,
                 exclude_mbid=recording_mbid,
             )
             if deep:
                 return deep
-            fallback = self._writer_from_cover_work(cover_work_ids, performer=album_artist)
+            fallback = self._writer_from_cover_work(cover_work_ids, performer=performer)
+
             if fallback:
                 fallback = {**fallback, "confidence": "low"}
             return fallback
@@ -2082,7 +2165,7 @@ class CoverDetector:
         release_mbid: str,
         track_title: str,
         recording_mbid: str | None,
-        album_artist: str | None,
+        performer: str | None,
         track_year: int | None = None,
         _depth: int = 0,
     ) -> dict[str, Any] | None:
@@ -2110,7 +2193,7 @@ class CoverDetector:
                 return self._detect_via_recording_relation(
                     recording_mbid=release_rec_id,
                     title=track_title,
-                    album_artist=album_artist or "",
+                    performer=performer or "",
                     track_year=track_year,
                     _depth=_depth,
                 )
