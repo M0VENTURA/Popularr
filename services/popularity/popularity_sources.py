@@ -500,6 +500,37 @@ def _position_title_corroborates(local_title: str, release_title: str) -> bool:
     return bool(titles_match_for_review(left, right))
 
 
+def resolve_performance_title(local_title: str, release_title: str | None) -> str:
+    """The title every provider must be QUERIED with for this row.
+
+    ⭐⭐ IDENTITY-FIRST, and the reason a remix album was scored as its studio
+    originals. Every provider match is a TITLE match, so the title handed to
+    Last.fm decides which recording the row is measured as. A local file name
+    is what survived a retitle — a remix album's plainly titled rows ("My Way"
+    on Limp Bizkit's "New Old Songs", which is "My Way (DJ Premier Way
+    remix)" on the release) are a *different performance* from the studio hit
+    the name alone resolves to, and the studio hit's ~1.2M scrobbles were
+    scored against them while ListenBrainz, which is release-scoped, reported
+    the remix's ~10k. The two sources were describing two different recordings.
+
+    The ALBUM'S OWN RELEASE names the rendition the row is; it is the same
+    identity ``_build_album_recording_batch`` already applies to the MusicBrainz
+    metadata. It is only substituted when it CORROBORATES the local title
+    (position/duration-matched upstream) and it carries a performance marker the
+    local title lost — so a plain row on an ordinary album is untouched, and a
+    row whose local title is already specific keeps it.
+    """
+    local = str(local_title or "").strip()
+    release = str(release_title or "").strip()
+    if not local or not release:
+        return local or release
+    if not _position_title_corroborates(local, release):
+        return local
+    if not (_performance_types(release) - _performance_types(local)):
+        return local
+    return release
+
+
 def _position_alias_allowed(
     local_title: str, release_title: str | None, *, local_track_count: int,
     release_track_count: int, layout_verified: bool = False,

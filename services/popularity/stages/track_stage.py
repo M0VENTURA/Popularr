@@ -62,6 +62,7 @@ from services.popularity.popularity_sources import (
     get_aggregated_listenbrainz_popularity,
     get_search_aggregated_lastfm_popularity,
     get_work_level_listenbrainz_popularity,
+    resolve_performance_title,
     track_identity_key,
 )
 
@@ -1809,7 +1810,45 @@ def process_track(
                             effective_track.get("track_number"),
                         )
                     ) or (prefetched_popularity or {}).get(_prefetch_key)
+
+                # ⭐⭐ THE ROW'S PERFORMANCE TITLE, BEFORE ANY PROVIDER IS ASKED.
+                # Every provider match is a title match, so the title handed to
+                # Last.fm decides WHICH recording the row is measured as. A
+                # remix album's plainly titled rows — "My Way" on Limp Bizkit's
+                # "New Old Songs", which the release calls "My Way (DJ Premier
+                # Way remix)" — resolved to the STUDIO hit: the row was scored
+                # on ~1.2M scrobbles while ListenBrainz, release-scoped, reported
+                # the remix's ~10k. Same row, two different recordings, a ~100x
+                # spread between the two sources.
+                #
+                # Two reasons this is resolved HERE and from the RELEASE title
+                # rather than from ``musicbrainz_title`` later:
+                #  * the album's own release names the rendition the row is (the
+                #    same identity ``_build_album_recording_batch`` applies to the
+                #    MusicBrainz metadata), and
+                #  * ``musicbrainz_title`` is a DB column written by the PREVIOUS
+                #    scan, so on a first pass it was empty and the flag below
+                #    flipped between scans — the reported "first grab and later
+                #    scan are completely different".
+                _local_perf_title = _as_str(raw_title or title or "")
+                _perf_title = _local_perf_title
+                _release_title_hint = _as_str(
+                    (_prefetch_entry or {}).get("release_track_title") or ""
+                ).strip()
+                if _release_title_hint:
+                    _perf_title = resolve_performance_title(
+                        _local_perf_title, _release_title_hint
+                    ) or _local_perf_title
+                if _perf_title != _local_perf_title:
+                    # The release says this row is a different PERFORMANCE than
+                    # the file name claims, so the provider gates must judge the
+                    # release title, not the retitled one.
+                    _alt_rendition = True
+
                 if _force and _prefetch_entry and not _prefetch_entry.get("_album_tracklist"):
+                    # ⚠️ Dropping a stale cached COUNT is right; dropping the
+                    # IDENTITY with it is not. ``_perf_title`` above was taken
+                    # before this line on purpose.
                     _prefetch_entry = None
 
                 # ``listenbrainz_listens`` is not loaded until the ListenBrainz
@@ -1847,7 +1886,7 @@ def process_track(
                                 lf = LastFmClient(_lf_api_key)
                                 agg = get_aggregated_lastfm_popularity(
                                     artist,
-                                    raw_title or title,
+                                    _perf_title,
                                     lastfm_client=lf,
                                     isrc=isrc or None,
                                     recording_mbid=recording_mbid or None,
@@ -1877,7 +1916,13 @@ def process_track(
                                     lastfm_listeners = 0
                                     lastfm_playcount = 0
                                 else:
-                                    lf_result = lf.get_track_info(artist, title)
+                                    # ⚠️ ``_perf_title``, not the local title: this
+                                    # fallback ran whenever the aggregate came back
+                                    # empty, and querying the RETITLED name here put
+                                    # the studio recording straight back — the remix
+                                    # row kept the original's count through the one
+                                    # path meant to catch a miss.
+                                    lf_result = lf.get_track_info(artist, _perf_title)
                                     lastfm_listeners = _as_int(lf_result.get("listeners") if isinstance(lf_result, dict) else 0)
                                     lastfm_playcount = _as_int(lf_result.get("track_play") if isinstance(lf_result, dict) else 0)
 
@@ -1913,7 +1958,7 @@ def process_track(
                         if _lf_key2:
                             _lf2 = LastFmClient(_lf_key2)
                             _search_agg = get_search_aggregated_lastfm_popularity(
-                                artist, raw_title or title, lastfm_client=_lf2,
+                                artist, _perf_title, lastfm_client=_lf2,
                                 is_live_release=is_live_release,
                                 target_is_alt_rendition=_alt_rendition,
                             ) or {}
