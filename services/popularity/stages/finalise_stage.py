@@ -76,9 +76,11 @@ COMPILATION RATING FIX (this revision):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
+import os
 import random
 import re
 import threading
@@ -88,6 +90,15 @@ from datetime import datetime
 from statistics import mean, median, stdev
 from typing import Any
 from urllib.parse import urlsplit
+
+try:  # pragma: no cover - platform dependent
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+try:  # pragma: no cover - platform dependent
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None  # type: ignore[assignment]
 
 import structlog
 from sqlalchemy import bindparam, text
@@ -2515,20 +2526,221 @@ def _playlist_signature(song_ids: list[str]) -> str:
     return hashlib.sha1(joined.encode("utf-8", "replace")).hexdigest()
 
 
+# ── The durable "already pushed" store ───────────────────────────────────────
+#
+# ⭐⭐ WHY THIS IS ON DISK AND NOT ONLY IN MEMORY.
+#
+# ``_PLAYLIST_SIGNATURES`` is a per-process dict with a one-hour TTL, so it
+# remembered a push only for as long as that PROCESS happened to live. The
+# consequences were both real and visible:
+#
+#   * every container restart / redeploy emptied it, so the next scan re-pushed
+#     EVERY generated playlist — the reported "only playlists that changed
+#     should sync after an album scan" (measured in the log as
+#     ``69 playlist(s) synced`` with nothing changed);
+#   * a scan that ran longer than the TTL re-pushed everything it touched after
+#     the hour rolled over;
+#   * the four hypercorn workers and the queue worker each kept their OWN dict,
+#     so which process ran the rebuild decided whether anything was skipped.
+#
+# A playlist's content does not become stale because time passed or a process
+# restarted. The record therefore lives beside the other runtime state files and
+# is only dropped when the content ACTUALLY changes, when the playlist is
+# deleted, or when the config is saved.
+
+#: Bound on the on-disk map, so the file cannot grow without limit. Playlist
+#: names are few (one per genre/curated playlist), so this is generous.
+_PLAYLIST_SIG_STORE_MAX = 2000
+
+#: How long a remembered push stays authoritative.
+#:
+#: ⚠️ NOT the same job as the in-memory TTL. That one bounds MEMORY; this one
+#: bounds how long a playlist edited BY HAND in Navidrome's own UI can stay
+#: edited before the next rebuild overwrites it. Seven days keeps the "only
+#: changed playlists sync" promise while still self-healing a manual edit
+#: eventually — and a playlist DELETED on the server comes back immediately via
+#: the confirmed-absent path, not via this timer.
+_PLAYLIST_PUSH_MAX_AGE_SECONDS = 7 * 24 * 3600.0
+
+
+def _playlist_signature_store_path() -> str:
+    """``<state>/playlist_pushes.json`` — beside the other runtime state."""
+    try:
+        from helpers.config_helpers import get_state_directory
+
+        return os.path.join(get_state_directory(), "playlist_pushes.json")
+    except Exception:
+        return os.path.join(os.environ.get("SCAN_STATE_DIR", "/state"), "playlist_pushes.json")
+
+
+@contextlib.contextmanager
+def _signature_store_lock(path: str):
+    """Exclusive cross-process lock around a read-modify-write of the store.
+
+    ``flock`` (kernel-released on crash) rather than a lock file, so a killed
+    worker can never leave the store permanently locked. If the filesystem
+    cannot lock, this degrades to in-process coordination: skipping a redundant
+    playlist push is an optimisation, and must never fail a scan.
+    """
+    handle = None
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        handle = open(f"{path}.lock", "a+b")
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None:  # pragma: no cover - Windows
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+    except Exception as exc:
+        logger.debug("Playlist signature store lock unavailable", path=path, error=str(exc))
+        with contextlib.suppress(Exception):
+            if handle is not None:
+                handle.close()
+        handle = None
+
+    try:
+        yield
+    finally:
+        if handle is not None:
+            with contextlib.suppress(Exception):
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                elif msvcrt is not None:  # pragma: no cover - Windows
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            with contextlib.suppress(Exception):
+                handle.close()
+
+
+def _coerce_store_entry(value: Any) -> tuple[str, float] | None:
+    """``{"sig": str, "at": epoch}`` → ``(sig, at)``; a bare string → ``(sig, 0)``.
+
+    The bare-string form is accepted so a store written by an older build still
+    loads (as already-stale, i.e. re-pushed once and then rewritten in the new
+    shape) instead of being discarded wholesale.
+    """
+    if isinstance(value, dict):
+        sig = str(value.get("sig") or "").strip()
+        if not sig:
+            return None
+        try:
+            at = float(value.get("at") or 0.0)
+        except (TypeError, ValueError):
+            at = 0.0
+        return sig, at
+    if isinstance(value, str) and value.strip():
+        return value.strip(), 0.0
+    return None
+
+
+def _read_signature_store() -> dict[str, tuple[str, float]]:
+    """The persisted ``{playlist name (casefolded): (signature, pushed_at)}`` map.
+
+    Tolerant by design: a missing, empty or corrupt file reads as ``{}``, which
+    can only cause a redundant push — never a skipped one.
+    """
+    path = _playlist_signature_store_path()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            out: dict[str, tuple[str, float]] = {}
+            for key, value in loaded.items():
+                name = str(key or "").strip().casefold()
+                entry = _coerce_store_entry(value)
+                if name and entry:
+                    out[name] = entry
+            return out
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.debug("Playlist signature store unreadable", path=path, error=str(exc))
+    return {}
+
+
+def _update_signature_store(updates: dict[str, str | None]) -> None:
+    """Merge *updates* into the store; ``None`` means "forget this playlist".
+
+    A read-modify-write under an exclusive lock: several processes record pushes
+    (the web workers and the queue worker all run rebuilds), and a blind
+    overwrite would drop another process's entries — which would then re-push.
+    """
+    if not updates:
+        return
+    path = _playlist_signature_store_path()
+    now = time.time()
+    with _signature_store_lock(path):
+        store = _read_signature_store()
+        for name, signature in updates.items():
+            key = str(name or "").strip().casefold()
+            if not key:
+                continue
+            if signature is None:
+                store.pop(key, None)
+            else:
+                store[key] = (str(signature), now)
+
+        # Bound the map by dropping the OLDEST pushes, which is the information
+        # a rebuild can most afford to re-derive.
+        if len(store) > _PLAYLIST_SIG_STORE_MAX:
+            for key, _entry in sorted(store.items(), key=lambda kv: kv[1][1])[
+                : len(store) - _PLAYLIST_SIG_STORE_MAX
+            ]:
+                store.pop(key, None)
+
+        payload = {
+            key: {"sig": sig, "at": at} for key, (sig, at) in store.items()
+        }
+        try:
+            tmp_path = f"{path}.{os.getpid()}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+            os.replace(tmp_path, path)
+        except Exception as exc:
+            logger.debug("Playlist signature store write failed", path=path, error=str(exc))
+
+
 def _playlist_already_pushed(playlist_name: str, signature: str) -> bool:
+    """True when this exact playlist content has already been pushed.
+
+    Checks the in-memory cache first (cheap, and it covers one pass over many
+    playlists), then the durable store. The in-memory TTL is a MEMORY bound
+    only — it never invalidates the durable record, because a playlist does not
+    become stale by ageing.
+    """
     key = str(playlist_name or "").strip().casefold()
+    if not key:
+        return False
+
     with _PLAYLIST_SIG_LOCK:
         existing = _PLAYLIST_SIGNATURES.get(key)
-        if not existing:
-            return False
-        sig, pushed_at = existing
-        if (time.monotonic() - pushed_at) >= _PLAYLIST_SIG_TTL_SECONDS:
-            _PLAYLIST_SIGNATURES.pop(key, None)
-            return False
-        if sig == signature:
-            _PLAYLIST_SIGNATURES.move_to_end(key)
-            return True
-    return False
+        if existing:
+            sig, pushed_at = existing
+            if (time.monotonic() - pushed_at) < _PLAYLIST_SIG_TTL_SECONDS:
+                if sig == signature:
+                    _PLAYLIST_SIGNATURES.move_to_end(key)
+                    return True
+            else:
+                # Drop the stale MEMORY entry only; the durable record stands.
+                _PLAYLIST_SIGNATURES.pop(key, None)
+
+    entry = _read_signature_store().get(key)
+    if not entry:
+        return False
+    stored_sig, stored_at = entry
+    if stored_sig != str(signature):
+        return False
+    if (time.time() - stored_at) >= _PLAYLIST_PUSH_MAX_AGE_SECONDS:
+        # Old enough that a hand edit in Navidrome may have been overwritten in
+        # the meantime; let the caller re-push and re-stamp it.
+        return False
+
+    with _PLAYLIST_SIG_LOCK:
+        _PLAYLIST_SIGNATURES[key] = (str(signature), time.monotonic())
+        _PLAYLIST_SIGNATURES.move_to_end(key)
+        while len(_PLAYLIST_SIGNATURES) > _PLAYLIST_SIG_MAX:
+            _PLAYLIST_SIGNATURES.popitem(last=False)
+    return True
 
 
 def _record_playlist_push(playlist_name: str, signature: str) -> None:
@@ -2538,17 +2750,27 @@ def _record_playlist_push(playlist_name: str, signature: str) -> None:
         _PLAYLIST_SIGNATURES.move_to_end(key)
         while len(_PLAYLIST_SIGNATURES) > _PLAYLIST_SIG_MAX:
             _PLAYLIST_SIGNATURES.popitem(last=False)
+    _update_signature_store({key: signature})
 
 
 def _forget_playlist_push(playlist_name: str) -> None:
     key = str(playlist_name or "").strip().casefold()
     with _PLAYLIST_SIG_LOCK:
         _PLAYLIST_SIGNATURES.pop(key, None)
+    _update_signature_store({key: None})
 
 
 def reset_playlist_push_cache() -> None:
+    """Forget EVERY remembered push, in memory and on disk.
+
+    Called when the config is saved: a change to the naming template, the track
+    limits or the ordering makes the previous signatures meaningless, and the
+    next scan must re-push everything so the new settings take effect.
+    """
     with _PLAYLIST_SIG_LOCK:
         _PLAYLIST_SIGNATURES.clear()
+    with contextlib.suppress(Exception):
+        os.remove(_playlist_signature_store_path())
     global _CLIENTS_CACHE
     with _CLIENTS_LOCK:
         _CLIENTS_CACHE = None
@@ -2645,7 +2867,18 @@ def _sync_playlist_to_navidrome(
     song_ids: list[str],
     rows: list[dict[str, Any]] | None = None,
     existing_playlist_id: str | None = None,
+    *,
+    server_confirmed_exists: bool | None = None,
 ) -> dict[str, Any]:
+    """Push one playlist, skipping it when its content is already there.
+
+    ``server_confirmed_exists`` is the caller's answer to "did the server list
+    this playlist a moment ago?":
+      * ``False`` — the server does NOT have it, so a remembered push is void
+        (the playlist was deleted there) and it MUST be re-created now;
+      * ``True``  — present, so the content signature decides;
+      * ``None``  — not checked; the signature decides, bounded by age.
+    """
     synced: dict[str, Any] = {
         "updated": 0,
         "created": 0,
@@ -2659,7 +2892,13 @@ def _sync_playlist_to_navidrome(
 
     song_ids = list(song_ids or [])
     signature = _playlist_signature(song_ids)
-    if _playlist_already_pushed(playlist_name, signature):
+
+    if server_confirmed_exists is False:
+        # ⭐ The playlist is GONE from the server. A remembered push would
+        # otherwise keep it gone until the age bound elapsed, so drop the record
+        # and let this call re-create it.
+        _forget_playlist_push(playlist_name)
+    elif _playlist_already_pushed(playlist_name, signature):
         synced["skipped"] = 1
         return synced
 
@@ -3405,6 +3644,11 @@ def _create_genre_top_track_playlists(
                 _song_ids,
                 rows=winners,
                 existing_playlist_id=_known_pl_id,
+                # ⭐ ``playlist_exists`` was already computed from the server's
+                # own playlist list, so passing it here costs nothing and is
+                # what makes "deleted in Navidrome comes back" immediate rather
+                # than waiting for the age bound.
+                server_confirmed_exists=playlist_exists,
             )
             if not _playlist_sync_succeeded(sync_res):
                 logger.warning(

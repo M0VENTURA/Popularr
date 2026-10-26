@@ -100,7 +100,7 @@ def stubs(monkeypatch):
     synced: list[tuple[str, list[str]]] = []
     deleted: list[str] = []
 
-    def fake_sync(name, song_ids, rows=None, existing_playlist_id=None):
+    def fake_sync(name, song_ids, rows=None, existing_playlist_id=None, **kwargs):
         synced.append((name, list(song_ids)))
         return {"ok": True, "playlist_id": f"pl-{name}", "skipped": False}
 

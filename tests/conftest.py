@@ -21,6 +21,12 @@ os.environ.setdefault("CONFIG_PATH", "/dev/null")
 # not blow up on import.
 import tempfile
 os.environ.setdefault("LOG_PATH", os.path.join(tempfile.mkdtemp(), "app.log"))
+# ⭐ Runtime STATE lives in ``<SCAN_STATE_DIR>`` (default ``/state``): the API
+# rate-limiter counters, scan progress files, and the DURABLE playlist-push
+# signatures. Without this the suite writes into a real ``/state`` when one
+# exists (and silently fails to when it does not), so the playlist-skip tests
+# would pass or fail depending on who ran them last.
+os.environ.setdefault("SCAN_STATE_DIR", tempfile.mkdtemp(prefix="popularr-state-"))
 # Production is PostgreSQL-only; an explicit DATABASE_URL keeps the unit
 # test suite self-contained on an in-memory SQLite engine.
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
