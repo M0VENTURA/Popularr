@@ -428,6 +428,12 @@
     set('editReleaseArtistField', artist);
     set('editReleaseYear', data.year || '');
     set('editReleaseMbid', data.mbid || '');
+    // ⭐ The RELEASE GROUP is what tells two same-named releases apart. The
+    // artist page renders one card per release group, so without carrying it
+    // here every card's edit opened (and SAVED TO) whichever release the
+    // unscoped album route happened to resolve — the reported "selecting edit
+    // only shows one item with all the releases inside it".
+    set('editReleaseRgid', data.rgid || '');
 
     // Then load the album's ACTUAL metadata.
     //
@@ -437,6 +443,10 @@
     // precedence the album page uses — one source of truth for both forms.
     setStatus('Loading album metadata…');
     var qs = '?artist=' + encodeURIComponent(artist) + '&album=' + encodeURIComponent(album);
+    // Scope the prefill to THIS card's release. Without it a name covering
+    // several releases loaded the primary one's values into the other cards'
+    // forms, so saving would write one release's metadata onto another's.
+    if (data.rgid) qs += '&release_group=' + encodeURIComponent(data.rgid);
     fetch('/api/album/metadata' + qs, { headers: { Accept: 'application/json' } })
       .then(function (r) { return r.json(); })
       .then(function (payload) {
@@ -847,7 +857,14 @@
         // KEY, which is what the route looks the album up by. It is not the new
         // title, so it must not be replaced by ``title`` here — a rename has to
         // address the album under its CURRENT name.
-        var url = '/album/' + encodeURIComponent(artist) + '/' + encodeURIComponent(original);
+        //
+        // ⭐ AND the RELEASE GROUP must ride along. An unscoped URL makes the
+        // album route pick the PRIMARY release when a name covers several — so
+        // editing the second card wrote its values onto the FIRST release's
+        // tracks, which is data loss, not just a confusing view.
+        var rgid = get('editReleaseRgid');
+        var url = '/album/' + encodeURIComponent(artist) + '/' + encodeURIComponent(original)
+          + (rgid ? '/' + encodeURIComponent(rgid) : '');
         fetch(url, {
           method: 'POST',
           headers: { Accept: 'application/json' },

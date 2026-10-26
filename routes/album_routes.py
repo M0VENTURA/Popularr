@@ -113,6 +113,18 @@ async def api_album_metadata() -> Any:
     if not artist or not album:
         return jsonify({"success": False, "error": "artist and album required"}), 400
 
+    # ⭐⭐ OPTIONAL RELEASE-GROUP SCOPE, and the reason it exists.
+    #
+    # The artist page renders ONE CARD PER RELEASE GROUP when a single name
+    # covers several releases (routes/ui_routes.py::artist_detail). Without a
+    # scope this endpoint returned values aggregated across ALL of them, so
+    # every card's Edit form was prefilled with the PRIMARY release's metadata
+    # — and, because the modal then posts to an equally unscoped URL, saving
+    # card #2 wrote card #1's values. Reported as "releases shown multiple
+    # times, but selecting edit or opening the album only shows one item with
+    # all the releases inside it".
+    release_group = unquote(request.args.get("release_group") or "").strip()
+
     # (payload key) -> (candidate track columns, in priority order).
     # Mirrors routes/ui_routes.py::album_detail's ``album_data`` construction.
     fields: dict[str, tuple[str, ...]] = {
@@ -169,6 +181,20 @@ async def api_album_metadata() -> Any:
         return jsonify({"success": False, "error": "Album not found"}), 404
 
     tracks = [dict(getattr(row, "_mapping", row)) for row in rows]
+
+    # Apply the scope in PYTHON rather than in the SQL: the query has already
+    # run, and falling back to the unscoped set when nothing matches keeps the
+    # modal usable for a release whose rows carry no group at all. Returning
+    # empty would look like a broken album, and the caller has already seeded
+    # the form from the row it was opened from.
+    if release_group:
+        _scoped = [
+            t for t in tracks
+            if str(t.get("musicbrainz_releasegroupid") or "").strip().lower()
+            == release_group.lower()
+        ]
+        if _scoped:
+            tracks = _scoped
 
     def _first(candidates: tuple[str, ...]) -> str:
         """First non-empty value across the tracks, honouring column priority.

@@ -809,6 +809,72 @@ async def artists() -> Any:
     )
 
 
+def plan_artist_release_cards(
+    tracks: list[dict[str, Any]],
+) -> dict[tuple[str, str], str]:
+    """Decide which artist-page CARD each ``(album name, release group)`` pair
+    belongs to.
+
+    Returns ``{(name_key, release_group_or_empty): album_key}``. A row is looked
+    up as ``plan[(name_key, its_own_rg)]``, falling back to
+    ``plan[(name_key, "")]`` when it carries no release-group tag.
+
+    ⭐⭐ THE ARTIST PAGE AND THE ALBUM PAGE MUST GROUP ALBUMS THE SAME WAY.
+    Reported: "the artist page is sometimes showing releases multiple times,
+    selecting edit or opening the album will only show one item with all the
+    releases inside it." They disagreed in two places:
+
+    * **Several release groups under one name.** ``album_detail`` opens the
+      PRIMARY one (the most tracks) when the URL carries no scope, and lists the
+      others only under an explicit ``/<release-group>`` address. Rows carrying
+      no group belong to that primary release. This used to key such a row by
+      its own YEAR, inventing a third card that no address could ever open.
+    * **No release-group data at all.** ``album_detail`` merges every year for
+      one name on purpose ("the year no longer scopes anything"). This page used
+      to emit ``name + year`` cards, so a re-press tagged with its pressing
+      year, or a compilation crediting its source recordings, appeared several
+      times — every copy linking to the SAME single album page.
+
+    ``album_key`` is the grouping key ``_build_artist_detail_payload`` uses for
+    ``albums_by_key``/``tracks_by_key``, so the card and its tracks can never
+    diverge.
+    """
+    counts: dict[tuple[str, str], int] = {}
+    for track in tracks:
+        name_key = str(track.get("album") or "").strip().lower()
+        rg = str(track.get("musicbrainz_releasegroupid") or "").strip()
+        if name_key and rg:
+            counts[(name_key, rg)] = counts.get((name_key, rg), 0) + 1
+
+    groups_by_name: dict[str, list[str]] = {}
+    for name_key, rg in counts:
+        groups_by_name.setdefault(name_key, []).append(rg)
+
+    plan: dict[tuple[str, str], str] = {}
+    for name_key, groups in groups_by_name.items():
+        if len(groups) == 1:
+            # ONE release → ONE card, whatever the per-track years say.
+            only = groups[0]
+            plan[(name_key, only)] = f"{name_key}::rg:{only}"
+            plan[(name_key, "")] = plan[(name_key, only)]
+            continue
+        # Several releases share this name: one card EACH, so every one stays
+        # browsable (and editable) from the artist page. First-seen order
+        # breaks a tie, matching ``album_detail``'s
+        # ``_primary = max(counts, key=lambda r: counts[r])``.
+        primary = groups[0]
+        for rg in groups[1:]:
+            if counts[(name_key, rg)] > counts[(name_key, primary)]:
+                primary = rg
+        for rg in groups:
+            plan[(name_key, rg)] = f"{name_key}::rg:{rg}"
+        plan[(name_key, "")] = f"{name_key}::rg:{primary}"
+
+    # A name with NO release-group data is absent from the plan on purpose: the
+    # caller then uses the name-only card, which is what ``album_detail`` shows.
+    return plan
+
+
 def _build_artist_detail_payload(name: str) -> dict[str, Any]:
     """Build the artist-page template context.
 
@@ -1012,12 +1078,9 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
     def _release_group_of(t: dict[str, Any]) -> str:
         return str(t.get("musicbrainz_releasegroupid") or "").strip()
 
-    release_groups_by_name: dict[str, set[str]] = {}
-    for t in tracks:
-        _n = str(t.get("album") or "").strip().lower()
-        _rg = _release_group_of(t)
-        if _n and _rg:
-            release_groups_by_name.setdefault(_n, set()).add(_rg)
+    # ⭐ ONE grouping rule, in ``plan_artist_release_cards``, so the artist page
+    # and the album page can be compared and tested side by side.
+    card_plan = plan_artist_release_cards(tracks)
 
     tracks_by_key: dict[str, list[dict[str, Any]]] = {}
 
@@ -1028,26 +1091,22 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
 
         track_year = _leading_year(track)
         _name_key = album_name.lower().strip()
-        _rgs = release_groups_by_name.get(_name_key) or set()
         rg = _release_group_of(track)
 
-        if len(_rgs) == 1:
-            # One release → ONE card, whatever the per-track years say.
-            entry_rg = next(iter(_rgs))
-            album_key = f"{_name_key}::rg:{entry_rg}"
-        elif len(_rgs) > 1:
-            # Several releases share this name: one card EACH, so every one
-            # stays browsable (and editable) from the artist page. A track
-            # with no group falls back to its year rather than joining a
-            # stranger's release.
-            entry_rg = rg
-            album_key = (
-                f"{_name_key}::rg:{rg}" if rg
-                else f"{_name_key}::{track_year or ''}"
-            )
-        else:
-            entry_rg = ""
-            album_key = f"{_name_key}::{track_year or ''}"
+        # The card this row belongs to. A row carrying no release-group tag
+        # joins the name's DEFAULT card (the primary release when several
+        # exist) rather than inventing a year-keyed one — see
+        # ``plan_artist_release_cards`` for why that mattered.
+        album_key = (
+            card_plan.get((_name_key, rg))
+            or card_plan.get((_name_key, ""))
+            # No release-group data for this name at all: ONE card per name,
+            # mirroring the album page's merge across years.
+            or f"{_name_key}::name"
+        )
+        entry_rg = rg or (
+            album_key.rsplit("::rg:", 1)[1] if "::rg:" in album_key else ""
+        )
 
         tracks_by_key.setdefault(album_key, []).append(track)
 
@@ -1092,7 +1151,13 @@ def _build_artist_detail_payload(name: str) -> dict[str, Any]:
             album_entry["total_duration"] += duration
 
         year = _leading_year(track)
-        if year and not album_entry.get("album_year"):
+        # The card's year is the ALBUM PAGE's year: the MAXIMUM of the original
+        # years on its rows (``album_detail`` computes ``max(year_values)``).
+        # Taking the first track's year made a merged card display whichever
+        # year the scan reached first, so one album could read 1996 on one load
+        # and 1997 on the next — a second way the "same album, several rows"
+        # confusion showed up.
+        if year and (album_entry.get("album_year") is None or year > album_entry["album_year"]):
             album_entry["album_year"] = year
 
         # Backfill the edition name/year from any track that carries them —

@@ -161,6 +161,13 @@
       <div class="modal-body">
         <input type="hidden" id="editReleaseArtist">
         <input type="hidden" id="editReleaseOriginalTitle">
+        {#- Bookkeeping only, deliberately WITHOUT a name attribute: the save
+            handler posts every ``#editReleaseModal [name]`` generically, and
+            this is the scope the request is addressed by, not a field.
+            It carries the release group so a name covering several releases
+            edits THIS one rather than whichever the unscoped album route
+            resolves. -#}
+        <input type="hidden" id="editReleaseRgid">
         <input type="text" class="form-control mb-3" id="editReleaseTitle">
         <input type="text" class="form-control mb-3" id="editReleaseYear" placeholder="Year">
         <input type="text" class="form-control" id="editReleaseMbid" placeholder="MBID">

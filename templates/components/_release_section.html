@@ -69,6 +69,19 @@
 {%- set title = _title_of(album)|trim -%}
 {%- set mbid = _mbid_of(album)|trim -%}
 {%- set rgid = _rgid_of(album)|trim -%}
+{#-
+  THE RELEASE SCOPE for this row's links — the same value
+  ``components/_album_category_section.html`` calls ``album_scope``.
+
+  ⚠️⚠️ The artist page renders ONE CARD PER RELEASE GROUP when a single name
+  covers several releases (see routes/ui_routes.py::artist_detail). Linking
+  every card by ``/<year>`` threw that away: a year is NOT a scope, so the
+  album page resolved each card to the SAME release — the reported "releases
+  shown multiple times, but selecting edit or opening the album only shows one
+  item with all the releases inside it". The release group is the identity the
+  album page honours; the year survives only as a legacy address.
+-#}
+{%- set scope = ('/' ~ rgid) if rgid else (('/' ~ year) if year else '') -%}
 {%- set cover = _cover_of(album, artist_name)|trim -%}
 {%- set is_missing = album.is_missing -%}
 {#-
@@ -162,7 +175,7 @@
     <div class="release-actions" onclick="event.stopPropagation();">
       {% if not is_missing %}
         <a class="btn btn-sm btn-outline-secondary release-open-btn"
-           href="/album/{{ artist_name|path_segment }}/{{ title|path_segment }}{% if year %}/{{ year }}{% endif %}"
+           href="/album/{{ artist_name|path_segment }}/{{ title|path_segment }}{{ scope }}"
            title="Open album"><i class="bi bi-box-arrow-up-right" aria-hidden="true"></i><span class="d-none d-sm-inline ms-1">Open</span></a>
       {% elif not is_upcoming %}
         <button type="button" class="btn btn-sm btn-outline-success release-import-btn" data-artist="{{ artist_name|e }}" data-album="{{ title|e }}" data-mbid="{{ mbid|e }}" data-release-id="{{ album.release_id|e }}" title="Download this release"><i class="bi bi-download" aria-hidden="true"></i><span class="d-none d-sm-inline ms-1">Download</span></button>

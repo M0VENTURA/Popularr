@@ -95,12 +95,34 @@ class TestTheAlbumPageKnowsItsScope:
 
 class TestTheArtistPageGroupsByRelease:
     def test_the_group_key_is_built_from_the_release_group(self):
+        """The rule MOVED into ``plan_artist_release_cards`` (2026-10-26) so it
+        is testable without a database and can be compared with the album
+        page's. The intent is unchanged: a card key is a RELEASE, never a year.
+
+        ``tests/test_artist_page_release_cards.py`` now exercises the function
+        directly, including the two cases that used to produce duplicate cards.
+        """
         src = UI_ROUTES.read_text(encoding="utf-8")
-        assert "release_groups_by_name.setdefault" in src, (
-            "the artist page still keys albums by name + year — one release "
-            "would keep appearing as several cards"
+        assert "plan_artist_release_cards(tracks)" in src, (
+            "the artist page no longer uses the shared card plan — it will "
+            "drift from the album page again"
         )
-        assert 'album_key = f"{_name_key}::rg:' in src
+        assert 'f"{name_key}::rg:{' in src, (
+            "the card key stopped being built from the release group"
+        )
+        assert "::rg:" in src
+
+    def test_no_card_is_keyed_by_year(self):
+        """The reported duplicate: ``name + track_year`` cards for one album.
+
+        A year is not an identity — the album page merges every year for one
+        name — so a year-keyed card could only ever be a duplicate that resolved
+        to someone else's page.
+        """
+        src = UI_ROUTES.read_text(encoding="utf-8")
+        assert 'f"{_name_key}::{track_year or \'\'}"' not in src, (
+            "a year-keyed album card is back on the artist page"
+        )
 
     def test_each_card_carries_the_release_group_for_its_link(self):
         src = UI_ROUTES.read_text(encoding="utf-8")
