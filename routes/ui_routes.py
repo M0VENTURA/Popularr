@@ -1871,14 +1871,16 @@ def _write_album_track_file_tags(
 ) -> tuple[bool, str]:
     """Write one track's tags to its audio file. Returns ``(ok, file_path)``.
 
-    Carries the two conventions the DB payload cannot express:
+    Carries the conventions the DB payload cannot express:
 
     * the "Cover" genre, mirroring the standalone cover-detection area;
     * the single-disc ``disc_number=""`` clear — ``build_tag_updates`` drops
       empty values, so it must be pushed explicitly. Skipped when the review
       supplied a disc number: the strip is an album-level heuristic while a
       staged value is a confirmed correction, and this line used to undo that
-      correction on the file after the DB had accepted it.
+      correction on the file after the DB had accepted it;
+    * the Release Name → ``albumversion`` write/clear, for the same reason (see
+      the comment on it below).
     """
     resolved = resolve_music_file_path(track.get("file_path"))
     if not resolved:
@@ -1901,6 +1903,24 @@ def _write_album_track_file_tags(
                 file_tags["genre"] = "Cover"
         if strip_disc_numbers and not disc_staged:
             file_tags["disc_number"] = ""
+        # ── The RELEASE NAME → the file's ALBUMVERSION frame ────────────────
+        # ⚠️ ANOTHER FIELD THAT COULD NOT BE CLEARED, and the one that makes a
+        # cleared Release Name come BACK.
+        #
+        # Two reasons it needed handling here rather than through
+        # ``build_tag_updates``: ``release_title`` is not in that function's
+        # column map at all (the FILE's name for it is ``albumversion``), and
+        # that function deliberately DROPS empty values — so an explicit clear
+        # could never reach the writer. Written explicitly, like the
+        # single-disc ``disc_number`` clear above.
+        #
+        # Leaving the old frame in the file is not cosmetic: Navidrome reads
+        # ``albumversion`` and appends it to the album NAME as a subtitle (see
+        # ``strip_appended_album_version``), so a file still carrying the deleted
+        # edition would re-clip a name the album page no longer shows.
+        # ``albumversion`` in the payload wins when a caller supplies it directly.
+        if "release_title" in payload and "albumversion" not in payload:
+            file_tags["albumversion"] = str(payload.get("release_title") or "").strip()
         if file_tags:
             return bool(update_file_tags(resolved, file_tags)), resolved
     except Exception as tag_err:
@@ -2685,8 +2705,32 @@ async def album_detail(album_path: str) -> Any:
                         payload["release_year"] = int(release_year)
                     except ValueError:
                         pass
+                elif "release_year" in form:
+                    # An EMPTIED edition-year box means "this edition has no
+                    # year", so the stored value must go. ``""`` is coerced to
+                    # NULL for an INTEGER column by
+                    # ``coerce_track_value_for_pg_type``.
+                    payload["release_year"] = ""
 
-                if release_title:
+                # ── The RELEASE NAME (the specific edition) ────────────────
+                # ⚠️⚠️ PRESENCE-GATED, NOT TRUTHINESS-GATED — and this is the
+                # reported "deleting the release name and saving puts the same
+                # one back".
+                #
+                # ``if release_title:`` treated an EMPTY box as "nothing to say",
+                # so the column was simply not in the payload, ``_execute_save``
+                # never touched it, and the value the user had just deleted was
+                # still there on the next render. The box was write-only in the
+                # one direction a user actually needs — removing an edition name
+                # the collection no longer holds.
+                #
+                # Blank is a MEANINGFUL input here, not a missing one: the field's
+                # own hint says "Leave blank when the collection holds the
+                # original release." So the question is not "is the value
+                # empty?" but "did the form CARRY this field?" — the same
+                # convention ``album_lookup_skip`` below already uses. A caller
+                # that omits the input (a partial save) leaves the column alone.
+                if "album_release_title" in form:
                     payload["release_title"] = release_title
 
                 if album_type:
@@ -2698,6 +2742,14 @@ async def album_detail(album_path: str) -> Any:
                     # Without it the file kept the old release type, so the album
                     # page's choice was contradicted everywhere outside the DB.
                     payload["releasetype"] = normalize_primary_release_type(album_type)
+                # ⚠️ ``album_type`` is DELIBERATELY still truthiness-gated, unlike
+                # the fields above. Its select cannot render every type the scan
+                # can store (``album+acoustic``, ``album+dj-mix``, a mixtape…), and
+                # when no option matches the browser falls back to the first one —
+                # which is the BLANK "Unknown" option. Presence-gating it would
+                # therefore treat "this album's type is not in my list" as "the
+                # user cleared it" and wipe a type the page never showed. To clear
+                # a type safely the select needs an option for every value first.
 
                 if track_artist and track_artist != track.get("artist"):
                     payload["artist"] = track_artist
@@ -2742,8 +2794,13 @@ async def album_detail(album_path: str) -> Any:
                         if _base_title and "cover)" not in _base_title.lower():
                             payload["title"] = f"{_base_title} ({_staged_cover_artist} Cover)"
 
+                # The same presence gate as the fields above: a release field the
+                # form did not carry must never be written, or every save would
+                # blank metadata the page has no box for. But a field the form DID
+                # carry and the user EMPTIED must be cleared — ``if value:`` made
+                # each of these boxes write-only, exactly like the Release Name.
                 for field, value in release_values.items():
-                    if value:
+                    if value or f"album_{field}" in form:
                         payload[field] = value
 
                 # Single-disc albums: strip the per-track disc_number so neither
