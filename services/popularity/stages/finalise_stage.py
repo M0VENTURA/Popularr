@@ -2040,6 +2040,12 @@ def _filter_christmas_rows(
     return kept
 
 
+#: The New Music playlist's name. ONE source of truth: it is used by the
+#: Christmas filter, the delete path, the sync call and the weekly-rotation
+#: seed, and a literal typed in four places is how they drift apart.
+_NEW_MUSIC_PLAYLIST_NAME = "New Music"
+
+
 def _create_new_music_playlist() -> int:
     rows: list[dict[str, Any]] = []
     try:
@@ -2084,7 +2090,7 @@ def _create_new_music_playlist() -> int:
             if str(r.get("artist") or "").strip().casefold() not in excluded_artists
         ]
 
-    rows = _filter_christmas_rows(rows, "New Music")
+    rows = _filter_christmas_rows(rows, _NEW_MUSIC_PLAYLIST_NAME)
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
@@ -2114,25 +2120,34 @@ def _create_new_music_playlist() -> int:
         winners = _interleave_artists(winners)
 
     if len(winners) < _NEW_MUSIC_MIN_TRACKS:
-        _delete_playlist_from_navidrome("New Music")
+        _delete_playlist_from_navidrome(_NEW_MUSIC_PLAYLIST_NAME)
         return 0
 
     winners = winners[:_NEW_MUSIC_MAX_TRACKS]
 
     # Rotation after the slice: the SAME tracks in a different sequence, once
     # per ISO week. See ``_weekly_shuffle`` for why the order matters.
-    winners = _weekly_shuffle(winners, playlist_key=playlist_name)
+    #
+    # ⚠️ ``playlist_key`` must be the playlist's OWN name. This line once read
+    # ``playlist_name`` — a name that exists in the sibling builders but NOT in
+    # this function — so every New Music run raised NameError at this point and
+    # the playlist silently stopped being generated. The function's own name is
+    # now the constant above, so the two cannot disagree.
+    winners = _weekly_shuffle(winners, playlist_key=_NEW_MUSIC_PLAYLIST_NAME)
 
     _song_ids = [str(r.get("id") or "").strip() for r in winners if str(r.get("id") or "").strip()]
     if not _song_ids:
         return 0
 
     try:
-        sync_res = _sync_playlist_to_navidrome("New Music", _song_ids, rows=winners)
+        sync_res = _sync_playlist_to_navidrome(_NEW_MUSIC_PLAYLIST_NAME, _song_ids, rows=winners)
         if not _playlist_sync_succeeded(sync_res):
             return 0
         if not sync_res.get("skipped"):
-            log_unified(f"📄 Playlist: Synced 'New Music' to Navidrome ({len(_song_ids)} tracks)")
+            log_unified(
+                f"📄 Playlist: Synced '{_NEW_MUSIC_PLAYLIST_NAME}' to Navidrome "
+                f"({len(_song_ids)} tracks)"
+            )
         return len(_song_ids)
     except Exception as exc:
         logger.warning("New Music playlist sync failed", error=str(exc))
