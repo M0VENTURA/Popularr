@@ -206,16 +206,83 @@ def test_bug_album_corroborates_through_the_canonical_detector():
 # The remix branch is unaffected
 # ---------------------------------------------------------------------------
 
-def test_remix_still_requires_a_title_marker():
-    """+remix has its own branch (album title must say remix) — unchanged."""
-    assert album_stage._mb_type_is_corroborated("album+remix", "Remixes", [], {}) is True
-    assert album_stage._mb_type_is_corroborated("album+remix", "Some Album", [], {}) is False
+def test_remix_is_applied_without_a_title_marker():
+    """⭐ CONTRACT REVERSAL (2026-10-26) — this test used to assert the OPPOSITE.
+
+    It read: *"+remix has its own branch (album title must say remix) —
+    unchanged"* and pinned
+
+        _mb_type_is_corroborated("album+remix", "Some Album", [], {}) is False
+
+    That requirement was the defect. This guard exists to stop a bad match
+    RENAMING files, and ``+remix`` never renames: for ``+remix``
+    ``_apply_live_remix_album_tagging`` only sets ``is_remix = 1`` and injects
+    the "Remix" genre — the title is untouched (unlike ``+live``/``+acoustic``,
+    which do rewrite it).
+
+    The reported case was Limp Bizkit's "New Old Songs" — a genuine remix album
+    whose title contains no remix word. MusicBrainz said ``album+remix``, the
+    title check rejected it, and a fresh scan filed a remix album as a studio
+    album. Losing a real remix classification is worse than one track carrying
+    an ``is_remix`` flag it did not earn.
+    """
+    # Applied regardless of the title, because it cannot retitle anything.
+    assert album_stage._mb_type_is_corroborated("album+remix", "Some Album", [], {}) is True
+    assert album_stage._mb_type_is_corroborated("album+remix", "New Old Songs", [], {}) is True
+
+    # And the evidence is still RECOGNISED when it exists (it drives the log
+    # message, so a classification can be audited).
+    assert album_stage._album_title_suggests_remix("Remixes") is True
+    assert album_stage._album_title_suggests_remix("Re-Works") is True
+    assert album_stage._album_title_suggests_remix("New Old Songs") is False
+
+
+def test_the_remix_evidence_recognises_the_spellings_albums_use():
+    """A remix collection does not always say the word "remix"."""
+    for title in ("Remixes", "Remixed", "Re-Mix", "Reworked", "The Re-Works", "Refixed", "Dub Mix"):
+        assert album_stage._album_title_suggests_remix(title) is True, title
+    for title in ("New Old Songs", "Greatest Hits", "Version 2.0"):
+        assert album_stage._album_title_suggests_remix(title) is False, title
+
+
+def test_track_titles_are_remix_evidence_too():
+    """Mirrors the +live branch: the tracklist can carry the evidence."""
+    tracks = [{"title": f"Song {i} (Remix)"} for i in range(4)] + [{"title": "Plain"}]
+    marked, total = album_stage._remix_track_ratio(tracks)
+    assert (marked, total) == (4, 5)
+
+    tracks = [{"title": "Plain A"}, {"title": "Plain B"}]
+    assert album_stage._remix_track_ratio(tracks) == (0, 2)
 
 
 def test_plain_types_always_pass_the_guard():
-    """A type with no destructive marker needs no corroboration at all."""
-    for safe_type in ("album", "single", "ep", "album+compilation"):
+    """A type with no destructive marker needs no corroboration at all.
+
+    ⚠️ ``album+compilation`` used to be listed here and the assertion FAILED —
+    at baseline, before any 2026-10-26 change — because a compilation IS a
+    guarded type with its own evidence branch (greatest-hits detection, title
+    markers, various-artists detection). The list was describing the test
+    author's intent, not the code. A compilation needs evidence; a plain
+    album/single/ep does not.
+    """
+    for safe_type in ("album", "single", "ep"):
         assert album_stage._mb_type_is_corroborated(safe_type, "Whatever", [], {}) is True
+
+
+def test_the_compilation_branch_is_guarded_not_plain():
+    """CONTROL for the correction above — this is why it was never a "plain" type."""
+    assert (
+        album_stage._mb_type_is_corroborated(
+            "album+compilation", "Some Album", [{"title": "a"}], {"artist": "X"}
+        )
+        is False
+    )
+    assert (
+        album_stage._mb_type_is_corroborated(
+            "album+compilation", "Greatest Hits", [{"title": "a"}], {"artist": "X"}
+        )
+        is True
+    )
 
 
 def test_guard_falls_back_to_local_patterns_if_helper_raises(monkeypatch):

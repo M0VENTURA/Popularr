@@ -331,6 +331,31 @@ _LIVE_ALBUM_PATTERNS = (
 _DESTRUCTIVE_SECONDARY_TYPES = ("+live", "+acoustic", "+remix", "+compilation")
 _LIVE_TRACK_CORROBORATION_RATIO = 0.5
 
+#: Words that mark a release as a remix/rework collection IN ITS TITLE.
+#:
+#: ⚠️ The old test was a bare ``"remix" in album``, which is why a genuine
+#: remix album called "New Old Songs" could never pass. These are the spellings
+#: a remix collection actually uses; they are NOT a guess at the album's
+#: content, only an acknowledgement that the wording varies.
+_REMIX_ALBUM_TITLE_MARKERS: tuple[str, ...] = (
+    "remix", "remixes", "remixed", "re-mix", "re-mixed",
+    "rework", "reworked", "re-work", "re-works",
+    "refix", "refixed", "dub mix", "dubmix",
+)
+
+#: A TRACK title that says it is a remix/alternate version.
+_REMIX_TRACK_TITLE_RE = re.compile(
+    r"\bremix(?:es|ed)?\b|\bre-mix(?:es|ed)?\b|\breworked?\b|\brefix(?:ed)?\b|\bdub\s?mix\b",
+    re.IGNORECASE,
+)
+
+#: Share of track titles that must carry a remix marker to corroborate
+#: ``album+remix`` when the ALBUM title does not (a text-search match on a remix
+#: album whose title is uninformative, e.g. "Greatest Hits Remixed" retitled).
+#: Mirrors ``_LIVE_TRACK_CORROBORATION_RATIO`` on purpose: the same evidence
+#: standard for every secondary type.
+_REMIX_TRACK_CORROBORATION_RATIO = 0.5
+
 
 def _rich_stored_album_type(raw: str | None) -> str | None:
     text = str(raw or "").strip().lower()
@@ -422,12 +447,47 @@ def _live_track_ratio(tracks: list[dict[str, Any]]) -> tuple[int, int]:
     return live, len(titled)
 
 
+def _remix_track_ratio(tracks: list[dict[str, Any]]) -> tuple[int, int]:
+    """``(tracks_with_a_remix_marker, tracks_examined)`` for an album."""
+    titled = [str(track.get("title") or "") for track in tracks or []]
+    titled = [title for title in titled if title.strip()]
+    if not titled:
+        return 0, 0
+    marked = sum(1 for title in titled if _REMIX_TRACK_TITLE_RE.search(title))
+    return marked, len(titled)
+
+
+def _album_title_suggests_remix(album: str) -> bool:
+    lower = (album or "").casefold()
+    return any(marker in lower for marker in _REMIX_ALBUM_TITLE_MARKERS)
+
+
 def _mb_type_is_corroborated(
     mb_type: str,
     album: str,
     tracks: list[dict[str, Any]],
     context: dict[str, Any],
 ) -> bool:
+    """Should MusicBrainz's secondary type be APPLIED, or discarded?
+
+    This guard exists because a secondary type RETITLES tracks (a remix or a
+    live take is a different recording), and a *text search* can bind an album
+    to the wrong release group. So an unsupported type is discarded.
+
+    ⭐⭐ IT MUST NOT OVERRULE AN ALBUM THAT IS MBID-BOUND. When the album already
+    carries a release-group MBID, MusicBrainz's answer is about THAT release
+    group — there is no text-search risk left to guard against, and overriding
+    it is the same mistake the rest of this codebase calls out as "not
+    MBID-first". Measured on Limp Bizkit's "New Old Songs" (a genuine remix
+    album): its title says nothing about remixes, so the title check rejected
+    MusicBrainz, and a fresh scan classified a remix album as a studio album.
+
+    ⚠️ For a text search the corroboration stays — but for ``+remix`` it is no
+    longer TITLE-ONLY. Track titles are consulted exactly as they already are
+    for ``+live``, because "New Old Songs" is the normal shape of a remix
+    album's name and requiring the word in the album title was never a real
+    test of anything.
+    """
     lower = (mb_type or "").casefold()
     marker = next(
         (value for value in _DESTRUCTIVE_SECONDARY_TYPES if value in lower),
@@ -436,16 +496,83 @@ def _mb_type_is_corroborated(
     if not marker:
         return True
 
-    if marker == "+remix":
-        if "remix" in (album or "").casefold():
-            return True
-        Logger.warning(
-            "[ENRICH] MusicBrainz secondary type rejected",
-            reason="album title carries no remix marker",
+    # ── MBID-first: a bound release group IS the corroboration ──────────────
+    try:
+        bound_release_group = _stored_release_group_mbid(tracks)
+    except Exception:
+        bound_release_group = ""
+    if bound_release_group:
+        Logger.info(
+            "[ENRICH] MusicBrainz secondary type accepted — album is bound to "
+            "its release group by MBID",
             musicbrainz_type=mb_type,
+            release_group_mbid=bound_release_group,
             **context,
         )
-        return False
+        return True
+
+    # ── The stored type already says this: MusicBrainz is CONFIRMING it ─────
+    # ⚠️ Without this the reported log contradicted itself — a warning saying
+    # the type was "rejected" immediately followed by
+    # ``Album enriched: … (type=album+remix)``, because the stored value
+    # survived while MusicBrainz's agreement was thrown away. An answer that
+    # matches what the album already carries is corroboration, not a guess.
+    try:
+        stored_rich = _rich_stored_album_type(_stored_album_type(tracks))
+    except Exception:
+        stored_rich = None
+    if stored_rich and stored_rich.casefold() == lower:
+        Logger.info(
+            "[ENRICH] MusicBrainz secondary type confirms the stored type",
+            musicbrainz_type=mb_type,
+            stored_album_type=stored_rich,
+            **context,
+        )
+        return True
+
+    if marker == "+remix":
+        # ⭐⭐ ``+remix`` IS NOT A DESTRUCTIVE TYPE, SO IT NEEDS NO RETITLING
+        # EVIDENCE.
+        #
+        # This guard exists to stop a bad match RENAMING files:
+        # ``_apply_live_remix_album_tagging`` rewrites ``title`` for ``+live``
+        # and ``+acoustic``. For ``+remix`` it sets ``is_remix = 1`` and injects
+        # the "Remix" genre — the title is never touched. Requiring the album
+        # TITLE to say "remix" therefore failed the case it most needed to pass:
+        # Limp Bizkit's "New Old Songs" is a remix album, MusicBrainz says so,
+        # and the name simply does not contain the word.
+        #
+        # ⚠️ The evidence checks below are kept as a WARNING so a wrong
+        # classification is still visible in the log — but they no longer
+        # discard MusicBrainz's answer. Losing a genuine remix album (classified
+        # as a studio album, so it stops appearing under Remix) is a worse
+        # outcome than one track carrying an ``is_remix`` flag it did not earn.
+        has_title_marker = _album_title_suggests_remix(album)
+        remix_tracks, total_tracks = _remix_track_ratio(tracks)
+        has_track_evidence = bool(
+            total_tracks and (remix_tracks / total_tracks) >= _REMIX_TRACK_CORROBORATION_RATIO
+        )
+        if has_title_marker or has_track_evidence:
+            Logger.info(
+                "[ENRICH] MusicBrainz secondary type corroborated by " + (
+                    "the album title" if has_title_marker else "track titles"
+                ),
+                musicbrainz_type=mb_type,
+                remix_track_count=remix_tracks,
+                track_count=total_tracks,
+                **context,
+            )
+        else:
+            Logger.warning(
+                "[ENRICH] MusicBrainz remix type applied without title or track "
+                "evidence — remix does not retitle tracks, so it is kept; check "
+                "this album if it is not really a remix release",
+                musicbrainz_type=mb_type,
+                remix_track_count=remix_tracks,
+                track_count=total_tracks,
+                **context,
+            )
+        return True
 
     if marker == "+compilation":
         if detect_greatest_hits_album(album, context.get("artist", "")) or "compilation" in (album or "").casefold() or "best" in (album or "").casefold() or "hits" in (album or "").casefold():
