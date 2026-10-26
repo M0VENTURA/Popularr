@@ -273,8 +273,136 @@ class TestListenbrainzReconciliation:
 
 
 # ---------------------------------------------------------------------------
-# 4. listenbrainz_score means ONE thing
+# 5. The 4★ evidence guard — "no evidence" must not earn 4★
 # ---------------------------------------------------------------------------
+
+
+class TestACompilationTrackWithNoEvidenceCannotHoldFourStars:
+    """⭐ Demoting a 5★ to a flat 4★ was only half the fix.
+
+    The score that reached 5★ was a scale-free "#1 of N" rank, so a track with
+    no popularity evidence at all still landed exactly one tier below its rank.
+    Measured: Allen Ginsberg's "Ballad of the Skeletons" — final_score 0.0, 26
+    Last.fm listeners, 0 ListenBrainz listens, not a single — was rated 4★.
+    """
+
+    RULES = {
+        "enabled": 1, "min_local_catalogue": 5,
+        "rank_percentile_5star": 0.02, "rank_percentile_4star": 0.10,
+        "rank_percentile_3star": 0.35, "rank_percentile_2star": 0.65,
+        "min_catalogue_size": 5,
+        "top_tier_min_score": 55.0, "top_tier_min_listeners": 250_000,
+        "high_tier_min_score": 45.0, "high_tier_min_listeners": 1_000,
+        "standout_floor_percentile": 0.0, "standout_floor_stars": 4,
+    }
+
+    @staticmethod
+    def _rate(monkeypatch, *, score, lf, rank, total, single=True, conf="high", rules=None):
+        from services.popularity.stages import finalise_stage as fs
+        import services.popularity.popularity_sources as ps
+
+        monkeypatch.setattr(
+            ps, "get_online_artist_track_rank",
+            lambda artist, title, lastfm_client=None: {
+                "rank": rank, "total": total, "percentile": rank / total,
+                "listeners": lf, "top_listeners": 500_000,
+                "source": "lastfm_artist_top_tracks",
+            },
+        )
+        track = {
+            "track_id": "t", "title": "T", "artist": "X", "album": "A Comp",
+            "popularity_score": score, "final_score": score, "_raw_combined": score,
+            "lastfm_listeners": lf, "listenbrainz_listens": 0,
+            "is_single": single, "single_confidence": conf, "is_live": False,
+            "popularity_marked": False, "exclude_from_stats": False,
+        }
+        stars = fs._assign_stars(
+            track, [score], [score] * 3,
+            album_model={"has_benchmark": True, "era": "solid",
+                         "catalog_cutoff": 99.0, "max_5star_slots": 3,
+                         "album_top_n": 3},
+            is_compilation=True,
+            compilation_online_rules=dict(rules or TestACompilationTrackWithNoEvidenceCannotHoldFourStars.RULES),
+            compilation_raw_scores=[score] * 5,
+        )
+        return stars, track
+
+    def test_the_reported_row_drops_to_one_star(self, monkeypatch) -> None:
+        """⭐ THE REPORTED CASE. 0.0 score, 26 listeners, not a single."""
+        stars, track = self._rate(
+            monkeypatch, score=0.0, lf=26, rank=1, total=40,
+            single=False, conf="low",
+        )
+        assert stars == 1, "a 26-listener track with no blend must not hold 4★"
+        assert track.get("_compilation_high_tier_gated") is True
+
+    def test_a_low_score_with_modest_reach_drops_to_the_ladder(self, monkeypatch) -> None:
+        """The same objection one tier down: 44.8 at 713 listeners was 4★."""
+        stars, track = self._rate(monkeypatch, score=44.8, lf=713, rank=3, total=171)
+        assert stars == 3
+        assert track.get("_compilation_high_tier_gated") is True
+
+    def test_a_genuine_hit_keeps_four(self, monkeypatch) -> None:
+        """CONTROL — 83.6 score and 137,600 listeners clears both 4★ bars."""
+        stars, track = self._rate(monkeypatch, score=83.6, lf=137_600, rank=1, total=164)
+        assert stars == 4
+        assert track.get("_compilation_high_tier_gated") is None
+
+    def test_the_guard_never_lowers_a_track_already_below_four(self, monkeypatch) -> None:
+        """CONTROL — it is a 4★/5★ guard; a 2★ stays 2★ and is not touched."""
+        stars, track = self._rate(
+            monkeypatch, score=36.0, lf=900, rank=150, total=171,
+            rules={**self.RULES, "standout_floor_percentile": 0.0},
+        )
+        assert stars <= 3
+        assert track.get("_compilation_high_tier_gated") is None
+
+    def test_zero_on_both_bars_disables_it(self, monkeypatch) -> None:
+        """CONTROL — 0/0 restores the previous behaviour exactly."""
+        stars, track = self._rate(
+            monkeypatch, score=44.8, lf=713, rank=3, total=171,
+            rules={**self.RULES, "high_tier_min_score": 0, "high_tier_min_listeners": 0},
+        )
+        assert stars == 4
+        assert track.get("_compilation_high_tier_gated") is None
+
+    def test_one_bar_alone_cannot_carry_it(self, monkeypatch) -> None:
+        """Both 4★ bars are required, matching the 5★ pair."""
+        stars, _ = self._rate(
+            monkeypatch, score=44.8, lf=900_000, rank=3, total=171,
+        )
+        assert stars == 3, "reach alone must not earn 4★ when the score bar fails"
+
+    def test_the_shipped_defaults_carry_the_bars(self) -> None:
+        """The config page is the source of truth; the defaults must ship on."""
+        from helpers.config_helpers import get_compilation_online_catalogue_config
+
+        rules = get_compilation_online_catalogue_config({})
+        assert rules["high_tier_min_score"] == 45.0
+        assert rules["high_tier_min_listeners"] == 1000.0
+
+    def test_the_bars_are_on_the_config_page(self) -> None:
+        """§4.1 — every configurable option must appear on the Config page."""
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        for rel in ("templates/pages/config.html", "test_site/templates/Pages/config.html"):
+            html = (root / rel).read_text(encoding="utf-8")
+            assert "compilation_online_high_tier_min_score" in html, rel
+            assert "compilation_online_high_tier_min_listeners" in html, rel
+
+    def test_the_bars_round_trip_through_the_config_js(self) -> None:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        for rel in (
+            "static/js/config.js",
+            "static/js/pages/config.js",
+            "test_site/static/js/pages/config.js",
+        ):
+            js = (root / rel).read_text(encoding="utf-8")
+            assert "high_tier_min_score:" in js, rel
+            assert "high_tier_min_listeners:" in js, rel
 
 
 class TestListenbrainzScoreIsAlwaysAbsolute:

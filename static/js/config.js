@@ -633,6 +633,8 @@ function buildConfigObject() {
           rank_percentile_2star: parseFloat(getValue('compilation_online_rank_percentile_2star', '0.65')) || 0.65,
           top_tier_min_score: (function () { var v = parseFloat(getValue('compilation_online_top_tier_min_score', '55')); return isFinite(v) ? v : 55; })(),
           top_tier_min_listeners: (function () { var v = parseInt(getValue('compilation_online_top_tier_min_listeners', '250000'), 10); return isFinite(v) ? v : 250000; })(),
+          high_tier_min_score: (function () { var v = parseFloat(getValue('compilation_online_high_tier_min_score', '45')); return isFinite(v) ? v : 45; })(),
+          high_tier_min_listeners: (function () { var v = parseInt(getValue('compilation_online_high_tier_min_listeners', '1000'), 10); return isFinite(v) ? v : 1000; })(),
           standout_floor_percentile: (function () { var v = parseFloat(getValue('compilation_online_standout_floor_percentile', '0.10')); return isFinite(v) ? v : 0.10; })(),
           standout_floor_stars: (function () { var v = parseInt(getValue('compilation_online_standout_floor_stars', '4'), 10); return isFinite(v) ? v : 4; })()
         }

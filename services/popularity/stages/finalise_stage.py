@@ -1019,6 +1019,46 @@ def _build_compilation_track_artist_scores(
     return score_map
 
 
+def _compilation_absolute_ladder_stars(
+    score: float,
+    raw_lf: float,
+    is_verified_single: bool,
+) -> int:
+    """The ABSOLUTE star ladder for a compilation track, with no rank input.
+
+    ⭐⭐ This is the "how popular is this song in absolute terms" answer, as
+    opposed to the artist-catalogue percentile's "how popular is it for this
+    artist". It is used two ways:
+
+    * as the fallback when no catalogue/online rank is available at all;
+    * as the destination when a scale-free rank is DEMOTED by an evidence bar
+      (see the 4★ guard in ``_assign_stars``), so a track with no popularity
+      evidence lands on the tier its evidence actually supports rather than
+      on "one below the rank it was given".
+
+    Extracted so those two paths cannot drift apart.
+    """
+    if is_verified_single:
+        if score >= 55.0 or raw_lf >= 1_000_000:
+            return 5
+        if score >= 45.0 or raw_lf >= 250_000:
+            return 4
+        if score >= 30.0 or raw_lf >= 50_000:
+            return 3
+        if score >= 15.0 or raw_lf >= 10_000:
+            return 2
+        return 1
+    if score >= 95.0 or raw_lf >= 1_500_000:
+        return 5
+    if score >= 85.0 or raw_lf >= 500_000:
+        return 4
+    if score >= 70.0 or raw_lf >= 75_000:
+        return 3
+    if score >= 35.0 or raw_lf >= 10_000:
+        return 2
+    return 1
+
+
 def _assign_stars(
     track: dict[str, Any],
     album_scores: list[float],
@@ -1282,27 +1322,13 @@ def _assign_stars(
                     stars=comp_stars,
                 )
             elif is_verified_single and not popularity_only:
-                if score >= 55.0 or raw_lf >= 1_000_000:
-                    comp_stars = 5
-                elif score >= 45.0 or raw_lf >= 250_000:
-                    comp_stars = 4
-                elif score >= 30.0 or raw_lf >= 50_000:
-                    comp_stars = 3
-                elif score >= 15.0 or raw_lf >= 10_000:
-                    comp_stars = 2
-                else:
-                    comp_stars = 1
+                comp_stars = _compilation_absolute_ladder_stars(
+                    score, raw_lf, is_verified_single=True,
+                )
             else:
-                if score >= 95.0 or raw_lf >= 1_500_000:
-                    comp_stars = 5
-                elif score >= 85.0 or raw_lf >= 500_000:
-                    comp_stars = 4
-                elif score >= 70.0 or raw_lf >= 75_000:
-                    comp_stars = 3
-                elif score >= 35.0 or raw_lf >= 10_000:
-                    comp_stars = 2
-                else:
-                    comp_stars = 1
+                comp_stars = _compilation_absolute_ladder_stars(
+                    score, raw_lf, is_verified_single=False,
+                )
 
             if _online_stars <= 0:
                 track["_compilation_rating_mode"] = "absolute_thin_catalogue_fallback"
@@ -1360,6 +1386,50 @@ def _assign_stars(
                     failed_score_bar=bool(_min_score > 0 and score < _min_score),
                     failed_listener_bar=bool(_min_listeners > 0 and raw_lf < _min_listeners),
                 )
+
+        # ⭐⭐ THE SAME GUARD ONE TIER DOWN — "no evidence" must not earn 4★.
+        #
+        # Demoting a 5★ to a flat 4★ on the bar above is only half the job: the
+        # SCORE that got the track to 5★ was a scale-free "#1 of N" rank, and a
+        # track with no popularity evidence at all still ends up one tier below
+        # its rank. Measured on "Triple J's Hottest 100 (1996)": Allen Ginsberg's
+        # "Ballad of the Skeletons" — final_score 0.0, 26 Last.fm listeners, 0
+        # ListenBrainz listens, not a single — was rated 4★, because the online
+        # rank put it at 5★ and the gate shaved exactly one tier off.
+        #
+        # So 4★ needs its own evidence: a track that clears NEITHER 4★ bar lands
+        # on the ABSOLUTE ladder, which is the tier its evidence supports (1★ for
+        # that row) rather than an arithmetic decrement of a rank it never earned.
+        try:
+            _hi_score = float(_online_rules.get("high_tier_min_score") or 0.0)
+            _hi_listeners = float(_online_rules.get("high_tier_min_listeners") or 0.0)
+        except (TypeError, ValueError):
+            _hi_score, _hi_listeners = 0.0, 0.0
+
+        if comp_stars >= 4 and (_hi_score > 0 or _hi_listeners > 0):
+            _clears_high_evidence = all((
+                _hi_score <= 0 or score >= _hi_score,
+                _hi_listeners <= 0 or raw_lf >= _hi_listeners,
+            ))
+            if not _clears_high_evidence:
+                _ladder = _compilation_absolute_ladder_stars(
+                    score, raw_lf, is_verified_single=is_verified_single,
+                )
+                # Never RAISE a tier here: this guard only removes evidence it
+                # could not justify. ``min`` with the current value does that.
+                _demoted = max(1, min(3, min(comp_stars, _ladder)))
+                track["_compilation_high_tier_gated"] = True
+                logger.info(
+                    "Compilation 4★/5★ demoted — no absolute evidence",
+                    title=track.get("title"),
+                    artist=_compilation_track_artist(track),
+                    stars=f"{comp_stars}★ → {_demoted}★",
+                    score=round(float(score or 0), 1),
+                    lastfm_listeners=int(raw_lf),
+                    min_score=_hi_score,
+                    min_listeners=int(_hi_listeners),
+                )
+                comp_stars = _demoted
 
         try:
             _floor_pct = float(_online_rules.get("standout_floor_percentile") or 0.0)

@@ -40,6 +40,11 @@ RULES = {
     "min_catalogue_size": 5,
     "top_tier_min_score": 55.0,
     "top_tier_min_listeners": 250_000,
+    # ⭐ The 4★ evidence bars (2026-10-27). Present so these fixtures exercise
+    # the SHIPPED config rather than an older subset — without them the guard
+    # reads 0 (disabled) and the tests silently stop covering it.
+    "high_tier_min_score": 45.0,
+    "high_tier_min_listeners": 1_000,
     "standout_floor_percentile": 0.10,
     "standout_floor_stars": 4,
 }
@@ -122,12 +127,22 @@ class TestTheTopTierGate:
         assert track.get("_compilation_top_tier_gated") is True
 
     def test_an_underground_number_three_is_gated(self, monkeypatch):
-        """Echochamber's "devil may cry": #3/171, 713 listeners, 0 LB."""
+        """Echochamber's "devil may cry": #3/171, 713 listeners, 0 LB.
+
+        ⚠️ REFINED (2026-10-27): was 4★. The 5★ gate demoted it by exactly one
+        tier, which left a 713-listener track at 4★ — the same "a scale-free
+        rank is not popularity" objection, one tier down. The 4★ evidence bars
+        (``high_tier_min_score``/``high_tier_min_listeners``) now drop it to the
+        absolute ladder. This fixture is a NON-single (``_track`` hardcodes
+        ``is_single=False``), so that ladder needs score >= 70 for 3★; 44.8 at
+        713 listeners is 2★.
+        """
         track = _track("devil may cry", "Echochamber", score=44.8, lf=713)
 
         stars = _assign(monkeypatch, track, rank=3, total=171)
 
-        assert stars == 4
+        assert stars == 2
+        assert track.get("_compilation_high_tier_gated") is True
 
     def test_a_hit_that_clears_both_bars_keeps_five(self, monkeypatch):
         """CONTROL — a track that is both a standout for its artist (score
@@ -173,7 +188,11 @@ class TestTheTopTierGate:
 
         stars = _assign(monkeypatch, track, rank=2, total=100)
 
-        assert stars == 4, "reach alone is not a top tier — the score bar failed"
+        # ⚠️ Refined again by the 4★ evidence bars: with 300k reach it clears
+        # the 4★ listener bar but NOT the 4★ score bar (40 < 45), so it drops to
+        # the absolute ladder — which gives 3★ here (the non-single ladder's
+        # 75,000-listener rung), not a flat 4.
+        assert stars == 3, "reach alone is not a top tier — the score bar failed"
         assert track.get("_compilation_top_tier_gated") is True
 
     def test_the_score_bar_alone_does_not_clear_the_gate(self, monkeypatch):
@@ -341,9 +360,13 @@ class TestTheReportedAlbum:
         [
             # (a) tiny catalogues gated out of the top tier
             ("type shit", "Gritmonger", 50.3, 1_200, 1, 9, 4, "1.2k listeners"),
-            ("devil may cry", "Echochamber", 44.8, 713, 3, 171, 4, "713 listeners"),
-            ("Do You Feel Alive?", "Alchemize", 35.3, 1_400, 1, 68, 4, "1.4k listeners"),
-            ("KICK BACK", "Private School", 37.0, 2_800, 2, 192, 4, "2.8k listeners"),
+            # ⚠️ REFINED (2026-10-27): these two were 4★. The 4★ evidence bars
+            # drop anything scoring under 45 to the absolute ladder — which for
+            # a NON-single (this fixture) needs 70 for 3★, so 2★ is the honest
+            # tier rather than "one below the rank it was given".
+            ("devil may cry", "Echochamber", 44.8, 713, 3, 171, 2, "713 listeners"),
+            ("Do You Feel Alive?", "Alchemize", 35.3, 1_400, 1, 68, 2, "1.4k listeners"),
+            ("KICK BACK", "Private School", 37.0, 2_800, 2, 192, 2, "2.8k listeners"),
             # (b) buried heavyweights floored
             ("infinite source", "Deftones", 83.0, 401_200, 58, 187, 4, "compilation leader"),
             ("Reward the Scars", "Korn", 84.9, 53_600, 159, 190, 4, "compilation leader"),

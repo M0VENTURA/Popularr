@@ -2434,7 +2434,25 @@
         <div class="col-12 col-sm-6 col-lg-3">
           <label class="form-label form-label-sm" for="compilation_online_top_tier_min_listeners">5★ Min Last.fm Listeners</label>
           <input type="number" step="1000" min="0" class="form-control form-control-sm" id="compilation_online_top_tier_min_listeners" placeholder="250000" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('top_tier_min_listeners', 250000) }}">
-          <small class="form-text text-muted">Either this or the score clears the 5★ gate. <strong>0</strong> disables. Default: <strong>250000</strong></small>
+          <small class="form-text text-muted">A compilation's 5★ must also clear this reach. <strong>Both</strong> 5★ bars are required; set one to <strong>0</strong> to ignore it. Default: <strong>250000</strong></small>
+        </div>
+        {#
+          ⭐⭐ THE SAME GUARD ONE TIER DOWN. Demoting a 5★ to 4★ on the bar
+          above left tracks with NO evidence holding 4★ — a 0.0 score and 26
+          listeners reached 4★ because a scale-free "#1 of N" rank got them to
+          5★ first and the gate shaved exactly one tier. These bars decide
+          whether 4★ is earned; failing them drops the track to the absolute
+          ladder instead of the tier below.
+        #}
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_online_high_tier_min_score">4★ Min Score</label>
+          <input type="number" step="0.1" min="0" max="100" class="form-control form-control-sm" id="compilation_online_high_tier_min_score" placeholder="45" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('high_tier_min_score', 45) }}">
+          <small class="form-text text-muted">A compilation's 4★ must also clear this score, or it falls to the absolute star ladder. <strong>0</strong> disables. Default: <strong>45</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_online_high_tier_min_listeners">4★ Min Last.fm Listeners</label>
+          <input type="number" step="100" min="0" class="form-control form-control-sm" id="compilation_online_high_tier_min_listeners" placeholder="1000" value="{{ config.get('single_detection', {}).get('compilation_online_catalogue', {}).get('high_tier_min_listeners', 1000) }}">
+          <small class="form-text text-muted">A compilation's 4★ must also clear this reach. <strong>Both</strong> 4★ bars are required; set one to <strong>0</strong> to ignore it. Default: <strong>1000</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-3">
           <label class="form-label form-label-sm" for="compilation_online_standout_floor_percentile">Standout Floor Percentile</label>

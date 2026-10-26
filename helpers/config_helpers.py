@@ -833,9 +833,20 @@ _DEFAULT_COMPILATION_ONLINE_CATALOGUE: dict[str, Any] = {
     "min_catalogue_size": 5,
     # Absolute bar a compilation's 5★ must ALSO clear. The artist-catalogue
     # percentile is scale-free, so "#1 of 9 songs" reached 5★ at 713 listeners
-    # while the album's real hits sat below it. Either bar clears the gate.
+    # while the album's real hits sat below it. BOTH bars must be cleared
+    # (2026-10-27: they used to be alternatives, which made the listener bar
+    # unreachable — see the changelog).
     "top_tier_min_score": 55.0,
     "top_tier_min_listeners": 250000,
+    # ⭐⭐ THE SAME GUARD ONE TIER DOWN. Demoting a 5★ to 4★ on the top-tier bar
+    # left tracks with NO popularity evidence holding 4★: measured on "Triple
+    # J's Hottest 100 (1996)", Allen Ginsberg's "Ballad of the Skeletons"
+    # (final_score 0.0, 26 Last.fm listeners, 0 ListenBrainz listens) was 4★
+    # because a scale-free "#1 of N" rank reached 5★ and the gate shaved one
+    # tier off. A track clearing neither of these bars drops to the ABSOLUTE
+    # ladder instead (a 26-listener track lands on 1★). 0 on both disables it.
+    "high_tier_min_score": 45.0,
+    "high_tier_min_listeners": 1000,
     # The mirror guard: a track in the compilation's own top band (by the
     # cross-artist raw blend) floors at this many stars, so a heavyweight's
     # deep discography cannot bury their genuine hit. 0 disables it.
@@ -868,6 +879,8 @@ def get_compilation_online_catalogue_config(config: dict | None = None) -> dict[
         "min_catalogue_size",
         "top_tier_min_score",
         "top_tier_min_listeners",
+        "high_tier_min_score",
+        "high_tier_min_listeners",
         "standout_floor_percentile",
         "standout_floor_stars",
     ):
