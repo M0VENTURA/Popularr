@@ -1717,6 +1717,33 @@ def _apply_track_artist_relative_normalization(album_results: list[dict[str, Any
     The album under rating is EXCLUDED from that band (see
     ``_load_track_artist_scores``): on a compilation its own tracks are the
     hits being judged, and letting them define the reference is circular.
+
+    ⚠️⚠️ ``popularity_score`` IS REMAPPED; ``final_score`` IS NOT.
+
+    This function used to write the per-artist value into BOTH, which made
+    ``final_score`` — the column every cross-track comparison reads (the album
+    page's ordering, playlist selection, the popularity report, the star
+    monotonicity invariant) — an ARTIST-RELATIVE number on a compilation. Two
+    tracks on one album were then measured against two different populations,
+    so the values were not comparable even to each other.
+
+    Measured on "Triple J's Hottest 100 (1996)":
+
+        The Prodigy       mean LF  962,642   mean final_score  97.45
+        Bush              mean LF  553,215   mean final_score  84.54
+        The Smashing Pumpkins mean LF 1,888,518 mean final_score 66.92
+        Powderfinger      mean LF   16,977   mean final_score  66.99
+
+    — a 111x listener gap between Smashing Pumpkins and Powderfinger worth
+    0.07 score points, while Beck (525k listeners) scored 60.27 against Bush's
+    84.54 (553k). Sorting that album by ``final_score`` interleaved the low and
+    high bands (25 adjacent star inversions), which is why the report only reads
+    sensibly through ``raw_score``.
+
+    ``popularity_score`` keeps the remap because that is what the compilation
+    star tier reads ("is this a hit for THIS artist"), which is the question the
+    per-artist band is the right answer to. ``final_score`` stays the pre-remap
+    blend so it remains one scale across the whole album.
     """
     changed = 0
     rows: list[dict[str, Any]] = []
@@ -1747,12 +1774,24 @@ def _apply_track_artist_relative_normalization(album_results: list[dict[str, Any
         else:
             remapped = apply_album_relative_popularity(raw, album_raw_scores)
 
+        # ⚠️ ``final_score`` is FORCED back to the pre-remap blend on every row
+        # that has one, not merely left alone. A frozen row can still carry a
+        # per-artist ``final_score`` written by an earlier scan, and setdefault-
+        # style preservation would keep that incomparable value forever.
+        _previous_final = float(tr.get("final_score") or 0)
+        tr["final_score"] = raw
+        _final_restored = abs(_previous_final - raw) > 0.001
+
         if abs(remapped - float(tr.get("popularity_score") or 0)) > 0.001:
             tr["popularity_score"] = remapped
-            tr["final_score"] = remapped
+            tr["_artist_relative_score"] = remapped
             tr["popularity_adjusted"] = True
-            rows.append(tr)
             changed += 1
+            rows.append(tr)
+        elif _final_restored:
+            # The only change was un-remapping ``final_score``; it still has to
+            # be written back or the DB keeps the per-artist value.
+            rows.append(tr)
 
     if rows:
         _persist_album_relative_scores(rows)

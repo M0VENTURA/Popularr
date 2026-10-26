@@ -42,6 +42,7 @@ from services.popularity.popularity_math import (
     evaluate_log_ratio_deviation,
     fmt_count as _fmt_count,
     is_interlude_lb_outlier,
+    reconcile_listenbrainz_score,
 )
 from services.popularity.popularity_config import (
     get_interlude_lb_outlier_config,
@@ -2928,6 +2929,38 @@ def process_track(
         or _result_final_score
         or 0.0
     )
+    # ⭐⭐ LAST-MOMENT LISTENBRAINZ RECONCILIATION.
+    #
+    # ``listenbrainz_score`` is a pure function of ``listenbrainz_listens``,
+    # so the two columns can only disagree if they were written at different
+    # times — the score during scoring, the count backfilled later by the
+    # album-tracklist prefetch. ``popularity_frozen`` then stops any rescore
+    # and the contradiction is permanent. Measured on "Triple J's Hottest 100
+    # (1996)": Bush's "Comedown" held 500,794 listens with score 0.0.
+    #
+    # Applied to BOTH branches (fresh and stored) and to ``update_payload`` —
+    # the dict that is actually persisted — so the repair reaches the DB, not
+    # only the in-memory result.
+    _lb_payload_listens = int(
+        update_payload.get("listenbrainz_listens")
+        if update_payload.get("listenbrainz_listens") is not None
+        else listenbrainz_listens or 0
+    )
+    _lb_payload_score = update_payload.get("listenbrainz_score")
+    if _lb_payload_score is None:
+        _lb_payload_score = score_data.get("listenbrainz_score", 0)
+    _lb_reconciled = reconcile_listenbrainz_score(_lb_payload_listens, _lb_payload_score)
+    if _lb_reconciled != float(_lb_payload_score or 0):
+        logger.info(
+            "ListenBrainz score reconciled from its listen count",
+            track_id=track_id,
+            listenbrainz_listens=_lb_payload_listens,
+            stored_score=round(float(_lb_payload_score or 0), 3),
+            reconciled_score=_lb_reconciled,
+        )
+        update_payload["listenbrainz_score"] = _lb_reconciled
+        score_data["listenbrainz_score"] = _lb_reconciled
+
     _ret_is_single = bool(update_payload.get("is_single", track.get("is_single", False)))
     _ret_single_conf = str(update_payload.get("single_confidence") or track.get("single_confidence") or "low")
     _ret_single_srcs = update_payload.get("single_sources") or track.get("single_sources") or "[]"

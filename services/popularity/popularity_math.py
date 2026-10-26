@@ -359,6 +359,38 @@ def calculate_listenbrainz_popularity_score(listen_count: int) -> float:
     return min(100.0, math.log10(listen_count + 1) * LOG_SCALE_MULTIPLIER)
 
 
+def reconcile_listenbrainz_score(
+    listenbrainz_listens: int | float | None,
+    listenbrainz_score: float | None,
+) -> float:
+    """Make a stored ListenBrainz (listens, score) pair self-consistent.
+
+    ⭐⭐ A SCORE OF ZERO BESIDE A REAL LISTEN COUNT IS A CONTRADICTION.
+    ``listenbrainz_score`` is a pure function of ``listenbrainz_listens``
+    (``16 * log10(n + 1)``, capped at 100), so the two columns cannot disagree
+    unless they were written at different times. They were: the score is
+    computed during scoring, and a later pass (the album-tracklist prefetch)
+    can backfill the listen count — after which ``popularity_frozen`` stops any
+    rescore, and the contradiction is permanent.
+
+    Measured on "Triple J's Hottest 100 (1996)": Bush's "Comedown" stored
+    500,794 listens with score **0.0**, and "Swallowed" 545,750 with **0.0**,
+    while the other 16 rows carrying a count matched the formula exactly. Each
+    of those two lost ListenBrainz's whole 30% weight from its blend.
+
+    This RECOMPUTES the score from the count rather than discarding the record.
+    The count is the real measurement; throwing away 500k listens to "reject a
+    malformed row" would lose more signal than it protects. A score that is
+    already positive, or a row with no listen count at all, is returned
+    unchanged — so this can only ever repair, never lower, a score.
+    """
+    listens = int(listenbrainz_listens or 0)
+    score = float(listenbrainz_score or 0)
+    if listens <= 0 or score > 0:
+        return score
+    return round(calculate_listenbrainz_popularity_score(listens), 3)
+
+
 def album_prominence_score(
     lastfm_listeners: int,
     listenbrainz_listens: int,
@@ -808,7 +840,6 @@ def calculate_combined_popularity_score(
     if album_lb_listens:
         lb_percentile = calculate_listenbrainz_percentile(listenbrainz_listens, album_lb_listens)
         lb_score = max(lb_log, lb_percentile * 100.0)
-
     age_score = 0.0
     if release_date and age_source_value:
         aged, _days = score_by_age(age_source_value, release_date)
@@ -905,7 +936,24 @@ def calculate_combined_popularity_score(
     return {
         "combined_score": round(min(100.0, max(0.0, combined)), 3),
         "lastfm_score": round(lastfm_score, 3),
-        "listenbrainz_score": round(lb_score, 3),
+        # ⭐⭐ THE ABSOLUTE LOG SCORE, NOT ``lb_score``.
+        #
+        # ``lb_score`` above may have been raised to the ALBUM PERCENTILE
+        # (``max(lb_log, lb_percentile * 100)``), which is scale-free: it
+        # answers "how does this sit within the album", not "how popular is it".
+        # Persisting THAT under ``listenbrainz_score`` made one column mean two
+        # different things depending on the album's size —
+        #
+        #   * "In the Shadow of Your Shadow" (Cult of Luna, 2-track album):
+        #     438 listens -> percentile 0.75 -> stored score **75.0**, while
+        #     the log score for the same 438 listens is **42.28**;
+        #   * every other track in the collection stores the log score.
+        #
+        # The percentile still drives the BLEND (that is what it is for — a
+        # small album's best track deserves its standing), but the REPORTED and
+        # PERSISTED component is now always the absolute log score, so the
+        # column is comparable across albums and rows.
+        "listenbrainz_score": round(lb_log, 3),
         "age_score": round(age_score, 3),
     }
 

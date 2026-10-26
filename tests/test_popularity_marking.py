@@ -310,7 +310,12 @@ class TestCompilationTrackArtistNormalization:
         from services.popularity import scan_stage_runner as s
         monkeypatched = artist_scores_map is not None
 
-        def _fake_load(track_artist):
+        def _fake_load(track_artist, **kwargs):
+            # ⚠️ ``**kwargs``, not a bare ``track_artist``: the real loader is
+            # called as ``_load_track_artist_scores(primary,
+            # exclude_album=...)`` and a fake that refuses the keyword raises
+            # TypeError inside the function under test, so all three tests in
+            # this class were failing on the FAKE rather than on the code.
             return list(artist_scores_map.get(track_artist) or [])
 
         if monkeypatched:

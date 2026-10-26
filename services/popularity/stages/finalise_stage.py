@@ -1318,10 +1318,34 @@ def _assign_stars(
             _min_score, _min_listeners = 0.0, 0.0
 
         if comp_stars >= 5 and (_min_score > 0 or _min_listeners > 0):
-            _clears_absolute = (
-                (_min_score > 0 and score >= _min_score)
-                or (_min_listeners > 0 and raw_lf >= _min_listeners)
-            )
+            # ⚠️⚠️ CONJUNCTION, NOT DISJUNCTION — a documented reversal.
+            #
+            # This was an ``or``: "clear EITHER the score bar OR the listener
+            # bar". That reads as two alternative ways to be a hit, but only one
+            # of them is an ABSOLUTE measurement:
+            #
+            #   * ``raw_lf`` (lastfm_listeners) is absolute reach;
+            #   * ``score`` here is ``popularity_score``, which on a compilation
+            #     has already been through the per-track-artist remap and is
+            #     therefore SCALE-FREE — it says "popular for THIS artist", not
+            #     "popular".
+            #
+            # Because a scale-free score almost always clears 55, the ``or``
+            # made the listener bar unreachable. Measured on "Triple J's
+            # Hottest 100 (1996)": Pearl Jam's "Leaving Here" (19,396 Last.fm
+            # listeners) held 5★ on score 70.27, and 26 of the 100 tracks were
+            # 5★. The guard only ever fired for tracks that failed BOTH bars —
+            # e.g. "Waiting for a Star to Fall" (175,111 listeners, score 49.5).
+            #
+            # Requiring BOTH is the honest reading of "a top-tier track": a hit
+            # for its artist AND a hit in absolute terms. Each bar is still
+            # independently disableable by setting it to 0, so a deployment that
+            # wants the old looser behaviour sets ONE of them to 0 rather than
+            # the guard silently short-circuiting.
+            _clears_absolute = all((
+                _min_score <= 0 or score >= _min_score,
+                _min_listeners <= 0 or raw_lf >= _min_listeners,
+            ))
             if not _clears_absolute:
                 comp_stars = 4
                 track["_compilation_top_tier_gated"] = True
@@ -1333,6 +1357,8 @@ def _assign_stars(
                     lastfm_listeners=int(raw_lf),
                     min_score=_min_score,
                     min_listeners=int(_min_listeners),
+                    failed_score_bar=bool(_min_score > 0 and score < _min_score),
+                    failed_listener_bar=bool(_min_listeners > 0 and raw_lf < _min_listeners),
                 )
 
         try:

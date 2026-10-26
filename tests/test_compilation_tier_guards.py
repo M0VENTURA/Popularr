@@ -129,32 +129,75 @@ class TestTheTopTierGate:
 
         assert stars == 4
 
-    def test_a_genuine_hit_keeps_five(self, monkeypatch):
-        """CONTROL — Sally's Song (#1/164, raw 83.6, 137.6k LF) is genuinely
-        popular and must stay 5★."""
-        track = _track("Sally’s Song", "Amy Lee", score=83.6, lf=137_600, lb=151_100)
+    def test_a_hit_that_clears_both_bars_keeps_five(self, monkeypatch):
+        """CONTROL — a track that is both a standout for its artist (score
+        83.6) AND genuinely big (300k Last.fm listeners) keeps 5★.
+
+        ⚠️ CONTRACT REVERSAL (2026-10-27). This test used to use Amy Lee's
+        "Sally's Song" — 83.6 score, 137,600 listeners — and assert it kept 5★
+        under the "either bar" rule. It is now GATED, because the two bars are
+        a CONJUNCTION: 137,600 is below the 250,000 listener bar. That is the
+        intended tightening (a compilation whose tracks sit at 19k-137k
+        listeners should not hand out 26 five-star ratings out of 100), and the
+        bar is config-driven — lowering ``top_tier_min_listeners`` restores the
+        looser behaviour deliberately rather than by accident.
+        """
+        track = _track("Big Hit", "Some Band", score=83.6, lf=300_000, lb=151_100)
 
         stars = _assign(monkeypatch, track, rank=1, total=164)
 
         assert stars == 5
         assert track.get("_compilation_top_tier_gated") is None
 
-    def test_the_listener_bar_alone_clears_the_gate(self, monkeypatch):
-        """CONTROL — either bar is enough: a low score with huge reach keeps
-        5★ (the two bars are alternatives, not a conjunction)."""
+    def test_a_hit_just_under_the_listener_bar_is_gated(self, monkeypatch):
+        """The reported tightening, stated as behaviour: Amy Lee's "Sally's
+        Song" (83.6 score, 137,600 listeners) is a genuine hit but not a
+        top-tier one, so it takes 4★."""
+        track = _track("Sally’s Song", "Amy Lee", score=83.6, lf=137_600, lb=151_100)
+
+        stars = _assign(monkeypatch, track, rank=1, total=164)
+
+        assert stars == 4
+        assert track.get("_compilation_top_tier_gated") is True
+
+    def test_the_listener_bar_alone_does_not_clear_the_gate(self, monkeypatch):
+        """⚠️ CONTRACT REVERSAL (2026-10-27). This test used to assert that
+        EITHER bar was enough — "a low score with huge reach keeps 5★".
+
+        That made the guard unreachable, because the score it OR'd against is
+        the per-track-artist REMAP (scale-free), so it clears 55 almost always.
+        Measured: Pearl Jam's "Leaving Here" (19,396 listeners) held 5★ on
+        score 70.27. Both bars are now required.
+        """
         track = _track("Big Reach", "Some Band", score=40.0, lf=300_000)
 
         stars = _assign(monkeypatch, track, rank=2, total=100)
 
-        assert stars == 5
+        assert stars == 4, "reach alone is not a top tier — the score bar failed"
+        assert track.get("_compilation_top_tier_gated") is True
 
-    def test_the_score_bar_alone_clears_the_gate(self, monkeypatch):
-        """CONTROL — a high score with modest listeners keeps 5★."""
+    def test_the_score_bar_alone_does_not_clear_the_gate(self, monkeypatch):
+        """⚠️ CONTRACT REVERSAL (2026-10-27) — the mirror of the above. A high
+        remapped score with 5,000 listeners used to keep 5★; that is exactly
+        the "top of a tiny catalogue" case the gate exists to stop."""
         track = _track("High Score", "Some Band", score=70.0, lf=5_000)
 
         stars = _assign(monkeypatch, track, rank=2, total=100)
 
-        assert stars == 5
+        assert stars == 4, "a scale-free score alone is not a top tier"
+        assert track.get("_compilation_top_tier_gated") is True
+
+    def test_zeroing_one_bar_leaves_the_other_enforceable(self, monkeypatch):
+        """Each bar is independently disableable, so the old looser behaviour is
+        one config edit away — and it is DOCUMENTED rather than accidental."""
+        track = _track("High Score Only", "Some Band", score=70.0, lf=5_000)
+
+        stars = _assign(
+            monkeypatch, track, rank=2, total=100,
+            rules={**RULES, "top_tier_min_listeners": 0},
+        )
+
+        assert stars == 5, "with the listener bar disabled, the score bar decides"
 
     def test_the_gate_does_not_touch_lower_tiers(self, monkeypatch):
         """CONTROL — the gate is a TOP-TIER guard only; a 3★ stays 3★."""
@@ -305,7 +348,12 @@ class TestTheReportedAlbum:
             ("infinite source", "Deftones", 83.0, 401_200, 58, 187, 4, "compilation leader"),
             ("Reward the Scars", "Korn", 84.9, 53_600, 159, 190, 4, "compilation leader"),
             # (c) genuinely popular tracks keep their tier
-            ("Sally’s Song", "Amy Lee", 83.6, 137_600, 1, 164, 5, "genuine hit"),
+            # ⚠️ CONTRACT REVERSAL (2026-10-27): "Sally's Song" (137,600 LF) was
+            # listed here as a "genuine hit" expected to keep 5★. Under the
+            # conjunction it is GATED — 137.6k is below the 250k listener bar.
+            # A track that clears BOTH bars is the new control (see
+            # TestTheTopTierGate::test_a_hit_that_clears_both_bars_keeps_five).
+            ("Sally’s Song", "Amy Lee", 83.6, 137_600, 1, 164, 4, "below the listener bar"),
         ],
     )
     def test_the_final_tier(
