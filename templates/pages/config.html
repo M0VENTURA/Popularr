@@ -2468,6 +2468,56 @@
 
       <hr class="my-3">
       {#
+        ⭐⭐ COMPILATION ABSOLUTE LADDER.
+        Two measured defects: the artist-catalogue percentile GRANTS tiers (so
+        stored 5★ tracks exist at 26 and 60 Last.fm listeners), and the shipped
+        rungs are unevenly spaced (7.5x / 6.7x / 3.0x) starting at 10,000
+        listeners, so 24% of compilations collapse to a single tier.
+      #}
+      <h6 class="mb-1">Compilation Absolute Ladder</h6>
+      <p class="text-muted small mb-3">
+        Grades a compilation track on its own audience instead of its rank inside one artist's
+        catalogue. Enabling this changes compilation ratings — preview with the Star Rating Resync below.
+      </p>
+      <div class="row g-3 mb-3">
+        <div class="col-12 col-sm-6 col-lg-3">
+          <div class="form-check form-switch mt-3">
+            <input class="form-check-input" type="checkbox" id="compilation_ladder_enabled" {% if config.get('single_detection', {}).get('compilation_ladder', {}).get('enabled', 0) %}checked{% endif %}>
+            <label class="form-check-label form-label-sm" for="compilation_ladder_enabled">Enable Absolute Ladder</label>
+          </div>
+          <small class="form-text text-muted">Default: <strong>Disabled</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <div class="form-check form-switch mt-3">
+            <input class="form-check-input" type="checkbox" id="compilation_ladder_catalogue_is_cap_only" {% if config.get('single_detection', {}).get('compilation_ladder', {}).get('catalogue_is_cap_only', 1) %}checked{% endif %}>
+            <label class="form-check-label form-label-sm" for="compilation_ladder_catalogue_is_cap_only">Catalogue Can Only Cap</label>
+          </div>
+          <small class="form-text text-muted">Stop the artist-catalogue percentile from <em>granting</em> a tier; it may only demote. Default: <strong>On</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_ladder_five_star_listeners">5★ Min Listeners</label>
+          <input type="number" step="1000" min="0" class="form-control form-control-sm" id="compilation_ladder_five_star_listeners" placeholder="900000" value="{{ config.get('single_detection', {}).get('compilation_ladder', {}).get('five_star_listeners', 900000) }}">
+          <small class="form-text text-muted">Default: <strong>900000</strong> (was 1500000)</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_ladder_four_star_listeners">4★ Min Listeners</label>
+          <input type="number" step="1000" min="0" class="form-control form-control-sm" id="compilation_ladder_four_star_listeners" placeholder="120000" value="{{ config.get('single_detection', {}).get('compilation_ladder', {}).get('four_star_listeners', 120000) }}">
+          <small class="form-text text-muted">Default: <strong>120000</strong> (was 500000)</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_ladder_three_star_listeners">3★ Min Listeners</label>
+          <input type="number" step="1000" min="0" class="form-control form-control-sm" id="compilation_ladder_three_star_listeners" placeholder="15000" value="{{ config.get('single_detection', {}).get('compilation_ladder', {}).get('three_star_listeners', 15000) }}">
+          <small class="form-text text-muted">Default: <strong>15000</strong> (was 75000)</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_ladder_two_star_listeners">2★ Min Listeners</label>
+          <input type="number" step="100" min="0" class="form-control form-control-sm" id="compilation_ladder_two_star_listeners" placeholder="2000" value="{{ config.get('single_detection', {}).get('compilation_ladder', {}).get('two_star_listeners', 2000) }}">
+          <small class="form-text text-muted">Default: <strong>2000</strong> (was 10000)</small>
+        </div>
+      </div>
+
+      <hr class="my-3">
+      {#
         ⭐⭐ ALBUM STAR CURVE — the shape of a rating across ONE release.
         A rating should describe a track's place ON ITS ALBUM, so an album
         ought to spread across 1-5 tiers. Measured on the collection report,

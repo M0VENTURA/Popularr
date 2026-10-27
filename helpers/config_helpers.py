@@ -1011,6 +1011,74 @@ def get_star_resync_config(config: dict | None = None) -> dict[str, Any]:
     return out
 
 
+#: ⭐⭐ COMPILATION ABSOLUTE LADDER — the tier a compilation track earns from
+#: its own audience, plus whether the artist-catalogue percentile may GRANT a
+#: tier or only CAP one.
+#:
+#: Two measured defects this addresses (861 compilations / 10,408 scored rows):
+#:
+#: 1. The percentile GRANTS tiers. `_online_catalogue_stars` ranks a track
+#:    inside its OWN artist's Last.fm catalogue, so "#1 of 9 songs" reached 5★.
+#:    Measured on the collection: stored 5★ tracks exist at **26 listeners**
+#:    ("Ballad of the Skeletons") and **60 listeners**. Being the biggest song
+#:    of a tiny artist is not a hit. Making the percentile a CAP only means it
+#:    can still demote ("this is not even 60th percentile for this artist") but
+#:    can never promote a track the absolute evidence does not support.
+#:
+#: 2. The ladder's bands are unevenly spaced and start too high. The shipped
+#:    rungs are 1.5M / 500k / 75k / 10k listeners, i.e. 7.5x, 6.7x, 3.0x apart,
+#:    and NOTHING below 10,000 listeners resolves at all. Measured effect: 24%
+#:    of compilations collapse to a single tier. Re-spacing to 7.5x throughout
+#:    (900k / 120k / 15k / 2k) takes that to 13% and raises distinct tiers per
+#:    compilation from 2.33 to 2.54 while leaving cross-album consistency at
+#:    98% (the same track still grades the same on every album it appears on —
+#:    the property that disqualifies the within-album percentile, which managed
+#:    only 39%).
+#:
+#: ⚠️ DEFAULT OFF. Turning this on changes compilation ratings, so preview with
+#: the Star Rating Resync before enabling it.
+_DEFAULT_COMPILATION_LADDER: dict[str, Any] = {
+    "enabled": 0,
+    # Absolute Last.fm reach required for each tier.
+    "five_star_listeners": 900000,
+    "four_star_listeners": 120000,
+    "three_star_listeners": 15000,
+    "two_star_listeners": 2000,
+    # 1 when the artist-catalogue percentile may only DEMOTE a track. 0 keeps
+    # the legacy behaviour where a rank can grant 5★ on its own.
+    "catalogue_is_cap_only": 1,
+}
+
+
+def get_compilation_ladder_config(config: dict | None = None) -> dict[str, Any]:
+    """Return the compilation absolute-ladder settings."""
+    cfg = config if isinstance(config, dict) else get_config()
+    sd = cfg.get("single_detection", {}) if isinstance(cfg, dict) else {}
+    block = sd.get("compilation_ladder") if isinstance(sd, dict) else None
+
+    rules = dict(_DEFAULT_COMPILATION_LADDER)
+    if isinstance(block, dict):
+        rules.update(block)
+
+    out: dict[str, Any] = {
+        "enabled": 1 if _as_truthy(rules.get("enabled", 0)) else 0,
+        "catalogue_is_cap_only": (
+            1 if _as_truthy(rules.get("catalogue_is_cap_only", 1)) else 0
+        ),
+    }
+    for key in (
+        "five_star_listeners",
+        "four_star_listeners",
+        "three_star_listeners",
+        "two_star_listeners",
+    ):
+        try:
+            out[key] = float(rules.get(key, _DEFAULT_COMPILATION_LADDER[key]))
+        except (TypeError, ValueError):
+            out[key] = float(_DEFAULT_COMPILATION_LADDER[key])
+    return out
+
+
 def _as_truthy(value: Any) -> bool:
     """Interpret config booleans/ints/strings the way the Config page writes them."""
     if isinstance(value, str):

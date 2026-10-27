@@ -2528,6 +2528,49 @@
       </div>
 
       <hr class="my-3">
+      <h6 class="mb-1">Compilation Absolute Ladder</h6>
+      <p class="text-muted small mb-3">
+        Grades a compilation track on its own audience instead of its rank inside one artist's
+        catalogue. Enabling this changes compilation ratings — preview with the Star Rating Resync below.
+      </p>
+      <div class="row g-3 mb-3">
+        <div class="col-12 col-sm-6 col-lg-3">
+          <div class="form-check form-switch mt-3">
+            <input class="form-check-input" type="checkbox" id="compilation_ladder_enabled" {% if config.get('single_detection', {}).get('compilation_ladder', {}).get('enabled', 0) %}checked{% endif %}>
+            <label class="form-check-label form-label-sm" for="compilation_ladder_enabled">Enable Absolute Ladder</label>
+          </div>
+          <small class="form-text text-muted">Default: <strong>Disabled</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <div class="form-check form-switch mt-3">
+            <input class="form-check-input" type="checkbox" id="compilation_ladder_catalogue_is_cap_only" {% if config.get('single_detection', {}).get('compilation_ladder', {}).get('catalogue_is_cap_only', 1) %}checked{% endif %}>
+            <label class="form-check-label form-label-sm" for="compilation_ladder_catalogue_is_cap_only">Catalogue Can Only Cap</label>
+          </div>
+          <small class="form-text text-muted">Default: <strong>On</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_ladder_five_star_listeners">5★ Min Listeners</label>
+          <input type="number" step="1000" min="0" class="form-control form-control-sm" id="compilation_ladder_five_star_listeners" placeholder="900000" value="{{ config.get('single_detection', {}).get('compilation_ladder', {}).get('five_star_listeners', 900000) }}">
+          <small class="form-text text-muted">Default: <strong>900000</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_ladder_four_star_listeners">4★ Min Listeners</label>
+          <input type="number" step="1000" min="0" class="form-control form-control-sm" id="compilation_ladder_four_star_listeners" placeholder="120000" value="{{ config.get('single_detection', {}).get('compilation_ladder', {}).get('four_star_listeners', 120000) }}">
+          <small class="form-text text-muted">Default: <strong>120000</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_ladder_three_star_listeners">3★ Min Listeners</label>
+          <input type="number" step="1000" min="0" class="form-control form-control-sm" id="compilation_ladder_three_star_listeners" placeholder="15000" value="{{ config.get('single_detection', {}).get('compilation_ladder', {}).get('three_star_listeners', 15000) }}">
+          <small class="form-text text-muted">Default: <strong>15000</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="compilation_ladder_two_star_listeners">2★ Min Listeners</label>
+          <input type="number" step="100" min="0" class="form-control form-control-sm" id="compilation_ladder_two_star_listeners" placeholder="2000" value="{{ config.get('single_detection', {}).get('compilation_ladder', {}).get('two_star_listeners', 2000) }}">
+          <small class="form-text text-muted">Default: <strong>2000</strong></small>
+        </div>
+      </div>
+
+      <hr class="my-3">
       <h6 class="mb-1">Album Star Curve</h6>
       <p class="text-muted small mb-3">
         Spreads every regular album across all five star tiers by within-album rank, then caps each

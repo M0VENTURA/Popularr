@@ -1163,6 +1163,7 @@ def _compilation_absolute_ladder_stars(
     score: float,
     raw_lf: float,
     is_verified_single: bool,
+    rules: dict[str, Any] | None = None,
 ) -> int:
     """The ABSOLUTE star ladder for a compilation track, with no rank input.
 
@@ -1175,8 +1176,12 @@ def _compilation_absolute_ladder_stars(
       (see the 4★ guard in ``_assign_stars``), so a track with no popularity
       evidence lands on the tier its evidence actually supports rather than
       on "one below the rank it was given".
+    * as the CAP when ``catalogue_is_cap_only`` is set, so a rank alone can
+      never grant a tier the absolute evidence does not support.
 
-    Extracted so those two paths cannot drift apart.
+    Extracted so those paths cannot drift apart, and configuration-driven so
+    the rungs can be re-spaced without editing code (see the measured spacing
+    defect in ``get_compilation_ladder_config``).
     """
     if is_verified_single:
         if score >= 55.0 or raw_lf >= 1_000_000:
@@ -1188,6 +1193,24 @@ def _compilation_absolute_ladder_stars(
         if score >= 15.0 or raw_lf >= 10_000:
             return 2
         return 1
+
+    # Configured rungs take over only when the ladder is explicitly enabled;
+    # otherwise the shipped thresholds keep the current rating.
+    if rules and rules.get("enabled"):
+        for tier, key in (
+            (5, "five_star_listeners"),
+            (4, "four_star_listeners"),
+            (3, "three_star_listeners"),
+            (2, "two_star_listeners"),
+        ):
+            try:
+                need = float(rules.get(key) or 0.0)
+            except (TypeError, ValueError):
+                need = 0.0
+            if need > 0 and raw_lf >= need:
+                return tier
+        return 1
+
     if score >= 95.0 or raw_lf >= 1_500_000:
         return 5
     if score >= 85.0 or raw_lf >= 500_000:
@@ -1221,6 +1244,7 @@ def _assign_stars(
     compilation_online_rules: dict[str, Any] | None = None,
     album_curve_rules: dict[str, Any] | None = None,
     album_curve_pool: list[float] | None = None,
+    compilation_ladder_rules: dict[str, Any] | None = None,
 ) -> int:
     """Assign 1-5 star rating to a single track."""
     score = float(track.get("popularity_score") or track.get("final_score") or 0)
@@ -1397,6 +1421,18 @@ def _assign_stars(
                 logger.debug("Compilation online config read failed", error=str(exc))
                 _online_rules = {}
 
+        # The ABSOLUTE rungs and whether the artist-catalogue rank may grant or
+        # only cap a tier. Read once per track; the caller may pre-resolve it.
+        if compilation_ladder_rules is not None:
+            _ladder_rules = compilation_ladder_rules
+        else:
+            try:
+                from helpers.config_helpers import get_compilation_ladder_config
+                _ladder_rules = get_compilation_ladder_config()
+            except Exception as exc:
+                logger.debug("Compilation ladder config read failed", error=str(exc))
+                _ladder_rules = {}
+
         try:
             _min_local = int(float(_online_rules.get("min_local_catalogue") or 5.0))
         except (TypeError, ValueError):
@@ -1446,6 +1482,40 @@ def _assign_stars(
                 comp_stars = _online_stars
                 if is_verified_single and organic and not popularity_only:
                     comp_stars = max(comp_stars, 3)
+
+                # ⭐⭐ THE RANK MAY CAP, NOT GRANT.
+                #
+                # `_online_catalogue_stars` ranks the track inside its OWN
+                # artist's catalogue, so "#1 of 9 songs" reached 5★. Measured
+                # on the collection: stored 5★ tracks exist at 26 and 60
+                # Last.fm listeners. Being the biggest song of a tiny artist
+                # is not a hit.
+                #
+                # With `catalogue_is_cap_only` the rank can still DEMOTE ("this
+                # is not even 60th percentile for this artist") but can never
+                # promote past what absolute reach supports.
+                if (
+                    _ladder_rules
+                    and _ladder_rules.get("enabled")
+                    and _ladder_rules.get("catalogue_is_cap_only")
+                ):
+                    _absolute_cap = _compilation_absolute_ladder_stars(
+                        score, raw_lf,
+                        is_verified_single=bool(is_verified_single and organic and not popularity_only),
+                        rules=_ladder_rules,
+                    )
+                    if _absolute_cap < comp_stars:
+                        logger.info(
+                            "Compilation rank capped by absolute reach",
+                            title=track.get("title"),
+                            artist=_compilation_track_artist(track),
+                            rank_stars=comp_stars,
+                            absolute_cap=_absolute_cap,
+                            lastfm_listeners=int(raw_lf),
+                        )
+                        track["_compilation_rank_capped"] = _absolute_cap
+                        comp_stars = _absolute_cap
+
                 track["_compilation_rating_mode"] = "track_artist_online_catalogue"
                 track["_compilation_artist_z"] = None
                 track["_compilation_online_rank"] = int(_online_detail.get("rank") or 0)
@@ -1465,11 +1535,11 @@ def _assign_stars(
                 )
             elif is_verified_single and not popularity_only:
                 comp_stars = _compilation_absolute_ladder_stars(
-                    score, raw_lf, is_verified_single=True,
+                    score, raw_lf, is_verified_single=True, rules=_ladder_rules,
                 )
             else:
                 comp_stars = _compilation_absolute_ladder_stars(
-                    score, raw_lf, is_verified_single=False,
+                    score, raw_lf, is_verified_single=False, rules=_ladder_rules,
                 )
 
             if _online_stars <= 0:
@@ -1556,6 +1626,7 @@ def _assign_stars(
             if not _clears_high_evidence:
                 _ladder = _compilation_absolute_ladder_stars(
                     score, raw_lf, is_verified_single=is_verified_single,
+                    rules=_ladder_rules,
                 )
                 # Never RAISE a tier here: this guard only removes evidence it
                 # could not justify. ``min`` with the current value does that.
@@ -4525,6 +4596,14 @@ def post_album_star_ratings(
             except Exception:
                 _comp_online_rules = {}
 
+        _comp_ladder_rules: dict[str, Any] | None = None
+        if is_compilation:
+            try:
+                from helpers.config_helpers import get_compilation_ladder_config
+                _comp_ladder_rules = get_compilation_ladder_config()
+            except Exception:
+                _comp_ladder_rules = {}
+
         # 1. Assign star ratings in memory
         _lb_unusable_ids, _lb_cohort_scores = _lb_unusable_cohort(album_results)
         for track in album_results:
@@ -4562,6 +4641,7 @@ def post_album_star_ratings(
                     compilation_online_rules=_comp_online_rules,
                     album_curve_rules=_curve_rules,
                     album_curve_pool=_curve_pool,
+                    compilation_ladder_rules=_comp_ladder_rules,
                 )
             except Exception as exc:
                 track_id = str(track.get("track_id") or "").strip()

@@ -2065,6 +2065,54 @@ async def api_collection_popularity_report() -> Any:
 
 
 # ===========================================================================
+# LISTENER CONTRADICTION REPORT
+# ===========================================================================
+
+@misc_api_bp.route("/popularity/contradictions", methods=["GET"])
+async def api_listener_contradictions() -> Any:
+    """Report rows whose stored Last.fm listener count contradicts itself.
+
+    Last.fm's count is keyed on ``(artist, title)``, not on a release, so two
+    rows with the same artist and title must hold the same number. Where they
+    do not, one was matched to something else — and ``should_freeze_track``
+    means a 2+ year old track never re-queries, so the bad value is durable.
+
+    Query args:
+        ``min_ratio`` (default 3.0) — minimum high/low spread to report.
+        ``limit`` (default 0 = all) — cap the number of groups returned.
+
+    Read-only: this never writes to the database.
+    """
+    from services.popularity.contradiction_report_service import (
+        build_listener_contradictions,
+    )
+
+    def _num(name: str, default: float) -> float:
+        raw = request.args.get(name)
+        if raw in (None, ""):
+            return default
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+
+    min_ratio = _num("min_ratio", 3.0)
+    limit = int(_num("limit", 0)) or None
+
+    try:
+        report = await asyncio.to_thread(
+            build_listener_contradictions,
+            min_ratio=min_ratio,
+            limit_groups=limit,
+        )
+    except Exception as exc:
+        logger.error("Contradiction report failed", error=str(exc))
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    return jsonify({"ok": True, **report}), 200
+
+
+# ===========================================================================
 # STAR RATING RESYNC
 # ===========================================================================
 
