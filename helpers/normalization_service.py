@@ -574,17 +574,39 @@ def strip_remaster_suffix(value: str) -> str:
 # vocabulary.
 # ---------------------------------------------------------------------------
 
-#: Single-word edition markers, tokenised from the keyword list above (which
-#: also carries the multi-word "mastered for"). Used ONLY to decide whether an
-#: unbracketed trailing run is a marker.
-_TRAILING_MARKER_TOKENS = frozenset({
+#: Edition words that are unambiguous enough to ESTABLISH a trailing marker on
+#: their own. A run must contain at least one of these to be bracketed at all.
+_TRAILING_MARKER_STRONG = frozenset({
     "edition", "deluxe", "version", "remaster", "remastered", "anniversary",
-    "expanded", "extended", "limited", "special", "bonus", "collector",
-    "collectors", "ultimate", "standard", "digital", "premium", "reissue",
-    "repress", "epic", "clean", "explicit", "tour", "press", "production", "mastered",
-    "itunes", "apple", "masters", "japanese", "uk", "us", "european",
-    "super", "disc", "tracks", "track",
+    "expanded", "extended", "collector", "collectors", "reissue",
+    "repress", "digital", "premium", "mastered",
 })
+
+#: Words that may be part of a marker run but can NEVER establish one.
+#:
+#: ⭐ WHY THIS SET EXISTS. Every word here is also an ordinary English word (or a
+#: territory/medium word) that legitimately ENDS a real song title, and the
+#: backward sweep used to accept any single member as a marker. It therefore
+#: rewrote real titles into a parenthetical: "One of Us" became "One (of Us)",
+#: "Anarchy In The UK" became "Anarchy In (The UK)", "Coming Clean" became
+#: "Coming (Clean)", "Following My Own Tracks" became "Following My Own
+#: (Tracks)". Because `repair_annotations()` writes its result back to
+#: ``tracks.title`` and the same album pass pushes it into the audio file tags,
+#: those titles were PERMANENTLY renamed — and the rewrite is idempotent, so the
+#: damaged name then looks stable and is never revisited.
+#:
+#: These tokens stay in the sweep because a real regional/edition marker is
+#: spelled with them — "Song US Version", "Song UK Edition", "Song Japanese
+#: Edition" must still bracket. They simply need a strong word alongside them.
+_TRAILING_MARKER_CONFIRM_ONLY = frozenset({
+    "us", "uk", "japanese", "european", "itunes", "apple", "masters",
+    "disc", "tracks", "track",
+    "clean", "explicit", "special", "super", "standard", "epic", "press",
+    "production", "limited", "ultimate", "bonus", "tour",
+})
+
+#: Everything the backward sweep may consume as part of a marker run.
+_TRAILING_MARKER_TOKENS = _TRAILING_MARKER_STRONG | _TRAILING_MARKER_CONFIRM_ONLY
 
 #: Glue allowed inside a marker run ("Collector's Edition", "20th Anniversary
 #: Deluxe Edition", "Remastered 2016"). A run made ONLY of glue carries no
@@ -666,8 +688,11 @@ def _split_trailing_edition_marker(value: str) -> tuple[str, str]:
     # bracketed rule's leading lookahead.
     if marker_tokens & _FORM_TOKENS:
         return text, ""
-    # Require a genuine marker word; a run of only glue/digits is not one.
-    if not (marker_tokens & _TRAILING_MARKER_TOKENS):
+    # Require a STRONG marker word. A run of only glue/digits, or one built only
+    # from CONFIRM-ONLY tokens, is an ordinary title ending — not an edition.
+    # This is the guard that stops "One of Us" becoming "One (of Us)";
+    # see _TRAILING_MARKER_CONFIRM_ONLY.
+    if not (marker_tokens & _TRAILING_MARKER_STRONG):
         return text, ""
 
     head = " ".join(tokens[:index]).strip()
@@ -678,6 +703,75 @@ def _split_trailing_edition_marker(value: str) -> tuple[str, str]:
     return head, marker
 
 
+#: Tokens whose presence marks a trailing bracket as the bogus kind this module
+#: used to create. Restricted to words that are NEVER a legitimate standalone
+#: annotation — ``(Clean)``, ``(Explicit)`` and ``(Bonus)`` all mean something
+#: real to a music library, so they are deliberately absent and their brackets
+#: are never undone.
+_TRAILING_UNBRACKET_TOKENS = frozenset({
+    "us", "uk", "japanese", "european", "itunes", "apple", "masters",
+    "disc", "tracks", "track", "super", "special",
+})
+
+#: Everything such a group may consist of — the corrupting tokens plus the glue
+#: that got swept into them ("One (of Us)", "World (for Us)"). A group holding
+#: anything else is left alone.
+_TRAILING_UNBRACKET_SAFE = _TRAILING_UNBRACKET_TOKENS | _TRAILING_MARKER_GLUE
+
+#: The final parenthetical group, used by the inverse repair below.
+_TRAILING_GROUP_RE = re.compile(r"\s*\(\s*([^()]*?)\s*\)\s*$")
+
+
+def unbracket_ambiguous_edition_marker(value: str) -> str:
+    """Undo the bogus ``(us)`` / ``(clean)`` brackets this module used to write.
+
+        "One (of Us)"          -> "One of Us"
+        "Abandon (Us)"         -> "Abandon Us"
+        "Anarchy In (The UK)"  -> "Anarchy In The UK"
+        "Coming (Clean)"       -> unchanged  (a real clean-edit annotation)
+        "Song (US Version)"    -> unchanged  (a real edition marker)
+        "Song (Deluxe)"        -> unchanged  (a real edition marker)
+
+    ⭐ WHY. ``bracket_trailing_edition_marker()`` used to treat any single word
+    in its marker vocabulary as an edition marker, so real titles were rewritten
+    into a parenthetical and — because ``repair_annotations()`` writes its result
+    back to ``tracks.title`` and the album pass pushes it into the file tags —
+    permanently renamed. Simply narrowing the vocabulary fixes FUTURE writes but
+    leaves the damaged rows alone: the rewrite is idempotent, so a name that is
+    already ``"One (of Us)"`` looks stable forever.
+
+    The inverse is deliberately restricted to the tokens that can only ever
+    CONFIRM a marker (`_TRAILING_MARKER_CONFIRM_ONLY` minus the ones that are
+    legitimate standalone annotations — ``(Clean)``, ``(Explicit)``, ``(Bonus)``,
+    ``(Deluxe)`` all mean something real, so they are left bracketed). A group
+    that also contains a strong edition word is a genuine marker and survives.
+    """
+    text = str(value or "")
+    match = _TRAILING_GROUP_RE.search(text)
+    if not match:
+        return text
+
+    inner = match.group(1)
+    tokens = [
+        re.sub(r"[^a-z0-9]+", "", token.casefold())
+        for token in inner.split()
+    ]
+    tokens = [token for token in tokens if token]
+    if not tokens:
+        return text
+    if not any(token in _TRAILING_UNBRACKET_TOKENS for token in tokens):
+        return text
+    if any(token not in _TRAILING_UNBRACKET_SAFE for token in tokens):
+        # Carries a strong edition word, a form word, or a real annotation —
+        # the bracket is meaningful, so leave it alone.
+        return text
+
+    head = text[: match.start()].strip()
+    if not head:
+        return text
+    return f"{head} {inner.strip()}"
+
+
 def bracket_trailing_edition_marker(value: str) -> str:
     """Rewrite an unbracketed trailing edition marker into its bracketed form.
 
@@ -685,10 +779,16 @@ def bracket_trailing_edition_marker(value: str) -> str:
         "American Idiot Deluxe Edition"  -> "American Idiot (Deluxe Edition)"
         "Helden X Hymnen Live Version"   -> unchanged (form marker)
         "The Wall"                       -> unchanged
+        "One of Us"                      -> unchanged (ordinary title ending)
 
     Idempotent, and a no-op whenever there is nothing to normalise — so it is
     safe to run ahead of every rule in this module.
+
+    ⚠️ The bogus brackets this function previously produced are undone first by
+    :func:`unbracket_ambiguous_edition_marker`, so an already-damaged name heals
+    on the next pass instead of being locked in by idempotency.
     """
+    value = unbracket_ambiguous_edition_marker(value)
     head, marker = _split_trailing_edition_marker(value)
     if not marker:
         return value
