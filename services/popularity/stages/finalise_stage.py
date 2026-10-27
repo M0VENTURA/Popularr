@@ -1958,12 +1958,40 @@ def _build_album_model(
         return {}
 
 
+def _resolve_playlist_order_mode(value: Any) -> str:
+    """Normalise ``playlists.playlist_order_mode`` to a supported mode.
+
+    Modes:
+      * ``final_score`` — the track's stored final score (the "Score" shown on
+        the track page). This is the recommended default.
+      * ``popularity``  — raw Last.fm / ListenBrainz listener counts.
+      * ``stored``      — the album/artist-relative ``popularity_score``.
+
+    ⚠️ ``prominence`` was the value of the previous default ("Global
+    popularity"). It maps to ``final_score`` rather than to ``popularity``: a
+    config written while that was the default must follow the new default, and
+    anyone who deliberately wants the old listener-based ordering now selects
+    "Global popularity", which persists ``popularity``.
+    """
+    mode = str(value or "final_score").strip().lower()
+    if mode == "prominence":
+        return "final_score"
+    return mode if mode in ("final_score", "popularity", "stored") else "final_score"
+
+
 def _effective_order_score(
     row: dict[str, Any],
     mode: str,
 ) -> float:
-    """The score a PLAYLIST sorts on, in a form comparable ACROSS albums."""
-    if mode == "prominence":
+    """The score a PLAYLIST sorts on."""
+    if mode == "final_score":
+        return float(
+            row.get("final_score")
+            or row.get("popularity_score")
+            or row.get("score")
+            or 0
+        )
+    if mode in ("prominence", "popularity"):
         prominence = playlist_popularity_score(
             int(row.get("lastfm_listeners") or 0),
             int(row.get("listenbrainz_listens") or 0),
@@ -1975,7 +2003,7 @@ def _effective_order_score(
 
 def _playlist_order_key(
     row: dict[str, Any],
-    mode: str = "prominence",
+    mode: str = "final_score",
 ) -> tuple:
     """Full sort key for a generated playlist, most preferred first."""
     return (
@@ -2237,6 +2265,122 @@ def _normalise_artist_key(artist: Any) -> str:
     return normalize_unicode_punctuation(str(artist or "")).strip().casefold()
 
 
+def _group_duplicate_tracks(
+    rows: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Group rows that are the SAME TRACK, checking BOTH artist fields.
+
+    ⭐ A track's identity is its normalised title together with its artist.
+    BOTH the track artist (``artist``) and the album artist
+    (``album_artist``) take part, because a compilation copy of a song carries
+    the performer in one field and "Various Artists" (or the album's artist) in
+    the other. A key built from only one of them lets the other copy through —
+    that is exactly how a duplicated track kept appearing in a playlist.
+
+    Rows are merged when their titles match AND **either** artist field
+    matches, and whenever they share a track id. Two genuinely different songs
+    that merely share a title still stay apart, since neither artist field
+    agrees.
+
+    Grouping is transitive (union-find): A↔B by album artist and B↔C by track
+    artist puts A, B and C in one group.
+    """
+    if not rows:
+        return []
+
+    parent = list(range(len(rows)))
+
+    def _find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def _union(left: int, right: int) -> None:
+        left_root, right_root = _find(left), _find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    seen: dict[tuple[str, str, str], int] = {}
+    for index, row in enumerate(rows):
+        title = _normalise_essential_title(str(row.get("title") or ""))
+        # Guest credits are stripped from the TRACK artist so "Band feat. Guest"
+        # and "Band" resolve to the same identity for the same recording.
+        track_artist = _normalise_artist_key(
+            _essential_strip_guest_credit(
+                str(row.get("artist") or row.get("track_artist") or "")
+            )
+        )
+        album_artist = _normalise_artist_key(row.get("album_artist") or "")
+        track_id = str(row.get("id") or "").strip()
+
+        keys: list[tuple[str, str, str]] = []
+        if track_id:
+            keys.append(("id", track_id, ""))
+        if title:
+            has_artist_key = False
+            if track_artist:
+                keys.append(("track", title, track_artist))
+                has_artist_key = True
+            # ⚠️ A placeholder album artist ("Various Artists", "Soundtrack", …)
+            # does not identify a track: every row of a compilation shares it,
+            # so keying on it would merge unrelated songs that merely share a
+            # title. The track artist key above still catches the compilation
+            # copy of a real track.
+            if album_artist and album_artist not in _ESSENTIAL_EXCLUDED_ARTISTS:
+                keys.append(("album", title, album_artist))
+                has_artist_key = True
+            if not has_artist_key:
+                keys.append(("title", title, ""))
+        if not keys:
+            # A row with neither a usable title nor an id must never merge into
+            # another such row just because both are empty.
+            keys.append(("row", str(index), ""))
+
+        for key in keys:
+            other = seen.get(key)
+            if other is None:
+                seen[key] = index
+            else:
+                _union(other, index)
+
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for index, row in enumerate(rows):
+        grouped.setdefault(_find(index), []).append(row)
+    return list(grouped.values())
+
+
+def _row_artist_is_excluded(
+    row: dict[str, Any],
+    excluded: set[str],
+) -> bool:
+    """True when EITHER the track artist or the album artist is excluded.
+
+    Checking only the album artist is what let compilation tracks through:
+    those rows carry "Various Artists" in ``album_artist`` while the artist the
+    operator excluded is in ``artist``.
+    """
+    if not excluded:
+        return False
+    for field in ("artist", "track_artist", "album_artist"):
+        raw = str(row.get(field) or "").strip()
+        if not raw:
+            continue
+        candidates = {raw.casefold(), _essential_strip_guest_credit(raw).casefold()}
+        # ⚠️ A featured credit is a credit: "Band feat. Excluded" still plays
+        # the excluded act, so each guest name is checked as well.
+        match = _ESSENTIAL_FEAT_RE.search(raw)
+        if match:
+            candidates.update(
+                guest.strip().casefold()
+                for guest in _ESSENTIAL_FEAT_SPLIT_RE.split(raw[match.end():])
+                if guest and guest.strip()
+            )
+        if any(who and who in excluded for who in candidates):
+            return True
+    return False
+
+
 def _is_excluded_essential_artist(artist: str) -> bool:
     """True when an artist must not get an Essential Collection."""
     if str(artist or "").strip().casefold() in _ESSENTIAL_EXCLUDED_ARTISTS:
@@ -2413,6 +2557,7 @@ def _create_new_music_playlist() -> int:
             result = session.execute(
                 text("""
                     SELECT id, title, album, file_path, duration,
+                           artist AS track_artist, album_artist,
                            COALESCE(NULLIF(album_artist, ''), artist) AS artist,
                            COALESCE(stars, star_rating) AS stars,
                            COALESCE(is_live, 0) AS is_live,
@@ -2447,7 +2592,7 @@ def _create_new_music_playlist() -> int:
     if excluded_artists:
         rows = [
             r for r in rows
-            if str(r.get("artist") or "").strip().casefold() not in excluded_artists
+            if not _row_artist_is_excluded(r, excluded_artists)
         ]
 
     rows = _filter_christmas_rows(rows, _NEW_MUSIC_PLAYLIST_NAME)
@@ -2549,10 +2694,11 @@ def _fetch_essential_featured_rows() -> list[dict[str, Any]]:
                            COALESCE(stars, star_rating) AS stars,
                            COALESCE(is_live, 0) AS is_live,
                            COALESCE(is_compilation, 0) AS is_compilation,
+                           COALESCE(final_score, popularity, 0) AS final_score,
                            COALESCE(popularity, final_score, 0) AS popularity_score,
                            COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
                            COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
-                           year, release_year, artist, genres
+                           year, release_year, artist, album_artist, genres
                     FROM tracks
                     WHERE COALESCE(stars, star_rating) >= 4
                       AND (
@@ -2586,12 +2732,10 @@ def _sync_essential_playlist(
         from helpers.config_helpers import get_config
         cfg = (get_config() or {}).get("playlists") or {}
         max_tracks = max(1, int(cfg.get("essential_max_tracks", 50) or 50))
-        order_mode = str(cfg.get("playlist_order_mode", "prominence") or "prominence").strip().lower()
-        if order_mode not in ("prominence", "stored"):
-            order_mode = "prominence"
+        order_mode = _resolve_playlist_order_mode(cfg.get("playlist_order_mode"))
     except Exception:
         max_tracks = 50
-        order_mode = "prominence"
+        order_mode = "final_score"
 
     if artist_scores is None:
         try:
@@ -2620,6 +2764,7 @@ def _sync_essential_playlist(
                            COALESCE(is_live, 0) AS is_live,
                            COALESCE(is_compilation, 0) AS is_compilation,
                            COALESCE(popularity, final_score, 0) AS popularity_score,
+                           COALESCE(final_score, popularity, 0) AS final_score,
                            COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
                            COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
                            year, release_year, artist, album_artist, genres
@@ -2668,6 +2813,23 @@ def _sync_essential_playlist(
 
     rows = _filter_christmas_rows(rows, playlist_name)
 
+    # ⚠️ Check the TRACK artist as well as the album artist. A compilation row
+    # stores "Various Artists" (or the album's artist) in ``album_artist`` while
+    # the excluded act is in ``artist``, so an album-artist-only check let those
+    # tracks through.
+    try:
+        from helpers.config_helpers import get_excluded_playlist_artists
+
+        _excluded_artists = get_excluded_playlist_artists()
+    except Exception as exc:
+        logger.debug("Excluded-artist config read failed", error=str(exc))
+        _excluded_artists = set()
+    if _excluded_artists:
+        rows = [
+            row for row in rows
+            if not _row_artist_is_excluded(row, _excluded_artists)
+        ]
+
     def _track_year(row: dict[str, Any]) -> int:
         raw = row.get("release_year") or row.get("year") or 0
         try:
@@ -2676,19 +2838,13 @@ def _sync_essential_playlist(
         except (TypeError, ValueError):
             return 9999
 
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        key = _normalise_essential_title(row.get("title") or "")
-        if key:
-            grouped.setdefault(key, []).append(row)
-
     winners: list[dict[str, Any]] = []
-    for group in grouped.values():
+    for group in _group_duplicate_tracks(rows):
         group.sort(
             key=lambda r: (
                 int(r.get("is_live") or 0),
                 -int(r.get("stars") or 0),
-                -float(r.get("popularity_score") or 0),
+                -float(r.get("final_score") or r.get("popularity_score") or 0),
                 int(r.get("is_compilation") or 0),
                 _track_year(r),
                 str(r.get("title") or "").casefold(),
@@ -2706,10 +2862,10 @@ def _sync_essential_playlist(
     # second key was the ARTIST-relative percentile of
     # ``COALESCE(popularity, final_score)`` — the album-relative value — so an
     # Essential Collection was the ONLY playlist that ignored
-    # ``playlist_order_mode``. With "Global popularity" selected, Top Tracks
-    # were ordered by real listener counts while Essential Collections stayed
-    # ordered by the stored album-context score, which is exactly the reported
-    # "essential playlists are not using the new 5★-then-score ordering".
+    # ``playlist_order_mode``. The ordering key now leads with the star tier
+    # (5★, then 4★) and ranks each tier by the track's FINAL SCORE, which is
+    # exactly the reported "essential playlists should be 5★ then 4★, in score
+    # order inside each".
     #
     # No per-artist cap / interleave here on purpose: this playlist is one
     # artist's best-of, so a cap would truncate it at ``max_per_artist``.
@@ -3500,6 +3656,7 @@ _GENRE_ROWS_SQL = """
     SELECT id, title, album, file_path, duration, artist, album_artist,
            COALESCE(stars, star_rating) AS stars,
            COALESCE(popularity, final_score, 0) AS popularity_score,
+           COALESCE(final_score, popularity, 0) AS final_score,
            COALESCE(is_live, 0) AS is_live,
            COALESCE(is_compilation, 0) AS is_compilation,
            COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
@@ -3551,6 +3708,7 @@ _GENRE_ALBUM_ROWS_SQL = """
     SELECT id, title, file_path, duration, artist, album_artist,
            COALESCE(stars, star_rating) AS stars,
            COALESCE(popularity, final_score, 0) AS popularity_score,
+           COALESCE(final_score, popularity, 0) AS final_score,
            COALESCE(is_live, 0) AS is_live,
            COALESCE(is_compilation, 0) AS is_compilation,
            genres,
@@ -3771,9 +3929,7 @@ def _create_genre_top_track_playlists(
     create_threshold = max(1, int(cfg.get("genre_playlists_create_threshold", 100) or 100))
     delete_threshold = max(1, int(cfg.get("genre_playlists_delete_threshold", 80) or 80))
     max_tracks = _resolve_genre_max_tracks(cfg)
-    order_mode = str(cfg.get("playlist_order_mode", "prominence") or "prominence").strip().lower()
-    if order_mode not in ("prominence", "stored"):
-        order_mode = "prominence"
+    order_mode = _resolve_playlist_order_mode(cfg.get("playlist_order_mode"))
     max_per_artist = _resolve_max_per_artist(cfg)
     interleave_artists = bool(cfg.get("playlist_interleave_artists", True))
 
@@ -3795,12 +3951,8 @@ def _create_genre_top_track_playlists(
     if _excluded_artists:
         _before = len(rows)
         rows = [
-            r
-            for r in rows
-            if str(r.get("album_artist") or r.get("artist") or "")
-            .strip()
-            .casefold()
-            not in _excluded_artists
+            r for r in rows
+            if not _row_artist_is_excluded(r, _excluded_artists)
         ]
         if len(rows) != _before:
             logger.info(
@@ -3906,9 +4058,11 @@ def _create_genre_top_track_playlists(
                 "stars": int(row.get("stars") or 0),
                 "score": float(row.get("popularity_score") or row.get("final_score") or 0),
                 "popularity_score": float(row.get("popularity_score") or row.get("final_score") or 0),
+                "final_score": float(row.get("final_score") or row.get("popularity_score") or 0),
                 "lastfm_listeners": int(row.get("lastfm_listeners") or 0),
                 "listenbrainz_listens": int(row.get("listenbrainz_listens") or 0),
                 "artist": str(row.get("artist") or row.get("album_artist") or ""),
+                "album_artist": str(row.get("album_artist") or ""),
                 "is_live": int(row.get("is_live") or 0),
                 "is_compilation": int(row.get("is_compilation") or 0),
             })
@@ -3922,7 +4076,7 @@ def _create_genre_top_track_playlists(
             item["is_live"],
             item["is_compilation"],
             -item["stars"],
-            -item["score"],
+            -float(item.get("final_score") or item.get("score") or 0),
             item["title"].casefold(),
         )
 
@@ -3960,15 +4114,10 @@ def _create_genre_top_track_playlists(
             continue
         genre = genre_display[norm_key]
 
-        grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-        for t in tracks:
-            key = (
-                _normalise_artist_key(t["artist"]),
-                _normalise_essential_title(t["title"]),
-            )
-            grouped[key].append(t)
-
-        winners = [min(group, key=_tiebreak) for group in grouped.values()]
+        winners = [
+            min(group, key=_tiebreak)
+            for group in _group_duplicate_tracks(tracks)
+        ]
         qualifying_count = len(winners)
         playlist_name = _genre_playlist_name(_display_genre(genre))
         playlist_exists = playlist_name.casefold() in existing_playlists
@@ -3989,10 +4138,15 @@ def _create_genre_top_track_playlists(
             winners,
             order_mode=order_mode,
             max_per_artist=max_per_artist,
-            interleave=interleave_artists,
+            # ⭐ No interleave yet: the TOP tracks must be the ones the score
+            # ordering selected, so the cap is sliced from the pure ranking.
+            # Spreading the artists afterwards only reorders the survivors.
+            interleave=False,
         )
         if max_tracks:
             winners = winners[:max_tracks]
+        if interleave_artists:
+            winners = _interleave_artists(winners)
 
         # ⭐ AFTER the slice, always. Shuffling before it would let the cap drop
         # genuinely top tracks at random; here the rotation can only reorder the
@@ -5112,6 +5266,7 @@ _CURATED_ROWS_SQL = """
            year, release_year, originalyear,
            COALESCE(stars, star_rating, 0) AS stars,
            COALESCE(popularity, final_score, 0) AS popularity_score,
+           COALESCE(final_score, popularity, 0) AS final_score,
            COALESCE(is_live, 0) AS is_live,
            COALESCE(is_compilation, 0) AS is_compilation,
            COALESCE(is_single, FALSE) AS is_single,
@@ -5147,8 +5302,7 @@ def _fetch_curated_playlist_rows(min_stars: int = 4) -> list[dict[str, Any]]:
 
     filtered: list[dict[str, Any]] = []
     for r in rows:
-        who = str(r.get("album_artist") or r.get("artist") or "").strip().casefold()
-        if excluded_artists and who in excluded_artists:
+        if _row_artist_is_excluded(r, excluded_artists):
             continue
         if is_christmas_track(
             title=str(r.get("title") or ""),
@@ -5201,9 +5355,7 @@ def _sync_single_curated_playlist(
     max_tracks: int,
     cfg: dict[str, Any],
 ) -> bool:
-    order_mode = str(cfg.get("playlist_order_mode", "prominence") or "prominence").strip().lower()
-    if order_mode not in ("prominence", "stored"):
-        order_mode = "prominence"
+    order_mode = _resolve_playlist_order_mode(cfg.get("playlist_order_mode"))
     max_per_artist = _resolve_max_per_artist(cfg)
     interleave_artists = bool(cfg.get("playlist_interleave_artists", True))
 

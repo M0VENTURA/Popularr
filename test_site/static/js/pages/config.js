@@ -591,7 +591,7 @@
       genre_playlist_ai_cover_enabled: getChecked('playlists_genre_ai_cover_enabled', true),
       genre_playlist_ai_cover_regenerate: getChecked('playlists_genre_ai_cover_regenerate', false),
       genre_playlist_ai_cover_prompt: getValue('playlists_genre_ai_cover_prompt', ''),
-      playlist_order_mode: getValue('playlists_order_mode', 'prominence') || 'prominence',
+      playlist_order_mode: getValue('playlists_order_mode', 'final_score') || 'final_score',
       // ⚠️ Math.max(0, raw), NOT `|| 25`: 0 means "no per-artist cap", so a
       // `|| default` guard would make that impossible to express.
       genre_playlists_max_per_artist: (() => {

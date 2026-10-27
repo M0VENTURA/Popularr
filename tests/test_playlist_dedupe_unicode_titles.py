@@ -121,8 +121,12 @@ class TestThePlaylistBuildersUseTheFoldedKey:
         from services.popularity.stages import finalise_stage as fs
 
         source = inspect.getsource(fs._create_genre_top_track_playlists)
-        assert "_normalise_artist_key(" in source
-        assert "_normalise_essential_title(" in source
+        helper = inspect.getsource(fs._group_duplicate_tracks)
+        assert "_group_duplicate_tracks(" in source, (
+            "the genre builder must de-duplicate through the shared helper"
+        )
+        assert "_normalise_artist_key(" in helper
+        assert "_normalise_essential_title(" in helper
 
     def test_the_new_music_builder_groups_on_the_folded_key(self):
         import inspect

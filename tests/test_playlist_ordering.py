@@ -595,6 +595,37 @@ class TestTheEssentialCollectionOrdering:
         ]
         assert titles_of(fs._ordered_playlist_rows(rows, order_mode="prominence")) == ["A", "B"]
 
+    def test_final_score_ranks_inside_the_star_tier(self):
+        """The requested ordering: 5★, then 4★, each section by final score."""
+        rows = [
+            {**track("Five Low", "A", stored=50, lf=9_000_000), "stars": 5},
+            {**track("Five High", "A", stored=50, lf=100), "stars": 5},
+            {**track("Four High", "A", stored=50, lf=8_000_000), "stars": 4},
+            {**track("Four Low", "A", stored=50, lf=1_000), "stars": 4},
+        ]
+        rows[0]["final_score"] = 10.0
+        rows[1]["final_score"] = 95.0
+        rows[2]["final_score"] = 80.0
+        rows[3]["final_score"] = 5.0
+
+        ordered = titles_of(
+            fs._ordered_playlist_rows(rows, order_mode="final_score")
+        )
+        assert ordered == ["Five High", "Five Low", "Four High", "Four Low"], (
+            "the star tier must gate position and the FINAL SCORE must rank "
+            "inside each tier — listener counts must not override it"
+        )
+
+    def test_final_score_ignores_listener_counts(self):
+        """A quiet track with the better final score still wins its tier."""
+        rows = [
+            {**track("Loud", "A", stored=50, lf=9_000_000), "final_score": 20.0},
+            {**track("Quiet", "A", stored=50, lf=10), "final_score": 90.0},
+        ]
+        assert titles_of(
+            fs._ordered_playlist_rows(rows, order_mode="final_score")
+        ) == ["Quiet", "Loud"]
+
     def test_the_essential_builder_shares_the_top_tracks_orderer(self):
         """Symmetry pin: the SAME input must produce the SAME order whether it
         is going into a genre Top Tracks playlist or an Essential Collection."""
@@ -604,11 +635,12 @@ class TestTheEssentialCollectionOrdering:
             {**track("Four Loud", "A", stored=10, lf=5_000_000), "stars": 4},
             {**track("Five Mid", "A", stored=60, lf=40_000), "stars": 5},
         ]
-        top_tracks = titles_of(fs._ordered_playlist_rows(list(rows), order_mode="prominence"))
-        essential = titles_of(fs._ordered_playlist_rows(list(rows), order_mode="prominence"))
+        # ``final_score`` is the default mode; the star tier still leads.
+        top_tracks = titles_of(fs._ordered_playlist_rows(list(rows), order_mode="final_score"))
+        essential = titles_of(fs._ordered_playlist_rows(list(rows), order_mode="final_score"))
         assert essential == top_tracks
-        assert top_tracks[:3] == ["Five Loud", "Five Mid", "Five Quiet"], (
-            "5★ tier first, strongest global listener count first inside it"
+        assert top_tracks[:3] == ["Five Quiet", "Five Mid", "Five Loud"], (
+            "5★ tier first, strongest FINAL SCORE first inside it"
         )
 
 
@@ -871,8 +903,22 @@ class TestTheOrderingConfigIsExposed:
         js = (root / tree[1]).read_text(encoding="utf-8")
         assert 'id="playlists_order_mode"' in html
         assert "playlist_order_mode" in js, "the value must be collected, or it never persists"
-        for option in ("prominence", "stored"):
+        for option in ("final_score", "popularity", "stored"):
             assert f'value="{option}"' in html, f"the {option} option must be offered"
+
+    @pytest.mark.parametrize("tree", [LIVE, REBUILT], ids=["live", "test_site"])
+    def test_the_final_score_mode_is_the_default(self, tree):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        html = (root / tree[0]).read_text(encoding="utf-8")
+        js = (root / tree[1]).read_text(encoding="utf-8")
+        assert "get('playlist_order_mode', 'final_score')" in html, (
+            f"{tree[0]}: the default option must be Final score"
+        )
+        assert "getValue('playlists_order_mode', 'final_score')" in js, (
+            f"{tree[1]}: the page script default must agree"
+        )
 
     @pytest.mark.parametrize("tree", [LIVE, REBUILT], ids=["live", "test_site"])
     def test_the_per_artist_cap_preserves_an_explicit_zero(self, tree):
@@ -900,15 +946,20 @@ class TestTheOrderingConfigIsExposed:
         assert "checked" in html[idx: idx + 200], "the default must be on"
         assert "playlist_interleave_artists" in js
 
-    def test_an_unknown_order_mode_falls_back_to_prominence(self):
-        """A stale config must not silently select the legacy behaviour."""
-        def _resolve(value):
-            mode = str(value or "prominence").strip().lower()
-            return mode if mode in ("prominence", "stored") else "prominence"
+    def test_an_unknown_order_mode_falls_back_to_final_score(self):
+        """A stale config must not silently select legacy behaviour."""
+        from services.popularity.stages.finalise_stage import (
+            _resolve_playlist_order_mode,
+        )
 
-        assert _resolve("nonsense") == "prominence"
-        assert _resolve(None) == "prominence"
-        assert _resolve("STORED") == "stored"
+        assert _resolve_playlist_order_mode("nonsense") == "final_score"
+        assert _resolve_playlist_order_mode(None) == "final_score"
+        assert _resolve_playlist_order_mode("STORED") == "stored"
+        assert _resolve_playlist_order_mode("popularity") == "popularity"
+        # ``prominence`` was the value of the OLD default ("Global popularity").
+        # It must follow the new default rather than silently restoring the
+        # listener-based order the change replaced.
+        assert _resolve_playlist_order_mode("prominence") == "final_score"
 
     def test_the_new_keys_survive_a_config_round_trip(self, tmp_path, monkeypatch):
         """A Config control that writes nothing is a false win.

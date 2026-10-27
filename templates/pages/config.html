@@ -3471,14 +3471,17 @@
         <div class="input-card">
           <label for="playlists_order_mode">Track Ordering</label>
           <select class="form-select form-select-sm" id="playlists_order_mode">
-            <option value="prominence" {% if config.get('playlists', {}).get('playlist_order_mode', 'prominence') == 'prominence' %}selected{% endif %}>Global popularity (recommended)</option>
-            <option value="stored" {% if config.get('playlists', {}).get('playlist_order_mode', 'prominence') == 'stored' %}selected{% endif %}>Stored score (legacy)</option>
+            <option value="final_score" {% if config.get('playlists', {}).get('playlist_order_mode', 'final_score') == 'final_score' %}selected{% endif %}>Final score (recommended)</option>
+            <option value="popularity" {% if config.get('playlists', {}).get('playlist_order_mode', 'final_score') in ('popularity', 'prominence') %}selected{% endif %}>Global popularity</option>
+            <option value="stored" {% if config.get('playlists', {}).get('playlist_order_mode', 'final_score') == 'stored' %}selected{% endif %}>Stored score (album-relative)</option>
           </select>
           <span class="help-text">
-            <strong>Global popularity</strong> ranks every track by its raw Last.fm/ListenBrainz
-            listener counts, which mean the same thing on every album.
+            <strong>Final score</strong> orders 5★ tracks first, then 4★, and ranks the tracks
+            inside each star section by their final score — the number shown on the track page.
+            <strong>Global popularity</strong> uses the raw Last.fm/ListenBrainz listener counts.
             <strong>Stored score</strong> uses the score relative to each track's own album — so a
-            weak track on a quiet album can outrank a strong track on a busy one. Default: <strong>Global popularity</strong>
+            weak track on a quiet album can outrank a strong track on a busy one.
+            Default: <strong>Final score</strong>
           </span>
         </div>
         <div class="input-card">

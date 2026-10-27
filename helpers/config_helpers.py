@@ -1743,7 +1743,7 @@ def get_playlists_config() -> dict[str, Any]:
         ),
         "genre_playlists_max_tracks": max(0, _genre_max_tracks),
         "genre_playlists_max_per_artist": max(0, _max_per_artist),
-        "playlist_order_mode": str(p.get("playlist_order_mode") or "prominence").strip().lower(),
+        "playlist_order_mode": str(p.get("playlist_order_mode") or "final_score").strip().lower(),
         "playlist_interleave_artists": bool(p.get("playlist_interleave_artists", True)),
         "new_music_playlist_enabled": bool(p.get("new_music_playlist_enabled", True)),
         "decade_playlists_enabled": bool(p.get("decade_playlists_enabled", True)),
