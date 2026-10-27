@@ -602,6 +602,12 @@
       // Reorders a finished playlist once per ISO week. Applied AFTER the cap,
       // so membership never changes — only the sequence.
       weekly_shuffle_enabled: getChecked('playlists_weekly_shuffle', true),
+      // Which playlist FAMILIES rotate. A top-tracks chart is a shopping list
+      // and rotates; an Essential collection is a ranked best-of and does not,
+      // because "track 1 is their strongest" is the only thing it says.
+      weekly_shuffle_genre_top_tracks: getChecked('playlists_shuffle_genre', true),
+      weekly_shuffle_new_music: getChecked('playlists_shuffle_new_music', true),
+      weekly_shuffle_essential: getChecked('playlists_shuffle_essential', false),
       // Nested block: ``_sanitize_config_sections`` must list it under
       // ``playlists`` or the dict is coerced to {} on save.
       genre_exclusions: {

@@ -1543,13 +1543,28 @@ def get_genre_track_limit() -> int:
 def get_playlist_shuffle_config() -> dict[str, Any]:
     """Weekly rotation of a generated playlist's ORDER.
 
-    Config section: ``playlists`` → ``weekly_shuffle_enabled``.
+    Config section: ``playlists`` → ``weekly_shuffle_enabled`` (master switch)
+    plus one switch per playlist FAMILY under ``shuffle_scopes``.
 
     The rotation is applied AFTER the playlist has been ranked and capped, so
     it changes the ORDER ONLY — the same tracks, in a different sequence, once
     per ISO week. That distinction is what keeps the sync quiet: membership
     changes still drive an immediate rewrite, while the order only moves when
     the week rolls over.
+
+    ⭐ WHY THE PER-FAMILY SWITCHES EXIST. Rotation means opposite things to the
+    two playlist families:
+
+    * a **Top Tracks** playlist is a *shopping list* — a chart of what is
+      hottest right now. A chart that always reads in the same order goes stale
+      even when nothing about the music changed, so it rotates.
+    * an **Essential Collection** is a *ranked best-of for one artist* — the
+      whole point is that track 1 is their strongest and track 50 their
+      weakest. Rotating it destroys the only information it carries, so it does
+      NOT rotate by default.
+
+    A single global switch could not express that: turning rotation on to keep
+    the genre charts fresh also scrambled every artist's best-of.
     """
     cfg = get_config() or {}
     playlists = cfg.get("playlists") or {}
@@ -1557,6 +1572,14 @@ def get_playlist_shuffle_config() -> dict[str, Any]:
         playlists = {}
     return {
         "enabled": bool(playlists.get("weekly_shuffle_enabled", True)),
+        "scopes": {
+            # A chart: rotates by default.
+            "genre_top_tracks": bool(playlists.get("weekly_shuffle_genre_top_tracks", True)),
+            # A "what's new" discovery feed: rotates by default.
+            "new_music": bool(playlists.get("weekly_shuffle_new_music", True)),
+            # A ranked best-of: ORDER IS THE POINT, so it stays put.
+            "essential": bool(playlists.get("weekly_shuffle_essential", False)),
+        },
     }
 
 

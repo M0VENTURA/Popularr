@@ -2081,6 +2081,7 @@ def _weekly_shuffle(
     rows: list[dict[str, Any]],
     *,
     playlist_key: str,
+    scope: str | None = None,
     enabled: bool | None = None,
     when: datetime | None = None,
 ) -> list[dict[str, Any]]:
@@ -2104,6 +2105,19 @@ def _weekly_shuffle(
     ``random.Random``, which derives the state from a SHA-512 of the text — so
     the order is identical in every process and after every restart, and two
     playlists never share an order by accident.
+
+    ⭐ ``scope`` names the playlist FAMILY, and it exists because rotation means
+    opposite things to the two families. A Top Tracks chart is a *shopping
+    list*: it should not always read in the same sequence. An Essential
+    Collection is a *ranked best-of*: "track 1 is their strongest" is the whole
+    information it carries, so rotating it destroys its meaning. Callers pass
+    the family and the per-family config decides; a caller that passes no scope
+    is gated by the master switch alone, which is what the rotation's own unit
+    tests exercise.
+
+    Precedence: an explicit ``enabled=`` wins (that is how a test or a caller
+    forces the decision), otherwise the master switch AND the family switch
+    must BOTH allow it.
     """
     if not rows or len(rows) < 2:
         return rows
@@ -2112,7 +2126,11 @@ def _weekly_shuffle(
         try:
             from helpers.config_helpers import get_playlist_shuffle_config
 
-            enabled = bool(get_playlist_shuffle_config().get("enabled", True))
+            shuffle_cfg = get_playlist_shuffle_config()
+            enabled = bool(shuffle_cfg.get("enabled", True))
+            if enabled and scope:
+                scopes = shuffle_cfg.get("scopes") or {}
+                enabled = bool(scopes.get(str(scope), True))
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Playlist shuffle config unreadable — rotation off", error=str(exc))
             enabled = False
@@ -2475,7 +2493,9 @@ def _create_new_music_playlist() -> int:
     # this function — so every New Music run raised NameError at this point and
     # the playlist silently stopped being generated. The function's own name is
     # now the constant above, so the two cannot disagree.
-    winners = _weekly_shuffle(winners, playlist_key=_NEW_MUSIC_PLAYLIST_NAME)
+    winners = _weekly_shuffle(
+        winners, playlist_key=_NEW_MUSIC_PLAYLIST_NAME, scope="new_music"
+    )
 
     _song_ids = [str(r.get("id") or "").strip() for r in winners if str(r.get("id") or "").strip()]
     if not _song_ids:
@@ -2696,9 +2716,15 @@ def _sync_essential_playlist(
     winners = _ordered_playlist_rows(winners, order_mode=order_mode)
     winners = winners[:max_tracks]
 
-    # Rotation after the slice: the SAME tracks in a different sequence, once
-    # per ISO week. See ``_weekly_shuffle`` for why the order matters.
-    winners = _weekly_shuffle(winners, playlist_key=playlist_name)
+    # ⭐ NO ROTATION BY DEFAULT — the order IS this playlist's information.
+    #
+    # An Essential Collection is a ranked best-of for ONE artist: track 1 is
+    # their strongest and the last row their weakest. Shuffling it (as the
+    # single global switch used to do) throws away the only thing the list says.
+    # The call is still made so the family switch on the Config page can turn
+    # rotation on for someone who wants it, and so the "rotation runs after the
+    # cap" contract holds for every builder.
+    winners = _weekly_shuffle(winners, playlist_key=playlist_name, scope="essential")
 
     _song_ids = [str(r.get("id") or "").strip() for r in winners if str(r.get("id") or "").strip()]
     if not _song_ids:
@@ -3971,7 +3997,13 @@ def _create_genre_top_track_playlists(
         # ⭐ AFTER the slice, always. Shuffling before it would let the cap drop
         # genuinely top tracks at random; here the rotation can only reorder the
         # tracks that already qualified.
-        winners = _weekly_shuffle(winners, playlist_key=playlist_name)
+        #
+        # "genre_top_tracks" is a CHART, so it rotates: a top-tracks list that
+        # always reads in the same sequence looks stale even when nothing about
+        # the music changed.
+        winners = _weekly_shuffle(
+            winners, playlist_key=playlist_name, scope="genre_top_tracks"
+        )
 
         _song_ids = [str(t.get("id") or "").strip() for t in winners if str(t.get("id") or "").strip()]
         if not _song_ids:

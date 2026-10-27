@@ -3498,7 +3498,28 @@
           <div class="form-check form-switch m-0">
             <input class="form-check-input" type="checkbox" id="playlists_weekly_shuffle" {% if config.get('playlists', {}).get('weekly_shuffle_enabled', True) %}checked{% endif %}>
           </div>
-          <span class="help-text">Reorders each generated playlist <strong>once per ISO week</strong> so it is not always the same sequence. The rotation is applied <em>after</em> the ranking and the track cap, so the SAME tracks are kept — only their order changes. Within a week the order is fixed, so an unchanged week costs no playlist rewrite. Default: <strong>on</strong></span>
+          <span class="help-text">Reorders each generated playlist <strong>once per ISO week</strong> so it is not always the same sequence. The rotation is applied <em>after</em> the ranking and the track cap, so the SAME tracks are kept — only their order changes. Within a week the order is fixed, so an unchanged week costs no playlist rewrite. This is the master switch; which playlist types actually rotate is set below. Default: <strong>on</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_shuffle_genre">Shuffle Top Tracks Playlists</label>
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_shuffle_genre" {% if config.get('playlists', {}).get('weekly_shuffle_genre_top_tracks', True) %}checked{% endif %}>
+          </div>
+          <span class="help-text">The genre Top Tracks playlists are <em>charts</em> — a shopping list of what is hottest right now — so they rotate to stop a chart looking stale when nothing about the music changed. Needs the master switch above. Default: <strong>on</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_shuffle_new_music">Shuffle New Music</label>
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_shuffle_new_music" {% if config.get('playlists', {}).get('weekly_shuffle_new_music', True) %}checked{% endif %}>
+          </div>
+          <span class="help-text">The New Music playlist is a discovery feed, so it rotates to keep recent arrivals from always appearing in the same sequence. Needs the master switch above. Default: <strong>on</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_shuffle_essential">Shuffle Essential Artist Collections</label>
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_shuffle_essential" {% if config.get('playlists', {}).get('weekly_shuffle_essential', False) %}checked{% endif %}>
+          </div>
+          <span class="help-text">An Essential collection is a <strong>ranked best-of for one artist</strong>: the first track is their strongest and the last their weakest. Shuffling it throws that ranking away, so it is <strong>off</strong> by default and the list stays in score order. Needs the master switch above. Default: <strong>off</strong></span>
         </div>
       </div>
 

@@ -401,6 +401,180 @@ class TestWeeklyRotation:
         assert ch.get_playlist_shuffle_config()["enabled"] is False
 
 
+class TestRotationIsPerPlaylistFamily:
+    """A chart rotates; a ranked best-of must not.
+
+    Reported: "I wanted the top genre tracks to be randomised, but the essential
+    artist collections in order."
+
+    One global switch could not express that. Rotation is right for a Top Tracks
+    chart (a shopping list that looks stale if it never moves) and wrong for an
+    Essential Collection (a best-of where "track 1 is their strongest" is the
+    only information the list carries).
+    """
+
+    # -- the defaults -----------------------------------------------------
+
+    def test_defaults_per_family(self, monkeypatch) -> None:
+        import helpers.config_helpers as ch
+
+        monkeypatch.setattr(ch, "get_config", lambda: {})
+        scopes = ch.get_playlist_shuffle_config()["scopes"]
+        assert scopes["genre_top_tracks"] is True, "a chart should rotate"
+        assert scopes["new_music"] is True
+        assert scopes["essential"] is False, (
+            "an Essential Collection is a RANKED best-of — rotating it destroys "
+            "the ranking that is its whole point"
+        )
+
+    # -- the behaviour ----------------------------------------------------
+
+    def test_a_genre_playlist_is_reordered(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "helpers.config_helpers.get_config", lambda: {"playlists": {}}
+        )
+        source = tracks()
+        out = fs()._weekly_shuffle(
+            source, playlist_key="Rock - Top Tracks",
+            scope="genre_top_tracks", when=WEEK_1,
+        )
+        assert [t["id"] for t in out] != [t["id"] for t in source]
+        assert sorted(t["id"] for t in out) == sorted(t["id"] for t in source)
+
+    def test_an_essential_collection_keeps_its_order(self, monkeypatch) -> None:
+        """The regression: the global switch used to scramble every best-of."""
+        monkeypatch.setattr(
+            "helpers.config_helpers.get_config", lambda: {"playlists": {}}
+        )
+        source = tracks()
+        out = fs()._weekly_shuffle(
+            source, playlist_key="The Offspring - Essential Collection",
+            scope="essential", when=WEEK_1,
+        )
+        assert [t["id"] for t in out] == [t["id"] for t in source], (
+            "the Essential Collection was reordered — its ranking is information"
+        )
+
+    def test_the_master_switch_still_governs_everything(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "helpers.config_helpers.get_config",
+            lambda: {"playlists": {"weekly_shuffle_enabled": False}},
+        )
+        source = tracks()
+        for scope in ("genre_top_tracks", "new_music", "essential"):
+            out = fs()._weekly_shuffle(
+                source, playlist_key="Rock - Top Tracks", scope=scope, when=WEEK_1
+            )
+            assert [t["id"] for t in out] == [t["id"] for t in source]
+
+    def test_a_family_can_be_turned_on(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "helpers.config_helpers.get_config",
+            lambda: {"playlists": {"weekly_shuffle_essential": True}},
+        )
+        source = tracks()
+        out = fs()._weekly_shuffle(
+            source, playlist_key="The Offspring - Essential Collection",
+            scope="essential", when=WEEK_1,
+        )
+        assert [t["id"] for t in out] != [t["id"] for t in source]
+
+    def test_a_family_can_be_turned_off(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "helpers.config_helpers.get_config",
+            lambda: {"playlists": {"weekly_shuffle_genre_top_tracks": False}},
+        )
+        source = tracks()
+        out = fs()._weekly_shuffle(
+            source, playlist_key="Rock - Top Tracks",
+            scope="genre_top_tracks", when=WEEK_1,
+        )
+        assert [t["id"] for t in out] == [t["id"] for t in source]
+
+    def test_an_explicit_enabled_flag_wins_over_the_family(self, monkeypatch) -> None:
+        """The unit tests above force the decision; they must keep working."""
+        monkeypatch.setattr(
+            "helpers.config_helpers.get_config", lambda: {"playlists": {}}
+        )
+        source = tracks()
+        out = fs()._weekly_shuffle(
+            source, playlist_key="x", scope="essential", enabled=True, when=WEEK_1
+        )
+        assert [t["id"] for t in out] != [t["id"] for t in source]
+
+    def test_no_scope_falls_back_to_the_master_switch_only(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "helpers.config_helpers.get_config", lambda: {"playlists": {}}
+        )
+        source = tracks()
+        out = fs()._weekly_shuffle(source, playlist_key="x", when=WEEK_1)
+        assert [t["id"] for t in out] != [t["id"] for t in source]
+
+    def test_an_unreadable_config_turns_rotation_off(self, monkeypatch) -> None:
+        def boom():
+            raise RuntimeError("config unavailable")
+
+        monkeypatch.setattr("helpers.config_helpers.get_config", boom)
+        source = tracks()
+        out = fs()._weekly_shuffle(
+            source, playlist_key="x", scope="genre_top_tracks", when=WEEK_1
+        )
+        assert [t["id"] for t in out] == [t["id"] for t in source]
+
+    # -- each builder passes the right family -----------------------------
+
+    def test_every_builder_names_its_family(self) -> None:
+        fsm = fs()
+        expected = {
+            "_create_genre_top_track_playlists": 'scope="genre_top_tracks"',
+            "_create_new_music_playlist": 'scope="new_music"',
+            "_sync_essential_playlist": 'scope="essential"',
+        }
+        for builder, token in expected.items():
+            if not hasattr(fsm, builder):
+                pytest.skip(f"{builder} not present")
+            source = inspect.getsource(getattr(fsm, builder))
+            assert token in source, (
+                f"{builder} must declare its playlist family, or the per-family "
+                "rotation switch cannot distinguish a chart from a best-of"
+            )
+
+    # -- the Config page carries every switch ----------------------------
+
+    @pytest.mark.parametrize("tree", sorted(TREES))
+    def test_the_family_switches_are_rendered(self, tree: str) -> None:
+        template, _js = TREES[tree]
+        text = template.read_text(encoding="utf-8")
+        for element_id in (
+            "playlists_shuffle_genre",
+            "playlists_shuffle_new_music",
+            "playlists_shuffle_essential",
+        ):
+            assert f'id="{element_id}"' in text
+
+    @pytest.mark.parametrize("tree", sorted(TREES))
+    def test_the_family_switches_are_collected(self, tree: str) -> None:
+        _template, js = TREES[tree]
+        source = js.read_text(encoding="utf-8")
+        for element_id, key in (
+            ("playlists_shuffle_genre", "weekly_shuffle_genre_top_tracks"),
+            ("playlists_shuffle_new_music", "weekly_shuffle_new_music"),
+            ("playlists_shuffle_essential", "weekly_shuffle_essential"),
+        ):
+            assert f"'{element_id}'" in source
+            assert key in source
+
+    @pytest.mark.parametrize("tree", sorted(TREES))
+    def test_the_essential_switch_is_off_by_default_in_the_markup(self, tree: str) -> None:
+        """The template default and the Python default must agree."""
+        template, _js = TREES[tree]
+        text = template.read_text(encoding="utf-8")
+        line = next(
+            ln for ln in text.splitlines() if 'id="playlists_shuffle_essential"' in ln
+        )
+        assert "weekly_shuffle_essential', False" in line
+
+
 # ---------------------------------------------------------------------------
 # 4. The Config page carries the switch (both trees — they must match)
 # ---------------------------------------------------------------------------
