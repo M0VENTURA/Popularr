@@ -1335,6 +1335,20 @@ def _assign_stars(
             track["_era_5star"] = True
         return live_stars
 
+    # ⚠️ `popularity_only` EXCLUDES this branch, and that is a pinned contract
+    # (tests/test_locked_five_star_not_revoked.py
+    # ::test_popularity_only_still_skips_the_lock_branch).
+    #
+    # The consequence is severe and worth knowing: because the same mode also
+    # blocks `is_standout` and the forced-percentile floor, and
+    # ``_album_z_band_star`` caps at 4★, a POPULARITY-ONLY scan cannot produce a
+    # 5★ for a studio-album track at all. Probed: locked+normal → 5★,
+    # locked+popularity_only → 4★, nothing else reached 5★.
+    #
+    # So a popularity-only scan rates the whole library with a 4★ ceiling on
+    # regular albums. The artist pre-pass still sets and logs
+    # ``GLOBAL 5★ LOCKED`` in that mode, so the log and the stored rating
+    # disagree by design — ``scan_stage_runner`` now says so in the log line.
     if track.get("_global_5star_locked") and not popularity_only and not is_compilation:
         if not is_live and organic:
             _epsilon_alb = _star_epsilon_z(album_spread, th["epsilon"])

@@ -2182,11 +2182,22 @@ def run_scan(
         # Disc 2.
         _locked_set = _artist_5star_locked_ids.get(artist) or set()
         if _locked_set:
+            # ⚠️ In a POPULARITY-ONLY scan the lock is announced but NOT applied:
+            # `_assign_stars` excludes the lock branch when `popularity_only` is
+            # set (a pinned contract), and that mode also blocks `is_standout`
+            # and the forced-percentile floor while `_album_z_band_star` caps at
+            # 4★. A studio-album track therefore cannot reach 5★ in this mode.
+            # Logging "LOCKED" without saying so made the log contradict the
+            # stored rating.
+            _lock_applies = not bool(options.get("popularity_only"))
             for _tr in album_results:
                 if _lock_identity(_tr) in _locked_set:
                     _tr["_global_5star_locked"] = True
                     if not bool(_tr.get("exclude_from_stats")) and not bool(_tr.get("is_live")):
-                        log_unified(f"[scan_runner] '{_tr.get('title')}' → GLOBAL 5★ LOCKED (raw {float(_tr.get('_raw_combined') or 0):.1f}, catalog top)")
+                        if _lock_applies:
+                            log_unified(f"[scan_runner] '{_tr.get('title')}' → GLOBAL 5★ LOCKED (raw {float(_tr.get('_raw_combined') or 0):.1f}, catalog top)")
+                        else:
+                            log_unified(f"[scan_runner] '{_tr.get('title')}' → catalog top (5★ lock NOT applied: popularity-only scan caps regular albums at 4★)")
 
         try:
             _sd = get_config().get("single_detection") or {}
