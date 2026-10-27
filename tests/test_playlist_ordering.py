@@ -546,10 +546,17 @@ class TestTheOrderIsDeterministic:
 # ---------------------------------------------------------------------------
 
 class TestTheEssentialCollectionOrdering:
-    """An Essential Collection is ONE artist, so the catalogue percentile IS a
-    legitimate primary key — the album-relative distortion does not apply.
-    Only the TIE-BREAK changed, to a signal that is not derived from the same
-    album-relative value.
+    """⭐ ONE ordering contract for EVERY generated playlist.
+
+    The Essential Collection used to sort on an ARTIST-relative ``percentile``
+    derived from ``COALESCE(popularity, final_score)`` — the album-relative
+    value — as its second key. That made it the only playlist that ignored
+    ``playlist_order_mode``: with "Global popularity" selected, {Genre} - Top
+    Tracks were ordered by real listener counts while {Artist} - Essential
+    Collection was still ordered by the stored album-context score.
+
+    Reported symptom: *"the essential playlists aren't being created with the
+    new ordering of 5★ followed by the new score for each track"*.
     """
 
     def test_star_tier_still_wins(self):
@@ -557,29 +564,28 @@ class TestTheEssentialCollectionOrdering:
             {**track("Four", "A", stored=99, lf=999_999), "stars": 4, "percentile": 0.99},
             {**track("Five", "A", stored=10, lf=10), "stars": 5, "percentile": 0.10},
         ]
-        ordered = fs._ordered_by_percentile_then_prominence(rows)
+        ordered = fs._ordered_playlist_rows(rows, order_mode="prominence")
         assert titles_of(ordered)[0] == "Five", "a 5★ track outranks a 4★ track"
 
-    def test_percentile_wins_within_a_tier(self):
+    def test_global_popularity_wins_within_a_tier(self):
         rows = [
-            {**track("Low", "A", stored=99, lf=999_999), "stars": 5, "percentile": 0.20},
-            {**track("High", "A", stored=10, lf=10), "stars": 5, "percentile": 0.90},
+            {**track("Low", "A", stored=99, lf=100), "stars": 5, "percentile": 0.90},
+            {**track("High", "A", stored=10, lf=9_000_000), "stars": 5, "percentile": 0.20},
         ]
-        ordered = fs._ordered_by_percentile_then_prominence(rows)
-        assert titles_of(ordered)[0] == "High"
+        ordered = fs._ordered_playlist_rows(rows, order_mode="prominence")
+        assert titles_of(ordered)[0] == "High", (
+            "within a star tier the GLOBAL listener count decides — not the "
+            "artist-relative percentile the Essential builder used to sort on"
+        )
 
-    def test_prominence_breaks_a_percentile_tie(self):
-        """The old tie-break used the album-relative score, which is derived
-        from the same value as the percentile and so could not separate two
-        albums' tracks meaningfully."""
+    def test_stored_mode_still_orders_on_the_stored_score(self):
         rows = [
-            {**track("Quiet", "A", stored=100, lf=100), "stars": 5, "percentile": 0.5},
-            {**track("Loud", "A", stored=1, lf=9_000_000), "stars": 5, "percentile": 0.5},
+            {**track("Quiet", "A", stored=10, lf=9_000_000), "stars": 5, "percentile": 0.10},
+            {**track("Loud", "A", stored=90, lf=10), "stars": 5, "percentile": 0.90},
         ]
-        ordered = fs._ordered_by_percentile_then_prominence(rows)
+        ordered = fs._ordered_playlist_rows(rows, order_mode="stored")
         assert titles_of(ordered)[0] == "Loud", (
-            "equal percentiles must be separated by real listener counts, not "
-            "by which album happened to be spread wider"
+            "legacy 'stored' mode must keep honouring the stored score"
         )
 
     def test_ordering_is_deterministic(self):
@@ -587,7 +593,23 @@ class TestTheEssentialCollectionOrdering:
             {**track("B", "A", stored=50, lf=1000), "stars": 5, "percentile": 0.5},
             {**track("A", "A", stored=50, lf=1000), "stars": 5, "percentile": 0.5},
         ]
-        assert titles_of(fs._ordered_by_percentile_then_prominence(rows)) == ["A", "B"]
+        assert titles_of(fs._ordered_playlist_rows(rows, order_mode="prominence")) == ["A", "B"]
+
+    def test_the_essential_builder_shares_the_top_tracks_orderer(self):
+        """Symmetry pin: the SAME input must produce the SAME order whether it
+        is going into a genre Top Tracks playlist or an Essential Collection."""
+        rows = [
+            {**track("Five Loud", "A", stored=20, lf=800_000), "stars": 5},
+            {**track("Five Quiet", "A", stored=95, lf=500), "stars": 5},
+            {**track("Four Loud", "A", stored=10, lf=5_000_000), "stars": 4},
+            {**track("Five Mid", "A", stored=60, lf=40_000), "stars": 5},
+        ]
+        top_tracks = titles_of(fs._ordered_playlist_rows(list(rows), order_mode="prominence"))
+        essential = titles_of(fs._ordered_playlist_rows(list(rows), order_mode="prominence"))
+        assert essential == top_tracks
+        assert top_tracks[:3] == ["Five Loud", "Five Mid", "Five Quiet"], (
+            "5★ tier first, strongest global listener count first inside it"
+        )
 
 
 def strip_py_comments(source: str) -> str:
@@ -703,10 +725,15 @@ class TestTheBuildersUseTheOrderingPipeline:
             "key silently falls back to the stored score for every track"
         )
 
-    def test_the_essential_builder_uses_the_percentile_orderer(self):
+    def test_the_essential_builder_uses_the_shared_orderer(self):
         src = self._finalise_source()
-        assert "_ordered_by_percentile_then_prominence(winners, order_mode)" in src, (
-            "the Essential Collection must use its (single-artist) orderer"
+        assert "winners = _ordered_playlist_rows(winners, order_mode=order_mode)" in src, (
+            "the Essential Collection must use the SAME ordering pipeline as the "
+            "genre Top Tracks builder, or it silently ignores playlist_order_mode"
+        )
+        assert "_ordered_by_percentile_then_prominence" not in strip_py_comments(src), (
+            "the percentile-first orderer must be gone; keeping it would leave a "
+            "second ordering contract in place"
         )
         assert "winners.sort(\n        key=lambda r: (\n            -int(r.get(\"stars\")" not in src, (
             "the old inline Essential sort must be gone"

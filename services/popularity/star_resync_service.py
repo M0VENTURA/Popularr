@@ -14,6 +14,19 @@ so every downstream rule still applies — compilation handling, live-album caps
 era slot limits, short-track clamps, favourite floors, genre invalidation and
 Navidrome sync.
 
+⭐ AND IT REBUILDS THE GENERATED PLAYLISTS.
+
+A rating change is only half of "apply the new scoring". Every generated
+playlist (each artist's Essential Collection, ``{Genre} - Top Tracks``, New
+Music, the curated lists) selects on stars and orders on the score, so a resync
+that rewrites stars but leaves the playlists untouched leaves them showing the
+OLD ordering — which is exactly the reported *"the essential playlists aren't
+being created with the new ordering of 5★ followed by the new score"*. A scan
+gets the rebuild for free (``finalise_scan`` → ``_refresh_all_essential_
+collections`` + ``_run_global_playlist_rebuild``); the resync has no finalise
+stage, so it must ask for one explicitly. It does so only when at least one
+star actually changed, and never on a dry run.
+
 Usage
 -----
     result = resync_star_ratings(dry_run=True)   # preview
@@ -250,6 +263,58 @@ def _compute_stars_for_album(
     return rows, summary
 
 
+def _refresh_generated_playlists(artist: str | None = None) -> dict[str, Any]:
+    """Rebuild the generated playlists a rating change just invalidated.
+
+    WHY THIS IS NEEDED. Every generated playlist SELECTS on stars and ORDERS on
+    the score, so changing star ratings without rebuilding them leaves the
+    playlists on the old ordering. A scan does this in ``finalise_scan``; the
+    resync has no finalise stage, so it performs the same two steps here:
+
+    * the per-artist best-of lists (Essential Collections) — only the resynced
+      artist when the resync was artist-scoped, otherwise every artist;
+    * the library-wide lists (``{Genre} - Top Tracks``, New Music, curated
+      playlists, favourites, playlist index) via ``_run_global_playlist_rebuild``.
+
+    Each callee applies its own enable flag, so nothing is written that the
+    configuration does not ask for. Never fatal: a playlist failure must not
+    discard a rating pass that already succeeded.
+    """
+    stats: dict[str, Any] = {"essential": 0, "global": False}
+
+    try:
+        from services.popularity.stages import finalise_stage as fs
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Playlist refresh helpers unavailable", error=str(exc))
+        return stats
+
+    # The genre pool cache is keyed on a TTL and would otherwise hand the
+    # rebuild the star values this resync just replaced.
+    try:
+        fs.invalidate_genre_playlist_rows()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Genre pool cache invalidation failed", error=str(exc))
+
+    try:
+        if not fs._essential_playlists_enabled({}):
+            pass
+        elif artist:
+            if fs._sync_essential_playlist(str(artist)):
+                stats["essential"] = 1
+        else:
+            stats["essential"] = int(fs._refresh_all_essential_collections() or 0)
+    except Exception as exc:
+        logger.warning("Essential playlist refresh failed", artist=artist, error=str(exc))
+
+    try:
+        fs._run_global_playlist_rebuild({}, force=True)
+        stats["global"] = True
+    except Exception as exc:
+        logger.warning("Global playlist rebuild failed", error=str(exc))
+
+    return stats
+
+
 def resync_star_ratings(
     *,
     artist: str | None = None,
@@ -376,6 +441,18 @@ def resync_star_ratings(
         failed=len(failed), seconds=elapsed, dry_run=dry_run,
     )
 
+    # ⭐ Playlists reuse the stars, so a pass that changed any of them must
+    # rebuild the playlists or they keep the OLD ordering. Skipped on a dry run
+    # and when nothing changed (a rebuild that cannot differ is pure cost).
+    playlists: dict[str, Any] = {}
+    if not dry_run and tracks_changed:
+        playlists = _refresh_generated_playlists(artist)
+        logger.info(
+            "Generated playlists refreshed after star resync",
+            essential=playlists.get("essential"),
+            global_rebuild=playlists.get("global"),
+        )
+
     return {
         "ok": not failed,
         "dry_run": dry_run,
@@ -387,6 +464,7 @@ def resync_star_ratings(
         "seconds": elapsed,
         "write_file_tags": bool(write_file_tags),
         "sync_navidrome": bool(sync_navidrome),
+        "playlists": playlists,
     }
 
 

@@ -122,7 +122,6 @@ from services.popularity.popularity_math import (
     album_prominence_score,
     album_ratio_standout,
     apply_album_relative_popularity,
-    calculate_percentile_star_rating,
     calculate_robust_zscore,
     effective_album_ratio,
     fmt_count as _fmt_count,
@@ -2127,32 +2126,6 @@ def _weekly_shuffle(
     return shuffled
 
 
-def _ordered_by_percentile_then_prominence(
-    winners: list[dict[str, Any]],
-    mode: str = "prominence",
-) -> list[dict[str, Any]]:
-    """Essential-Collection ordering: star tier, then prominence (or percentile in stored mode)."""
-    if str(mode or "prominence").strip().lower() == "stored":
-        return sorted(
-            winners,
-            key=lambda r: (
-                -int(r.get("stars") or 0),
-                -float(r.get("percentile") or 0.0),
-                -float(_effective_order_score(r, mode)),
-                str(r.get("title") or "").casefold(),
-            ),
-        )
-    return sorted(
-        winners,
-        key=lambda r: (
-            -int(r.get("stars") or 0),
-            -float(_effective_order_score(r, mode)),
-            -float(r.get("percentile") or 0.0),
-            str(r.get("title") or "").casefold(),
-        ),
-    )
-
-
 def _resolve_max_per_artist(cfg: dict[str, Any]) -> int | None:
     """Per-artist track cap for a generated playlist."""
     raw = cfg.get("genre_playlists_max_per_artist", 25)
@@ -2707,11 +2680,20 @@ def _sync_essential_playlist(
         _delete_playlist_from_navidrome(playlist_name)
         return False
 
-    for w in winners:
-        _, pct = calculate_percentile_star_rating(float(w.get("popularity_score") or 0), artist_scores)
-        w["percentile"] = pct
-
-    winners = _ordered_by_percentile_then_prominence(winners, order_mode)
+    # ⭐ ONE ordering contract for EVERY generated playlist.
+    #
+    # This used to run through ``_ordered_by_percentile_then_prominence``, whose
+    # second key was the ARTIST-relative percentile of
+    # ``COALESCE(popularity, final_score)`` — the album-relative value — so an
+    # Essential Collection was the ONLY playlist that ignored
+    # ``playlist_order_mode``. With "Global popularity" selected, Top Tracks
+    # were ordered by real listener counts while Essential Collections stayed
+    # ordered by the stored album-context score, which is exactly the reported
+    # "essential playlists are not using the new 5★-then-score ordering".
+    #
+    # No per-artist cap / interleave here on purpose: this playlist is one
+    # artist's best-of, so a cap would truncate it at ``max_per_artist``.
+    winners = _ordered_playlist_rows(winners, order_mode=order_mode)
     winners = winners[:max_tracks]
 
     # Rotation after the slice: the SAME tracks in a different sequence, once
