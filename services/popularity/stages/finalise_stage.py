@@ -523,6 +523,146 @@ def _has_z_standout_source(track: dict[str, Any]) -> bool:
         return False
 
 
+def _curve_metric(track: dict[str, Any], fallback: float = 0.0) -> float:
+    """The value the album curve ranks on.
+
+    ⚠️ This is deliberately NOT ``popularity_score``. On a regular album
+    ``popularity`` and ``final_score`` both carry the per-artist re-map, which
+    is NOT monotonic in audience. Measured on the collection report (1,786
+    albums, 8+ tracks): ranking on the re-mapped score produced 13,390
+    inversions against Last.fm listeners, i.e. a track with MORE listeners
+    scoring BELOW one with fewer. Concretely, AC/DC "Back in Black" gave
+    931,173 listeners -> 31.1 while 134,444 listeners -> 53.8.
+
+    A curve whose input is non-monotonic assigns tiers by noise, so the curve
+    ranks on the ABSOLUTE log score, which is monotonic by construction. Same
+    test, ranking on this: 0 inversions.
+    """
+    try:
+        listeners = float(track.get("lastfm_listeners") or 0)
+    except (TypeError, ValueError):
+        listeners = 0.0
+    if listeners <= 0:
+        return float(fallback or 0)
+    try:
+        from services.popularity.popularity_math import LOG_SCALE_MULTIPLIER
+        return min(100.0, math.log10(listeners + 1) * float(LOG_SCALE_MULTIPLIER))
+    except Exception:
+        return float(fallback or 0)
+
+
+def _album_curve_rules() -> dict[str, Any]:
+    """Album star-curve config, or an empty dict when unavailable."""
+    try:
+        from helpers.config_helpers import get_album_star_curve_config
+        return get_album_star_curve_config()
+    except Exception as exc:
+        logger.debug("Album star curve config read failed", error=str(exc))
+        return {}
+
+
+def _rank_percentile(score: float, pool: list[float]) -> float | None:
+    """Position in ``pool`` measured from the TOP (best = 1.0, worst = 0.0).
+
+    Ties share the rank of the first of them, so equal scores get equal stars.
+    """
+    valid = [float(v) for v in (pool or []) if float(v or 0) > 0]
+    if not valid:
+        return None
+    if len(valid) == 1:
+        return 1.0
+    rank = sum(1 for v in valid if v > score) + 1
+    return 1.0 - (rank - 1) / (len(valid) - 1)
+
+
+def _below_percentile(score: float, pool: list[float]) -> float | None:
+    """Fraction of ``pool`` strictly below ``score`` (0.0-1.0)."""
+    valid = [float(v) for v in (pool or []) if float(v or 0) > 0]
+    if not valid:
+        return None
+    return sum(1 for v in valid if v < score) / len(valid)
+
+
+def _album_curve_star(
+    score: float,
+    album_pool: list[float],
+    artist_scores: list[float],
+    raw_listeners: float,
+    rules: dict[str, Any],
+) -> int | None:
+    """Star tier from the track's PERCENTILE inside its album.
+
+    Returns ``None`` when the curve does not apply, so the caller keeps the
+    banded z-score result. Two independent gates are applied on top of the
+    within-album position:
+
+    1. ``catalogue_cap_*`` — the tier must also sit that far up the ARTIST's
+       whole catalogue. A weak album's best track is not a 5★ hit.
+    2. ``five_star_min_listeners`` — an absolute reach floor. The catalogue
+       percentile is scale-free, so without this a 10-listener track reaches
+       5★ by being top-decile of a 10-listener artist.
+
+    Both gates only demote; neither can raise a tier above the curve's.
+    """
+    if not rules or not rules.get("enabled"):
+        return None
+    if score <= 0:
+        return None
+
+    min_tracks = int(float(rules.get("min_album_tracks") or 3))
+    valid_album = [float(v) for v in (album_pool or []) if float(v or 0) > 0]
+    if len(valid_album) < min_tracks:
+        return None
+
+    pos = _rank_percentile(score, valid_album)
+    if pos is None:
+        return None
+
+    star = 1
+    for cut_key, tier in (
+        ("curve_5star_percentile", 5),
+        ("curve_4star_percentile", 4),
+        ("curve_3star_percentile", 3),
+        ("curve_2star_percentile", 2),
+    ):
+        try:
+            cut = float(rules.get(cut_key) or 0.0)
+        except (TypeError, ValueError):
+            cut = 0.0
+        if cut > 0 and pos >= cut:
+            star = tier
+            break
+
+    # Catalogue cap — demotion only.
+    catalogue_pos = _below_percentile(score, artist_scores)
+    if catalogue_pos is not None:
+        for cap_key, tier in (
+            ("catalogue_cap_5star", 5),
+            ("catalogue_cap_4star", 4),
+            ("catalogue_cap_3star", 3),
+            ("catalogue_cap_2star", 2),
+        ):
+            try:
+                needed = float(rules.get(cap_key) or 0.0)
+            except (TypeError, ValueError):
+                needed = 0.0
+            if needed <= 0 or star < tier:
+                continue
+            if catalogue_pos < needed:
+                star = max(1, tier - 1)
+
+    # Absolute reach floor for the top tier.
+    if star >= 5:
+        try:
+            floor_listeners = float(rules.get("five_star_min_listeners") or 0.0)
+        except (TypeError, ValueError):
+            floor_listeners = 0.0
+        if floor_listeners > 0 and float(raw_listeners or 0) < floor_listeners:
+            star = 4
+
+    return max(1, min(5, star))
+
+
 def _album_z_band_star(
     score: float,
     album_scores: list[float],
@@ -1079,6 +1219,8 @@ def _assign_stars(
     organic_floor: tuple[float, float] | None = None,
     force_star_percentiles: tuple[float, float] | None = None,
     compilation_online_rules: dict[str, Any] | None = None,
+    album_curve_rules: dict[str, Any] | None = None,
+    album_curve_pool: list[float] | None = None,
 ) -> int:
     """Assign 1-5 star rating to a single track."""
     score = float(track.get("popularity_score") or track.get("final_score") or 0)
@@ -1479,6 +1621,41 @@ def _assign_stars(
         precomputed_album_z=(album_z, album_spread),
         precomputed_artist_z=(artist_z, artist_spread),
     )
+
+    # ⭐⭐ ALBUM STAR CURVE — shape the whole release across 1-5 tiers.
+    #
+    # Replaces the banded z-score base ONLY where the curve applies (a regular
+    # album with enough scored tracks). Compilations, live albums, singles and
+    # EPs keep their existing paths. The curve never overrides a user lock, a
+    # forced percentile, or the standout/era logic below — it only supplies a
+    # better BASE, so every downstream cap and floor still applies.
+    if not is_compilation and not is_live and not popularity_only:
+        _curve_rules = album_curve_rules if album_curve_rules is not None else _album_curve_rules()
+        if _curve_rules and _curve_rules.get("enabled"):
+            _curve_pool = (
+                [float(v) for v in album_curve_pool if float(v or 0) > 0]
+                if album_curve_pool is not None
+                else [float(v) for v in _album_pool if float(v or 0) > 0]
+            )
+            _curve_star = _album_curve_star(
+                score=_curve_metric(track, fallback=score),
+                album_pool=_curve_pool,
+                artist_scores=[
+                    _curve_metric({"lastfm_listeners": v}, fallback=v)
+                    for v in (artist_scores or [])
+                ] or list(artist_scores or []),
+                raw_listeners=float(track.get("lastfm_listeners") or 0),
+                rules=_curve_rules,
+            )
+            if _curve_star is not None:
+                track["_album_curve_stars"] = _curve_star
+                if _curve_star != base_stars:
+                    logger.debug(
+                        "Album curve adjusted the base tier",
+                        title=track.get("title"),
+                        banded=base_stars, curve=_curve_star,
+                    )
+                base_stars = _curve_star
 
     if (
         is_standout
@@ -4274,6 +4451,12 @@ def post_album_star_ratings(
         except Exception:
             _skip_unchanged = True
 
+        # ⭐ Resync overrides. ``None`` keeps scan behaviour untouched; a
+        # resync run sets these explicitly so re-rating from stored data can
+        # honour its own config (write tags / sync Navidrome) without a scan.
+        _write_tags_enabled = options.get("write_file_tags")
+        _write_tags_enabled = True if _write_tags_enabled is None else bool(_write_tags_enabled)
+
         _artist_listen_distribution = [
             float(result.get("lastfm_listeners") or 0)
             for result in album_results
@@ -4324,6 +4507,16 @@ def post_album_star_ratings(
         except Exception:
             _force_star_pcts = None
 
+        # Album curve ranks on the ABSOLUTE log score (monotonic in audience),
+        # never on the re-mapped popularity_score. See _curve_metric.
+        _curve_rules = _album_curve_rules()
+        _curve_pool = [
+            _curve_metric(r)
+            for r in album_results
+            if not bool(r.get("exclude_from_stats"))
+        ]
+        _curve_pool = [v for v in _curve_pool if v > 0]
+
         _comp_online_rules: dict[str, Any] | None = None
         if is_compilation:
             try:
@@ -4367,6 +4560,8 @@ def post_album_star_ratings(
                     organic_floor=_organic_floor,
                     force_star_percentiles=_force_star_pcts,
                     compilation_online_rules=_comp_online_rules,
+                    album_curve_rules=_curve_rules,
+                    album_curve_pool=_curve_pool,
                 )
             except Exception as exc:
                 track_id = str(track.get("track_id") or "").strip()
@@ -4637,7 +4832,7 @@ def post_album_star_ratings(
             # Provisional ratings are reconciled at the artist boundary; the
             # reconcile pass writes the file tag (including ratings that did
             # not move but were stored provisionally), so skip it here.
-            if not provisional and not (_skip_unchanged and not _rating_changed):
+            if not provisional and not (_skip_unchanged and not _rating_changed) and _write_tags_enabled:
                 try:
                     from services.metadata.tag_file_service import (
                         _resolve_music_file_path,

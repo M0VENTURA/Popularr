@@ -633,6 +633,25 @@
             high_tier_min_listeners: (function () { var v = parseInt(getValue('compilation_online_high_tier_min_listeners', '1000'), 10); return isFinite(v) ? v : 1000; })(),
             standout_floor_percentile: (function () { var v = parseFloat(getValue('compilation_online_standout_floor_percentile', '0.10')); return isFinite(v) ? v : 0.10; })(),
             standout_floor_stars: (function () { var v = parseInt(getValue('compilation_online_standout_floor_stars', '4'), 10); return isFinite(v) ? v : 4; })()
+          },
+          album_star_curve: {
+            enabled: getChecked('album_star_curve_enabled', false),
+            curve_5star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_5star_percentile', '0.80')); return isFinite(v) ? v : 0.80; })(),
+            curve_4star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_4star_percentile', '0.55')); return isFinite(v) ? v : 0.55; })(),
+            curve_3star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_3star_percentile', '0.30')); return isFinite(v) ? v : 0.30; })(),
+            curve_2star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_2star_percentile', '0.12')); return isFinite(v) ? v : 0.12; })(),
+            catalogue_cap_5star: (function () { var v = parseFloat(getValue('album_star_curve_catalogue_cap_5star', '0.85')); return isFinite(v) ? v : 0.85; })(),
+            catalogue_cap_4star: (function () { var v = parseFloat(getValue('album_star_curve_catalogue_cap_4star', '0.60')); return isFinite(v) ? v : 0.60; })(),
+            catalogue_cap_3star: (function () { var v = parseFloat(getValue('album_star_curve_catalogue_cap_3star', '0.30')); return isFinite(v) ? v : 0.30; })(),
+            catalogue_cap_2star: (function () { var v = parseFloat(getValue('album_star_curve_catalogue_cap_2star', '0.10')); return isFinite(v) ? v : 0.10; })(),
+            five_star_min_listeners: (function () { var v = parseInt(getValue('album_star_curve_five_star_min_listeners', '0'), 10); return isFinite(v) ? v : 0; })(),
+            min_album_tracks: (function () { var v = parseInt(getValue('album_star_curve_min_album_tracks', '3'), 10); return isFinite(v) ? v : 3; })()
+          },
+          star_resync: {
+            enabled: getChecked('star_resync_enabled', true),
+            write_file_tags: getChecked('star_resync_write_file_tags', true) ? 1 : 0,
+            sync_navidrome: getChecked('star_resync_sync_navidrome', true) ? 1 : 0,
+            albums_per_batch: (function () { var v = parseInt(getValue('star_resync_albums_per_batch', '25'), 10); return isFinite(v) && v > 0 ? v : 25; })()
           }
         }
       ),

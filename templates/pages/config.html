@@ -2467,6 +2467,131 @@
       </div>
 
       <hr class="my-3">
+      {#
+        ⭐⭐ ALBUM STAR CURVE — the shape of a rating across ONE release.
+        A rating should describe a track's place ON ITS ALBUM, so an album
+        ought to spread across 1-5 tiers. Measured on the collection report,
+        the bottom tier was routinely absent: d'Artagnan's "Felsenfest" had 8
+        of 20 tracks at 2★ and none at 1★, because the absolute ladder's
+        lowest band is unreachable for a track with any listeners at all.
+        The curve awards the tier from the track's PERCENTILE inside its
+        album, then caps it by the artist's whole catalogue so a weak album's
+        best track is not crowned a hit.
+      #}
+      <h6 class="mb-1">Album Star Curve</h6>
+      <p class="text-muted small mb-3">
+        Spreads every regular album across all five star tiers by within-album rank, then caps each
+        tier by the track's place in the artist's whole catalogue. Compilations, live albums and
+        singles keep their existing paths. Disable to restore the plain z-score bands.
+      </p>
+      <div class="row g-3 mb-3">
+        <div class="col-12 col-sm-6 col-lg-3">
+          <div class="form-check form-switch mt-3">
+            <input class="form-check-input" type="checkbox" id="album_star_curve_enabled" {% if config.get('single_detection', {}).get('album_star_curve', {}).get('enabled', 0) %}checked{% endif %}>
+            <label class="form-check-label form-label-sm" for="album_star_curve_enabled">Enable Album Curve</label>
+          </div>
+          <small class="form-text text-muted">Default: <strong>Disabled</strong> — enabling re-rates every album on the next scan, so preview with the resync below first.</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="album_star_curve_curve_5star_percentile">5★ Album Percentile</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_curve_5star_percentile" placeholder="0.80" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('curve_5star_percentile', 0.80) }}">
+          <small class="form-text text-muted">Top 20% of the album. Default: <strong>0.80</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="album_star_curve_curve_4star_percentile">4★ Album Percentile</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_curve_4star_percentile" placeholder="0.55" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('curve_4star_percentile', 0.55) }}">
+          <small class="form-text text-muted">Default: <strong>0.55</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="album_star_curve_curve_3star_percentile">3★ Album Percentile</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_curve_3star_percentile" placeholder="0.30" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('curve_3star_percentile', 0.30) }}">
+          <small class="form-text text-muted">Default: <strong>0.30</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="album_star_curve_curve_2star_percentile">2★ Album Percentile</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_curve_2star_percentile" placeholder="0.12" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('curve_2star_percentile', 0.12) }}">
+          <small class="form-text text-muted">Below this is 1★, so every album has a bottom tier. Default: <strong>0.12</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="album_star_curve_catalogue_cap_5star">5★ Artist Catalogue Percentile</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_catalogue_cap_5star" placeholder="0.85" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('catalogue_cap_5star', 0.85) }}">
+          <small class="form-text text-muted">A 5★ must also sit in the artist's top 15% overall. <strong>0</strong> disables. Default: <strong>0.85</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="album_star_curve_catalogue_cap_4star">4★ Artist Catalogue Percentile</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_catalogue_cap_4star" placeholder="0.60" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('catalogue_cap_4star', 0.60) }}">
+          <small class="form-text text-muted">Default: <strong>0.60</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="album_star_curve_catalogue_cap_3star">3★ Artist Catalogue Percentile</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_catalogue_cap_3star" placeholder="0.30" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('catalogue_cap_3star', 0.30) }}">
+          <small class="form-text text-muted">Default: <strong>0.30</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="album_star_curve_catalogue_cap_2star">2★ Artist Catalogue Percentile</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_catalogue_cap_2star" placeholder="0.10" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('catalogue_cap_2star', 0.10) }}">
+          <small class="form-text text-muted">Default: <strong>0.10</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="album_star_curve_five_star_min_listeners">5★ Min Last.fm Listeners</label>
+          <input type="number" step="1000" min="0" class="form-control form-control-sm" id="album_star_curve_five_star_min_listeners" placeholder="0" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('five_star_min_listeners', 0) }}">
+          <small class="form-text text-muted">Absolute reach a 5★ must also clear. The catalogue percentile is scale-free, so without a floor a 10-listener track reaches 5★ by being top of a 10-listener artist. <strong>0</strong> disables. Default: <strong>0</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="album_star_curve_min_album_tracks">Min Album Tracks</label>
+          <input type="number" step="1" min="1" class="form-control form-control-sm" id="album_star_curve_min_album_tracks" placeholder="3" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('min_album_tracks', 3) }}">
+          <small class="form-text text-muted">Albums smaller than this keep the z-score bands — a single has no curve. Default: <strong>3</strong></small>
+        </div>
+      </div>
+
+      <hr class="my-3">
+      {#
+        ⭐ STAR RESYNC — re-rate from stored data, no provider calls.
+        Scoring changes only reach the library on the next scan, and a scan
+        re-queries Last.fm/ListenBrainz for every track. Every input a rating
+        needs is already stored, so this is a pure recomputation.
+      #}
+      <h6 class="mb-1">Star Rating Resync</h6>
+      <p class="text-muted small mb-3">
+        Re-applies the current scoring rules to every track using the popularity data already stored —
+        no Last.fm, ListenBrainz or Discogs calls. Run this after changing any scoring setting above
+        instead of waiting for a full scan. Preview first: it reports every rating that would change.
+      </p>
+      <div class="row g-3 mb-3">
+        <div class="col-12 col-sm-6 col-lg-3">
+          <div class="form-check form-switch mt-3">
+            <input class="form-check-input" type="checkbox" id="star_resync_enabled" {% if config.get('single_detection', {}).get('star_resync', {}).get('enabled', 1) %}checked{% endif %}>
+            <label class="form-check-label form-label-sm" for="star_resync_enabled">Enable Resync</label>
+          </div>
+          <small class="form-text text-muted">Default: <strong>Enabled</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <div class="form-check form-switch mt-3">
+            <input class="form-check-input" type="checkbox" id="star_resync_write_file_tags" {% if config.get('single_detection', {}).get('star_resync', {}).get('write_file_tags', 1) %}checked{% endif %}>
+            <label class="form-check-label form-label-sm" for="star_resync_write_file_tags">Write File Tags</label>
+          </div>
+          <small class="form-text text-muted">Write the new rating into the music file's tags. Off = database only. Default: <strong>On</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <div class="form-check form-switch mt-3">
+            <input class="form-check-input" type="checkbox" id="star_resync_sync_navidrome" {% if config.get('single_detection', {}).get('star_resync', {}).get('sync_navidrome', 1) %}checked{% endif %}>
+            <label class="form-check-label form-label-sm" for="star_resync_sync_navidrome">Sync Navidrome</label>
+          </div>
+          <small class="form-text text-muted">Push the new rating to Navidrome. Off = database only. Default: <strong>On</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="star_resync_albums_per_batch">Albums Per Batch</label>
+          <input type="number" step="1" min="1" class="form-control form-control-sm" id="star_resync_albums_per_batch" placeholder="25" value="{{ config.get('single_detection', {}).get('star_resync', {}).get('albums_per_batch', 25) }}">
+          <small class="form-text text-muted">Smaller keeps the connection pool free under concurrent scans. Default: <strong>25</strong></small>
+        </div>
+        <div class="col-12">
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="star_resync_preview_btn">Preview Rating Changes</button>
+          <button type="button" class="btn btn-warning btn-sm ms-2" id="star_resync_apply_btn">Apply Rating Resync</button>
+          <div id="star_resync_output" class="small mt-2"></div>
+        </div>
+      </div>
+
+      <hr class="my-3">
       <h6 class="mb-3">3 · Score Adjustments</h6>
       <div class="row g-3">
         <div class="col-12 col-sm-6 col-lg-3">

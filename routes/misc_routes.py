@@ -2065,6 +2065,71 @@ async def api_collection_popularity_report() -> Any:
 
 
 # ===========================================================================
+# STAR RATING RESYNC
+# ===========================================================================
+
+@misc_api_bp.route("/ratings/resync", methods=["POST"])
+async def api_resync_star_ratings() -> Any:
+    """Re-rate the library from STORED popularity data — no provider calls.
+
+    Scoring changes (weights, tier thresholds, the album star curve) normally
+    only reach the library on the next scan, and a scan re-queries Last.fm and
+    ListenBrainz for every track. Every input a rating needs is already in the
+    ``tracks`` table, so this recomputes ratings without touching a provider.
+
+    Body (all optional)::
+
+        {"dry_run": true}                      # preview only
+        {"artist": "AC/DC"}                    # one artist
+        {"artist": "AC/DC", "album": "..."}    # one album
+        {"limit_albums": 5}                    # smoke test
+
+    ``dry_run`` writes nothing at all — no DB stars, no file tags, no
+    Navidrome. It returns the per-track before/after list so the effect of a
+    scoring change can be reviewed before it is applied.
+    """
+    from services.popularity.star_resync_service import resync_star_ratings
+
+    try:
+        payload = (await request.get_json(silent=True)) or {}
+    except Exception:
+        payload = {}
+
+    def _as_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip().casefold() not in ("", "0", "false", "no", "off")
+        return bool(value)
+
+    dry_run = _as_bool(payload.get("dry_run"), default=False)
+    artist = str(payload.get("artist") or "").strip() or None
+    album = str(payload.get("album") or "").strip() or None
+    limit_albums: int | None = None
+    if payload.get("limit_albums") not in (None, ""):
+        try:
+            limit_albums = max(1, int(payload.get("limit_albums")))
+        except (TypeError, ValueError):
+            limit_albums = None
+
+    try:
+        result = await asyncio.to_thread(
+            resync_star_ratings,
+            artist=artist,
+            album=album,
+            limit_albums=limit_albums,
+            dry_run=dry_run,
+        )
+    except Exception as exc:
+        logger.error("Star resync request failed", error=str(exc))
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    if not result.get("ok") and result.get("error"):
+        return jsonify(result), 400
+    return jsonify(result), 200
+
+
+# ===========================================================================
 # DATABASE CLEANUP
 # ===========================================================================
 

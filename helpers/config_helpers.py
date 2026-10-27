@@ -891,6 +891,126 @@ def get_compilation_online_catalogue_config(config: dict | None = None) -> dict[
     return out
 
 
+#: ⭐⭐ ALBUM STAR CURVE — the shape of a rating across ONE release.
+#:
+#: A star rating is supposed to describe a track's place ON ITS ALBUM, so an
+#: album should spread across the 1-5 range instead of collapsing into one or
+#: two tiers. Measured on the collection report (4,456 genuine releases): the
+#: banded z-score path already produced 3-5 tiers on most albums, but the
+#: BOTTOM tier was routinely missing — "d'Artagnan / Felsenfest" had 8 of 20
+#: tracks at 2★ and NONE at 1★, because the absolute ladder's lowest band
+#: (score < 35) is unreachable for a track that has any listeners at all.
+#:
+#: The curve assigns the tier from the track's PERCENTILE inside its album, so
+#: the shape is guaranteed. The catalog_cap_* keys then stop a weak album's
+#: best track from being crowned: a 5★ must ALSO be in the top decile of the
+#: artist's whole catalogue. The cap only ever DEMOTES — it never promotes a
+#: track the curve did not already put there.
+_DEFAULT_ALBUM_STAR_CURVE: dict[str, Any] = {
+    # ⚠️ DEFAULT OFF. Enabling this replaces the z-band base tier for every
+    # regular album, so shipping it on would silently re-rate the whole
+    # library on the next scan. Turn it on from the Config page, then run the
+    # Star Rating Resync (which previews every change first).
+    "enabled": 0,
+    # Within-album percentile needed for each tier (top of the album = 1.0).
+    "curve_5star_percentile": 0.80,
+    "curve_4star_percentile": 0.55,
+    "curve_3star_percentile": 0.30,
+    "curve_2star_percentile": 0.12,
+    # Artist-catalogue percentile each tier must ALSO clear. 0 disables a tier's
+    # catalogue check.
+    "catalogue_cap_5star": 0.85,
+    "catalogue_cap_4star": 0.60,
+    "catalogue_cap_3star": 0.30,
+    "catalogue_cap_2star": 0.10,
+    # Absolute Last.fm listener floor for 5★. The catalogue percentile is
+    # scale-free, so without a floor a 10-listener track still reaches 5★ by
+    # being top-decile of a 10-listener artist (measured: 386 five-star tracks
+    # under 10,000 listeners). 0 disables the floor.
+    "five_star_min_listeners": 0,
+    # Albums with fewer scored tracks than this keep the existing z-band path;
+    # a 1-2 track single has no distribution to curve across.
+    "min_album_tracks": 3,
+}
+
+
+def get_album_star_curve_config(config: dict | None = None) -> dict[str, Any]:
+    """Return the album star-curve settings (``single_detection.album_star_curve``)."""
+    cfg = config if isinstance(config, dict) else get_config()
+    sd = cfg.get("single_detection", {}) if isinstance(cfg, dict) else {}
+    block = sd.get("album_star_curve") if isinstance(sd, dict) else None
+
+    rules = dict(_DEFAULT_ALBUM_STAR_CURVE)
+    if isinstance(block, dict):
+        rules.update(block)
+
+    out: dict[str, Any] = {"enabled": 1 if _as_truthy(rules.get("enabled", 1)) else 0}
+    for key in (
+        "curve_5star_percentile",
+        "curve_4star_percentile",
+        "curve_3star_percentile",
+        "curve_2star_percentile",
+        "catalogue_cap_5star",
+        "catalogue_cap_4star",
+        "catalogue_cap_3star",
+        "catalogue_cap_2star",
+        "five_star_min_listeners",
+        "min_album_tracks",
+    ):
+        try:
+            out[key] = float(rules.get(key, _DEFAULT_ALBUM_STAR_CURVE[key]))
+        except (TypeError, ValueError):
+            out[key] = float(_DEFAULT_ALBUM_STAR_CURVE[key])
+    return out
+
+
+#: ⭐ STAR RESYNC — re-rate from stored data, with NO provider calls.
+#:
+#: Scoring changes (weights, bands, the album curve above) only reach the
+#: library through a scan, and a full scan re-queries Last.fm/ListenBrainz for
+#: every track. That is the wrong tool: the popularity inputs are already in
+#: the ``tracks`` table, so re-rating is a pure recomputation.
+#:
+#: This drives the SAME ``post_album_star_ratings`` entry point a scan uses, so
+#: every cap, floor, slot limit and genre invalidation still applies — it is
+#: not a second rating implementation.
+_DEFAULT_STAR_RESYNC: dict[str, Any] = {
+    "enabled": 1,
+    # Write the new rating into the music file's tags as well as the database.
+    "write_file_tags": 1,
+    # Push the new rating to Navidrome (Subsonic ``setRating``).
+    "sync_navidrome": 1,
+    # Albums committed per transaction batch. Larger is faster; smaller keeps
+    # the connection pool free under concurrent scans.
+    "albums_per_batch": 25,
+}
+
+
+def get_star_resync_config(config: dict | None = None) -> dict[str, Any]:
+    """Return the star-resync settings (``single_detection.star_resync``)."""
+    cfg = config if isinstance(config, dict) else get_config()
+    sd = cfg.get("single_detection", {}) if isinstance(cfg, dict) else {}
+    block = sd.get("star_resync") if isinstance(sd, dict) else None
+
+    rules = dict(_DEFAULT_STAR_RESYNC)
+    if isinstance(block, dict):
+        rules.update(block)
+
+    def _flag(key: str) -> int:
+        return 1 if _as_truthy(rules.get(key, _DEFAULT_STAR_RESYNC[key])) else 0
+
+    out: dict[str, Any] = {
+        "enabled": _flag("enabled"),
+        "write_file_tags": _flag("write_file_tags"),
+        "sync_navidrome": _flag("sync_navidrome"),
+    }
+    try:
+        out["albums_per_batch"] = max(1, int(float(rules.get("albums_per_batch", 25))))
+    except (TypeError, ValueError):
+        out["albums_per_batch"] = 25
+    return out
+
+
 def _as_truthy(value: Any) -> bool:
     """Interpret config booleans/ints/strings the way the Config page writes them."""
     if isinstance(value, str):

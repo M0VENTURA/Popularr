@@ -84,6 +84,82 @@
     return (global.escapeHtml || ((v) => String(v == null ? '' : v)))(value);
   }
 
+  /**
+   * Preview or apply a star-rating resync.
+   *
+   * Re-rates from STORED popularity data — no Last.fm/ListenBrainz calls.
+   * Preview writes nothing; Apply writes DB stars (plus file tags / Navidrome
+   * per the toggles above). Deliberately does NOT auto-save the config first:
+   * the run uses the SAVED config, so what runs matches what is stored.
+   */
+  async function runStarResync(dryRun) {
+    const out = document.getElementById('star_resync_output');
+    const setOut = (html) => { if (out) out.innerHTML = html; };
+
+    if (!dryRun && !confirm(
+      'Re-rate every scored track from stored popularity data?\n\n' +
+      'This rewrites star ratings in the database' +
+      (document.getElementById('star_resync_write_file_tags')?.checked ? ', the music file tags' : '') +
+      (document.getElementById('star_resync_sync_navidrome')?.checked ? ' and Navidrome' : '') +
+      '.\n\nRun Preview first if you have not.'
+    )) {
+      return;
+    }
+
+    const btns = [
+      document.getElementById('star_resync_preview_btn'),
+      document.getElementById('star_resync_apply_btn')
+    ].filter(Boolean);
+    btns.forEach(b => { b.disabled = true; });
+    setOut(dryRun ? 'Calculating preview…' : 'Re-rating the library…');
+
+    try {
+      const resp = await fetch('/api/ratings/resync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dry_run: !!dryRun })
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) {
+        setOut('<span class="text-danger">' + esc(data.error || ('HTTP ' + resp.status)) + '</span>');
+        return;
+      }
+
+      const changed = Array.isArray(data.changed_tracks) ? data.changed_tracks : [];
+      const rows = changed.slice(0, 200).map(t => {
+        const label = (t.artist ? t.artist + ' — ' : '') + (t.album || '');
+        return '<tr><td>' + esc(t.title || '') + '</td>'
+          + '<td class="text-muted">' + esc(label) + '</td>'
+          + '<td class="text-end">' + Number(t.lastfm_listeners || 0).toLocaleString() + '</td>'
+          + '<td class="text-center">' + t.before + '★ → <strong>' + t.after + '★</strong></td></tr>';
+      }).join('');
+
+      setOut(
+        '<div class="alert alert-' + (dryRun ? 'info' : 'success') + ' py-2 mb-2">'
+        + (dryRun ? '<strong>Preview only — nothing was written.</strong> ' : '<strong>Resync applied.</strong> ')
+        + data.albums + ' albums, ' + data.tracks + ' tracks, '
+        + '<strong>' + data.changed + '</strong> rating(s) ' + (dryRun ? 'would change' : 'changed')
+        + ' in ' + data.seconds + 's.'
+        + (data.failed && data.failed.length
+          ? ' <span class="text-danger">' + data.failed.length + ' album(s) failed.</span>'
+          : '')
+        + '</div>'
+        + (rows
+          ? '<div style="max-height:24rem;overflow:auto"><table class="table table-sm table-striped mb-0">'
+            + '<thead><tr><th>Track</th><th>Album</th><th class="text-end">Listeners</th><th class="text-center">Change</th></tr></thead>'
+            + '<tbody>' + rows + '</tbody></table></div>'
+            + (changed.length > 200
+              ? '<div class="text-muted mt-1">Showing first 200 of ' + changed.length + '.</div>'
+              : '')
+          : '<div class="text-muted">No rating changes.</div>')
+      );
+    } catch (err) {
+      setOut('<span class="text-danger">' + esc(String(err)) + '</span>');
+    } finally {
+      btns.forEach(b => { b.disabled = false; });
+    }
+  }
+
   // ── Excluded playlist artists ───────────────────────────────────────────
 
   let configExcludedArtists = [];
@@ -801,6 +877,25 @@
             high_tier_min_listeners: (function () { var v = parseInt(getValue('compilation_online_high_tier_min_listeners', '1000'), 10); return isFinite(v) ? v : 1000; })(),
             standout_floor_percentile: (function () { var v = parseFloat(getValue('compilation_online_standout_floor_percentile', '0.10')); return isFinite(v) ? v : 0.10; })(),
             standout_floor_stars: (function () { var v = parseInt(getValue('compilation_online_standout_floor_stars', '4'), 10); return isFinite(v) ? v : 4; })()
+          },
+          album_star_curve: {
+            enabled: getChecked('album_star_curve_enabled', false),
+            curve_5star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_5star_percentile', '0.80')); return isFinite(v) ? v : 0.80; })(),
+            curve_4star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_4star_percentile', '0.55')); return isFinite(v) ? v : 0.55; })(),
+            curve_3star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_3star_percentile', '0.30')); return isFinite(v) ? v : 0.30; })(),
+            curve_2star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_2star_percentile', '0.12')); return isFinite(v) ? v : 0.12; })(),
+            catalogue_cap_5star: (function () { var v = parseFloat(getValue('album_star_curve_catalogue_cap_5star', '0.85')); return isFinite(v) ? v : 0.85; })(),
+            catalogue_cap_4star: (function () { var v = parseFloat(getValue('album_star_curve_catalogue_cap_4star', '0.60')); return isFinite(v) ? v : 0.60; })(),
+            catalogue_cap_3star: (function () { var v = parseFloat(getValue('album_star_curve_catalogue_cap_3star', '0.30')); return isFinite(v) ? v : 0.30; })(),
+            catalogue_cap_2star: (function () { var v = parseFloat(getValue('album_star_curve_catalogue_cap_2star', '0.10')); return isFinite(v) ? v : 0.10; })(),
+            five_star_min_listeners: (function () { var v = parseInt(getValue('album_star_curve_five_star_min_listeners', '0'), 10); return isFinite(v) ? v : 0; })(),
+            min_album_tracks: (function () { var v = parseInt(getValue('album_star_curve_min_album_tracks', '3'), 10); return isFinite(v) ? v : 3; })()
+          },
+          star_resync: {
+            enabled: getChecked('star_resync_enabled', true),
+            write_file_tags: getChecked('star_resync_write_file_tags', true) ? 1 : 0,
+            sync_navidrome: getChecked('star_resync_sync_navidrome', true) ? 1 : 0,
+            albums_per_batch: (function () { var v = parseInt(getValue('star_resync_albums_per_batch', '25'), 10); return isFinite(v) && v > 0 ? v : 25; })()
           }
         }
       ),
@@ -2193,6 +2288,10 @@
     if (vocabSave) vocabSave.addEventListener('click', saveGenreVocabulary);
     const vocabReset = document.getElementById('genre_vocab_reset');
     if (vocabReset) vocabReset.addEventListener('click', resetGenreVocabulary);
+    const resyncPreview = document.getElementById('star_resync_preview_btn');
+    if (resyncPreview) resyncPreview.addEventListener('click', () => runStarResync(true));
+    const resyncApply = document.getElementById('star_resync_apply_btn');
+    if (resyncApply) resyncApply.addEventListener('click', () => runStarResync(false));
     if (document.getElementById('excludedArtistsList')) {
       loadExcludedArtists();
     }
