@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Double,
     Float,
@@ -25,6 +26,7 @@ from sqlalchemy import (
     Sequence,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -577,11 +579,10 @@ class AlbumArt(Base):
     def __repr__(self) -> str:
         return f"<AlbumArt(id={self.id}, artist={self.artist_name!r}, album={self.album_name!r})>"
 
+
 # =============================================================================
 # missing_album_tracks
 # =============================================================================
-
-from sqlalchemy import Boolean, UniqueConstraint
 
 class MissingAlbumTrack(Base):
     __tablename__ = "missing_album_tracks"
