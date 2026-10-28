@@ -39,6 +39,7 @@ from typing import Any
 
 from helpers.logging_config import log_unified
 from db.repositories import playlists as _repo
+from services.playlists.playlist_taxonomy import classify_managed_playlist
 
 _SOURCE_FILE = "file"
 _SOURCE_NAVIDROME = "navidrome"
@@ -113,6 +114,13 @@ def _enumerate(clients: list[Any]) -> tuple[list[dict[str, Any]], int, list[list
     """
     from services.playlists.playlist_service import list_nsp_playlists
 
+    try:
+        from helpers.config_helpers import get_playlists_config
+
+        _playlist_cfg = get_playlists_config()
+    except Exception:
+        _playlist_cfg = {}
+
     entries: list[dict[str, Any]] = []
     seen_names: set[str] = set()
 
@@ -135,6 +143,7 @@ def _enumerate(clients: list[Any]) -> tuple[list[dict[str, Any]], int, list[list
             "file_path": str(item.get("file_path") or ""),
             "kind": str(item.get("kind") or "nsp"),
             "rule_based": bool(item.get("rule_based")),
+            "managed_type": classify_managed_playlist(name, config=_playlist_cfg),
         })
 
     errors = 0
@@ -202,6 +211,7 @@ def _enumerate(clients: list[Any]) -> tuple[list[dict[str, Any]], int, list[list
                 "file_path": "",
                 "kind": "navidrome",
                 "rule_based": bool(nav.get("criteria")),
+                "managed_type": classify_managed_playlist(name, config=_playlist_cfg),
             })
 
     return entries, errors, listings
@@ -565,6 +575,7 @@ def sync_playlist_index(clients: list[Any] | None = None) -> dict[str, int]:
         "changed": 0,
         "entries": 0,
         "skipped": 0,
+        "typed": 0,
         "pruned": 0,
         "unresolved": 0,
         "errors": 0,
@@ -587,6 +598,12 @@ def sync_playlist_index(clients: list[Any] | None = None) -> dict[str, int]:
         _logger().warning("Playlist index: could not read stored stamps: %s", exc)
         stored = {}
 
+    try:
+        stored_types = _repo.stored_managed_type_map()
+    except Exception as exc:
+        _logger().warning("Playlist index: could not read stored types: %s", exc)
+        stored_types = {}
+
     seen_ids: list[str] = []
     changed_entries: list[dict[str, Any]] = []
     for entry in entries:
@@ -595,9 +612,23 @@ def sync_playlist_index(clients: list[Any] | None = None) -> dict[str, int]:
             continue
         seen_ids.append(playlist_id)
 
-        if stored.get(playlist_id) == str(entry.get("changed") or ""):
+        _incoming_type = str(entry.get("managed_type") or "")
+        _type_changed = stored_types.get(playlist_id, "") != _incoming_type
+        _stamp_same = stored.get(playlist_id) == str(entry.get("changed") or "")
+        if _stamp_same and not _type_changed:
             stats["skipped"] += 1
             continue
+        if _stamp_same and _type_changed:
+            # The CONTENTS did not move; only the ownership classification did.
+            # Record it without re-reading the playlist.
+            try:
+                if _repo.update_playlist_managed_type(
+                    playlist_id, entry.get("managed_type")
+                ):
+                    stats["typed"] += 1
+                    continue
+            except Exception:
+                pass
         changed_entries.append(entry)
 
     # ── Phase 1: fetch the changed playlists' contents, BOUNDED-CONCURRENT ──
@@ -649,6 +680,7 @@ def sync_playlist_index(clients: list[Any] | None = None) -> dict[str, int]:
                 comment=str(entry.get("comment") or ""),
                 changed=str(entry.get("changed") or ""),
                 track_ids=track_ids,
+                managed_type=entry.get("managed_type"),
             )
         except Exception as exc:
             _logger().warning(
@@ -673,11 +705,11 @@ def sync_playlist_index(clients: list[Any] | None = None) -> dict[str, int]:
             "and pruning on a partial view would delete playlists that still exist"
         )
 
-    if stats["changed"] or stats["pruned"]:
+    if stats["changed"] or stats["pruned"] or stats.get("typed"):
         log_unified(
             f"🎧 Playlists: indexed {stats['playlists']} playlist(s) "
-            f"({stats['changed']} updated, {stats['entries']} entries, "
-            f"{stats['pruned']} removed)"
+            f"({stats['changed']} updated, {stats['typed']} type(s) recorded, "
+            f"{stats['entries']} entries, {stats['pruned']} removed)"
         )
     if stats["unresolved"]:
         # Never silent: an entry that resolves to no library track is either a

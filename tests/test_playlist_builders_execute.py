@@ -201,8 +201,9 @@ class TestTheOtherBuildersAlsoRun:
         _patch_rows(stubs["monkeypatch"], rows)
         _patch_config(stubs["monkeypatch"])
 
-        # ⚠️ The real signature is (artist, artist_scores, featured_rows) —
-        # there is no ``order_mode`` parameter; the mode is read from config.
+        # The real signature is (artist, artist_scores, featured_rows) — there
+        # is no ``order_mode`` parameter; artist-specific builders use the
+        # fixed stars-then-artist-global contract internally.
         result = fs._sync_essential_playlist(
             artist="The Offspring",
             artist_scores=[60.0 + i for i in range(20)],

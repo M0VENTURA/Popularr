@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime
 from typing import Any, Dict
 
 import structlog
@@ -156,6 +157,34 @@ def perform_library_sync() -> dict[str, Any]:
     scan_status = client.get_scan_status()
     if not scan_status.get("success"):
         return {"success": False, "skipped": True, "reason": "scan_status_failed"}
+
+    # A local file-tag correction must not be read from an unverified
+    # Navidrome index. Trigger and wait once; if that cannot be verified,
+    # defer and leave the checkpoint/last-known-good data alone.
+    try:
+        from services.scanning.reconciliation import has_dirty_navidrome_metadata
+
+        _dirty = bool(has_dirty_navidrome_metadata())
+    except Exception:
+        # Unknown is not "clean": take the full/verified path.
+        _dirty = True
+    if _dirty:
+        try:
+            from services.scanning.navidrome_rescan_service import consume_rescan_required
+
+            consume_rescan_required()
+        except Exception:
+            pass
+        if not client.trigger_and_wait_for_scan():
+            return {
+                "success": False,
+                "deferred": True,
+                "reason": "remote scan not verified",
+            }
+        scan_status = client.get_scan_status()
+        if not scan_status.get("success"):
+            return {"success": False, "skipped": True, "reason": "scan_status_failed"}
+
     if scan_status.get("scanning"):
         return {"success": False, "skipped": True, "reason": "navidrome_scanning"}
 
@@ -163,8 +192,8 @@ def perform_library_sync() -> dict[str, Any]:
     last_scan_ts = scan_status.get("lastScan")
 
     checkpoint = load_scan_checkpoint(_SYNC_CHECKPOINT) or {}
-    last_marker = checkpoint.get("scan_marker")
-    last_scan_ts_stored = checkpoint.get("last_scan_ts")
+    last_marker = checkpoint.get("last_successful_import_marker")
+    last_scan_ts_stored = checkpoint.get("last_successful_import_ts")
     
     marker_unchanged = (
         marker is not None
@@ -180,7 +209,11 @@ def perform_library_sync() -> dict[str, Any]:
     if marker_unchanged and scan_unchanged:
         return {"success": True, "skipped": True, "reason": "marker_already_processed", "marker": marker}
 
-    since_ts = last_scan_ts_stored or last_scan_ts
+    # No fallback to the current scan timestamp: a missing previous checkpoint
+    # means a full reconciliation, not "ask what changed since just now". A
+    # dirty local correction also forces the full path so its artist cannot be
+    # omitted merely because Navidrome did not report a change.
+    since_ts = None if _dirty else last_scan_ts_stored
     candidate_artists = get_candidate_artists(client, since_ts=since_ts)
     if not candidate_artists:
         return {"success": True, "skipped": True, "reason": "no_candidate_artists"}
@@ -195,6 +228,7 @@ def perform_library_sync() -> dict[str, Any]:
     seen_track_ids: set[str] = set()
     artists_processed = 0
     artists_failed = 0
+    metadata_conflicts = 0
     tracks_attempted = 0
     total = len(candidate_artists)
 
@@ -206,6 +240,9 @@ def perform_library_sync() -> dict[str, Any]:
         try:
             result = sync_artist_with_diff(artist_name, artist_id)
             artists_processed += 1
+            if result.get("success") is False:
+                artists_failed += 1
+            metadata_conflicts += int(result.get("metadata_conflicts", 0) or 0)
             with _library_status_lock:
                 _library_status["artists_processed"] = artists_processed
 
@@ -232,21 +269,46 @@ def perform_library_sync() -> dict[str, Any]:
     if all_tracks_to_upsert:
         tracks_attempted += run_bulk_commit(all_tracks_to_upsert)
 
+    if artists_failed or metadata_conflicts:
+        return {
+            "success": False,
+            "partial": True,
+            "reason": "incomplete_reconciliation",
+            "marker": marker,
+            "artists_processed": artists_processed,
+            "artists_failed": artists_failed,
+            "metadata_conflicts": metadata_conflicts,
+            "tracks_attempted": tracks_attempted,
+            "duration_seconds": time.time() - started_at,
+        }
+
     _last_processed_scan_marker = marker
     marker_extra: dict[str, Any] = {}
     if marker is not None:
+        marker_extra["last_successful_import_marker"] = marker
         marker_extra["scan_marker"] = marker
     if last_scan_ts is not None:
+        marker_extra["last_successful_import_ts"] = str(last_scan_ts)
         marker_extra["last_scan_ts"] = str(last_scan_ts)
-    if marker_extra:
-        try:
-            save_artist_scan_checkpoint(
-                "__marker__",
-                checkpoint_path=_SYNC_CHECKPOINT,
-                extra=marker_extra,
-            )
-        except Exception as exc:
-            logger.debug("Could not persist library sync marker", error=str(exc))
+    marker_extra["last_successful_import_at"] = datetime.now().isoformat()
+    try:
+        save_artist_scan_checkpoint(
+            "__marker__",
+            checkpoint_path=_SYNC_CHECKPOINT,
+            extra=marker_extra,
+        )
+    except Exception as exc:
+        logger.debug("Could not persist library sync marker", error=str(exc))
+
+    try:
+        from services.playlists.song_id_reconciliation import (
+            clear_playlist_song_rejections,
+            server_key,
+        )
+
+        clear_playlist_song_rejections(server_key(client))
+    except Exception as exc:
+        logger.debug("Playlist rejection retry reset failed", error=str(exc))
 
     duration = time.time() - started_at
     logger.info("Bulk sync complete", duration_seconds=round(duration, 2))
@@ -262,7 +324,14 @@ def perform_library_sync() -> dict[str, Any]:
 
 
 def sync_artist_with_diff(artist_name: str, artist_id: str) -> dict[str, Any]:
-    result = scan_artist_to_db(artist_name, artist_id, verbose=False, force=False, diff_mode=True)
+    result = scan_artist_to_db(
+        artist_name,
+        artist_id,
+        verbose=False,
+        force=False,
+        diff_mode=True,
+        freshness_verified=True,
+    )
     if not isinstance(result, dict):
         return {
             "skipped_mtime": False,
@@ -272,10 +341,13 @@ def sync_artist_with_diff(artist_name: str, artist_id: str) -> dict[str, Any]:
             "tracks": [],
         }
     return {
+        "success": bool(result.get("success", True)),
+        "reason": result.get("reason"),
         "skipped_mtime": bool(result.get("skipped_mtime", False)),
         "skipped_album_diff": bool(result.get("skipped_album_diff", False)),
         "changed": bool(result.get("changed", False)),
         "changed_albums": int(result.get("changed_albums", 0) or 0),
+        "metadata_conflicts": int(result.get("metadata_conflicts", 0) or 0),
         "tracks": result.get("tracks", []) or [],
     }
 

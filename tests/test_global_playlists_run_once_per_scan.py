@@ -103,12 +103,12 @@ def _spy_rebuild(monkeypatch):
 
     monkeypatch.setattr(fs, "_genre_playlists_active", lambda: True)
     monkeypatch.setattr(
-        fs, "_create_genre_top_track_playlists", lambda: calls.append("genre") or 1
+        fs, "_create_genre_top_track_playlists", lambda *a, **k: calls.append("genre") or 1
     )
     monkeypatch.setattr(
         fs, "_new_music_playlist_enabled", lambda: True
     )
-    monkeypatch.setattr(fs, "_create_new_music_playlist", lambda: calls.append("newmusic"))
+    monkeypatch.setattr(fs, "_create_new_music_playlist", lambda *a, **k: calls.append("newmusic"))
 
     # The index sync imports lazily inside the function.
     import services.playlists.playlist_index_service as idx

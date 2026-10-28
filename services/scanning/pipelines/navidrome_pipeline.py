@@ -12,6 +12,7 @@ from __future__ import annotations
 import concurrent.futures
 import os
 import threading
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -37,23 +38,75 @@ logger = structlog.get_logger(__name__)
 _PARALLEL_WORKERS = int(os.environ.get("POPULARLR_IMPORT_WORKERS", "4"))
 
 
-def sync_remote_navidrome_before_import(nav_client: Any) -> bool:
-    """Trigger ONE Navidrome server-side scan and WAIT until VERIFIED.
+def sync_remote_navidrome_before_import(
+    nav_client: Any,
+    *,
+    checkpoint_file: str | None = None,
+    use_dirty_state: bool = False,
+    force: bool = False,
+) -> bool:
+    """Ensure Navidrome has ingested local file changes, VERIFIED.
 
-    This is the ONLY automatic remote sync: the frequent per-tag-write
-    triggers were removed (they paused the server and locked the database).
-    The wait ensures freshly written file tags are fully ingested by
-    Navidrome before the import reads them back.
+    Direct callers (and older call sites) get the original behaviour: one
+    drain-and-wait scan. The import passes ``use_dirty_state=True`` so it only
+    starts a scan when there is a durable reason to (dirty local corrections or
+    no successful-import checkpoint yet). If no scan is needed it still proves
+    the server is reachable/current; otherwise it refuses the import.
 
-    ⚠️ The return value matters: when False the remote scan was NOT
-    verified (``startScan`` failed — e.g. the Navidrome user is not admin —
-    or the scan never finished).  A caller that proceeds anyway imports
-    Navidrome's PRE-save rows, whose upsert OVERWRITES the metadata just
-    saved on the album page — "the import puts the old data back".  So this
-    says so loudly instead of claiming "scan finished".
+    ⚠️ The return value matters: when False the import MUST NOT read Navidrome.
+    An unverified scan can expose the OLD indexed metadata, and the upsert
+    would then overwrite the correction Popularr just saved.
     """
     if not nav_client:
         return True  # no client configured — nothing to sync, nothing to verify
+
+    if use_dirty_state and not force:
+        try:
+            from services.scanning.navidrome_rescan_service import (
+                consume_rescan_required,
+                is_rescan_required,
+            )
+            from services.scanning.reconciliation import (
+                has_dirty_navidrome_metadata,
+            )
+            from services.scanning.scan_state import load_scan_checkpoint
+
+            checkpoint = (
+                load_scan_checkpoint(checkpoint_file)
+                if checkpoint_file
+                else {}
+            )
+            dirty = bool(has_dirty_navidrome_metadata() or is_rescan_required())
+            has_successful_import = bool(
+                checkpoint.get("last_successful_import_ts")
+            )
+            if not dirty and has_successful_import:
+                status = nav_client.get_scan_status()
+                if status.get("success") and not status.get("scanning"):
+                    logger.info(
+                        "Navidrome import freshness already established — no new scan needed"
+                    )
+                    log_unified(
+                        "Navidrome Import - Using current verified Navidrome state "
+                        "(no metadata changes pending)"
+                    )
+                    return True
+                log_unified(
+                    "⚠️ Navidrome Import deferred — Navidrome is still scanning or "
+                    "its state cannot be verified"
+                )
+                logger.warning(
+                    "Navidrome import deferred — freshness cannot be verified",
+                    error=status.get("error"),
+                )
+                return False
+            consume_rescan_required()
+        except Exception as exc:
+            logger.warning(
+                "Navidrome import freshness pre-check failed — refusing to import stale state",
+                error=str(exc),
+            )
+            return False
 
     try:
         log_unified("Navidrome Import - Triggering remote Navidrome scan (waiting for completion)…")
@@ -62,24 +115,25 @@ def sync_remote_navidrome_before_import(nav_client: Any) -> bool:
             log_unified("Navidrome Import - Remote Navidrome scan finished")
         else:
             log_unified(
-                "⚠️ Navidrome Import - Remote Navidrome scan FAILED or timed out. "
-                "Navidrome may serve STALE metadata — recently saved edits could be "
-                "overwritten by this import. Check that the Navidrome user is an "
-                "admin (startScan requires admin) and that Navidrome can scan."
+                "⚠️ Navidrome Import DEFERRED - Remote Navidrome scan FAILED or "
+                "timed out. Navidrome may serve STALE metadata, so this import "
+                "will NOT run and existing local metadata is preserved. Check "
+                "that the Navidrome user is an admin (startScan requires admin) "
+                "and that Navidrome can scan."
             )
             logger.warning(
-                "Navidrome import proceeding WITHOUT a verified remote scan — "
-                "stale rows may overwrite recently saved metadata"
+                "Navidrome import deferred — remote scan not verified; "
+                "stale rows cannot overwrite local metadata"
             )
         return remote_sync_ok
     except Exception as exc:
         logger.warning(
-            "Remote Navidrome sync failed — proceeding with import",
+            "Remote Navidrome sync failed — import deferred",
             error=str(exc),
         )
         log_unified(
-            f"⚠️ Navidrome Import - Remote scan error: {exc}. "
-            "Navidrome may serve STALE metadata to this import."
+            f"⚠️ Navidrome Import DEFERRED - Remote scan error: {exc}. "
+            "Existing local metadata is preserved."
         )
         return False
 
@@ -102,6 +156,23 @@ def run_navidrome_import_scan(
     record_scan("navidrome", "started", message=f"Navidrome import (mode={mode})")
 
     try:
+        # One authoritative import at a time. The progress file is the existing
+        # cross-process signal (web workers + standalone queue worker).
+        try:
+            from services.navidrome.import_gate import is_import_running_uncached
+
+            if is_import_running_uncached():
+                logger.warning("Navidrome import already running — not starting a second")
+                log_unified("Navidrome Import - skipped (another import is already running)")
+                record_scan(
+                    "navidrome",
+                    "failed",
+                    message="Navidrome import skipped: another import is already running",
+                )
+                return
+        except Exception:
+            pass  # fail open only for the guard read; the import itself still runs
+
         os.environ["SPTNR_SKIP_SINGLES"] = "1"
 
         if restart_requested:
@@ -137,23 +208,64 @@ def run_navidrome_import_scan(
             )
 
         # ── Remote Navidrome sync BEFORE the import ───────────────────────
-        # Verified drain-and-wait (see sync_remote_navidrome_before_import):
-        # a False return means Navidrome may serve STALE rows whose upsert
-        # would overwrite metadata just saved — the helper logs that loudly.
-        remote_sync_ok = sync_remote_navidrome_before_import(nav_client)
+        # Verified drain-and-wait. The import only asks for a scan when local
+        # metadata is dirty or no successful-import checkpoint exists yet.
+        remote_sync_ok = sync_remote_navidrome_before_import(
+            nav_client,
+            checkpoint_file=checkpoint_file,
+            use_dirty_state=True,
+            force=force_rescan,
+        )
+        if not remote_sync_ok:
+            # FAIL SAFE: never import an unverified Navidrome view. Existing
+            # local metadata is known-good and the checkpoint must not move.
+            write_progress_with_current_artist(
+                progress_file,
+                "navidrome_scan",
+                False,
+                extra={
+                    "status": "deferred",
+                    "message": "Remote Navidrome scan could not be verified",
+                    "reason": "remote scan not verified",
+                    "exit_code": 0,
+                },
+            )
+            log_unified(
+                "Navidrome Import - DEFERRED (remote scan not verified); "
+                "local metadata preserved and import checkpoint unchanged"
+            )
+            record_scan(
+                "navidrome",
+                "deferred",
+                message="Navidrome import deferred: remote scan not verified",
+            )
+            return
 
-        # Check scan marker — skip if nothing changed since last run
+        try:
+            from services.scanning.reconciliation import (
+                has_dirty_navidrome_metadata,
+            )
+
+            _metadata_dirty = bool(has_dirty_navidrome_metadata())
+        except Exception:
+            # Unknown is not "clean": force the full/reconciling path.
+            _metadata_dirty = True
+
+        checkpoint = load_scan_checkpoint(checkpoint_file)
+
+        # Check scan marker — skip if nothing changed since the last SUCCESSFUL
+        # import. Dirty local metadata forbids the skip: the import still has
+        # to observe/confirm the corrected values.
         current_marker: int | None = None
         current_last_scan: Any = None
-        if nav_client and not force_rescan:
+        if nav_client and not force_rescan and not _metadata_dirty:
             try:
                 scan_status = nav_client.get_scan_status()
                 if scan_status.get("success"):
                     current_marker = scan_status.get("count")
                     current_last_scan = scan_status.get("lastScan")
-                    checkpoint = load_scan_checkpoint(checkpoint_file)
-                    last_marker = checkpoint.get("scan_marker")
-                    last_scan_ts = checkpoint.get("last_scan_ts")
+                    last_marker = checkpoint.get("last_successful_import_marker")
+                    last_scan_ts = checkpoint.get("last_successful_import_ts")
 
                     # Skip only when BOTH the file-count marker and the last
                     # Navidrome scan timestamp are unchanged.
@@ -187,7 +299,7 @@ def run_navidrome_import_scan(
                                 False,
                                 extra={
                                     "status": "skipped",
-                                    "message": "No new tracks since last scan",
+                                    "message": "No new tracks since last successful import",
                                     "exit_code": 0,
                                 },
                             )
@@ -201,11 +313,13 @@ def run_navidrome_import_scan(
         if nav_client:
             try:
                 # Delta scan: only import artists whose albums/songs changed
-                # since the previous scan, instead of crawling the full library.
+                # since the previous SUCCESSFUL import. There is deliberately
+                # NO fallback to the scan that just completed — that timestamp
+                # describes the wrong baseline and can exclude the very changes
+                # this import is meant to read.
                 delta_since = None
-                if not force_rescan:
-                    checkpoint = load_scan_checkpoint(checkpoint_file)
-                    delta_since = checkpoint.get("last_scan_ts") or current_last_scan
+                if not force_rescan and not _metadata_dirty:
+                    delta_since = checkpoint.get("last_successful_import_ts")
 
                 if not force_rescan and delta_since is not None:
                     try:
@@ -263,6 +377,7 @@ def run_navidrome_import_scan(
         _progress_lock = threading.Lock()
         _processed_count = [0]  # mutable for closure
         _stop_requested = [False]
+        _import_success = [True]
 
         def _process_one(artist_name: str, info: dict[str, Any]) -> bool:
             """Import one artist. Returns True on success."""
@@ -273,15 +388,33 @@ def run_navidrome_import_scan(
             if not artist_id:
                 return False
 
-            scan_artist_to_db(
+            _artist_result = scan_artist_to_db(
                 artist_name,
                 artist_id,
                 verbose=False,
                 force=force_rescan,
                 filter_missing=filter_missing,
-                diff_mode=not force_rescan,
+                diff_mode=not force_rescan and not _metadata_dirty,
                 client=nav_client,
+                freshness_verified=True,
             )
+            if isinstance(_artist_result, dict):
+                if _artist_result.get("success") is False:
+                    _import_success[0] = False
+                    logger.warning(
+                        "Artist import did not complete — successful-import "
+                        "checkpoint will not advance",
+                        artist=artist_name,
+                        reason=_artist_result.get("reason"),
+                    )
+                if int(_artist_result.get("metadata_conflicts") or 0) > 0:
+                    _import_success[0] = False
+                    logger.warning(
+                        "Artist import preserved local corrections that Navidrome "
+                        "has not confirmed; successful-import checkpoint will not advance",
+                        artist=artist_name,
+                        conflicts=_artist_result.get("metadata_conflicts"),
+                    )
 
             with _progress_lock:
                 _processed_count[0] += 1
@@ -316,12 +449,14 @@ def run_navidrome_import_scan(
                 for future in concurrent.futures.as_completed(futures):
                     if is_stop_requested(progress_file):
                         _stop_requested[0] = True
+                        _import_success[0] = False
                         for f in futures:
                             f.cancel()
                         break
                     try:
                         future.result()
                     except Exception as exc:
+                        _import_success[0] = False
                         logger.error("Artist import failed", error=str(exc))
         else:
             # Serial mode (resume or forced)
@@ -329,14 +464,37 @@ def run_navidrome_import_scan(
                 artists[start_index:], start=start_index + 1
             ):
                 if is_stop_requested(progress_file):
+                    _import_success[0] = False
                     break
                 _process_one(artist_name, info)
 
+        if not _import_success[0]:
+            write_progress_with_current_artist(
+                progress_file,
+                "navidrome_scan",
+                False,
+                extra={
+                    "status": "partial",
+                    "message": "Import stopped or an artist import failed",
+                    "exit_code": 1,
+                },
+            )
+            log_unified(
+                "Navidrome Import - PARTIAL; checkpoint NOT advanced so the "
+                "next run retries the incomplete reconciliation"
+            )
+            record_scan(
+                "navidrome",
+                "failed",
+                message="Navidrome import partial — checkpoint not advanced",
+            )
+            return
+
         clear_scan_checkpoint(checkpoint_file)
 
-        # Save final marker so next run can skip if nothing changed
+        # Save the SUCCESSFUL-import checkpoint. The marker/timestamp describe
+        # the last completed and committed import, never a scan that merely ran.
         if nav_client and not force_rescan:
-            # Re-fetch marker after scan if we skipped the initial check
             try:
                 if current_marker is None or current_last_scan is None:
                     scan_status = nav_client.get_scan_status()
@@ -347,9 +505,24 @@ def run_navidrome_import_scan(
 
                 marker_extra: dict[str, Any] = {}
                 if current_marker is not None:
+                    marker_extra["last_successful_import_marker"] = current_marker
                     marker_extra["scan_marker"] = current_marker
                 if current_last_scan is not None:
+                    marker_extra["last_successful_import_ts"] = str(current_last_scan)
                     marker_extra["last_scan_ts"] = str(current_last_scan)
+                marker_extra["last_successful_import_at"] = datetime.now().isoformat()
+
+                # A successful import makes previously rejected playlist IDs
+                # worth retrying: the mapping may have been refreshed.
+                try:
+                    from services.playlists.song_id_reconciliation import (
+                        clear_playlist_song_rejections,
+                        server_key,
+                    )
+
+                    clear_playlist_song_rejections(server_key(nav_client))
+                except Exception as exc:
+                    logger.debug("Playlist rejection retry reset failed", error=str(exc))
 
                 if marker_extra:
                     save_artist_scan_checkpoint(
@@ -358,7 +531,7 @@ def run_navidrome_import_scan(
                         extra=marker_extra,
                     )
             except Exception as exc:
-                logger.debug("Could not save scan marker", error=str(exc))
+                logger.debug("Could not save successful-import checkpoint", error=str(exc))
 
         write_progress_with_current_artist(
             progress_file,
@@ -367,10 +540,7 @@ def run_navidrome_import_scan(
             extra={"status": "complete", "exit_code": 0},
         )
 
-        log_unified(
-            "Navidrome Import - Complete"
-            + ("" if remote_sync_ok else " (remote scan NOT verified — see warning above)")
-        )
+        log_unified("Navidrome Import - Complete")
         record_scan("navidrome", "completed", message="Navidrome import complete")
 
     except Exception as exc:

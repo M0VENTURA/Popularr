@@ -17,7 +17,7 @@ from typing import Any
 import structlog
 
 from db.repositories import popularity_cache as cache_repo
-from helpers.normalization_service import strip_diacritics
+from helpers.normalization_service import has_mastering_marker, strip_diacritics
 from services.popularity.popularity_matching import (
     get_primary_artist_preserve_case,
     normalize_for_aggregation,
@@ -73,6 +73,19 @@ _lf_top_tracks_titles: dict[str, dict[str, str]] = {}
 
 # Last.fm top-tags for the same map.
 _lf_top_tracks_tags: dict[str, dict[str, str]] = {}
+
+
+def clear_prefetch_memory_caches() -> None:
+    """Drop the per-process artist.getTopTracks maps.
+
+    A FORCED scan must not answer from a map built by an earlier pass: that map
+    may predate a provider-side change (or our own remaster matching fix), and
+    the whole point of a forced refresh is to replace a stale match.
+    """
+    with _CACHE_LOCK:
+        _lf_top_tracks_cache.clear()
+        _lf_top_tracks_titles.clear()
+        _lf_top_tracks_tags.clear()
 
 
 def _is_fresh(row: dict[str, Any]) -> bool:
@@ -193,7 +206,14 @@ def _lf_top_tracks_map(lastfm_client: Any, artist: str) -> dict[str, dict[str, i
     tags: dict[str, str] = {}
     acc: dict[str, dict[str, int]] = {}
     best: dict[str, tuple[int, str]] = {}
-    
+    # Remaster rows are the SAME performance as the plain title. Summing them
+    # into the plain row doubles the audience (e.g. 400k + 400k = 800k), so a
+    # remaster row competes with the plain total on strength instead.
+    remaster_best: dict[str, tuple[int, int, str]] = {}
+    remaster_tags: dict[str, str] = {}
+    plain_playcount_seen: dict[str, bool] = {}
+    remaster_playcount_seen: dict[str, bool] = {}
+
     for track in top_tracks:
         if not isinstance(track, dict):
             continue
@@ -203,29 +223,77 @@ def _lf_top_tracks_map(lastfm_client: Any, artist: str) -> dict[str, dict[str, i
         key = _norm(name)
         if not key:
             continue
-            
+
         listeners = int(track.get("listeners") or 0)
         playcount = int(track.get("playcount") or 0)
-        
+
+        if has_mastering_marker(str(name)):
+            previous = remaster_best.get(key)
+            if previous is None or (listeners, playcount) > (previous[0], previous[1]):
+                remaster_best[key] = (listeners, playcount, str(name))
+                remaster_playcount_seen[key] = "playcount" in track
+                _tags = _extract_top_tags(track)
+                if _tags:
+                    remaster_tags[key] = _tags
+            continue
+
+        if "playcount" in track:
+            plain_playcount_seen[key] = True
         entry = acc.setdefault(key, {"lastfm_listeners": 0, "lastfm_playcount": 0})
         entry["lastfm_listeners"] += listeners
         entry["lastfm_playcount"] += playcount
-        
+
         if key not in best or listeners > best[key][0]:
             best[key] = (listeners, name)
             _tags = _extract_top_tags(track)
             if _tags:
                 tags[key] = _tags
-                
-    for key, counts in acc.items():
-        out[key] = dict(counts)
-        titles[key] = best.get(key, (0, key))[1]
-        
+
+    for key in set(acc) | set(remaster_best):
+        plain = acc.get(key)
+        remaster = remaster_best.get(key)
+        if plain is not None and remaster is not None:
+            plain_strength = (plain["lastfm_listeners"], plain["lastfm_playcount"])
+            remaster_strength = (remaster[0], remaster[1])
+            if remaster_strength > plain_strength:
+                out[key] = {
+                    "name": remaster[2],
+                    "lastfm_listeners": remaster[0],
+                    "lastfm_playcount": remaster[1],
+                    "_playcount_available": bool(
+                        remaster_playcount_seen.get(key, False)
+                    ),
+                }
+                titles[key] = remaster[2]
+                if remaster_tags.get(key):
+                    tags[key] = remaster_tags[key]
+                continue
+        if plain is not None:
+            out[key] = dict(plain)
+            out[key]["name"] = best.get(key, (0, key))[1]
+            out[key]["_playcount_available"] = bool(
+                plain_playcount_seen.get(key, False)
+            )
+            titles[key] = best.get(key, (0, key))[1]
+            continue
+        if remaster is not None:
+            out[key] = {
+                "name": remaster[2],
+                "lastfm_listeners": remaster[0],
+                "lastfm_playcount": remaster[1],
+                "_playcount_available": bool(
+                    remaster_playcount_seen.get(key, False)
+                ),
+            }
+            titles[key] = remaster[2]
+            if remaster_tags.get(key):
+                tags[key] = remaster_tags[key]
+
     with _CACHE_LOCK:
         _lf_top_tracks_cache[cache_key] = out
         _lf_top_tracks_titles[cache_key] = titles
         _lf_top_tracks_tags[cache_key] = tags
-        
+
     return out
 
 
@@ -561,6 +629,23 @@ def prefetch_artist_popularity(
 
     # 2. Last.fm: one bulk call, only when some title lacks LF data.
     if lastfm_client is not None and _missing("lastfm_listeners"):
+        if force:
+            # A forced pass must re-query the provider, not reuse a map built by
+            # an earlier pass. This is the "stale/bad match survives a forced
+            # refresh" path.
+            with _CACHE_LOCK:
+                _lf_top_tracks_cache.pop(_lf_cache_key, None)
+                _lf_top_tracks_titles.pop(_lf_cache_key, None)
+                _lf_top_tracks_tags.pop(_lf_cache_key, None)
+            try:
+                from services.popularity.popularity_sources import (
+                    invalidate_artist_provider_cache,
+                )
+
+                invalidate_artist_provider_cache(artist)
+            except Exception as exc:
+                logger.debug("Provider cache invalidation failed", artist=artist, error=str(exc))
+
         lf_map = _lf_top_tracks_map(lastfm_client, artist)
         
         with _CACHE_LOCK:

@@ -7,6 +7,7 @@ a persistent, configurable scheduler that survives gunicorn worker reloads.
 Managed jobs:
     - ``library_sync`` — Periodic library sync with Navidrome (default: every 6 hours)
     - ``popularity_scan`` — Periodic popularity recalculation (default: daily)
+    - ``playlist_maintenance`` — GLOBAL playlist reconciliation (default: daily)
     - ``download_queue_processor`` — Process queued downloads (default: every 30s)
 
 Architecture:
@@ -215,6 +216,7 @@ def _scheduler_env_enabled() -> bool:
 _JOB_LOCK_KEY_MAP = {
     "library_sync": "popularr_scheduler_library_sync",
     "popularity_scan": "popularr_scheduler_popularity_scan",
+    "playlist_maintenance": "popularr_scheduler_playlist_maintenance",
     "navidrome_import": "popularr_scheduler_navidrome_import",
     "download_queue_processor": "popularr_scheduler_download_queue",
     "queue_processor_watchdog": "popularr_scheduler_queue_watchdog",
@@ -566,6 +568,31 @@ def _register_default_jobs(
         except Exception as exc:
             logger.warning("APScheduler failed to register popularity_scan", error=str(exc))
 
+    # ── Playlist maintenance (GLOBAL reconciliation) ───────────────────────
+    #
+    # The authoritative library-wide playlist pass. It rebuilds EVERY managed
+    # playlist (genre, decade, New Music, curated, favourites), sweeps genuine
+    # orphaned GENRE playlists and reconciles the playlist index. Incremental
+    # artist/album finalisation does not run it: it refreshes only the genre
+    # playlists that artist's changes touch, so the daily pass is what
+    # guarantees eventual consistency.
+    #
+    # `interval_minutes: 0` disables it; `enabled: false` too.
+    playlist_maintenance_interval = _interval("playlist_maintenance", "interval_minutes", 1440)
+    if playlist_maintenance_interval <= 0 or not _enabled("playlist_maintenance", None, True):
+        _remove_job("playlist_maintenance")
+    else:
+        try:
+            _put(
+                "playlist_maintenance", "Global playlist reconciliation",
+                IntervalTrigger(minutes=playlist_maintenance_interval),
+                func=_run_playlist_maintenance_job,
+                max_instances=1,
+                coalesce=True,
+            )
+        except Exception as exc:
+            logger.warning("APScheduler failed to register playlist_maintenance", error=str(exc))
+
     # ── Navidrome import (keep the database current) ──
     #
     # The scheduled Import (the same pipeline the dashboard's Import button
@@ -873,6 +900,24 @@ def _run_upcoming_musicbrainz_job() -> None:
             return
         from services.upcoming_releases.musicbrainz_fetcher_service import fetch_musicbrainz_upcoming_releases
         fetch_musicbrainz_upcoming_releases()
+
+
+def _run_playlist_maintenance_job() -> None:
+    """Daily GLOBAL playlist reconciliation, guarded across workers."""
+    with _job_tick_lock("playlist_maintenance") as _acquired:
+        if not _acquired:
+            logger.debug(
+                "Skipping playlist_maintenance tick — another worker holds the lock"
+            )
+            return
+        try:
+            from services.popularity.stages.finalise_stage import (
+                run_global_playlist_rebuild,
+            )
+
+            run_global_playlist_rebuild(reason="scheduled daily maintenance")
+        except Exception as exc:
+            logger.warning("Scheduled playlist maintenance failed", error=str(exc))
 
 
 def _run_popularity_scan_job() -> None:

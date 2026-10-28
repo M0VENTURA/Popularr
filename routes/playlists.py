@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import threading
 import time
 
 from quart import Blueprint, render_template, redirect, url_for, session, request, jsonify, send_file
@@ -1439,3 +1440,30 @@ async def api_playlists_delete():
     except Exception as exc:
         logging.error("Failed to delete playlist: %s", exc, exc_info=True)
         return jsonify({"error": f"Delete failed: {exc}"}), 500
+
+
+@playlists_bp.route("/api/playlists/rebuild-all", methods=["POST"])
+async def api_playlists_rebuild_all():
+    """Trigger the GLOBAL playlist reconciliation in the background.
+
+    This is the manual equivalent of the daily ``playlist_maintenance`` job:
+    every managed playlist (genre, decade, New Music, curated, favourites) is
+    rebuilt, genuine genre orphans are swept and the playlist index is
+    reconciled. Normal artist/album finalisation does NOT run this.
+    """
+
+    def _run() -> None:
+        try:
+            from services.popularity.stages.finalise_stage import (
+                run_global_playlist_rebuild,
+            )
+
+            run_global_playlist_rebuild(reason="manual rebuild-all")
+        except Exception as exc:
+            logging.error("Manual playlist rebuild failed: %s", exc, exc_info=True)
+
+    thread = threading.Thread(
+        target=_run, name="playlist-rebuild-all", daemon=True
+    )
+    thread.start()
+    return jsonify({"accepted": True, "message": "Global playlist rebuild started"}), 202

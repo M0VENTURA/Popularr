@@ -627,20 +627,17 @@ class TestTheEssentialCollectionOrdering:
         ) == ["Quiet", "Loud"]
 
     def test_the_essential_builder_shares_the_top_tracks_orderer(self):
-        """Symmetry pin: the SAME input must produce the SAME order whether it
-        is going into a genre Top Tracks playlist or an Essential Collection."""
+        """Symmetry pin: the artist page and Essential Collection must agree."""
         rows = [
             {**track("Five Loud", "A", stored=20, lf=800_000), "stars": 5},
             {**track("Five Quiet", "A", stored=95, lf=500), "stars": 5},
             {**track("Four Loud", "A", stored=10, lf=5_000_000), "stars": 4},
             {**track("Five Mid", "A", stored=60, lf=40_000), "stars": 5},
         ]
-        # ``final_score`` is the default mode; the star tier still leads.
-        top_tracks = titles_of(fs._ordered_playlist_rows(list(rows), order_mode="final_score"))
-        essential = titles_of(fs._ordered_playlist_rows(list(rows), order_mode="final_score"))
-        assert essential == top_tracks
-        assert top_tracks[:3] == ["Five Quiet", "Five Mid", "Five Loud"], (
-            "5★ tier first, strongest FINAL SCORE first inside it"
+        essential = titles_of(fs._ordered_playlist_rows(list(rows), order_mode="artist_global"))
+        assert essential == ["Five Loud", "Five Mid", "Five Quiet", "Four Loud"], (
+            "5★ tier first, then ARTIST-GLOBAL listener popularity (not the "
+            "album-relative final score) inside it"
         )
 
 
@@ -759,10 +756,12 @@ class TestTheBuildersUseTheOrderingPipeline:
 
     def test_the_essential_builder_uses_the_shared_orderer(self):
         src = self._finalise_source()
-        assert "winners = _ordered_playlist_rows(winners, order_mode=order_mode)" in src, (
-            "the Essential Collection must use the SAME ordering pipeline as the "
-            "genre Top Tracks builder, or it silently ignores playlist_order_mode"
+        assert 'order_mode = "artist_global"' in src, (
+            "the Essential Collection is an artist-specific list: it must rank "
+            "by stars then artist-global popularity, not the album-relative "
+            "final score selected for library-wide builders"
         )
+        assert "winners = _ordered_playlist_rows(winners, order_mode=order_mode)" in src
         assert "_ordered_by_percentile_then_prominence" not in strip_py_comments(src), (
             "the percentile-first orderer must be gone; keeping it would leave a "
             "second ordering contract in place"

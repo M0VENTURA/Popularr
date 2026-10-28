@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime
 from typing import Any, Callable
 import structlog
 
@@ -385,16 +386,51 @@ def start_boot_navidrome_import():
         checkpoint_path = get_navidrome_checkpoint_path()
 
         try:
+            from services.scanning.navidrome_scan_service import get_nav_client
+            from services.scanning.pipelines.navidrome_pipeline import (
+                sync_remote_navidrome_before_import,
+            )
+
+            try:
+                nav_client = get_nav_client()
+            except Exception as exc:
+                logger.warning("Boot Navidrome import: client unavailable", error=str(exc))
+                write_progress_with_current_artist(
+                    progress,
+                    "navidrome_scan",
+                    False,
+                    extra={"status": "error", "error": str(exc), "exit_code": 1},
+                )
+                return
+            if not sync_remote_navidrome_before_import(
+                nav_client,
+                checkpoint_file=checkpoint_path,
+                use_dirty_state=True,
+            ):
+                write_progress_with_current_artist(
+                    progress,
+                    "navidrome_scan",
+                    False,
+                    extra={
+                        "status": "deferred",
+                        "message": "Remote Navidrome scan could not be verified",
+                        "exit_code": 0,
+                    },
+                )
+                return
+
             write_progress_with_current_artist(progress, "navidrome_scan", True)
             pre_import_sync_album_artists()
             
             # Also sort alphabetical for the boot import pass
             raw_artists = list((build_artist_index() or {}).items())
             artists = sorted(raw_artists, key=lambda x: str(x[0]).lower())
+            _boot_success = True
 
             for name, data in artists:
                 if is_stop_requested(progress):
                     log_unified("Boot scan stopped by user")
+                    _boot_success = False
                     break
 
                 write_progress_with_current_artist(progress, "navidrome_scan", True, current_artist=name)
@@ -405,8 +441,20 @@ def start_boot_navidrome_import():
 
                 try:
                     # Enabled diff_mode here to make startup imports significantly faster
-                    scan_artist_to_db(name, artist_id, diff_mode=True)
+                    _result = scan_artist_to_db(
+                        name,
+                        artist_id,
+                        diff_mode=True,
+                        client=nav_client,
+                        freshness_verified=True,
+                    )
+                    if isinstance(_result, dict) and (
+                        _result.get("success") is False
+                        or int(_result.get("metadata_conflicts") or 0) > 0
+                    ):
+                        _boot_success = False
                 except Exception as exc:
+                    _boot_success = False
                     if "OperationalError" in str(exc) or "connection" in str(exc).lower():
                         log_unified("🛑 CRITICAL: Database connection lost during boot import. Aborting.")
                         break
@@ -414,7 +462,35 @@ def start_boot_navidrome_import():
 
                 save_artist_scan_checkpoint(name, checkpoint_path)
 
+            if not _boot_success:
+                write_progress_with_current_artist(
+                    progress,
+                    "navidrome_scan",
+                    False,
+                    extra={"status": "partial", "exit_code": 1},
+                )
+                log_unified(
+                    "Boot Navidrome import PARTIAL — checkpoint not advanced"
+                )
+                return
+
             clear_scan_checkpoint(checkpoint_path)
+            if nav_client is not None:
+                try:
+                    _status = nav_client.get_scan_status()
+                    _extra = {"last_successful_import_at": datetime.now().isoformat()}
+                    if _status.get("success"):
+                        if _status.get("count") is not None:
+                            _extra["last_successful_import_marker"] = _status.get("count")
+                        if _status.get("lastScan") is not None:
+                            _extra["last_successful_import_ts"] = str(_status.get("lastScan"))
+                    save_artist_scan_checkpoint(
+                        "__marker__",
+                        checkpoint_path=checkpoint_path,
+                        extra=_extra,
+                    )
+                except Exception:
+                    pass
             write_progress_with_current_artist(progress, "navidrome_scan", False)
             mark_navidrome_first_full_import_complete("boot")
             log_unified("Boot Navidrome import complete")

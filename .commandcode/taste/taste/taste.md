@@ -1,0 +1,16 @@
+# Taste
+- Expects the implementation to be read and understood before any edit; asks explicitly to "inspect the existing implementation before changing anything" and repeats this per subsystem (handlers, cleaners, schedulers). Confidence: 0.9
+- Preserves existing behaviour by default — scoring, eligibility rules, caps, ordering, exclusions and configuration — and expects changes to be strictly limited to what was requested. Confidence: 0.85
+- Prefers reusing what already exists (existing locks, helper functions, existing logging style, existing selection logic) over introducing a second implementation or a new framework. Confidence: 0.8
+- Favours incremental per-item work with expensive library-wide work deferred to a separate scheduled/manual reconciliation pass, rather than doing global work after every item. Confidence: 0.75
+- Wants filtering/narrowing pushed as far down the pipeline as safely possible (into the query/DB) instead of computing everything and filtering just before the write. Confidence: 0.7
+- Dislikes redundant writes: if the computed desired state equals the current state, nothing should be written to the external system. Confidence: 0.7
+- Prefers explicit, typed identification over name/path-pattern heuristics for destructive operations, and being conservative — delete nothing — when ownership cannot be positively proven. Confidence: 0.7
+- Asks for timing/performance instrumentation around hot code paths, using the project's existing logging conventions rather than a new logging framework. Confidence: 0.7
+- Writes long, numbered specs (primary goal, current problem, per-section requirements, "do not change" constraints) and expects them followed section by section. Confidence: 0.65
+- Before a behaviour change, wants the whole data flow traced end to end (every source, cache, normaliser, fallback and downstream consumer) and explicit questions answered — "do not modify scoring until the matching path is understood". Confidence: 0.75
+- Wants one central classification/normalisation authority reused by every source, rather than each source getting its own competing rule set ("reuse existing classification rather than creating competing rules"). Confidence: 0.75
+- Prefers exact matching first, then a deliberately narrow fallback, and never merging results obtained by different strategies (no summing tiers). Confidence: 0.65
+- Under genuine uncertainty prefers the conservative answer — keep things separate / do nothing — over a plausible but unproven positive match. Confidence: 0.7
+- Wants per-decision provenance logged (what was requested, what matched, which strategy matched) so a future bad match is obvious, at DEBUG rather than flooding INFO. Confidence: 0.7
+- Expects a structured closing report: root cause, files changed, what old vs new behaviour is, tests added, test results, and questionable cases deliberately left unchanged. Confidence: 0.65

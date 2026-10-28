@@ -1916,6 +1916,20 @@ def _persist_album_track_payloads(
         return 0, 0
     try:
         if upsert_tracks_bulk(payloads):
+            # The DB correction is authoritative even if a later FILE write
+            # fails. Mark it before the file phase so a stale Navidrome import
+            # can never reverse it; a verified import clears the mark only when
+            # it observes the corrected values.
+            try:
+                from services.scanning.reconciliation import (
+                    mark_local_tags_written_for_track_ids,
+                )
+
+                mark_local_tags_written_for_track_ids(
+                    [str(p.get("id")) for p in payloads if p.get("id")]
+                )
+            except Exception as exc:
+                logger.debug("Album save metadata authority stamp failed", error=str(exc))
             return len(payloads), 0
         return 0, len(payloads)
     except Exception as db_err:

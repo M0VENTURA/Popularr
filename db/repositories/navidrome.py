@@ -20,9 +20,21 @@ def bulk_upsert_navidrome_tracks(conn: Any = None, tracks: list[dict[str, Any]] 
                     INSERT INTO tracks (id, title, artist, album, duration)
                     VALUES (:id, :title, :artist, :album, :duration)
                     ON CONFLICT (id) DO UPDATE SET
-                        title = EXCLUDED.title,
-                        artist = EXCLUDED.artist,
-                        album = EXCLUDED.album,
+                        title = CASE WHEN COALESCE(tracks.metadata_dirty_for_navidrome, FALSE)
+                                      AND tracks.local_tags_written_at IS NOT NULL
+                                      AND (tracks.navidrome_imported_at IS NULL
+                                           OR tracks.local_tags_written_at >= tracks.navidrome_imported_at)
+                                     THEN tracks.title ELSE EXCLUDED.title END,
+                        artist = CASE WHEN COALESCE(tracks.metadata_dirty_for_navidrome, FALSE)
+                                       AND tracks.local_tags_written_at IS NOT NULL
+                                       AND (tracks.navidrome_imported_at IS NULL
+                                            OR tracks.local_tags_written_at >= tracks.navidrome_imported_at)
+                                      THEN tracks.artist ELSE EXCLUDED.artist END,
+                        album = CASE WHEN COALESCE(tracks.metadata_dirty_for_navidrome, FALSE)
+                                      AND tracks.local_tags_written_at IS NOT NULL
+                                      AND (tracks.navidrome_imported_at IS NULL
+                                           OR tracks.local_tags_written_at >= tracks.navidrome_imported_at)
+                                     THEN tracks.album ELSE EXCLUDED.album END,
                         duration = EXCLUDED.duration
                 """),
                 {

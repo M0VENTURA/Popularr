@@ -761,6 +761,18 @@ def _run_full_scan_as_artist_pipeline(
                 "[FULL_SCAN] End-of-scan playlist rebuild failed", error=str(exc)
             )
 
+        # One rescan for the whole scan, even a stopped one: the scan may have
+        # written rating tags to disk, and the coalescer collapses this into
+        # the single running/pending scan.
+        try:
+            from services.scanning.navidrome_rescan_service import (
+                flush_rescan_if_required,
+            )
+
+            flush_rescan_if_required("full scan complete")
+        except Exception as exc:
+            logger.debug("[FULL_SCAN] End-of-scan rescan flush failed", error=str(exc))
+
         # A completed full scan clears the checkpoint so the NEXT scan starts
         # from the top (no stale resume point).  A stopped/failed scan keeps it
         # so the next run resumes where it left off.

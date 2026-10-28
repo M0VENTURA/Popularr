@@ -67,6 +67,93 @@ def stored_changed_map() -> dict[str, str]:
         return {str(r["playlist_id"]): str(r["changed"] or "") for r in rows}
 
 
+def stored_managed_type_map() -> dict[str, str]:
+    """``playlist_id -> managed_type`` for every indexed playlist.
+
+    The sync compares this alongside the content stamp so a classification
+    written by a NEWER build (or a changed config template) is backfilled even
+    when the playlist's contents have not moved.
+    """
+    with db_session() as session:
+        if not _tables_exist(session):
+            return {}
+        try:
+            rows = session.execute(
+                text("SELECT playlist_id, managed_type FROM playlists")
+            ).mappings().all()
+        except Exception:
+            return {}
+        return {
+            str(row.get("playlist_id") or ""): str(row.get("managed_type") or "")
+            for row in rows
+            if str(row.get("playlist_id") or "")
+        }
+
+
+def update_playlist_managed_type(playlist_id: str, managed_type: str | None) -> int:
+    """Backfill one playlist's ownership type WITHOUT touching its entries.
+
+    The sync calls this when the content stamp is unchanged but the stored type
+    differs (a newer build, or a changed naming template). Re-fetching every
+    playlist just to record a type would be a full-library read for a metadata
+    change.
+    """
+    with db_session() as session:
+        if not _tables_exist(session):
+            return 0
+        try:
+            result = session.execute(
+                text(
+                    "UPDATE playlists SET managed_type = :managed_type "
+                    "WHERE playlist_id = :playlist_id"
+                ),
+                {"managed_type": managed_type, "playlist_id": playlist_id},
+            )
+            return int(result.rowcount or 0)
+        except Exception:
+            return 0
+
+
+def playlist_index_available() -> bool:
+    """True when the playlist index tables are present and queryable.
+
+    Destructive cleanup uses this as its proof gate: an unavailable index means
+    "ownership cannot be proven", and the safe answer is to delete nothing.
+    """
+    with db_session() as session:
+        return _tables_exist(session)
+
+
+def managed_playlist_types() -> dict[str, str]:
+    """``playlist name (casefolded) -> managed_type`` for the orphan cleaner.
+
+    Returns only rows whose type is KNOWN. A playlist absent from this map is
+    one the cleaner must not treat as its own, which is why the caller cannot
+    use a missing entry as "orphan".
+
+    Tolerant by design: an un-migrated database (no ``managed_type`` column)
+    reads as ``{}``, so cleanup refuses until the index has been migrated and
+    re-synced rather than guessing from names.
+    """
+    with db_session() as session:
+        if not _tables_exist(session):
+            return {}
+        try:
+            rows = session.execute(
+                text(
+                    "SELECT name, managed_type FROM playlists "
+                    "WHERE managed_type IS NOT NULL AND TRIM(managed_type) <> ''"
+                )
+            ).mappings().all()
+        except Exception:
+            return {}
+        return {
+            str(row.get("name") or "").strip().casefold(): str(row.get("managed_type") or "")
+            for row in rows
+            if str(row.get("name") or "").strip()
+        }
+
+
 def replace_playlist(
     *,
     playlist_id: str,
@@ -79,6 +166,7 @@ def replace_playlist(
     comment: str | None,
     changed: str | None,
     track_ids: list[str],
+    managed_type: str | None = None,
 ) -> dict[str, int]:
     """Replace one playlist's row and its entries in a SINGLE transaction.
 
@@ -102,14 +190,15 @@ def replace_playlist(
             text(
                 "INSERT INTO playlists "
                 "(playlist_id, name, source, type, owner, is_public, song_count, "
-                " comment, changed, synced_at) "
+                " comment, changed, managed_type, synced_at) "
                 "VALUES (:playlist_id, :name, :source, :type, :owner, :is_public, "
-                "        :song_count, :comment, :changed, CURRENT_TIMESTAMP) "
+                "        :song_count, :comment, :changed, :managed_type, CURRENT_TIMESTAMP) "
                 "ON CONFLICT (playlist_id) DO UPDATE SET "
                 "  name = EXCLUDED.name, source = EXCLUDED.source, "
                 "  type = EXCLUDED.type, owner = EXCLUDED.owner, "
                 "  is_public = EXCLUDED.is_public, song_count = EXCLUDED.song_count, "
                 "  comment = EXCLUDED.comment, changed = EXCLUDED.changed, "
+                "  managed_type = EXCLUDED.managed_type, "
                 "  synced_at = CURRENT_TIMESTAMP"
             ),
             {
@@ -122,6 +211,7 @@ def replace_playlist(
                 "song_count": int(song_count or 0),
                 "comment": comment,
                 "changed": changed,
+                "managed_type": managed_type,
             },
         )
 

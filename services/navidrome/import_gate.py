@@ -105,18 +105,38 @@ def _progress_file() -> str:
 
 
 def _read_import_running() -> bool:
-    """Read the import progress file. Unreadable/missing → NOT running."""
+    """Read the cross-process import state.
+
+    The canonical state is now the DB-backed ``scan_states`` row written by
+    ``scan_state.write_progress_with_current_artist``. The JSON progress file
+    is still honoured for legacy/standalone workers and tests, but a DB row
+    saying ``is_running`` must win: otherwise the playlist/rating gate never
+    defers during a modern import.
+    """
+    file_running = False
     try:
         path = _progress_file()
         with open(path, "r", encoding="utf-8") as handle:
             state: Any = json.load(handle)
-        return bool((state or {}).get("is_running"))
+        file_running = bool((state or {}).get("is_running"))
     except FileNotFoundError:
-        return False
+        pass
+    except Exception as exc:
+        logger.debug("Navidrome import gate: file state unreadable", error=str(exc))
+
+    try:
+        from db.engine import db_session
+        from db.models import ScanState
+
+        with db_session() as session:
+            row = session.query(ScanState).filter_by(scan_type="navidrome_scan").first()
+            if row is not None and bool(row.is_running):
+                return True
     except Exception as exc:
         # Fail OPEN — see the module docstring.
-        logger.debug("Navidrome import gate: state unreadable, assuming idle", error=str(exc))
-        return False
+        logger.debug("Navidrome import gate: DB state unreadable", error=str(exc))
+
+    return file_running
 
 
 def is_import_running() -> bool:

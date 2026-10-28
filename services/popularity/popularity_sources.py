@@ -31,9 +31,8 @@ from api_clients.listenbrainz import (
 from helpers.normalization_service import (
     normalize_unicode_punctuation,
     strip_cover_attribution,
-    strip_diacritics,
     strip_featured_artist,
-    REMASTER_MARKER_RE,
+    has_mastering_marker,
     titles_match_for_review,
 )
 from services.popularity.popularity_matching import (
@@ -44,6 +43,12 @@ from services.popularity.popularity_matching import (
     get_primary_artist_preserve_case,
     normalize_for_aggregation,
     title_variants_compatible,
+)
+from services.popularity.title_versioning import (
+    classify_popularity_title,
+    normalized_title_key,
+    popularity_lookup_titles,
+    remaster_performance_key,
 )
 
 logger = structlog.get_logger(__name__)
@@ -104,6 +109,26 @@ def clear_provider_memory_caches() -> None:
             cache.clear()
 
 
+def invalidate_artist_provider_cache(artist: str) -> None:
+    """Drop cached provider data for ONE artist.
+
+    Called by a FORCED prefetch so a bad historical remaster match cannot be
+    replayed from this process's artist catalogue/max/online-rank caches.
+    """
+    keys = {
+        _artist_cache_key(artist),
+        _artist_cache_key(get_primary_artist_preserve_case(artist)),
+    }
+    keys.discard("")
+    if not keys:
+        return
+    with _CACHE_LOCK:
+        for cache in (_lastfm_artist_catalog_cache, _lastfm_artist_max_cache,
+                      _ONLINE_CATALOGUE_CACHE):
+            for key in keys:
+                cache.pop(key, None)
+
+
 def _parse_number(value: Any, default: int = 0) -> int:
     try:
         return int(str(value if value not in (None, "") else default)
@@ -135,7 +160,11 @@ def _length_agreement(local_seconds: Any, release_ms: Any) -> bool | None:
 def _artist_cache_key(value: str) -> str:
     # Do not strip diacritics here: different artist names must not share a
     # bucket merely because transliteration makes their spellings identical.
-    return normalize_unicode_punctuation(str(value or "")).casefold().strip()
+    # Apostrophes ARE folded: "D'artagnan" and "dArtagnan" are one artist, and
+    # leaving them distinct split both the cache and the provider-row dedupe.
+    text = normalize_unicode_punctuation(str(value or ""))
+    text = text.replace("'", "").replace("\u2019", "")
+    return text.casefold().strip()
 
 
 def _token_similarity(a: str, b: str) -> float:
@@ -202,12 +231,13 @@ _PERFORMANCE_PATTERNS = {
     "live": r"\blive\b",
     "acoustic": r"\b(?:acoustic|unplugged|stripped)\b",
     "orchestral": r"\b(?:orchestral|orchestra|symphonic)\b",
+    "strings": r"\bstrings\s+(?:version|arrangement)\b",
     "demo": r"\bdemo\b",
     "instrumental": r"\binstrumental\b",
     "karaoke": r"\bkaraoke\b",
-    "remix": r"\b(?:remix|club mix|extended mix|dub mix)\b",
+    "remix": r"\b(?:remix|remixed|mix|club mix|extended(?:\s+mix)?|dub mix|rework|bootleg)\b",
     "edit": r"\b(?:radio edit|single edit|extended edit|edit)\b",
-    "alternate": r"\b(?:alternate|alternative take|alt|take)\b",
+    "alternate": r"\b(?:alternate take|alternative take|alternate|alternative|alt|take\s+\d+)\b",
     "session": r"\b(?:session|rehearsal|jam[- ]along)\b",
     "rerecording": r"\bre[- ]?record(?:ed|ing)\b",
     "piano": r"\bpiano version\b",
@@ -215,10 +245,12 @@ _PERFORMANCE_PATTERNS = {
 _PERFORMANCE_RES = {key: re.compile(value, re.I)
                     for key, value in _PERFORMANCE_PATTERNS.items()}
 _ALTERNATE_PERFORMANCE_RE = re.compile(
-    r"[\[(][^\])]*\b(?:live|unplugged|acoustic|orchestral|symphonic|demo|"
-    r"instrumental|karaoke|remix|alternate|alt|take|session|rehearsal|jam[- ]along)"
-    r"\b[^\])]*[\])]|\s+-\s*(?:live|unplugged|acoustic|orchestral|symphonic|"
-    r"demo|instrumental|karaoke|remix|alternate|alt|take|session|rehearsal|jam[- ]along)\s*$",
+    r"[\[(][^\])]*\b(?:live|unplugged|acoustic|orchestral|symphonic|strings|demo|"
+    r"instrumental|karaoke|remix|mix|extended|edit|alternate|alt|take|session|"
+    r"rehearsal|jam[- ]along|re[- ]?record(?:ed|ing)|piano)"
+    r"\b[^\])]*[\])]|\s+-\s*(?:live|unplugged|acoustic|orchestral|symphonic|strings|"
+    r"demo|instrumental|karaoke|remix|mix|extended|edit|alternate|alt|take|session|"
+    r"rehearsal|jam[- ]along|re[- ]?record(?:ed|ing)|piano)\s*$",
     re.I,
 )
 
@@ -250,8 +282,10 @@ def _alt_status_matches_ctx(
         return target == candidate
     if target_is_alt_rendition:
         # A boolean says the version is alternate, but not WHICH alternate.
-        # Refuse speculative aggregation until a version-bearing title is supplied.
-        return False
+        # Accept a candidate that carries its OWN visible marker rather than
+        # the plain studio row; the exact flavour is then visible in the
+        # provenance (protected_version / matched_title).
+        return bool(candidate)
     return not candidate
 
 
@@ -285,6 +319,10 @@ def _credit_identity_tokens(value: str) -> frozenset[str]:
     tokens: set[str] = set()
     for part in _CREDIT_SPLIT_RE.split(str(value or "")):
         part = normalize_unicode_punctuation(_resolve_credit_alias(part.strip()))
+        # "D'artagnan" and "dArtagnan" are the SAME credited name; leaving the
+        # ASCII apostrophe as a token boundary split one artist into {d,
+        # artagnan}, which then never matched its own catalogue row.
+        part = part.replace("'", "").replace("\u2019", "")
         tokens.update(token for token in re.findall(r"[^\W_]+", part.casefold())
                       if token not in _CREDIT_JOIN_TOKENS)
     return frozenset(tokens)
@@ -321,7 +359,22 @@ def _normalize_artist(name: str) -> str:
 def _artist_matches(target: str, candidate: str) -> bool:
     left = _credit_identity_tokens(target)
     right = _credit_identity_tokens(candidate)
-    return bool(left and right and left == right)
+    if not (left and right):
+        return False
+    if left == right:
+        return True
+    # A COLLABORATION indexes the same recording under each contributor's own
+    # artist page. Accept a candidate that IS one of the target's explicit
+    # lookup candidates, or a multi-token subset of a multi-artist credit
+    # (e.g. the featured half). A single-token subset is NOT accepted for a
+    # slash/comma artist name: "AC/DC" must not answer for a different "AC".
+    candidates = get_artist_lookup_candidates(target)
+    if len(candidates) <= 1:
+        return False
+    candidate_sets = {_credit_identity_tokens(item) for item in candidates}
+    if right in candidate_sets:
+        return True
+    return len(right) >= 2 and right.issubset(left)
 
 
 def _search_item_artist(item: dict[str, Any]) -> str:
@@ -549,8 +602,23 @@ def _release_year(value: Any) -> int | None:
 
 
 def _release_is_remaster_edition(release: dict[str, Any]) -> bool:
-    """Explicit label only. Release age does not establish remaster status."""
-    return bool(REMASTER_MARKER_RE.search(str(release.get("title") or "")))
+    """True for an explicit remaster title or a reissue more than two years on.
+
+    A remaster is the SAME performance on a new mastering; a reissue/remaster
+    release usually reuses the original recordings, so its identities are safe
+    to prefer for popularity. Release age ALONE is not evidence: a same-cycle
+    reissue within two years is not a remaster.
+    """
+    if has_mastering_marker(str(release.get("title") or "")):
+        return True
+    release_year = _release_year(release.get("date"))
+    group = release.get("release-group") or {}
+    first_year = _release_year(
+        group.get("first-release-date") if isinstance(group, dict) else None
+    )
+    return bool(
+        release_year and first_year and (release_year - first_year) > 2
+    )
 
 
 def _original_release_of_group(release: dict[str, Any], mb_client: Any) -> dict[str, Any] | None:
@@ -740,18 +808,72 @@ def get_listenbrainz_score_for_track(track: dict[str, Any]) -> int:
 def get_lastfm_track_info(
     artist: str, title: str, track_mbid: str | None = None,
     album_artist: str | None = None, lastfm_client: LastFmClient | None = None,
+    is_live_release: bool = False, target_is_alt_rendition: bool = False,
 ) -> dict[str, Any]:
+    """Direct ``track.getInfo`` with the EXACT → safe-remaster fallback.
+
+    The MBID is used only on the exact tier. A remaster MBID can point at a
+    near-empty remaster page, so the canonical fallback deliberately queries
+    the title alone and lets Last.fm resolve the canonical release.
+    """
     if lastfm_client is None:
         return {"track_play": 0, "listeners": 0}
-    results = []
-    for candidate in _unique_ids(get_artist_lookup_candidates(artist, album_artist=album_artist)):
-        try:
-            result = lastfm_client.get_track_info(candidate, title, track_mbid=track_mbid)
-            if isinstance(result, dict):
-                results.append(result)
-        except Exception:
-            continue
-    return choose_best_provider_counts(results) if results else {"track_play": 0, "listeners": 0}
+    if not hasattr(lastfm_client, "get_track_info"):
+        raise AttributeError("Last.fm client has no get_track_info")
+    requested = normalize_unicode_punctuation(title)
+    for lookup_title, match_type in popularity_lookup_titles(requested):
+        results = []
+        errors: list[Exception] = []
+        for candidate in _unique_ids(
+            get_artist_lookup_candidates(artist, album_artist=album_artist)
+        ):
+            try:
+                result = lastfm_client.get_track_info(
+                    candidate,
+                    lookup_title,
+                    track_mbid=track_mbid if match_type == "exact" else None,
+                )
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result.setdefault("artist", _search_item_artist(result) or candidate)
+                    if not _lastfm_candidate_ok(
+                        result,
+                        candidate,
+                        lookup_title,
+                        is_live=is_live_release,
+                        is_alt=target_is_alt_rendition,
+                    ):
+                        continue
+                    result["lookup_title"] = lookup_title
+                    result["match_type"] = match_type
+                    result.setdefault("requested_title", requested)
+                    results.append(result)
+            except Exception as exc:
+                errors.append(exc)
+                continue
+        if not results and errors:
+            # Every candidate failed. Let the caller keep its stored counts
+            # instead of stamping a fabricated zero with a fresh timestamp.
+            raise errors[-1]
+        if results:
+            best = choose_best_provider_counts(results)
+            if _count(best.get("listeners")) or _count(
+                best.get("track_play") or best.get("playcount")
+            ):
+                if match_type != "exact":
+                    logger.debug(
+                        "[POPULARITY_MATCH]",
+                        artist=artist,
+                        library_title=requested,
+                        canonical_title=lookup_title,
+                        source="lastfm",
+                        lookup=match_type,
+                        matched_title=str(
+                            best.get("name") or best.get("title") or lookup_title
+                        ),
+                    )
+                return best
+    return {"track_play": 0, "listeners": 0}
 
 
 def _configured_lastfm_client(client: Any = None, api_key: str | None = None) -> Any:
@@ -788,6 +910,9 @@ def _artist_catalogue(artist: str, client: Any) -> list[dict[str, Any]]:
             catalogue.append({"name": raw_title,
                               "listeners": _count(entry.get("lastfm_listeners")),
                               "playcount": _count(entry.get("lastfm_playcount")),
+                              "_playcount_available": bool(
+                                  entry.get("_playcount_available", True)
+                              ),
                               "artist": artist,
                               "_raw_title_verified": bool(entry.get("name") or entry.get("title"))})
     except Exception as exc:
@@ -891,14 +1016,184 @@ def get_online_artist_track_rank(
 
 
 def _empty_lastfm() -> dict[str, Any]:
-    return {"listeners": 0, "track_play": 0, "matched_tracks": []}
+    return {
+        "listeners": 0,
+        "track_play": 0,
+        "matched_tracks": [],
+        "playcount_available": False,
+        "lookup_path": "none",
+    }
+
+
+def _lastfm_item_strength(item: dict[str, Any]) -> tuple[int, int]:
+    return (
+        _count(item.get("listeners")),
+        _count(item.get("playcount") or item.get("track_play")),
+    )
 
 
 def _lastfm_result(items: list[dict[str, Any]]) -> dict[str, Any]:
-    # Different provider buckets may contain overlapping listeners.
-    return {"listeners": sum(_count(i.get("listeners")) for i in items),
-            "track_play": sum(_count(i.get("playcount") or i.get("track_play")) for i in items),
-            "matched_tracks": items}
+    """Aggregate provider rows, treating mastering variants as ONE entity.
+
+    Different provider buckets may contain overlapping listeners, so rows are
+    summed — BUT "Orpheus" and "Orpheus (2011 Remaster)" are the SAME audience
+    under two spellings, and adding them would invent 800k from 400k + 400k.
+
+    The split matters: two IDENTICAL plain spellings are separate provider
+    buckets the project has always summed (the novelty-take regression pins
+    that), while a mastering variant competes with the plain total on strength
+    instead of being added to it.
+    """
+    plain_by_key: dict[str, list[dict[str, Any]]] = {}
+    remaster_best: dict[str, dict[str, Any]] = {}
+
+    for item in items or []:
+        title = str(item.get("name") or item.get("title") or "")
+        # Include the ACTOR: a collaboration legitimately indexes the same
+        # title under each contributing artist, and those split counts are
+        # intentionally merged. Remaster variants by the SAME artist are not.
+        artist_key = _artist_cache_key(_search_item_artist(item))
+        performance_key = remaster_performance_key(title) or _lastfm_item_key(item)
+        key = f"{artist_key}::{performance_key}" if artist_key else performance_key
+
+        raw_key = normalized_title_key(title)
+        is_mastering_variant = performance_key != raw_key
+        if is_mastering_variant:
+            previous = remaster_best.get(key)
+            if previous is None or _lastfm_item_strength(item) > _lastfm_item_strength(previous):
+                remaster_best[key] = item
+        else:
+            plain_by_key.setdefault(key, []).append(item)
+
+    chosen: list[dict[str, Any]] = []
+    for key in set(plain_by_key) | set(remaster_best):
+        plain_items = plain_by_key.get(key) or []
+        remaster_item = remaster_best.get(key)
+        if plain_items and remaster_item:
+            plain_strength = (
+                sum(_count(i.get("listeners")) for i in plain_items),
+                sum(_count(i.get("playcount") or i.get("track_play")) for i in plain_items),
+            )
+            if _lastfm_item_strength(remaster_item) > plain_strength:
+                chosen.append(remaster_item)
+            else:
+                chosen.extend(plain_items)
+            continue
+        chosen.extend(plain_items)
+        if remaster_item is not None:
+            chosen.append(remaster_item)
+
+    playcount_available = any(
+        item.get(
+            "_playcount_available",
+            (
+                item.get("track_play") is not None
+                or item.get("playcount") is not None
+            ),
+        )
+        for item in chosen
+    )
+    return {
+        "listeners": sum(_count(i.get("listeners")) for i in chosen),
+        "track_play": sum(_count(i.get("playcount") or i.get("track_play")) for i in chosen),
+        "matched_tracks": chosen,
+        "playcount_available": playcount_available,
+    }
+
+
+#: Same "credible data" floor the cache policy and track stage use. Below it,
+#: a remaster's own near-empty page is not strong evidence and the safe
+#: canonical fallback may beat it.
+_LASTFM_USEFUL_MIN_COUNT = 25
+
+
+def _lastfm_evidence_strength(result: dict[str, Any] | None) -> int:
+    """0 = none, 1 = weak, 2 = useful/high-confidence."""
+    if not result:
+        return 0
+    listeners = _count(result.get("listeners"))
+    plays = max(
+        _count(result.get("track_play")),
+        _count(result.get("playcount")),
+    )
+    if listeners >= _LASTFM_USEFUL_MIN_COUNT or plays >= _LASTFM_USEFUL_MIN_COUNT:
+        return 2
+    return 1 if (listeners > 0 or plays > 0) else 0
+
+
+def _lastfm_count_pair(result: dict[str, Any] | None) -> tuple[int, int]:
+    if not result:
+        return (0, 0)
+    return (
+        _count(result.get("listeners")),
+        max(_count(result.get("track_play")), _count(result.get("playcount"))),
+    )
+
+
+def _annotate_lastfm_result(
+    result: dict[str, Any],
+    *,
+    artist: str,
+    requested_title: str,
+    lookup_title: str,
+    match_type: str,
+) -> dict[str, Any]:
+    """Attach source/lookup provenance without changing the counts."""
+    info = classify_popularity_title(requested_title)
+    annotated = dict(result)
+    annotated.setdefault("requested_title", requested_title)
+    annotated["lookup_title"] = lookup_title
+    annotated["match_type"] = match_type
+    annotated["canonical_song_title"] = info.canonical_song_title
+    annotated["canonical_title"] = info.mastering_stripped_title or info.canonical_song_title
+    annotated["protected_versions"] = sorted(info.protected_versions)
+    annotated["source"] = "lastfm"
+
+    matched = annotated.get("matched_tracks") or []
+    if matched:
+        best_item = max(
+            matched,
+            key=lambda item: (
+                _count(item.get("listeners")),
+                _count(item.get("playcount") or item.get("track_play")),
+            ),
+        )
+        annotated["matched_title"] = str(
+            best_item.get("name") or best_item.get("title") or lookup_title
+        )
+    else:
+        annotated["matched_title"] = lookup_title
+
+    # The exact tier may have matched a CANONICAL provider row through the
+    # normaliser (Last.fm has "Orpheus" but the row is titled "Orpheus (2011
+    # Remaster)"). Record that honestly as the remaster fallback, not as an
+    # exact-title hit.
+    if match_type == "exact" and has_mastering_marker(info.display_title):
+        matched_cf = str(annotated["matched_title"]).strip().casefold()
+        canonical_cf = info.mastering_stripped_title.strip().casefold()
+        if canonical_cf and matched_cf == canonical_cf:
+            match_type = "canonical_remaster_fallback"
+            lookup_title = info.mastering_stripped_title
+            annotated["lookup_title"] = lookup_title
+
+    if (
+        info.protected_versions
+        or info.display_title != lookup_title
+        or str(annotated["matched_title"]).casefold() != info.display_title.casefold()
+    ):
+        logger.debug(
+            "[POPULARITY_MATCH]",
+            artist=artist,
+            library_title=info.display_title,
+            canonical_title=info.mastering_stripped_title,
+            canonical_version_title=info.mastering_stripped_title,
+            protected_version=",".join(sorted(info.protected_versions)) or None,
+            source="lastfm",
+            lookup=match_type,
+            matched_title=annotated["matched_title"],
+            lookup_path=annotated.get("lookup_path"),
+        )
+    return annotated
 
 
 def _lastfm_item_key(item: dict[str, Any]) -> str:
@@ -918,8 +1213,13 @@ def _lastfm_candidate_ok(
         return False
     if not item_title:
         return False
-    if require_artist and not _artist_matches(artist, _search_item_artist(item)):
-        return False
+    if require_artist:
+        item_artist = _search_item_artist(item)
+        # A search hit may omit the artist entirely; it came from a query for
+        # THIS artist, so absence is not a mismatch. A PRESENT different
+        # artist is decisive.
+        if item_artist and not _artist_matches(artist, item_artist):
+            return False
     if not _alt_status_matches_ctx(title, item_title, target_is_live=is_live,
                                    target_is_alt_rendition=is_alt):
         return False
@@ -943,18 +1243,26 @@ def _lastfm_direct(client: Any, artist: str, title: str, mbid: str | None = None
             is_live=False, is_alt=False,
         ):
             return _empty_lastfm()
-        return {"listeners": _count(info.get("listeners")),
-                "track_play": _count(info.get("track_play") or info.get("playcount")),
-                "matched_tracks": []}
+        return {
+            "listeners": _count(info.get("listeners")),
+            "track_play": _count(info.get("track_play") or info.get("playcount")),
+            "matched_tracks": [],
+            "playcount_available": bool(
+                info.get("track_play") is not None
+                or info.get("playcount") is not None
+            ),
+            "lookup_path": "direct",
+        }
     except Exception as exc:
         logger.debug("Last.fm direct lookup failed", artist=artist, track=title, error=str(exc))
         return _empty_lastfm()
 
 
-def get_search_aggregated_lastfm_popularity(
-    artist: str, track_title: str, lastfm_client: Any = None,
+def _search_aggregated_lastfm_for_title(
+    artist: str, track_title: str, lastfm_client: Any,
     is_live_release: bool = False, target_is_alt_rendition: bool = False,
 ) -> dict[str, Any]:
+    """One title's Last.fm search/direct result. No canonical fallback here."""
     if lastfm_client is None:
         return _empty_lastfm()
     artist = normalize_unicode_punctuation(artist)
@@ -982,18 +1290,21 @@ def get_search_aggregated_lastfm_popularity(
             if previous is None or _count(item.get("listeners")) > _count(previous.get("listeners")):
                 matched[key] = dict(item)
     if matched:
-        return _lastfm_result(list(matched.values()))
+        result = _lastfm_result(list(matched.values()))
+        result["lookup_path"] = "search"
+        return result
     # Guard explicit title markers as well as release-derived flags.
     if is_live_release or target_is_alt_rendition or _is_alternate_performance_title(track_title):
         return _empty_lastfm()
     return _lastfm_direct(lastfm_client, artist, track_title)
 
 
-def get_aggregated_lastfm_popularity(
-    artist: str, track_title: str, lastfm_client: Any = None,
+def _aggregated_lastfm_for_title(
+    artist: str, track_title: str, lastfm_client: Any,
     isrc: str | None = None, recording_mbid: str | None = None,
     is_live_release: bool = False, target_is_alt_rendition: bool = False,
 ) -> dict[str, Any]:
+    """One title's full Last.fm aggregation. No canonical fallback here."""
     if lastfm_client is None:
         return _empty_lastfm()
     artist = normalize_unicode_punctuation(artist)
@@ -1003,14 +1314,34 @@ def get_aggregated_lastfm_popularity(
         return _empty_lastfm()
     matched: dict[str, dict[str, Any]] = {}
     # A collaboration is not automatically identical to each contributor's
-    # solo catalogue. Search can still find the full credited collaboration.
-    for item in _artist_catalogue(artist, lastfm_client):
-        if _lastfm_candidate_ok(item, artist, track_title, is_live=is_live_release,
-                               is_alt=target_is_alt_rendition):
-            matched[_lastfm_item_key(item)] = item
+    # solo catalogue. The FULL credit is tried first: if it resolves, the
+    # sub-artist catalogues must NOT be added on top (that would double-count
+    # the same scrobbles). Only when the full credit is empty do we merge each
+    # contributor's catalogue — where the split counts really do live.
+    catalogue_artists = [artist]
+    if ARTIST_JOIN_RE.search(artist):
+        catalogue_artists.extend(
+            candidate
+            for candidate in get_artist_lookup_candidates(artist)
+            if candidate.casefold() != artist.casefold()
+        )
+    for catalogue_artist in catalogue_artists:
+        before = len(matched)
+        for item in _artist_catalogue(catalogue_artist, lastfm_client):
+            if _lastfm_candidate_ok(
+                item, catalogue_artist, track_title,
+                is_live=is_live_release,
+                is_alt=target_is_alt_rendition,
+            ):
+                matched[_lastfm_item_key(item)] = item
+        if catalogue_artist.casefold() == artist.casefold() and len(matched) > before:
+            # Full-credit catalogue resolved; do not add contributor counts.
+            break
     best = _lastfm_result(list(matched.values())) if matched else _empty_lastfm()
-    if not matched or _is_featured_artist(artist) or ARTIST_JOIN_RE.search(artist):
-        search = get_search_aggregated_lastfm_popularity(
+    if matched:
+        best["lookup_path"] = "catalogue"
+    if not matched or _is_featured_artist(artist):
+        search = _search_aggregated_lastfm_for_title(
             artist, track_title, lastfm_client, is_live_release, target_is_alt_rendition,
         )
         if (search["listeners"], search["track_play"]) > (best["listeners"], best["track_play"]):
@@ -1019,7 +1350,9 @@ def get_aggregated_lastfm_popularity(
         return best
     if is_live_release or target_is_alt_rendition or _is_alternate_performance_title(track_title):
         return _empty_lastfm()
-    variants: dict[str, dict[str, Any]] = {"Primary": _lastfm_direct(lastfm_client, artist, track_title)}
+    variants: dict[str, dict[str, Any]] = {
+        "Primary": _lastfm_direct(lastfm_client, artist, track_title)
+    }
     if isrc or recording_mbid:
         resolved = resolve_isrc_recording(isrc, title=track_title, artist=artist) if isrc else None
         mbid = (resolved or {}).get("recording_mbid") or recording_mbid
@@ -1028,10 +1361,12 @@ def get_aggregated_lastfm_popularity(
                 lastfm_client, str((resolved or {}).get("artist") or artist),
                 str((resolved or {}).get("title") or track_title), str(mbid),
             )
+            variants["ISRC"]["lookup_path"] = "isrc_direct"
     if _is_featured_artist(artist):
         inverted = invert_featured_artist(artist)
         if inverted != artist:
             variants["Inverted"] = _lastfm_direct(lastfm_client, inverted, track_title)
+            variants["Inverted"]["lookup_path"] = "inverted_direct"
     best_key = max(variants, key=lambda key: (variants[key]["listeners"], variants[key]["track_play"]))
     result = dict(variants[best_key])
     if len(variants) > 1:
@@ -1039,6 +1374,103 @@ def get_aggregated_lastfm_popularity(
             key: value["listeners"] for key, value in variants.items() if value["listeners"] > 0
         })
     return result
+
+
+def get_search_aggregated_lastfm_popularity(
+    artist: str, track_title: str, lastfm_client: Any = None,
+    is_live_release: bool = False, target_is_alt_rendition: bool = False,
+) -> dict[str, Any]:
+    """Search-aggregate Last.fm, trying EXACT then the safe remaster fallback.
+
+    Only the first tier with usable evidence is returned; the two tiers are
+    never summed, so an original and its remaster cannot double the count.
+    """
+    if lastfm_client is None:
+        return _empty_lastfm()
+    requested = normalize_unicode_punctuation(track_title)
+    weak: tuple[dict[str, Any], str, str] | None = None
+    weak_pair: tuple[int, int] | None = None
+    for lookup_title, match_type in popularity_lookup_titles(requested):
+        result = _search_aggregated_lastfm_for_title(
+            artist, lookup_title, lastfm_client,
+            is_live_release=is_live_release,
+            target_is_alt_rendition=target_is_alt_rendition,
+        )
+        strength = _lastfm_evidence_strength(result)
+        if strength >= 2:
+            return _annotate_lastfm_result(
+                result,
+                artist=artist,
+                requested_title=requested,
+                lookup_title=lookup_title,
+                match_type=match_type,
+            )
+        if strength == 1:
+            pair = _lastfm_count_pair(result)
+            if weak is None or pair > (weak_pair or (0, 0)):
+                weak = (result, lookup_title, match_type)
+                weak_pair = pair
+    if weak is not None:
+        return _annotate_lastfm_result(
+            weak[0],
+            artist=artist,
+            requested_title=requested,
+            lookup_title=weak[1],
+            match_type=weak[2],
+        )
+    return _empty_lastfm()
+
+
+def get_aggregated_lastfm_popularity(
+    artist: str, track_title: str, lastfm_client: Any = None,
+    isrc: str | None = None, recording_mbid: str | None = None,
+    is_live_release: bool = False, target_is_alt_rendition: bool = False,
+) -> dict[str, Any]:
+    """Aggregate Last.fm, trying EXACT then the safe remaster fallback.
+
+    The recording MBID/ISRC are used only on the exact tier: the fallback is
+    deliberately title-based, because the remaster's own identity is the thing
+    that failed to provide useful evidence.
+    """
+    if lastfm_client is None:
+        return _empty_lastfm()
+    requested = normalize_unicode_punctuation(track_title)
+    weak: tuple[dict[str, Any], str, str] | None = None
+    weak_pair: tuple[int, int] | None = None
+    for lookup_title, match_type in popularity_lookup_titles(requested):
+        _exact = match_type == "exact"
+        result = _aggregated_lastfm_for_title(
+            artist,
+            lookup_title,
+            lastfm_client,
+            isrc=isrc if _exact else None,
+            recording_mbid=recording_mbid if _exact else None,
+            is_live_release=is_live_release,
+            target_is_alt_rendition=target_is_alt_rendition,
+        )
+        strength = _lastfm_evidence_strength(result)
+        if strength >= 2:
+            return _annotate_lastfm_result(
+                result,
+                artist=artist,
+                requested_title=requested,
+                lookup_title=lookup_title,
+                match_type=match_type,
+            )
+        if strength == 1:
+            pair = _lastfm_count_pair(result)
+            if weak is None or pair > (weak_pair or (0, 0)):
+                weak = (result, lookup_title, match_type)
+                weak_pair = pair
+    if weak is not None:
+        return _annotate_lastfm_result(
+            weak[0],
+            artist=artist,
+            requested_title=requested,
+            lookup_title=weak[1],
+            match_type=weak[2],
+        )
+    return _empty_lastfm()
 
 
 def _recording_artist_mbids(recording: dict[str, Any]) -> set[str]:
@@ -1078,6 +1510,48 @@ def _lb_result(mbids: Any, **extra: Any) -> dict[str, Any]:
     return {"total_listen_count": total, "total_user_count": users, "mbids": ids, **extra}
 
 
+def _lb_search_recording_ids(
+    lookup_title: str,
+    artist: str,
+    client: Any,
+    *,
+    is_live_release: bool = False,
+    target_is_alt_rendition: bool = False,
+) -> set[str]:
+    """MusicBrainz recordings for ONE lookup title, matching performance/artist."""
+    found: set[str] = set()
+    try:
+        from helpers.normalization_service import normalize_title_for_lucene_query
+        from api_clients.musicbrainz_http import escape_lucene_special_chars
+
+        query = (
+            f'recording:"{escape_lucene_special_chars(normalize_title_for_lucene_query(lookup_title))}" '
+            f'AND artist:"{escape_lucene_special_chars(artist)}"'
+        )
+        target = normalize_for_aggregation(lookup_title)
+        for rec in client.search_recordings(query, limit=20) or []:
+            if not isinstance(rec, dict) or not rec.get("id"):
+                continue
+            if not _artist_matches(artist, _release_credit_text(rec)):
+                continue
+            if not _alt_status_matches_ctx(
+                lookup_title, _recording_title(rec), target_is_live=is_live_release,
+                target_is_alt_rendition=target_is_alt_rendition,
+            ):
+                continue
+            candidate = normalize_for_aggregation(str(rec.get("title") or ""))
+            if (
+                target
+                and candidate
+                and aggregation_keys_compatible(target, candidate)
+                and _token_similarity(target, candidate) >= 0.90
+            ):
+                found.add(str(rec["id"]))
+    except Exception as exc:
+        logger.debug("LB recording candidate search failed", artist=artist, track=lookup_title, error=str(exc))
+    return found
+
+
 def get_aggregated_listenbrainz_popularity(
     title: str, artist: str, primary_mbid: str | None = None,
     isrc: str | None = None, lb_client: Any = None, mb_client: Any = None,
@@ -1085,38 +1559,60 @@ def get_aggregated_listenbrainz_popularity(
 ) -> dict[str, Any]:
     # lb_client remains accepted for compatibility; counts use the established
     # module-level LB batch wrapper, whose contract is known to this module.
+    requested = normalize_unicode_punctuation(title)
+    info = classify_popularity_title(requested)
     mbids: set[str] = set(_unique_ids([primary_mbid]))
     client = _shared_mb(mb_client)
     if isrc and not primary_mbid:
         resolved = resolve_isrc_recording(
-            isrc, mb_client=client, title=title, artist=artist,
+            isrc, mb_client=client, title=requested, artist=artist,
             is_live_release=is_live_release, target_is_alt_rendition=target_is_alt_rendition,
         )
         if resolved and resolved.get("recording_mbid"):
             mbids.add(str(resolved["recording_mbid"]))
-    if client is not None and hasattr(client, "search_recordings"):
-        try:
-            from helpers.normalization_service import normalize_title_for_lucene_query
-            from api_clients.musicbrainz_http import escape_lucene_special_chars
-            query = (f'recording:"{escape_lucene_special_chars(normalize_title_for_lucene_query(title))}" '
-                     f'AND artist:"{escape_lucene_special_chars(artist)}"')
-            target = normalize_for_aggregation(title)
-            for rec in client.search_recordings(query, limit=20) or []:
-                if not isinstance(rec, dict) or not rec.get("id"):
-                    continue
-                if not _artist_matches(artist, _release_credit_text(rec)):
-                    continue
-                if not _alt_status_matches_ctx(
-                    title, _recording_title(rec), target_is_live=is_live_release,
-                    target_is_alt_rendition=target_is_alt_rendition,
-                ):
-                    continue
-                candidate = normalize_for_aggregation(str(rec.get("title") or ""))
-                if target and candidate and aggregation_keys_compatible(target, candidate) and _token_similarity(target, candidate) >= 0.90:
-                    mbids.add(str(rec["id"]))
-        except Exception as exc:
-            logger.debug("LB recording candidate search failed", artist=artist, track=title, error=str(exc))
-    return _lb_result(mbids)
+
+    matched_lookup = ""
+    matched_type = "recording_mbid" if mbids else "none"
+    # If a recording identity is already known, TRUST it. Searching by title
+    # as well would add a remaster/original sibling recording and SUM the same
+    # audience twice (the explicit "do not double 400k into 800k" rule).
+    if client is not None and hasattr(client, "search_recordings") and not mbids:
+        # EXACT first, then the safe remaster title. Only the first tier with
+        # candidates contributes recordings; the tiers are never summed.
+        for lookup_title, match_type in info.lookup_titles():
+            found = _lb_search_recording_ids(
+                lookup_title,
+                artist,
+                client,
+                is_live_release=is_live_release,
+                target_is_alt_rendition=target_is_alt_rendition,
+            )
+            if found:
+                mbids.update(found)
+                matched_lookup = lookup_title
+                matched_type = match_type
+                break
+
+    result = _lb_result(mbids)
+    result.update({
+        "requested_title": info.display_title,
+        "canonical_title": info.mastering_stripped_title,
+        "lookup_title": matched_lookup or (primary_mbid or "") or next(iter(mbids), ""),
+        "match_type": matched_type,
+        "protected_versions": sorted(info.protected_versions),
+        "source": "listenbrainz",
+    })
+    if matched_type == "canonical_remaster_fallback":
+        logger.debug(
+            "[POPULARITY_MATCH]",
+            artist=artist,
+            library_title=info.display_title,
+            canonical_title=info.mastering_stripped_title,
+            source="listenbrainz",
+            lookup=matched_type,
+            matched_title=matched_lookup,
+        )
+    return result
 
 
 def _empty_work_lb_result() -> dict[str, Any]:
@@ -1188,7 +1684,19 @@ def get_work_level_listenbrainz_popularity(
         if not left or not right or not aggregation_keys_compatible(left, right):
             continue
         mbids.add(str(rec["id"]))
-    return _lb_result(mbids, work_mbid=work_mbid, source="work")
+    info = classify_popularity_title(title)
+    result = _lb_result(mbids, work_mbid=work_mbid, source="work")
+    result.update({
+        "requested_title": info.display_title,
+        # Work identity alone is NOT recording identity: the artist and
+        # performance-marker checks above are what make these recordings
+        # eligible to share ListenBrainz evidence.
+        "canonical_title": info.mastering_stripped_title,
+        "protected_versions": sorted(info.protected_versions),
+        "lookup_title": info.mastering_stripped_title or info.display_title,
+        "match_type": "work_recording_identity",
+    })
+    return result
 
 
 def get_metadata_sources_info(single_sources: list[str]) -> dict[str, Any]:

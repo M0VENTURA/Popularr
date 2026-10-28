@@ -63,6 +63,7 @@ def cleanup_stale_album_tracks_if_needed(
     cached_ids_for_album: set[str],
     navidrome_tracks: list[dict[str, Any]],
     live_track_ids: set[str] | None = None,
+    allow_cleanup: bool = True,
 ) -> None:
     """Delete DB tracks that no longer exist in a Navidrome album.
 
@@ -76,6 +77,12 @@ def cleanup_stale_album_tracks_if_needed(
     just rewritten.
     """
     nav_ids = {track.get("id") for track in navidrome_tracks if track.get("id")}
+    if not allow_cleanup:
+        logger.debug(
+            "Stale album cleanup skipped — import is not a verified full reconciliation",
+            artist=artist_name, album=album_name,
+        )
+        return
     if live_track_ids:
         nav_ids |= set(live_track_ids)
     stale_ids = cached_ids_for_album - nav_ids
@@ -106,8 +113,15 @@ def cleanup_stale_artist_tracks_if_needed(
     artist_name: str,
     existing_track_ids: set[str],
     navidrome_track_ids: set[str],
+    allow_cleanup: bool = True,
 ) -> None:
     """Delete DB tracks that no longer exist in Navidrome for an artist."""
+    if not allow_cleanup:
+        logger.debug(
+            "Stale artist cleanup skipped — import is not a verified full reconciliation",
+            artist=artist_name,
+        )
+        return
     if not existing_track_ids:
         return
     if not navidrome_track_ids:

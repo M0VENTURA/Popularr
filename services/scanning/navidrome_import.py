@@ -45,6 +45,19 @@ from services.scanning.cleanup import (
 )
 from services.scanning.filters import should_skip_album, should_skip_cached_album
 from services.scanning.metadata_extractor import extract_album_metadata, extract_track_metadata
+from services.scanning.reconciliation import (
+    adopt_navidrome_track_id,
+    build_existing_indexes,
+    db_album_fingerprint,
+    find_adoptable_track_id,
+    invalidate_track_id_caches,
+    local_authority_conflicts,
+    local_authority_values_match,
+    mark_navidrome_import_confirmed,
+    mark_navidrome_import_seen,
+    navidrome_album_fingerprint,
+    path_keys,
+)
 from services.scanning.scan_state import is_stop_requested
 from services.scanning.payload_builder import build_track_payload
 
@@ -332,8 +345,10 @@ def prefetch_artist_state(*, canonical_artist_name: str) -> dict[str, Any]:
     """
     existing_track_ids: set[str] = set()
     existing_album_tracks: dict[str, set[str]] = {}
+    existing_album_rows: dict[str, list[dict[str, Any]]] = {}
     existing_album_artists: dict[str, str] = {}
     albums_needing_reimport: set[str] = set()
+    all_rows: list[dict[str, Any]] = []
 
     def _missing(value: Any) -> bool:
         """NULL / empty / non-positive numeric = the field never landed."""
@@ -350,7 +365,11 @@ def prefetch_artist_state(*, canonical_artist_name: str) -> dict[str, Any]:
     with db_session() as session:
         result = session.execute(
             text("""
-                SELECT id, album, album_artist, duration, track_number, year, file_path
+                SELECT id, album, album_artist, duration, track_number, year, file_path,
+                       title, artist, disc_number, musicbrainz_trackid, recording_mbid,
+                       mbid, navidrome_genres,
+                       local_tags_written_at, metadata_dirty_for_navidrome,
+                       navidrome_imported_at
                 FROM tracks
                 WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
             """),
@@ -358,27 +377,73 @@ def prefetch_artist_state(*, canonical_artist_name: str) -> dict[str, Any]:
         )
 
         for row in result.fetchall() or []:
-            track_id = row[0]
-            album = row[1]
-            album_artist = row[2]
+            mapping = dict(row._mapping) if hasattr(row, "_mapping") else {}
+            if not mapping:
+                continue
+            track_id = mapping.get("id")
+            album = mapping.get("album")
+            album_artist = mapping.get("album_artist")
+            row_dict = {
+                "id": str(track_id) if track_id else "",
+                "album": str(album or ""),
+                "album_artist": str(album_artist or ""),
+                "title": mapping.get("title") or "",
+                "artist": mapping.get("artist") or "",
+                "duration": mapping.get("duration"),
+                "track_number": mapping.get("track_number"),
+                "disc_number": mapping.get("disc_number"),
+                "year": mapping.get("year"),
+                "file_path": mapping.get("file_path") or "",
+                "musicbrainz_trackid": mapping.get("musicbrainz_trackid") or "",
+                "recording_mbid": mapping.get("recording_mbid") or "",
+                "mbid": mapping.get("mbid") or "",
+                "navidrome_genres": mapping.get("navidrome_genres") or "",
+                "local_tags_written_at": mapping.get("local_tags_written_at"),
+                "metadata_dirty_for_navidrome": bool(
+                    mapping.get("metadata_dirty_for_navidrome")
+                ),
+                "navidrome_imported_at": mapping.get("navidrome_imported_at"),
+            }
+            all_rows.append(row_dict)
 
             if track_id:
                 existing_track_ids.add(str(track_id))
             if album and track_id:
-                existing_album_tracks.setdefault(strip_album_edition_marker(str(album)), set()).add(str(track_id))
+                album_key = strip_album_edition_marker(str(album))
+                existing_album_tracks.setdefault(album_key, set()).add(str(track_id))
+                existing_album_rows.setdefault(album_key, []).append(row_dict)
             if album and album_artist:
                 existing_album_artists[strip_album_edition_marker(str(album))] = str(album_artist)
             # Any critical field still empty → this album needs a re-import
             # when ``filter_missing`` is on (all four ARE on the wire, so a
             # re-import genuinely fills them).
-            if album and any(_missing(value) for value in row[3:]):
+            if album and any(
+                _missing(row_dict.get(field))
+                for field in ("duration", "track_number", "year", "file_path")
+            ):
                 albums_needing_reimport.add(strip_album_edition_marker(str(album)))
+
+    existing_album_fingerprints = {
+        album_key: db_album_fingerprint(rows)
+        for album_key, rows in existing_album_rows.items()
+    }
+    existing_album_dirty = {
+        album_key: any(bool(row.get("metadata_dirty_for_navidrome")) for row in rows)
+        for album_key, rows in existing_album_rows.items()
+    }
+    by_path, by_mbid = build_existing_indexes(all_rows)
 
     return {
         "existing_track_ids": existing_track_ids,
         "navidrome_track_ids": set(),
         "existing_album_tracks": existing_album_tracks,
+        "existing_album_rows": existing_album_rows,
         "existing_album_artists": existing_album_artists,
+        "existing_album_fingerprints": existing_album_fingerprints,
+        "existing_album_dirty": existing_album_dirty,
+        "existing_by_path": by_path,
+        "existing_by_mbid": by_mbid,
+        "known_rows_by_id": {row["id"]: row for row in all_rows if row.get("id")},
         "albums_needing_reimport": albums_needing_reimport,
     }
 
@@ -396,6 +461,8 @@ def scan_artist_to_db(
     progress_scan_type: str | None = None,
     diff_mode: bool = False,
     client: NavidromeClient | None = None,
+    allow_cleanup: bool = True,
+    freshness_verified: bool | None = None,
 ):
     """Scan one Navidrome artist and upsert local PostgreSQL track rows efficiently."""
     log_unified(f"[NAVIDROME_IMPORT] Importing artist: {artist_name} (artist_id={artist_id or 'none'}, force={force}, processed={processed_artists})")
@@ -407,6 +474,31 @@ def scan_artist_to_db(
     canonical_artist_name = _clean_artist_name_for_storage(artist_name) or artist_name
     active_client = client
 
+    # Direct callers (album page, targeted pipeline, library sync) do not go
+    # through run_navidrome_import_scan's freshness gate. Prove the remote
+    # state before reading it. A client without scan capability is legacy/test
+    # only; the verified import pipeline always passes freshness_verified=True.
+    if freshness_verified is None:
+        _freshness_client = client or _get_fallback_client()
+        if _freshness_client is not None and hasattr(
+            _freshness_client, "trigger_and_wait_for_scan"
+        ):
+            from services.scanning.pipelines.navidrome_pipeline import (
+                sync_remote_navidrome_before_import,
+            )
+            from services.scanning.scan_state import get_scan_checkpoint_path
+
+            if not sync_remote_navidrome_before_import(
+                _freshness_client,
+                checkpoint_file=get_scan_checkpoint_path("navidrome_scan"),
+                use_dirty_state=True,
+            ):
+                log_unified(
+                    f"Navidrome Import - DEFERRED for '{artist_name}' "
+                    "(remote scan not verified); local metadata preserved"
+                )
+                return {"deferred": True, "reason": "remote scan not verified"}
+
     try:
         _phase_started = time.monotonic()
         state = prefetch_artist_state(canonical_artist_name=canonical_artist_name)
@@ -414,8 +506,17 @@ def scan_artist_to_db(
         existing_track_ids = state["existing_track_ids"]
         navidrome_track_ids = state["navidrome_track_ids"]
         existing_album_tracks = state["existing_album_tracks"]
+        existing_album_rows = state["existing_album_rows"]
         existing_album_artists = state["existing_album_artists"]
         albums_needing_reimport = state["albums_needing_reimport"]
+        existing_album_fingerprints = state["existing_album_fingerprints"]
+        existing_album_dirty = state["existing_album_dirty"]
+        existing_by_path = state["existing_by_path"]
+        existing_by_mbid = state["existing_by_mbid"]
+        known_rows_by_id = state["known_rows_by_id"]
+        _adopted_ids = False
+        _metadata_conflict_count = 0
+        _ambiguous_old_ids: set[str] = set()
 
         # The import preamble below is silent by design (it only logs when it
         # actually changes rows), so a large catalogue made the dashboard show
@@ -458,7 +559,19 @@ def scan_artist_to_db(
                 "[NAVIDROME_SCAN] fetch_artist_albums returned empty — skipping import + cleanup to avoid deleting existing tracks",
                 artist=artist_name,
             )
-            return None
+            if existing_track_ids:
+                return {
+                    "success": False,
+                    "changed": False,
+                    "reason": "no_albums_for_known_artist",
+                    "metadata_conflicts": 0,
+                }
+            return {
+                "success": True,
+                "changed": False,
+                "reason": "empty_artist",
+                "metadata_conflicts": 0,
+            }
 
         changed_album_names: set[str] | None = None
         removed_album_names: set[str] = set()
@@ -570,6 +683,101 @@ def scan_artist_to_db(
                 if track.get("id"):
                     navidrome_track_ids.add(track.get("id"))
 
+            # ── Navidrome ID reconciliation ───────────────────────────────
+            # Navidrome can re-encode IDs (0.64) or re-adopt a row for the same
+            # file. Importing the new ID as a brand-new row would leave the old
+            # row stale and lose every Popularr-owned enrichment. Adopt only
+            # on strong identity evidence: exact file path, or MBID + title +
+            # artist corroboration. Never by title alone.
+            album_artist_value = album_artist_from_sources(
+                api_album_artist=api_album_artist,
+                album_artist_from_artist_view=album.get("artist", "") or "",
+                canonical_artist_name=canonical_artist_name,
+                album_name=album_name,
+                existing_album_artists=existing_album_artists,
+            )
+            for track in tracks:
+                new_id = str(track.get("id") or "").strip()
+                if not new_id or new_id in existing_track_ids:
+                    continue
+                match = find_adoptable_track_id(
+                    track,
+                    album_name=album_name,
+                    album_artist=album_artist_value,
+                    by_path=existing_by_path,
+                    by_mbid=existing_by_mbid,
+                )
+                if not match:
+                    # If several existing rows share this exact file path, do
+                    # not guess which one is the new ID. Preserve those rows
+                    # from stale cleanup and leave the ambiguity for review.
+                    _path_matches: set[str] = set()
+                    for _key in path_keys(track.get("path") or track.get("file_path")):
+                        for _old in existing_by_path.get(_key, []):
+                            if _old and _old != new_id:
+                                _path_matches.add(str(_old))
+                    if len(_path_matches) > 1:
+                        _ambiguous_old_ids.update(_path_matches)
+                        logger.warning(
+                            "[NAVIDROME_IMPORT] ambiguous ID reconciliation — "
+                            "preserving existing rows instead of deleting them",
+                            new_id=new_id,
+                            candidates=sorted(_path_matches)[:8],
+                            album=album_name,
+                        )
+                    _mbid = str(
+                        track.get("musicBrainzId")
+                        or track.get("musicbrainz_trackid")
+                        or track.get("recording_mbid")
+                        or track.get("mbid")
+                        or ""
+                    ).strip().casefold()
+                    if _mbid:
+                        _mbid_candidates = {
+                            str(row.get("id"))
+                            for row in existing_by_mbid.get(_mbid, [])
+                            if row.get("id") and str(row.get("id")) != new_id
+                        }
+                        if _mbid_candidates:
+                            _ambiguous_old_ids.update(_mbid_candidates)
+                    continue
+                old_id, match_reason = match
+                if not adopt_navidrome_track_id(old_id, new_id):
+                    # Adoption failed (e.g. the new ID already exists). Do not
+                    # let stale cleanup delete a row we could not reconcile.
+                    _ambiguous_old_ids.add(str(old_id))
+                    continue
+                _adopted_ids = True
+                existing_track_ids.discard(old_id)
+                existing_track_ids.add(new_id)
+                for _ids in existing_album_tracks.values():
+                    if old_id in _ids:
+                        _ids.discard(old_id)
+                        _ids.add(new_id)
+                _row = known_rows_by_id.pop(old_id, None)
+                if _row is not None:
+                    _row["id"] = new_id
+                    known_rows_by_id[new_id] = _row
+                for _path_key, _ids in existing_by_path.items():
+                    if old_id in _ids:
+                        existing_by_path[_path_key] = [
+                            new_id if value == old_id else value for value in _ids
+                        ]
+                logger.info(
+                    "[NAVIDROME_IMPORT] track ID adopted",
+                    old_id=old_id, new_id=new_id, match=match_reason,
+                    artist=artist_name, album=album_name,
+                )
+                log_unified(
+                    f"[NAVIDROME_IMPORT] Adopted changed Navidrome ID for "
+                    f"'{album_name}' ({match_reason}): {old_id} → {new_id}"
+                )
+
+            if album_name in existing_album_rows:
+                existing_album_fingerprints[album_name] = db_album_fingerprint(
+                    existing_album_rows[album_name]
+                )
+
             # Record this entry's ids for the deferred colliding-name cleanup.
             # Counted straight after the fetch — before any skip decision — so
             # an entry skipped as "cached" still contributes its live ids.
@@ -586,6 +794,16 @@ def scan_artist_to_db(
                 duplicate_cached_ids[album_name] = cached_ids_for_album
             album_needs_reimport = album_name in albums_needing_reimport
 
+            _incoming_fingerprint = navidrome_album_fingerprint(
+                tracks, album_name=album_name, album_artist=album_artist_value,
+            )
+            _cached_fingerprint = existing_album_fingerprints.get(album_name)
+            _fingerprint_equal = bool(
+                _cached_fingerprint
+                and _incoming_fingerprint
+                and _cached_fingerprint == _incoming_fingerprint
+            )
+
             if should_skip_cached_album(
                 artist_name=artist_name,
                 album_name=album_name,
@@ -594,19 +812,16 @@ def scan_artist_to_db(
                 force=force,
                 album_needs_reimport=album_needs_reimport,
                 verbose=verbose,
+                metadata_fingerprint_equal=_fingerprint_equal,
+                album_metadata_dirty=existing_album_dirty.get(album_name, False),
             ):
                 continue
 
-            album_artist_value = album_artist_from_sources(
-                api_album_artist=api_album_artist,
-                album_artist_from_artist_view=album.get("artist", "") or "",
-                canonical_artist_name=canonical_artist_name,
-                album_name=album_name,
-                existing_album_artists=existing_album_artists,
-            )
-
             album_mbids_seen: set[str] = set()
             _album_payloads: list[dict[str, Any]] = []
+            _confirmed_ids: list[str] = []
+            _seen_ids: list[str] = []
+            _dirty_conflicts: list[tuple[str, list[str]]] = []
 
             for track in tracks:
                 if not track.get("id"):
@@ -641,13 +856,38 @@ def scan_artist_to_db(
                 if album_mbid:
                     album_mbids_seen.add(album_mbid)
 
+                _tid = str(payload.get("id") or "").strip()
+                _existing = known_rows_by_id.get(_tid)
+                if _existing and bool(_existing.get("metadata_dirty_for_navidrome")):
+                    _conflicts = local_authority_conflicts(_existing, payload)
+                    if _conflicts:
+                        _dirty_conflicts.append((_tid, _conflicts))
+                    else:
+                        _confirmed_ids.append(_tid)
+                elif _tid:
+                    _seen_ids.append(_tid)
+
                 _album_payloads.append(payload)
+
+            for _tid, _fields in _dirty_conflicts[:5]:
+                _row = known_rows_by_id.get(_tid) or {}
+                logger.warning(
+                    "[NAVIDROME_IMPORT] metadata conflict — local correction preserved",
+                    artist=artist_name,
+                    album=album_name,
+                    track=_row.get("title") or _tid,
+                    fields=",".join(sorted(_fields)),
+                    winner="existing",
+                    reason="local correction newer than last verified import",
+                )
+            _metadata_conflict_count += len(_dirty_conflicts)
 
             if _album_payloads:
                 try:
                     # ⚠️ The return value is CHECKED — see the note in
                     # scan_stage_runner. A refused batch must not pass silently.
-                    if not upsert_tracks_bulk(_album_payloads):
+                    _bulk_ok = bool(upsert_tracks_bulk(_album_payloads))
+                    if not _bulk_ok:
                         logger.warning(
                             "[NAVIDROME_SCAN] Bulk track persist reported FAILURES — "
                             "some rows were refused by the database",
@@ -655,6 +895,20 @@ def scan_artist_to_db(
                             album=album_name,
                             count=len(_album_payloads),
                         )
+                    else:
+                        # Only after the transaction committed: rows whose
+                        # incoming values agreed with the local correction are
+                        # no longer dirty; ordinary rows record the verified
+                        # import time. Conflicting dirty rows keep their
+                        # authority (and their old navidrome_imported_at).
+                        if _confirmed_ids:
+                            mark_navidrome_import_confirmed(_confirmed_ids)
+                        if _seen_ids:
+                            mark_navidrome_import_seen(_seen_ids)
+                        for _tid in _confirmed_ids:
+                            _row = known_rows_by_id.get(_tid)
+                            if _row is not None:
+                                _row["metadata_dirty_for_navidrome"] = False
                 except Exception as exc:
                     logger.warning(
                         "[NAVIDROME_SCAN] Bulk track persist failed",
@@ -677,6 +931,8 @@ def scan_artist_to_db(
                     album_name=album_name,
                     cached_ids_for_album=cached_ids_for_album,
                     navidrome_tracks=tracks,
+                    live_track_ids=_ambiguous_old_ids or None,
+                    allow_cleanup=allow_cleanup,
                 )
 
         # Deferred cleanup for names that collide once edition markers are
@@ -701,6 +957,8 @@ def scan_artist_to_db(
                         {"id": track_id}
                         for track_id in duplicate_nav_ids.get(_dup_name, set())
                     ],
+                    live_track_ids=_ambiguous_old_ids or None,
+                    allow_cleanup=allow_cleanup,
                 )
 
         # An album_filter that matches nothing used to return silently, so the
@@ -743,7 +1001,8 @@ def scan_artist_to_db(
                 cleanup_stale_artist_tracks_if_needed(
                     artist_name=artist_name,
                     existing_track_ids=existing_track_ids,
-                    navidrome_track_ids=navidrome_track_ids,
+                    navidrome_track_ids=navidrome_track_ids | _ambiguous_old_ids,
+                    allow_cleanup=allow_cleanup,
                 )
             else:
                 log_unified(
@@ -768,7 +1027,8 @@ def scan_artist_to_db(
                         # A renamed album keeps its track ids under the NEW
                         # name; they are alive, so they must not be deleted
                         # just because the old NAME is gone.
-                        live_track_ids=navidrome_track_ids,
+                        live_track_ids=navidrome_track_ids | _ambiguous_old_ids,
+                        allow_cleanup=allow_cleanup,
                     )
 
         # ⚠️ THIS IMPORT MAY HAVE JUST REWRITTEN ``tracks.id`` — the id IS the
@@ -792,10 +1052,36 @@ def scan_artist_to_db(
                 error=str(_inv_exc),
             )
 
-        if diff_mode and changed_album_names is not None:
-            return {"changed": True, "changed_albums": len(changed_album_names)}
+        if _adopted_ids:
+            # The cache above is the one that carries Navidrome song ids. The
+            # dedicated helper also covers future ID-bearing caches.
+            invalidate_track_id_caches()
+            try:
+                from services.playlists.song_id_reconciliation import (
+                    clear_playlist_song_rejections,
+                    server_key,
+                )
 
-        return None
+                clear_playlist_song_rejections(server_key(navi_client))
+            except Exception as exc:
+                logger.debug("Playlist rejection retry reset failed", error=str(exc))
+            logger.info(
+                "[NAVIDROME_IMPORT] ID adoption invalidated ID-bearing caches",
+                artist=artist_name,
+            )
+
+        if diff_mode and changed_album_names is not None:
+            return {
+                "changed": True,
+                "changed_albums": len(changed_album_names),
+                "metadata_conflicts": _metadata_conflict_count,
+            }
+
+        return {
+            "changed": True,
+            "changed_albums": len(changed_album_names or []),
+            "metadata_conflicts": _metadata_conflict_count,
+        }
 
     except Exception:
         logger.exception("scan_artist_to_db failed", artist=artist_name)

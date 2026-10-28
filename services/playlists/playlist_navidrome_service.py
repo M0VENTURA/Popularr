@@ -38,6 +38,11 @@ from typing import Any
 import structlog
 
 from api_clients.navidrome import NavidromeClient
+from services.playlists.song_id_reconciliation import (
+    get_rejected_song_ids,
+    record_rejected_song_ids,
+    server_key,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -192,9 +197,13 @@ def sync_playlist_by_name(
         "created": False,
         "unchanged": False,
         "skipped": False,
+        "partial": False,
+        "reconciliation_complete": False,
+        "needs_navidrome_import": False,
         "deduped": 0,
         "playlist_id": "",
         "song_count": 0,
+        "requested_song_count": len(song_ids or []),
     }
     if not client or not name:
         return result
@@ -238,6 +247,33 @@ def sync_playlist_by_name(
         cleaned.append(text_value)
     song_ids = cleaned
     result["song_count"] = len(song_ids)
+
+    # ── Known rejected IDs ────────────────────────────────────────────────
+    # Filter IDs this exact server/playlist already rejected. A forced sync
+    # retries them (an explicit repair), otherwise the playlist is written
+    # with the RESOLVED subset and reported as partial. The rejection is
+    # cleared by a verified import / ID adoption, so retry remains possible.
+    _server = server_key(client)
+    _rejected = {} if force else get_rejected_song_ids(_server, name)
+    if _rejected:
+        _unresolved = [value for value in song_ids if value in _rejected]
+        if _unresolved:
+            song_ids = [value for value in song_ids if value not in _rejected]
+            result["unresolved_ids"] = _unresolved
+            result["partial"] = True
+            result["needs_navidrome_import"] = True
+            result["song_count"] = len(song_ids)
+            logger.debug(
+                "[PLAYLISTS] unresolved track mapping retained",
+                playlist=name,
+                count=len(_unresolved),
+                ids=_unresolved[:8],
+            )
+            if not song_ids:
+                # Never clear/replace a populated playlist with an empty list
+                # merely because every requested ID is currently unresolved.
+                result["skipped"] = True
+                return result
 
     matches: list[dict[str, Any]] = []
     if existing_playlist_id and all_playlists is None:
@@ -295,12 +331,14 @@ def sync_playlist_by_name(
         # ── Change detection ────────────────────────────────────────────
         if not force and existing is not None and existing == song_ids:
             result["unchanged"] = True
-            result["success"] = True
+            result["success"] = not result["partial"]
+            result["reconciliation_complete"] = not result["partial"]
             logger.info(
                 "[PLAYLISTS] Navidrome playlist already up to date",
                 name=name,
                 playlist_id=primary_id,
                 songs=len(song_ids),
+                unresolved=len(result.get("unresolved_ids") or []),
             )
             return result
 
@@ -331,7 +369,6 @@ def sync_playlist_by_name(
                 playlist_name=name,
             )
             result["updated"] = bool(ok)
-            result["success"] = bool(ok)
             if ok:
                 # One line per genre playlist per scan meant a finalise pass
                 # emitted ~45 of these. The section report's PLAYLIST
@@ -353,12 +390,15 @@ def sync_playlist_by_name(
                 # playlist converts that silent drift into a warning.
                 stored = _current_song_ids(client, primary_id)
                 if stored is None:
+                    result["partial"] = True
+                    result["reconciliation_complete"] = False
+                    result["needs_navidrome_import"] = True
                     logger.warning(
                         "[PLAYLISTS] could not verify playlist contents after update",
                         name=name,
                         playlist_id=primary_id,
                     )
-                elif len(stored) != len(song_ids):
+                elif stored != song_ids:
                     # WHICH ids were dropped. A count alone cannot separate the
                     # two very different causes: a STALE id (a Navidrome import
                     # refreshes it) from a song Navidrome has not INDEXED yet
@@ -372,23 +412,44 @@ def sync_playlist_by_name(
                     extra = [i for i in stored if i not in _requested]
                     result["dropped_ids"] = dropped
                     result["extra_ids"] = extra
-                    logger.warning(
-                        "[PLAYLISTS] Navidrome stored a different number of tracks "
-                        "than requested — stale song IDs are the usual cause "
-                        "(Navidrome re-encoded all IDs in 0.64); re-run the "
-                        "Navidrome import scan to refresh them. If they survive "
-                        "an import, Navidrome has not indexed those files yet — "
-                        "rescan Navidrome first",
-                        name=name,
-                        playlist_id=primary_id,
-                        requested=len(song_ids),
-                        stored=len(stored),
-                        dropped=len(dropped),
-                        dropped_ids=dropped[:8],
-                        extra=len(extra),
-                        extra_ids=extra[:8],
+                    result["stored_song_ids"] = stored
+                    result["partial"] = True
+                    result["reconciliation_complete"] = False
+                    result["needs_navidrome_import"] = True
+                    _new_rejections = record_rejected_song_ids(
+                        _server, name, dropped,
                     )
+                    result["new_rejections"] = _new_rejections
+                    if _new_rejections:
+                        logger.warning(
+                            "[PLAYLISTS] Navidrome stored a different number of tracks "
+                            "than requested — stale song IDs are the usual cause "
+                            "(Navidrome re-encoded all IDs in 0.64); re-run the "
+                            "Navidrome import scan to refresh them. If they survive "
+                            "an import, Navidrome has not indexed those files yet — "
+                            "rescan Navidrome first",
+                            name=name,
+                            playlist_id=primary_id,
+                            requested=len(song_ids),
+                            stored=len(stored),
+                            dropped=len(dropped),
+                            dropped_ids=dropped[:8],
+                            extra=len(extra),
+                            extra_ids=extra[:8],
+                        )
+                    else:
+                        logger.debug(
+                            "[PLAYLISTS] known rejected song IDs still unresolved",
+                            name=name,
+                            playlist_id=primary_id,
+                            dropped_ids=dropped[:8],
+                        )
+                else:
+                    result["stored_song_ids"] = stored
+                    result["reconciliation_complete"] = not result["partial"]
+                    result["success"] = not result["partial"]
             else:
+                result["reconciliation_complete"] = False
                 logger.warning(
                     "[PLAYLISTS] updatePlaylist returned failure",
                     name=name,
@@ -410,10 +471,10 @@ def sync_playlist_by_name(
     # ``songId`` list through ``_get_subsonic_response``).
     try:
         data = client.create_playlist(name, song_ids) or {}
-        pid = str((data.get("playlist") or {}).get("id") or "")
+        _playlist = data.get("playlist") or {}
+        pid = str(_playlist.get("id") or "")
         created = data.get("status") == "ok"
         result["created"] = bool(created)
-        result["success"] = bool(created)
         result["playlist_id"] = pid
         if created:
             logger.info(
@@ -422,20 +483,62 @@ def sync_playlist_by_name(
                 playlist_id=pid,
                 songs=len(song_ids),
             )
-            # Same post-write verification as the update path, answered from
-            # the create response's own songCount (no extra fetch).
-            _stored_count = int(((data.get("playlist") or {}).get("songCount")) or 0)
-            if _stored_count and _stored_count != len(song_ids):
-                logger.warning(
-                    "[PLAYLISTS] Navidrome stored a different number of tracks "
-                    "than requested — stale song IDs are the usual cause "
-                    "(Navidrome re-encoded all IDs in 0.64); re-run the "
-                    "Navidrome import scan to refresh them",
-                    name=name,
-                    playlist_id=pid,
-                    requested=len(song_ids),
-                    stored=_stored_count,
-                )
+            # ── Verify creation, exactly like update ────────────────────
+            # ``stored_count == 0`` is a valid value, so never use truthiness.
+            stored_ids = _current_song_ids(client, pid) if pid else None
+            _stored_count_raw = _playlist.get("songCount")
+            if stored_ids is not None and _stored_count_raw is not None:
+                try:
+                    if int(_stored_count_raw) != len(stored_ids):
+                        # The create response's own count is authoritative
+                        # when the follow-up fetch cannot see the new playlist.
+                        stored_ids = None
+                except (TypeError, ValueError):
+                    pass
+            if stored_ids is not None:
+                result["stored_song_ids"] = stored_ids
+                if stored_ids != song_ids:
+                    _stored = set(stored_ids)
+                    dropped = [i for i in song_ids if i not in _stored]
+                    result["dropped_ids"] = dropped
+                    result["partial"] = True
+                    result["needs_navidrome_import"] = True
+                    result["new_rejections"] = record_rejected_song_ids(
+                        _server, name, dropped,
+                    )
+                    if result["new_rejections"]:
+                        logger.warning(
+                            "[PLAYLISTS] Navidrome stored a different number of tracks "
+                            "than requested on create — stale song IDs are the usual cause",
+                            name=name,
+                            playlist_id=pid,
+                            requested=len(song_ids),
+                            stored=len(stored_ids),
+                            dropped_ids=dropped[:8],
+                        )
+            elif _stored_count_raw is not None:
+                try:
+                    _stored_count = int(_stored_count_raw)
+                except (TypeError, ValueError):
+                    _stored_count = -1
+                if _stored_count != len(song_ids):
+                    result["partial"] = True
+                    result["needs_navidrome_import"] = True
+                    logger.warning(
+                        "[PLAYLISTS] Navidrome stored a different number of tracks "
+                        "than requested on create",
+                        name=name,
+                        playlist_id=pid,
+                        requested=len(song_ids),
+                        stored=_stored_count,
+                    )
+            else:
+                # Created but the result cannot be verified: never call that
+                # fully synchronised.
+                result["partial"] = True
+                result["needs_navidrome_import"] = True
+            result["reconciliation_complete"] = not result["partial"]
+            result["success"] = bool(created and not result["partial"])
         else:
             logger.warning(
                 "[PLAYLISTS] createPlaylist failed",

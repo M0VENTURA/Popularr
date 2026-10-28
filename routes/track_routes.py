@@ -492,6 +492,29 @@ async def api_track_update_metadata() -> Any:
                     logger.debug("Live-state revert failed", track_id=track_id, error=str(revert_err))
 
         file_synced = False
+        # The DB correction is authoritative even when the FILE write below
+        # fails; protect it from an older Navidrome index immediately. Rating /
+        # single-detection-only edits are already popularity-owned and must not
+        # force an import scan.
+        _metadata_fields = {
+            "title", "artist", "album", "album_artist", "writer", "work", "genres",
+            "musicbrainz_genres", "year", "track_number", "disc_number", "mbid", "isrc",
+            "is_cover", "original_cover_artist", "alternate_take", "is_compilation",
+            "is_live", "is_acoustic", "is_remix", "musicbrainz_albumid",
+            "musicbrainz_artistid", "musicbrainz_albumartistid",
+            "musicbrainz_releasegroupid", "musicbrainz_releasetrackid",
+            "musicbrainz_workid", "musicbrainz_albumtype", "spotify_album_type",
+        }
+        if any(field in updates for field in _metadata_fields):
+            try:
+                from services.scanning.reconciliation import (
+                    mark_local_tags_written_for_track_ids,
+                )
+
+                mark_local_tags_written_for_track_ids([track_id])
+            except Exception as stamp_err:
+                logger.debug("Track metadata authority stamp failed", track_id=track_id, error=str(stamp_err))
+
         if data.get("sync_to_file", True):
             try:
                 file_synced = bool(sync_track_tags_to_file(track_id))
@@ -594,6 +617,14 @@ async def api_track_bulk_update() -> Any:
 
     files_updated = 0
     file_failures: list[str] = []
+    try:
+        from services.scanning.reconciliation import (
+            mark_local_tags_written_for_track_ids,
+        )
+
+        mark_local_tags_written_for_track_ids(track_ids)
+    except Exception as stamp_err:
+        logger.debug("Bulk metadata authority stamp failed", error=str(stamp_err))
     if data.get("sync_to_file", True):
         for track_id in track_ids:
             try:

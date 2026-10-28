@@ -125,6 +125,15 @@ class Track(Base):
     # file tags against the DB.
     recording_mbid_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     file_tags_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # ── Local metadata authority / Navidrome reconciliation ───────────────
+    # See db/schema.py. A local file-tag correction keeps these fields dirty
+    # until a VERIFIED Navidrome import observes the corrected values.
+    local_tags_written_at: Mapped[datetime | None] = mapped_column(DateTime)
+    metadata_dirty_for_navidrome: Mapped[bool | None] = mapped_column(
+        server_default=text("FALSE")
+    )
+    navidrome_imported_at: Mapped[datetime | None] = mapped_column(DateTime)
+    metadata_source: Mapped[str | None] = mapped_column(String)
 
     # Two-phase star rating (2026-10-14). FALSE = the album's stars were posted
     # by the PER-ALBUM pass (provisional, partial artist context); TRUE = the
@@ -184,6 +193,9 @@ class Track(Base):
     popularity_marked: Mapped[bool | None] = mapped_column(server_default=text("FALSE"))
     popularity_frozen: Mapped[bool | None] = mapped_column(server_default=text("FALSE"))
     popularity_frozen_at: Mapped[datetime | None] = mapped_column(DateTime)
+    exclude_from_stats: Mapped[bool | None] = mapped_column(
+        server_default=text("FALSE")
+    )
 
     # External Provider IDs
     mbid: Mapped[str | None] = mapped_column(String)
@@ -261,6 +273,7 @@ class Track(Base):
     listenbrainz_listens: Mapped[int | None] = mapped_column(Integer)
     listenbrainz_users: Mapped[int | None] = mapped_column(Integer)
     lastfm_playcount: Mapped[int | None] = mapped_column(BigInteger)
+    lastfm_playcount_available: Mapped[bool | None] = mapped_column(Boolean)
 
     def __repr__(self) -> str:
         return f"<Track(id={self.id!r}, title={self.title!r}, artist={self.artist!r})>"
@@ -602,3 +615,24 @@ class MissingAlbumTrack(Base):
 
     def __repr__(self) -> str:
         return f"<MissingAlbumTrack(id={self.id}, artist={self.artist_name!r}, title={self.title!r})>"
+
+
+# =============================================================================
+# playlist_song_rejections
+# =============================================================================
+
+class PlaylistSongRejection(Base):
+    """A Navidrome song ID the server refused to store in a playlist."""
+
+    __tablename__ = "playlist_song_rejections"
+
+    server_key: Mapped[str] = mapped_column(String, primary_key=True)
+    playlist_name: Mapped[str] = mapped_column(String, primary_key=True)
+    song_id: Mapped[str] = mapped_column(String, primary_key=True)
+    track_hint: Mapped[str | None] = mapped_column(String)
+    first_seen: Mapped[datetime | None] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP")
+    )
+    last_seen: Mapped[datetime | None] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP")
+    )

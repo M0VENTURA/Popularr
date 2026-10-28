@@ -313,11 +313,111 @@ REMASTER_SUFFIX_RE = re.compile(
 #: The remaster WORD, wherever it appears inside a title.
 REMASTER_MARKER_RE = re.compile(r"\bremaster(?:ed)?\b", re.IGNORECASE)
 
-#: A trailing bracketed qualifier group: opener, inner text, closer.
-_TRAILING_QUALIFIER_RE = re.compile(r"\s*([(\[])([^)\]]*?)\s*([)\]])\s*$")
+#: Mastering/reissue markers the STRIPPER acts on. Broader than
+#: ``REMASTER_MARKER_RE`` so the "Mastered for iTunes" spelling is covered.
+_MASTERING_MARKER_RE = re.compile(
+    r"\bremaster(?:ed)?\b|\bmastered\s+for\s+itunes\b", re.IGNORECASE
+)
+
+#: Any bracketed qualifier group (used to remove ALL remaster annotations,
+#: including one that sits before a later protected qualifier, e.g.
+#: ``Song (2011 Remaster) (Live)``).
+_QUALIFIER_GROUP_RE = re.compile(r"([(\[])([^)\]]*?)([)\]])")
 
 #: The separator inside a compound qualifier: "radio edit / remastered 2024".
-_QUALIFIER_PART_SEPARATOR_RE = re.compile(r"\s*[/,]\s*")
+#: Commas are deliberately NOT separators: they are common inside a real venue
+#: annotation ("Live at Wembley, London") and the single-part cleanup already
+#: removes the mastering half from "radio edit, remastered 2024".
+_QUALIFIER_PART_SEPARATOR_RE = re.compile(r"\s*/\s*")
+
+#: Protected version descriptors. These name a DIFFERENT performance / mix /
+#: arrangement, so a remaster strip must never remove them.
+#:
+#: Kept here (rather than in a second popularity-only table) because the
+#: remaster stripper itself needs to know whether a leftover is meaningful.
+_PROTECTED_VERSION_PATTERNS: dict[str, str] = {
+    "live": r"\blive\b",
+    "acoustic": r"\b(?:acoustic|unplugged|stripped)\b",
+    "demo": r"\bdemo\b",
+    "remix": r"\b(?:remix|remixed|mix|club mix|extended(?:\s+mix)?|dub mix|rework|bootleg)\b",
+    "edit": r"\b(?:radio edit|single edit|extended edit|edit)\b",
+    "instrumental": r"\binstrumental\b",
+    "karaoke": r"\bkaraoke\b",
+    "orchestral": r"\b(?:orchestral|orchestra|symphonic)\b",
+    "strings": r"\bstrings\s+(?:version|arrangement)\b",
+    "rerecording": r"\bre[- ]?record(?:ed|ing)\b",
+    "session": r"\b(?:session|rehearsal|jam[- ]along)\b",
+    "alternate": r"\b(?:alternate take|alternative take|alternate|alternative|take\s+\d+)\b",
+    "piano": r"\bpiano version\b",
+    "cover": r"\bcover\b",
+}
+_PROTECTED_VERSION_RES = {
+    key: re.compile(pattern, re.IGNORECASE)
+    for key, pattern in _PROTECTED_VERSION_PATTERNS.items()
+}
+
+#: Title annotations only: bracketed text or a dash suffix. Used so a song
+#: literally titled "Live and Let Die" is not mistaken for a live version.
+_TITLE_ANNOTATION_RE = re.compile(r"[\[(]([^\])]+)[\])]|\s+[-\u2013\u2014]\s+(.+)$")
+
+
+def _protected_version_tokens_in_text(text: str) -> frozenset[str]:
+    value = str(text or "")
+    if not value:
+        return frozenset()
+    return frozenset(
+        key for key, pattern in _PROTECTED_VERSION_RES.items() if pattern.search(value)
+    )
+
+
+def protected_version_tokens(title: str) -> frozenset[str]:
+    """Protected version descriptors present in a title's annotations.
+
+    Only bracketed / dash-suffixed annotations are inspected. A song called
+    "Live and Let Die" therefore yields no tokens, while
+    "Song (Live - 2011 Remaster)" yields ``{"live"}``.
+    """
+    annotations = " ".join(
+        (match.group(1) or match.group(2) or "")
+        for match in _TITLE_ANNOTATION_RE.finditer(str(title or ""))
+    )
+    return _protected_version_tokens_in_text(annotations)
+
+
+def version_tokens_in_descriptor(text: str) -> frozenset[str]:
+    """Protected version descriptors in ALREADY-EXTRACTED annotation text.
+
+    Use this for a qualifier body ("Live at Wembley") that no longer carries
+    its brackets; :func:`protected_version_tokens` inspects a full title.
+    """
+    return _protected_version_tokens_in_text(text)
+
+
+#: Mastering/reissue wording. Deliberately requires a remaster/mastering word:
+#: "Deluxe Edition" alone is NOT a mastering pass and must survive.
+_MASTERING_PHRASE_SOURCE = r"""
+    (?:(?:19|20)\d{2}\s+)?
+    (?:
+        (?:digital(?:ly)?|deluxe|expanded|edition|special|anniversary|
+           collector'?s|collectors|limited|reissue|repress)\s+
+    )*
+    (?: remaster(?:ed)? | mastered\s+for\s+itunes )
+    (?:\s+(?:version|edition))?
+    (?:\s+(?:19|20)\d{2})?
+"""
+_MASTERING_PHRASE_RE = re.compile(
+    _MASTERING_PHRASE_SOURCE, re.IGNORECASE | re.VERBOSE
+)
+_TRAILING_MASTERING_RE = re.compile(
+    r"\s+" + _MASTERING_PHRASE_SOURCE + r"\s*$",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _strip_mastering_words(text: str) -> str:
+    value = _MASTERING_PHRASE_RE.sub("", str(text or ""))
+    value = re.sub(r"\s+", " ", value)
+    return value.strip(" ,;/-").strip()
 
 
 def has_remaster_marker(title: str) -> bool:
@@ -332,70 +432,94 @@ def has_remaster_marker(title: str) -> bool:
     return bool(REMASTER_MARKER_RE.search(str(title or "")))
 
 
+def has_mastering_marker(title: str) -> bool:
+    """True for remaster OR the "Mastered for iTunes" spelling.
+
+    ``has_remaster_marker`` stays narrow for callers that specifically mean a
+    remaster; popularity fallback uses this broader predicate so the
+    "mastered for iTunes" mastering pass is also safe to strip.
+    """
+    return bool(_MASTERING_MARKER_RE.search(str(title or "")))
+
+
 def strip_remaster_qualifier(title: str) -> str:
-    """Strip the REMASTER half of a title, keeping the genuine variant half.
+    """Strip ONLY mastering/reissue wording, keeping genuine version identity.
 
     A compound qualifier names TWO things at once — the variant AND the
     mastering pass — and only the second half is a remaster:
 
         "Higher (radio edit / remastered 2024)"  ->  "Higher (radio edit)"
-        "Is This the End? (Scream edit / remastered 2024)"
-                                             ->  "Is This the End? (Scream edit)"
+        "Song (Live - 2011 Remaster)"            ->  "Song (Live)"
+        "Song (Acoustic Version - Remastered)"   ->  "Song (Acoustic Version)"
 
-    A qualifier that is ONLY a remaster is dropped entirely, because it says
-    nothing about the performance:
+    A qualifier that is ONLY mastering/reissue metadata is dropped entirely:
 
-        "Higher (remastered 2024)"  ->  "Higher"
-        "Higher [remastered]"       ->  "Higher"
-        "Higher - 2024 Remaster"     ->  "Higher"
+        "Higher (remastered 2024)"        -> "Higher"
+        "Higher (Deluxe Remaster)"        -> "Higher"
+        "Higher (Digital Remaster)"       -> "Higher"
+        "Higher - 2024 Remaster"          -> "Higher"
 
-    ⭐ The compound form matters. Stripping the whole bracket would lose the
-    "radio edit" / "Scream edit" half — which names a DIFFERENT performance
-    that must stay separated — and keeping the whole bracket would leave the
-    remaster in place, so the track would neither resolve to the canonical
-    recording nor be recognised as a variant.
+    ⭐ The protected half is load-bearing. Stripping the whole bracket would
+    lose "radio edit" / "Live" / "Acoustic", which name a DIFFERENT
+    performance that must stay separated. Conversely, leaving "Deluxe" or
+    "Digital" behind would stop the track resolving to its canonical
+    popularity entity even though those words describe the same performance.
     """
     value = str(title or "").strip()
     if not value:
         return ""
 
-    # A trailing bracketed qualifier that mentions a remaster.
-    match = _TRAILING_QUALIFIER_RE.search(value)
-    if match and REMASTER_MARKER_RE.search(match.group(2)):
+    def _replace_group(match: re.Match[str]) -> str:
         opener, inner, closer = match.group(1), match.group(2), match.group(3)
-        # ``start(1)`` is the OPENER's index, so the space before the bracket
-        # survives — "Higher (radio edit)" must not become "Higher(radio edit)".
-        head = value[: match.start(1)]
+        if not _MASTERING_MARKER_RE.search(inner):
+            return match.group(0)
         kept = _strip_remaster_from_qualifier(inner)
-        if kept:
-            return f"{head}{opener}{kept}{closer}".strip()
-        return head.strip()
+        return f"{opener}{kept}{closer}" if kept else ""
 
-    # A standalone trailing remaster marker, bracketed or not.
+    # Process EVERY bracket group, so "(2011 Remaster) (Live)" becomes "(Live)".
+    value = _QUALIFIER_GROUP_RE.sub(_replace_group, value)
+    value = re.sub(r"\s{2,}", " ", value).strip()
+
+    # An unbracketed trailing form: "Song - 2024 Remaster", "Song Digital Remaster".
+    dash = re.search(r"\s*[-\u2013\u2014]\s*(.+)$", value)
+    if dash and _MASTERING_MARKER_RE.search(dash.group(1)):
+        head = value[: dash.start()].rstrip()
+        kept = _strip_remaster_from_qualifier(dash.group(1))
+        return f"{head} - {kept}".strip() if kept else (head or value)
+
+    trailing = _TRAILING_MASTERING_RE.search(value)
+    if trailing:
+        return value[: trailing.start()].strip() or value
+
+    # Legacy fallback for a trailing marker the phrase regex did not cover.
     return REMASTER_SUFFIX_RE.sub("", value).strip() or value
 
 
 def _strip_remaster_from_qualifier(inner: str) -> str:
-    """The qualifier's text with the remaster half removed.
+    """The qualifier's text with mastering wording removed.
 
-    Splits a compound qualifier on its separator and drops the parts that
-    mention a remaster; a single-part qualifier that mentions a remaster is
-    emptied.
+    A compound qualifier is split on ``/``; parts carrying a mastering marker
+    are cleaned and kept only when what remains names a protected version.
+    A single part is cleaned the same way. This is what makes
+    "Live - 2011 Remaster" survive as "Live" while "Deluxe Remastered 2011"
+    disappears.
     """
     parts = [p for p in _QUALIFIER_PART_SEPARATOR_RE.split(inner or "") if p.strip()]
     if len(parts) > 1:
-        kept = [p.strip() for p in parts if not REMASTER_MARKER_RE.search(p)]
+        kept: list[str] = []
+        for part in parts:
+            if not _MASTERING_MARKER_RE.search(part):
+                kept.append(part.strip())
+                continue
+            cleaned = _strip_mastering_words(part)
+            if cleaned and _protected_version_tokens_in_text(cleaned):
+                kept.append(cleaned)
         return " / ".join(kept)
 
-    # One part: remove the remaster phrase from it, keeping anything else.
-    text = inner or ""
-    text = re.sub(
-        r"\(?\s*(?:\d{4}\s*)?remaster(?:ed)?(?:\s*\d{4})?(?:\s+version)?\s*\)?",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-    return text.strip(" ,;/-").strip()
+    cleaned = _strip_mastering_words(inner or "")
+    if cleaned and _protected_version_tokens_in_text(cleaned):
+        return cleaned
+    return ""
 
 
 def strip_single_release_suffix(value: str) -> str:

@@ -36,15 +36,19 @@ POPULARITY_REPORT_COLUMNS: tuple[str, ...] = (
     "disc_number",
     "track_number",
     "year",
+    "raw_score",
     "final_score",
     "popularity",
     "stars",
+    "duration",
     "lastfm_listeners",
     "lastfm_playcount",
+    "lastfm_playcount_available",
     "lastfm_score",
     "listenbrainz_listens",
     "listenbrainz_users",
     "listenbrainz_score",
+    "exclude_from_stats",
     "is_single",
     "single_confidence",
     "single_confidence_score",
@@ -67,9 +71,11 @@ POPULARITY_REPORT_COLUMNS: tuple[str, ...] = (
 #: album file reads out in the same relative order as the artist file.
 _POPULARITY_REPORT_SELECT = """
     SELECT title, artist, album, disc_number, track_number, year,
-           final_score, popularity, stars,
-           lastfm_listeners, lastfm_playcount, lastfm_score,
+           raw_score, final_score, popularity, stars, duration,
+           lastfm_listeners, lastfm_playcount, lastfm_playcount_available,
+           lastfm_score,
            listenbrainz_listens, listenbrainz_users, listenbrainz_score,
+           exclude_from_stats,
            is_single, single_confidence, single_confidence_score,
            is_live, popularity_frozen
     FROM tracks

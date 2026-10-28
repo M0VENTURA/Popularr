@@ -9,6 +9,8 @@ from helpers.normalization_service import (
     FEAT_SUFFIX_RE,
     strip_cover_attribution,
     strip_diacritics,
+    strip_remaster_qualifier,
+    version_tokens_in_descriptor,
 )
 
 ARTIST_JOIN_RE = re.compile(
@@ -256,13 +258,49 @@ def normalize_for_aggregation(title: str) -> str:
     # "Gangnam Style" single vs the low-listen "Gangnam Style (PSY Cover)"
     # album row are the same song and must collapse to one key.
     value = strip_cover_attribution(value)
-    value = re.sub(r"\s*[\(\[].*?(feat\.|featuring|ft\.|remaster|remastered|radio edit|single version|album version).*?[\)\]]", "", value, flags=re.IGNORECASE)
-    value = re.sub(r"\s*-\s*(remaster(?:ed)?|radio edit|single version|album version).*$", "", value, flags=re.IGNORECASE)
+    # Remove ONLY mastering/reissue wording. The old single regex removed an
+    # ENTIRE bracket whenever it contained "remaster", so
+    # "Song (Live - 2011 Remaster)" became "song" and could inherit the studio
+    # recording's audience. ``strip_remaster_qualifier`` keeps "Live" (and every
+    # other protected descriptor) while dropping the mastering half.
+    value = strip_remaster_qualifier(value)
+
+    def _drop_bracket_unless_protected(match: re.Match[str]) -> str:
+        # A soft annotation ("feat. X", "Album Version") is safe to drop, but
+        # a combined one ("Live - Album Version") names a DIFFERENT
+        # performance and must survive.
+        text = match.group(0)
+        return text if version_tokens_in_descriptor(text) else ""
+
+    value = re.sub(
+        r"\s*[\(\[][^)\]]*(feat\.|featuring|ft\.|single version|album version)[^)\]]*[)\]]",
+        _drop_bracket_unless_protected,
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    def _drop_dash_unless_protected(match: re.Match[str]) -> str:
+        return match.group(0) if version_tokens_in_descriptor(match.group(1)) else ""
+
+    value = re.sub(
+        r"\s*-\s*((?:single version|album version).*)$",
+        _drop_dash_unless_protected,
+        value,
+        flags=re.IGNORECASE,
+    )
     # Unparenthesised "feat. Guest" / "featuring Guest" suffixes — the album
     # version of a song is frequently stored without brackets, and correlating
     # it with the bracket-carrying single requires both forms to collapse to
     # the same key (legacy parity with old_system/popularity_helpers.py).
-    value = re.sub(r"\s+(?:feat\.?|ft\.?|featuring)\s+.*$", "", value, flags=re.IGNORECASE)
+    def _drop_feat_suffix_unless_protected(match: re.Match[str]) -> str:
+        return match.group(0) if version_tokens_in_descriptor(match.group(1)) else ""
+
+    value = re.sub(
+        r"\s+(?:feat\.?|ft\.?|featuring)\s+(.*)$",
+        _drop_feat_suffix_unless_protected,
+        value,
+        flags=re.IGNORECASE,
+    )
     # Drop dashes that are NOT space-delimited ("Ph4/NT0‐mA" → "Ph4/NT0mA",
     # unicode/ASCII variants) — some sources omit the separator entirely, so
     # both variants must collapse to the same key.  Space-delimited dashes

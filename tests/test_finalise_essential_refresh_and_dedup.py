@@ -122,9 +122,16 @@ class TestTheScanResultWinsTheDedup:
 
 
 # ---------------------------------------------------------------------------
-# 2. An empty scan still refreshes the collections
+# 2. An empty scan does NOT run a library-wide playlist rebuild
 # ---------------------------------------------------------------------------
-class TestAnEmptyScanRefreshesTheCollections:
+class TestAnEmptyScanDoesNoGlobalWork:
+    """A finalise pass with no tracks has nothing incremental to apply.
+
+    Library-wide playlist reconciliation is the daily/manual global rebuild's
+    job. Running it here re-introduced exactly the per-finalise global work the
+    incremental architecture removes.
+    """
+
     @staticmethod
     def _instrument(monkeypatch) -> list[str]:
         calls: list[str] = []
@@ -132,21 +139,21 @@ class TestAnEmptyScanRefreshesTheCollections:
             fs, "_refresh_all_essential_collections", lambda: calls.append("refresh") or 1
         )
         monkeypatch.setattr(
-            fs, "_run_global_playlist_rebuild", lambda options: calls.append("rebuild")
+            fs, "_run_global_playlist_rebuild", lambda *a, **k: calls.append("rebuild")
         )
         return calls
 
-    def test_a_scan_with_no_results_still_refreshes(self, monkeypatch):
+    def test_a_scan_with_no_results_does_not_refresh_every_collection(self, monkeypatch):
         calls = self._instrument(monkeypatch)
 
         fs.finalise_scan(results=[], options={"create_playlists": True})
 
-        assert calls == ["refresh", "rebuild"], (
-            "a library that scans clean must not keep last season's "
-            "Essential collections"
+        assert calls == [], (
+            "an empty finalise must not rebuild every Essential collection or "
+            "the global playlists — the scheduled/manual rebuild owns that"
         )
 
-    def test_a_scan_that_already_refreshed_does_not_refresh_again(self, monkeypatch):
+    def test_a_scan_that_already_refreshed_also_does_nothing_global(self, monkeypatch):
         calls = self._instrument(monkeypatch)
 
         fs.finalise_scan(
@@ -157,11 +164,5 @@ class TestAnEmptyScanRefreshesTheCollections:
             },
         )
 
-        assert calls == ["rebuild"], "the per-artist pass already did the work"
+        assert calls == []
 
-    def test_playlists_disabled_means_no_refresh(self, monkeypatch):
-        calls = self._instrument(monkeypatch)
-
-        fs.finalise_scan(results=[], options={"create_playlists": False})
-
-        assert calls == ["rebuild"], "the config gate must still be honoured"

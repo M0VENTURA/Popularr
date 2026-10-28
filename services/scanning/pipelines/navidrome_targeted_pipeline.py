@@ -60,12 +60,21 @@ def run_navidrome_artist_pipeline(
             "artist": artist,
         }
 
-    scan_artist_to_db(
+    result = scan_artist_to_db(
         artist,
         artist_id,
         verbose=True,
         force=force,
     )
+    if isinstance(result, dict) and (
+        result.get("deferred") or result.get("success") is False
+    ):
+        return {
+            "success": False,
+            "deferred": bool(result.get("deferred")),
+            "reason": result.get("reason") or "remote scan not verified",
+            "artist": artist,
+        }
 
     log_unified(f"Navidrome import completed for artist: {artist}")
 
@@ -95,13 +104,23 @@ def run_navidrome_album_pipeline(
             "album": album,
         }
 
-    scan_artist_to_db(
+    result = scan_artist_to_db(
         artist,
         artist_id,
         verbose=True,
         force=force,
         album_filter=album,
     )
+    if isinstance(result, dict) and (
+        result.get("deferred") or result.get("success") is False
+    ):
+        return {
+            "success": False,
+            "deferred": bool(result.get("deferred")),
+            "reason": result.get("reason") or "remote scan not verified",
+            "artist": artist,
+            "album": album,
+        }
 
     log_unified(f"Navidrome import completed for album: {artist} - {album}")
 

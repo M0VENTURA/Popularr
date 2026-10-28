@@ -67,11 +67,78 @@ MIN_SCAN_INTERVAL_SECONDS = 300.0
 _state_lock = threading.Lock()
 _state: dict[str, Any] = {"running": False, "pending": False, "reason": None}
 
+#: Set by metadata writers during a scan; drained ONCE at a scan boundary.
+_required_lock = threading.Lock()
+_required: bool = False
+_required_reason: str | None = None
+
+
+def mark_rescan_required(reason: str = "metadata write") -> None:
+    """Remember that Navidrome must rescan, WITHOUT starting a scan now.
+
+    A scan writes many files. Requesting a rescan per file is exactly the
+    behaviour that paused Navidrome and locked its database. Writers mark the
+    requirement cheaply; the scan boundary calls
+    :func:`flush_rescan_if_required` once.
+    """
+    global _required, _required_reason
+    with _required_lock:
+        _required = True
+        _required_reason = reason
+
+
+def flush_rescan_if_required(reason: str | None = None) -> bool:
+    """Start at most ONE rescan if any metadata write marked one required.
+
+    Returns True when a request was accepted (or none was needed), False when
+    Navidrome is unconfigured / the request could not be queued.
+    """
+    global _required, _required_reason
+    with _required_lock:
+        if not _required:
+            return True
+        _required = False
+        pending_reason = str(_required_reason or "metadata write")
+        _required_reason = None
+    return bool(request_rescan(reason or pending_reason))
+
+
+def consume_rescan_required() -> bool:
+    """Clear the pending request WITHOUT starting a background scan.
+
+    The import performs its own synchronous drain-and-wait scan boundary. If
+    it called :func:`flush_rescan_if_required` it would start a SECOND scan in
+    the background at the same time. This returns whether a scan was required
+    and lets the caller perform exactly one verified scan.
+    """
+    global _required, _required_reason
+    with _required_lock:
+        was_required = bool(_required)
+        _required = False
+        _required_reason = None
+    return was_required
+
+
+def reset_rescan_state() -> None:
+    """Drop in-process state. Tests only; does not stop a running scan."""
+    global _required, _required_reason
+    with _required_lock:
+        _required = False
+        _required_reason = None
+    with _state_lock:
+        _state.update({"running": False, "pending": False, "reason": None})
+
 
 def get_rescan_state() -> dict[str, Any]:
     """Return a snapshot of the coalescer state (for diagnostics/tests)."""
     with _state_lock:
         return dict(_state)
+
+
+def is_rescan_required() -> bool:
+    """True while metadata writes have asked for a rescan but it was not sent."""
+    with _required_lock:
+        return _required
 
 
 def request_rescan(reason: str = "metadata save") -> bool:

@@ -352,6 +352,10 @@ _POPULARITY_PROTECTED_COLUMNS: frozenset[str] = frozenset({
     # Single detection
     "is_single", "single_confidence", "single_sources",
     "single_detection_last_updated", "single_manual_override",
+    # Cover detection / manual cover decisions (Popularr-owned; Navidrome has
+    # no authoritative view of these).
+    "is_cover", "is_cover_reason", "original_cover_artist",
+    "cover_manual_override", "cover_last_checked",
     # Genres / tags (owned by the popularity pipeline's enrichment pass, and
     # by the album page's genre box — see _apply_album_track_genres)
     #
@@ -426,6 +430,21 @@ def _execute_save(session, track_data: dict) -> bool:
 
     named_placeholders = ", ".join([f":{k}" for k in keys])
 
+    try:
+        from services.scanning.reconciliation import LOCAL_AUTHORITY_FIELDS
+
+        _local_authority_fields = LOCAL_AUTHORITY_FIELDS
+    except Exception:
+        _local_authority_fields = frozenset()
+    _has_authority_state = all(
+        column in columns
+        for column in (
+            "local_tags_written_at",
+            "metadata_dirty_for_navidrome",
+            "navidrome_imported_at",
+        )
+    )
+
     # Build the UPDATE SET clause, skipping popularity-protected columns
     # when this is a Navidrome metadata sync.
     update_parts = []
@@ -442,6 +461,23 @@ def _execute_save(session, track_data: dict) -> bool:
             )
             continue
         if is_navidrome_sync and k in _POPULARITY_PROTECTED_COLUMNS:
+            continue
+        if (
+            is_navidrome_sync
+            and _has_authority_state
+            and k in _local_authority_fields
+        ):
+            # A local correction written by Popularr AFTER the last verified
+            # Navidrome import owns the field until a verified import observes
+            # the corrected value. This is deliberately narrow and timestamped:
+            # an ordinary Navidrome-owned row still updates normally.
+            update_parts.append(
+                f"{k}=CASE WHEN COALESCE(tracks.metadata_dirty_for_navidrome, FALSE) "
+                f"AND tracks.local_tags_written_at IS NOT NULL "
+                f"AND (tracks.navidrome_imported_at IS NULL "
+                f"OR tracks.local_tags_written_at >= tracks.navidrome_imported_at) "
+                f"THEN tracks.{k} ELSE EXCLUDED.{k} END"
+            )
             continue
         update_parts.append(f"{k}=EXCLUDED.{k}")
 

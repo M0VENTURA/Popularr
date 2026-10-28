@@ -331,7 +331,7 @@ def _existing_non_empty_fields(file_path: str, tags: Dict[str, Any]) -> set[str]
     return present
 
 
-def write_tags_to_file(file_path: str, tags: Dict[str, Any]) -> bool:
+def _write_tags_to_file_impl(file_path: str, tags: Dict[str, Any]) -> bool:
     # ── Resolve the path ───────────────────────────────────────────────────
     # A stored path may be RELATIVE to the music root (Navidrome stores it
     # that way, and ``rename-file`` can too). Resolving here — once, for every
@@ -787,6 +787,37 @@ def write_flac_tags(file_path: str, tags: Dict[str, Any]) -> bool:
 # =============================================================================
 # PUBLIC WRAPPERS
 # =============================================================================
+
+def write_tags_to_file(file_path: str, tags: Dict[str, Any]) -> bool:
+    """Write tags, then durably mark the local correction.
+
+    ⭐ The mark is what protects the correction from a later, older Navidrome
+    import. It is written only after the file write SUCCEEDS: a failed write
+    must not claim local authority. Rating/cover-only writes are excluded:
+    those columns are already popularity-owned and must not force a scan.
+    """
+    ok = _write_tags_to_file_impl(file_path, tags)
+    _non_metadata = {"rating", "playcount", "skipcount", "cover_art_data", "cover_art_mime"}
+    _is_metadata_write = bool(tags) and any(key not in _non_metadata for key in tags)
+    if ok and _is_metadata_write:
+        try:
+            from services.scanning.reconciliation import (
+                mark_local_tags_written_for_path,
+            )
+
+            mark_local_tags_written_for_path(file_path)
+        except Exception as exc:
+            logger.debug("Local tag write marker failed: %s", exc)
+        try:
+            from services.scanning.navidrome_rescan_service import (
+                mark_rescan_required,
+            )
+
+            mark_rescan_required("file tags written")
+        except Exception:
+            pass
+    return ok
+
 
 def update_file_tags(file_path: str, tag_updates: Dict[str, Any]) -> bool:
     if not file_path or not tag_updates:

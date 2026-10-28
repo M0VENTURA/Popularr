@@ -256,6 +256,27 @@ class TestTheRuleMatchesTheGeneratedPlaylists:
 
         assert artist_page == playlist == [5, 5, 4, 3, 1]
 
+    def test_artist_global_playlist_key_matches_the_top_tracks_key(self) -> None:
+        """The artist page and Essential Collection must produce one order."""
+        fs = pytest.importorskip(
+            "services.popularity.stages.finalise_stage",
+            reason="playlist ordering module unavailable",
+        )
+        rows = [
+            track(title="quiet5", stars=5, lastfm_listeners=500),
+            track(title="loud5", stars=5, lastfm_listeners=800_000),
+            track(title="huge4", stars=4, lastfm_listeners=5_000_000),
+            track(title="mid5", stars=5, listenbrainz_listens=40_000),
+        ]
+        artist_page = [r["title"] for r in sorted(rows, key=order_key)]
+        essential = [
+            r["title"]
+            for r in sorted(
+                rows, key=lambda r: fs._playlist_order_key(r, "artist_global")
+            )
+        ]
+        assert essential == artist_page == ["loud5", "mid5", "quiet5", "huge4"]
+
     def test_playlist_popularity_score_is_the_shared_measure(self) -> None:
         """Both surfaces must measure popularity with ONE function."""
         row = track(stars=4, lastfm_listeners=1234, listenbrainz_listens=5678)

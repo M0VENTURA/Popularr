@@ -50,6 +50,7 @@ from services.catalog.album_classification_service import (
     detect_live_album_type,
     is_bonus_track_title,
     is_instrumental_track_title,
+    normalize_primary_release_type,
     should_exclude_track_from_stats,
 )
 from services.metadata.album_missing_service import get_missing_tracks
@@ -92,15 +93,15 @@ from services.popularity.scan_hooks import (
 from services.popularity.stages.album_stage import enrich_album, enrich_album_extras, ensure_album_type
 from services.popularity.stages.finalise_stage import (
     _sync_essential_playlist,
-    _create_genre_top_track_playlists,
     _essential_playlists_enabled,
     _essential_strip_guest_credit,
     _fetch_essential_featured_rows,
     finalise_scan,
     post_album_star_ratings,
-    prune_genre_playlists_for_deletion,
     refresh_genre_playlist_covers_for_artist,
-    refresh_genre_playlists_for_album,
+    refresh_genre_playlists_for_albums,
+    _genre_refresh_config,
+    _playlist_genres_from_rows,
 )
 from services.popularity.stages.load_stage import load_candidates
 from services.popularity.stages.track_stage import process_track
@@ -1276,8 +1277,13 @@ def _close_artist_essential_section(artist_name: str | None, options: dict[str, 
     try:
         if featured_rows is None:
             featured_rows = _fetch_essential_featured_rows()
+        _essential_started = time.monotonic()
         _sync_essential_playlist(artist_name, featured_rows=featured_rows)
         done.add(key)
+        log_unified(
+            f"[FINALISE_TIMING] artist='{artist_name}' "
+            f"essential_playlist={time.monotonic() - _essential_started:.2f}s"
+        )
     except Exception as exc:
         logger.debug("Essential collection failed", artist=artist_name, error=str(exc))
 
@@ -1431,6 +1437,26 @@ def _run_album_cover_detection(artist: str, album: str, tracks: list[dict[str, A
         # a pass that found no covers.
         log_unified(f"[COVER_DETECT] {artist} - {album}: failed ({exc})")
         return set()
+
+
+def _prefer_specific_release_type(
+    detected_album_type: Any,
+    primary_release_type: Any,
+) -> str:
+    """Prefer an explicit primary release type over the generic ``"album"``.
+
+    ``_detect_album_type`` returns the literal default ``"album"`` when it has
+    no evidence. That default used to shadow the more specific
+    ``album_context["primary_release_type"]`` (usually the file/API
+    ``releasetype``) because the call site used
+    ``detected or primary``. A release with a generic detected type but an
+    explicit single/EP tag now keeps that tag.
+    """
+    detected = str(detected_album_type or "").strip()
+    primary = str(primary_release_type or "").strip()
+    if detected.casefold() == "album" and primary and primary.casefold() != "album":
+        return primary
+    return detected or primary
 
 
 def _artist_top_marked_cutoffs(scan_scores: list[float], db_scores: list[float], top_percentile: float = 0.10, medium_percentile: float = 0.20, large_catalog_percentile: float | None = None, large_catalog_threshold: int = 30) -> tuple[float | None, float | None, int, int]:
@@ -1686,6 +1712,24 @@ def _album_reference_scores(album_results: list[dict[str, Any]], score_key: str 
 def _apply_album_relative_normalization(album_results: list[dict[str, Any]], is_compilation: bool = False) -> int:
     if is_compilation:
         return _apply_track_artist_relative_normalization(album_results)
+
+    # A SINGLE release has no album distribution to normalise against. Its
+    # stars are referenced against the ARTIST catalogue in `_assign_stars`, so
+    # remapping the score onto its own 1-3 tracks would reintroduce the very
+    # self-reference the rating path is avoiding.
+    if album_results:
+        _release_type = str(
+            album_results[0].get("detected_album_type")
+            or album_results[0].get("album_type")
+            or album_results[0].get("musicbrainz_albumtype")
+            or album_results[0].get("spotify_album_type")
+            or ""
+        )
+        try:
+            if normalize_primary_release_type(_release_type) == "single":
+                return 0
+        except Exception:
+            pass
 
     raw_scores = _album_reference_scores(album_results, score_key="_raw_combined")
     if len(raw_scores) < 3:
@@ -2016,10 +2060,9 @@ def run_scan(
         log_unified(f"🚀 {_banner_title} ({total_albums} Album(s) Queued)")
         log_unified("=" * 80)
 
-    try:
-        prune_genre_playlists_for_deletion()
-    except Exception as exc:
-        logger.debug("Genre playlist prune skipped", error=str(exc))
+    # Genre orphan deletion is a GLOBAL operation. It runs in the global
+    # playlist rebuild (daily/manual/full-scan end), never at the start of an
+    # artist or album scan: an incremental scan has no library-wide view.
 
     albums_processed = 0
     tracks_processed = 0
@@ -2155,9 +2198,9 @@ def run_scan(
             logger.debug("Artist DB listen fetch failed", artist=artist, error=str(exc))
             return []
 
-    def _post_album_stars(artist: str, album_results: list[dict[str, Any]], is_compilation: bool = False, is_va_compilation: bool = False, reconciled: bool = False, provisional: bool = False) -> bool:
+    def _post_album_stars(artist: str, album_results: list[dict[str, Any]], is_compilation: bool = False, is_va_compilation: bool = False, reconciled: bool = False, provisional: bool = False) -> dict[str, Any]:
         if not album_results or options.get("metadata_only"):
-            return False
+            return {}
 
         try:
             # FIX: Ensure single-artist compilations bypass standard album stretching
@@ -2260,11 +2303,11 @@ def run_scan(
             )
             if int(_outcome.get("star_ratings") or 0) > 0:
                 _per_album_posted_keys.add((artist, str(album_results[0].get("album") or "")))
-                return True
+                return _outcome
         except Exception as exc:
             logger.debug("Per-album star posting failed", artist=artist, error=str(exc))
 
-        return False
+        return {}
 
     def _flush_artist_star_ratings(artist: str) -> None:
         pending = _artist_pending_albums.pop(artist, [])
@@ -2286,6 +2329,9 @@ def run_scan(
         # can feed a genre playlist, and therefore the playlists that owe a
         # cover check.
         _updated_albums: list[str] = []
+        _previous_genres_by_album: dict[str, set[str]] = {}
+        _finalise_timings: dict[str, float] = {}
+        _artist_started = time.monotonic()
 
         for _pending in pending:
             _album_results_this = _pending.get("album_results") or []
@@ -2303,41 +2349,72 @@ def run_scan(
             )
             if _posted:
                 _report_album_summary(_pending.get("report") or {}, _album_results_this)
-                _updated_albums.append(str(_pending.get("album") or ""))
-            if _posted and total_albums <= 1:
-                try:
-                    refresh_genre_playlists_for_album(artist, str(_pending.get("album") or ""))
-                except Exception as exc:
-                    logger.debug("Genre playlist refresh failed", artist=artist, error=str(exc))
+                _album_name = str(_pending.get("album") or "")
+                _updated_albums.append(_album_name)
+                _previous_genres_by_album[_album_name] = set(
+                    _pending.get("previous_genres") or set()
+                )
+                for _timing_key, _timing_value in (_posted.get("timings") or {}).items():
+                    _finalise_timings[_timing_key] = (
+                        _finalise_timings.get(_timing_key, 0.0) + float(_timing_value or 0.0)
+                    )
+
+        # ── Incremental genre refresh, ONCE per artist ──────────────────────
+        #
+        # Normal finalisation refreshes only the genre playlists this artist's
+        # albums can have changed. The affected set is the union of the genres
+        # loaded before the scan and the genres stored now, so a genre MOVE
+        # refreshes BOTH playlists, and a rating change within one genre still
+        # refreshes that genre. Library-wide reconciliation is deferred to the
+        # daily/manual global rebuild.
+        if _updated_albums:
+            _genre_started = time.monotonic()
+            try:
+                refresh_genre_playlists_for_albums(
+                    artist,
+                    _updated_albums,
+                    previous_genres_by_album=_previous_genres_by_album,
+                    timings=_finalise_timings,
+                )
+            except Exception as exc:
+                logger.debug("Genre playlist refresh failed", artist=artist, error=str(exc))
+            if "genre_playlist_refresh" not in _finalise_timings:
+                _finalise_timings["genre_playlist_refresh"] = time.monotonic() - _genre_started
 
         # ── AI cover art for the genre playlists this artist feeds ──────────
         #
-        # ⭐⭐ WHY THIS IS HERE AND NOT ONLY IN THE END-OF-SCAN REBUILD.
-        #
-        # A full library scan runs one artist at a time, and the GLOBAL genre
-        # rebuild is deliberately deferred to the END of the scan (see
-        # ``services/popularity.scan_scope``): the genre playlists aggregate
-        # the WHOLE library, so rebuilding them after every artist is slow and
-        # semantically wrong.
-        #
-        # The AI-cover check lives inside that rebuild — so during a
-        # 940-artist scan it ran ONCE, at the very end, and if the scan was
-        # stopped, not even that. The per-ALBUM refresh above could not fill
-        # the gap: it only ran for a single-ALBUM scan, and it also re-pools
-        # the whole library, which is the expensive half this path must avoid.
-        #
-        # This pass is the cheap half: it asks which genre playlists this
-        # artist's updated tracks feed and ensures each one carries its AI
-        # cover. The playlist CONTENT is still synced by the end-of-scan
-        # rebuild.
+        # This pass only asks which genre playlists the artist's updated tracks
+        # feed and ensures each carries its AI cover. The playlist CONTENT is
+        # synced by the incremental refresh above (and, for the full library,
+        # reconciled by the daily/manual global rebuild).
         #
         # Never fatal: an image API that is out of quota must not cost the
         # scan its ratings.
         if _updated_albums:
+            _cover_started = time.monotonic()
             try:
                 refresh_genre_playlist_covers_for_artist(artist, _updated_albums)
             except Exception as exc:
                 logger.debug("Genre playlist cover pass failed", artist=artist, error=str(exc))
+            _finalise_timings["cover_playlists"] = time.monotonic() - _cover_started
+
+        _finalise_timings["total"] = time.monotonic() - _artist_started
+        logger.info(
+            "[FINALISE_TIMING]",
+            artist=artist,
+            **{key: round(value, 3) for key, value in _finalise_timings.items()},
+        )
+        log_unified(
+            f"[FINALISE_TIMING] artist='{artist}' "
+            f"ratings={_finalise_timings.get('ratings', 0.0):.2f}s "
+            f"persistence={_finalise_timings.get('persistence', 0.0):.2f}s "
+            f"file_tags={_finalise_timings.get('file_tags', 0.0):.2f}s "
+            f"navidrome_ratings={_finalise_timings.get('navidrome_ratings', 0.0):.2f}s "
+            f"essential_playlist={_finalise_timings.get('essential_playlist', 0.0):.2f}s "
+            f"affected_genres={_finalise_timings.get('affected_genres', 0.0):.2f}s "
+            f"genre_playlist_refresh={_finalise_timings.get('genre_playlist_refresh', 0.0):.2f}s "
+            f"total={_finalise_timings['total']:.2f}s"
+        )
 
     def _report_album_summary(report: dict[str, Any], album_results: list[dict[str, Any]]) -> None:
         """Emit the closing ALBUM SUMMARY block for one album.
@@ -2520,6 +2597,20 @@ def run_scan(
 
             album = album_row.get("album") or ""
             tracks = album_row.get("tracks") or []
+            # Snapshot the genres as LOADED. The scan's genre writers update
+            # the database, and comparing this with the rows at finalise time
+            # is what catches a genre MOVE (old playlist AND new playlist).
+            try:
+                _, _previous_max_genres = _genre_refresh_config()
+                _album_previous_genres = _playlist_genres_from_rows(
+                    tracks, max_genres=_previous_max_genres
+                )
+            except Exception as _genre_snapshot_exc:
+                logger.debug(
+                    "Album genre snapshot failed",
+                    artist=artist, album=album, error=str(_genre_snapshot_exc),
+                )
+                _album_previous_genres = set()
             _album_start = len(results)
             # Report accumulator for this album's closing ALBUM SUMMARY block.
             # Populated as each stage completes; emitted when the album's star
@@ -3883,6 +3974,17 @@ def run_scan(
                     logger.debug("record_scan(completed) failed", artist=artist, album=album, error=str(exc))
 
                 _album_results_this = results[_album_start:]
+                # Carry the RELEASE verdict with the rows. `_assign_stars`
+                # otherwise cannot tell a dedicated SINGLE release from an
+                # ordinary 1-track album, and both land on the "too few tracks
+                # for an album z" 3★ ceiling.
+                _album_release_type = _prefer_specific_release_type(
+                    (album_result or {}).get("detected_album_type"),
+                    album_context.get("primary_release_type"),
+                )
+                for _r in _album_results_this:
+                    if isinstance(_r, dict) and _album_release_type:
+                        _r["detected_album_type"] = _album_release_type
                 _album_report["singles_detected"] = sum(
                     1 for _r in _album_results_this if isinstance(_r, dict) and bool(_r.get("is_single"))
                 )
@@ -3893,6 +3995,7 @@ def run_scan(
                         "is_compilation": bool(album_context.get("is_compilation")),
                         "is_va_compilation": bool(album_context.get("is_va_compilation")),
                         "album": album,
+                        "previous_genres": _album_previous_genres,
                         # Report metadata for the closing ALBUM SUMMARY. Carried
                         # here because the star ratings this summary reports are
                         # only assigned when the artist's pending albums are
@@ -4014,12 +4117,13 @@ def run_scan(
             logger.warning("Finalise failed", error=str(_finalise_exc))
             log_unified(f"[POPULARITY] Finalise step failed ({_finalise_exc})")
     else:
-        try:
-            _genre_playlists_written = _create_genre_top_track_playlists()
-            if _genre_playlists_written:
-                log_unified(f"[FINALISE_STAGE] Genre playlists: {_genre_playlists_written} file(s) written")
-        except Exception as exc:
-            logger.debug("Metadata genre playlist rebuild failed", error=str(exc))
+        # A metadata-only pass changes no ratings, so there is no incremental
+        # genre refresh to perform here. Library-wide playlist reconciliation
+        # belongs to the daily/manual global rebuild — not to every scan.
+        log_unified(
+            "[FINALISE_STAGE] Metadata-only scan — library-wide playlists left "
+            "to the scheduled/manual rebuild"
+        )
 
     update(stage="complete", progress=100, message="Popularity scan complete.", processed=total_albums, total_items=total_albums)
     finish(success=True)

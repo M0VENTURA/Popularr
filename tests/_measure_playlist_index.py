@@ -48,7 +48,7 @@ def _create_schema() -> None:
             "CREATE TABLE IF NOT EXISTS playlists ("
             " playlist_id TEXT PRIMARY KEY, name TEXT, source TEXT, type TEXT,"
             " owner TEXT, is_public BOOLEAN, song_count INTEGER, comment TEXT,"
-            " changed TEXT, synced_at TIMESTAMP)"
+            " changed TEXT, managed_type TEXT, synced_at TIMESTAMP)"
         ))
         conn.execute(text(
             "CREATE TABLE IF NOT EXISTS playlist_entries ("

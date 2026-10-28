@@ -66,8 +66,29 @@ def test_skip_cached_album_removals_not_skipped():
 
 
 def test_skip_cached_album_equal_ids_skipped():
-    """Unchanged album: same count, same ids → skip."""
-    assert _skip(tracks=[{"id": "n1"}, {"id": "n2"}], cached={"n1", "n2"}) is True
+    """Unchanged album: same count, same ids AND same metadata fingerprint."""
+    assert _skip(
+        tracks=[{"id": "n1"}, {"id": "n2"}],
+        cached={"n1", "n2"},
+        metadata_fingerprint_equal=True,
+    ) is True
+
+
+def test_skip_cached_album_equal_ids_changed_metadata_processed():
+    """IDs equal but metadata changed → must re-import, not skip."""
+    assert _skip(
+        tracks=[{"id": "n1"}, {"id": "n2"}],
+        cached={"n1", "n2"},
+        metadata_fingerprint_equal=False,
+    ) is False
+
+
+def test_skip_cached_album_equal_ids_unknown_fingerprint_processed():
+    """An unproven fingerprint must not be treated as unchanged."""
+    assert _skip(
+        tracks=[{"id": "n1"}, {"id": "n2"}],
+        cached={"n1", "n2"},
+    ) is False
 
 
 def test_skip_cached_album_equal_count_different_ids_processed():

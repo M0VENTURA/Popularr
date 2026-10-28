@@ -83,6 +83,19 @@ class TestNavidromeOrphanSweep:
 
     def test_sweeps_orphaned_keeps_named_and_foreign(self, monkeypatch):
         monkeypatch.setattr(fs, "_genre_playlists_delete_enabled", lambda: True)
+        # The index is the ownership proof. Both genre playlists are typed;
+        # only the one outside the keep set may go.
+        monkeypatch.setattr(
+            fs,
+            "_managed_type_map_for_cleanup",
+            lambda: (
+                {
+                    "alt-rock - top tracks": "genre",
+                    "alternative - top tracks": "genre",
+                },
+                True,
+            ),
+        )
 
         client = _FakeNavidromeClient([
             {"id": "p1", "name": "Alt-rock - Top Tracks"},                    # not kept → sweep
@@ -106,6 +119,76 @@ class TestNavidromeOrphanSweep:
 
         assert client.deleted == []
 
+    def test_decade_playlist_is_never_swept(self, monkeypatch):
+        """``1980s - Top Tracks`` fits the genre template, but it is a DECADE.
+
+        This is the reported delete-then-recreate loop: the sweep removed the
+        decade playlists and the curated builder put them back.
+        """
+        monkeypatch.setattr(fs, "_genre_playlists_delete_enabled", lambda: True)
+        monkeypatch.setattr(
+            fs,
+            "_managed_type_map_for_cleanup",
+            lambda: (
+                {
+                    "1980s - top tracks": "decade",
+                    "1990s - top tracks": "decade",
+                    "new music": "new_music",
+                    "amon amarth - essential collection": "essential",
+                },
+                True,
+            ),
+        )
+        client = _FakeNavidromeClient([
+            {"id": "d1", "name": "1980s - Top Tracks"},
+            {"id": "d2", "name": "1990s - Top Tracks"},
+            {"id": "n1", "name": "New Music"},
+            {"id": "e1", "name": "Amon Amarth - Essential Collection"},
+        ])
+        monkeypatch.setattr(fs, "_navidrome_clients", lambda: [client])
+
+        fs._sweep_orphaned_genre_playlists_from_navidrome(set())
+
+        assert client.deleted == [], (
+            "only positively-identified GENRE playlists may be swept"
+        )
+
+    def test_no_index_means_no_deletion(self, monkeypatch):
+        """When ownership cannot be proven, nothing is deleted."""
+        monkeypatch.setattr(fs, "_genre_playlists_delete_enabled", lambda: True)
+        monkeypatch.setattr(fs, "_managed_type_map_for_cleanup", lambda: ({}, False))
+        client = _FakeNavidromeClient([{"id": "p1", "name": "Alt-rock - Top Tracks"}])
+        monkeypatch.setattr(fs, "_navidrome_clients", lambda: [client])
+
+        fs._sweep_orphaned_genre_playlists_from_navidrome(set())
+
+        assert client.deleted == []
+
+    def test_index_type_is_authoritative_when_available(self, monkeypatch):
+        """With an index, an UNINDEXED candidate is left alone (unproven).
+
+        This is the conservative half of the fix: no index row means no proof
+        of ownership, so nothing is deleted.
+        """
+        monkeypatch.setattr(fs, "_genre_playlists_delete_enabled", lambda: True)
+        monkeypatch.setattr(
+            fs,
+            "_managed_type_map_for_cleanup",
+            lambda: ({"some genre - top tracks": "genre"}, True),
+        )
+        client = _FakeNavidromeClient([
+            {"id": "u1", "name": "Unindexed - Top Tracks"},
+            {"id": "g1", "name": "Some Genre - Top Tracks"},
+        ])
+        monkeypatch.setattr(fs, "_navidrome_clients", lambda: [client])
+
+        fs._sweep_orphaned_genre_playlists_from_navidrome(set())
+
+        assert client.deleted == ["g1"], (
+            "only an index-confirmed genre playlist may be swept; an unproven "
+            "one is kept"
+        )
+
     def test_delete_by_name_uses_normalized_clients(self, monkeypatch):
         """``_delete_playlist_from_navidrome`` must resolve clients via
         ``_navidrome_clients`` (normalised config) and delete by case-insensitive
@@ -116,3 +199,28 @@ class TestNavidromeOrphanSweep:
         fs._delete_playlist_from_navidrome("Alt-Rock - Top Tracks")
 
         assert client.deleted == ["p9"]
+
+
+class TestPlaylistTaxonomy:
+    """Ownership is decided by the explicit classifier, not by the suffix."""
+
+    def test_decade_is_classified_before_genre(self):
+        from services.playlists.playlist_taxonomy import (
+            DECADE,
+            ESSENTIAL,
+            GENRE,
+            NEW_MUSIC,
+            classify_managed_playlist,
+        )
+
+        assert classify_managed_playlist("1980s - Top Tracks", config={}) == DECADE
+        assert classify_managed_playlist("1990s - Top Tracks", config={}) == DECADE
+        assert (
+            classify_managed_playlist("Alternative Rock - Top Tracks", config={})
+            == GENRE
+        )
+        assert (
+            classify_managed_playlist("Amon Amarth - Essential Collection", config={})
+            == ESSENTIAL
+        )
+        assert classify_managed_playlist("New Music", config={}) == NEW_MUSIC

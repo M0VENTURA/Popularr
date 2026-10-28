@@ -421,6 +421,14 @@ def _detect_album_type(
         return "album+live"
     if "+remix" in album_lower or "(remix)" in album_lower:
         return "album+remix"
+    # A release explicitly marked as a single is a SINGLE even when its file
+    # tags carry no release type. Navidrome/library naming commonly uses
+    # ``Guardian [Single]`` / ``Song (Single)`` / ``Song - Single``.
+    if re.search(
+        r"(?:[\[(]\s*single\s*[\])]|(?:^|\s[-–—:]\s*)single)\s*$",
+        album_lower,
+    ):
+        return "single"
 
     return "album"
 

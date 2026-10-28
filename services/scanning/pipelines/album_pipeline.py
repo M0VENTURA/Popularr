@@ -134,13 +134,22 @@ def run_album_pipeline(artist_name: str, album_name: str, force: bool = False) -
 
         if artist_id:
             log_unified(f"Step 1/3: Navidrome import for album '{album_display}'")
-            scan_artist_to_db(
+            _import_result = scan_artist_to_db(
                 artist_name,
                 artist_id,
                 verbose=True,
                 force=force,
                 album_filter=album_name,
             )
+            if isinstance(_import_result, dict) and (
+                _import_result.get("deferred")
+                or _import_result.get("success") is False
+            ):
+                log_unified(
+                    f"⚠️ Album scan for '{album_display}' did not complete: "
+                    f"{_import_result.get('reason') or 'remote scan not verified'}"
+                )
+                return
         else:
             track_count = lookup_track_artist_count(artist_name)
             if track_count == 0:

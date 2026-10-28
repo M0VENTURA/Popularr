@@ -69,6 +69,7 @@ TABLES_TO_ENSURE: dict[str, str] = {
             song_count INTEGER DEFAULT 0,
             comment TEXT,
             changed TEXT,
+            managed_type TEXT,
             synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """,
@@ -82,6 +83,21 @@ TABLES_TO_ENSURE: dict[str, str] = {
             track_id TEXT NOT NULL,
             position INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (playlist_id, position)
+        )
+    """,
+    # Song IDs Navidrome refused to store in a playlist. Keyed by SERVER as
+    # well as playlist: IDs from two Navidrome servers must never be mixed.
+    # A rejection is retained until a verified import/ID adoption clears it,
+    # so the same invalid ID is not retried on every scan.
+    "playlist_song_rejections": """
+        CREATE TABLE IF NOT EXISTS playlist_song_rejections (
+            server_key TEXT NOT NULL,
+            playlist_name TEXT NOT NULL,
+            song_id TEXT NOT NULL,
+            track_hint TEXT,
+            first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (server_key, playlist_name, song_id)
         )
     """,
     "scan_history": """
@@ -385,6 +401,18 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         # column (already fully reconciled by the old deferred flush) are not
         # forced through a full re-scan on upgrade.
         "stars_reconciled": "BOOLEAN DEFAULT TRUE",
+        # ── Local metadata authority / Navidrome reconciliation ───────────
+        # When Popularr writes a correction into the FILE tags, the local DB
+        # value must win over an older Navidrome index until Navidrome has
+        # re-read the file. ``local_tags_written_at`` records that write;
+        # ``metadata_dirty_for_navidrome`` keeps the requirement alive across
+        # processes; ``navidrome_imported_at`` only advances after a VERIFIED
+        # import that observed the expected values. ``metadata_source`` is
+        # diagnostic provenance (popularr / navidrome / navidrome_confirmed).
+        "local_tags_written_at": "TIMESTAMP",
+        "metadata_dirty_for_navidrome": "BOOLEAN DEFAULT FALSE",
+        "navidrome_imported_at": "TIMESTAMP",
+        "metadata_source": "TEXT",
         "genres": "TEXT", "genre": "TEXT", "manual_genres": "JSONB", "navidrome_genres": "JSONB", 
         "spotify_genres": "JSONB", "listenbrainz_genres": "JSONB", "discogs_genres": "JSONB", 
         "musicbrainz_genres": "JSONB", "essentia_genres": "JSONB", 
@@ -405,11 +433,16 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "raw_score": "DOUBLE PRECISION",
         "spotify_score": "DOUBLE PRECISION", 
         "lastfm_score": "DOUBLE PRECISION", "lastfm_listeners": "INTEGER", "lastfm_playcount": "BIGINT",
+        "lastfm_playcount_available": "BOOLEAN",
         "lastfm_tags": "JSONB", "lastfm_last_updated": "TIMESTAMP",
         "listenbrainz_score": "DOUBLE PRECISION", "listenbrainz_listens": "INTEGER",
         "listenbrainz_users": "INTEGER", "listenbrainz_last_updated": "TIMESTAMP",
         "popularity_marked": "BOOLEAN DEFAULT FALSE", "popularity_frozen": "BOOLEAN DEFAULT FALSE",
         "popularity_frozen_at": "TIMESTAMP",
+        # Persisted so the popularity report can explain why a row with visible
+        # source counts has final_score 0 / 1★. The scan already computes this
+        # verdict per track; it was previously memory-only.
+        "exclude_from_stats": "BOOLEAN DEFAULT FALSE",
         "mbid": "TEXT", "suggested_mbid": "TEXT", "recording_mbid": "TEXT",
         "musicbrainz_id": "TEXT", "musicbrainz_trackid": "TEXT", "musicbrainz_albumid": "TEXT",
         "musicbrainz_album_mbid": "TEXT", "musicbrainz_artistid": "TEXT", "musicbrainz_albumartistid": "TEXT",

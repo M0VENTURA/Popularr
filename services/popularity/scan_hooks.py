@@ -34,6 +34,7 @@ from helpers.normalization_service import (
     normalise_scan_track_identity,
     normalize_title_for_lastfm,
     normalize_title_for_lookup,
+    strip_remaster_qualifier,
     strip_remaster_suffix,
     strip_single_release_suffix,
 )
@@ -297,7 +298,7 @@ def prepare_track_context(
     lookup_title = normalize_title_for_lookup(title)
     lastfm_title = normalize_title_for_lastfm(title)
 
-    remaster_stripped_title = strip_remaster_suffix(title)
+    remaster_stripped_title = strip_remaster_qualifier(title)
     single_suffix_stripped_title = strip_single_release_suffix(title)
 
     remastered_only = is_remastered_only_variant(title)
@@ -412,6 +413,7 @@ __all__ = [
     "normalize_title_for_lookup",
     "detect_cover_and_normalize_title",
     "is_remastered_only_variant",
+    "strip_remaster_qualifier",
     "strip_remaster_suffix",
     "strip_single_release_suffix",
     "prepare_album_context",

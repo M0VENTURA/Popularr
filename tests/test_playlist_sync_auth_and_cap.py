@@ -185,7 +185,8 @@ class TestPostWriteVerification:
 
         result = _sync(client, "Metal - Top Tracks", self.REQUESTED)
 
-        assert result["updated"] is True and result["success"] is True
+        assert result["updated"] is True and result["success"] is False
+        assert result["partial"] is True and result["reconciliation_complete"] is False
         warns = rec.warnings("stored a different number of tracks")
         assert warns, (
             "an accepted write that stores fewer tracks (stale IDs after "
@@ -230,7 +231,8 @@ class TestPostWriteVerification:
 
         result = _sync(client, "Brand New - Top Tracks", self.REQUESTED)
 
-        assert result["created"] is True and result["success"] is True
+        assert result["created"] is True and result["success"] is False
+        assert result["partial"] is True and result["reconciliation_complete"] is False
         warns = rec.warnings("stored a different number of tracks")
         assert warns and warns[0][2]["stored"] == 2
 

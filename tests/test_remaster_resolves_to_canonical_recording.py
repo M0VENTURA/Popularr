@@ -96,11 +96,13 @@ class TestTheRemasterHelpers:
         assert strip_remaster_qualifier("Higher (feat. Someone)") == "Higher (feat. Someone)"
 
     def test_strip_handles_deluxe_remastered(self):
-        """A qualifier whose only remaster word is "remastered" inside a
-        compound like "Deluxe Remastered 2011" keeps "Deluxe"."""
+        """"Deluxe Remastered 2011" is mastering/reissue wording, not a
+        performance descriptor, so the whole qualifier is safe to drop."""
         from helpers.normalization_service import strip_remaster_qualifier
 
-        assert strip_remaster_qualifier("Higher (Deluxe Remastered 2011)") == "Higher (Deluxe)"
+        assert strip_remaster_qualifier("Higher (Deluxe Remastered 2011)") == "Higher"
+        assert strip_remaster_qualifier("Higher (Digital Remaster)") == "Higher"
+        assert strip_remaster_qualifier("Higher (Digitally Remastered)") == "Higher"
 
 
 # ===========================================================================

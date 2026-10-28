@@ -58,9 +58,20 @@ def should_skip_cached_album(
     force: bool,
     album_needs_reimport: bool,
     verbose: bool,
+    metadata_fingerprint_equal: bool | None = None,
+    album_metadata_dirty: bool = False,
 ) -> bool:
-    """Return True when the DB cache appears current for an album."""
+    """Return True when the DB cache is provably current for an album.
+
+    ⭐ Equal song IDs are NOT proof of unchanged metadata. The IDs can stay
+    identical while title/artist/album/year/position/path/duration/MBID/genres
+    change. The caller therefore supplies a metadata fingerprint comparison;
+    an unknown fingerprint means "do not skip". A dirty local correction also
+    forbids skipping: the import still has to confirm the corrected values.
+    """
     if force or album_needs_reimport or not tracks:
+        return False
+    if album_metadata_dirty:
         return False
     if len(cached_ids_for_album) == len(tracks):
         # Equal counts — the ID comparison below decides whether the track
@@ -68,11 +79,23 @@ def should_skip_cached_album(
         # whose songs were REMOVED in Navidrome, because the DB then holds
         # MORE ids than Navidrome — leaving the removed songs in the DB.)
         navidrome_album_ids = {track.get("id") for track in tracks if track.get("id")}
-        if navidrome_album_ids and navidrome_album_ids == cached_ids_for_album:
+        if (
+            navidrome_album_ids
+            and navidrome_album_ids == cached_ids_for_album
+            and metadata_fingerprint_equal is True
+        ):
             logger.debug(
-                "Skipping unchanged album (IDs match)",
+                "Skipping unchanged album (IDs and metadata fingerprint match)",
                 album=album_name,
                 track_count=len(cached_ids_for_album),
             )
             return True
+        if navidrome_album_ids and navidrome_album_ids == cached_ids_for_album:
+            logger.info(
+                "Re-importing album — song IDs match but metadata changed or "
+                "cannot be proven unchanged",
+                album=album_name,
+                fingerprint_equal=metadata_fingerprint_equal,
+                dirty=bool(album_metadata_dirty),
+            )
     return False

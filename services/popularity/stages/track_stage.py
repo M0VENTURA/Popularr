@@ -61,6 +61,7 @@ from services.popularity.popularity_sources import (
     album_recording_batch_key,
     get_aggregated_lastfm_popularity,
     get_aggregated_listenbrainz_popularity,
+    get_lastfm_track_info,
     get_search_aggregated_lastfm_popularity,
     get_work_level_listenbrainz_popularity,
     resolve_performance_title,
@@ -1871,7 +1872,17 @@ def process_track(
                         and not is_live_release
                     ):
                         lastfm_listeners = _as_int(_prefetch_entry.get("lastfm_listeners") or 0)
-                        lastfm_playcount = _as_int(_prefetch_entry.get("lastfm_playcount") or 0)
+                        _prefetch_playcount_available = _prefetch_entry.get(
+                            "_playcount_available"
+                        )
+                        if _prefetch_playcount_available is None:
+                            _prefetch_playcount_available = (
+                                "lastfm_playcount" in _prefetch_entry
+                            )
+                        if _prefetch_playcount_available:
+                            lastfm_playcount = _as_int(_prefetch_entry.get("lastfm_playcount") or 0)
+                        else:
+                            lastfm_playcount = _stored_lf_play
                         update_payload["lastfm_listeners"] = lastfm_listeners
                         update_payload["lastfm_playcount"] = lastfm_playcount
                         update_payload["lastfm_last_updated"] = now_ts
@@ -1896,7 +1907,26 @@ def process_track(
                                 )
                                 if agg and (agg.get("listeners") or 0) > 0:
                                     lastfm_listeners = _as_int(agg.get("listeners") or 0)
-                                    lastfm_playcount = _as_int(agg.get("track_play") or agg.get("playcount") or 0)
+                                    # A missing playcount is UNKNOWN, not a
+                                    # measured zero: keep the stored value
+                                    # rather than overwriting it with 0.
+                                    if agg.get("playcount_available", True):
+                                        lastfm_playcount = _as_int(
+                                            agg.get("track_play") or agg.get("playcount") or 0
+                                        )
+                                    else:
+                                        lastfm_playcount = _stored_lf_play
+                                    if agg.get("match_type") == "canonical_remaster_fallback":
+                                        logger.debug(
+                                            "[POPULARITY_MATCH]",
+                                            track_id=track_id,
+                                            artist=artist,
+                                            library_title=str(raw_title or title or ""),
+                                            canonical_title=str(agg.get("lookup_title") or ""),
+                                            source="lastfm",
+                                            lookup="canonical_remaster_fallback",
+                                            matched_title=str(agg.get("matched_title") or ""),
+                                        )
                                     if not update_payload.get("lastfm_tags"):
                                         _agg_tags: list[str] = []
                                         for _mt in (agg.get("matched_tracks") or []):
@@ -1923,9 +1953,35 @@ def process_track(
                                     # the studio recording straight back — the remix
                                     # row kept the original's count through the one
                                     # path meant to catch a miss.
-                                    lf_result = lf.get_track_info(artist, _perf_title)
+                                    #
+                                    # ``get_lastfm_track_info`` applies the same
+                                    # EXACT → safe-remaster tiering as the
+                                    # aggregator, so a remaster title can reach
+                                    # "Orpheus" without ever collapsing a protected
+                                    # Live/Acoustic/Edit version.
+                                    if not hasattr(lf, "get_track_info"):
+                                        # Preserve the pre-existing failure
+                                        # contract: keep stored counts and do
+                                        # NOT stamp a fresh zero.
+                                        raise RuntimeError("Last.fm client unavailable")
+                                    lf_result = get_lastfm_track_info(
+                                        artist,
+                                        _perf_title,
+                                        track_mbid=recording_mbid or None,
+                                        lastfm_client=lf,
+                                        is_live_release=is_live_release,
+                                        target_is_alt_rendition=_alt_rendition,
+                                    )
                                     lastfm_listeners = _as_int(lf_result.get("listeners") if isinstance(lf_result, dict) else 0)
-                                    lastfm_playcount = _as_int(lf_result.get("track_play") if isinstance(lf_result, dict) else 0)
+                                    if isinstance(lf_result, dict) and (
+                                        lf_result.get("track_play") is not None
+                                        or lf_result.get("playcount") is not None
+                                    ):
+                                        lastfm_playcount = _as_int(
+                                            lf_result.get("track_play") or lf_result.get("playcount") or 0
+                                        )
+                                    else:
+                                        lastfm_playcount = _stored_lf_play
 
                                     toptags = lf_result.get("toptags", {}) if isinstance(lf_result, dict) else {}
                                     tag_list = toptags.get("tag", []) if isinstance(toptags, dict) else []
@@ -1966,7 +2022,8 @@ def process_track(
                             _search_listeners = _as_int(_search_agg.get("listeners") or 0)
                             if _search_listeners > lastfm_listeners:
                                 lastfm_listeners = _search_listeners
-                                lastfm_playcount = _as_int(_search_agg.get("track_play") or 0)
+                                if _search_agg.get("playcount_available", True):
+                                    lastfm_playcount = _as_int(_search_agg.get("track_play") or 0)
                                 update_payload["lastfm_listeners"] = lastfm_listeners
                                 update_payload["lastfm_playcount"] = lastfm_playcount
                                 update_payload["lastfm_last_updated"] = now_ts
@@ -2808,6 +2865,25 @@ def process_track(
         if _scan_album_artist:
             update_payload.setdefault("album_artist", _scan_album_artist)
 
+    # Persist the two diagnostics the popularity report needs. ``exclude``
+    # explains a 0 score / 1★ row that still has source counts; availability
+    # distinguishes a measured playcount of 0 from an unavailable one.
+    _exclude_value = update_payload.get(
+        "exclude_from_stats", track.get("exclude_from_stats")
+    )
+    if _exclude_value is not None:
+        update_payload["exclude_from_stats"] = bool(_exclude_value)
+    _playcount_value = update_payload.get(
+        "lastfm_playcount", track.get("lastfm_playcount")
+    )
+    if _playcount_value is not None:
+        try:
+            update_payload["lastfm_playcount_available"] = int(
+                _playcount_value or 0
+            ) > 0
+        except (TypeError, ValueError):
+            update_payload["lastfm_playcount_available"] = False
+
     effective_track = _strip_album_type_columns(track, update_payload)
 
     _jsonb_fields = [
@@ -3038,6 +3114,9 @@ def process_track(
         "lastfm_listeners": int(lastfm_listeners or 0),
         "listenbrainz_listens": int(listenbrainz_listens or 0),
         "lb_percentile": float(lb_percentile or 0.0),
+        "lastfm_playcount_available": bool(
+            update_payload.get("lastfm_playcount_available")
+        ),
         "popularity_score": _result_final_score,
         "final_score": _result_final_score,
         "_raw_combined": _ret_raw_combined,

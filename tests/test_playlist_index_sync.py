@@ -559,7 +559,7 @@ class TestTheScanRunsTheSync:
         source = self._source()
         marker = "sync_playlist_index(_navidrome_clients())"
         assert source.index("_create_new_music_playlist()") < source.index(marker)
-        assert source.index("_create_genre_top_track_playlists()") < source.index(marker)
+        assert source.index("_create_genre_top_track_playlists(") < source.index(marker)
 
     def test_it_uses_the_server_scoped_client_factory(self):
         """⚠️ Not a per-account source.

@@ -113,7 +113,7 @@ def _recreate_test_schema():
                       # in-memory engine), which means a test for the artist
                       # page's playlist section would assert an empty result and
                       # PASS while proving nothing.
-                      "playlists", "playlist_entries"):
+                      "playlists", "playlist_entries", "playlist_song_rejections"):
             _ddl = TABLES_TO_ENSURE.get(_name)
             if _ddl:
                 conn.execute(_text(_ddl))
