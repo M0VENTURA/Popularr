@@ -626,19 +626,21 @@ class TestTheEssentialCollectionOrdering:
             fs._ordered_playlist_rows(rows, order_mode="final_score")
         ) == ["Quiet", "Loud"]
 
-    def test_the_essential_builder_shares_the_top_tracks_orderer(self):
-        """Symmetry pin: the artist page and Essential Collection must agree."""
+    def test_the_essential_builder_orders_by_stars_then_popularity_score(self):
+        """Symmetry pin for the artist-specific Essential contract."""
         rows = [
             {**track("Five Loud", "A", stored=20, lf=800_000), "stars": 5},
-            {**track("Five Quiet", "A", stored=95, lf=500), "stars": 5},
-            {**track("Four Loud", "A", stored=10, lf=5_000_000), "stars": 4},
-            {**track("Five Mid", "A", stored=60, lf=40_000), "stars": 5},
+            {**track("Five Quiet", "A", stored=96, lf=500), "stars": 5},
+            {**track("Four Loud", "A", stored=95, lf=5_000_000), "stars": 4},
+            {**track("Five Mid", "A", stored=80, lf=40_000), "stars": 5},
+            {**track("Four Quiet", "A", stored=37, lf=10), "stars": 4},
         ]
-        essential = titles_of(fs._ordered_playlist_rows(list(rows), order_mode="artist_global"))
-        assert essential == ["Five Loud", "Five Mid", "Five Quiet", "Four Loud"], (
-            "5★ tier first, then ARTIST-GLOBAL listener popularity (not the "
-            "album-relative final score) inside it"
+        essential = titles_of(
+            fs._ordered_playlist_rows(list(rows), order_mode="popularity_score")
         )
+        assert essential == [
+            "Five Quiet", "Five Mid", "Five Loud", "Four Loud", "Four Quiet",
+        ], "5★ tier first, then Popularity Score; nothing else may outrank it"
 
 
 def strip_py_comments(source: str) -> str:
@@ -756,12 +758,14 @@ class TestTheBuildersUseTheOrderingPipeline:
 
     def test_the_essential_builder_uses_the_shared_orderer(self):
         src = self._finalise_source()
-        assert 'order_mode = "artist_global"' in src, (
-            "the Essential Collection is an artist-specific list: it must rank "
-            "by stars then artist-global popularity, not the album-relative "
-            "final score selected for library-wide builders"
+        assert 'order_mode = "popularity_score"' in src, (
+            "the Essential Collection must rank by stars then the stored "
+            "Popularity Score, not listener prominence"
         )
         assert "winners = _ordered_playlist_rows(winners, order_mode=order_mode)" in src
+        assert "winners = [row for row in winners if int(row.get(\"stars\") or 0) >= 4]" in src, (
+            "the final Essential membership must be 4★/5★ only"
+        )
         assert "_ordered_by_percentile_then_prominence" not in strip_py_comments(src), (
             "the percentile-first orderer must be gone; keeping it would leave a "
             "second ordering contract in place"
@@ -770,13 +774,14 @@ class TestTheBuildersUseTheOrderingPipeline:
             "the old inline Essential sort must be gone"
         )
 
-    def test_the_essential_query_selects_the_raw_listener_counts(self):
+    def test_the_essential_query_selects_the_popularity_score_it_sorts_on(self):
         src = self._finalise_source()
         idx = src.index("def _sync_essential_playlist")
         # Generous window: the SELECT sits well inside the function.
         window = src[idx: idx + 12000]
-        assert "COALESCE(lastfm_listeners, 0) AS lastfm_listeners" in window, (
-            "the Essential SELECT must fetch the raw counts for the tie-break"
+        assert "AS popularity_score" in window, (
+            "the Essential SELECT must fetch the Popularity Score used as its "
+            "second ordering key"
         )
 
     def test_the_recommendation_generator_interleaves_its_sources(self):

@@ -2176,14 +2176,29 @@ def _playlist_order_key(
 ) -> tuple:
     """Full sort key for a generated playlist, most preferred first.
 
-    ``artist_global`` is the artist-page/Essential contract: star tier first,
+    ``artist_global`` is the artist-page Top 20 contract: star tier first,
     then the cross-album artist-global popularity score (max of the two log
-    listener scales), then the stored score. It is deliberately identical to
-    ``popularity_math.star_then_popularity_order_key`` so the artist Top 20 and
-    the Essential Collection cannot disagree about "top".
+    listener scales). ``popularity_score`` is the Essential Collection
+    contract: star tier first, then the stored Popularity Score shown on the
+    artist page.
     """
     if mode == "artist_global":
         return star_then_popularity_order_key(row)
+    if mode == "popularity_score":
+        # Artist-specific Essential Collection contract: stars first, then the
+        # stored Popularity Score shown on the artist page. Listener-based
+        # cross-album prominence is deliberately NOT used here.
+        return (
+            -int(row.get("stars") or 0),
+            -float(
+                row.get("popularity_score")
+                or row.get("popularity")
+                or row.get("final_score")
+                or 0
+            ),
+            -float(row.get("final_score") or row.get("popularity_score") or 0),
+            str(row.get("title") or "").casefold(),
+        )
     return (
         -int(row.get("stars") or 0),
         -float(_effective_order_score(row, mode)),
@@ -2397,7 +2412,10 @@ _ESSENTIAL_EXCLUDED_ARTISTS = frozenset({
 })
 _ESSENTIAL_MIN_TRACKS = 12
 _ESSENTIAL_TITLE_NOISE_RE = re.compile(r"\([^)]*\)|\[[^\]]*\]")
-_ESSENTIAL_FEAT_RE = re.compile(r"\s+(?:feat\.?|featuring|ft\.?)\s+", re.IGNORECASE)
+_ESSENTIAL_FEAT_RE = re.compile(
+    r"(?:\s+|\(\s*)(?:feat\.?|featuring|ft\.?)\s+",
+    re.IGNORECASE,
+)
 _ESSENTIAL_FEAT_SPLIT_RE = re.compile(r"\s*(?:&|,|/|\+|\bx\b|\bvs\.?\b)\s*", re.IGNORECASE)
 
 
@@ -2848,19 +2866,42 @@ def _essential_include_featured_enabled() -> bool:
         return True
 
 
-def _track_has_featured_artist(artist_field: str, target_artist: str) -> bool:
+def _track_has_featured_artist(
+    artist_field: str,
+    target_artist: str,
+    *,
+    title_field: str = "",
+    album_artist_field: str = "",
+) -> bool:
+    """True when *target_artist* is a guest credit in ANY track field.
+
+    Navidrome/metadata correction can leave the guest credit in ``artist``
+    (``Lead feat. Guest``), ``album_artist``, or the ``title``
+    (``Song (feat. Guest)``). The old check inspected only ``artist`` and
+    required whitespace before ``feat.``, so title/parenthesised credits never
+    reached the guest artist's Essential Collection.
+    """
     if not target_artist:
         return False
-    match = _ESSENTIAL_FEAT_RE.search(artist_field or "")
-    if not match:
-        return False
     target_key = re.sub(r"\s+", " ", target_artist).strip().casefold()
-    guests = _ESSENTIAL_FEAT_SPLIT_RE.split(artist_field[match.end():])
-    return any(
-        re.sub(r"\s+", " ", g).strip().casefold() == target_key
-        for g in guests
-        if g and g.strip()
-    )
+    for source in (artist_field, album_artist_field, title_field):
+        text = str(source or "")
+        if not text:
+            continue
+        for match in _ESSENTIAL_FEAT_RE.finditer(text):
+            tail = text[match.end():]
+            # Stop at the closing bracket of "(feat. Guest)" so the guest name
+            # does not keep the ")" / "] [Live]" suffix.
+            tail = re.split(r"[\)\]]", tail, maxsplit=1)[0]
+            guests = _ESSENTIAL_FEAT_SPLIT_RE.split(tail)
+            for guest in guests:
+                guest_key = re.sub(
+                    r"^(?:and|with)\s+", "", str(guest or "").strip(), flags=re.IGNORECASE
+                )
+                guest_key = re.sub(r"\s+", " ", guest_key).strip().casefold()
+                if guest_key == target_key:
+                    return True
+    return False
 
 
 def _fetch_essential_featured_rows() -> list[dict[str, Any]]:
@@ -2883,6 +2924,12 @@ def _fetch_essential_featured_rows() -> list[dict[str, Any]]:
                           artist ILIKE '% feat %' OR artist ILIKE '% feat.%'
                           OR artist ILIKE '%feat.%' OR artist ILIKE '%featuring%'
                           OR artist ILIKE '% ft %' OR artist ILIKE '% ft.%'
+                          OR album_artist ILIKE '% feat %' OR album_artist ILIKE '% feat.%'
+                          OR album_artist ILIKE '%feat.%' OR album_artist ILIKE '%featuring%'
+                          OR album_artist ILIKE '% ft %' OR album_artist ILIKE '% ft.%'
+                          OR title ILIKE '% feat %' OR title ILIKE '% feat.%'
+                          OR title ILIKE '%feat.%' OR title ILIKE '%featuring%'
+                          OR title ILIKE '% ft %' OR title ILIKE '% ft.%'
                       )
                 """),
             )
@@ -2913,11 +2960,10 @@ def _sync_essential_playlist(
     except Exception:
         max_tracks = 50
 
-    # ⭐ Artist-specific playlists use ONE fixed contract: stars first, then
-    # the artist-global popularity of the recording. ``playlist_order_mode`` is
-    # for the library-wide builders; an Essential Collection must not switch to
-    # the album-relative final score just because that mode is selected.
-    order_mode = "artist_global"
+    # ⭐ Artist-specific Essential Collection: stars first, then the stored
+    # Popularity Score. ``playlist_order_mode`` is for library-wide builders;
+    # listener-based prominence is not this list's contract.
+    order_mode = "popularity_score"
 
     if artist_scores is None:
         try:
@@ -2987,13 +3033,32 @@ def _sync_essential_playlist(
     if _essential_include_featured_enabled():
         try:
             _feat_rows = featured_rows if featured_rows is not None else _fetch_essential_featured_rows()
+            _matched_feat = 0
             for row in _feat_rows:
-                if _track_has_featured_artist(row.get("artist") or "", artist):
+                if _track_has_featured_artist(
+                    row.get("artist") or "",
+                    artist,
+                    title_field=row.get("title") or "",
+                    album_artist_field=row.get("album_artist") or "",
+                ):
                     rows.append(row)
+                    _matched_feat += 1
+            if _feat_rows:
+                logger.debug(
+                    "Essential featured merge",
+                    artist=artist,
+                    fetched=len(_feat_rows),
+                    matched=_matched_feat,
+                )
         except Exception as exc:
             logger.debug("Featured-track merge failed", artist=artist, error=str(exc))
 
     rows = _filter_christmas_rows(rows, playlist_name)
+
+    # Hard membership floor: an Essential Collection is 4★/5★ only. The SQL
+    # already filters, but featured rows and any future merge path must not be
+    # able to reintroduce a 3★ track.
+    rows = [row for row in rows if int(row.get("stars") or 0) >= 4]
 
     # ⚠️ Check the TRACK artist as well as the album artist. A compilation row
     # stores "Various Artists" (or the album's artist) in ``album_artist`` while
@@ -3026,8 +3091,13 @@ def _sync_essential_playlist(
             key=lambda r: (
                 int(r.get("is_live") or 0),
                 -int(r.get("stars") or 0),
+                -float(
+                    r.get("popularity_score")
+                    or r.get("popularity")
+                    or r.get("final_score")
+                    or 0
+                ),
                 -float(cross_album_track_score(r)),
-                -float(r.get("final_score") or r.get("popularity_score") or 0),
                 int(r.get("is_compilation") or 0),
                 _track_year(r),
                 str(r.get("title") or "").casefold(),
@@ -3053,6 +3123,7 @@ def _sync_essential_playlist(
     # No per-artist cap / interleave here on purpose: this playlist is one
     # artist's best-of, so a cap would truncate it at ``max_per_artist``.
     winners = _ordered_playlist_rows(winners, order_mode=order_mode)
+    winners = [row for row in winners if int(row.get("stars") or 0) >= 4]
     winners = winners[:max_tracks]
 
     # ⭐ NO ROTATION BY DEFAULT — the order IS this playlist's information.
