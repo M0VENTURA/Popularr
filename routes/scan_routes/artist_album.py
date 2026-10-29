@@ -34,6 +34,7 @@ from services.scanning.pipelines.navidrome_targeted_pipeline import (
 from services.scanning.pipelines.popularity_pipeline import (
     run_popularity_album_scan,
     run_popularity_artist_scan,
+    run_popularity_track_scan,
 )
 
 from helpers.logging_config import log_unified
@@ -166,25 +167,29 @@ async def scan_album_custom():
     methods=["POST"],
 )
 async def scan_track_rescan(artist, album, track_id):
-    """Force a re-scan of the ALBUM the track belongs to.
+    """Scan exactly ONE track, using the album's stored rows as context.
 
-    ⭐ WHY THE ALBUM, NOT THE ARTIST. This route used to run
-    ``run_artist_pipeline(artist, False)``: a Navidrome import plus EVERY album
-    of the artist plus Essentia, for one track — and non-forced, so the
-    per-album skip window could skip the very album that was just edited. The
-    album-scoped forced pipeline below re-imports and re-scores exactly the
-    album, and the true per-track paths (metadata edit, single-source rescan)
-    already run from their own routes.
+    ⭐ WHY THIS IS NOT THE ALBUM PIPELINE. The route used to run the whole
+    artist pipeline; even an album-scoped version still re-processes every
+    track on the album. This runs the normal track stage for the requested
+    track only, while every sibling contributes its STORED score/stars to the
+    album and artist distributions — so the rating matches what a full album
+    scan would compute, without paying for the album-wide metadata, cover,
+    missing-track and rename passes.
     """
     artist = unquote(artist)
     album = unquote(album)
     track_id = unquote(track_id)
 
     started = guard_and_launch_popularity_scan(
-        run_album_pipeline,
+        run_popularity_track_scan,
         artist,
         album,
+        track_id,
         force=True,
+        # A full pass (no stage flag) so the target gets metadata, popularity,
+        # singles, its file tags and its rating. The album-wide extras are
+        # skipped by the runner's track-scoped gates.
         scan_type="full",
     )
     if not started:

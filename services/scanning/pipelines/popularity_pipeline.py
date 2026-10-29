@@ -850,10 +850,11 @@ def _build_targeted_popularity_kwargs(
     *,
     artist: str | None = None,
     album: str | None = None,
+    track_id: str | None = None,
     force: bool = False,
     scan_type: str = "popularity",
 ) -> dict[str, Any]:
-    """Build kwargs for targeted artist/album scans."""
+    """Build kwargs for targeted artist/album/track scans."""
 
     kwargs: dict[str, Any] = {
         "verbose": True,
@@ -869,6 +870,9 @@ def _build_targeted_popularity_kwargs(
 
     if album:
         kwargs["album_filter"] = album
+
+    if track_id:
+        kwargs["track_id_filter"] = str(track_id).strip()
 
     if scan_type == "metadata":
         kwargs["metadata_only"] = True
@@ -931,6 +935,33 @@ def run_popularity_album_scan(
     kwargs = _build_targeted_popularity_kwargs(
         artist=artist,
         album=album,
+        force=force,
+        scan_type=scan_type,
+    )
+
+    return run_popularity_scan(**kwargs)
+
+
+def run_popularity_track_scan(
+    artist: str,
+    album: str,
+    track_id: str,
+    *,
+    force: bool = False,
+    scan_type: str = "popularity",
+) -> Any:
+    """Scan ONE track, using the album's stored rows as rating context.
+
+    The album is still LOADED in full (prep, z-score references, live/
+    compilation detection); only the requested track is processed and written.
+    Sibling rows contribute their stored scores/stars so the track is rated
+    against the same album distribution a full album scan would use.
+    """
+
+    kwargs = _build_targeted_popularity_kwargs(
+        artist=artist,
+        album=album,
+        track_id=track_id,
         force=force,
         scan_type=scan_type,
     )

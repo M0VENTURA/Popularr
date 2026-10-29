@@ -1480,6 +1480,8 @@ def _artist_top_marked_cutoffs(scan_scores: list[float], db_scores: list[float],
 
 def _apply_popularity_marking_bump(album_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for tr in album_results:
+        if tr.get("_context_only"):
+            continue
         if not bool(tr.get("popularity_marked")) or not bool(tr.get("is_single")):
             continue
         if str(tr.get("single_confidence") or "low") != "medium":
@@ -1602,6 +1604,10 @@ def _mark_track_artist_top_band(album_results: list[dict[str, Any]]) -> None:
 
     catalogue_cache: dict[str, list[float]] = {}
     for _tr in album_results:
+        if _tr.get("_context_only"):
+            # Stored sibling: its score still contributes to ``by_primary``
+            # above, but its stored marking must not be rewritten.
+            continue
         if bool(_tr.get("exclude_from_stats")) or is_instrumental_track_title(str(_tr.get("title") or "")):
             _tr["popularity_marked"] = False
             continue
@@ -1693,6 +1699,52 @@ def _load_track_artist_scores(
         return [float(s) for _alb, s in db_rows]
 
 
+def _stored_context_result(track: dict[str, Any]) -> dict[str, Any] | None:
+    """A stored album row reshaped as a rating result, for CONTEXT ONLY.
+
+    A track-scoped scan processes one track. Its siblings must still shape the
+    album/artist z-scores and the live/compilation verdict, so they are fed to
+    the rating pass as stored values and marked ``_context_only``. Every write
+    path skips that marker: the siblings' scores, stars, tags and Navidrome
+    ratings stay exactly as they are.
+
+    Returns ``None`` for a row the library has not assessed yet (no stored
+    score and no stars) — an unscanned sibling must not invent a distribution
+    point.
+    """
+    track_id = str(track.get("id") or "").strip()
+    if not track_id:
+        return None
+
+    final = track.get("final_score")
+    raw = track.get("raw_score")
+    stars = int(track.get("stars") or track.get("star_rating") or 0)
+    assessed = (
+        final is not None
+        or (raw is not None and float(raw or 0) > 0)
+        or stars > 0
+    )
+    if not assessed:
+        return None
+
+    score = float(final if final is not None else (track.get("popularity") or 0) or 0)
+    row = dict(track)
+    row.update({
+        "track_id": track_id,
+        "popularity_score": score,
+        "final_score": score,
+        # The pre-remap blend is what the album-relative remap references.
+        "_raw_combined": float(raw or score or 0),
+        "stars": stars,
+        "is_single": bool(track.get("is_single")),
+        "single_confidence": track.get("single_confidence") or "low",
+        "single_sources": track.get("single_sources") or "",
+        "exclude_from_stats": bool(track.get("exclude_from_stats")),
+        "_context_only": True,
+    })
+    return row
+
+
 def _album_reference_scores(album_results: list[dict[str, Any]], score_key: str = "popularity_score") -> list[float]:
     full = [float(r.get(score_key) or 0) for r in album_results if float(r.get(score_key) or 0) > 0]
     if len(full) < 3:
@@ -1741,6 +1793,10 @@ def _apply_album_relative_normalization(album_results: list[dict[str, Any]], is_
     for tr in album_results:
         raw = float(tr.get("_raw_combined") or 0)
         if raw <= 0:
+            continue
+        if tr.get("_context_only"):
+            # Stored sibling: it shapes ``raw_scores`` above but is never
+            # remapped or written by a track-scoped scan.
             continue
         remapped = apply_album_relative_popularity(raw, raw_scores)
         if abs(remapped - float(tr.get("popularity_score") or 0)) > 0.001:
@@ -1800,6 +1856,8 @@ def _apply_track_artist_relative_normalization(album_results: list[dict[str, Any
     for tr in album_results:
         raw = float(tr.get("_raw_combined") or 0)
         if raw <= 0:
+            continue
+        if tr.get("_context_only"):
             continue
 
         track_artist = str(tr.get("artist") or "").strip()
@@ -1869,6 +1927,8 @@ def _persist_popularity_marking(rows: list[dict[str, Any]]) -> None:
     try:
         with db_session() as session:
             for tr in rows:
+                if tr.get("_context_only"):
+                    continue
                 tid = str(tr.get("track_id") or "")
                 if not tid:
                     continue
@@ -1955,6 +2015,7 @@ def run_scan(
     artist_filter: str | None = None,
     album_filter: str | None = None,
     artists: list[str] | None = None,
+    track_id_filter: str | None = None,
     skip_header: bool = False,
     force: bool = False,
     filter_missing: bool = False,
@@ -1974,6 +2035,7 @@ def run_scan(
         "artist_filter": artist_filter,
         "album_filter": album_filter,
         "artists": artists,
+        "track_id_filter": track_id_filter,
         "skip_header": skip_header,
         "force": force,
         "filter_missing": filter_missing,
@@ -2095,7 +2157,20 @@ def run_scan(
     # artist.
     _album_budget = _resolve_album_budget()
 
+    # ── Track-scoped scan ─────────────────────────────────────────────────
+    # Only the named track is processed. The rest of its album is still
+    # loaded and fed to the RATING pass as stored context (``_context_only``),
+    # so the album/artist z-scores are the same ones a full album scan would
+    # use while only the target is written.
+    _track_scan_id = str(options.get("track_id_filter") or "").strip()
+    _track_scoped = bool(_track_scan_id)
+
     log_unified(f"[POPULARITY] Scan mode: {scan_type.capitalize()} — {total_albums} album(s) queued")
+    if _track_scoped:
+        log_unified(
+            f"[POPULARITY] Track-scoped scan: {_track_scan_id} — sibling tracks "
+            "contribute their stored scores; only this track is written"
+        )
     if force:
         log_unified("[POPULARITY] Forced mode — album-skip and score-freeze checks are DISABLED")
 
@@ -2269,6 +2344,8 @@ def run_scan(
                 _mark_track_artist_top_band(album_results)
             elif _top_cutoff is not None:
                 for _tr in album_results:
+                    if _tr.get("_context_only"):
+                        continue
                     if bool(_tr.get("exclude_from_stats")) or is_instrumental_track_title(str(_tr.get("title") or "")):
                         _tr["popularity_marked"] = False
                         continue
@@ -2392,7 +2469,7 @@ def run_scan(
         #
         # Never fatal: an image API that is out of quota must not cost the
         # scan its ratings.
-        if _updated_albums:
+        if _updated_albums and not _track_scoped:
             _cover_started = time.monotonic()
             try:
                 refresh_genre_playlist_covers_for_artist(artist, _updated_albums)
@@ -2852,7 +2929,7 @@ def run_scan(
             # Skipped for popularity-only and singles passes, which write no
             # metadata. Disable with features.repair_album_annotations.
             # -------------------------------------------------------------
-            if not _mode_pop and not _mode_singles:
+            if not _mode_pop and not _mode_singles and not _track_scoped:
                 try:
                     _repair = repair_album_annotations(artist, album, tracks)
                     if _repair.get("album_repaired"):
@@ -2951,44 +3028,63 @@ def run_scan(
                 if _full_pass:
                     options["defer_full_enrichment"] = True
 
-                log_unified(f"[POPULARITY] Enriching album: {artist} - {album}")
-
-                album_result = _bounded_album_phase(
-                    enrich_album,
-                    album_row=album_row,
-                    album_context=album_context,
-                    stat_eligible_tracks=stat_eligible_tracks,
-                    options=options,
-                    section="enrich_album",
-                    log_context={"artist": artist, "album": album},
-                    seconds=_album_budget,
-                ) or {}
-
-                # An album that blew the per-album budget is SKIPPED — the artist
-                # keeps every remaining album.  This is deliberately NOT a
-                # cancellation: the scan_cancellation registry is keyed per ARTIST,
-                # so cancelling here would unwind the artist's remaining albums and
-                # recreate the whole-artist loss one level down.
-                _album_abandoned, _album_abandon_reason = _album_phase_was_abandoned(
-                    album_result
-                )
-                if _album_abandoned:
-                    skipped_albums += 1
-                    abandoned_albums += 1
+                if _track_scoped:
+                    # ⭐ TRACK-SCOPED: use the album identity the library
+                    # already stores. Album enrichment resolves and re-persists
+                    # album-wide fields on EVERY sibling row, which is exactly
+                    # the work a one-track scan must not do.
+                    _stored_album_type = str(
+                        album_row.get("musicbrainz_album_type")
+                        or album_row.get("spotify_album_type")
+                        or ""
+                    ).strip()
+                    album_result = {
+                        "detected_album_type": _stored_album_type,
+                        "album_context": {},
+                    }
                     log_unified(
-                        f"[POPULARITY] Album '{artist} - {album}' skipped "
-                        f"({_album_abandon_reason}) — continuing with the artist's "
-                        "remaining albums"
+                        f"[POPULARITY] Track-scoped: using stored album identity "
+                        f"for '{artist} - {album}' (no album enrichment)"
                     )
-                    record_scan(
-                        scan_type, "failed",
-                        message=f"Album exceeded its time budget: {_album_abandon_reason}",
-                        artist=artist, album=album,
-                    )
-                    albums_processed += 1
-                    continue
+                else:
+                    log_unified(f"[POPULARITY] Enriching album: {artist} - {album}")
 
-                log_unified(f"[POPULARITY] Album enriched: {artist} - {album} (type={album_result.get('detected_album_type')})")
+                    album_result = _bounded_album_phase(
+                        enrich_album,
+                        album_row=album_row,
+                        album_context=album_context,
+                        stat_eligible_tracks=stat_eligible_tracks,
+                        options=options,
+                        section="enrich_album",
+                        log_context={"artist": artist, "album": album},
+                        seconds=_album_budget,
+                    ) or {}
+
+                    # An album that blew the per-album budget is SKIPPED — the artist
+                    # keeps every remaining album.  This is deliberately NOT a
+                    # cancellation: the scan_cancellation registry is keyed per ARTIST,
+                    # so cancelling here would unwind the artist's remaining albums and
+                    # recreate the whole-artist loss one level down.
+                    _album_abandoned, _album_abandon_reason = _album_phase_was_abandoned(
+                        album_result
+                    )
+                    if _album_abandoned:
+                        skipped_albums += 1
+                        abandoned_albums += 1
+                        log_unified(
+                            f"[POPULARITY] Album '{artist} - {album}' skipped "
+                            f"({_album_abandon_reason}) — continuing with the artist's "
+                            "remaining albums"
+                        )
+                        record_scan(
+                            scan_type, "failed",
+                            message=f"Album exceeded its time budget: {_album_abandon_reason}",
+                            artist=artist, album=album,
+                        )
+                        albums_processed += 1
+                        continue
+
+                    log_unified(f"[POPULARITY] Album enriched: {artist} - {album} (type={album_result.get('detected_album_type')})")
 
                 # Re-derive live-album context and per-track exclude_from_stats now
                 # that the detected album type is known.
@@ -3035,9 +3131,19 @@ def run_scan(
                     def _prefetch_artist_work() -> None:
                         if not _singles_pass:
                             try:
+                                _prefetch_tracks = (
+                                    artist_all_tracks.get(artist) or track_dicts
+                                )
+                                if _track_scoped:
+                                    # Only the target needs fresh provider data;
+                                    # every sibling is using its STORED score.
+                                    _prefetch_tracks = [
+                                        _t for _t in _prefetch_tracks
+                                        if str(_t.get("id") or "").strip() == _track_scan_id
+                                    ]
                                 _prefetch_state["prefetched_popularity"] = prefetch_artist_popularity(
                                     artist=artist,
-                                    tracks=artist_all_tracks.get(artist) or track_dicts,
+                                    tracks=_prefetch_tracks,
                                     force=bool(options.get("force")),
                                     cache_full_catalogue=True,
                                 )
@@ -3369,11 +3475,19 @@ def run_scan(
                 # Reset FIRST: if the build below raises, the previous album's
                 # batch must not be offered to this album's tracks.
                 options["mb_batch_metadata"] = {}
+                # A track-scoped scan only needs identity for the target; the
+                # batch builders otherwise search MusicBrainz for every sibling.
+                _batch_track_dicts = track_dicts
+                if _track_scoped:
+                    _batch_track_dicts = [
+                        _t for _t in track_dicts
+                        if str(_t.get("id") or "").strip() == _track_scan_id
+                    ]
                 if not _singles_pass and not options.get("popularity_only"):
                     try:
                         options["mb_batch_metadata"] = _build_album_recording_batch(
                             album=album,
-                            track_dicts=track_dicts,
+                            track_dicts=_batch_track_dicts,
                             prefetched_popularity=prefetched_popularity,
                         )
                         if options["mb_batch_metadata"]:
@@ -3395,6 +3509,8 @@ def run_scan(
                         _lb_tag_mbids: list[str] = []
                         for _tc in track_contexts:
                             _t = _tc.get("track") or {}
+                            if _track_scoped and str(_t.get("id") or "").strip() != _track_scan_id:
+                                continue
                             if _t.get("listenbrainz_genres"):
                                 continue
                             _m = str(_t.get("recording_mbid") or _t.get("mbid") or _t.get("musicbrainz_trackid") or "").strip()
@@ -3535,7 +3651,16 @@ def run_scan(
                     )
                     _album_prefetched = prefetched_popularity
 
+                _skipped_non_target = 0
                 for track_context in track_contexts:
+                    if _track_scoped:
+                        _ctx_track_id = str(
+                            (track_context.get("track") or {}).get("id") or ""
+                        ).strip()
+                        if _ctx_track_id != _track_scan_id:
+                            _skipped_non_target += 1
+                            continue
+
                     prepared_track = apply_context_fields_to_track(track_context)
                     _frozen = False
 
@@ -3591,6 +3716,31 @@ def run_scan(
                         prepared_track["single_sources"] = track_context.get("track", {}).get("single_sources") or []
 
                     _track_jobs.append((prepared_track, track_context, _track_options, _frozen))
+
+                if _track_scoped:
+                    if _track_jobs:
+                        log_unified(
+                            f"[POPULARITY] Track-scoped '{album}': processing 1 track, "
+                            f"{_skipped_non_target} sibling(s) used as stored context"
+                        )
+                    else:
+                        log_unified(
+                            f"[POPULARITY] Track-scoped '{album}': target track "
+                            f"{_track_scan_id} not found — album skipped"
+                        )
+                        skipped_albums += 1
+                        albums_processed += 1
+                        try:
+                            record_scan(
+                                scan_type,
+                                "failed",
+                                message="Track-scoped target not found",
+                                artist=artist,
+                                album=album,
+                            )
+                        except Exception:
+                            pass
+                        continue
 
                 _track_results_ordered = _bounded_album_phase(
                     _execute_track_jobs_safely,
@@ -3704,7 +3854,10 @@ def run_scan(
                 # -------------------------------------------------------------
                 # Post-singles enrichment (covers, genres, artist metadata).
                 # -------------------------------------------------------------
-                if _full_pass or _mode_meta:
+                # Album-wide enrichment is skipped for a TRACK-scoped scan:
+                # similar artists / artist bio / album extras are not part of
+                # one track's score, and re-fetching them defeats the purpose.
+                if (_full_pass or _mode_meta) and not _track_scoped:
                     def _post_singles_enrichment_work() -> None:
                         try:
                             _extra_ctx, _extra_similar, _extra_meta = enrich_album_extras(
@@ -3791,9 +3944,14 @@ def run_scan(
                 # Ids whose cover TITLE the deep pass wrote (new covers and
                 # repaired "(X Cover)" suffixes) — fed to the tag sync below so
                 # their files' TITLE tags are REWRITTEN, not fill-if-missing.
-                _cover_title_ids = _run_album_cover_detection(
-                    artist=artist, album=album, tracks=tracks, options=options,
-                ) or set()
+                if _track_scoped:
+                    # Cover detection is an album-wide deep pass. A track scan
+                    # leaves cover verdicts to the album/artist scan.
+                    _cover_title_ids: set[str] = set()
+                else:
+                    _cover_title_ids = _run_album_cover_detection(
+                        artist=artist, album=album, tracks=tracks, options=options,
+                    ) or set()
 
                 # --- RECOMMEND-INSTEAD-OF-APPLY (metadata_update.apply_during_scan) ---
                 # When the Config page has metadata updating set to "Recommend only",
@@ -3817,7 +3975,7 @@ def run_scan(
                     logger.debug("Could not read metadata_update config", error=str(exc))
                     _stash_only = False
 
-                if _stash_only and not options.get("popularity_only") and not options.get("singles_detection_only") and not _mode_finalise:
+                if _stash_only and not _track_scoped and not options.get("popularity_only") and not options.get("singles_detection_only") and not _mode_finalise:
                     try:
                         _release_mbid = ""
                         for _ctx in track_contexts:
@@ -3919,7 +4077,7 @@ def run_scan(
                 # that cost per PAGE LOAD per owned album instead — and the release
                 # SEARCH it falls back to when an album has no stored MBID was paid
                 # one-per-album every time the artist page was opened.
-                if not options.get("popularity_only") and not options.get("singles_detection_only") and not _mode_finalise:
+                if not _track_scoped and not options.get("popularity_only") and not options.get("singles_detection_only") and not _mode_finalise:
                     # A "do not search album release" album is SKIPPED: its
                     # missing list comes from the user's CSV tracklist (or is
                     # simply absent), not from a MusicBrainz release — the MB
@@ -3949,7 +4107,7 @@ def run_scan(
                 # ------------------------------
 
                 # Deferred album rename detection.
-                if not _mode_singles:
+                if not _mode_singles and not _track_scoped:
                     try:
                         _new_name, _reason = resolve_album_name(artist=artist, album=album)
                         if _reason and _new_name and _new_name != album:
@@ -4005,10 +4163,38 @@ def run_scan(
                 _album_report["singles_detected"] = sum(
                     1 for _r in _album_results_this if isinstance(_r, dict) and bool(_r.get("is_single"))
                 )
+
+                # ── Track-scoped scans: stored siblings are CONTEXT ─────────
+                # The rating pass must see the whole album's score distribution,
+                # but only the processed target may be written. Siblings are
+                # therefore appended as ``_context_only`` rows built from their
+                # STORED values; every write path skips that marker.
+                _rating_rows = _album_results_this
+                if _track_scoped and _album_results_this:
+                    _processed_ids = {
+                        str(_r.get("track_id") or "").strip()
+                        for _r in _album_results_this
+                        if isinstance(_r, dict)
+                    }
+                    _context_rows: list[dict[str, Any]] = []
+                    for _tc in track_contexts:
+                        _ctx_row = _stored_context_result(_tc.get("track") or {})
+                        if not _ctx_row or _ctx_row["track_id"] in _processed_ids:
+                            continue
+                        if _album_release_type:
+                            _ctx_row["detected_album_type"] = _album_release_type
+                        _context_rows.append(_ctx_row)
+                    if _context_rows:
+                        _rating_rows = _album_results_this + _context_rows
+                        log_unified(
+                            f"[POPULARITY] Track-scoped rating context: "
+                            f"{len(_context_rows)} stored album track(s) on '{album}'"
+                        )
+
                 if _album_results_this:
                     _artist_scan_results.setdefault(artist, []).extend(_album_results_this)
                     _artist_pending_albums.setdefault(artist, []).append({
-                        "album_results": _album_results_this,
+                        "album_results": _rating_rows,
                         "is_compilation": bool(album_context.get("is_compilation")),
                         "is_va_compilation": bool(album_context.get("is_va_compilation")),
                         "album": album,
@@ -4039,7 +4225,7 @@ def run_scan(
                     try:
                         _post_album_stars(
                             artist,
-                            _album_results_this,
+                            _rating_rows,
                             is_compilation=bool(album_context.get("is_compilation")),
                             is_va_compilation=bool(album_context.get("is_va_compilation")),
                             reconciled=False,

@@ -5415,6 +5415,10 @@ def post_album_star_ratings(
         _ratings_started = time.monotonic()
         _lb_unusable_ids, _lb_cohort_scores = _lb_unusable_cohort(album_results)
         for track in album_results:
+            if track.get("_context_only"):
+                # Stored sibling from a track-scoped scan: it shapes the album
+                # distribution above but is not rated or written.
+                continue
             try:
                 if is_compilation:
                     _credited_artist = _compilation_track_artist(track)
@@ -5552,6 +5556,8 @@ def post_album_star_ratings(
         _persist_failures = 0
         _batch_params: list[dict[str, Any]] = []
         for track in album_results:
+            if track.get("_context_only"):
+                continue
             track_id = str(track.get("track_id") or "").strip()
             stars = int(track.get("stars") or 0)
             if not track_id or stars < 1:
@@ -5648,6 +5654,8 @@ def post_album_star_ratings(
         # 6. Write file tags and log progress using final values
         _file_tags_started = time.monotonic()
         for track in album_results:
+            if track.get("_context_only"):
+                continue
             stars = int(track.get("stars") or 0)
             if stars < 1:
                 continue
@@ -5779,6 +5787,8 @@ def post_album_star_ratings(
 
                 rows: list[dict[str, Any]] = []
                 for t in album_results:
+                    if t.get("_context_only"):
+                        continue
                     t_stars = int(t.get("stars") or 0)
                     t_conf = str(t.get("single_confidence") or "low").lower()
                     t_title = str(t.get("title") or "Unknown").strip()
@@ -5853,6 +5863,8 @@ def post_album_star_ratings(
             _consecutive_failures = 0
 
             for track in album_results:
+                if track.get("_context_only"):
+                    continue
                 stars = track.get("stars", 0)
                 if stars < 1:
                     continue

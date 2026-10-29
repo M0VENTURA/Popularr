@@ -112,19 +112,22 @@ class TestScanScopeWiring:
         root = Path(__file__).resolve().parent.parent
         return (root / relative).read_text(encoding="utf-8")
 
-    def test_track_rescan_is_album_scoped_and_forced(self) -> None:
+    def test_track_rescan_is_track_scoped_and_forced(self) -> None:
         src = self._read("routes/scan_routes/artist_album.py")
         start = src.index("async def scan_track_rescan")
         end = src.find("\n@scans_bp.route", start + 10)
         body = src[start: end if end != -1 else len(src)]
 
         assert "guard_and_launch_popularity_scan(" in body
-        assert "run_album_pipeline" in body
+        assert "run_popularity_track_scan" in body
         assert "run_async(run_artist_pipeline" not in body, (
             "one track must not drag the whole artist through the pipeline"
         )
         assert "force=True" in body, (
             "a non-forced rescan can be skipped by the album's freshness window"
+        )
+        assert 'scan_type="full"' in body, (
+            "the target needs metadata/singles/file tags, not a score-only pass"
         )
 
     def test_letter_scan_passes_the_letters_artist_list(self) -> None:
@@ -149,6 +152,48 @@ class TestScanScopeWiring:
         window = window[: window.index("save_artist_scan_checkpoint")]
         assert "if _essentia_enabled:" in window, (
             "the artist pipeline must not run Essentia when the feature is off"
+        )
+
+
+class TestTrackScopedContext:
+    """A track scan writes one row; siblings only supply stored context."""
+
+    def test_a_scored_sibling_becomes_a_context_row(self) -> None:
+        from services.popularity import scan_stage_runner as runner
+
+        ctx = runner._stored_context_result({
+            "id": "t2",
+            "title": "Sibling",
+            "final_score": 62.5,
+            "raw_score": 70.0,
+            "stars": 4,
+            "is_single": 1,
+            "single_confidence": "high",
+        })
+
+        assert ctx is not None
+        assert ctx["_context_only"] is True
+        assert ctx["track_id"] == "t2"
+        assert ctx["popularity_score"] == 62.5
+        assert ctx["final_score"] == 62.5
+        assert ctx["_raw_combined"] == 70.0
+        assert ctx["stars"] == 4
+
+    def test_an_unassessed_sibling_is_not_context(self) -> None:
+        from services.popularity import scan_stage_runner as runner
+
+        assert runner._stored_context_result({"id": "t3", "title": "Never scanned"}) is None
+
+    def test_the_file_tag_and_persistence_paths_skip_context(self) -> None:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        src = (root / "services/popularity/stages/finalise_stage.py").read_text(
+            encoding="utf-8"
+        )
+        assert src.count('track.get("_context_only")') >= 4, (
+            "rating persistence, file tags and Navidrome sync must all skip "
+            "stored-context siblings"
         )
 
 
