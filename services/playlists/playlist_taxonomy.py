@@ -84,6 +84,50 @@ def _matches_exact(name: str, candidates: list[str]) -> bool:
     return bool(key) and key in {str(c).strip().casefold() for c in candidates if str(c).strip()}
 
 
+def managed_name_value(
+    name: str,
+    managed_type: str,
+    *,
+    config: dict[str, Any] | None = None,
+) -> str | None:
+    """The ``{genre}``/``{artist}``/``{decade}``/``{mood}`` a name encodes.
+
+    The inverse of the naming templates, used to rebuild ONE managed playlist
+    from its name (the playlists page's per-playlist Regenerate action). Returns
+    ``None`` when the type carries no name value or the name does not fit the
+    configured template.
+    """
+    cfg = config if isinstance(config, dict) else _config()
+    text = str(name or "").strip()
+    if not text:
+        return None
+    if managed_type == GENRE:
+        return _template_value(
+            text,
+            str(cfg.get("genre_playlists_name_template") or _DEFAULT_GENRE_TEMPLATE),
+            "{genre}",
+        )
+    if managed_type == DECADE:
+        return _template_value(
+            text,
+            str(cfg.get("decade_playlists_name_template") or _DEFAULT_DECADE_TEMPLATE),
+            "{decade}",
+        )
+    if managed_type == ESSENTIAL:
+        return _template_value(
+            text,
+            str(cfg.get("essential_name_template") or _DEFAULT_ESSENTIAL_TEMPLATE),
+            "{artist}",
+        )
+    if managed_type == MOOD:
+        return _template_value(
+            text,
+            str(cfg.get("mood_playlists_name_template") or _DEFAULT_MOOD_TEMPLATE),
+            "{mood}",
+        )
+    return None
+
+
 def classify_managed_playlist(
     name: str,
     *,

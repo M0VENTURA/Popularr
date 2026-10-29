@@ -3750,6 +3750,7 @@ def _sync_playlist_to_navidrome(
     existing_playlist_id: str | None = None,
     *,
     server_confirmed_exists: bool | None = None,
+    create_if_missing: bool = True,
 ) -> dict[str, Any]:
     """Push one playlist, skipping it when its content is already there.
 
@@ -3807,6 +3808,7 @@ def _sync_playlist_to_navidrome(
                     playlist_name,
                     list(song_ids),
                     existing_playlist_id=existing_playlist_id,
+                    create_if_missing=create_if_missing,
                 )
                 or {}
             )
@@ -5929,14 +5931,23 @@ _CURATED_ROWS_SQL = """
 """
 
 
-def _fetch_curated_playlist_rows(min_stars: int = 4) -> list[dict[str, Any]]:
+def _fetch_curated_playlist_rows(min_stars: int = 4) -> list[dict[str, Any]] | None:
+    """Rows at or above *min_stars*, or ``None`` when the query FAILED.
+
+    ⭐ ``None`` and ``[]`` are different facts and the builders depend on it:
+    ``[]`` means "the library genuinely has nothing to offer" (so a stale
+    playlist may safely be cleared), while ``None`` means "we could not read the
+    library" (so every playlist must be left ALONE). Returning ``[]`` for both
+    made a transient database error indistinguishable from an empty pool, and
+    the clear-on-empty path would then wipe every curated playlist.
+    """
     try:
         with db_session() as session:
             result = session.execute(text(_CURATED_ROWS_SQL), {"min_stars": min_stars})
             rows = [dict(r._mapping) for r in result.fetchall() or []]
     except Exception as exc:
         logger.warning("Curated playlist row fetch failed", min_stars=min_stars, error=str(exc))
-        return []
+        return None
 
     if not rows:
         return []
@@ -6001,14 +6012,38 @@ def _sync_single_curated_playlist(
     *,
     max_tracks: int,
     cfg: dict[str, Any],
+    clear_when_empty: bool = True,
 ) -> bool:
+    """Push ONE curated playlist so it matches *pool* exactly.
+
+    ⭐⭐ AN EMPTY POOL MUST EMPTY THE PLAYLIST. Returning early here left the
+    previous contents untouched, so a "Great Covers" playlist kept every track
+    whose cover verdict had been removed — the reported "it adds tracks, but
+    doesn't remove tracks that have had the cover detection removed" — whenever
+    the remaining pool was empty. Syncing ``[]`` through the normal path removes
+    every current entry and keeps the playlist (and its cover art) in place.
+
+    ``clear_when_empty=False`` retains the old leave-it-alone behaviour for
+    callers that cannot prove the empty pool is real.
+    """
     order_mode = _resolve_playlist_order_mode(cfg.get("playlist_order_mode"))
     max_per_artist = _resolve_max_per_artist(cfg)
     interleave_artists = bool(cfg.get("playlist_interleave_artists", True))
 
     winners = _dedupe_curated_pool(pool)
     if not winners:
-        return False
+        if not clear_when_empty:
+            return False
+        sync_res = _sync_playlist_to_navidrome(
+            playlist_name, [], rows=[], create_if_missing=False
+        )
+        if not _playlist_sync_succeeded(sync_res):
+            return False
+        if sync_res.get("updated"):
+            log_unified(
+                f"📄 Playlist: cleared '{playlist_name}' — no tracks qualify any more"
+            )
+        return True
 
     winners = _ordered_playlist_rows(
         winners,
@@ -6041,7 +6076,7 @@ def _create_decade_playlists(cfg: dict[str, Any]) -> int:
     max_tracks = max(10, int(cfg.get("decade_playlists_max_tracks", 200) or 200))
 
     rows = _fetch_curated_playlist_rows(min_stars=4)
-    if not rows:
+    if rows is None:
         return 0
 
     pools: dict[int, list[dict[str, Any]]] = defaultdict(list)
@@ -6068,6 +6103,8 @@ def _create_hit_singles_playlist(cfg: dict[str, Any]) -> bool:
     pl_name = str(cfg.get("hit_singles_playlist_name") or "Hit Singles").strip() or "Hit Singles"
     max_tracks = max(10, int(cfg.get("hit_singles_max_tracks", 250) or 250))
     rows = _fetch_curated_playlist_rows(min_stars=4)
+    if rows is None:
+        return False
     pool = [r for r in rows if bool(r.get("is_single"))]
     return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
 
@@ -6078,6 +6115,8 @@ def _create_hidden_gems_playlist(cfg: dict[str, Any]) -> bool:
     pl_name = str(cfg.get("hidden_gems_playlist_name") or "Hidden Gems").strip() or "Hidden Gems"
     max_tracks = max(10, int(cfg.get("hidden_gems_max_tracks", 200) or 200))
     rows = _fetch_curated_playlist_rows(min_stars=4)
+    if rows is None:
+        return False
     pool = [
         r for r in rows
         if not bool(r.get("is_single"))
@@ -6095,6 +6134,8 @@ def _create_new_releases_playlist(cfg: dict[str, Any]) -> bool:
     current_year = datetime.now().year
     cutoff_year = current_year - 1
     rows = _fetch_curated_playlist_rows(min_stars=4)
+    if rows is None:
+        return False
     pool = []
     for r in rows:
         yr = _extract_track_year(r)
@@ -6109,6 +6150,8 @@ def _create_covers_playlist(cfg: dict[str, Any]) -> bool:
     pl_name = str(cfg.get("covers_playlist_name") or "Great Covers").strip() or "Great Covers"
     max_tracks = max(10, int(cfg.get("covers_max_tracks", 150) or 150))
     rows = _fetch_curated_playlist_rows(min_stars=3)
+    if rows is None:
+        return False
     pool = [r for r in rows if int(r.get("is_cover") or 0) == 1]
     return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
 
@@ -6122,6 +6165,8 @@ def _create_acoustic_playlist(cfg: dict[str, Any]) -> bool:
     pl_name = str(cfg.get("acoustic_playlist_name") or "Acoustic Essentials").strip() or "Acoustic Essentials"
     max_tracks = max(10, int(cfg.get("acoustic_max_tracks", 150) or 150))
     rows = _fetch_curated_playlist_rows(min_stars=4)
+    if rows is None:
+        return False
     pool = []
     for r in rows:
         if int(r.get("is_acoustic") or 0) == 1:
@@ -6148,6 +6193,8 @@ def _create_high_energy_playlist(cfg: dict[str, Any]) -> bool:
     pl_name = str(cfg.get("high_energy_playlist_name") or "High Energy & Upbeat").strip() or "High Energy & Upbeat"
     max_tracks = max(10, int(cfg.get("high_energy_max_tracks", 200) or 200))
     rows = _fetch_curated_playlist_rows(min_stars=4)
+    if rows is None:
+        return False
     pool = []
     for r in rows:
         dance = float(r.get("danceability") or 0)
@@ -6171,7 +6218,7 @@ def _create_mood_playlists(cfg: dict[str, Any]) -> int:
     max_tracks = max(10, int(cfg.get("mood_playlists_max_tracks", 150) or 150))
 
     rows = _fetch_curated_playlist_rows(min_stars=4)
-    if not rows:
+    if rows is None:
         return 0
 
     pools: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -6234,6 +6281,167 @@ def _run_curated_playlists(timings: dict[str, float] | None = None) -> None:
                 timings[timing_key] = timings.get(timing_key, 0.0) + (
                     time.monotonic() - _started
                 )
+
+
+def refresh_curated_playlists(*, reason: str = "scan") -> dict[str, float]:
+    """Rebuild the library-wide curated playlists after a TARGETED scan.
+
+    ⭐ WHY THIS EXISTS. Curated playlists (covers, decades, hit singles, mood
+    mixes …) used to be rebuilt only by the global rebuild, which runs at the
+    end of a COMPLETE full scan, the daily job and "rebuild all". An artist,
+    album or metadata scan therefore changed ``is_cover``/``is_genre``-driven
+    membership without ever reconciling those playlists — the reported "the
+    covers playlist doesn't update after a scan".
+
+    It is a no-op while the full-scan orchestrator owns the rebuild
+    (``global_playlists_deferred``), so a full scan still pays for it exactly
+    once. Playlists whose content has not changed are skipped by their push
+    signature, so a scan that changes nothing costs no playlist writes.
+    """
+    try:
+        from services.popularity.scan_scope import global_playlists_deferred
+
+        if global_playlists_deferred():
+            return {}
+    except Exception:
+        pass
+
+    timings: dict[str, float] = {}
+    try:
+        with _playlist_mutation_lock():
+            _run_curated_playlists(timings=timings)
+    except Exception as exc:
+        logger.warning("Curated playlist refresh failed", reason=reason, error=str(exc))
+        return timings
+
+    logger.info("[PLAYLISTS] Curated playlists refreshed", reason=reason)
+    return timings
+
+
+def _artist_for_essential_playlist(playlist_name: str) -> str:
+    """The stored artist whose Essential name is *playlist_name*.
+
+    ``_essential_playlist_name`` normalises the "The " prefix, so the value in
+    the playlist name is a DISPLAY form ("Offspring, The") that cannot be
+    handed straight to the library query. The reverse lookup is over the
+    artist keys the library actually stores.
+    """
+    wanted = str(playlist_name or "").strip().casefold()
+    if not wanted:
+        return ""
+    try:
+        with db_session() as session:
+            rows = session.execute(
+                text(
+                    "SELECT DISTINCT COALESCE(NULLIF(album_artist, ''), artist) "
+                    "FROM tracks"
+                )
+            ).fetchall() or []
+        for (artist,) in rows:
+            artist_name = str(artist or "").strip()
+            if artist_name and _essential_playlist_name(artist_name).casefold() == wanted:
+                return artist_name
+    except Exception as exc:
+        logger.debug("Essential artist reverse lookup failed", error=str(exc))
+    return ""
+
+
+def _regenerate_curated_playlist(playlist_name: str, cfg: dict[str, Any]) -> bool:
+    """Rebuild the curated builder that OWNS *playlist_name*."""
+    wanted = str(playlist_name or "").strip().casefold()
+    for cfg_key, default_name, builder in (
+        ("hit_singles_playlist_name", "Hit Singles", _create_hit_singles_playlist),
+        ("hidden_gems_playlist_name", "Hidden Gems", _create_hidden_gems_playlist),
+        ("new_releases_playlist_name", "New Releases", _create_new_releases_playlist),
+        ("covers_playlist_name", "Great Covers", _create_covers_playlist),
+        ("acoustic_playlist_name", "Acoustic Essentials", _create_acoustic_playlist),
+        ("high_energy_playlist_name", "High Energy & Upbeat", _create_high_energy_playlist),
+    ):
+        configured = str(cfg.get(cfg_key) or default_name).strip() or default_name
+        if configured.casefold() == wanted:
+            return bool(builder(cfg))
+    return False
+
+
+def regenerate_managed_playlist(
+    playlist_name: str,
+    managed_type: str | None = None,
+) -> dict[str, Any]:
+    """Rebuild ONE app-managed playlist in place, on demand.
+
+    Used by the playlists page's per-playlist Regenerate button. Ownership is
+    proven by ``classify_managed_playlist`` unless the caller supplies the type
+    the playlist index recorded; an unrecognised name is refused, so this can
+    never overwrite a playlist the user made themselves.
+
+    Never raises: returns ``{"ok", "name", "managed_type", "synced", "message"}``.
+    """
+    name = str(playlist_name or "").strip()
+    if not name:
+        return {"ok": False, "name": "", "error": "Playlist name is required"}
+
+    try:
+        from helpers.config_helpers import get_playlists_config
+        from services.playlists import playlist_taxonomy as taxonomy
+
+        cfg = get_playlists_config() or {}
+    except Exception as exc:
+        logger.warning("Managed playlist regenerate config read failed", error=str(exc))
+        return {"ok": False, "name": name, "error": "Playlist configuration is unreadable"}
+
+    resolved_type = str(managed_type or "").strip().lower()
+    if not resolved_type:
+        resolved_type = taxonomy.classify_managed_playlist(name, config=cfg) or ""
+    if not resolved_type:
+        return {
+            "ok": False,
+            "name": name,
+            "error": "This playlist is not generated by Popularr",
+        }
+
+    synced = False
+    try:
+        with _playlist_mutation_lock():
+            if resolved_type == taxonomy.GENRE:
+                genre = taxonomy.managed_name_value(name, taxonomy.GENRE, config=cfg)
+                if genre:
+                    synced = bool(
+                        _create_genre_top_track_playlists(only_genres=[genre])
+                    )
+            elif resolved_type == taxonomy.DECADE:
+                synced = bool(_create_decade_playlists(cfg))
+            elif resolved_type == taxonomy.NEW_MUSIC:
+                synced = bool(_create_new_music_playlist())
+            elif resolved_type == taxonomy.ESSENTIAL:
+                artist = _artist_for_essential_playlist(name)
+                if artist:
+                    synced = bool(_sync_essential_playlist(artist))
+            elif resolved_type == taxonomy.FAVOURITES:
+                from services.playlists.favourite_playlist_service import (
+                    sync_favourite_playlists,
+                )
+
+                result = sync_favourite_playlists(force=True) or {}
+                synced = bool(result.get("success")) and not result.get("errors")
+            elif resolved_type == taxonomy.CURATED:
+                synced = _regenerate_curated_playlist(name, cfg)
+            elif resolved_type == taxonomy.MOOD:
+                synced = bool(_create_mood_playlists(cfg))
+    except Exception as exc:
+        logger.warning("Managed playlist regenerate failed", name=name, error=str(exc))
+        return {"ok": False, "name": name, "managed_type": resolved_type, "error": str(exc)}
+
+    return {
+        "ok": True,
+        "name": name,
+        "managed_type": resolved_type,
+        "synced": synced,
+        "message": (
+            "Playlist regenerated."
+            if synced
+            else "Playlist is already up to date, or has no matching tracks."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------

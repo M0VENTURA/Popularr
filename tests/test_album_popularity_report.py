@@ -262,6 +262,58 @@ class TestTheReportEndpoint:
         )
 
 
+class TestDataFreshness:
+    """The file must say how old the popularity data is.
+
+    Asked: "should we have a last scanned time on the popularity reports? That
+    way it can tell whether it's old or new data?"
+
+    ``last_scanned`` is the NEWEST popularity-source fetch (Last.fm or
+    ListenBrainz) for the track — the per-track equivalent of "when was this
+    measured". A popularity scan that reuses cached counts leaves the older
+    timestamp in place, which is exactly the fact the reader needs.
+    """
+
+    async def test_the_header_carries_last_scanned(self, client, db_session):
+        _insert(db_session, track_id="t1", title="Popular", final_score=50.0)
+
+        rows = await _report_rows(client)
+
+        assert "last_scanned" in rows[0]
+
+    async def test_it_reports_the_newest_source_fetch(self, client, db_session):
+        from sqlalchemy import text
+
+        _insert(db_session, track_id="t1", title="Popular", final_score=50.0)
+        db_session.execute(
+            text(
+                "UPDATE tracks SET lastfm_last_updated = :lf, "
+                "listenbrainz_last_updated = :lb WHERE id = 't1'"
+            ),
+            {"lf": "2026-10-01 09:00:00", "lb": "2026-10-20 12:00:00"},
+        )
+        db_session.commit()
+
+        rows = await _report_rows(client)
+        record = dict(zip(rows[0], rows[1]))
+
+        assert record["last_scanned"].startswith("2026-10-20"), (
+            "the newer of the two source fetches must be reported"
+        )
+
+    async def test_an_unscanned_row_is_blank_not_a_misleading_date(
+        self, client, db_session
+    ):
+        """No source timestamp means UNKNOWN. Falling back to ``updated_at``
+        would let a metadata edit make stale popularity data look fresh."""
+        _insert(db_session, track_id="t1", title="Popular", final_score=50.0)
+
+        rows = await _report_rows(client)
+        record = dict(zip(rows[0], rows[1]))
+
+        assert record["last_scanned"] == ""
+
+
 class TestTheTwoScopesShareOneBuilder:
     async def test_the_album_file_is_the_artist_file_filtered(
         self, client, db_session

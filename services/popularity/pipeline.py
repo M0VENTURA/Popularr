@@ -289,6 +289,28 @@ def run_popularity_scan(
         # misleading state that sends someone hunting for a Stop click that
         # never happened.
         _cancelled_internally = result is False and _scan_cancellation.is_cancelled(artist_filter)
+        _scan_stopped = result is False or (
+            isinstance(result, dict) and result.get("status") == "stopped"
+        )
+
+        # ── Curated playlists after a TARGETED scan ─────────────────────────
+        # The global rebuild covers a COMPLETE full scan (and defers this to its
+        # own end-of-scan pass). Artist / album / metadata scans reach HERE, and
+        # those are exactly the runs that change cover verdicts and ratings — the
+        # curated playlists (covers, decades, hit singles …) must be reconciled
+        # or they keep tracks the scan no longer considers members.
+        if not _scan_stopped and not global_playlists_deferred():
+            try:
+                from services.popularity.stages.finalise_stage import (
+                    refresh_curated_playlists,
+                )
+
+                refresh_curated_playlists(reason="targeted scan")
+            except Exception as _playlist_exc:
+                logger.debug(
+                    "[POPULARITY] Curated playlist refresh failed",
+                    error=str(_playlist_exc),
+                )
 
         if _cancelled_internally:
             update(stage="cancelled", message="Artist cancelled by scan (budget exceeded)")

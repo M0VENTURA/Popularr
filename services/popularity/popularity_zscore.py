@@ -11,41 +11,42 @@ album's own tracklist distribution.
 
 from __future__ import annotations
 
-import math
-from statistics import mean, stdev
-
 import structlog
+
+from services.popularity.popularity_math import (
+    LOG_LISTENER_Z_MIN_SPREAD,
+    LOG_LISTENER_Z_RELATIVE_SPREAD,
+    calculate_robust_log_zscore,
+)
 
 logger = structlog.get_logger(__name__)
 
-# Log-space noise floor for ``log_listener_z``.  On a UNIFORM album (all
-# counts near-identical, stdev → 0) the z formula amplifies tiny scrobble
-# gaps into huge swings — a 10-scrobble difference across a tracklist of
-# ~10k-count tracks is measurement noise, not a standout signal.  The sigma
-# is floored at a small absolute value AND a fraction of the mean log so
-# low-variance albums at any magnitude damp the same relative noise.
-LOG_LISTENER_Z_MIN_SIGMA = 0.05
-LOG_LISTENER_Z_RELATIVE_SIGMA = 0.02
+# Backwards-compatible names.  The floors now live beside the helper that uses
+# them (``popularity_math``), so the ALBUM SCORE z and this standout z cannot
+# drift onto different scales.
+LOG_LISTENER_Z_MIN_SIGMA = LOG_LISTENER_Z_MIN_SPREAD
+LOG_LISTENER_Z_RELATIVE_SIGMA = LOG_LISTENER_Z_RELATIVE_SPREAD
 
 
 def log_listener_z(count: float, counts: list[float]) -> float:
-    """Log-scaled z-score of a track's listener/listen count within its album.
+    """Outlier-resistant log-scaled z of a track's count within its album.
 
-    Listener counts are heavily right-skewed (one hit dominates), so the
-    z-score is computed over ``log1p``-transformed values.  This is the raw
-    "standout within the album" signal that blended/decay-adjusted popularity
-    scores compress.  Zero-variance distributions (all counts identical, or
-    fewer than 3 positive counts) carry no outlier signal — return 0.0.
+    ⭐ MEDIAN + MAD, not mean + stdev.  Listener counts are heavy-tailed: one
+    runaway hit inflates a mean/stdev reference so much that every sibling
+    lands at a negative z and stops looking like a standout at all.  In log
+    space a 2M-listener single beside 30k-listener album tracks no longer moves
+    the centre, so "how unusual is this track" stays a question about the
+    album's own typical spread.
+
+    The noise floors (a small absolute value and a fraction of the centre) stop
+    a near-uniform album from turning measurement noise into huge z values.
+    Zero-variance distributions (all counts identical, or fewer than 3 positive
+    counts) carry no outlier signal — return 0.0.
     """
-    logs = [math.log1p(float(c)) for c in (counts or []) if float(c) > 0]
-    if len(logs) < 3 or not any(logs):
+    try:
+        return calculate_robust_log_zscore(float(count or 0), list(counts or []))
+    except Exception:
         return 0.0
-    mu = mean(logs)
-    sigma = stdev(logs) if len(logs) > 1 else 1.0
-    if not sigma or sigma <= 0:
-        return 0.0
-    sigma = max(sigma, LOG_LISTENER_Z_MIN_SIGMA, LOG_LISTENER_Z_RELATIVE_SIGMA * abs(mu))
-    return (math.log1p(float(count)) - mu) / sigma
 
 
 def composite_listener_z(

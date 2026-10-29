@@ -46,6 +46,13 @@ def fuzzy_match_score(str1: str, str2: str) -> float:
 ADAPTIVE_MIN_SPREAD_FRACTION = 0.10
 Z_SCORE_LOGISTIC_K = Z_SCORE_TO_POPULARITY_SCALE / 25.0
 LOG_SCALE_MULTIPLIER = 16.0
+
+#: Log-space noise floors for the robust listener z.  On a UNIFORM album (all
+#: counts near-identical) the MAD collapses toward zero, so tiny scrobble gaps
+#: would otherwise become enormous z values.  Mirrors
+#: ``popularity_zscore.LOG_LISTENER_Z_MIN_SIGMA`` / ``_RELATIVE_SIGMA``.
+LOG_LISTENER_Z_MIN_SPREAD = 0.05
+LOG_LISTENER_Z_RELATIVE_SPREAD = 0.02
 SINGLE_BOOST_FADE_START = 60.0
 SINGLE_BOOST_FADE_END = 92.0
 LOG_RATIO_DIVERGENCE_THRESHOLD = 0.85
@@ -105,6 +112,43 @@ def calculate_robust_zscore(
     if spread <= 0:
         return 0.0, 0.0
     return (float(score) - ref_median) / spread, spread
+
+
+def calculate_robust_log_zscore(count: float, counts: list[float]) -> float:
+    """Outlier-resistant z-score of a listener/listen count within its album.
+
+    ⭐⭐ WHY MEDIAN + MAD IN LOG SPACE, NOT MEAN + STDEV.
+
+    Listener counts are heavy-tailed: one runaway hit swamps its album.  With a
+    mean/stdev reference a 2,000,000-listener single against ~30,000-listener
+    album tracks raises the mean to ~200,000 and the standard deviation to
+    ~550,000, so EVERY other track lands at z ≈ -0.3 and is scored below the
+    midpoint no matter how popular it actually is ("Barbie Girl throws the
+    z-score off for the rest of the album").  The median and the MAD do not
+    move with a single extreme value, so the album's typical track stays at
+    z ≈ 0 and the tracks around it keep their real differences.
+
+    ``log1p`` keeps the scale proportional (4x listeners is a fixed distance,
+    not an ever-growing one) and the floors stop a near-uniform album from
+    turning measurement noise into a huge z.  Fewer than three positive counts
+    carry no distribution — return 0.0.
+    """
+    logs = [math.log1p(float(c)) for c in (counts or []) if float(c or 0) > 0]
+    if len(logs) < 3:
+        return 0.0
+    center = median(logs)
+    mad = median([abs(value - center) for value in logs])
+    if mad <= 0:
+        # A perfectly uniform album has no outlier signal at all.
+        return 0.0
+    spread = max(
+        mad * 1.4826,
+        LOG_LISTENER_Z_MIN_SPREAD,
+        LOG_LISTENER_Z_RELATIVE_SPREAD * abs(center),
+    )
+    if spread <= 0:
+        return 0.0
+    return (math.log1p(float(count or 0)) - center) / spread
 
 
 def _remap_relative_popularity(raw_score: float, reference_scores: list[float]) -> float:
@@ -340,12 +384,26 @@ def calculate_lastfm_zscore_popularity(
     album_listeners_list: list[int],
     album_playcounts_list: list[int],
 ) -> float:
-    """Calculate Last.fm popularity using album-level z-score normalization."""
+    """Last.fm popularity from the track's standing within its album.
+
+    The album reference is a ROBUST (median + MAD) z in log space, so a
+    runaway hit does not widen the spread enough to push every sibling below
+    the midpoint.  A two-track album has no robust distribution; it keeps the
+    symmetric mean/stdev z, and a single-track album uses the absolute log
+    scale.
+    """
     valid_listeners = [int(x or 0) for x in album_listeners_list if x is not None and int(x or 0) > 0]
     if not valid_listeners:
         return calculate_lastfm_popularity_score(listeners)
     if len(valid_listeners) < 2:
         return calculate_lastfm_popularity_score(listeners, max(valid_listeners))
+    if len(valid_listeners) >= 3:
+        # ⭐ Robust (median + MAD, log space): one runaway hit must not widen the
+        # reference so far that every sibling is pushed below the midpoint.
+        z = calculate_robust_log_zscore(float(listeners or 0), valid_listeners)
+        return zscore_to_popularity(z)
+    # Two tracks are not a distribution to be robust about; the symmetric
+    # mean/stdev z is the honest answer and maps them to ~38 / ~62.
     listener_mean = mean(valid_listeners)
     listener_std = stdev(valid_listeners)
     z = calculate_track_zscore(float(listeners or 0), listener_mean, listener_std)

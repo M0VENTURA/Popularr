@@ -146,6 +146,14 @@ function playlistCard(playlist) {
   const countBadge = playlist.rule_based
     ? '<span class="badge bg-info-subtle text-info-emphasis text-nowrap">Rules</span>'
     : `<span class="badge bg-secondary-subtle text-secondary-emphasis text-nowrap">${playlist.track_count || 0} tracks</span>`;
+  // Only app-generated playlists get a Regenerate action — the server proves
+  // ownership and reports ``managed_type`` for exactly those.
+  const regenButton = playlist.managed_type
+    ? `<button type="button" class="btn btn-sm btn-outline-success py-0" data-action="regenerate"
+               title="Rebuild this playlist from the current library data">
+         <i class="bi bi-arrow-repeat"></i>
+       </button>`
+    : '';
   // The server resolves the thumbnail (the browser has no Navidrome session).
   // ``alt=""`` because the name is right beside it — a screen reader reading
   // the playlist name twice is noise.
@@ -168,13 +176,21 @@ function playlistCard(playlist) {
       </div>
       <div class="d-flex align-items-center gap-2 text-nowrap">
         ${countBadge}
-        <button type="button" class="btn btn-sm btn-outline-secondary py-0" title="Rename playlist">
+        ${regenButton}
+        <button type="button" class="btn btn-sm btn-outline-secondary py-0" data-action="rename" title="Rename playlist">
           <i class="bi bi-pencil"></i>
         </button>
       </div>
     </div>`;
 
-  card.querySelector('button').addEventListener('click', event => {
+  const regenBtn = card.querySelector('[data-action="regenerate"]');
+  if (regenBtn) {
+    regenBtn.addEventListener('click', event => {
+      event.stopPropagation();
+      regeneratePlaylist(playlist, regenBtn);
+    });
+  }
+  card.querySelector('[data-action="rename"]').addEventListener('click', event => {
     event.stopPropagation();
     openRenameModal(playlist.id, playlist.source);
   });
@@ -226,6 +242,11 @@ async function selectPlaylist(playlist) {
   const regenBtn = document.getElementById('detailRegenerateBtn');
   if (regenBtn) {
     regenBtn.classList.toggle('d-none', !_aiCoverAvailable);
+  }
+  // Rebuilding the playlist is offered only for playlists Popularr builds.
+  const regenPlaylistBtn = document.getElementById('detailRegeneratePlaylistBtn');
+  if (regenPlaylistBtn) {
+    regenPlaylistBtn.classList.toggle('d-none', !playlist.managed_type);
   }
   document.getElementById('detailMeta').textContent = `${playlist.type === 'smart' ? 'Smart' : 'Regular'} playlist · ${playlist.rule_based ? 'rule-based' : (playlist.track_count || 0) + ' tracks'}`;
 
@@ -340,6 +361,61 @@ async function regenerateCover() {
   } finally {
     btn.disabled = false;
     btn.innerHTML = original;
+  }
+}
+
+/**
+ * Rebuild one app-generated playlist from the current library data.
+ *
+ * The server proves ownership (playlist index, then naming rules) before it
+ * writes anything, so this never touches a playlist the user created.
+ *
+ * @param {object} [playlist] target playlist (defaults to the selected one)
+ * @param {HTMLElement} [button] the card button that was clicked, if any
+ */
+async function regeneratePlaylist(playlist, button) {
+  const target = playlist || currentPlaylist;
+  if (!target || !target.managed_type) return;
+
+  const detailBtn = document.getElementById('detailRegeneratePlaylistBtn');
+  const buttons = [button, detailBtn].filter((btn, index, all) =>
+    btn && all.indexOf(btn) === index
+  );
+  const originals = buttons.map(btn => btn.innerHTML);
+  buttons.forEach(btn => {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  });
+
+  try {
+    const response = await fetch('/api/playlists/regenerate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: target.name }),
+    });
+    const data = await parseJsonOrThrow(response);
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || 'Playlist regeneration failed');
+    }
+
+    showAlert(data.message || 'Playlist regenerated.');
+
+    // Membership and track count may both have changed — reload the list, then
+    // re-select the same playlist so its tracks reflect the rebuild.
+    const keepId = target.id;
+    const keepSource = target.source;
+    await loadPlaylists();
+    const refreshed = playlists.find(p => p.id === keepId && p.source === keepSource)
+      || playlists.find(p => p.name === target.name);
+    if (refreshed) selectPlaylist(refreshed);
+  } catch (err) {
+    console.error('regeneratePlaylist:', err);
+    showAlert(err.message || 'Playlist regeneration failed', true);
+  } finally {
+    buttons.forEach((btn, index) => {
+      btn.disabled = false;
+      btn.innerHTML = originals[index];
+    });
   }
 }
 

@@ -5,7 +5,8 @@ and the collection-wide export on the Config page: the full popularity row set
 — Last.fm listeners/playcount, ListenBrainz listens/users, both source scores,
 the combined score, the star rating and the single-detection verdict — so the
 numbers can be sorted and filtered in a spreadsheet instead of read off a
-screen.
+screen. It also carries ``last_scanned`` (the newest Last.fm/ListenBrainz fetch
+for the row) so a reader can tell whether the numbers are current or stale.
 
 All three scopes share ONE query and ONE ordering rule. The album report is a
 subset of the artist report at the same ordering, and the artist report is a
@@ -25,9 +26,10 @@ from sqlalchemy import text
 
 from db.engine import db_session
 
-#: Columns of the report, in file order. ``rank`` is assigned after the query
-#: has sorted; every other name is a real ``tracks`` column (checked against
-#: ``db.schema.COLUMN_REGISTRY`` — selecting one that does not exist would 500).
+#: Columns of the report, in file order. ``rank`` and ``last_scanned`` are
+#: computed after the query; every other name is a real ``tracks`` column
+#: (checked against ``db.schema.COLUMN_REGISTRY`` — selecting one that does not
+#: exist would 500).
 POPULARITY_REPORT_COLUMNS: tuple[str, ...] = (
     "rank",
     "title",
@@ -54,6 +56,17 @@ POPULARITY_REPORT_COLUMNS: tuple[str, ...] = (
     "single_confidence_score",
     "is_live",
     "popularity_frozen",
+    # Data freshness. ``last_scanned`` is the NEWEST of the two per-source
+    # fetch stamps (computed below, because GREATEST/max differs between
+    # PostgreSQL and the SQLite leg); the individual stamps follow so a stale
+    # column can be traced to Last.fm or ListenBrainz.  Blank means the row
+    # predates those timestamps / was never source-refreshed — deliberately NOT
+    # ``updated_at`` (a metadata edit would make stale popularity data look
+    # fresh) and not ``tracks.last_scanned`` (that legacy column is no longer
+    # written by the pipeline).
+    "last_scanned",
+    "lastfm_last_updated",
+    "listenbrainz_last_updated",
 )
 
 #: Most popular first. ``raw_score`` is the PRE-REMAP blend (migration 016):
@@ -77,7 +90,8 @@ _POPULARITY_REPORT_SELECT = """
            listenbrainz_listens, listenbrainz_users, listenbrainz_score,
            exclude_from_stats,
            is_single, single_confidence, single_confidence_score,
-           is_live, popularity_frozen
+           is_live, popularity_frozen,
+           lastfm_last_updated, listenbrainz_last_updated
     FROM tracks
     WHERE {where}
     ORDER BY COALESCE(NULLIF(raw_score, 0), final_score, popularity, stars, 0) DESC,
@@ -118,6 +132,25 @@ def _scope(*, artist: str | None, album: str | None) -> tuple[str, dict[str, Any
     return predicate, params
 
 
+def _newest_timestamp(*values: Any) -> str:
+    """The newest of several timestamp values, as text ('' when none).
+
+    Both PostgreSQL drivers and SQLite can hand back ``datetime`` OR ISO text
+    for the same column, so the values are compared as their string form —
+    ISO-8601 and SQL timestamps both sort correctly that way.  Using SQL
+    ``GREATEST``/``max`` instead would need a dialect fork for no benefit: the
+    row set is already in memory.
+    """
+    newest = ""
+    for value in values:
+        if value is None:
+            continue
+        text_value = str(value).strip()
+        if text_value and text_value > newest:
+            newest = text_value
+    return newest
+
+
 def _filename_part(value: str, fallback: str) -> str:
     """Strip everything a filesystem or a Content-Disposition header dislikes."""
     return re.sub(r"[^A-Za-z0-9 _-]", "", str(value or "")).strip() or fallback
@@ -149,10 +182,16 @@ def build_popularity_report(*, artist: str | None = None, album: str | None = No
     writer = csv.writer(buffer)
     writer.writerow(POPULARITY_REPORT_COLUMNS)
     for position, row in enumerate(rows, start=1):
-        # ``None`` becomes an empty cell; everything else is written as stored.
-        writer.writerow(
-            [position] + [row.get(column) for column in POPULARITY_REPORT_COLUMNS[1:]]
+        last_scanned = _newest_timestamp(
+            row.get("lastfm_last_updated"),
+            row.get("listenbrainz_last_updated"),
         )
+        values = [
+            last_scanned if column == "last_scanned" else row.get(column)
+            for column in POPULARITY_REPORT_COLUMNS[1:]
+        ]
+        # ``None`` becomes an empty cell; everything else is written as stored.
+        writer.writerow([position] + values)
     return buffer.getvalue()
 
 

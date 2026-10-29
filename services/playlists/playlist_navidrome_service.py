@@ -171,6 +171,7 @@ def sync_playlist_by_name(
     force: bool = False,
     existing_playlist_id: str | None = None,
     all_playlists: list[dict[str, Any]] | None = None,
+    create_if_missing: bool = True,
 ) -> dict[str, Any]:
     """Create or update (IN PLACE) a Navidrome playlist by name.
 
@@ -186,6 +187,10 @@ def sync_playlist_by_name(
     4. If none exists → create it with the song list.
 
     Set ``force=True`` to write even when the contents already match.
+
+    Set ``create_if_missing=False`` to reconcile an EXISTING playlist only. That
+    is what clearing a stale curated playlist uses: syncing ``[]`` must remove
+    its entries, not conjure an empty playlist on a server that never had one.
 
     Returns ``{"success": bool, "updated": bool, "created": bool,
     "unchanged": bool, "deduped": int, "playlist_id": str,
@@ -463,6 +468,14 @@ def sync_playlist_by_name(
                 playlist_id=primary_id,
                 error=str(exc),
             )
+        return result
+
+    # A caller clearing a playlist must never CREATE an empty one it does not
+    # have: "reconcile to nothing" means "remove the stale entries", not "make a
+    # new empty playlist appear on every fresh install".
+    if not create_if_missing:
+        result["success"] = True
+        result["skipped"] = True
         return result
 
     # No existing regular playlist — create it.  Uses the client's
