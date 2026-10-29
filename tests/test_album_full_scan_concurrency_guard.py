@@ -342,6 +342,67 @@ class TestGuardFiltersKwargsForTheRunner:
         assert _registered.get("type") == "full"
 
 
+class TestGuardDoesNotWarnAboutExpectedScanTypeDrop:
+    """``scan_type`` is the guard's own bookkeeping, not a runner kwarg.
+
+    The full pipelines (``run_album_pipeline`` / ``run_artist_pipeline``) do
+    not accept it, so the guard drops it by design. Reporting that as
+    "Dropping kwargs the scan runner does not accept" turned a normal scan
+    into a scary warning on every album-page "full" scan.
+    """
+
+    @staticmethod
+    def _logger(monkeypatch) -> list[tuple]:
+        import routes.scan_routes._common as common
+
+        warnings: list[tuple] = []
+
+        class _Logger:
+            def warning(self, *args, **kwargs):
+                warnings.append((args, kwargs))
+
+        monkeypatch.setattr(common, "logger", _Logger())
+        return warnings
+
+    def test_scan_type_is_dropped_without_a_warning(self, monkeypatch):
+        TestGuardAndLaunchBehaviour._patch(monkeypatch, scan_active=False)
+        warnings = self._logger(monkeypatch)
+        ran: dict = {}
+
+        def _pipeline(artist_name, album_name, *, force=False):
+            ran["artist"] = artist_name
+
+        from routes.scan_routes._common import guard_and_launch_popularity_scan
+
+        assert guard_and_launch_popularity_scan(
+            _pipeline, "Artist", "Album", force=True, scan_type="full"
+        ) is True
+        _wait_for(lambda: "artist" in ran)
+
+        assert warnings == [], (
+            "dropping the guard's OWN scan_type bookkeeping was reported as a "
+            f"caller bug: {warnings}"
+        )
+
+    def test_a_genuinely_unexpected_kwarg_still_warns(self, monkeypatch):
+        TestGuardAndLaunchBehaviour._patch(monkeypatch, scan_active=False)
+        warnings = self._logger(monkeypatch)
+        ran: dict = {}
+
+        def _pipeline(artist_name, album_name, *, force=False):
+            ran["artist"] = artist_name
+
+        from routes.scan_routes._common import guard_and_launch_popularity_scan
+
+        assert guard_and_launch_popularity_scan(
+            _pipeline, "Artist", "Album", force=True, scan_type="full", bogus=1
+        ) is True
+        _wait_for(lambda: "artist" in ran)
+
+        assert warnings, "a genuine signature mismatch must still be reported"
+        assert warnings[0][1].get("dropped") == ["bogus"]
+
+
 def _wait_for(condition, timeout: float = 5.0) -> None:
     """Poll a condition with a hard ceiling (tests spawn real threads)."""
     deadline = time.monotonic() + timeout

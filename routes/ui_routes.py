@@ -2000,6 +2000,22 @@ def _write_album_track_file_tags(
         # ``albumversion`` in the payload wins when a caller supplies it directly.
         if "release_title" in payload and "albumversion" not in payload:
             file_tags["albumversion"] = str(payload.get("release_title") or "").strip()
+
+        # ── Cleared identifiers must reach the FILE too ─────────────────────
+        # ``build_tag_updates`` drops empty values, so an explicitly cleared
+        # MBID never reached the writer. The old frame then survived in the
+        # file, and a later Navidrome import could read it back and undo the
+        # removal. Pushing "" is the writers' explicit "delete this frame"
+        # signal (the same contract the disc/release-name clears above use).
+        for _column, _tag_name in (
+            ("musicbrainz_album_mbid", "musicbrainz_albumid"),
+            ("musicbrainz_albumid", "musicbrainz_albumid"),
+            ("musicbrainz_releasegroupid", "musicbrainz_releasegroupid"),
+            ("musicbrainz_artistid", "musicbrainz_artistid"),
+            ("musicbrainz_albumartistid", "musicbrainz_albumartistid"),
+        ):
+            if _column in payload and not str(payload.get(_column) or "").strip():
+                file_tags[_tag_name] = ""
         if file_tags:
             return bool(update_file_tags(resolved, file_tags)), resolved
     except Exception as tag_err:
@@ -2493,6 +2509,54 @@ async def album_detail(album_path: str) -> Any:
         genres_str = (form.get("album_genres") or "").strip()
         cover_url = (form.get("cover_art_url") or "").strip()
 
+        # ── Identifier fields: PRESENT, not truthy ─────────────────────────
+        # An emptied identifier box is a request to REMOVE the stored value.
+        # The writes below used to be ``if album_mbid:`` / ``if artist_mbid:``,
+        # so deleting an MBID and saving simply omitted the column and the old
+        # value stayed — the reported "it doesn't remove them". Presence of the
+        # form field is what distinguishes "leave it alone" (field absent, e.g.
+        # a partial caller) from "clear it" (field present and empty).
+        _album_mbid_field = next(
+            (key for key in ("album_mbid", "musicbrainz_release_id", "mbid") if key in form),
+            None,
+        )
+        _album_rg_field = next(
+            (
+                key
+                for key in (
+                    "album_release_group_mbid",
+                    "musicbrainz_release_group_id",
+                    "release_group_mbid",
+                )
+                if key in form
+            ),
+            None,
+        )
+        _artist_mbid_present = "artist_mbid" in form
+        _discogs_present = "album_discogs_id" in form
+
+        # The page renders ONE "Artist ID" box from the first non-empty of
+        # these two columns (see the render's ``first_value``). Remember which
+        # value it showed, so clearing the box removes the column that supplied
+        # it without wiping a genuinely DIFFERENT album-artist id on a
+        # compilation.
+        _artist_mbid_displayed = ""
+        for _t in tracks:
+            for _col in ("musicbrainz_artistid", "musicbrainz_albumartistid"):
+                _value = str(_t.get(_col) or "").strip()
+                if _value:
+                    _artist_mbid_displayed = _value
+                    break
+            if _artist_mbid_displayed:
+                break
+
+        # Read the value from the SAME field that proved presence, so an
+        # emptied ``album_mbid`` cannot pick up a value from another alias.
+        if _album_mbid_field:
+            album_mbid = str(form.get(_album_mbid_field) or "").strip()
+        if _album_rg_field:
+            album_rg_mbid = str(form.get(_album_rg_field) or "").strip()
+
         # ── Staged per-track MusicBrainz review ──────────────────────────────
         # The album page's "Lookup MBID" preview stages every per-track change
         # (title, track/disc number, recording MBID, writer, genres, cover
@@ -2835,15 +2899,34 @@ async def album_detail(album_path: str) -> Any:
                 if track_composer:
                     payload["writer"] = track_composer
 
-                if album_mbid:
-                    payload["musicbrainz_album_mbid"] = album_mbid
-                    payload["musicbrainz_albumid"] = album_mbid
-                if album_rg_mbid:
-                    payload["musicbrainz_releasegroupid"] = album_rg_mbid
-                if artist_mbid:
-                    payload["musicbrainz_artistid"] = artist_mbid
-                if discogs_id:
-                    payload["discogs_album_id"] = discogs_id
+                # ⚠️ PRESENCE-gated, not truthiness-gated. ``None`` clears the
+                # column; an omitted form field leaves it untouched.
+                if _album_mbid_field:
+                    payload["musicbrainz_album_mbid"] = album_mbid or None
+                    # The library stores BOTH spellings of the release id; the
+                    # album page reads the ``_mbid`` one, so a clear must reach
+                    # both or the page would keep showing the other.
+                    payload["musicbrainz_albumid"] = album_mbid or None
+                if _album_rg_field:
+                    payload["musicbrainz_releasegroupid"] = album_rg_mbid or None
+                if _artist_mbid_present:
+                    payload["musicbrainz_artistid"] = artist_mbid or None
+                    if not artist_mbid:
+                        # The page's single "Artist ID" box is populated from
+                        # EITHER artist column. Clear the album-artist column
+                        # too when it is empty or held the value the page
+                        # displayed — otherwise the box would refill from it.
+                        # A genuinely different album-artist id is preserved.
+                        _current_album_artist_mbid = str(
+                            track.get("musicbrainz_albumartistid") or ""
+                        ).strip()
+                        if (
+                            not _current_album_artist_mbid
+                            or _current_album_artist_mbid == _artist_mbid_displayed
+                        ):
+                            payload["musicbrainz_albumartistid"] = None
+                if _discogs_present:
+                    payload["discogs_album_id"] = discogs_id or None
 
                 if cover_url:
                     payload["cover_art_url"] = cover_url

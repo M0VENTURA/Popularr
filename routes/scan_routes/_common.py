@@ -185,7 +185,11 @@ def guard_and_launch_popularity_scan(
                     inspect.Parameter.KEYWORD_ONLY,
                 )
             }
-            _dropped = sorted(set(_runner_kwargs) - _accepted)
+            # ``scan_type`` is expected to be absent from the full pipelines
+            # (see above); dropping it is the DESIGNED behaviour, so it must
+            # not be reported as a caller bug. Any other unexpected keyword is
+            # still surfaced loudly.
+            _dropped = sorted(set(_runner_kwargs) - _accepted - {"scan_type"})
             _runner_kwargs = {
                 k: v for k, v in _runner_kwargs.items() if k in _accepted
             }

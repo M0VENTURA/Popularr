@@ -453,7 +453,11 @@ class TestClearingHappensAfterDetection:
         import services.enrichment.cover_detector_impl as impl
 
         source = inspect.getsource(impl.CoverDetector.detect_covers_for_album)
-        clear_at = source.index("_clear_unconfirmed_verdicts")
+        # Anchor on the CALL, not the bare name: the method body documents the
+        # clear step in comments before the detection techniques run, and a
+        # bare-name search lands on the first COMMENT — passing or failing for
+        # a reason unrelated to the ordering it claims to pin.
+        clear_at = source.index("self._clear_unconfirmed_verdicts(")
         # Every deep technique must be attempted before the clear runs.
         for technique in (
             "_detect_via_isrc",

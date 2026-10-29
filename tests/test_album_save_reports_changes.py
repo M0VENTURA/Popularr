@@ -168,10 +168,10 @@ class TestAlbumFieldsAreApplied:
         [
             'payload["release_title"] = release_title',
             'payload["release_year"] = int(release_year)',
-            'payload["musicbrainz_album_mbid"] = album_mbid',
-            'payload["musicbrainz_releasegroupid"] = album_rg_mbid',
-            'payload["musicbrainz_artistid"] = artist_mbid',
-            'payload["discogs_album_id"] = discogs_id',
+            'payload["musicbrainz_album_mbid"] = album_mbid or None',
+            'payload["musicbrainz_releasegroupid"] = album_rg_mbid or None',
+            'payload["musicbrainz_artistid"] = artist_mbid or None',
+            'payload["discogs_album_id"] = discogs_id or None',
             'payload["musicbrainz_albumtype"] = album_type',
             # The FILE tag too — it is what Navidrome reads back, so a type
             # chosen on the album page must reach it or everything outside the

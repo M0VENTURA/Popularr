@@ -45,7 +45,9 @@ Rebuilt with the following corrections:
   - ``_get_band_members`` no longer caches empty lists on transient failures.
   - ``_clear_unconfirmed_verdicts`` also strips stale ``(X Cover)`` suffixes
     from both the DB title and the audio file's TITLE tag when clearing a
-    false cover verdict.
+    false cover verdict, and deletes the file's ``IS_COVER`` /
+    ``ORIGINAL_COVER_ARTIST`` tags so a later Navidrome import cannot restore
+    the flag.
 """
 
 from __future__ import annotations
@@ -756,33 +758,62 @@ class CoverDetector:
         #: the repair below. Counted separately so the summary does not report
         #: a repair as a new detection.
         _repaired_titles: set[str] = set()
+        #: Tracks whose stored cover verdict was RE-CONFIRMED by this pass with
+        #: the SAME original artist. They are confirmed for the clear step, but
+        #: they are not written again — a verdict that has not changed must not
+        #: churn its DB row or audio-file tags on every scan.
+        _verified_existing_ids: set[str] = set()
+
+        # ── Overlay the CURRENT stored verdict ────────────────────────────
+        # ``tracks`` is the caller's load-time snapshot. The track stage runs
+        # before this pass and may have just written a cover verdict for this
+        # album, so judging the snapshot made a flag set earlier in the SAME
+        # scan invisible — and ``_clear_unconfirmed_verdicts`` then saw
+        # "nothing stored" and left it set. One query also supplies the
+        # freshness timestamps used below.
+        _stored_state = self._load_cover_checked_map([t.get("id") for t in tracks])
+        for track in tracks:
+            _state = _stored_state.get(str(track.get("id") or "")) or {}
+            if not _state:
+                continue
+            for _column in ("is_cover", "original_cover_artist", "cover_manual_override"):
+                if _column in _state:
+                    track[_column] = _state[_column]
+            if _state.get("cover_last_checked") is not None:
+                track["cover_last_checked"] = _state["cover_last_checked"]
 
         if not force:
-            checked_map = self._load_cover_checked_map([t.get("id") for t in tracks])
             for track in tracks:
                 tid = track.get("id")
                 if not tid:
                     continue
-                # ── Repair BEFORE the freshness skip ───────────────────────
-                # A confirmed cover whose "(X Cover)" suffix was lost was
-                # almost always checked RECENTLY — that is the scan that
-                # stripped it — so the 90-day window below would hide it for
-                # months. The repair needs no MusicBrainz lookup (the stored
-                # original artist is enough), so it runs first; the
-                # ``continue`` stops the later branch repairing it twice.
-                _early_repair = self._suffix_repair_update(track)
-                if _early_repair is not None:
+                # A user-locked verdict outranks every heuristic: never
+                # re-detect it and never clear it.
+                if track.get("cover_manual_override"):
                     _confirmed_skipped.add(tid)
                     seen_track_ids.add(tid)
-                    pending_updates.append(_early_repair)
-                    _repaired_titles.add(tid)
                     continue
                 # ``_cover_recheck`` is set by the scan runner when this pass
                 # stripped "(X Cover)" wording from the title: the stored
                 # timestamp says "checked recently", but the evidence the
                 # title-hint step needs only exists on THIS pass.
-                if not track.get("_cover_recheck") and _checked_fresh(
-                    track.get("cover_last_checked") or checked_map.get(tid)
+                #
+                # ⚠️ THE FRESHNESS WINDOW ONLY PROTECTS NEGATIVE VERDICTS.
+                # A track already flagged as a cover is ALWAYS re-verified,
+                # however recently it was checked. Previously a stored verdict
+                # was trusted FOREVER (and re-stamped on every scan), so a
+                # wrong flag — e.g. one written by the compilation bug — could
+                # never be corrected: the deep pass skipped it, and the Great
+                # Covers playlist kept picking it up. Positive verdicts are a
+                # small fraction of a library, so re-checking them is cheap;
+                # leaving a false one is not.
+                if (
+                    not track.get("_cover_recheck")
+                    and not self._is_cover_flagged(track)
+                    and _checked_fresh(
+                        track.get("cover_last_checked")
+                        or (_stored_state.get(tid) or {}).get("cover_last_checked")
+                    )
                 ):
                     _fresh_skipped.add(tid)
                     seen_track_ids.add(tid)
@@ -799,22 +830,6 @@ class CoverDetector:
                         track=track.get("title"),
                         original_artist=track.get("original_cover_artist"),
                     )
-                elif self._is_already_confirmed_cover(track) or self._cover_has_original_artist(track):
-                    _confirmed_skipped.add(tid)
-                    seen_track_ids.add(tid)
-                    # ── Repair a confirmed cover that lost its title suffix ──
-                    #
-                    # ``apply_cover_metadata_batch`` is the ONLY writer of the
-                    # "(Original Artist Cover)" suffix, and it only runs for a
-                    # NEW detection. A cover confirmed on an earlier scan is
-                    # skipped right here — so once an earlier scan stripped the
-                    # suffix, nothing ever put it back. The stored verdict
-                    # already names the original artist, so the title is
-                    # rebuilt from it with no MusicBrainz lookup at all.
-                    _repair = self._suffix_repair_update(track)
-                    if _repair is not None:
-                        pending_updates.append(_repair)
-                        _repaired_titles.add(tid)
 
         # ⭐ The START line, emitted AFTER the skip scan above so the number of
         # tracks that actually need work is known. That number — not the album's
@@ -868,8 +883,36 @@ class CoverDetector:
                     original_artist=_orig,
                 )
                 return
+            _tid = str(result["track_id"])
+            _stored_orig = str(track.get("original_cover_artist") or "").strip()
+            if (
+                self._is_cover_flagged(track)
+                and _stored_orig
+                and _orig
+                and _same_artist(_stored_orig, _orig)
+            ):
+                # Same verdict the row already carries: it STANDS (so the
+                # clear step must not touch it), but there is nothing to write.
+                # Skipping the pending update keeps an unchanged cover from
+                # rewriting its DB row and audio-file tags on every scan.
+                _verified_existing_ids.add(_tid)
+                seen_track_ids.add(_tid)
+                # The verdict is genuine, so restore its "(X Cover)" suffix
+                # if a previous pass stripped it. This repair runs only AFTER
+                # detection has re-confirmed the verdict — doing it first (as
+                # the old code did) stamped a bogus suffix onto a FALSE stored
+                # verdict and then shielded it from re-assessment.
+                _repair = self._suffix_repair_update(track)
+                if _repair is not None:
+                    pending_updates.append(_repair)
+                    _repaired_titles.add(_tid)
+                log_scan_detail(
+                    f"[COVER_DETECT] \u2713 '{track.get('title')}' still a cover "
+                    f"(original={_orig})"
+                )
+                return
             cover_results.append(result)
-            seen_track_ids.add(result["track_id"])
+            seen_track_ids.add(_tid)
             pending_updates.append(self._build_update(result, track))
 
             # ⭐ The ACTIONABLE event, so it goes to the scan log the operator
@@ -1236,7 +1279,11 @@ class CoverDetector:
         # ── Clear verdicts that this pass could NOT confirm ────────────────
         self._clear_unconfirmed_verdicts(
             tracks,
-            confirmed_ids={str(r.get("track_id")) for r in cover_results} | _repaired_titles,
+            confirmed_ids=(
+                {str(r.get("track_id")) for r in cover_results}
+                | _repaired_titles
+                | _verified_existing_ids
+            ),
             fresh_skipped=_fresh_skipped,
             confirmed_skipped=_confirmed_skipped,
             force=force,
@@ -1248,7 +1295,7 @@ class CoverDetector:
         log_unified(
             f"[COVER_DETECT] {artist} - {album}: {len(cover_results)} cover(s) | "
             f"checked={_checked}, settled-in-window={len(_fresh_skipped)}, "
-            f"already-confirmed={len(_confirmed_skipped)}"
+            f"already-confirmed={len(_confirmed_skipped) + len(_verified_existing_ids)}"
             + (f", titles-repaired={len(_repaired_titles)}" if _repaired_titles else "")
         )
 
@@ -1388,8 +1435,16 @@ class CoverDetector:
                     if (result.rowcount or 0) > 0:
                         cleared += 1
                         fp = str(track.get("file_path") or "").strip()
-                        if title_changed and fp:
-                            self._update_file_metadata(fp, clean_title, [])
+                        if fp:
+                            # ⚠️ THE FILE TAG MUST GO TOO. Clearing only the
+                            # DB row leaves ``IS_COVER`` on disk; the next
+                            # Navidrome import reads it back (OpenSubsonic's
+                            # ``tags``) and re-flags the track, so the false
+                            # verdict survives every scan and keeps showing up
+                            # in the Great Covers playlist.
+                            self._clear_cover_file_tags(
+                                fp, clean_title if title_changed else None
+                            )
             except Exception as exc:
                 logger.debug("Cover verdict clear failed", track_id=tid, error=str(exc))
 
@@ -2382,7 +2437,21 @@ class CoverDetector:
 
     # -- writers ----------------------------------------------------------
 
-    def _load_cover_checked_map(self, track_ids: list[Any]) -> dict[str, Any]:
+    def _load_cover_checked_map(self, track_ids: list[Any]) -> dict[str, dict[str, Any]]:
+        """Return the CURRENT stored cover state for *track_ids*.
+
+        ⭐ The rows this pass is handed were read at the START of the scan; the
+        track stage runs before this pass and may have just written a new
+        ``is_cover`` / ``original_cover_artist`` verdict for the album. Judging
+        the stale snapshot meant a flag set earlier in the SAME scan was
+        invisible here: the deep pass could not confirm it, yet
+        ``_clear_unconfirmed_verdicts`` saw "nothing stored" and left it set.
+
+        Keyed by string id, each value carries ``cover_last_checked``, so this
+        one query serves both the freshness window and the verdict overlay.
+        Returns ``{}`` on any failure — the caller then falls back to the rows
+        it was given.
+        """
         ids = [str(t) for t in track_ids if t]
         if not ids:
             return {}
@@ -2394,12 +2463,21 @@ class CoverDetector:
             with _db_session() as session:
                 rows = session.execute(
                     _text(
-                        f"SELECT CAST(id AS TEXT), cover_last_checked FROM tracks "
+                        f"SELECT CAST(id AS TEXT), cover_last_checked, is_cover, "
+                        f"original_cover_artist, cover_manual_override FROM tracks "
                         f"WHERE CAST(id AS TEXT) IN ({placeholders})"
                     ),
                     {f"tid{i}": t for i, t in enumerate(ids)},
                 ).fetchall() or []
-            return {str(r[0]): r[1] for r in rows}
+            return {
+                str(r[0]): {
+                    "cover_last_checked": r[1],
+                    "is_cover": r[2],
+                    "original_cover_artist": r[3],
+                    "cover_manual_override": r[4],
+                }
+                for r in rows
+            }
         except Exception as exc:
             logger.debug("cover_last_checked load failed", error=str(exc))
             return {}
@@ -2741,5 +2819,31 @@ class CoverDetector:
         except Exception as exc:
             logger.error(
                 "Failed to update file metadata", file_path=file_path, error=str(exc)
+            )
+            return False
+
+    @staticmethod
+    def _clear_cover_file_tags(file_path: str, title: str | None = None) -> bool:
+        """Remove the cover verdict from the AUDIO FILE's tags.
+
+        ``write_tags_to_file``'s contract is that ``""`` clears a frame and an
+        absent key leaves it alone, so empty strings — not omission — are what
+        delete ``IS_COVER`` / ``ORIGINAL_COVER_ARTIST``. Without this the next
+        Navidrome import reads the stale tag back (OpenSubsonic exposes the
+        file's tags) and restores the DB flag that was just cleared.
+        """
+        tags: dict[str, Any] = {
+            "is_cover": "",
+            "original_cover_artist": "",
+        }
+        if title:
+            tags["title"] = title
+        try:
+            from services.metadata.tag_file_service import write_tags_to_file
+
+            return write_tags_to_file(file_path, tags)
+        except Exception as exc:
+            logger.debug(
+                "Failed to clear cover file tags", file_path=file_path, error=str(exc)
             )
             return False

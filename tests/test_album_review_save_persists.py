@@ -261,6 +261,103 @@ class TestStagedFieldsReachTheDatabase:
         assert any(t and "(Bad Brains Cover)" in t for t in titles), titles
 
 
+class TestClearingAlbumIdentifiers:
+    """An EMPTIED identifier box must clear the stored column.
+
+    Reported: deleting any MBID on the album page and saving left the value in
+    place. The writes were truthiness-gated (``if album_mbid:``), so an empty
+    field was simply omitted from the payload and the DB kept the old id.
+    """
+
+    async def test_cleared_mbids_are_written_as_none(self, client, captured):
+        await _post(
+            client,
+            album_mbid="",
+            album_release_group_mbid="",
+            artist_mbid="",
+            album_discogs_id="",
+        )
+
+        assert captured.db_payloads, "the album save never reached the DB layer"
+        for payload in captured.db_payloads:
+            assert payload.get("musicbrainz_album_mbid") is None
+            assert payload.get("musicbrainz_albumid") is None
+            assert payload.get("musicbrainz_releasegroupid") is None
+            assert payload.get("musicbrainz_artistid") is None
+            assert payload.get("musicbrainz_albumartistid") is None, (
+                "the page's single Artist ID box reads both artist columns; "
+                "clearing one would let the other refill it"
+            )
+            assert payload.get("discogs_album_id") is None
+
+    async def test_an_omitted_identifier_field_is_left_alone(self, client, captured):
+        """A PARTIAL caller that does not post the field must not clear it."""
+        await _post(client)
+
+        assert captured.db_payloads
+        for payload in captured.db_payloads:
+            assert "musicbrainz_album_mbid" not in payload
+            assert "musicbrainz_releasegroupid" not in payload
+            assert "musicbrainz_artistid" not in payload
+
+    async def test_cleared_mbids_are_removed_from_the_file_tags(self, client, captured):
+        """The DB is not enough: an old frame could be re-imported later."""
+        await _post(
+            client,
+            album_mbid="",
+            album_release_group_mbid="",
+            artist_mbid="",
+        )
+
+        assert captured.file_writes, "no file-tag writes were attempted"
+        for _path, tags in captured.file_writes:
+            assert tags.get("musicbrainz_albumid") == ""
+            assert tags.get("musicbrainz_releasegroupid") == ""
+            assert tags.get("musicbrainz_artistid") == ""
+
+    async def test_a_distinct_album_artist_mbid_is_preserved(self, client, captured):
+        """Clearing the single Artist ID box must not wipe a different
+        album-artist id that the box never showed."""
+        captured.tracks[0]["musicbrainz_artistid"] = "track-artist"
+        captured.tracks[0]["musicbrainz_albumartistid"] = "album-artist"
+
+        await _post(client, artist_mbid="")
+
+        payload = captured.db_payloads[0]
+        assert payload["musicbrainz_artistid"] is None
+        assert "musicbrainz_albumartistid" not in payload, (
+            "the distinct album-artist id was erased by clearing the other column"
+        )
+
+    async def test_the_album_artist_column_is_cleared_when_it_was_shown(
+        self, client, captured
+    ):
+        captured.tracks[0]["musicbrainz_artistid"] = None
+        captured.tracks[0]["musicbrainz_albumartistid"] = "album-artist"
+
+        await _post(client, artist_mbid="")
+
+        payload = captured.db_payloads[0]
+        assert payload["musicbrainz_artistid"] is None
+        assert payload["musicbrainz_albumartistid"] is None, (
+            "the box was showing the album-artist id, so clearing it must clear "
+            "that column or the field refills"
+        )
+
+    async def test_non_empty_identifiers_are_still_written(self, client, captured):
+        await _post(
+            client,
+            album_release_group_mbid="rg-1",
+            artist_mbid="artist-1",
+            album_discogs_id="1234",
+        )
+
+        for payload in captured.db_payloads:
+            assert payload.get("musicbrainz_releasegroupid") == "rg-1"
+            assert payload.get("musicbrainz_artistid") == "artist-1"
+            assert payload.get("discogs_album_id") == "1234"
+
+
 # ---------------------------------------------------------------------------
 # 2. The SAME fields reach the files
 # ---------------------------------------------------------------------------
