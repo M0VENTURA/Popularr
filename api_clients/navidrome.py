@@ -82,6 +82,22 @@ _SUBSONIC_NON_ERROR_CODES = frozenset({70})
 # Auth-related codes where retrying the exact same request is pointless.
 _SUBSONIC_AUTH_ERROR_CODES = frozenset({40, 41, 42, 43, 44, 50})
 
+#: Navidrome's SQLite backend answers a write with
+#: ``Internal Server Error: database is locked`` (over HTTP 200) while its own
+#: scanner — or another write — holds the database lock. The rejection is
+#: TRANSIENT and the lock is released shortly after, so a playlist REPLACE
+#: (idempotent) is retried with backoff instead of leaving the playlist stale.
+_PLAYLIST_WRITE_ATTEMPTS = 4
+_PLAYLIST_WRITE_RETRY_BASE_SECONDS = 0.5
+
+
+def _is_database_locked(result: Any) -> bool:
+    """True for Navidrome's transient SQLite "database is locked" rejection."""
+    if not isinstance(result, dict) or result.get("status") != "failed":
+        return False
+    message = str((result.get("error") or {}).get("message") or "").casefold()
+    return "database is locked" in message or "database table is locked" in message
+
 # Navidrome answers with an XML envelope when it cannot serve JSON. The
 # status/error attributes still need to be honoured.
 _XML_STATUS_RE = re.compile(r'\bstatus\s*=\s*"([^"]+)"', re.IGNORECASE)
@@ -979,7 +995,24 @@ class NavidromeClient:
             if song_ids:
                 params["songIdToAdd"] = [str(s) for s in song_ids if str(s or "").strip()]
 
-            data = self._post_subsonic_response("updatePlaylist", timeout=120, **params)
+            data: dict[str, Any] = {}
+            for _attempt in range(1, _PLAYLIST_WRITE_ATTEMPTS + 1):
+                data = self._post_subsonic_response("updatePlaylist", timeout=120, **params)
+                if (
+                    not _is_database_locked(data)
+                    or _attempt >= _PLAYLIST_WRITE_ATTEMPTS
+                ):
+                    break
+                _wait = _PLAYLIST_WRITE_RETRY_BASE_SECONDS * (2 ** (_attempt - 1))
+                logger.warning(
+                    "Navidrome database locked during playlist update — retrying",
+                    playlist_id=playlist_id,
+                    playlist=playlist_name,
+                    attempt=_attempt,
+                    attempts=_PLAYLIST_WRITE_ATTEMPTS,
+                    retry_in_seconds=_wait,
+                )
+                time.sleep(_wait)
             ok = data.get("status") == "ok"
             if not ok:
                 # Code 50 covers TWO failures — see ``_playlist_denied_hint``.
