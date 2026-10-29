@@ -144,6 +144,40 @@
   }
 
   /**
+   * Run the deep cover-song detector across this album (⋮ → Run Cover
+   * Detection).
+   *
+   * The pass makes several MusicBrainz round trips per track, so the server
+   * runs it in the background and this only reports that it started. Verdicts
+   * and file tags are written by the detector when it finishes.
+   */
+  async function runAlbumCoverDetection(btn) {
+    const pd = global._pageData || {};
+    const artist = pd.artistName || '';
+    const album = pd.albumName || '';
+    if (!artist || !album) {
+      notifyError('Album context is unavailable.');
+      return;
+    }
+
+    const withBusy = (global.buttonState && global.buttonState.withBusy)
+      ? global.buttonState.withBusy
+      : ((_btn, _label, fn) => fn());
+
+    try {
+      await withBusy(btn, 'Starting…', async () => {
+        const data = await global.api.postJson(
+          '/api/album/cover-detection', { artist, album }
+        );
+        if (data && data.success) notifyInfo(data.message || 'Cover detection started.');
+        else notifyError((data && data.error) || 'Could not start cover detection.');
+      });
+    } catch (error) {
+      notifyError('Cover detection failed: ' + error.message);
+    }
+  }
+
+  /**
    * Play one track from a row button.
    * Player.playTrack takes a single object — see the note in player.js about
    * the old positional signature.
@@ -1337,9 +1371,11 @@
                 <i class="bi bi-search me-1"></i>Search external sources
               </button>
               <select class="form-select form-select-sm bg-dark text-light border-secondary" id="albumArtSourceSel" style="max-width:12rem">
-                <option value="musicbrainz" selected>MusicBrainz</option>
+                <option value="all" selected>All sources</option>
+                <option value="musicbrainz">MusicBrainz</option>
                 <option value="discogs">Discogs</option>
                 <option value="itunes">iTunes</option>
+                <option value="audiodb">AudioDB</option>
               </select>
             </div>
             <div id="albumArtStatus" class="small text-muted mb-2"></div>
@@ -1406,13 +1442,33 @@
           setStatus(data && data.error ? data.error : 'No images found on that source.', !data);
           return;
         }
-        setStatus(`${images.length} image(s) found — click one to apply.`);
+        const sources = (data && data.sources_searched) || [];
+        setStatus(
+          `${images.length} image(s) found`
+          + (sources.length ? ` across ${sources.join(', ')}` : '')
+          + ' — click one to apply.'
+        );
         resultsEl.innerHTML = images.map((img, i) => {
           const url = typeof img === 'string' ? img : (img.url || img.image_url || '');
           const safe = esc(String(url));
+          if (typeof img === 'string') {
+            return `<div class="col-4 col-md-3">
+              <button type="button" class="btn p-0 border-0 w-100 album-art-pick" data-url="${safe}" title="Use this image">
+                <img src="${safe}" class="img-fluid rounded" style="aspect-ratio:1;object-fit:cover" alt="Album art candidate ${i + 1}">
+              </button>
+            </div>`;
+          }
+          const source = String(img.source || '').trim();
+          const context = String(img.context || '').trim();
+          const caption = [source, context].filter(Boolean).join(' · ');
+          const title = [img.title, img.artist].filter(Boolean).join(' — ');
           return `<div class="col-4 col-md-3">
-            <button type="button" class="btn p-0 border-0 w-100 album-art-pick" data-url="${safe}" title="Use this image">
-              <img src="${safe}" class="img-fluid rounded" style="aspect-ratio:1;object-fit:cover" alt="Album art candidate ${i + 1}">
+            <button type="button" class="btn p-0 border-0 w-100 album-art-pick" data-url="${safe}"
+                    title="${esc(title || 'Use this image')}">
+              <img src="${esc(String(img.thumbnail || url))}" class="img-fluid rounded"
+                   style="aspect-ratio:1;object-fit:cover" alt="Album art candidate ${i + 1}"
+                   loading="lazy">
+              ${caption ? `<span class="d-block small text-muted text-truncate mt-1">${esc(caption)}</span>` : ''}
             </button>
           </div>`;
         }).join('');
@@ -3456,6 +3512,7 @@
   // Legacy globals for the inline onclick="" handlers in album_detail.html.
   global.playAlbum = playAlbum;
   global.openAlbumScanSheet = openAlbumScanSheet;
+  global.runAlbumCoverDetection = runAlbumCoverDetection;
   global.playTrackFromAlbum = playTrackFromAlbum;
   global.openEditTrackFromAlbum = openEditTrackFromAlbum;
   global.deleteTrack = deleteTrack;

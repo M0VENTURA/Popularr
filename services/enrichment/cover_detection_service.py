@@ -76,6 +76,142 @@ _ARTIST_TRACK_COLUMNS = (
 )
 
 
+def _track_from_row(row: Any) -> dict[str, Any]:
+    """Map one ``_ARTIST_TRACK_COLUMNS`` row to the detector's track dict."""
+    return {
+        "id": str(row_get(row, "id", 0, "")),
+        "title": str(row_get(row, "title", 1, "")),
+        "artist": str(row_get(row, "artist", 2, "")),
+        "album_artist": str(row_get(row, "album_artist", 3, "")),
+        "album": str(row_get(row, "album", 4, "")),
+        "composer": row_get(row, "composer", 5),
+        "writer": row_get(row, "writer", 6),
+        "isrc": row_get(row, "isrc", 7),
+        "mbid": row_get(row, "mbid", 8),
+        "musicbrainz_album_mbid": row_get(row, "musicbrainz_album_mbid", 9),
+        "file_path": row_get(row, "file_path", 10),
+        "is_cover": row_get(row, "is_cover", 11),
+        "genres": row_get(row, "genres", 12),
+        "musicbrainz_genres": row_get(row, "musicbrainz_genres", 13),
+        "original_cover_artist": row_get(row, "original_cover_artist", 14, ""),
+        "cover_manual_override": row_get(row, "cover_manual_override", 15, False),
+        "cover_last_checked": row_get(row, "cover_last_checked", 16),
+        # Read into the detector's in-memory name: the detector normalises
+        # ``musicbrainz_workid`` -> ``work_mbid`` at the top of
+        # ``detect_covers_for_album``, so selecting the column is enough.
+        "musicbrainz_workid": row_get(row, "musicbrainz_workid", 17, ""),
+        "recording_mbid": row_get(row, "recording_mbid", 18, ""),
+        "is_cover_reason": row_get(row, "is_cover_reason", 19, ""),
+        "musicbrainz_trackid": row_get(row, "musicbrainz_trackid", 20, ""),
+    }
+
+
+def _load_tracks(where_sql: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read the detector's fields for every track matching *where_sql*."""
+    columns = ", ".join(_ARTIST_TRACK_COLUMNS)
+    with db_session() as session:
+        result = session.execute(
+            text(f"SELECT {columns} FROM tracks WHERE {where_sql}"),
+            params,
+        )
+        rows = result.fetchall() or []
+    return [_track_from_row(row) for row in rows]
+
+
+def _detect_for_tracks(
+    tracks: list[dict[str, Any]],
+    artist_name: str,
+    *,
+    conn: Any = None,
+    force: bool = False,
+) -> list[dict[str, Any]]:
+    """Run the deep detector album-by-album and return every result.
+
+    The detector persists each verdict itself (``apply_cover_metadata_batch``),
+    so callers use the results for reporting only.
+    """
+    if not tracks:
+        return []
+
+    try:
+        detector = CoverDetector(db_connection=conn)
+    except Exception as exc:
+        logger.warning("CoverDetector unavailable", error=str(exc))
+        return []
+
+    # Group by album so the detector's per-album context and caching apply.
+    albums: dict[str, list[dict[str, Any]]] = {}
+    for track in tracks:
+        album_key = track["album"] or "_no_album"
+        albums.setdefault(album_key, []).append(track)
+
+    results: list[dict[str, Any]] = []
+    for album_name, album_tracks in albums.items():
+        # Prefer the artist the scan was requested for; the first track's
+        # artist can be a featured or per-track credit.
+        artist = artist_name or (
+            album_tracks[0].get("album_artist")
+            or album_tracks[0].get("artist")
+            or album_name
+        )
+        try:
+            results.extend(
+                detector.detect_covers_for_album(
+                    album=album_name, artist=artist,
+                    tracks=album_tracks, force=force,
+                ) or []
+            )
+        except Exception as exc:
+            logger.warning(
+                "Cover detection failed for album",
+                artist=artist_name,
+                album=album_name,
+                error=str(exc),
+            )
+    return results
+
+
+def detect_covers_for_artist_report(
+    artist_name: str,
+    conn: Any = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Run the full cover pipeline for every track of *artist_name*.
+
+    Returns a summary dict (``track_count``, ``cover_count`` and the raw
+    ``results``). ``conn`` is kept for backward compatibility — DB access runs
+    on SQLAlchemy sessions.
+    """
+    try:
+        tracks = _load_tracks(
+            "LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)",
+            {"artist": artist_name},
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to query tracks for artist cover scan",
+            artist=artist_name,
+            error=str(exc),
+        )
+        return {"track_count": 0, "cover_count": 0, "results": []}
+
+    results = _detect_for_tracks(tracks, artist_name, conn=conn, force=force)
+    # Results carry ``track_id`` and ``original_artist``; a repair is counted
+    # separately by the detector. This is the same count the old implementation
+    # reported as "updated".
+    covers = [
+        res for res in results
+        if str(res.get("track_id") or "").strip() and not res.get("repaired")
+    ]
+    logger.info(
+        "Cover detection complete for artist",
+        artist=artist_name,
+        updated_count=len(covers),
+        album_count=len({track["album"] or "_no_album" for track in tracks}),
+    )
+    return {"track_count": len(tracks), "cover_count": len(covers), "results": results}
+
+
 def detect_covers_for_artist(
     artist_name: str,
     conn: Any = None,
@@ -85,108 +221,192 @@ def detect_covers_for_artist(
 
     Uses the full ``CoverDetector`` pipeline (ISRC, MB relations, writer
     analysis, heuristics) for each track individually. Returns the number
-    of tracks updated. ``conn`` is kept for backward compatibility — DB
+    of covers found. ``conn`` is kept for backward compatibility — DB
     access runs on SQLAlchemy sessions.
     """
-    try:
-        detector = CoverDetector(db_connection=conn)
-    except Exception as exc:
-        logger.warning("CoverDetector unavailable", error=str(exc))
-        return 0
+    return int(detect_covers_for_artist_report(
+        artist_name, conn=conn, force=force,
+    )["cover_count"])
 
-    columns = ", ".join(_ARTIST_TRACK_COLUMNS)
+
+def detect_covers_for_album_name(
+    album: str,
+    artist: str,
+    conn: Any = None,
+    force: bool = True,
+) -> dict[str, Any]:
+    """Run the full cover pipeline for one album's stored tracks."""
     try:
-        with db_session() as session:
-            result = session.execute(
-                text(
-                    f"SELECT {columns} FROM tracks "
-                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)"
-                ),
-                {"artist": artist_name},
-            )
-            rows = result.fetchall() or []
+        tracks = _load_tracks(
+            "LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+            "AND LOWER(COALESCE(album, '')) = LOWER(:album)",
+            {"artist": artist, "album": album},
+        )
     except Exception as exc:
         logger.error(
-            "Failed to query tracks for artist cover scan",
-            artist=artist_name,
+            "Failed to query tracks for album cover scan",
+            artist=artist,
+            album=album,
             error=str(exc),
         )
-        return 0
+        return {"track_count": 0, "cover_count": 0, "results": []}
 
-    # Build a pseudo-album context so per-album caching works.
-    albums: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        track = {
-            "id": str(row_get(row, "id", 0, "")),
-            "title": str(row_get(row, "title", 1, "")),
-            "artist": str(row_get(row, "artist", 2, "")),
-            "album_artist": str(row_get(row, "album_artist", 3, "")),
-            "album": str(row_get(row, "album", 4, "")),
-            "composer": row_get(row, "composer", 5),
-            "writer": row_get(row, "writer", 6),
-            "isrc": row_get(row, "isrc", 7),
-            "mbid": row_get(row, "mbid", 8),
-            "musicbrainz_album_mbid": row_get(row, "musicbrainz_album_mbid", 9),
-            "file_path": row_get(row, "file_path", 10),
-            "is_cover": row_get(row, "is_cover", 11),
-            "genres": row_get(row, "genres", 12),
-            "musicbrainz_genres": row_get(row, "musicbrainz_genres", 13),
-            "original_cover_artist": row_get(row, "original_cover_artist", 14, ""),
-            "cover_manual_override": row_get(row, "cover_manual_override", 15, False),
-            "cover_last_checked": row_get(row, "cover_last_checked", 16),
-            # Read into the detector's in-memory name: the detector normalises
-            # ``musicbrainz_workid`` -> ``work_mbid`` at the top of
-            # ``detect_covers_for_album``, so selecting the column is enough.
-            "musicbrainz_workid": row_get(row, "musicbrainz_workid", 17, ""),
-            "recording_mbid": row_get(row, "recording_mbid", 18, ""),
-            "is_cover_reason": row_get(row, "is_cover_reason", 19, ""),
-            "musicbrainz_trackid": row_get(row, "musicbrainz_trackid", 20, ""),
-        }
-        album_key = track["album"] or "_no_album"
-        albums.setdefault(album_key, []).append(track)
-
-    updated = 0
-    for album_name, tracks in albums.items():
-        # Prefer the album artist the scan was requested for; the first
-        # track's artist can be a featured or per-track credit.
-        artist = artist_name or (tracks[0].get("album_artist") or tracks[0].get("artist") or album_name)
-        try:
-            results = detector.detect_covers_for_album(
-                album=album_name, artist=artist, tracks=tracks, force=force,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Cover detection failed for album",
-                artist=artist_name,
-                album=album_name,
-                error=str(exc),
-            )
-            continue
-
-        # The detector has ALREADY persisted every verdict, title and genre
-        # (``apply_cover_metadata_batch``), cleared unconfirmed flags and
-        # stamped ``cover_last_checked``. This loop only COUNTS the results.
-        #
-        # ⚠️ It used to write them again, reading ``res["id"]`` and
-        # ``res["original_cover_artist"]`` — but results carry ``track_id``
-        # and ``original_artist``. Every UPDATE matched ``id = NULL`` (no
-        # row), so the artist-level scan reported "updated" for writes that
-        # never happened; and had the id matched, the wrong key would have
-        # blanked the original artist the batch had just stored.
-        for res in results:
-            track_id = str(res.get("track_id") or "").strip()
-            if not track_id:
-                continue
-            if not res.get("repaired"):
-                updated += 1
-
+    results = _detect_for_tracks(tracks, artist, conn=conn, force=force)
+    covers = [res for res in results if res.get("is_cover")]
     logger.info(
-        "Cover detection complete for artist",
-        artist=artist_name,
-        updated_count=updated,
-        album_count=len(albums),
+        "Cover detection complete for album",
+        artist=artist,
+        album=album,
+        track_count=len(tracks),
+        cover_count=len(covers),
     )
-    return updated
+    return {"track_count": len(tracks), "cover_count": len(covers), "results": results}
+
+
+def detect_covers_for_track(
+    track_id: str,
+    conn: Any = None,
+    force: bool = True,
+) -> dict[str, Any] | None:
+    """Run the full cover pipeline for a single track.
+
+    Returns ``None`` when the track does not exist, otherwise the track's
+    resulting verdict. The detector persists it, so the caller only reports.
+    """
+    try:
+        tracks = _load_tracks(
+            "CAST(id AS TEXT) = :track_id", {"track_id": str(track_id)},
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to query track for cover scan",
+            track_id=track_id,
+            error=str(exc),
+        )
+        return None
+    if not tracks:
+        return None
+
+    track = tracks[0]
+    results = _detect_for_tracks(
+        tracks,
+        track.get("album_artist") or track.get("artist") or "",
+        conn=conn,
+        force=force,
+    )
+    result = next(
+        (res for res in results if str(res.get("track_id") or "") == str(track_id)),
+        None,
+    )
+    verdict = {
+        "track_id": str(track_id),
+        "is_cover": bool((result or {}).get("is_cover")),
+        "original_artist": str((result or {}).get("original_artist") or ""),
+        "reason": str((result or {}).get("reason") or ""),
+    }
+    logger.info(
+        "Cover detection complete for track",
+        track_id=track_id,
+        is_cover=verdict["is_cover"],
+    )
+    return verdict
+
+
+#: Runtime-registry key guarding concurrent manual cover-detection passes.
+_COVER_DETECTION_RUNTIME_KEY = "cover_detection"
+
+
+def cover_detection_running() -> bool:
+    """True while a manual cover-detection pass runs in this process."""
+    from services.scanning.runtime_state import is_runtime_running
+
+    return is_runtime_running(_COVER_DETECTION_RUNTIME_KEY)
+
+
+def start_cover_detection(
+    scope: str,
+    *,
+    artist: str = "",
+    album: str = "",
+    track_id: str = "",
+    force: bool = True,
+) -> dict[str, Any]:
+    """Run a cover-detection pass in the background.
+
+    The pass is the same deep detector the scan pipeline uses (ISRC, MB
+    relations, writer analysis, heuristics) and it persists every verdict
+    itself. One pass at a time per worker; the returned dict is JSON-ready.
+    """
+    import threading
+
+    from helpers.logging_config import log_unified
+    from services.scanning.runtime_state import (
+        clear_runtime,
+        is_runtime_running,
+        scan_lock,
+        set_runtime,
+    )
+
+    scope = str(scope or "").strip().lower()
+    if scope not in {"artist", "album", "track"}:
+        return {"started": False, "error": f"Unknown cover detection scope: {scope}"}
+    if scope == "track" and not str(track_id or "").strip():
+        return {"started": False, "error": "track_id is required"}
+    if scope == "album" and not (str(artist or "").strip() and str(album or "").strip()):
+        return {"started": False, "error": "artist and album are required"}
+    if scope == "artist" and not str(artist or "").strip():
+        return {"started": False, "error": "artist is required"}
+
+    def _worker() -> None:
+        try:
+            if scope == "track":
+                verdict = detect_covers_for_track(track_id, force=force)
+                if verdict is None:
+                    log_unified(f"[COVER_DETECT] track {track_id}: not found")
+                else:
+                    if verdict["is_cover"]:
+                        detail = (
+                            f"cover of {verdict['original_artist']}"
+                            if verdict["original_artist"]
+                            else "cover"
+                        )
+                    else:
+                        detail = "not a cover"
+                    log_unified(f"[COVER_DETECT] track {track_id}: {detail}")
+            elif scope == "album":
+                summary = detect_covers_for_album_name(album, artist, force=force)
+                log_unified(
+                    f"[COVER_DETECT] {artist} - {album}: "
+                    f"{summary['track_count']} track(s), "
+                    f"{summary['cover_count']} cover(s)"
+                )
+            else:
+                summary = detect_covers_for_artist_report(artist, force=force)
+                log_unified(
+                    f"[COVER_DETECT] {artist}: {summary['track_count']} track(s), "
+                    f"{summary['cover_count']} cover(s)"
+                )
+        except Exception as exc:
+            logger.error("Cover detection worker failed", scope=scope, error=str(exc))
+            log_unified(f"[COVER_DETECT] {scope} detection failed: {exc}")
+        finally:
+            clear_runtime(_COVER_DETECTION_RUNTIME_KEY)
+
+    with scan_lock:
+        # The guard is intentionally narrow: only another cover-detection pass
+        # is refused. A full scan may still be running, which the page's scan
+        # sheet already warns about.
+        if is_runtime_running(_COVER_DETECTION_RUNTIME_KEY):
+            return {"started": False, "error": "Cover detection is already running"}
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        set_runtime(
+            _COVER_DETECTION_RUNTIME_KEY,
+            {"thread": thread, "type": "cover_detection"},
+        )
+
+    return {"started": True}
 
 
 def detect_covers_for_album(

@@ -151,7 +151,10 @@ def harness(monkeypatch):
     """``get_missing_tracks`` with the DB-writing and queue-coverage halves off."""
     persisted: list[dict] = []
 
-    monkeypatch.setattr(ams, "_queued_coverage", lambda a, b: ({}, {}))
+    monkeypatch.setattr(
+        ams, "_queued_coverage",
+        lambda a, b, **k: ({}, {}, {}, {}),
+    )
     monkeypatch.setattr(
         ams, "_persist_missing_tracks",
         lambda a, b, missing: persisted.extend(missing),

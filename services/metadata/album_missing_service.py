@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 import structlog
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from db.engine import db_session
 from services.enrichment.musicbrainz_service import (
@@ -23,6 +23,7 @@ from api_clients.musicbrainz_http import escape_lucene_special_chars
 from helpers.normalization_service import (
     file_version_variant_key,
     is_track_artist_placeholder,
+    normalize_artist,
     normalize_title_for_compare,
     normalize_title_for_lucene_query,
 )
@@ -58,6 +59,32 @@ def _album_key(album: str) -> str:
     # "2024 - 樂-STAR" → "樂-STAR"; "2024 樂-STAR" → "樂-STAR".
     value = re.sub(r"^(?:19|20)\d{2}\s*[-–—]?\s+", "", value).strip()
     return value.lower()
+
+
+def _album_scope_matches(requested: str, stored: str) -> bool:
+    """Does *stored* belong to the album named by *requested*?
+
+    Year-tolerant, but not year-BLIND: a leading year may be present on one
+    side only (the year is part of the folder name for some libraries and not
+    others), yet two DIFFERENT years are two different albums. Without the
+    second rule, "2001 - MTV2 Handpicked" and "2002 - MTV2 Handpicked" collapse
+    into one scope and a track on both is flagged as a duplicate on a page that
+    can only show the requested album's rows.
+    """
+    requested_text = str(requested or "").strip()
+    stored_text = str(stored or "").strip()
+    if requested_text.casefold() == stored_text.casefold():
+        return True
+
+    requested_year = re.match(r"^((?:19|20)\d{2})\b", requested_text)
+    stored_year = re.match(r"^((?:19|20)\d{2})\b", stored_text)
+    if (
+        requested_year is not None
+        and stored_year is not None
+        and requested_year.group(1) != stored_year.group(1)
+    ):
+        return False
+    return _album_key(requested_text) == _album_key(stored_text)
 
 
 def _row_value(row: Any, column: str, position: int | None = None) -> Any:
@@ -118,23 +145,54 @@ def get_library_tracks(artist: str, album: str) -> list[dict[str, Any]]:
     return library
 
 
+def _artist_match_key(value: Any) -> str:
+    """Comparison key for an artist credit (case/punctuation/feat-insensitive)."""
+    return normalize_artist(str(value or ""))
+
+
 def _queued_coverage(
-    artist: str, album: str,
-) -> tuple[dict[str, str], dict[tuple[int, str], str]]:
+    artist: str,
+    album: str,
+    *,
+    track_artists: set[str] | None = None,
+) -> tuple[dict[str, str], dict[tuple[int, str], str], dict[tuple[str, str], str], dict[str, str]]:
     """Queue rows that may deliver THIS album's tracks, keyed to their status.
 
-    Returns ``(title_key -> status, (disc, track_number) -> status)``.
+    Returns ``(title_key -> status, (disc, track_number) -> status,
+    (artist_key, title_key) -> status, generic_title_key -> status)``.
 
-    ⚠️ ATTRIBUTION. The query is scoped to the ARTIST and the album is matched
-    in Python, which on a **Various Artists** album spans the whole library —
-    so a row whose ``album`` is empty used to slip past the
-    ``if q_album and ...`` guard and grant coverage to EVERY album by that
-    artist.  A row that does not name an album cannot be attributed to one, so
-    it now contributes nothing; re-queueing such a track is harmless because
-    ``find_blocking_queue_item`` de-duplicates by identity.
+    ⚠️ IDENTITY IS THE TRACK ARTIST + TITLE, NOT THE ALBUM ARTIST + ALBUM.
+    Queue coverage used to require the queue row's ``COALESCE(album_artist,
+    artist)`` AND its album to match the page. On a Various Artists compilation
+    that missed two legitimate cases, leaving an already-queued track showing
+    "Missing" (and its Add button enabled):
+
+    * the row's ``album_artist`` is the track artist (or empty) instead of
+      "Various Artists"; and
+    * the row was queued from a DIFFERENT release — same performer and song,
+      another album.
+
+    ``track_artists`` are the MusicBrainz release's per-track performers, so a
+    queue row from another album is still found. Album- and position-based keys
+    are kept for same-album rows, where a position is meaningful evidence.
+
+    ⚠️ ATTRIBUTION. A row naming no album contributes no album/position key; it
+    can still contribute an artist+title key, which is a statement about the
+    track, not about which album it belongs to.
     """
     title_keys: dict[str, str] = {}
     positions: dict[tuple[int, str], str] = {}
+    artist_title_keys: dict[tuple[str, str], str] = {}
+    generic_title_keys: dict[str, str] = {}
+
+    artists = {
+        str(value or "").strip()
+        for value in ({artist} | set(track_artists or set()))
+        if str(value or "").strip()
+    }
+    if not artists:
+        return title_keys, positions, artist_title_keys, generic_title_keys
+
     try:
         from db.engine import db_session as _q_session
         from sqlalchemy import text as _q_text
@@ -143,32 +201,55 @@ def _queued_coverage(
         with _q_session() as session:
             q_rows = session.execute(
                 _q_text("""
-                    SELECT title, track_number, disc_number, status, album
+                    SELECT title, track_number, disc_number, status, album,
+                           artist, album_artist
                     FROM download_queue
-                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                    WHERE (
+                            LOWER(COALESCE(NULLIF(album_artist, ''), artist)) IN :artists
+                         OR LOWER(COALESCE(NULLIF(artist, ''), album_artist)) IN :artists
+                    )
                       AND status IN ('queued', 'searching', 'downloading',
                                      'processing', 'moving', 'imported',
                                      'in_collection', 'matched', 'completed')
-                """),
-                {"artist": artist},
+                """).bindparams(bindparam("artists", expanding=True)),
+                {"artists": sorted(a.lower() for a in artists)},
             ).mappings().all() or []
         for q in q_rows:
-            # Match the queue row's album against the requested album, tolerating
-            # a leading year prefix ("2024 - 樂-STAR" ≈ "樂-STAR").
+            status = str(q.get("status") or "queued")
+            qt = q.get("title") or ""
+            if not qt:
+                continue
+            title_key = _title_match_key(qt)
+
+            # Artist + title: the identity the user asked for. Works across
+            # albums, and with either credit column on the queue row.
+            for credit in (q.get("artist"), q.get("album_artist")):
+                credit_key = _artist_match_key(credit)
+                if credit_key:
+                    artist_title_keys.setdefault((credit_key, title_key), status)
+
+            # Same-album keys: album title is meaningful, and so is a position.
             q_album = str(q.get("album") or "").strip()
             if not q_album or _album_key(q_album) != _album_norm:
                 continue
-            status = str(q.get("status") or "queued")
-            qt = q.get("title") or ""
-            if qt:
-                title_keys.setdefault(_title_match_key(qt), status)
+            title_keys.setdefault(title_key, status)
+
+            # A queue row whose ONLY credits are compilation placeholders
+            # ("Various Artists") still tells us the track was queued; its
+            # performer was simply never stored. The ALBUM is required here
+            # because a title alone cannot attribute an unrelated compilation.
+            if (
+                is_track_artist_placeholder(q.get("artist"))
+                and is_track_artist_placeholder(q.get("album_artist"))
+            ):
+                generic_title_keys.setdefault(title_key, status)
             qtn = str(q.get("track_number") or "").strip()
             qd = int(q.get("disc_number") or 1) if q.get("disc_number") not in (None, "", "0", 0) else 1
             if qtn:
                 positions.setdefault((qd, qtn), status)
     except Exception as _qexc:
         logger.debug("Download-queue coverage check failed", error=str(_qexc))
-    return title_keys, positions
+    return title_keys, positions, artist_title_keys, generic_title_keys
 
 
 def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None) -> dict[str, Any]:
@@ -283,7 +364,49 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
     #     that never progresses (multi-minute searches, a stalled transfer)
     #     removed the track from the page FOREVER — "missing tracks 10 and 11
     #     are still outstanding" — with nothing on screen to explain it.
-    queued_titles, queued_positions = _queued_coverage(artist, album)
+    # The release's own performers, so queue rows from ANOTHER release (same
+    # track artist + title, different album) still count as delivering this one.
+    _mb_track_artists = {
+        str(mt.get("artist") or "").strip()
+        for mt in mb_tracks
+        if str(mt.get("artist") or "").strip()
+    }
+    (
+        queued_titles,
+        queued_positions,
+        queued_artist_titles,
+        queued_generic_titles,
+    ) = _queued_coverage(artist, album, track_artists=_mb_track_artists)
+
+    # ── Cross-album library ownership ─────────────────────────────────────
+    # The SAME track artist + title may already be owned on ANOTHER release
+    # (the studio album, a different compilation, a Various Artists album whose
+    # album artist differs). It is the same recording, so it is not "missing"
+    # for this release — the same rule ``find_library_track`` applies when the
+    # Add button checks whether a track is already owned.
+    _cross_album_library: set[tuple[str, str]] = set()
+    try:
+        if _mb_track_artists:
+            with db_session() as session:
+                _owner_rows = session.execute(
+                    text("""
+                        SELECT title, artist, album_artist
+                        FROM tracks
+                        WHERE LOWER(COALESCE(NULLIF(artist, ''), album_artist)) IN :artists
+                           OR LOWER(COALESCE(NULLIF(album_artist, ''), artist)) IN :artists
+                    """).bindparams(bindparam("artists", expanding=True)),
+                    {"artists": sorted(a.lower() for a in _mb_track_artists)},
+                ).mappings().all() or []
+            for _owner in _owner_rows:
+                _owner_title = _title_match_key(_owner.get("title") or "")
+                if not _owner_title:
+                    continue
+                for _credit in (_owner.get("artist"), _owner.get("album_artist")):
+                    _credit_key = _artist_match_key(_credit)
+                    if _credit_key:
+                        _cross_album_library.add((_credit_key, _owner_title))
+    except Exception as _owner_exc:
+        logger.debug("Cross-album library ownership check failed", error=str(_owner_exc))
 
     missing = []
     #: Why the rest of the release is NOT listed — one dict, four gates.
@@ -325,8 +448,21 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
             excluded["in_library"] += 1
             continue
 
-        queue_status = queued_titles.get(norm) or (
-            queued_positions.get((mb_disc, mb_num)) if mb_num else None
+        _mb_artist_key = _artist_match_key(mt.get("artist") or artist)
+        if (_mb_artist_key, norm) in _cross_album_library:
+            # Owned on another release — same performer and song.
+            excluded["in_library"] += 1
+            continue
+
+        # Same album first, then TRACK ARTIST + TITLE (which also covers a row
+        # queued from a different release), then a compilation row that only
+        # stored "Various Artists", then the same-album position.
+        _track_artist_key = _artist_match_key(mt.get("artist") or artist)
+        queue_status = (
+            queued_titles.get(norm)
+            or queued_artist_titles.get((_track_artist_key, norm))
+            or queued_generic_titles.get(norm)
+            or (queued_positions.get((mb_disc, mb_num)) if mb_num else None)
         )
         # ⚠️ A queue status NEVER hides a track — ``in_library`` is the only
         # visibility gate, and the status rides along as an annotation (the UI
@@ -396,7 +532,12 @@ def find_duplicate_tracks(artist: str, album: str) -> dict[str, Any]:
     Returns the groups plus a flat id list so the album page can flag the
     matching tracklist rows by ``data-track-id``.
     """
-    album_key = _album_key(album)
+    # ⚠️ The scope is year-TOLERANT, not year-BLIND. ``_album_key`` alone made
+    # two genuinely different releases collide: "2001 - MTV2 Handpicked" and
+    # "2002 - MTV2 Handpicked" reduce to the same key, so a track present on
+    # both was flagged "Duplicate ×2" on a page that only renders the requested
+    # album's rows — a badge with nothing to point at. ``_album_scope_matches``
+    # still matches a year on one side only, but keeps different years apart.
     with db_session() as session:
         rows = session.execute(
             text(
@@ -411,7 +552,7 @@ def find_duplicate_tracks(artist: str, album: str) -> dict[str, Any]:
     grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for raw in rows:
         row = dict(raw)
-        if _album_key(str(row.get("album") or "")) != album_key:
+        if not _album_scope_matches(album, str(row.get("album") or "")):
             continue
         title = str(row.get("title") or "").strip()
         if not title:
@@ -587,7 +728,20 @@ def import_csv_tracklist(artist: str, album: str, csv_text: str) -> dict[str, An
         library_rows = _rows_in_album(library_rows)
         library_count = len(library_rows)
 
-    queued_titles, queued_positions = _queued_coverage(artist, album)
+    (
+        queued_titles,
+        queued_positions,
+        queued_artist_titles,
+        queued_generic_titles,
+    ) = _queued_coverage(
+        artist,
+        album,
+        track_artists={
+            str(row.get("artist") or "").strip()
+            for row in rows
+            if str(row.get("artist") or "").strip()
+        },
+    )
 
     lib_norm = {_title_match_key(str(r.get("title") or "")) for r in library_rows if r.get("title")}
     lib_by_position: dict[tuple[int, str], str] = {}
@@ -610,7 +764,10 @@ def import_csv_tracklist(artist: str, album: str, csv_text: str) -> dict[str, An
         position_key = (disc, tn) if tn else None
         if position_key and position_key in lib_by_position:
             continue
-        if norm in queued_titles:
+        _track_artist_key = _artist_match_key(row.get("artist") or artist)
+        if norm in queued_titles or norm in queued_generic_titles:
+            continue
+        if (queued_artist_titles.get((_track_artist_key, norm))):
             continue
         if tn:
             qd = disc if disc else 1

@@ -1196,28 +1196,73 @@ def _fetch_import_art(item: dict[str, Any]) -> Optional[tuple[bytes, str]]:
                 queue_id=item.get("id"), url=url, error=str(exc),
             )
 
-    artist = str(item.get("album_artist") or item.get("artist") or "").strip()
     album = str(item.get("album") or "").strip()
-    if artist and album:
-        try:
-            from services.enrichment.album_art_service import get_or_fetch_album_art
+    # The album page keys its art by the ALBUM artist, but a queue row can
+    # carry the performer in either credit column (and a library copy is
+    # often queued under the track artist). Ask under both, so stored /
+    # Navidrome art for the target album is found regardless.
+    preferred_artist = str(item.get("album_artist") or item.get("artist") or "").strip()
+    artist_candidates: list[str] = []
+    for value in (preferred_artist, str(item.get("artist") or "").strip()):
+        if value and value not in artist_candidates:
+            artist_candidates.append(value)
 
-            data, mime = get_or_fetch_album_art(artist, album)
-            if data:
-                return data, (mime or _sniff_image_mime(data))
-        except Exception as exc:
-            logger.debug(
-                "Album art lookup failed",
-                queue_id=item.get("id"), artist=artist, album=album, error=str(exc),
+    if album and artist_candidates:
+        try:
+            from services.enrichment.album_art_service import (
+                get_or_fetch_album_art,
+                save_album_art_to_db,
             )
+        except Exception:
+            get_or_fetch_album_art = None
+            save_album_art_to_db = None
+
+        if get_or_fetch_album_art is not None:
+            for lookup_artist in artist_candidates:
+                try:
+                    data, mime = get_or_fetch_album_art(lookup_artist, album)
+                except Exception as exc:
+                    logger.debug(
+                        "Album art lookup failed",
+                        queue_id=item.get("id"), artist=lookup_artist, album=album,
+                        error=str(exc),
+                    )
+                    continue
+                if not data:
+                    continue
+                # Mirror it under the album-artist key the album page reads, or
+                # the page can keep showing a placeholder even though the
+                # imported file got a cover.
+                if (
+                    preferred_artist
+                    and lookup_artist != preferred_artist
+                    and save_album_art_to_db is not None
+                ):
+                    try:
+                        save_album_art_to_db(
+                            preferred_artist, album, data, source="import",
+                        )
+                    except Exception:
+                        pass
+                return data, (mime or _sniff_image_mime(data))
 
     release_mbid = str(item.get("release_mbid") or item.get("release_id") or "").strip()
     if release_mbid:
         try:
             from api_clients.coverartarchive import get_release_front_image_bytes
+            from services.enrichment.album_art_service import save_album_art_to_db
 
             data = get_release_front_image_bytes(release_mbid)
             if data:
+                # Persist it too: otherwise the import embeds a cover the album
+                # page still cannot find (it reads ``album_art``).
+                if preferred_artist and album:
+                    try:
+                        save_album_art_to_db(
+                            preferred_artist, album, data, source="import",
+                        )
+                    except Exception:
+                        pass
                 return data, _sniff_image_mime(data)
         except Exception as exc:
             logger.debug(
@@ -1436,10 +1481,17 @@ def _resolve_track_id_for_import(
                 if row:
                     return str(row[0])
             if artist and title:
+                # Match EITHER credit column: on a Various Artists compilation
+                # the performer is in ``artist`` while ``album_artist`` is
+                # "Various Artists". A COALESCE(album_artist, artist) lookup
+                # missed the existing row and created a duplicate on import.
                 row = session.execute(
                     text("""
                         SELECT id FROM tracks
-                        WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:a)
+                        WHERE (
+                                LOWER(COALESCE(NULLIF(artist, ''), album_artist)) = LOWER(:a)
+                             OR LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:a)
+                        )
                           AND LOWER(title) = LOWER(:t)
                         LIMIT 1
                     """),

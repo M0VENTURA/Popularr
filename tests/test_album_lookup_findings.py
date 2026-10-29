@@ -485,6 +485,32 @@ class TestAlbumFindingRoutes:
         assert data["duplicate_group_count"] == 1
         assert sorted(data["duplicate_track_ids"]) == ["d1", "d2"]
 
+    async def test_a_different_year_prefix_is_a_different_album(self, client):
+        """2001 and 2002 "MTV2 Handpicked" releases must not share duplicates.
+
+        Reported: a track showed "Duplicate ×2" on an album page that rendered
+        only one copy, because the duplicate scan stripped the leading year and
+        pulled in the sibling year's album.
+        """
+        _seed_track(
+            "y2001", title="Yellow", album="2001 - MTV2 Handpicked",
+            file_path="/music/Various Artists/2001 - MTV2 Handpicked/05. Coldplay - Yellow.mp3",
+        )
+        _seed_track(
+            "y2002", title="Yellow", album="2002 - MTV2 Handpicked",
+            file_path="/music/Various Artists/2002 - MTV2 Handpicked/05. Coldplay - Yellow.mp3",
+        )
+
+        resp = await client.get(
+            "/api/album/duplicate-tracks?artist=Dup%20Artist"
+            "&album=2002%20-%20MTV2%20Handpicked"
+        )
+
+        assert resp.status_code == 200
+        data = await resp.get_json()
+        assert data["duplicate_group_count"] == 0
+        assert data["duplicate_track_ids"] == []
+
     async def test_missing_tracks_page_load_stays_db_only(self, monkeypatch, client):
         """The artist page requests this per owned album — a page load must
         NEVER trigger the MusicBrainz recompute (the original perf bug)."""

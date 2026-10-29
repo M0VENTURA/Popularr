@@ -256,6 +256,33 @@
     openArtistScanSheet({ preselect: 'metadata', force: true });
   }
 
+  /**
+   * Run the deep cover-song detector across every track of this artist
+   * (⋮ → Run Cover Detection).
+   *
+   * The pass makes several MusicBrainz round trips per track, so the server
+   * runs it in the background and this only reports that it started. Verdicts
+   * and file tags are written by the detector when it finishes.
+   */
+  function runArtistCoverDetection() {
+    var artist = artistName();
+    if (!artist) {
+      notifyError('Artist context is unavailable.');
+      return;
+    }
+    postJson('/api/artist/cover-detection', { artist: artist })
+      .then(function (data) {
+        if (data && data.success) {
+          notifySuccess(data.message || 'Cover detection started.');
+        } else {
+          notifyError((data && data.error) || 'Could not start cover detection.');
+        }
+      })
+      .catch(function (err) {
+        notifyError((err && (err.error || err.message)) || 'Could not start cover detection.');
+      });
+  }
+
   // ── Playlist exclusion ──────────────────────────────────────────────────
   /*
     "Exclude This Artist from Playlists" (⋮ → Show More).
@@ -604,6 +631,7 @@
   global.fetchArtistCountry = fetchArtistCountry;
   global.editArtistCountry = editArtistCountry;
   global.forceArtistMetadataRefresh = forceArtistMetadataRefresh;
+  global.runArtistCoverDetection = runArtistCoverDetection;
   global.toggleArtistPlaylistExclusion = toggleArtistPlaylistExclusion;
   global.setArtistPlaylistExclusion = setArtistPlaylistExclusion;
   global.loadArtistPlaylistExclusion = loadArtistPlaylistExclusion;

@@ -33,7 +33,7 @@ class TestLinkMovedFileToQueueItem:
 
         monkeypatch.setattr(queue_mod, "update_queue_item", _update)
 
-        ok = dfs._link_moved_file_to_queue_item(
+        ok, _err = dfs._link_moved_file_to_queue_item(
             queue_artist="BIGBANG",
             queue_album="BiiiG",
             file_title="BiiiG",
@@ -68,7 +68,7 @@ class TestLinkMovedFileToQueueItem:
 
         monkeypatch.setattr(queue_mod, "update_queue_item", _update)
 
-        ok = dfs._link_moved_file_to_queue_item(
+        ok, _err = dfs._link_moved_file_to_queue_item(
             queue_artist="BIGBANG",
             queue_album="BiiiG (FLAC) [24-Bit 48.0-kHz]",
             file_title="BiiiG",
@@ -87,7 +87,7 @@ class TestLinkMovedFileToQueueItem:
 
         monkeypatch.setattr(queue_mod, "get_album_queue_tracks", lambda a, b: [])
         monkeypatch.setattr(queue_mod, "get_active_queue", lambda limit=500: [])
-        ok = dfs._link_moved_file_to_queue_item(
+        ok, _err = dfs._link_moved_file_to_queue_item(
             queue_artist="Nobody", queue_album="Nothing",
             file_title="Nope", track_number="99",
             target_path="/music/x.flac", release_mbid="m",

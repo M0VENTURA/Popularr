@@ -633,7 +633,12 @@ def has_cover_marker(title: str) -> bool:
     return bool(_COVER_ANNOTATION_RE.search(str(title or "")))
 
 
-def titles_match_for_review(current: Any, proposed: Any) -> bool:
+def titles_match_for_review(
+    current: Any,
+    proposed: Any,
+    *,
+    local_is_cover: bool = False,
+) -> bool:
     """True when two titles should be treated as the SAME by the MB review.
 
     One rule, two call sites: the Lookup-MBID preview
@@ -654,13 +659,29 @@ def titles_match_for_review(current: Any, proposed: Any) -> bool:
       difference (with that verdict attached) and let the user skip it when the
       claim is false, instead of swallowing it silently.
 
+    * EXCEPT when the LOCAL track is already flagged as a cover
+      (``local_is_cover``). The trailing "(X Cover)" is then the app's OWN
+      annotation, written by cover detection. MusicBrainz's clean title is the
+      same song, so proposing it would only strip the annotation — and a later
+      cover-detection scan owns that verdict, removing it if it is wrong.
+      Reported: a metadata compare renamed "Sometimes (Ours Cover)" to
+      "Sometimes" on a confirmed cover.
+
     Two empty keys never count as a match: a title that normalises away to
     nothing must not swallow the change either.
     """
-    if has_cover_marker(current) or has_cover_marker(proposed):
+    current_text = str(current or "")
+    proposed_text = str(proposed or "")
+    if (
+        local_is_cover
+        and has_cover_marker(current_text)
+        and not has_cover_marker(proposed_text)
+    ):
+        current_text = strip_cover_attribution(current_text)
+    if has_cover_marker(current_text) or has_cover_marker(proposed_text):
         return False
-    left = normalize_title_for_compare(current)
-    right = normalize_title_for_compare(proposed)
+    left = normalize_title_for_compare(current_text)
+    right = normalize_title_for_compare(proposed_text)
     if not left or not right:
         return False
     return left == right

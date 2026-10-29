@@ -348,6 +348,24 @@ def clear_disc_number(artist, album, force_clear=False):
 # ---------------------------------------------------------------------------
 
 
+#: Match the caller's artist against EITHER credit column.
+#:
+#: A Various Artists compilation stores "Various Artists" in ``album_artist``
+#: and the performer in ``artist`` (e.g. artist="Coldplay",
+#: album_artist="Various Artists"). Queue rows and playlist imports carry the
+#: PERFORMER, so a ``COALESCE(album_artist, artist)``-only lookup made every VA
+#: track invisible: it was reported missing, re-queued and re-downloaded even
+#: though the track was already in the library. Matching either column keeps
+#: ordinary albums working (both columns hold the same artist) and lets a track
+#: match across a DIFFERENT album — the album is a preference, not identity.
+_ARTIST_CREDIT_MATCH_SQL = """
+    (
+        LOWER(COALESCE(NULLIF(artist, ''), album_artist)) = :artist
+        OR LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = :artist
+    )
+"""
+
+
 def find_library_track(
     *,
     artist: str,
@@ -362,6 +380,13 @@ def find_library_track(
 
     1. Artist + Title + Album (if strict_album=True)
     2. Artist + Title (fallback)
+    3. Fuzzy Title with the same artist (>= 0.92)
+
+    "Artist" matches EITHER credit column. A Various Artists compilation stores
+    the performer in ``artist`` and "Various Artists" in ``album_artist``, so a
+    ``COALESCE(album_artist, artist)``-only lookup never found it — the track
+    was reported missing and re-downloaded. The album is a PREFERENCE: steps 2
+    and 3 find the same performer + title on another release.
 
     Returns:
         Track row dictionary if found.
@@ -396,15 +421,10 @@ def find_library_track(
             if strict_album and album_norm:
 
                 result = session.execute(
-                    text("""
+                    text(f"""
                         SELECT *
                         FROM tracks
-                        WHERE LOWER(
-                            COALESCE(
-                                NULLIF(album_artist, ''),
-                                artist
-                            )
-                        ) = :artist
+                        WHERE {_ARTIST_CREDIT_MATCH_SQL}
                           AND LOWER(title) = :title
                           AND LOWER(
                                 COALESCE(album, '')
@@ -431,15 +451,10 @@ def find_library_track(
             # ---------------------------------------------------------
 
             result = session.execute(
-                text("""
+                text(f"""
                     SELECT *
                     FROM tracks
-                    WHERE LOWER(
-                        COALESCE(
-                            NULLIF(album_artist, ''),
-                            artist
-                        )
-                    ) = :artist
+                    WHERE {_ARTIST_CREDIT_MATCH_SQL}
                       AND LOWER(title) = :title
                       AND file_path IS NOT NULL
                       AND file_path NOT LIKE '__queued_for_download__%%'
@@ -474,15 +489,10 @@ def find_library_track(
             if _fz is not None:
                 try:
                     result = session.execute(
-                        text("""
+                        text(f"""
                             SELECT id, title, album, file_path
                             FROM tracks
-                            WHERE LOWER(
-                                COALESCE(
-                                    NULLIF(album_artist, ''),
-                                    artist
-                                )
-                            ) = :artist
+                            WHERE {_ARTIST_CREDIT_MATCH_SQL}
                               AND file_path IS NOT NULL
                               AND file_path NOT LIKE '__queued_for_download__%%'
                             LIMIT 500

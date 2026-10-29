@@ -193,9 +193,15 @@ def parse_retry_after(value: Any, *, default: float | None = None) -> float | No
 #: dead provider (ListenBrainz) cannot stall the others (MusicBrainz, Navidrome).
 _HOST_TIMEOUT_COOLDOWN: dict[str, float] = {}
 _HOST_TIMEOUT_STRIKES: dict[str, int] = {}
+#: The exception a cooling-down host raises. A timeout cooldown keeps raising
+#: ``ReadTimeout`` (the failure the caller already handles); a name-resolution /
+#: connection cooldown raises ``ConnectError``, which is ALSO the exact class
+#: that failure produced before the cooldown existed — so callers need no change.
+_HOST_COOLDOWN_ERROR: dict[str, type[BaseException]] = {}
 _HOST_COOLDOWN_SECONDS = 60.0
-#: Two, not one: a single transient timeout must not make a host untouchable —
-#: Navidrome imports would stall for a minute over one slow cover-art fetch.
+#: Two, not one: a single transient failure must not make a host untouchable —
+#: Navidrome imports would stall for a minute over one slow cover-art fetch or
+#: one resolver hiccup.
 _HOST_COOLDOWN_STRIKES = 2
 _COOLDOWN_LOCK = threading.Lock()
 
@@ -210,18 +216,33 @@ def _host_is_cooling_down(host: str) -> float:
     return max(0.0, until - now)
 
 
+def _host_cooldown_error(host: str) -> type[BaseException]:
+    """The exception class a cooling-down *host* should raise."""
+    if not host:
+        return httpx.ReadTimeout
+    with _COOLDOWN_LOCK:
+        return _HOST_COOLDOWN_ERROR.get(host, httpx.ReadTimeout)
+
+
 def _note_host_success(host: str) -> None:
     if not host:
         return
     with _COOLDOWN_LOCK:
         _HOST_TIMEOUT_STRIKES.pop(host, None)
+        _HOST_COOLDOWN_ERROR.pop(host, None)
 
 
-def _note_host_timeout(host: str) -> None:
-    """Record a request whose attempts ALL timed out; open the window at 2."""
+def _note_host_failure(host: str, error_type: type[BaseException]) -> None:
+    """Record a request whose attempts ALL failed; open the window at 2.
+
+    BOTH an all-timeout request and an all-connection-error request count:
+    ``[Errno -3] Temporary failure in name resolution`` is a live example of
+    the latter. A resolver outage retried four times per call, on every call,
+    wasted the scan budget exactly like a dead peer did — and the existing
+    cooldown never fired because it only watched ``TimeoutException``.
+    """
     if not host:
         return
-    global _HOST_TIMEOUT_STRIKES
     with _COOLDOWN_LOCK:
         strikes = _HOST_TIMEOUT_STRIKES.get(host, 0) + 1
         _HOST_TIMEOUT_STRIKES[host] = strikes
@@ -229,12 +250,13 @@ def _note_host_timeout(host: str) -> None:
             return
         _HOST_TIMEOUT_STRIKES.pop(host, None)
         _HOST_TIMEOUT_COOLDOWN[host] = time.monotonic() + _HOST_COOLDOWN_SECONDS
+        _HOST_COOLDOWN_ERROR[host] = error_type
     # NOTE: this module's ``logger`` is the stdlib one, so the context goes in
     # the message rather than as kwargs (structlog-style calls raise here).
     logger.warning(
         "[HTTP] host cooldown opened — failing fast for "
         f"{_HOST_COOLDOWN_SECONDS:.0f}s: {strikes} consecutive requests to "
-        f"{host} timed out on every attempt"
+        f"{host} failed on every attempt ({error_type.__name__})"
     )
 
 
@@ -320,8 +342,8 @@ class _RetryTransport(httpx.BaseTransport):
         if remaining > 0:
             # Same exception the caller already handles for this host, minus
             # another ~80s of attempts that cannot succeed.
-            raise httpx.ReadTimeout(
-                f"{host} is in a timeout cooldown ({remaining:.0f}s left)"
+            raise _host_cooldown_error(host)(
+                f"{host} is in a failure cooldown ({remaining:.0f}s left)"
             )
 
         class _RetryableStatus(Exception):
@@ -507,7 +529,18 @@ class _RetryTransport(httpx.BaseTransport):
             # Every attempt timed out: the peer is not answering at all, not
             # "one slow response". Record it so the next call to this host can
             # fail fast instead of re-paying attempts x read-timeout.
-            _note_host_timeout(host)
+            _note_host_failure(host, httpx.ReadTimeout)
+            if last_status_response is not None:
+                return last_status_response
+            raise
+        except httpx.ConnectError:
+            # Every attempt failed to CONNECT — a DNS outage
+            # (``[Errno -3] Temporary failure in name resolution``), a refused
+            # connection, or a TLS handshake failure. Retrying this request
+            # again on the next call cannot help either; treat the host as down
+            # so the cooldown stops the log from filling with one warning per
+            # attempt for every track.
+            _note_host_failure(host, httpx.ConnectError)
             if last_status_response is not None:
                 return last_status_response
             raise

@@ -126,7 +126,7 @@ _LINK_WRITABLE_FIELDS = ("mbid",)
 
 _COMPARE_LIBRARY_TRACKS_SQL = """
     SELECT id, title, track_number, disc_number, artist, year,
-           mbid, file_path, duration, mb_ignored_fields
+           mbid, file_path, duration, mb_ignored_fields, is_cover
     FROM tracks
     WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
       AND LOWER(COALESCE(album, '')) = LOWER(:album)
@@ -135,7 +135,7 @@ _COMPARE_LIBRARY_TRACKS_SQL = """
 
 _LIBRARY_TRACK_COLUMNS = (
     "id", "title", "track_number", "disc_number", "artist", "year",
-    "mbid", "file_path", "duration", "mb_ignored_fields",
+    "mbid", "file_path", "duration", "mb_ignored_fields", "is_cover",
 )
 
 
@@ -2483,7 +2483,14 @@ def _match_mb_tracks_to_library(
             library_duration = match.get("duration")
 
             diff_fields: list[str] = []
-            titles_confirmed = Titles_match_for_review(library_title, mb_title)
+            # A confirmed cover's "(X Cover)" suffix is OUR annotation. The MB
+            # title without it is the same song; a later cover-detection scan
+            # owns the verdict, so the Compare must not report a title rename.
+            titles_confirmed = Titles_match_for_review(
+                library_title,
+                mb_title,
+                local_is_cover=bool(_as_int(match.get("is_cover"), 0)),
+            )
             if not titles_confirmed:
                 diff_fields.append("title")
             if (

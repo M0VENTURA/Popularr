@@ -43,13 +43,18 @@ HOST = "192.168.1.50"
 class _FakeTransport:
     """Stands in for the real HTTP transport: always fails (or always answers)."""
 
-    def __init__(self, *, fail: bool):
+    def __init__(self, *, fail: bool, error: str = "timeout"):
         self.calls = 0
         self._fail = fail
+        self._error = error
 
     def handle_request(self, request):
         self.calls += 1
         if self._fail:
+            if self._error == "connect":
+                raise httpx.ConnectError(
+                    "simulated: [Errno -3] Temporary failure in name resolution"
+                )
             raise httpx.ReadTimeout("simulated: the peer never answered")
         return httpx.Response(200, request=request, content=b"{}")
 
@@ -61,10 +66,10 @@ class _FakeTransport:
         return False
 
 
-def _transport(*, fail: bool, retries: int = 1) -> tuple:
+def _transport(*, fail: bool, retries: int = 1, error: str = "timeout") -> tuple:
     """A retry transport whose real HTTP layer is replaced by *fail*."""
     transport = http_utils._RetryTransport(retries=retries, backoff=0.0)
-    fake = _FakeTransport(fail=fail)
+    fake = _FakeTransport(fail=fail, error=error)
     transport._transport = fake
     return transport, fake
 
@@ -184,3 +189,79 @@ class TestFailFastAfterRepeatedTimeouts:
         assert fake.calls == 0, (
             "a second client to the same dead host still paid for attempts"
         )
+
+
+class TestFailFastAfterRepeatedConnectErrors:
+    """A resolver/connection outage is as fatal as a timeout, and as costly.
+
+    REPORTED LOG: hundreds of
+    ``ConnectError('[Errno -3] Temporary failure in name resolution')`` lines,
+    four attempts per request, for every track. The cooldown watched only
+    ``TimeoutException``, so it never fired and every request re-paid the full
+    retry budget (and logged every attempt).
+    """
+
+    def test_a_dns_outage_opens_the_same_window(self):
+        transport, fake = _transport(fail=True, error="connect")
+
+        for _ in range(2):
+            with pytest.raises(httpx.ConnectError):
+                _get(transport)
+
+        assert http_utils._host_is_cooling_down(HOST) > 0
+        assert http_utils._host_cooldown_error(HOST) is httpx.ConnectError
+
+    def test_requests_inside_the_window_do_not_touch_the_network(self):
+        transport, fake = _transport(fail=True, error="connect")
+        for _ in range(2):
+            with pytest.raises(httpx.ConnectError):
+                _get(transport)
+        calls_before = fake.calls
+
+        with pytest.raises(httpx.ConnectError):
+            _get(transport)
+
+        assert fake.calls == calls_before, (
+            "a cooling-down host was still contacted — every track keeps "
+            "paying four DNS attempts and logging four warnings"
+        )
+
+    def test_the_exception_is_the_class_the_caller_already_handles(self):
+        """No new failure mode: the real failure was also a ConnectError."""
+        transport, _ = _transport(fail=True, error="connect")
+        for _ in range(2):
+            with pytest.raises(httpx.ConnectError):
+                _get(transport)
+        with pytest.raises(httpx.ConnectError):
+            _get(transport)
+
+    def test_one_connect_failure_does_not_open_the_window(self):
+        """A single resolver hiccup must not make a host untouchable."""
+        transport, fake = _transport(fail=True, error="connect")
+
+        with pytest.raises(httpx.ConnectError):
+            _get(transport)
+
+        assert fake.calls == 2, "retries still happened on the first failure"
+        assert http_utils._host_is_cooling_down(HOST) == 0.0
+
+    def test_a_success_resets_the_connect_strikes(self):
+        failing, _ = _transport(fail=True, error="connect")
+        with pytest.raises(httpx.ConnectError):
+            _get(failing)
+
+        working, _ = _transport(fail=False)
+        assert isinstance(_get(working), httpx.Response)
+        with pytest.raises(httpx.ConnectError):
+            _get(failing)
+        assert http_utils._host_is_cooling_down(HOST) == 0.0, (
+            "the first connect failure after a success must start the count again"
+        )
+
+    def test_a_connect_cooldown_does_not_stall_another_host(self):
+        dead, _ = _transport(fail=True, error="connect")
+        for _ in range(2):
+            with pytest.raises(httpx.ConnectError):
+                _get(dead)
+
+        assert http_utils._host_is_cooling_down("192.168.1.51") == 0.0

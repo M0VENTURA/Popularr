@@ -191,6 +191,7 @@
             <li><a class="dropdown-item" href="javascript:void(0)" onclick="downloadMissingTracks()"><i class="bi bi-download me-2"></i> Download Missing Tracks</a></li>
             <li><a class="dropdown-item" href="javascript:void(0)" onclick="renameAlbumFiles('{{ artist_name|escapejs }}', '{{ album_name|escapejs }}')"><i class="bi bi-files me-2"></i> Rename Files</a></li>
             <li><a class="dropdown-item" href="javascript:void(0)" onclick="autoLinkAllMbids()"><i class="bi bi-link-45deg me-2"></i> Auto-Link MBIDs</a></li>
+            <li><button class="dropdown-item" type="button" onclick="runAlbumCoverDetection(this)"><i class="bi bi-vinyl me-2"></i> Run Cover Detection</button></li>
             <li><a class="dropdown-item" href="javascript:void(0)" onclick="openAlbumArtModal()"><i class="bi bi-image me-2"></i> Change Album Art</a></li>
             {#-
               A plain <a> download, not an onclick handler: the browser's own

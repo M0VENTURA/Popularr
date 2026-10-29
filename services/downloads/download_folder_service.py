@@ -1147,6 +1147,7 @@ def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
                         queue_artist=album_artist,
                         queue_album=album,
                         file_title=title or Path(src).stem,
+                        file_artist=track_artist,
                         track_number=number,
                         target_path=target_path,
                         release_mbid=release_mbid,
@@ -1190,9 +1191,15 @@ def _link_moved_file_to_queue_item(
     track_number: Any,
     target_path: str,
     release_mbid: str,
+    file_artist: str = "",
 ) -> tuple[bool, str]:
     """Associate a library-moved file with its download_queue item.
-    
+
+    Identity is the TRACK ARTIST + TITLE; the album is context, not identity.
+    A queue row created from another release (or a Various Artists compilation
+    whose ``album_artist`` is the performer) must still be linked, otherwise the
+    moved file leaves the queue row orphaned in 'downloading'.
+
     Returns (success, error_message) so failures can be surfaced to the caller.
     """
     try:
@@ -1200,38 +1207,64 @@ def _link_moved_file_to_queue_item(
         from helpers.normalization_service import (
             edition_annotations_compatible,
             extract_track_disc,
+            normalize_artist,
             normalize_match_text,
         )
 
         file_title = str(file_title or "")
         file_title_norm = normalize_match_text(file_title)
+        file_artist_norm = normalize_artist(file_artist)
+        album_norm = normalize_match_text(queue_album)
         file_num, _ = extract_track_disc(str(track_number or ""))
 
+        def _credit_matches(q: dict[str, Any]) -> bool:
+            if not file_artist_norm:
+                return False
+            return file_artist_norm in {
+                normalize_artist(str(q.get("artist") or "")),
+                normalize_artist(str(q.get("album_artist") or "")),
+            }
+
+        def _same_album(q: dict[str, Any]) -> bool:
+            return bool(album_norm) and (
+                normalize_match_text(str(q.get("album") or "")) == album_norm
+            )
+
         queue_items = get_album_queue_tracks(queue_artist, queue_album)
-        if not queue_items:
+        if not queue_items or (
+            file_artist_norm and not any(_credit_matches(q) for q in queue_items)
+        ):
             try:
                 from db.repositories.queue import get_active_queue
                 _all = get_active_queue(limit=500) or []
                 _a_norm = normalize_match_text(queue_artist)
                 queue_items = [
                     q for q in _all
-                    if _a_norm and (
-                        _a_norm.startswith(normalize_match_text(str(q.get("artist") or ""))[:12])
-                        or normalize_match_text(str(q.get("artist") or "")).startswith(_a_norm[:12])
+                    if _credit_matches(q)
+                    or _same_album(q)
+                    or (
+                        _a_norm and (
+                            _a_norm.startswith(normalize_match_text(str(q.get("artist") or ""))[:12])
+                            or normalize_match_text(str(q.get("artist") or "")).startswith(_a_norm[:12])
+                        )
                     )
                 ]
             except Exception:
                 queue_items = []
-                
+
         if not queue_items:
             return False, "No matching queue items found"
 
         used: set[int] = set()
         target = None
 
+        # 1. Same album + same position. A position only identifies a track
+        #    inside the album it belongs to.
         if file_num is not None:
             for q in queue_items:
                 if q.get("id") in used or str(q.get("status") or "").lower() in ("imported", "completed"):
+                    continue
+                if not _same_album(q):
                     continue
                 q_num, _ = extract_track_disc(str(q.get("track_number") or ""))
                 if q_num == file_num and edition_annotations_compatible(
@@ -1241,15 +1274,24 @@ def _link_moved_file_to_queue_item(
                     used.add(int(q["id"]))
                     break
 
+        # 2. Track artist + title, across albums. Prefer a candidate whose
+        #    credit names the file's performer.
         if target is None:
+            title_matches: list[dict[str, Any]] = []
             for q in queue_items:
                 if q.get("id") in used or str(q.get("status") or "").lower() in ("imported", "completed"):
                     continue
                 q_title_norm = normalize_match_text(str(q.get("title") or ""))
                 if q_title_norm and q_title_norm == file_title_norm:
+                    title_matches.append(q)
+            for q in title_matches:
+                if _credit_matches(q) or _same_album(q) or not file_artist_norm:
                     target = q
                     used.add(int(q["id"]))
                     break
+            if target is None and title_matches:
+                target = title_matches[0]
+                used.add(int(target["id"]))
 
         if target is None:
             logger.debug(

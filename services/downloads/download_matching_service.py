@@ -33,6 +33,7 @@ from db.engine import db_session
 from db.repositories.queue import (
     get_album_queue_tracks,
     get_queue_match_targets,
+    get_queue_tracks_for_artists,
 )
 from db.repositories.tracks import find_library_track
 from helpers.normalization_service import (
@@ -486,38 +487,76 @@ def _find_matching_queue_item(
     track: dict[str, Any],
     queue_items: list[dict[str, Any]],
     used_queue_ids: set[int],
+    *,
+    album: str = "",
 ) -> dict[str, Any] | None:
-    """Match a release track against queue items."""
+    """Match a release track against queue items.
+
+    Identity is the TRACK TITLE (plus the release track's performer when the
+    queue row stores one). The album is context, not identity: a row queued
+    from another release must still satisfy this album's track, and on a
+    Various Artists compilation the queue row's ``album_artist`` is often the
+    performer rather than "Various Artists".
+
+    A track NUMBER is only evidence inside the SAME album; across albums the
+    same number is a different song, so cross-album candidates must match on
+    the title.
+    """
     track_title = track.get("title") or ""
     track_num, _ = extract_track_disc(str(track.get("track_number") or ""))
     title_norm = normalize_match_text(track_title)
+    album_norm = normalize_match_text(album)
+    track_artist_norm = normalize_match_text(track.get("artist") or "")
 
+    def _same_album(candidate: dict[str, Any]) -> bool:
+        return bool(album_norm) and (
+            normalize_match_text(candidate.get("album") or "") == album_norm
+        )
+
+    def _artist_matches(candidate: dict[str, Any]) -> bool:
+        if not track_artist_norm:
+            return True
+        return track_artist_norm in {
+            normalize_match_text(candidate.get("artist") or ""),
+            normalize_match_text(candidate.get("album_artist") or ""),
+        }
+
+    # 1. Same album + same position (the strongest same-album evidence).
     if track_num is not None:
         for candidate in queue_items:
             if candidate.get("id") in used_queue_ids:
                 continue
-
+            if not _same_album(candidate):
+                continue
             if not edition_annotations_compatible(
                 track_title, candidate.get("title") or ""
             ):
                 continue
-
             candidate_num, _ = extract_track_disc(str(candidate.get("track_number") or ""))
             if candidate_num == track_num:
                 return candidate
 
+    # 2. Exact title, preferring a candidate whose credit names the release's
+    #    performer. This is the cross-album path (and the VA path).
+    title_matches: list[dict[str, Any]] = []
     for candidate in queue_items:
         if candidate.get("id") in used_queue_ids:
             continue
-
         if not edition_annotations_compatible(
             track_title, candidate.get("title") or ""
         ):
             continue
-
         candidate_title_norm = normalize_match_text(candidate.get("title") or "")
         if candidate_title_norm and candidate_title_norm == title_norm:
-            return candidate
+            title_matches.append(candidate)
+
+    if title_matches:
+        for candidate in title_matches:
+            if _artist_matches(candidate) or _same_album(candidate):
+                return candidate
+        # A generic compilation row ("Various Artists") still identifies the
+        # track by title alone.
+        return title_matches[0]
 
     return None
 
@@ -570,6 +609,25 @@ def get_release_tracks_with_status(
         album=album,
     )
 
+    # A track queued from ANOTHER release (same performer + title, different
+    # album) is still this album's track. The queue's own album/album-artist
+    # fields are precisely what differ on a Various Artists compilation, so the
+    # extra rows are merged here and matched by title/artist below.
+    _release_artists = sorted({
+        str(release_track.get("artist") or "").strip()
+        for release_track in release_tracks
+        if str(release_track.get("artist") or "").strip()
+        and str(release_track.get("artist") or "").strip().casefold()
+        != str(artist or "").strip().casefold()
+    })
+    if _release_artists:
+        _seen_queue_ids = {str(item.get("id")) for item in queue_items}
+        for extra_item in get_queue_tracks_for_artists(_release_artists):
+            if str(extra_item.get("id")) in _seen_queue_ids:
+                continue
+            _seen_queue_ids.add(str(extra_item.get("id")))
+            queue_items.append(extra_item)
+
     library_tracks_by_title = _get_library_tracks_for_album(artist, album)
 
     current_folder_files = [
@@ -588,6 +646,7 @@ def get_release_tracks_with_status(
             track,
             queue_items,
             used_queue_ids,
+            album=album,
         )
 
         if queue_item:
@@ -614,6 +673,17 @@ def get_release_tracks_with_status(
         if status == "missing":
             track_title_norm = normalize_match_text(track.get("title") or "")
             library_track = library_tracks_by_title.get(track_title_norm)
+            if not library_track:
+                # Cross-album / VA fallback: the same performer + title may
+                # already be owned on another release. ``find_library_track``
+                # matches EITHER credit column and treats the album as a
+                # preference, not identity.
+                library_track = find_library_track(
+                    artist=str(track.get("artist") or artist),
+                    title=str(track.get("title") or ""),
+                    album=None,
+                    strict_album=False,
+                )
             if library_track:
                 status = "other_folder"
                 status_details = {

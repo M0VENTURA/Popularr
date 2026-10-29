@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any
 
 import structlog
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from db.engine import db_session
 from db.utils import interval_minutes_expr, numeric_track_number_expr, row_get
@@ -1013,15 +1013,27 @@ def get_queue_match_targets(
 
 
 def get_album_queue_tracks(artist: str, album: str) -> list[dict[str, Any]]:
+    """Queue rows that belong to this album or carry this artist credit.
+
+    ⚠️ EITHER CREDIT COLUMN COUNTS. A Various Artists compilation stores
+    "Various Artists" in ``album_artist`` and the performer in ``artist``; a
+    ``COALESCE(album_artist, artist)``-only filter missed rows whose album
+    artist was the performer (or empty) and made an already-queued track look
+    missing. The album name is kept as an OR so a queue row titled with the
+    requested album is found even when neither credit names the caller.
+    """
     try:
         with db_session() as session:
             result = session.execute(
                 text(f"""
                     SELECT id, title, file_path, status, track_number,
-                           disc_number, artist, album_artist
+                           disc_number, artist, album_artist, album
                     FROM download_queue
-                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
-                      AND LOWER(COALESCE(album, '')) = LOWER(:album)
+                    WHERE (
+                            LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                         OR LOWER(COALESCE(NULLIF(artist, ''), album_artist)) = LOWER(:artist)
+                         OR LOWER(COALESCE(album, '')) = LOWER(:album)
+                    )
                     ORDER BY
                         {numeric_track_number_expr(session)},
                         title
@@ -1031,6 +1043,39 @@ def get_album_queue_tracks(artist: str, album: str) -> list[dict[str, Any]]:
             return [dict(r._mapping) for r in result.fetchall()]
     except Exception as e:
         logger.error("Failed to get album queue tracks", error=str(e))
+        return []
+
+
+def get_queue_tracks_for_artists(artists: list[str]) -> list[dict[str, Any]]:
+    """Queue rows whose TRACK or ALBUM artist is one of *artists*.
+
+    Used to find a track queued from a DIFFERENT release. The caller matches
+    the returned rows by title (and artist), never by album, because the queue
+    row's album is precisely what differs.
+    """
+    names = sorted({
+        str(value or "").strip().lower()
+        for value in (artists or [])
+        if str(value or "").strip()
+    })
+    if not names:
+        return []
+    try:
+        with db_session() as session:
+            result = session.execute(
+                text("""
+                    SELECT id, title, file_path, status, track_number,
+                           disc_number, artist, album_artist, album
+                    FROM download_queue
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) IN :artists
+                       OR LOWER(COALESCE(NULLIF(artist, ''), album_artist)) IN :artists
+                    ORDER BY id
+                """).bindparams(bindparam("artists", expanding=True)),
+                {"artists": names},
+            )
+            return [dict(r._mapping) for r in result.fetchall()]
+    except Exception as e:
+        logger.error("Failed to get queue tracks for artists", error=str(e))
         return []
 
 

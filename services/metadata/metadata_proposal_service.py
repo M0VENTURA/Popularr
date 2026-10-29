@@ -527,6 +527,10 @@ def _track_proposals(
         mb_track = enrichment.get(rec_mbid, {})
 
         changes: list[dict[str, Any]] = []
+        # A confirmed cover's trailing "(X Cover)" is OUR annotation; the MB
+        # title is the same song without it. Compare accordingly so the review
+        # does not propose stripping it (a later cover scan owns that verdict).
+        local_is_cover = bool(int(local.get("is_cover") or 0))
 
         # ``current`` for the MB-derived keys is the matched library value from
         # the comparison; the enrichment keys read the local row directly.
@@ -620,7 +624,9 @@ def _track_proposals(
             # them compares two track numbers and suppresses every renumber,
             # confirmed ones included.
             if field == "track_number" and not titles_match_for_review(
-                current_map.get("title"), proposed_map.get("title")
+                current_map.get("title"),
+                proposed_map.get("title"),
+                local_is_cover=local_is_cover,
             ):
                 continue
             # A title differing ONLY by a PERFORMANCE marker is not a change:
@@ -634,7 +640,9 @@ def _track_proposals(
             # difference surfaces (with that verdict attached) and can be
             # skipped when the claim is false.  Shared with the Compare button
             # through ``titles_match_for_review`` so the two can never disagree.
-            if field == "title" and titles_match_for_review(current, proposed):
+            if field == "title" and titles_match_for_review(
+                current, proposed, local_is_cover=local_is_cover
+            ):
                 continue
             # Genres are an unordered SET: "Rock, Metal" and "Metal, Rock" are
             # the same genres and must not raise a bar. Subset differences still

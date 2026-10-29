@@ -3320,6 +3320,39 @@
 
       <div class="setting-card">
         <div class="setting-info">
+          <label class="setting-title" for="playlists_covers_genre_enabled">Split Great Covers by Main Genre</label>
+          <p class="setting-description">Also create one playlist per <strong>main genre</strong> — Rock, Pop, Punk, Metal and the other root genres selected below. Subgenres are folded into their family, so <code>Nu Metal</code> lands in Metal and <code>Grunge</code> in Rock; no playlist is named after a subgenre. Off leaves only the library-wide <code>Great Covers</code> playlist.</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_covers_genre_enabled" {% if config.get('playlists', {}).get('covers_genre_playlists_enabled', False) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info">
+          <label class="setting-title">Main Genres for Great Covers</label>
+          <p class="setting-description">Which main genres get their own covers playlist when the split above is enabled. Only vocabulary root genres are offered, so a subgenre can never appear here. Default: Rock, Pop, Punk, Metal.</p>
+        </div>
+        <div class="setting-control">
+          {% set _cover_genre_selected = cover_main_genre_selected if cover_main_genre_selected is defined else ['rock', 'pop', 'punk', 'metal'] %}
+          {% set _genre_choices = cover_main_genres if cover_main_genres is defined else [] %}
+          <div class="d-flex flex-wrap gap-3" style="max-width: 420px;">
+            {% for genre in _genre_choices %}
+            <div class="form-check">
+              <input class="form-check-input playlist-cover-genre" type="checkbox"
+                     id="playlists_covers_genre_{{ genre.id }}" value="{{ genre.id }}"
+                     {% if genre.id in _cover_genre_selected %}checked{% endif %}>
+              <label class="form-check-label" for="playlists_covers_genre_{{ genre.id }}">{{ genre.display }}</label>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info">
           <label class="setting-title" for="playlists_acoustic_enabled">Create Acoustic &amp; Unplugged Playlist</label>
           <p class="setting-description">Library-wide <code>Acoustic Essentials</code> playlist of 4★/5★ acoustic, unplugged and stripped-back recordings.</p>
         </div>
@@ -3614,6 +3647,16 @@
           <span class="help-text">Maximum tracks in the Great Covers playlist. Default: <strong>150</strong></span>
         </div>
         <div class="input-card">
+          <label for="playlists_covers_genre_min_tracks">Genre Covers Min Tracks</label>
+          <input type="number" step="1" min="1" max="5000" class="form-control form-control-sm" id="playlists_covers_genre_min_tracks" placeholder="12" value="{{ config.get('playlists', {}).get('covers_genre_playlists_min_tracks', 12) }}">
+          <span class="help-text">Minimum covers in a main genre before its playlist is created. A playlist whose pool falls below this is removed. Default: <strong>12</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_covers_genre_max_tracks">Genre Covers Max Tracks</label>
+          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_covers_genre_max_tracks" placeholder="100" value="{{ config.get('playlists', {}).get('covers_genre_playlists_max_tracks', 100) }}">
+          <span class="help-text">Maximum tracks per main-genre covers playlist. Default: <strong>100</strong></span>
+        </div>
+        <div class="input-card">
           <label for="playlists_acoustic_max_tracks">Acoustic Playlist Max Tracks</label>
           <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_acoustic_max_tracks" placeholder="150" value="{{ config.get('playlists', {}).get('acoustic_max_tracks', 150) }}">
           <span class="help-text">Maximum tracks in the Acoustic Essentials playlist. Default: <strong>150</strong></span>
@@ -3664,6 +3707,11 @@
         <label for="playlists_covers_name">Great Covers Playlist Name</label>
         <input type="text" class="form-control" id="playlists_covers_name" placeholder="Great Covers" value="{{ config.get('playlists', {}).get('covers_playlist_name', 'Great Covers') }}">
         <span class="help-text">Default: <strong>Great Covers</strong></span>
+      </div>
+      <div class="input-card naming-card">
+        <label for="playlists_covers_genre_name_template">Genre Covers Playlist Name Template</label>
+        <input type="text" class="form-control" id="playlists_covers_genre_name_template" placeholder="{genre} - Great Covers" value="{{ config.get('playlists', {}).get('covers_genre_playlists_name_template', '{genre} - Great Covers') }}">
+        <span class="help-text">Supports the <code>{genre}</code> placeholder, which is replaced with the main genre. Default: <strong>{genre} - Great Covers</strong></span>
       </div>
       <div class="input-card naming-card">
         <label for="playlists_acoustic_name">Acoustic Playlist Name</label>

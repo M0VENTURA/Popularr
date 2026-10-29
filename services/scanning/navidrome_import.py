@@ -46,6 +46,7 @@ from services.scanning.cleanup import (
 from services.scanning.filters import should_skip_album, should_skip_cached_album
 from services.scanning.metadata_extractor import extract_album_metadata, extract_track_metadata
 from services.scanning.reconciliation import (
+    LOCAL_AUTHORITY_FIELDS,
     adopt_navidrome_track_id,
     build_existing_indexes,
     db_album_fingerprint,
@@ -64,6 +65,26 @@ from services.scanning.payload_builder import build_track_payload
 VA_ALBUM_ARTIST_VARIANTS = frozenset({
     "various artists", "various", "v/a", "va", "compilation", "original soundtrack",
 })
+
+#: Columns ``prefetch_artist_state`` must read for the per-track authority check.
+#: ``local_authority_conflicts`` treats a missing key as an empty stored value,
+#: so any authority field left out of the query looks like a local correction
+#: that differs from a non-empty payload value. The row then stays dirty for
+#: ever and re-logs the same "conflict" on every import (composer, barcode,
+#: originalyear, the release MBIDs, ...).
+_PREFETCH_BASE_COLUMNS: tuple[str, ...] = (
+    "id", "album", "album_artist", "duration", "track_number", "year",
+    "file_path", "title", "artist", "disc_number", "musicbrainz_trackid",
+    "recording_mbid", "mbid", "navidrome_genres",
+)
+_PREFETCH_AUTHORITY_COLUMNS: tuple[str, ...] = tuple(
+    field
+    for field in sorted(LOCAL_AUTHORITY_FIELDS)
+    if field not in _PREFETCH_BASE_COLUMNS
+)
+_PREFETCH_TRACK_COLUMNS: tuple[str, ...] = (
+    _PREFETCH_BASE_COLUMNS + _PREFETCH_AUTHORITY_COLUMNS
+)
 
 
 def _get_fallback_client() -> NavidromeClient | None:
@@ -364,15 +385,13 @@ def prefetch_artist_state(*, canonical_artist_name: str) -> dict[str, Any]:
 
     with db_session() as session:
         result = session.execute(
-            text("""
-                SELECT id, album, album_artist, duration, track_number, year, file_path,
-                       title, artist, disc_number, musicbrainz_trackid, recording_mbid,
-                       mbid, navidrome_genres,
-                       local_tags_written_at, metadata_dirty_for_navidrome,
-                       navidrome_imported_at
-                FROM tracks
-                WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
-            """),
+            text(
+                "SELECT "
+                + ", ".join(_PREFETCH_TRACK_COLUMNS)
+                + ", local_tags_written_at, metadata_dirty_for_navidrome,"
+                + " navidrome_imported_at FROM tracks"
+                + " WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)"
+            ),
             {"artist": canonical_artist_name},
         )
 
@@ -404,6 +423,10 @@ def prefetch_artist_state(*, canonical_artist_name: str) -> dict[str, Any]:
                 ),
                 "navidrome_imported_at": mapping.get("navidrome_imported_at"),
             }
+            # Authority fields must be present in the row even when empty, or
+            # the comparison reads them as "" and flags a permanent conflict.
+            for _field in _PREFETCH_AUTHORITY_COLUMNS:
+                row_dict[_field] = mapping.get(_field)
             all_rows.append(row_dict)
 
             if track_id:

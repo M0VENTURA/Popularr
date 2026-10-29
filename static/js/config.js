@@ -420,6 +420,16 @@ function buildConfigObject() {
       covers_playlist_enabled: getChecked('playlists_covers_enabled', false),
       covers_playlist_name: getValue('playlists_covers_name', 'Great Covers') || 'Great Covers',
       covers_max_tracks: parseInt(getValue('playlists_covers_max_tracks', '150'), 10) || 150,
+      // Per-genre Great Covers. Off leaves only the library-wide playlist.
+      covers_genre_playlists_enabled: getChecked('playlists_covers_genre_enabled', false),
+      covers_genre_playlists_name_template: getValue('playlists_covers_genre_name_template', '{genre} - Great Covers') || '{genre} - Great Covers',
+      covers_genre_playlists_min_tracks: parseInt(getValue('playlists_covers_genre_min_tracks', '12'), 10) || 12,
+      covers_genre_playlists_max_tracks: parseInt(getValue('playlists_covers_genre_max_tracks', '100'), 10) || 100,
+      // Rendered from the vocabulary's ROOT genres only, so no subgenre can be
+      // selected. An empty selection is a real choice and is saved as [].
+      covers_genre_playlists_genres: Array.from(
+        document.querySelectorAll('.playlist-cover-genre:checked')
+      ).map((el) => el.value).filter(Boolean),
       acoustic_playlist_enabled: getChecked('playlists_acoustic_enabled', false),
       acoustic_playlist_name: getValue('playlists_acoustic_name', 'Acoustic Essentials') || 'Acoustic Essentials',
       acoustic_max_tracks: parseInt(getValue('playlists_acoustic_max_tracks', '150'), 10) || 150,

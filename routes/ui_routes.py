@@ -4359,6 +4359,34 @@ async def search() -> Any:
     return await render_template("pages/search.html", initial_query=query)
 
 
+def _cover_main_genre_options() -> list[dict[str, str]]:
+    """Root-genre choices for the per-genre Great Covers selector."""
+    try:
+        from services.playlists.main_genres import main_genre_choices
+
+        return main_genre_choices()
+    except Exception:
+        return [
+            {"id": "rock", "display": "Rock"},
+            {"id": "pop", "display": "Pop"},
+            {"id": "punk", "display": "Punk"},
+            {"id": "metal", "display": "Metal"},
+        ]
+
+
+def _cover_main_genre_selection(config: dict) -> list[str]:
+    """Selected main-genre ids for the per-genre Great Covers checkboxes."""
+    try:
+        from helpers.config_helpers import normalise_main_genre_selection
+
+        playlists = (config or {}).get("playlists") or {}
+        return normalise_main_genre_selection(
+            playlists.get("covers_genre_playlists_genres")
+        )
+    except Exception:
+        return ["rock", "pop", "punk", "metal"]
+
+
 def _sanitize_config_sections(config: dict) -> dict:
     cleaned: dict = {}
     for key, value in (config or {}).items():
@@ -4453,6 +4481,8 @@ async def config_editor() -> Any:
                     return await render_template(
                         "pages/config.html", config=config, config_raw=config_content,
                         needs_setup=needs_setup(), test_site=test_site,
+                        cover_main_genres=_cover_main_genre_options(),
+                        cover_main_genre_selected=_cover_main_genre_selection(config),
                     )
                     
                 with open(config_path, "w", encoding="utf-8") as f:
@@ -4469,6 +4499,8 @@ async def config_editor() -> Any:
                 return await render_template(
                     "pages/config.html", config=config, config_raw=config_content,
                     needs_setup=needs_setup(), test_site=test_site,
+                    cover_main_genres=_cover_main_genre_options(),
+                    cover_main_genre_selected=_cover_main_genre_selection(config),
                 )
         return redirect(url_for("ui.config_editor"))
         
@@ -4478,6 +4510,8 @@ async def config_editor() -> Any:
         config_raw=raw,
         needs_setup=needs_setup(),
         test_site=test_site,
+        cover_main_genres=_cover_main_genre_options(),
+        cover_main_genre_selected=_cover_main_genre_selection(config),
     )
 
 

@@ -182,6 +182,23 @@ def classify_managed_playlist(
     if _matches_exact(text, curated_names):
         return CURATED
 
+    # 2b. Per-genre Great Covers ------------------------------------------
+    # One curated builder owns these, but their names carry a genre token, so
+    # the generic genre rule must not see them first.
+    covers_genre_template = str(
+        cfg.get("covers_genre_playlists_name_template") or "{genre} - Great Covers"
+    )
+    genre_template = str(
+        cfg.get("genre_playlists_name_template") or _DEFAULT_GENRE_TEMPLATE
+    )
+    # If a hand-edited config gave both families the SAME template, the name
+    # cannot prove which builder owns it. Leave it to the genre rule rather than
+    # reclassifying every Top Tracks chart as a covers list.
+    if covers_genre_template.strip().casefold() != genre_template.strip().casefold():
+        covers_genre_value = _template_value(text, covers_genre_template, "{genre}")
+        if covers_genre_value is not None and not _DECADE_RE.match(covers_genre_value):
+            return CURATED
+
     # 3. Essential collection ---------------------------------------------
     if _template_value(
         text,

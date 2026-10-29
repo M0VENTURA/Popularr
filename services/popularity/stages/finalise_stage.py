@@ -2599,14 +2599,29 @@ def _essential_strip_guest_credit(artist: str) -> str:
 
 def _refresh_all_essential_collections() -> int:
     artists: list[str] = []
+    # ⭐ An artist who only ever appears as the TRACK artist still earns a
+    # collection. The track-artist branch carries the builder's own 12-track
+    # minimum, so a one-off guest credit cannot spawn a playlist.
     try:
         with db_session() as session:
-            result = session.execute(text("""
-                SELECT DISTINCT TRIM(COALESCE(NULLIF(album_artist, ''), artist)) AS artist
-                FROM tracks
-                WHERE COALESCE(stars, star_rating) >= 4
-                  AND TRIM(COALESCE(NULLIF(album_artist, ''), artist)) <> ''
-            """))
+            result = session.execute(
+                text("""
+                    SELECT DISTINCT TRIM(COALESCE(NULLIF(album_artist, ''), artist)) AS artist
+                    FROM tracks
+                    WHERE COALESCE(stars, star_rating) >= 4
+                      AND TRIM(COALESCE(NULLIF(album_artist, ''), artist)) <> ''
+
+                    UNION
+
+                    SELECT TRIM(artist) AS artist
+                    FROM tracks
+                    WHERE COALESCE(stars, star_rating) >= 4
+                      AND TRIM(artist) <> ''
+                    GROUP BY TRIM(artist)
+                    HAVING COUNT(*) >= :min_tracks
+                """),
+                {"min_tracks": _ESSENTIAL_MIN_TRACKS},
+            )
             artists = [str(r[0]) for r in result.fetchall() or [] if r and r[0]]
     except Exception as exc:
         logger.debug("Essential collection artist scan failed", error=str(exc))
@@ -2983,6 +2998,12 @@ def _sync_essential_playlist(
             artist_scores = []
 
     rows: list[dict[str, Any]] = []
+    # ⭐ BOTH credit fields establish membership. The album artist owns the
+    # release; the track artist owns the performance. A track the target
+    # performs on but does not own the album of (a compilation, a split,
+    # another act's album) still belongs in their Essential Collection.
+    # Previously only the album-artist side was fetched, so those rows never
+    # even reached the membership filter below.
     try:
         with db_session() as session:
             result = session.execute(
@@ -3001,6 +3022,8 @@ def _sync_essential_playlist(
                       AND (
                           LOWER(TRIM(COALESCE(NULLIF(album_artist, ''), artist))) = LOWER(TRIM(:artist))
                           OR LOWER(TRIM(COALESCE(NULLIF(album_artist, ''), artist))) LIKE :artist_prefix ESCAPE '\\'
+                          OR LOWER(TRIM(artist)) = LOWER(TRIM(:artist))
+                          OR LOWER(TRIM(artist)) LIKE :artist_prefix ESCAPE '\\'
                       )
                 """),
                 {
@@ -3013,22 +3036,32 @@ def _sync_essential_playlist(
         logger.debug("Essential collection fetch failed", artist=artist, error=str(exc))
 
     _artist_lower = str(artist or "").strip().casefold()
-    _kept: list[dict[str, Any]] = []
-    for row in rows:
-        stored = str(row.get("album_artist") or row.get("artist") or "").strip()
-        if not stored:
-            _kept.append(row)
-            continue
-        stored_key = stored.casefold()
-        if stored_key == _artist_lower:
-            _kept.append(row)
-            continue
-        if (
-            _ESSENTIAL_FEAT_RE.search(stored)
-            and _essential_strip_guest_credit(stored).casefold() == _artist_lower
-        ):
-            _kept.append(row)
-    rows = _kept
+
+    def _credit_is_the_artist(value: Any) -> bool:
+        """True when ONE credit field names *artist* (exactly or as its lead).
+
+        A guest credit (``Target feat. Guest``) belongs to ``Target``. The
+        album artist owns the release and the track artist owns the
+        performance, so EITHER field may establish membership — checking only
+        ``album_artist or artist`` dropped every track the target performs on
+        another act's album.
+        """
+        text = str(value or "").strip()
+        if not text:
+            return False
+        if text.casefold() == _artist_lower:
+            return True
+        return bool(
+            _ESSENTIAL_FEAT_RE.search(text)
+            and _essential_strip_guest_credit(text).casefold() == _artist_lower
+        )
+
+    rows = [
+        row
+        for row in rows
+        if _credit_is_the_artist(row.get("album_artist"))
+        or _credit_is_the_artist(row.get("artist"))
+    ]
 
     if _essential_include_featured_enabled():
         try:
@@ -6218,6 +6251,220 @@ def _create_new_releases_playlist(
     )
 
 
+_COVERS_GENRE_DEFAULT_TEMPLATE = "{genre} - Great Covers"
+_COVERS_GENRE_DEFAULT_MIN_TRACKS = 12
+_COVERS_GENRE_DEFAULT_MAX_TRACKS = 100
+
+
+def _covers_genre_name_template(cfg: dict[str, Any]) -> str:
+    template = str(
+        cfg.get("covers_genre_playlists_name_template")
+        or _COVERS_GENRE_DEFAULT_TEMPLATE
+    ).strip()
+    if "{genre}" not in template:
+        return _COVERS_GENRE_DEFAULT_TEMPLATE
+    return template
+
+
+def _covers_genre_selection(cfg: dict[str, Any]) -> set[str] | None:
+    """Selected main-genre ids; ``None`` means every main genre."""
+    raw = cfg.get("covers_genre_playlists_genres")
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = re.split(r"[,;|]+", raw)
+    if not isinstance(raw, (list, tuple, set)):
+        return None
+
+    from services.playlists.main_genres import (
+        classify_main_genre,
+        normalize_main_genre_key,
+    )
+
+    selected: set[str] = set()
+    for value in raw:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        resolved = classify_main_genre([text])
+        key = normalize_main_genre_key(
+            (resolved or {}).get("id") or text
+        )
+        if key:
+            selected.add(key)
+    return selected
+
+
+def _sweep_orphaned_covers_genre_playlists(
+    keep_playlist_names: set[str],
+    *,
+    cfg: dict[str, Any] | None = None,
+) -> int:
+    """Delete per-genre Great Covers playlists this pass did not produce.
+
+    Ownership is proven by BOTH the configured name template and the playlist
+    index (``CURATED``), mirroring the genre-top-tracks sweep. An unavailable
+    index deletes nothing.
+    """
+    if cfg is None:
+        try:
+            from helpers.config_helpers import get_playlists_config
+
+            cfg = get_playlists_config()
+        except Exception:
+            cfg = {}
+
+    template = _covers_genre_name_template(cfg)
+    sentinel = "__GENRE_SENTINEL__"
+    rendered = template.replace("{genre}", sentinel)
+    if sentinel not in rendered:
+        return 0
+    prefix, suffix = rendered.split(sentinel, 1)
+    prefix_cf = prefix.casefold()
+    suffix_cf = suffix.casefold()
+    if not prefix_cf and not suffix_cf:
+        return 0
+
+    from services.playlists.playlist_taxonomy import CURATED
+
+    index_types, index_available = _managed_type_map_for_cleanup()
+    if not index_available:
+        logger.info(
+            "Covers genre sweep skipped — ownership index unavailable; "
+            "refusing to delete on a name alone"
+        )
+        return 0
+
+    keep_keys = {
+        str(name).strip().casefold()
+        for name in keep_playlist_names
+        if str(name).strip()
+    }
+    swept = 0
+    for client in _navidrome_clients():
+        try:
+            playlists = client.fetch_all_playlists() or []
+        except Exception as exc:
+            logger.debug("Covers genre sweep listing failed", error=str(exc))
+            continue
+        for playlist in playlists:
+            name = str(playlist.get("name") or "").strip()
+            name_cf = name.casefold()
+            if prefix_cf and not name_cf.startswith(prefix_cf):
+                continue
+            if suffix_cf and not name_cf.endswith(suffix_cf):
+                continue
+            if len(name_cf) <= len(prefix_cf) + len(suffix_cf):
+                continue
+            if name_cf in keep_keys:
+                continue
+            if index_types.get(name_cf) != CURATED:
+                logger.debug(
+                    "Covers sweep skipped a non-managed playlist",
+                    name=name,
+                    managed_type=index_types.get(name_cf) or "unknown",
+                )
+                continue
+            playlist_id = str(playlist.get("id") or "").strip()
+            if playlist_id and client.delete_playlist(playlist_id):
+                _forget_playlist_push(name)
+                swept += 1
+                logger.info("Swept orphaned covers genre playlist", name=name)
+    if swept:
+        log_unified(
+            f"🧹 Playlist: swept {swept} orphaned covers genre playlist(s) "
+            "from Navidrome"
+        )
+    return swept
+
+
+def _create_genre_covers_playlists(
+    cfg: dict[str, Any],
+    pool: list[dict[str, Any]],
+    *,
+    playlist_listing: dict[int, list[dict[str, Any]]] | None = None,
+) -> int:
+    """Create one Great Covers playlist per MAIN genre.
+
+    Only root vocabulary genres are used (Rock, Pop, Punk, Metal, …), never
+    subgenres: each cover's genres resolve to their deciding family first, so
+    ``Nu Metal`` lands in Metal and ``Grunge`` in Rock.
+
+    Each genre is created/updated only at or above the configured minimum and
+    is capped at the configured maximum, mirroring Essential collections: a
+    genre whose pool falls below the floor has any existing playlist removed.
+    """
+    from services.playlists.main_genres import (
+        classify_main_genre,
+        normalize_main_genre_key,
+    )
+
+    template = _covers_genre_name_template(cfg)
+    min_tracks = max(1, int(
+        cfg.get(
+            "covers_genre_playlists_min_tracks",
+            _COVERS_GENRE_DEFAULT_MIN_TRACKS,
+        ) or _COVERS_GENRE_DEFAULT_MIN_TRACKS
+    ))
+    max_tracks = max(1, int(
+        cfg.get(
+            "covers_genre_playlists_max_tracks",
+            _COVERS_GENRE_DEFAULT_MAX_TRACKS,
+        ) or _COVERS_GENRE_DEFAULT_MAX_TRACKS
+    ))
+    max_genres = max(1, int(cfg.get("genre_playlists_max_genres", 3) or 3))
+    selected = _covers_genre_selection(cfg)
+
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in pool:
+        genres, _owned = _resolve_playlist_genres(row, max_genres=max_genres)
+        main = classify_main_genre(genres)
+        if not main:
+            continue
+        genre_id = normalize_main_genre_key(main.get("id"))
+        if not genre_id:
+            continue
+        if selected is not None and genre_id not in selected:
+            continue
+        bucket = buckets.setdefault(
+            genre_id,
+            {"display": str(main.get("display") or genre_id), "rows": []},
+        )
+        bucket["rows"].append(row)
+
+    keep_names: set[str] = set()
+    written = 0
+    skipped_below_min: list[str] = []
+    for genre_id, bucket in sorted(buckets.items()):
+        display = str(bucket["display"] or genre_id)
+        playlist_name = template.replace("{genre}", display).strip()
+        deduped = _dedupe_curated_pool(bucket["rows"])
+        if len(deduped) < min_tracks:
+            # Mirrors an Essential Collection: no half-empty playlist, and an
+            # existing one whose pool fell below the floor is removed.
+            _delete_playlist_from_navidrome(playlist_name)
+            skipped_below_min.append(f"{display} ({len(deduped)})")
+            continue
+        keep_names.add(playlist_name)
+        if _sync_single_curated_playlist(
+            playlist_name,
+            deduped,
+            max_tracks=max_tracks,
+            cfg=cfg,
+            playlist_listing=playlist_listing,
+        ):
+            written += 1
+
+    if skipped_below_min:
+        log_unified(
+            "📄 Playlist: skipped covers genre(s) below the "
+            f"{min_tracks}-track minimum — " + ", ".join(skipped_below_min)
+        )
+
+    _sweep_orphaned_covers_genre_playlists(keep_names, cfg=cfg)
+    return written
+
+
 def _create_covers_playlist(
     cfg: dict[str, Any],
     rows: list[dict[str, Any]] | None = None,
@@ -6233,13 +6480,27 @@ def _create_covers_playlist(
     if rows is None:
         return False
     pool = [r for r in rows if int(r.get("is_cover") or 0) == 1]
-    return _sync_single_curated_playlist(
+
+    # The library-wide playlist remains the default shape; per-genre playlists
+    # are ADDITIONAL when the option is enabled.
+    synced = _sync_single_curated_playlist(
         pl_name,
         pool,
         max_tracks=max_tracks,
         cfg=cfg,
         playlist_listing=playlist_listing,
     )
+
+    if bool(cfg.get("covers_genre_playlists_enabled", False)):
+        _create_genre_covers_playlists(
+            cfg, pool, playlist_listing=playlist_listing,
+        )
+    else:
+        # Split mode is off: remove per-genre playlists a previous run created
+        # so switching back cannot leave stale lists behind.
+        _sweep_orphaned_covers_genre_playlists(set(), cfg=cfg)
+
+    return synced
 
 
 _ACOUSTIC_RE = re.compile(r"\b(acoustic|unplugged|stripped)\b", re.IGNORECASE)
@@ -6527,6 +6788,22 @@ def _artist_for_essential_playlist(playlist_name: str) -> str:
 def _regenerate_curated_playlist(playlist_name: str, cfg: dict[str, Any]) -> bool:
     """Rebuild the curated builder that OWNS *playlist_name*."""
     wanted = str(playlist_name or "").strip().casefold()
+
+    # Per-genre Great Covers names come from a TEMPLATE, not a fixed name.
+    # Membership is library-wide, so the whole covers family is reconciled
+    # rather than pretending one genre can be rebuilt in isolation.
+    covers_genre_template = _covers_genre_name_template(cfg)
+    if "{genre}" in covers_genre_template:
+        prefix, suffix = covers_genre_template.split("{genre}", 1)
+        prefix_cf = prefix.casefold()
+        suffix_cf = suffix.casefold()
+        if (
+            wanted.startswith(prefix_cf)
+            and wanted.endswith(suffix_cf)
+            and len(wanted) > len(prefix_cf) + len(suffix_cf)
+        ):
+            return bool(_create_covers_playlist(cfg))
+
     for cfg_key, default_name, builder in (
         ("hit_singles_playlist_name", "Hit Singles", _create_hit_singles_playlist),
         ("hidden_gems_playlist_name", "Hidden Gems", _create_hidden_gems_playlist),

@@ -612,6 +612,30 @@ def api_artist_missing_releases() -> Any:
     return jsonify(data), code
 
 
+@artist_bp.route("/api/artist/cover-detection", methods=["POST"])
+async def api_run_artist_cover_detection() -> Any:
+    """Run the deep cover-song detector across every track of an artist.
+
+    Started in the background: the pass makes several MusicBrainz round trips
+    per track, so the request only reports that it started. The detector
+    persists every verdict itself.
+    """
+    body = await request.get_json(force=True, silent=True) or {}
+    artist = str(body.get("artist") or "").strip()
+    if not artist:
+        return jsonify({"error": "artist is required"}), 400
+
+    from services.enrichment.cover_detection_service import start_cover_detection
+
+    result = start_cover_detection("artist", artist=artist, force=True)
+    if not result.get("started"):
+        return jsonify({"error": result.get("error") or "Could not start cover detection"}), 409
+    return jsonify({
+        "success": True,
+        "message": f"Cover detection started for '{artist}'",
+    })
+
+
 @artist_bp.route("/api/artist/missing-release-tracks")
 def api_artist_missing_release_tracks() -> Any:
     """Fetch the MusicBrainz tracklist for a missing release."""

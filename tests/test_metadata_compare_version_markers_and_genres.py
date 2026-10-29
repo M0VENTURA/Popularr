@@ -100,7 +100,7 @@ def _mb_track(mb_title, disc=1, num=1, rec="rec-1"):
     }
 
 
-def _lib_track(title, disc="1", num="1", mbid="", tid="t1"):
+def _lib_track(title, disc="1", num="1", mbid="", tid="t1", is_cover=0):
     return {
         "id": tid,
         "title": title,
@@ -109,12 +109,13 @@ def _lib_track(title, disc="1", num="1", mbid="", tid="t1"):
         "mbid": mbid,
         "duration": 0,
         "mb_ignored_fields": None,
+        "is_cover": is_cover,
     }
 
 
-def _diff_fields(lib_title, mb_title):
+def _diff_fields(lib_title, mb_title, *, is_cover=0):
     comparison, _extra = _match_mb_tracks_to_library(
-        [_mb_track(mb_title)], [_lib_track(lib_title)]
+        [_mb_track(mb_title)], [_lib_track(lib_title, is_cover=is_cover)]
     )
     return set(comparison[0].get("diff_fields") or [])
 
@@ -485,6 +486,48 @@ class TestCoverMarkersAreReportedAndJudged:
         assert "title" not in _fields(
             _local(title="Song"), _comparison(mb_title="Song"),
             _metadata(mb_title="Song"),
+        )
+
+
+class TestConfirmedCoverKeepsItsOwnAnnotation:
+    """A track already flagged as a cover keeps its ``(X Cover)`` suffix.
+
+    The annotation is written by cover detection, not by the tagger. MusicBrainz
+    returns the clean title, so reporting it would rename the track and destroy
+    the only visible trace of the verdict — and a later cover-detection scan
+    owns that verdict, removing the annotation if it is wrong.
+
+    Reported: *"if a track has a cover flag, it shouldn't rename the track if
+    the same name is shown but (with cover), a cover detection scan later will
+    remove this if its not a cover."*
+    """
+
+    @pytest.mark.parametrize("lib,mb", [
+        ("Sometimes (Ours Cover)", "Sometimes"),
+        ("The Life (Babybird Cover)", "The Life"),
+    ])
+    def test_the_preview_does_not_propose_stripping_it(self, lib, mb):
+        assert "title" not in _fields(
+            _local(title=lib, is_cover=1),
+            _comparison(mb_title=mb),
+            _metadata(mb_title=mb),
+        )
+
+    @pytest.mark.parametrize("lib,mb", [
+        ("Sometimes (Ours Cover)", "Sometimes"),
+        ("The Life (Babybird Cover)", "The Life"),
+    ])
+    def test_the_compare_button_agrees(self, lib, mb):
+        assert "title" not in _diff_fields(lib, mb, is_cover=1)
+        # CONTROL: without the flag the marker is still reviewable.
+        assert "title" in _diff_fields(lib, mb, is_cover=0)
+
+    def test_an_mb_cover_claim_is_still_reported(self):
+        """CONTROL — only OUR annotation is suppressed, never MusicBrainz's."""
+        assert "title" in _fields(
+            _local(title="Song (Artist Cover)", is_cover=1),
+            _comparison(mb_title="Song (Cover Version)"),
+            _metadata(mb_title="Song (Cover Version)"),
         )
 
 

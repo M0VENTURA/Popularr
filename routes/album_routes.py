@@ -398,7 +398,8 @@ def api_album_search_art() -> Any:
     """Search for album art on external sources."""
     artist = request.args.get("artist", "").strip()
     album = request.args.get("album", "").strip()
-    source = request.args.get("source", "musicbrainz").strip()
+    # "all" is the default: one search shows every provider's candidates.
+    source = request.args.get("source", "all").strip() or "all"
     
     if not artist or not album:
         return jsonify({"error": "Artist and album name required"}), 400
@@ -880,6 +881,31 @@ async def api_album_lookup_skip() -> Any:
     except Exception as exc:
         logger.error("Album lookup-skip save failed", artist=artist, album=album, error=str(exc))
         return jsonify({"error": str(exc)}), 500
+
+
+@album_bp.route("/cover-detection", methods=["POST"])
+async def api_run_album_cover_detection() -> Any:
+    """Run the deep cover-song detector across this album's tracks.
+
+    Started in the background: the pass makes several MusicBrainz round trips
+    per track and can take minutes on a large album, so the request must not
+    wait for it. The detector persists every verdict itself.
+    """
+    body = await request.get_json(force=True, silent=True) or {}
+    artist = str(body.get("artist") or "").strip()
+    album = str(body.get("album") or "").strip()
+    if not artist or not album:
+        return jsonify({"error": "artist and album are required"}), 400
+
+    from services.enrichment.cover_detection_service import start_cover_detection
+
+    result = start_cover_detection("album", artist=artist, album=album, force=True)
+    if not result.get("started"):
+        return jsonify({"error": result.get("error") or "Could not start cover detection"}), 409
+    return jsonify({
+        "success": True,
+        "message": f"Cover detection started for '{album}'",
+    })
 
 
 @album_bp.route("/duplicate-tracks", methods=["GET"])

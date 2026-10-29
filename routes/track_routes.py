@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -853,6 +854,35 @@ async def api_fetch_track_lyrics(track_id: str) -> Any:
         })
     except Exception as exc:
         logger.error("Lyrics fetch failed", track_id=track_id, error=str(exc))
+        return jsonify({"error": str(exc)}), 500
+
+
+# ---------------------------------------------------------------------------
+# POST /api/track/<track_id>/cover-detection
+# ---------------------------------------------------------------------------
+
+@track_bp.route("/<track_id>/cover-detection", methods=["POST"])
+async def api_run_track_cover_detection(track_id: str) -> Any:
+    """Run the deep cover-song detector for one track, forced.
+
+    Single-track detection is short enough to answer in-request; it runs in a
+    worker thread so the deep pass's MusicBrainz round trips never block the
+    event loop. Album/artist scopes run in the background (see the album and
+    artist endpoints).
+    """
+    try:
+        from services.enrichment.cover_detection_service import (
+            detect_covers_for_track,
+        )
+
+        verdict = await asyncio.to_thread(
+            detect_covers_for_track, str(track_id),
+        )
+        if verdict is None:
+            return jsonify({"error": "Track not found"}), 404
+        return jsonify({"success": True, **verdict})
+    except Exception as exc:
+        logger.error("Cover detection failed", track_id=track_id, error=str(exc))
         return jsonify({"error": str(exc)}), 500
 
 

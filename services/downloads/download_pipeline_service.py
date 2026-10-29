@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -1141,122 +1140,6 @@ def _attempt_candidate_downloads(
     return success, chosen, fail_reason
 
 
-# =============================================================================
-# LIBRARY-FIRST REUSE
-# =============================================================================
-
-def _library_track_format(album_name: str) -> tuple[bool, bool]:
-    from services.catalog.album_classification_service import (
-        detect_live_album_type,
-        is_live_or_alternate_album,
-    )
-
-    name = (album_name or "").strip()
-    return (
-        bool(is_live_or_alternate_album(name)),
-        detect_live_album_type(name) == "acoustic",
-    )
-
-
-def _library_reuse_source(item: dict[str, Any]) -> str | None:
-    title = (item.get("title") or "").strip()
-    artist = (item.get("artist") or "").strip()
-    if not title or not artist:
-        return None
-
-    expected_duration = queue_duration_seconds(item.get("duration")) if item.get("duration") else None
-    if not expected_duration:
-        return None
-
-    wanted_format = _library_track_format(item.get("album") or "")
-
-    rows: list[Any] = []
-    try:
-        with db_session() as session:
-            rows = session.execute(
-                text(
-                    "SELECT title, artist, album_artist, album, duration, file_path "
-                    "FROM tracks "
-                    "WHERE LOWER(TRIM(title)) = LOWER(:title)"
-                ),
-                {"title": title},
-            ).fetchall() or []
-    except Exception as exc:
-        logger.debug("Library reuse lookup failed", title=title, error=str(exc))
-        return None
-
-    from services.metadata.tag_file_service import resolve_music_file_path
-
-    for row in rows:
-        cand_title = str(row[0] or "")
-        performer = str(row[1] or "").strip() or str(row[2] or "").strip()
-        cand_album = str(row[3] or "")
-        cand_path = str(row[5] or "")
-
-        if not performer or _normalise(performer) != _normalise(artist):
-            continue
-        if _similarity(cand_title, title) < 0.95:
-            continue
-        if _library_track_format(cand_album) != wanted_format:
-            continue
-
-        try:
-            cand_seconds = float(row[4] or 0)
-        except (TypeError, ValueError):
-            continue
-        if cand_seconds <= 0:
-            continue
-        if cand_seconds > 10_000:
-            cand_seconds /= 1000.0
-        if abs(cand_seconds - expected_duration) > _length_tolerance_seconds():
-            continue
-
-        resolved = resolve_music_file_path(cand_path)
-        if resolved and os.path.isfile(resolved) and os.path.getsize(resolved) > 0:
-            return resolved
-    return None
-
-
-def _stage_library_copy(item: dict[str, Any], source_path: str) -> dict[str, Any]:
-    from services.downloads.download_folder_service import resolve_downloads_dir
-
-    artist = (item.get("artist") or "Unknown").strip()
-    title = (item.get("title") or "").strip()
-    album = (item.get("album") or "Unknown").strip()
-
-    def _safe(value: str, fallback: str) -> str:
-        return re.sub(r'[\\/:*?"<>|]', "_", value).strip(" .") or fallback
-
-    staging_dir = os.path.join(
-        resolve_downloads_dir(),
-        _safe(f"{artist} - {album}", "reused"),
-    )
-    os.makedirs(staging_dir, exist_ok=True)
-
-    ext = os.path.splitext(os.path.basename(source_path))[1] or ".flac"
-    staged = os.path.join(staging_dir, f"{_safe(title, 'track')}{ext}")
-    if os.path.abspath(staged) == os.path.abspath(source_path):
-        return {"success": False, "status": "library_reuse_failed", "error": "source_inside_downloads"}
-    shutil.copy2(source_path, staged)
-
-    update_queue_item(int(item["id"]), status="downloading")
-    _log_queue_event(
-        "library_reuse",
-        f"{artist} - {title} → reused from library: {source_path}",
-        item.get("id"),
-    )
-    log_unified(
-        f"[QUEUE] {artist} - {title} → library reuse (copied, not downloaded): "
-        f"{os.path.basename(source_path)}"
-    )
-    return {
-        "success": True,
-        "status": "library_reuse",
-        "source_path": source_path,
-        "staged_path": staged,
-    }
-
-
 def process_queue_item(item: dict, slskd: SlskdService) -> dict:
     queue_id = item.get("id")
     logger.debug("Processing queue item", queue_id=queue_id)
@@ -1279,29 +1162,12 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
     except Exception as exc:
         logger.debug("Pre-search cleaner skipped", error=str(exc))
 
-    _reuse_source = None
-    try:
-        _reuse_source = _library_reuse_source(item)
-    except Exception as exc:
-        logger.debug("Library reuse lookup failed", queue_id=queue_id, error=str(exc))
-    if _reuse_source:
-        try:
-            _reuse_result = _stage_library_copy(item, _reuse_source)
-            if _reuse_result.get("success"):
-                return _reuse_result
-            logger.warning(
-                "Library reuse could not be staged — falling back to a search",
-                queue_id=queue_id,
-                source=_reuse_source,
-                error=_reuse_result.get("error"),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Library reuse failed — falling back to a search",
-                queue_id=queue_id,
-                source=_reuse_source,
-                error=str(exc),
-            )
+    # Library reuse is handled BEFORE this pipeline runs — see
+    # ``services.downloads.library_copy_service`` and
+    # ``queue_processing_service.process_queue_item``. It has to happen before
+    # the Soulseek availability gate, and it enforces the real quality gate;
+    # the old copy attempted here duplicated it and only checked an album-name
+    # format marker.
 
     expected_artist = (item.get("artist") or "").strip()
     expected_title = (item.get("title") or "").strip()

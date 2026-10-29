@@ -19,11 +19,16 @@ import structlog
 from sqlalchemy import text
 
 from api_clients.coverartarchive import (
+    CAA_RELEASE_FRONT_URL,
+    CAA_RELEASE_GROUP_URL,
     get_release_front_image_bytes,
     get_release_group_front_image_bytes,
 )
 from api_clients.discogs_http import DiscogsHttpClient
-from api_clients.musicbrainz_http import MusicBrainzHttpClient
+from api_clients.musicbrainz_http import (
+    MusicBrainzHttpClient,
+    escape_lucene_special_chars,
+)
 from db.engine import db_session
 from db.repositories.metadata import fetch_album_art_blob, fetch_album_art_record
 from db.utils import row_get
@@ -196,24 +201,99 @@ def fetch_album_art_from_itunes(
     return None
 
 
+def _discogs_search_results(
+    discogs: DiscogsHttpClient,
+    artist_name: str,
+    album_name: str,
+    *,
+    per_page: int = 10,
+) -> list[dict[str, Any]]:
+    """Discogs release candidates for an artist + album.
+
+    The database search endpoint's structured filters are more precise than a
+    free-text ``q``, but a fallback query keeps obscure releases findable.
+    """
+    clean_album = _sanitize_release_name(album_name)
+    try:
+        results = discogs.search_database({
+            "artist": artist_name,
+            "release_title": clean_album,
+            "type": "release",
+            "per_page": per_page,
+        })
+    except Exception:
+        results = []
+    if not results:
+        try:
+            results = discogs.search_database({
+                "q": f"{artist_name} {clean_album}",
+                "type": "release",
+                "per_page": per_page,
+            })
+        except Exception:
+            results = []
+    return [item for item in (results or []) if isinstance(item, dict)]
+
+
+def _discogs_search_image_urls(item: dict[str, Any]) -> list[str]:
+    """Image URLs the search result itself carries.
+
+    ⚠️ Discogs does NOT return a ``cover_url`` field — it returns ``thumb``
+    (always, 150px) and ``cover_image`` (usually empty). The old code looked
+    only for ``cover_url``, found nothing, and every Discogs art search failed
+    with "No album art found".
+    """
+    urls: list[str] = []
+    for key in ("cover_image", "thumb"):
+        url = str(item.get(key) or "").strip()
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
 def fetch_album_art_from_discogs(artist_name: str, album_name: str, token: str) -> bytes | None:
     """Fetch cover art cleanly using the low-level DiscogsHttpClient."""
     if not token:
         return None
-        
-    clean_album = _sanitize_release_name(album_name)
+
     try:
         discogs = DiscogsHttpClient(token=token)
-        results = discogs.search_database({"q": f"{artist_name} {clean_album}", "type": "release", "per_page": 1})
+        results = _discogs_search_results(discogs, artist_name, album_name)
 
-        if not results or not results[0].get("cover_url"):
-            return None
+        # Full-size art lives on the release detail; the search payload only
+        # carries a thumbnail. One detail request is enough for a cover, and
+        # Discogs is throttled to one request/second, so cap the upgrades.
+        detail_budget = 2
+        for item in results[:6]:
+            release_id = item.get("id")
+            if release_id and detail_budget > 0:
+                detail_budget -= 1
+                try:
+                    detail = discogs.get_release(release_id)
+                except Exception:
+                    detail = {}
+                images = detail.get("images") if isinstance(detail, dict) else None
+                # The PRIMARY image is the front cover; Discogs lists images in
+                # no guaranteed order, so an automatic fetch must not take the
+                # back cover first.
+                images = sorted(
+                    (img for img in (images or []) if isinstance(img, dict)),
+                    key=lambda img: 0 if str(img.get("type") or "").lower() == "primary" else 1,
+                )
+                for image in images:
+                    if not isinstance(image, dict):
+                        continue
+                    img_url = str(image.get("uri") or image.get("uri150") or "").strip()
+                    if not img_url:
+                        continue
+                    resp = _art_client.get(img_url)
+                    if resp.status_code == 200 and resp.content:
+                        return resp.content
 
-        img_url = results[0]["cover_url"]
-        resp = _art_client.get(img_url)
-
-        if resp.status_code == 200:
-            return resp.content
+            for img_url in _discogs_search_image_urls(item):
+                resp = _art_client.get(img_url)
+                if resp.status_code == 200 and resp.content:
+                    return resp.content
     except Exception as exc:
         logger.debug("Failed to fetch album art from Discogs", error=str(exc))
     return None
@@ -585,60 +665,286 @@ def download_and_save_album_art(artist: str, album: str, image_data: bytes, sour
     return count > 0
 
 
-def search_album_art_external(artist: str, album: str, source: str = "musicbrainz") -> tuple[dict, int]:
-    """Search for album art from the specified external source."""
+def _discogs_token() -> str:
     try:
         from helpers.config_helpers import get_config
-        _cfg = get_config() or {}
-        _discogs_cfg = (_cfg.get("api_integrations") or {}).get("discogs") or {}
-        _discogs_token = str(_discogs_cfg.get("token") or "").strip()
+
+        cfg = get_config() or {}
+        discogs_cfg = (cfg.get("api_integrations") or {}).get("discogs") or {}
+        return str(discogs_cfg.get("token") or "").strip()
     except Exception:
-        _discogs_token = ""
+        return ""
 
-    def _mb_search() -> bytes | None:
-        data = fetch_album_art_from_musicbrainz(artist, album)
-        if data:
-            return data
-        return None
 
-    sources = {
-        "musicbrainz": ("MusicBrainz", lambda: _mb_search()),
-        "discogs": ("Discogs", lambda: fetch_album_art_from_discogs(artist, album, token=_discogs_token)),
-        "applemusic": ("Apple Music", lambda: fetch_album_art_from_itunes(artist, album)),
-        "itunes": ("Apple Music", lambda: fetch_album_art_from_itunes(artist, album)),
-        "audiodb": ("AudioDB", lambda: fetch_album_art_from_audiodb(artist, album)),
+def _art_candidate(
+    source: str,
+    url: str,
+    *,
+    title: str = "",
+    artist: str = "",
+    context: str = "",
+    thumbnail: str = "",
+) -> dict[str, str]:
+    return {
+        "url": url,
+        "title": title or "",
+        "artist": artist or "",
+        "source": source,
+        "context": context or "",
+        "thumbnail": thumbnail or url,
     }
-    entry = sources.get(source)
-    if not entry:
-        return {"success": False, "error": f"Unknown source: {source}"}, 400
 
-    label, fn = entry
-    data = fn()
-    if not data:
-        return (
-            {
-                "success": False,
-                "error": "No album art found",
-                "images": [],
+
+def _probe_art_urls(candidates: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Drop candidates whose image URL is provably missing (404).
+
+    A HEAD probe keeps the grid free of broken images without downloading every
+    cover. 405 (server refuses HEAD) and a network error keep the candidate —
+    hiding a working image is worse than one broken thumbnail.
+    """
+
+    def _reachable(candidate: dict[str, str]) -> bool:
+        url = str(candidate.get("url") or "").strip()
+        if not url:
+            return False
+        try:
+            response = _art_client.head(url)
+            return response.status_code < 400 or response.status_code == 405
+        except Exception:
+            return True
+
+    if not candidates:
+        return []
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        reachable = list(pool.map(_reachable, candidates))
+    return [c for c, keep in zip(candidates, reachable) if keep]
+
+
+def _musicbrainz_art_candidates(artist: str, album: str) -> list[dict[str, str]]:
+    """Cover Art Archive candidates for every matching release group/release."""
+    clean_album = _sanitize_release_name(album)
+    candidates: list[dict[str, str]] = []
+    try:
+        client = MusicBrainzHttpClient()
+        query = (
+            f'release:"{escape_lucene_special_chars(clean_album)}" '
+            f'AND artist:"{escape_lucene_special_chars(artist)}"'
+        )
+        groups = client.search_release_groups(query, limit=5) or []
+    except Exception as exc:
+        logger.debug("MusicBrainz art candidate search failed", error=str(exc))
+        return []
+
+    for group in groups:
+        group_id = str(group.get("id") or "").strip()
+        if not group_id:
+            continue
+        group_title = str(group.get("title") or album)
+        candidates.append(_art_candidate(
+            "MusicBrainz",
+            CAA_RELEASE_GROUP_URL.format(mbid=group_id, size=500),
+            title=group_title,
+            artist=artist,
+            context="Release group",
+        ))
+        try:
+            releases = client.browse_releases_for_group(group_id, inc="", limit=5) or []
+        except Exception:
+            releases = []
+        for release in releases:
+            release_id = str(release.get("id") or "").strip()
+            if not release_id:
+                continue
+            candidates.append(_art_candidate(
+                "MusicBrainz",
+                CAA_RELEASE_FRONT_URL.format(mbid=release_id, size=500),
+                title=str(release.get("title") or group_title),
+                artist=artist,
+                context=str(release.get("date") or ""),
+            ))
+    return candidates
+
+
+def _discogs_art_candidates(artist: str, album: str) -> list[dict[str, str]]:
+    """Discogs candidates from the search payload plus full-size release art."""
+    token = _discogs_token()
+    if not token:
+        return []
+    try:
+        client = DiscogsHttpClient(token=token)
+        results = _discogs_search_results(client, artist, album)
+    except Exception as exc:
+        logger.debug("Discogs art candidate search failed", error=str(exc))
+        return []
+
+    candidates: list[dict[str, str]] = []
+    detail_budget = 2  # Discogs allows ~1 request/second
+    for item in results[:8]:
+        title = str(item.get("title") or album)
+        context = str(item.get("year") or "")
+        for url in _discogs_search_image_urls(item):
+            candidates.append(_art_candidate(
+                "Discogs", url, title=title, artist=artist, context=context,
+            ))
+
+        release_id = item.get("id")
+        if not release_id or detail_budget <= 0:
+            continue
+        detail_budget -= 1
+        try:
+            detail = client.get_release(release_id)
+        except Exception:
+            continue
+        for image in detail.get("images") or []:
+            if not isinstance(image, dict):
+                continue
+            uri = str(image.get("uri") or "").strip()
+            if not uri:
+                continue
+            candidates.append(_art_candidate(
+                "Discogs",
+                uri,
+                title=title,
+                artist=artist,
+                context=str(image.get("type") or ""),
+                thumbnail=str(image.get("uri150") or ""),
+            ))
+    return candidates
+
+
+def _itunes_art_candidates(artist: str, album: str) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    try:
+        response = _art_client.get(
+            "https://itunes.apple.com/search",
+            params={
+                "term": f"{artist} {_sanitize_release_name(album)}",
+                "entity": "album",
+                "limit": 10,
             },
+        )
+        if response.status_code != 200:
+            return []
+        results = response.json().get("results") or []
+    except Exception as exc:
+        logger.debug("iTunes art candidate search failed", error=str(exc))
+        return []
+
+    for result in results:
+        artwork = str(result.get("artworkUrl100") or "").strip()
+        if not artwork:
+            continue
+        candidates.append(_art_candidate(
+            "Apple Music",
+            artwork.replace("100x100", "600x600"),
+            title=str(result.get("collectionName") or album),
+            artist=str(result.get("artistName") or artist),
+            context=str(result.get("releaseDate") or "")[:4],
+            thumbnail=artwork,
+        ))
+    return candidates
+
+
+def _audiodb_art_candidates(artist: str, album: str) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    try:
+        response = _art_client.get(
+            "https://theaudiodb.com/api/v1/json/2/searchalbum.php",
+            params={"s": artist, "a": _sanitize_release_name(album)},
+        )
+        if response.status_code != 200:
+            return []
+        albums = response.json().get("album") or []
+    except Exception as exc:
+        logger.debug("AudioDB art candidate search failed", error=str(exc))
+        return []
+
+    for entry in albums:
+        for key in ("strAlbumThumb", "strAlbumCDart"):
+            url = str(entry.get(key) or "").strip()
+            if not url:
+                continue
+            candidates.append(_art_candidate(
+                "AudioDB",
+                url,
+                title=str(entry.get("strAlbum") or album),
+                artist=str(entry.get("strArtist") or artist),
+                context="CD art" if key == "strAlbumCDart" else "Front",
+            ))
+    return candidates
+
+
+def search_album_art_all(
+    artist: str,
+    album: str,
+    source: str = "all",
+) -> tuple[dict, int]:
+    """Search every art provider and return ALL candidate images.
+
+    ``source="all"`` (the default) queries MusicBrainz/Cover Art Archive,
+    Discogs, Apple Music and AudioDB. A specific source narrows the search.
+    Candidates are returned as URLs so the dialog can show the provider's own
+    thumbnails; applying one downloads it through ``set_album_art_from_url``.
+    """
+    source = str(source or "all").strip().lower()
+    providers = {
+        "musicbrainz": ("MusicBrainz", _musicbrainz_art_candidates),
+        "discogs": ("Discogs", _discogs_art_candidates),
+        "applemusic": ("Apple Music", _itunes_art_candidates),
+        "itunes": ("Apple Music", _itunes_art_candidates),
+        "audiodb": ("AudioDB", _audiodb_art_candidates),
+    }
+    if source != "all" and source not in providers:
+        return {"success": False, "error": f"Unknown source: {source}", "images": []}, 400
+
+    selected = (
+        list(providers.items())
+        if source == "all"
+        else [(source, providers[source])]
+    )
+    candidates: list[dict[str, str]] = []
+    for _key, (_label, finder) in selected:
+        try:
+            candidates.extend(finder(artist, album) or [])
+        except Exception as exc:
+            logger.debug("Album art provider failed", provider=_label, error=str(exc))
+
+    # Deduplicate by URL (the same release can be reached by two queries).
+    seen: set[str] = set()
+    unique: list[dict[str, str]] = []
+    for candidate in candidates:
+        url = str(candidate.get("url") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        unique.append(candidate)
+
+    unique = _probe_art_urls(unique)
+    if not unique:
+        return (
+            {"success": False, "error": "No album art found", "images": []},
             404,
         )
 
-    data_url = f"data:image/jpeg;base64,{_b64.b64encode(data).decode('ascii')}"
     return (
         {
             "success": True,
-            "images": [
-                {
-                    "url": data_url,
-                    "title": album,
-                    "artist": artist,
-                    "source": label,
-                }
-            ],
+            "images": unique,
+            "sources_searched": sorted({
+                label for _key, (label, _finder) in selected
+            }),
         },
         200,
     )
+
+
+def search_album_art_external(
+    artist: str,
+    album: str,
+    source: str = "all",
+) -> tuple[dict, int]:
+    """Backwards-compatible entry point for the album page's art search."""
+    return search_album_art_all(artist, album, source=source)
 
 
 def set_album_art_from_url(artist: str, album: str, image_url: str) -> dict[str, Any]:
@@ -707,4 +1013,6 @@ __all__ = [
     "navidrome_art_may_replace",
     "download_and_save_album_art",
     "get_album_art_placeholder_svg",
+    "search_album_art_external",
+    "search_album_art_all",
 ]

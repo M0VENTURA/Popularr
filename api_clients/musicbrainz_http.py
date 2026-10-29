@@ -294,6 +294,23 @@ class MusicBrainzHttpClient:
                     )
                 return {}
             except Exception as exc:
+                # ⚠️ THE SHARED SESSION ALREADY RETRIED THIS.
+                #
+                # ``api_clients.session`` is built by ``create_retry_client``
+                # with ``retries=3``, so a ``TransportError`` reaching here means
+                # FOUR attempts have already failed. Looping again multiplied
+                # that: during the reported resolver outage every track paid
+                # 3 outer x 4 inner = 12 DNS lookups, logged a dozen
+                # ``[HTTP-TRACE]`` lines, and burned the scan budget with no
+                # extra chance of success. Hand the failure to the caller /
+                # per-host cooldown instead of re-running the whole retry stack.
+                if isinstance(exc, httpx.TransportError):
+                    logger.warning(
+                        "MusicBrainz request failed after transport retries",
+                        endpoint=endpoint,
+                        error=str(exc),
+                    )
+                    return {}
                 if attempt < max_retries - 1:
                     time.sleep(2 ** (attempt + 1))
                     continue

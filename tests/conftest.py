@@ -156,15 +156,14 @@ def _reset_host_timeout_cooldowns():
     # fail on their assertions rather than every test erroring in this fixture.
     windows = getattr(http_utils, "_HOST_TIMEOUT_COOLDOWN", None)
     strikes = getattr(http_utils, "_HOST_TIMEOUT_STRIKES", None)
-    if windows is not None:
-        windows.clear()
-    if strikes is not None:
-        strikes.clear()
+    errors = getattr(http_utils, "_HOST_COOLDOWN_ERROR", None)
+    for _state in (windows, strikes, errors):
+        if _state is not None:
+            _state.clear()
     yield
-    if windows is not None:
-        windows.clear()
-    if strikes is not None:
-        strikes.clear()
+    for _state in (windows, strikes, errors):
+        if _state is not None:
+            _state.clear()
 
 
 @pytest.fixture(scope="session")

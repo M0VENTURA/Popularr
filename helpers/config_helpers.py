@@ -1656,6 +1656,46 @@ def get_genre_exclusion_config() -> dict[str, Any]:
     }
 
 
+#: Main genres a fresh installs' per-genre Great Covers playlists cover.
+_COVERS_GENRE_DEFAULT_SELECTION: tuple[str, ...] = ("rock", "pop", "punk", "metal")
+
+
+def normalise_main_genre_selection(raw: Any) -> list[str]:
+    """Canonical main-genre ids from a config list or comma-separated string.
+
+    ``None`` (key absent) means the default selection. An explicit empty list is
+    a real choice — no per-genre playlists — and stays empty.
+    """
+    if raw is None:
+        return list(_COVERS_GENRE_DEFAULT_SELECTION)
+    if isinstance(raw, str):
+        raw = re.split(r"[,;|]+", raw)
+    if not isinstance(raw, (list, tuple, set)):
+        return list(_COVERS_GENRE_DEFAULT_SELECTION)
+    out: list[str] = []
+    for value in raw:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        # Resolve through the vocabulary so aliases ("R&B") and even a
+        # hand-written subgenre ("Nu Metal") become the MAIN genre id. The
+        # Config page only offers roots, but a hand-edited YAML need not.
+        key = ""
+        try:
+            from services.playlists.main_genres import classify_main_genre
+
+            resolved = classify_main_genre([text])
+            if resolved:
+                key = str(resolved.get("id") or "")
+        except Exception:
+            key = ""
+        if not key:
+            key = re.sub(r"[^a-z0-9]+", "_", text.casefold()).strip("_")
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
 def get_playlists_config() -> dict[str, Any]:
     """Get playlist generation settings.
 
@@ -1677,6 +1717,11 @@ def get_playlists_config() -> dict[str, Any]:
         - genre_playlists_create_threshold: 100
         - genre_playlists_delete_threshold: 80
         - genre_playlists_max_tracks: 300
+        - covers_genre_playlists_enabled: False
+        - covers_genre_playlists_name_template: "{genre} - Great Covers"
+        - covers_genre_playlists_genres: ["rock", "pop", "punk", "metal"]
+        - covers_genre_playlists_min_tracks: 12
+        - covers_genre_playlists_max_tracks: 100
         - new_music_playlist_enabled: True
         - exclude_christmas_from_playlists: True
         - christmas_playlist_marker: "christmas"
@@ -1781,6 +1826,25 @@ def get_playlists_config() -> dict[str, Any]:
         ).strip() or "Great Covers",
         "covers_max_tracks": max(
             1, int(p.get("covers_max_tracks", 150) or 150)
+        ),
+        # ── Per-genre Great Covers ────────────────────────────────────────
+        # Off by default: the library-wide "Great Covers" playlist is the
+        # default shape. When on, one playlist per MAIN genre (root vocabulary
+        # entries only — subgenres resolve to their family root).
+        "covers_genre_playlists_enabled": bool(
+            p.get("covers_genre_playlists_enabled", False)
+        ),
+        "covers_genre_playlists_name_template": str(
+            p.get("covers_genre_playlists_name_template") or "{genre} - Great Covers"
+        ).strip() or "{genre} - Great Covers",
+        "covers_genre_playlists_genres": normalise_main_genre_selection(
+            p.get("covers_genre_playlists_genres")
+        ),
+        "covers_genre_playlists_min_tracks": max(
+            1, int(p.get("covers_genre_playlists_min_tracks", 12) or 12)
+        ),
+        "covers_genre_playlists_max_tracks": max(
+            1, int(p.get("covers_genre_playlists_max_tracks", 100) or 100)
         ),
         "acoustic_playlist_enabled": bool(p.get("acoustic_playlist_enabled", False)),
         "acoustic_playlist_name": str(

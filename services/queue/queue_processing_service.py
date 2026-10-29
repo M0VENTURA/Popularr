@@ -1145,6 +1145,27 @@ def process_queue_item(item: dict[str, Any]) -> dict[str, Any]:
     if not queue_id:
         return {"success": False, "error": "missing_queue_id"}
 
+    # ── Library copy first ────────────────────────────────────────────────
+    # A track already in the collection on another album does not need
+    # Soulseek: the file is copied into the downloads folder (quality and
+    # length verified) and the normal completion hook re-imports it for this
+    # album. Returning None falls through to the search as before. This runs
+    # BEFORE the slskd availability check, so an owned track is re-imported
+    # even while Soulseek is down.
+    try:
+        from services.downloads.library_copy_service import try_library_copy
+
+        copied = try_library_copy(item)
+        if copied:
+            copied.setdefault("queue_id", queue_id)
+            return copied
+    except Exception as exc:
+        logger.debug(
+            "Library-copy pre-check failed — continuing to Soulseek",
+            queue_id=queue_id,
+            error=str(exc),
+        )
+
     try:
         from services.downloads.download_pipeline_service import (
             process_queue_item as _pipeline_process,

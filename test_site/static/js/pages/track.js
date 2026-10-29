@@ -257,6 +257,44 @@
     }
   }
 
+  /**
+   * Run the deep cover-song detector for this track (Actions → Run Cover
+   * Detection).
+   *
+   * Unlike the "Detect" search above — which only looks up the original artist
+   * in MusicBrainz for the user to confirm — this runs the full pipeline the
+   * scan uses (ISRC, MB relations, writer analysis, heuristics) and persists
+   * the verdict. That means several MusicBrainz round trips, so it gets a
+   * longer timeout than the shared default.
+   */
+  async function runCoverDetection(button) {
+    if (!trackId) return;
+
+    const withBusy = (global.buttonState && global.buttonState.withBusy)
+      ? global.buttonState.withBusy
+      : ((_btn, _label, fn) => fn());
+
+    try {
+      await withBusy(button, 'Detecting…', async () => {
+        const data = await global.api.postJson(
+          `/api/track/${encodeURIComponent(trackId)}/cover-detection`,
+          {},
+          { timeoutMs: 120000 }
+        );
+        if (data.is_cover) {
+          notifyInfo(data.original_artist
+            ? `Cover detected — original artist: ${data.original_artist}`
+            : 'Cover detected.');
+        } else {
+          notifyInfo('Cover detection finished — this is not a cover.');
+        }
+        setTimeout(() => global.location.reload(), 1200);
+      });
+    } catch (error) {
+      notifyError('Cover detection failed: ' + error.message);
+    }
+  }
+
   /** Copy a cover-search result into the "original artist" field. */
   function selectCoverMatch(button) {
     const writerEl = document.getElementById('coverSearchWriter');
@@ -595,6 +633,7 @@
   const ACTIONS = {
     'track-artist-nav': (button) => navigateToArtist(button.dataset.artist),
     'track-rename': () => renameTrackFile(),
+    'track-cover-detection': (button) => runCoverDetection(button),
     'track-slskd-search': () => openSlskdSearchTrack(),
     'track-add-playlist': (button) => {
       if (typeof global.openAddToPlaylistModal === 'function') {
