@@ -417,6 +417,39 @@ def _run_full_scan_as_artist_pipeline(
     except Exception:
         _track_budget = 0
 
+    # ── Navidrome freshness: verified ONCE for the whole scan ──────────────
+    #
+    # ``scan_artist_to_db`` verifies freshness itself when the caller does not
+    # vouch for it, and the dirty test is GLOBAL: one row with
+    # ``metadata_dirty_for_navidrome`` made every artist's import trigger a
+    # remote Navidrome scan and WAIT for it. Proving it once here and passing
+    # ``freshness_verified=True`` keeps the safety guarantee without paying it
+    # per artist. If the one-shot check fails, fall back to None so each import
+    # keeps its own (safe) verification/deferral.
+    _freshness_verified: bool | None = None
+    try:
+        from services.scanning.pipelines.navidrome_pipeline import (
+            ensure_navidrome_import_freshness,
+        )
+        from services.scanning.scan_state import get_scan_checkpoint_path
+
+        if ensure_navidrome_import_freshness(
+            get_scan_checkpoint_path("navidrome_scan")
+        ):
+            _freshness_verified = True
+            log_unified(
+                "[FULL_SCAN] Navidrome freshness verified once for the whole scan"
+            )
+        else:
+            log_unified(
+                "[FULL_SCAN] Navidrome freshness could not be verified — each "
+                "artist import will verify or defer"
+            )
+    except Exception as exc:
+        logger.debug(
+            "[FULL_SCAN] One-shot Navidrome freshness check failed", error=str(exc)
+        )
+
     _all_counts: dict[str, int] = {}
     if _track_budget > 0:
         try:
@@ -584,7 +617,12 @@ def _run_full_scan_as_artist_pipeline(
                 _artist_budget = _ARTIST_FIXED_OVERHEAD_SECONDS
 
             def _run_one_artist() -> None:
-                run_artist_scan_pipeline(artist, force=force, progress_callback=_cb)
+                run_artist_scan_pipeline(
+                    artist,
+                    force=force,
+                    progress_callback=_cb,
+                    freshness_verified=_freshness_verified,
+                )
 
             from services.popularity.scan_stage_runner import _bounded_call_report
             _artist_report = _bounded_call_report(

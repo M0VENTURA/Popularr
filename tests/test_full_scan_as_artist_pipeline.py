@@ -37,7 +37,7 @@ def _patch_env(monkeypatch, artists, stop_after=None):
 
     calls = []
 
-    def fake_run(artist, force=False, progress_callback=None):
+    def fake_run(artist, force=False, progress_callback=None, **kwargs):
         calls.append((artist, force))
         if callable(progress_callback):
             # Simulate the real artist pipeline's SINGLE combined pass stage

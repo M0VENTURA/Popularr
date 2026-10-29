@@ -23,15 +23,19 @@ from services.scanning.scan_state import (
 logger = logging.getLogger(__name__)
 
 
-def _resolve_first_artist_for_letter(letter: str) -> str:
-    """Resolve the first matching local library artist for a starting letter.
+def _resolve_letter_artists(letter: str) -> list[str]:
+    """Every local library artist filed under *letter*, in filing order.
 
-    This keeps artist-page scans independent from Navidrome availability/state.
+    ⭐ WHY THE WHOLE LIST, NOT JUST THE FIRST. The letter button used to resolve
+    the FIRST artist and hand it to ``run_popularity_from_artist``, whose resume
+    semantics run from that artist to the **end of the library**. Pressing "Scan
+    Group" on A therefore scanned A→Z, not A. The resolved list is passed to the
+    scan as its explicit artist scope, so the scan covers exactly this letter.
 
     The letter is matched against the artist's CORE name, and the ordering is
-    the same filing order the /artists list uses.  That matters: the list files
+    the same filing order the /artists list uses. That matters: the list files
     ``The Offspring`` under **O**, so pressing O here must find it and pressing T
-    must not.  Matching ``UPPER(artist) LIKE 'O%'`` — the obvious spelling —
+    must not. Matching ``UPPER(artist) LIKE 'O%'`` — the obvious spelling —
     would do exactly the opposite and make the letter tiles disagree with the
     sections they sit above.
     """
@@ -55,7 +59,6 @@ def _resolve_first_artist_for_letter(letter: str) -> str:
                           AND {letter_expr} NOT BETWEEN 'A' AND 'Z'
                     ) t
                     ORDER BY {order_expr}
-                    LIMIT 1
                 """)
             )
         else:
@@ -69,16 +72,11 @@ def _resolve_first_artist_for_letter(letter: str) -> str:
                           AND {artist_starts_with_letter_sql(artist_expr)}
                     ) t
                     ORDER BY {order_expr}
-                    LIMIT 1
                 """),
                 {"prefix": f"{letter_upper}%"},
             )
 
-        row = result.fetchone()
-        if not row or not row[0]:
-            raise ValueError(f"No artists found in library starting with '{letter}'")
-
-        return str(row[0])
+        return [str(row[0]) for row in result.fetchall() or [] if row[0]]
 
 
 @scans_bp.route("/scan/popularity", methods=["POST"])
@@ -188,11 +186,23 @@ async def api_scan_from_artist():
         artist = str(data.get("artist", "") or "").strip()
         letter = str(data.get("letter", "") or "").strip()
         scan_mode = str(data.get("scan_mode", "changes") or "changes").strip().lower()
+        letter_artists: list[str] = []
 
         if letter:
             try:
-                artist = _resolve_first_artist_for_letter(letter)
-                logger.info("Letter '%s' scan resolved to artist '%s' from local library", letter, artist)
+                # The letter's FULL artist list is the scan scope. Resolving
+                # only the first artist used to turn "Scan Group A" into a
+                # resume-from-A scan that ran all the way to Z.
+                letter_artists = _resolve_letter_artists(letter)
+                if not letter_artists:
+                    raise ValueError(f"No artists found in library starting with '{letter}'")
+                artist = letter_artists[0]
+                logger.info(
+                    "Letter '%s' scan resolved to %d artist(s), starting with '%s'",
+                    letter,
+                    len(letter_artists),
+                    artist,
+                )
             except Exception as exc:
                 logger.error("Error resolving library artist for letter '%s': %s", letter, exc, exc_info=True)
                 return jsonify({"success": False, "error": f"Failed to resolve artist from library: {exc}"}), 500
@@ -229,7 +239,7 @@ async def api_scan_from_artist():
                     "resume_from": artist,
                     "current_artist": artist,
                     "processed_artists": 0,
-                    "total_artists": 0,
+                    "total_artists": len(letter_artists),
                     "percent_complete": 0,
                 },
             )
@@ -244,6 +254,9 @@ async def api_scan_from_artist():
             thread = run_async(
                 run_popularity_from_artist,
                 artist=artist,
+                # None for a plain "from artist" scan (resume semantics: run to
+                # the end of the library). A letter scan passes the exact list.
+                artists=letter_artists or None,
                 force_rescan=force_rescan,
                 progress_file=progress_file,
                 caller_scan_type="popularity",
@@ -255,8 +268,14 @@ async def api_scan_from_artist():
         return jsonify(
             {
                 "success": True,
-                "message": f"Popularity scan started from artist: {artist}",
+                "message": (
+                    f"Popularity scan started for {len(letter_artists)} artist(s) "
+                    f"under '{letter}'"
+                    if letter
+                    else f"Popularity scan started from artist: {artist}"
+                ),
                 "artist": artist,
+                "artist_count": len(letter_artists) or None,
                 "mode": mode_desc,
             }
         )

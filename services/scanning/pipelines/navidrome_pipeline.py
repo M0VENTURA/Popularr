@@ -138,6 +138,32 @@ def sync_remote_navidrome_before_import(
         return False
 
 
+def ensure_navidrome_import_freshness(checkpoint_file: str | None = None) -> bool:
+    """Prove Navidrome is current ONCE, for a scan that imports many artists.
+
+    ``scan_artist_to_db`` verifies freshness when the caller does not vouch for
+    it, and the dirty test is GLOBAL — one row with
+    ``metadata_dirty_for_navidrome`` makes every per-artist import trigger
+    ``trigger_and_wait_for_scan``. In a full scan that turned one pending
+    correction into a Navidrome scan-and-wait per artist. The orchestrator now
+    calls this once and passes ``freshness_verified=True`` down.
+
+    Returns False when freshness could not be verified; the caller must then
+    fall back to per-artist verification (None), never to the unverified path.
+    """
+    from services.scanning.navidrome_import import _get_fallback_client
+
+    client = _get_fallback_client()
+    if client is None:
+        # No Navidrome configured — nothing to verify, nothing to import.
+        return True
+    return sync_remote_navidrome_before_import(
+        client,
+        checkpoint_file=checkpoint_file,
+        use_dirty_state=True,
+    )
+
+
 def run_navidrome_import_scan(
     *,
     mode: str = "all",

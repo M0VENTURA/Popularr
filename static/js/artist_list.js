@@ -28,7 +28,7 @@ function jumpToLetter(letter) {
 async function scanLetterArtists(letter, scanMode) {
     var fullScan = scanMode === 'forced';
     var scanModeValue = fullScan ? 'forced' : 'changes';
-    var message = 'Start ' + (fullScan ? 'Full (Forced)' : 'Changes') + ' scan from letter "' + letter + '"?\n\nThis will resolve the first matching artist from your local library and scan from there.';
+    var message = 'Start ' + (fullScan ? 'Full (Forced)' : 'Changes') + ' scan for artists filed under "' + letter + '"?\n\nOnly the artists in this letter group are scanned.';
 
     // Gate on a running scan FIRST: the offer to cancel it subsumes the generic
     // confirmation below, and asking twice would be noise.
@@ -53,7 +53,10 @@ async function scanLetterArtists(letter, scanMode) {
 
         var data = await response.json();
         if (data.success) {
-            alert('Scan started successfully (' + data.mode + ')\n\nStarting from: ' + data.artist + '\n\nCheck the dashboard for progress.');
+            var scope = data.artist_count
+                ? data.artist_count + ' artist(s) under "' + letter + '"'
+                : 'artist ' + data.artist;
+            alert('Scan started successfully (' + data.mode + ')\n\nScope: ' + scope + '\n\nCheck the dashboard for progress.');
         } else {
             alert('Error: ' + data.error);
         }

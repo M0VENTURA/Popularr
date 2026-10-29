@@ -235,7 +235,7 @@ def _patch_orchestrator(monkeypatch, artists, *, run_artist=None):
     monkeypatch.setattr(
         pipeline_mod,
         "run_artist_scan_pipeline",
-        run_artist or (lambda artist, force=False, progress_callback=None: None),
+        run_artist or (lambda artist, force=False, progress_callback=None, **kwargs: None),
     )
     monkeypatch.setattr(
         load_stage_mod, "_artist_key",
@@ -266,7 +266,7 @@ class TestOrchestratorOwnsTheRebuild:
         # Observe the deferral as each artist's pipeline runs (the real
         # per-artist path calls _run_global_playlist_rebuild; here we only need
         # to know what the flag was during the loop).
-        def _run_artist(artist, force=False, progress_callback=None):
+        def _run_artist(artist, force=False, progress_callback=None, **kwargs):
             seen.append((artist, scope.global_playlists_deferred()))
 
         rebuilds: list[bool] = []

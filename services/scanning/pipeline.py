@@ -128,12 +128,18 @@ def run_artist_scan_pipeline(
     artist_name: str,
     force: bool = False,
     progress_callback: Callable[[str, int, int, str | None, float | None], None] | None = None,
+    freshness_verified: bool | None = None,
 ) -> None:
     if not _try_claim_artist(artist_name):
         log_unified(f"⏭️ Artist scan already running for: {artist_name} — skipping duplicate trigger")
         return
     try:
-        _run_artist_scan_pipeline_inner(artist_name, force, progress_callback=progress_callback)
+        _run_artist_scan_pipeline_inner(
+            artist_name,
+            force,
+            progress_callback=progress_callback,
+            freshness_verified=freshness_verified,
+        )
     finally:
         _release_artist(artist_name)
 
@@ -142,6 +148,7 @@ def _run_artist_scan_pipeline_inner(
     artist_name: str,
     force: bool = False,
     progress_callback: Callable[[str, int, int, str | None, float | None], None] | None = None,
+    freshness_verified: bool | None = None,
 ) -> None:
     def _cb(stage: str, idx: int, total: int, item: str | None = None, track_fraction: float | None = None) -> None:
         if callable(progress_callback):
@@ -199,6 +206,9 @@ def _run_artist_scan_pipeline_inner(
                 force=force,
                 diff_mode=True,  # Enable differential mode for performance
                 progress_file=import_progress_file or stop_progress_file,
+                # A full scan verifies Navidrome once and vouches for every
+                # artist; a targeted scan leaves this None so it verifies here.
+                freshness_verified=freshness_verified,
             )
         else:
             log_unified(f"Navidrome import skipped for '{artist_name}' (no Navidrome artist ID found)")
@@ -221,16 +231,33 @@ def _run_artist_scan_pipeline_inner(
             progress_callback=_stage_band_cb,
         )
 
-        if callable(progress_callback):
-            _cb("essentia", 0, 1, artist_name)
+        # ⭐ ``features.run_essentia`` is the operator's switch. This pass used
+        # to run regardless, so a full scan paid the Essentia setup (and any
+        # missing-track analysis) even when the feature was off. The standalone
+        # Essentia button still runs it explicitly.
         try:
-            from services.scanning.pipelines.essentia_scanner import run_essentia_mood_scan
-            run_essentia_mood_scan(artist_filter=artist_name, force=force)
-        except Exception as exc:
-            logger.debug("[SCAN_PIPELINE] Essentia scan skipped", artist=artist_name, error=str(exc))
-        
-        if callable(progress_callback):
-            _cb("essentia", 1, 1, artist_name)
+            from helpers.config_helpers import get_feature
+
+            _essentia_enabled = bool(get_feature("run_essentia", False))
+        except Exception:
+            _essentia_enabled = False
+
+        if _essentia_enabled:
+            if callable(progress_callback):
+                _cb("essentia", 0, 1, artist_name)
+            try:
+                from services.scanning.pipelines.essentia_scanner import run_essentia_mood_scan
+                run_essentia_mood_scan(artist_filter=artist_name, force=force)
+            except Exception as exc:
+                logger.debug("[SCAN_PIPELINE] Essentia scan skipped", artist=artist_name, error=str(exc))
+
+            if callable(progress_callback):
+                _cb("essentia", 1, 1, artist_name)
+        else:
+            logger.debug(
+                "[SCAN_PIPELINE] Essentia skipped — features.run_essentia is off",
+                artist=artist_name,
+            )
 
         save_artist_scan_checkpoint(artist_name)
         log_unified(f"Artist scan complete: {artist_name}")
@@ -316,6 +343,41 @@ def run_full_library_scan(force: bool = False, restart: bool = False):
     except Exception:
         pass
 
+    # ⭐ This legacy path ran the artist pipeline per artist WITHOUT deferring
+    # the global playlist rebuild, so every artist's popularity pass would
+    # reconcile the curated playlists (two full-library queries + a playlist
+    # listing per playlist, per artist). Defer it to the end, exactly like the
+    # dashboard "All" scan.
+    try:
+        from services.popularity.scan_scope import defer_global_playlists
+
+        defer_global_playlists()
+    except Exception as exc:
+        logger.debug("[SCAN_PIPELINE] Could not defer global playlists", error=str(exc))
+
+    _completed = False
+    _stopped = False
+
+    # Same one-shot freshness proof as the dashboard "All" scan: without it
+    # every artist import in this loop verified Navidrome again (and, while any
+    # row was dirty, triggered and WAITED for a remote scan per artist).
+    _freshness_verified: bool | None = None
+    try:
+        from services.scanning.pipelines.navidrome_pipeline import (
+            ensure_navidrome_import_freshness,
+        )
+        from services.scanning.scan_state import get_scan_checkpoint_path
+
+        if ensure_navidrome_import_freshness(
+            get_scan_checkpoint_path("navidrome_scan")
+        ):
+            _freshness_verified = True
+    except Exception as exc:
+        logger.debug(
+            "[SCAN_PIPELINE] One-shot Navidrome freshness check failed",
+            error=str(exc),
+        )
+
     try:
         write_progress_with_current_artist(progress, "library_scan", True)
         
@@ -334,6 +396,7 @@ def run_full_library_scan(force: bool = False, restart: bool = False):
 
             if is_stop_requested(progress):
                 log_unified("Scan stopped by user")
+                _stopped = True
                 try:
                     record_scan("full", "failed", message="Scan stopped by user")
                 except Exception:
@@ -343,7 +406,11 @@ def run_full_library_scan(force: bool = False, restart: bool = False):
             write_progress_with_current_artist(progress, "library_scan", True, current_artist=name)
 
             try:
-                run_artist_scan_pipeline(name, force=force)
+                run_artist_scan_pipeline(
+                    name,
+                    force=force,
+                    freshness_verified=_freshness_verified,
+                )
             except Exception as exc:
                 # 🚨 CRITICAL: Catch fatal database disconnections and abort immediately
                 # to prevent ruining the scan progress checkpoint file.
@@ -363,6 +430,7 @@ def run_full_library_scan(force: bool = False, restart: bool = False):
         clear_scan_checkpoint(checkpoint_path)
         write_progress_with_current_artist(progress, "library_scan", False)
         log_unified("Full library scan complete")
+        _completed = not _stopped
         try:
             record_scan("full", "completed", message="Full library scan complete")
         except Exception:
@@ -375,6 +443,26 @@ def run_full_library_scan(force: bool = False, restart: bool = False):
             record_scan("full", "failed", message=f"Full scan failed: {exc}")
         except Exception:
             pass
+
+    finally:
+        # Clear the deferral UNCONDITIONALLY (a stale flag would suppress the
+        # playlist rebuild of every later targeted scan). Rebuild once for a
+        # completed scan; a stopped/failed scan's playlists are caught up next
+        # run, matching the dashboard "All" scan.
+        try:
+            from services.popularity.scan_scope import resume_global_playlists
+
+            resume_global_playlists()
+            if _completed:
+                from services.popularity.stages.finalise_stage import (
+                    _run_global_playlist_rebuild,
+                )
+
+                _run_global_playlist_rebuild({}, force=True)
+        except Exception as exc:
+            logger.debug(
+                "[SCAN_PIPELINE] End-of-scan playlist rebuild failed", error=str(exc)
+            )
 
 
 def start_boot_navidrome_import():

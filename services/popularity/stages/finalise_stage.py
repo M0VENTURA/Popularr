@@ -3751,6 +3751,7 @@ def _sync_playlist_to_navidrome(
     *,
     server_confirmed_exists: bool | None = None,
     create_if_missing: bool = True,
+    playlist_listing: dict[int, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Push one playlist, skipping it when its content is already there.
 
@@ -3809,6 +3810,9 @@ def _sync_playlist_to_navidrome(
                     list(song_ids),
                     existing_playlist_id=existing_playlist_id,
                     create_if_missing=create_if_missing,
+                    # A batch pass fetches the listing ONCE; without this every
+                    # playlist re-fetched every playlist from every server.
+                    all_playlists=(playlist_listing or {}).get(id(client)),
                 )
                 or {}
             )
@@ -6013,6 +6017,7 @@ def _sync_single_curated_playlist(
     max_tracks: int,
     cfg: dict[str, Any],
     clear_when_empty: bool = True,
+    playlist_listing: dict[int, list[dict[str, Any]]] | None = None,
 ) -> bool:
     """Push ONE curated playlist so it matches *pool* exactly.
 
@@ -6035,7 +6040,11 @@ def _sync_single_curated_playlist(
         if not clear_when_empty:
             return False
         sync_res = _sync_playlist_to_navidrome(
-            playlist_name, [], rows=[], create_if_missing=False
+            playlist_name,
+            [],
+            rows=[],
+            create_if_missing=False,
+            playlist_listing=playlist_listing,
         )
         if not _playlist_sync_succeeded(sync_res):
             return False
@@ -6058,7 +6067,12 @@ def _sync_single_curated_playlist(
     if not song_ids:
         return False
 
-    sync_res = _sync_playlist_to_navidrome(playlist_name, song_ids, rows=winners)
+    sync_res = _sync_playlist_to_navidrome(
+        playlist_name,
+        song_ids,
+        rows=winners,
+        playlist_listing=playlist_listing,
+    )
     if not _playlist_sync_succeeded(sync_res):
         return False
     if not sync_res.get("skipped"):
@@ -6066,7 +6080,12 @@ def _sync_single_curated_playlist(
     return True
 
 
-def _create_decade_playlists(cfg: dict[str, Any]) -> int:
+def _create_decade_playlists(
+    cfg: dict[str, Any],
+    rows: list[dict[str, Any]] | None = None,
+    *,
+    playlist_listing: dict[int, list[dict[str, Any]]] | None = None,
+) -> int:
     if not bool(cfg.get("decade_playlists_enabled", False)):
         return 0
     template = str(cfg.get("decade_playlists_name_template") or "{decade}s - Top Tracks").strip()
@@ -6075,7 +6094,8 @@ def _create_decade_playlists(cfg: dict[str, Any]) -> int:
     min_tracks = max(5, int(cfg.get("decade_playlists_min_tracks", 50) or 50))
     max_tracks = max(10, int(cfg.get("decade_playlists_max_tracks", 200) or 200))
 
-    rows = _fetch_curated_playlist_rows(min_stars=4)
+    if rows is None:
+        rows = _fetch_curated_playlist_rows(min_stars=4)
     if rows is None:
         return 0
 
@@ -6092,29 +6112,53 @@ def _create_decade_playlists(cfg: dict[str, Any]) -> int:
         if len(deduped) < min_tracks:
             continue
         pl_name = template.replace("{decade}", str(decade)).strip()
-        if _sync_single_curated_playlist(pl_name, deduped, max_tracks=max_tracks, cfg=cfg):
+        if _sync_single_curated_playlist(
+            pl_name,
+            deduped,
+            max_tracks=max_tracks,
+            cfg=cfg,
+            playlist_listing=playlist_listing,
+        ):
             written += 1
     return written
 
 
-def _create_hit_singles_playlist(cfg: dict[str, Any]) -> bool:
+def _create_hit_singles_playlist(
+    cfg: dict[str, Any],
+    rows: list[dict[str, Any]] | None = None,
+    *,
+    playlist_listing: dict[int, list[dict[str, Any]]] | None = None,
+) -> bool:
     if not bool(cfg.get("hit_singles_playlist_enabled", False)):
         return False
     pl_name = str(cfg.get("hit_singles_playlist_name") or "Hit Singles").strip() or "Hit Singles"
     max_tracks = max(10, int(cfg.get("hit_singles_max_tracks", 250) or 250))
-    rows = _fetch_curated_playlist_rows(min_stars=4)
+    if rows is None:
+        rows = _fetch_curated_playlist_rows(min_stars=4)
     if rows is None:
         return False
     pool = [r for r in rows if bool(r.get("is_single"))]
-    return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
+    return _sync_single_curated_playlist(
+        pl_name,
+        pool,
+        max_tracks=max_tracks,
+        cfg=cfg,
+        playlist_listing=playlist_listing,
+    )
 
 
-def _create_hidden_gems_playlist(cfg: dict[str, Any]) -> bool:
+def _create_hidden_gems_playlist(
+    cfg: dict[str, Any],
+    rows: list[dict[str, Any]] | None = None,
+    *,
+    playlist_listing: dict[int, list[dict[str, Any]]] | None = None,
+) -> bool:
     if not bool(cfg.get("hidden_gems_playlist_enabled", False)):
         return False
     pl_name = str(cfg.get("hidden_gems_playlist_name") or "Hidden Gems").strip() or "Hidden Gems"
     max_tracks = max(10, int(cfg.get("hidden_gems_max_tracks", 200) or 200))
-    rows = _fetch_curated_playlist_rows(min_stars=4)
+    if rows is None:
+        rows = _fetch_curated_playlist_rows(min_stars=4)
     if rows is None:
         return False
     pool = [
@@ -6123,17 +6167,29 @@ def _create_hidden_gems_playlist(cfg: dict[str, Any]) -> bool:
         and int(r.get("is_live") or 0) == 0
         and int(r.get("is_compilation") or 0) == 0
     ]
-    return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
+    return _sync_single_curated_playlist(
+        pl_name,
+        pool,
+        max_tracks=max_tracks,
+        cfg=cfg,
+        playlist_listing=playlist_listing,
+    )
 
 
-def _create_new_releases_playlist(cfg: dict[str, Any]) -> bool:
+def _create_new_releases_playlist(
+    cfg: dict[str, Any],
+    rows: list[dict[str, Any]] | None = None,
+    *,
+    playlist_listing: dict[int, list[dict[str, Any]]] | None = None,
+) -> bool:
     if not bool(cfg.get("new_releases_playlist_enabled", False)):
         return False
     pl_name = str(cfg.get("new_releases_playlist_name") or "New Releases").strip() or "New Releases"
     max_tracks = max(10, int(cfg.get("new_releases_max_tracks", 100) or 100))
     current_year = datetime.now().year
     cutoff_year = current_year - 1
-    rows = _fetch_curated_playlist_rows(min_stars=4)
+    if rows is None:
+        rows = _fetch_curated_playlist_rows(min_stars=4)
     if rows is None:
         return False
     pool = []
@@ -6141,30 +6197,54 @@ def _create_new_releases_playlist(cfg: dict[str, Any]) -> bool:
         yr = _extract_track_year(r)
         if yr and yr >= cutoff_year:
             pool.append(r)
-    return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
+    return _sync_single_curated_playlist(
+        pl_name,
+        pool,
+        max_tracks=max_tracks,
+        cfg=cfg,
+        playlist_listing=playlist_listing,
+    )
 
 
-def _create_covers_playlist(cfg: dict[str, Any]) -> bool:
+def _create_covers_playlist(
+    cfg: dict[str, Any],
+    rows: list[dict[str, Any]] | None = None,
+    *,
+    playlist_listing: dict[int, list[dict[str, Any]]] | None = None,
+) -> bool:
     if not bool(cfg.get("covers_playlist_enabled", False)):
         return False
     pl_name = str(cfg.get("covers_playlist_name") or "Great Covers").strip() or "Great Covers"
     max_tracks = max(10, int(cfg.get("covers_max_tracks", 150) or 150))
-    rows = _fetch_curated_playlist_rows(min_stars=3)
+    if rows is None:
+        rows = _fetch_curated_playlist_rows(min_stars=3)
     if rows is None:
         return False
     pool = [r for r in rows if int(r.get("is_cover") or 0) == 1]
-    return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
+    return _sync_single_curated_playlist(
+        pl_name,
+        pool,
+        max_tracks=max_tracks,
+        cfg=cfg,
+        playlist_listing=playlist_listing,
+    )
 
 
 _ACOUSTIC_RE = re.compile(r"\b(acoustic|unplugged|stripped)\b", re.IGNORECASE)
 
 
-def _create_acoustic_playlist(cfg: dict[str, Any]) -> bool:
+def _create_acoustic_playlist(
+    cfg: dict[str, Any],
+    rows: list[dict[str, Any]] | None = None,
+    *,
+    playlist_listing: dict[int, list[dict[str, Any]]] | None = None,
+) -> bool:
     if not bool(cfg.get("acoustic_playlist_enabled", False)):
         return False
     pl_name = str(cfg.get("acoustic_playlist_name") or "Acoustic Essentials").strip() or "Acoustic Essentials"
     max_tracks = max(10, int(cfg.get("acoustic_max_tracks", 150) or 150))
-    rows = _fetch_curated_playlist_rows(min_stars=4)
+    if rows is None:
+        rows = _fetch_curated_playlist_rows(min_stars=4)
     if rows is None:
         return False
     pool = []
@@ -6178,7 +6258,13 @@ def _create_acoustic_playlist(cfg: dict[str, Any]) -> bool:
         )
         if _ACOUSTIC_RE.search(blob):
             pool.append(r)
-    return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
+    return _sync_single_curated_playlist(
+        pl_name,
+        pool,
+        max_tracks=max_tracks,
+        cfg=cfg,
+        playlist_listing=playlist_listing,
+    )
 
 
 _HIGH_ENERGY_RE = re.compile(
@@ -6187,12 +6273,18 @@ _HIGH_ENERGY_RE = re.compile(
 )
 
 
-def _create_high_energy_playlist(cfg: dict[str, Any]) -> bool:
+def _create_high_energy_playlist(
+    cfg: dict[str, Any],
+    rows: list[dict[str, Any]] | None = None,
+    *,
+    playlist_listing: dict[int, list[dict[str, Any]]] | None = None,
+) -> bool:
     if not bool(cfg.get("high_energy_playlist_enabled", False)):
         return False
     pl_name = str(cfg.get("high_energy_playlist_name") or "High Energy & Upbeat").strip() or "High Energy & Upbeat"
     max_tracks = max(10, int(cfg.get("high_energy_max_tracks", 200) or 200))
-    rows = _fetch_curated_playlist_rows(min_stars=4)
+    if rows is None:
+        rows = _fetch_curated_playlist_rows(min_stars=4)
     if rows is None:
         return False
     pool = []
@@ -6205,10 +6297,21 @@ def _create_high_energy_playlist(cfg: dict[str, Any]) -> bool:
         mood_blob = " ".join(str(r.get(k) or "") for k in ("mood", "genres", "lastfm_tags", "essentia_genres"))
         if _HIGH_ENERGY_RE.search(mood_blob):
             pool.append(r)
-    return _sync_single_curated_playlist(pl_name, pool, max_tracks=max_tracks, cfg=cfg)
+    return _sync_single_curated_playlist(
+        pl_name,
+        pool,
+        max_tracks=max_tracks,
+        cfg=cfg,
+        playlist_listing=playlist_listing,
+    )
 
 
-def _create_mood_playlists(cfg: dict[str, Any]) -> int:
+def _create_mood_playlists(
+    cfg: dict[str, Any],
+    rows: list[dict[str, Any]] | None = None,
+    *,
+    playlist_listing: dict[int, list[dict[str, Any]]] | None = None,
+) -> int:
     if not bool(cfg.get("mood_playlists_enabled", False)):
         return 0
     template = str(cfg.get("mood_playlists_name_template") or "{mood} - Mix").strip()
@@ -6217,7 +6320,8 @@ def _create_mood_playlists(cfg: dict[str, Any]) -> int:
     min_tracks = max(5, int(cfg.get("mood_playlists_min_tracks", 40) or 40))
     max_tracks = max(10, int(cfg.get("mood_playlists_max_tracks", 150) or 150))
 
-    rows = _fetch_curated_playlist_rows(min_stars=4)
+    if rows is None:
+        rows = _fetch_curated_playlist_rows(min_stars=4)
     if rows is None:
         return 0
 
@@ -6248,7 +6352,13 @@ def _create_mood_playlists(cfg: dict[str, Any]) -> int:
             continue
         display_mood = _display_genre(mood_key)
         pl_name = template.replace("{mood}", display_mood).strip()
-        if _sync_single_curated_playlist(pl_name, deduped, max_tracks=max_tracks, cfg=cfg):
+        if _sync_single_curated_playlist(
+            pl_name,
+            deduped,
+            max_tracks=max_tracks,
+            cfg=cfg,
+            playlist_listing=playlist_listing,
+        ):
             written += 1
     return written
 
@@ -6261,19 +6371,71 @@ def _run_curated_playlists(timings: dict[str, float] | None = None) -> None:
         logger.debug("Curated playlists config read failed", error=str(exc))
         return
 
-    for timing_key, fn_name, fn in (
-        ("decade_playlists", "Decade playlists", _create_decade_playlists),
-        ("curated", "Hit Singles playlist", _create_hit_singles_playlist),
-        ("curated", "Hidden Gems playlist", _create_hidden_gems_playlist),
-        ("curated", "New Releases playlist", _create_new_releases_playlist),
-        ("curated", "Covers playlist", _create_covers_playlist),
-        ("curated", "Acoustic playlist", _create_acoustic_playlist),
-        ("curated", "High Energy playlist", _create_high_energy_playlist),
-        ("curated", "Mood playlists", _create_mood_playlists),
+    # Nothing enabled -> no query and no Navidrome listing. Without this the
+    # shared fetch below would run even on installs with every curated
+    # playlist switched off (the default), which the per-builder checks used
+    # to prevent.
+    if not any(
+        bool(cfg.get(key, False))
+        for key in (
+            "decade_playlists_enabled",
+            "hit_singles_playlist_enabled",
+            "hidden_gems_playlist_enabled",
+            "new_releases_playlist_enabled",
+            "covers_playlist_enabled",
+            "acoustic_playlist_enabled",
+            "high_energy_playlist_enabled",
+            "mood_playlists_enabled",
+        )
+    ):
+        return
+
+    # ── ONE row query for every builder ───────────────────────────────────
+    # Every curated builder used to run its own full-library query (eight in
+    # one pass, and this pass now also runs after targeted scans). The 3★ set
+    # is the superset of the 4★ set — the SQL predicate is exactly
+    # ``stars >= min_stars`` — so ONE query feeds both pools.
+    _rows_started = time.monotonic()
+    rows_covers = _fetch_curated_playlist_rows(min_stars=3)
+    rows_mature: list[dict[str, Any]] | None = None
+    if rows_covers is not None:
+        rows_mature = []
+        for row in rows_covers:
+            try:
+                if int(row.get("stars") or 0) >= 4:
+                    rows_mature.append(row)
+            except (TypeError, ValueError):
+                continue
+    if timings is not None:
+        timings["curated_rows"] = time.monotonic() - _rows_started
+
+    # ── ONE playlist listing per server ───────────────────────────────────
+    # ``sync_playlist_by_name`` otherwise fetched the server's ENTIRE playlist
+    # list once per playlist. A batch pass shares one listing across all of
+    # them; a client missing from the map (cache expiry) falls back to its own
+    # fetch inside the sync.
+    playlist_listing: dict[int, list[dict[str, Any]]] = {}
+    for client in _navidrome_clients():
+        try:
+            playlist_listing[id(client)] = client.fetch_all_playlists() or []
+        except Exception as exc:
+            logger.debug(
+                "Curated playlist listing failed", error=str(exc)
+            )
+
+    for timing_key, fn_name, fn, rows in (
+        ("decade_playlists", "Decade playlists", _create_decade_playlists, rows_mature),
+        ("curated", "Hit Singles playlist", _create_hit_singles_playlist, rows_mature),
+        ("curated", "Hidden Gems playlist", _create_hidden_gems_playlist, rows_mature),
+        ("curated", "New Releases playlist", _create_new_releases_playlist, rows_mature),
+        ("curated", "Covers playlist", _create_covers_playlist, rows_covers),
+        ("curated", "Acoustic playlist", _create_acoustic_playlist, rows_mature),
+        ("curated", "High Energy playlist", _create_high_energy_playlist, rows_mature),
+        ("curated", "Mood playlists", _create_mood_playlists, rows_mature),
     ):
         _started = time.monotonic()
         try:
-            fn(cfg)
+            fn(cfg, rows=rows, playlist_listing=playlist_listing)
         except Exception as exc:
             logger.warning(f"{fn_name} generation failed", error=str(exc))
         finally:
@@ -6314,7 +6476,11 @@ def refresh_curated_playlists(*, reason: str = "scan") -> dict[str, float]:
         logger.warning("Curated playlist refresh failed", reason=reason, error=str(exc))
         return timings
 
-    logger.info("[PLAYLISTS] Curated playlists refreshed", reason=reason)
+    logger.info(
+        "[PLAYLISTS] Curated playlists refreshed",
+        reason=reason,
+        **{key: round(value, 3) for key, value in timings.items()},
+    )
     return timings
 
 

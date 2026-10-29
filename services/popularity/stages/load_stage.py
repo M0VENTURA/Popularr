@@ -14,8 +14,7 @@ import structlog
 
 from db.repositories.library import (
     get_all_artists,
-    get_albums_for_artist,
-    get_tracks_for_album,
+    get_scan_tracks,
 )
 from helpers.logging_config import log_unified
 from helpers.normalization_service import album_names_match
@@ -53,9 +52,34 @@ def _resolve_artist_for_scan(artists: list[str], artist_filter: str) -> str | No
     return None
 
 
+def _resume_artist_index(artists: list[str], resume_from: str) -> int:
+    """Index of the artist a resume scan starts at (0 when not found).
+
+    Uses the SAME punctuation-tolerant matching as the per-artist loop, so the
+    SQL scope and the in-loop skip cannot disagree.
+    """
+    target = str(resume_from or "").lower()
+    key = _artist_key(resume_from)
+    for index, artist in enumerate(artists):
+        if (
+            artist.lower() == target
+            or key == _artist_key(artist)
+            or (key and len(key) >= 3 and key in _artist_key(artist))
+        ):
+            return index
+    return 0
+
+
 def load_candidates(options: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Build artist → album → track structure for scan pipeline.
+
+    ⭐ ONE QUERY. The artist/album/track structure is loaded in a single
+    ordered query and grouped in memory (``get_scan_tracks``). The previous
+    implementation ran ``get_all_artists`` + ``get_albums_for_artist`` +
+    ``get_tracks_for_album`` per album — an N+1 that also repeated the full
+    DISTINCT-artists query for every artist when the full-scan orchestrator
+    called this once per artist.
     """
 
     injected = options.get("albums")
@@ -69,75 +93,96 @@ def load_candidates(options: dict[str, Any]) -> list[dict[str, Any]]:
     artist_filter = options.get("artist_filter")
     album_filter = options.get("album_filter")
     resume_from = options.get("resume_from")
+    # Explicit artist scope (letter scans). ``None`` means "no scope";
+    # an empty list is honoured by the repository as "no artists".
+    artist_scope = options.get("artists")
 
-    candidates: list[dict[str, Any]] = []
-
-    # -------------------------------------------------------------------------
-    # 1. Get artists
-    # -------------------------------------------------------------------------
-
-    artists = get_all_artists()
-
-    # Targeted artist scans must never silently no-op.  Resolve the requested
-    # name to a stored artist (tolerating case/punctuation variants such as
-    # "D'Artagnan" vs "dArtagnan") so the filter finds its tracks.
+    rows: list[dict[str, Any]] = []
     resolved_artist: str | None = None
+
     if artist_filter:
-        resolved_artist = _resolve_artist_for_scan(artists, artist_filter)
-        if resolved_artist is None:
+        # Try the stored name directly first. The DISTINCT-artist listing is
+        # paid only when that misses (case/punctuation variant), never once per
+        # artist in a full scan.
+        rows = get_scan_tracks(artist=artist_filter)
+        if not rows:
+            resolved_artist = _resolve_artist_for_scan(
+                get_all_artists(), artist_filter
+            )
+            if resolved_artist:
+                rows = get_scan_tracks(artist=resolved_artist)
+        if not rows:
             log_unified(
                 f"Popularity Scan - Artist filter '{artist_filter}' matched no artist "
-                f"in the library ({len(artists)} artist(s) present). Check the artist "
-                "name / that the library has been imported."
+                "in the library. Check the artist name / that the library has been "
+                "imported."
             )
             logger.warning(
                 "[LOAD_STAGE] artist_filter matched no artist in the library",
                 artist_filter=artist_filter,
-                present_artists=", ".join(repr(a) for a in artists[:10]),
+                resolved_artist=resolved_artist,
             )
+    elif artist_scope is not None:
+        rows = get_scan_tracks(artists=[str(a) for a in artist_scope])
+    elif resume_from:
+        # Push the RESUME POINT into the query: loading tracks for artists the
+        # scan is about to skip would undo the whole point of resuming. One
+        # artist-list query is far cheaper than every skipped artist's tracks.
+        all_artists = get_all_artists()
+        start_index = _resume_artist_index(all_artists, resume_from)
+        rows = get_scan_tracks(artists=all_artists[start_index:])
+    else:
+        rows = get_scan_tracks()
+
+    # Group in QUERY order. Python dicts preserve insertion order and the query
+    # sorts by filing artist, then album, then disc/track — the same order the
+    # per-artist/per-album queries produced.
+    grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for row in rows:
+        artist = (
+            str(row.get("album_artist") or "").strip()
+            or str(row.get("artist") or "").strip()
+        )
+        album = str(row.get("album") or "")
+        if not artist or not album.strip():
+            continue
+        grouped.setdefault(artist, {}).setdefault(album, []).append(row)
+
+    try:
+        from helpers.config_helpers import get_feature
+
+        min_tracks = max(1, int(get_feature("album_skip_min_tracks", 1) or 1))
+    except Exception:
+        min_tracks = 1
+
+    candidates: list[dict[str, Any]] = []
 
     # Resume support (legacy parity): skip artists before the resume point.
     # A fuzzy match (resume artist contained in the current artist) is also
     # accepted, matching the legacy popularity scanner.
     resume_hit = False if resume_from else True
+    resume_key = _artist_key(resume_from) if resume_from else ""
 
-    for artist in artists:
-        # Case-insensitive match — the artist/album pages render with LOWER()
-        # queries, so URL casing can differ from the stored name; a
-        # case-sensitive filter here silently produces zero candidates
-        # ("No tracks found") for such scans.
-        if artist_filter:
-            if resolved_artist is not None:
-                if artist.strip().lower() != resolved_artist.strip().lower():
-                    continue
-            else:
-                # Resolution failed — fall back to the historical comparison so
-                # behaviour stays predictable (and the diagnostic above shows why).
-                if artist.lower().strip() != artist_filter.lower().strip():
-                    continue
-
+    for artist, albums in grouped.items():
         if not resume_hit:
             # Punctuation-tolerant resume match: "D'Artagnan" vs "dArtagnan"
             # must resolve to the same stored artist, otherwise every artist
             # is skipped and the scan reports "No tracks found" immediately.
-            _resume_key = _artist_key(resume_from)
             if resume_from and (
-                artist.lower() == resume_from.lower()
-                or _resume_key == _artist_key(artist)
-                or (_resume_key and len(_resume_key) >= 3 and _resume_key in _artist_key(artist))
+                artist.lower() == str(resume_from).lower()
+                or resume_key == _artist_key(artist)
+                or (
+                    resume_key
+                    and len(resume_key) >= 3
+                    and resume_key in _artist_key(artist)
+                )
             ):
                 resume_hit = True
                 # Do NOT skip the matched artist — rescan from this point.
             else:
                 continue
 
-        # ---------------------------------------------------------------------
-        # 2. Get albums
-        # ---------------------------------------------------------------------
-
-        albums = get_albums_for_artist(artist)
-
-        for album in albums:
+        for album, tracks in albums.items():
             # ⚠️ Must use the SAME rule as ``should_skip_album`` does for the
             # Navidrome import: the two gate one album scan in sequence, so an
             # exact comparison here would re-skip the very album the import
@@ -146,23 +191,10 @@ def load_candidates(options: dict[str, Any]) -> list[dict[str, Any]]:
             if album_filter and not album_names_match(album_filter, album):
                 continue
 
-            # -----------------------------------------------------------------
-            # 3. Get tracks (YOU JUST FIXED THIS ✅)
-            # -----------------------------------------------------------------
-
-            tracks = get_tracks_for_album(artist, album)
-
             if not tracks:
                 continue
 
-            # Skip albums with fewer tracks than the configured minimum
-            # (features.album_skip_min_tracks, default 1 = no-op).
-            try:
-                from helpers.config_helpers import get_feature
-                min_tracks = int(get_feature("album_skip_min_tracks", 1) or 1)
-            except Exception:
-                min_tracks = 1
-            if len(tracks) < max(1, min_tracks):
+            if len(tracks) < min_tracks:
                 logger.debug(
                     "[LOAD_STAGE] Skipping album below minimum track count",
                     artist=artist,
@@ -174,8 +206,8 @@ def load_candidates(options: dict[str, Any]) -> list[dict[str, Any]]:
 
             # Album-type resolution for the album row: prefer a CONSISTENT
             # stored type (persisted by the album stage after the MB
-            # release-group lookup).  Live/alternate detection then treats
-            # the matched type as authoritative and only falls back to title
+            # release-group lookup).  Live/alternate detection then treats the
+            # matched type as authoritative and only falls back to title
             # heuristics when no type is stored yet (first scan).
             _mb_types = {
                 str(t.get("musicbrainz_albumtype") or "").strip()

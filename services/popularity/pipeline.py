@@ -200,6 +200,7 @@ def run_popularity_scan(
     resume_from: str | None = None,
     artist_filter: str | None = None,
     album_filter: str | None = None,
+    artists: list[str] | None = None,
     force: bool = False,
     singles_only: bool = False,
     singles_with_missing_popularity: bool = False,
@@ -260,6 +261,7 @@ def run_popularity_scan(
         "resume_from": resume_from,
         "artist_filter": artist_filter,
         "album_filter": album_filter,
+        "artists": artists,
         "force": force,
         "singles_only": singles_only,
         "singles_with_missing_popularity": singles_with_missing_popularity,
@@ -299,7 +301,23 @@ def run_popularity_scan(
         # those are exactly the runs that change cover verdicts and ratings — the
         # curated playlists (covers, decades, hit singles …) must be reconciled
         # or they keep tracks the scan no longer considers members.
-        if not _scan_stopped and not global_playlists_deferred():
+        # A scan that processed NO tracks cannot have changed playlist
+        # membership; skip the curated pass entirely (it is the common outcome
+        # for a targeted scan whose albums are all inside their skip windows).
+        _processed_tracks = 0
+        _processed_known = False
+        if isinstance(result, dict) and "tracks_processed" in result:
+            _processed_known = True
+            try:
+                _processed_tracks = int(result.get("tracks_processed") or 0)
+            except (TypeError, ValueError):
+                _processed_tracks = 0
+
+        if (
+            not _scan_stopped
+            and not global_playlists_deferred()
+            and not (_processed_known and _processed_tracks <= 0)
+        ):
             try:
                 from services.popularity.stages.finalise_stage import (
                     refresh_curated_playlists,
@@ -400,6 +418,7 @@ def _derive_progress_scan_type(
 def run_popularity_from_artist(
     *,
     artist: str,
+    artists: list[str] | None = None,
     force_rescan: bool = False,
     progress_file: str | None = None,
     verbose: bool = False,
@@ -447,7 +466,12 @@ def run_popularity_from_artist(
         completed = run_popularity_scan(
             verbose=verbose,
             force=force_rescan,
-            resume_from=artist,
+            # An explicit artist scope IS the complete set to process. Applying
+            # resume semantics on top of it could skip letter members whose DB
+            # sort order differs from their FILING order (e.g. "The Unicorns"
+            # sorts under T but files under U).
+            resume_from=None if artists else artist,
+            artists=artists,
             progress_file=progress_file,
             caller_scan_type=_effective_scan_type,
         )

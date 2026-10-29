@@ -65,6 +65,10 @@ def run_navidrome_artist_pipeline(
         artist_id,
         verbose=True,
         force=force,
+        # Differential mode: unchanged albums are skipped instead of being
+        # fetched and upserted again. The single-artist "Navidrome" scan used to
+        # process every album on every run.
+        diff_mode=True,
     )
     if isinstance(result, dict) and (
         result.get("deferred") or result.get("success") is False

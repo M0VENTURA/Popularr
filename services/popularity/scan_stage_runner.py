@@ -1954,6 +1954,7 @@ def run_scan(
     resume_from: str | None = None,
     artist_filter: str | None = None,
     album_filter: str | None = None,
+    artists: list[str] | None = None,
     skip_header: bool = False,
     force: bool = False,
     filter_missing: bool = False,
@@ -1972,6 +1973,7 @@ def run_scan(
         "resume_from": resume_from,
         "artist_filter": artist_filter,
         "album_filter": album_filter,
+        "artists": artists,
         "skip_header": skip_header,
         "force": force,
         "filter_missing": filter_missing,
@@ -3022,6 +3024,14 @@ def run_scan(
                     prefetched_popularity = {}
                     _prefetch_state: dict[str, Any] = {"prefetched_popularity": {}}
 
+                    # ⭐ An ALBUM-scoped scan only needs popularity for this
+                    # album. The rest of this prefetch is ARTIST-level work
+                    # (similar artists, biography/country/image/line-up,
+                    # Discogs discography, missing-release tracklists) that one
+                    # album cannot change — and it can burn the whole
+                    # prefetch budget on every single-album scan.
+                    _album_scoped_scan = bool(options.get("album_filter"))
+
                     def _prefetch_artist_work() -> None:
                         if not _singles_pass:
                             try:
@@ -3034,6 +3044,13 @@ def run_scan(
                             except Exception as exc:
                                 logger.warning("Popularity cache prefetch failed", artist=artist, error=str(exc))
 
+                        if _album_scoped_scan:
+                            # Nothing below is album-scoped: similar artists,
+                            # artist bio/metadata, the Discogs discography and
+                            # missing-release tracklists are all artist-level.
+                            return
+
+                        if not _singles_pass:
                             try:
                                 # Artist-level similar-artists refresh: the
                                 # per-album path is DB-READ-ONLY from here on
@@ -4118,11 +4135,13 @@ def run_scan(
             log_unified(f"[POPULARITY] Finalise step failed ({_finalise_exc})")
     else:
         # A metadata-only pass changes no ratings, so there is no incremental
-        # genre refresh to perform here. Library-wide playlist reconciliation
-        # belongs to the daily/manual global rebuild — not to every scan.
+        # genre refresh to perform here. Genre/decade reconciliation still
+        # belongs to the daily/manual global rebuild; the curated playlists
+        # (covers, moods, …) are reconciled by the scan runner's end-of-scan
+        # curated refresh.
         log_unified(
-            "[FINALISE_STAGE] Metadata-only scan — library-wide playlists left "
-            "to the scheduled/manual rebuild"
+            "[FINALISE_STAGE] Metadata-only scan — no rating changes to refresh; "
+            "curated playlists are reconciled at scan end"
         )
 
     update(stage="complete", progress=100, message="Popularity scan complete.", processed=total_albums, total_items=total_albums)

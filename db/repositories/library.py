@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 from typing import Any, List, Dict
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from db.engine import db_session
 import logging 
 
@@ -154,6 +154,64 @@ def get_tracks_for_album(artist: str, album: str) -> List[Dict[str, Any]]:
             ORDER BY disc_number NULLS FIRST, track_number NULLS FIRST
         """), {"artist": artist, "album": album})
         return [dict(r._mapping) for r in result.fetchall() or []]
+
+def get_scan_tracks(
+    *,
+    artist: str | None = None,
+    artists: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Every track row the scan loader needs, in ONE ordered query.
+
+    ⭐ WHY THIS EXISTS. ``load_candidates`` used to build the scan's
+    artist→album→track structure with ``get_all_artists()`` followed by
+    ``get_albums_for_artist`` + ``get_tracks_for_album`` for every album: one
+    query per album on every scan, plus a full DISTINCT-artists query per
+    ARTIST when the full-scan orchestrator called the popularity runner once
+    per artist. On a large library that was hundreds of round trips before the
+    first album was processed.
+
+    The ordering matches what the scan expects (filing artist, then album, then
+    disc/track), so the caller can group the rows in insertion order.
+
+    ``artists`` (an explicit artist list) wins over ``artist``; an EMPTY list
+    means "no artists" and returns no rows — never the whole library.
+    """
+    artist_key = "COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist))"
+    params: dict[str, Any] = {}
+    where: list[str] = []
+    use_artist_list = artists is not None
+
+    if use_artist_list:
+        cleaned = [str(a) for a in (artists or []) if str(a).strip()]
+        if not cleaned:
+            return []
+        params["artists"] = cleaned
+        where.append(f"{artist_key} IN :artists")
+    elif artist:
+        params["artist"] = artist
+        where.append(f"{artist_key} = :artist")
+
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    statement = text(
+        f"""
+        SELECT *
+        FROM tracks
+        {where_sql}
+        ORDER BY {artist_key} ASC,
+                 album ASC NULLS FIRST,
+                 disc_number NULLS FIRST,
+                 track_number NULLS FIRST
+        """
+    )
+    if use_artist_list:
+        statement = statement.bindparams(bindparam("artists", expanding=True))
+
+    with db_session() as session:
+        return [
+            dict(row._mapping)
+            for row in (session.execute(statement, params).fetchall() or [])
+        ]
+
 
 def get_all_artists() -> list[str]:
     """Return all distinct artists based on album_artist fallback logic."""

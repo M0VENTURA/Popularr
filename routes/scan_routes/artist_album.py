@@ -166,17 +166,33 @@ async def scan_album_custom():
     methods=["POST"],
 )
 async def scan_track_rescan(artist, album, track_id):
-    """
-    Trigger a track rescan.
+    """Force a re-scan of the ALBUM the track belongs to.
 
-    Current behaviour intentionally runs the artist pipeline, matching your
-    existing implementation. Later this can be replaced by a dedicated
-    track-level pipeline.
+    ⭐ WHY THE ALBUM, NOT THE ARTIST. This route used to run
+    ``run_artist_pipeline(artist, False)``: a Navidrome import plus EVERY album
+    of the artist plus Essentia, for one track — and non-forced, so the
+    per-album skip window could skip the very album that was just edited. The
+    album-scoped forced pipeline below re-imports and re-scores exactly the
+    album, and the true per-track paths (metadata edit, single-source rescan)
+    already run from their own routes.
     """
     artist = unquote(artist)
+    album = unquote(album)
     track_id = unquote(track_id)
 
-    run_async(run_artist_pipeline, artist, False)
+    started = guard_and_launch_popularity_scan(
+        run_album_pipeline,
+        artist,
+        album,
+        force=True,
+        scan_type="full",
+    )
+    if not started:
+        await flash(
+            "A popularity scan is already running — skipped duplicate trigger",
+            "warning",
+        )
+        return redirect(url_for("ui.track_detail", track_id=track_id))
 
-    await flash(f"Track rescan started for {artist}", "info")
+    await flash(f"Rescan started for '{artist} - {album}'", "info")
     return redirect(url_for("ui.track_detail", track_id=track_id))

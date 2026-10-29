@@ -168,7 +168,7 @@ def run_album_pipeline(artist_name: str, album_name: str, force: bool = False) -
         # metadata-only pre-pass here was pure duplicate work (double API
         # calls for art/bio/similar/last.fm per album).  Removed.
         log_unified(f"Step 2/3: Popularity scan for album '{album_display}'")
-        popularity_scan(
+        popularity_result = popularity_scan(
             verbose=True,
             force=force,
             artist_filter=artist_name,
@@ -176,8 +176,28 @@ def run_album_pipeline(artist_name: str, album_name: str, force: bool = False) -
             progress_file="popularity_scan",
         )
 
-        log_unified(f"Step 3/3: Auto-detecting album type for '{album_display}'")
-        _maybe_auto_detect_album_type(artist_name, album_name)
+        # ⭐ The album-filtered popularity pass ALWAYS runs this album (the skip
+        # windows are bypassed for an explicit album filter), and its album
+        # stage resolves and persists the album type. The safety net is kept
+        # only for the case where the pass processed nothing, so it no longer
+        # re-reads and re-detects an album the pass just handled.
+        _processed = 0
+        if isinstance(popularity_result, dict):
+            try:
+                _processed = int(popularity_result.get("albums_processed") or 0)
+            except (TypeError, ValueError):
+                _processed = 0
+        if _processed <= 0:
+            log_unified(
+                f"Step 3/3: Popularity pass processed no albums — running album-type "
+                f"detection for '{album_display}'"
+            )
+            _maybe_auto_detect_album_type(artist_name, album_name)
+        else:
+            log_unified(
+                f"Step 3/3: Album type already resolved by the popularity pass for "
+                f"'{album_display}' — no second detection"
+            )
 
         log_unified(f"✅ Scan complete for album '{album_display}'")
 
