@@ -17,35 +17,37 @@ from typing import Any, Dict
 import structlog
 
 from helpers.config_helpers import get_config
-from helpers.normalization_service import sanitize_path
-from services.downloads.download_organize_helpers import move_track_to_library
+from services.downloads.download_organize_helpers import (
+    _build_target_path,
+    move_track_to_library,
+)
 from services.infrastructure.base import get_infra
 
 logger = structlog.get_logger(__name__)
 
-_sanitize = lambda value: sanitize_path(value).lower()
-
-
-def _get_path_format() -> str:
-    return get_config().get("naming_format", "{album_artist}/{year} - {album}/{track_number}. {artist} - {title}")
-
 
 def build_target_path(metadata: dict[str, Any], ext: str, music_root: Path) -> Path:
-    """Generates the target path based on metadata rules."""
-    vars_map = {
-        "track_number": str(metadata.get("track_number", "00")).zfill(2),
-        "artist": _sanitize(metadata.get("artist", "Unknown")),
-        "album_artist": _sanitize(metadata.get("album_artist") or metadata.get("artist", "Unknown")),
-        "title": _sanitize(metadata.get("title", "Unknown")),
-        "album": _sanitize(metadata.get("album", "Unknown")),
-        "year": str(metadata.get("year", "0000"))[:4],
-    }
+    """Generates the target path from the one shared naming format.
 
-    relative_path = _get_path_format().format(**vars_map)
-    relative_path = relative_path.replace("\\", "/").strip("/")
-
-    filename = f"{vars_map['track_number']}. {vars_map['artist']} - {vars_map['title']}{ext}"
-    return music_root / relative_path / filename
+    Delegating to ``_build_target_path`` keeps queue imports, album renames
+    and this "Move to Music" action on the same layout — the old duplicate
+    implementation had its own format and no disc awareness, so multi-disc
+    tracks all came out as 01, 02, …
+    """
+    return Path(
+        _build_target_path(
+            str(music_root),
+            metadata.get("album_artist"),
+            metadata.get("year"),
+            metadata.get("album"),
+            metadata.get("artist"),
+            metadata.get("title"),
+            metadata.get("track_number"),
+            f"track{ext}",
+            disc_number=metadata.get("disc_number"),
+            multi_disc=metadata.get("multi_disc"),
+        )
+    )
 
 
 def organize_track(track_metadata: dict[str, Any] | int, payload: dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -64,6 +66,8 @@ def organize_track(track_metadata: dict[str, Any] | int, payload: dict[str, Any]
             "artist": payload.get("artist") or queue_item.get("artist"),
             "title": payload.get("title") or queue_item.get("title"),
             "track_number": payload.get("track_number") or queue_item.get("track_number"),
+            "disc_number": payload.get("disc_number") or queue_item.get("disc_number"),
+            "multi_disc": payload.get("multi_disc"),
             "album_artist": payload.get("album_artist") or queue_item.get("album_artist"),
             "album": payload.get("album") or queue_item.get("album"),
             "year": payload.get("year") or queue_item.get("year"),
@@ -197,10 +201,6 @@ def rename_and_move_file(file_path: str, metadata: dict[str, Any]) -> Dict[str, 
         "year": metadata.get("year"),
     }
     return move_track_to_library(track, release_metadata, os.environ.get("MUSIC_ROOT", "/music"))
-
-
-def _build_target_path(*args: Any, **kwargs: Any) -> Path:
-    return build_target_path(*args, **kwargs)
 
 
 def organize_folder(folder_path: str, payload: dict[str, Any] | None = None) -> Dict[str, Any]:

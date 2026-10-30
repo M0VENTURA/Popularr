@@ -1723,7 +1723,26 @@ def _assign_stars(
         except (TypeError, ValueError):
             _min_score, _min_listeners = 0.0, 0.0
 
-        if comp_stars >= 5 and (_min_score > 0 or _min_listeners > 0):
+        # ⚠️ VA COMPILATIONS ONLY.
+        #
+        # These absolute bars exist because a VA compilation's rank is a
+        # percentile inside the CREDITED artist's ONLINE chart — scale-free
+        # evidence that "#1 of 9 songs" satisfies. A single-artist compilation
+        # (greatest hits / covers record) is rated on the artist's OWN
+        # catalogue bands (CAT-Z), the model that lets a best-of produce a
+        # normal spread; the listener floor belongs to the online model.
+        #
+        # Applying it here demoted every 5★ candidate on Feuerschwanz
+        # "Todsünden" (a single-artist covers album): the CAT-Z top five all
+        # cleared the score bar, but their own Last.fm reach is 7.6k-25.3k, so
+        # the album could not produce a single 5★. "The compilation guard is
+        # only meant to be for Various Artist compilations, not artist
+        # compilations."
+        if (
+            is_va_compilation
+            and comp_stars >= 5
+            and (_min_score > 0 or _min_listeners > 0)
+        ):
             # ⚠️⚠️ CONJUNCTION, NOT DISJUNCTION — a documented reversal.
             #
             # This was an ``or``: "clear EITHER the score bar OR the listener
@@ -1786,7 +1805,14 @@ def _assign_stars(
         except (TypeError, ValueError):
             _hi_score, _hi_listeners = 0.0, 0.0
 
-        if comp_stars >= 4 and (_hi_score > 0 or _hi_listeners > 0):
+        # Same VA scope as the top-tier gate above: a single-artist
+        # compilation's CAT-Z tier is the rating model, so it needs no
+        # absolute-reach evidence check.
+        if (
+            is_va_compilation
+            and comp_stars >= 4
+            and (_hi_score > 0 or _hi_listeners > 0)
+        ):
             _clears_high_evidence = all((
                 _hi_score <= 0 or score >= _hi_score,
                 _hi_listeners <= 0 or raw_lf >= _hi_listeners,

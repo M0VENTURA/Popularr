@@ -270,7 +270,110 @@ class TestStepFiveUsesTheTrackArtist:
 
 
 # ---------------------------------------------------------------------------
-# 4. Wiring — every step names the performer, none names the album artist
+# 4. A VA compilation that is not an official release → match artist + title
+# ---------------------------------------------------------------------------
+
+
+COVER_REC = {
+    "id": "rec-cover",
+    "title": "Tainted Love",
+    "artist-credit": [{"artist": {"id": "a-soft", "name": "Soft Cell"}}],
+    "first-release-date": "1981-07-01",
+    "recording-relation-list": [
+        {
+            "type": "cover",
+            "direction": "forward",
+            "recording": {
+                "id": "rec-orig",
+                "title": "Tainted Love",
+                "artist-credit": [
+                    {"artist": {"id": "a-gloria", "name": "Gloria Jones"}}
+                ],
+                "first-release-date": "1965-01-01",
+            },
+        }
+    ],
+}
+
+
+class TestAPlaylistCompilationMatchesByArtistAndTitle:
+    """⭐ Reported: a VA compilation that was never an official release must
+    still be matched, using the track ARTIST and TITLE.
+
+    Such albums have no release MBID, so the metadata pass logged no
+    recording/work identity for any track and step 3's duplicate-search skip
+    silenced the whole album. The artist+title pair resolves the recording.
+    """
+
+    ALBUM = "Spotify - New Nu Metal"
+
+    def _run(self, monkeypatch, track: dict) -> list[dict]:
+        det = _detector(_WriterStub([COVER_REC], []))
+        det._collect_track_writers = lambda *a, **k: {}
+        monkeypatch.setattr(impl, "apply_cover_metadata_batch", lambda conn, ups: [])
+        return det.detect_covers_for_album(
+            self.ALBUM, ALBUM_ARTIST, [track], force=True,
+        )
+
+    def test_a_va_album_without_a_release_is_recognised(self) -> None:
+        det = _detector(_WriterStub([], []))
+        assert det._va_compilation_without_release(
+            ALBUM_ARTIST,
+            [{"id": "t1", "artist": "Soft Cell", "title": "Tainted Love"}],
+        ) is True
+
+    def test_a_known_release_keeps_the_duplicate_search_skip(self) -> None:
+        det = _detector(_WriterStub([], []))
+        assert det._va_compilation_without_release(
+            ALBUM_ARTIST,
+            [{"id": "t1", "artist": "Soft Cell", "title": "Tainted Love",
+              "musicbrainz_album_mbid": "rel-1"}],
+        ) is False
+
+    def test_a_non_va_album_keeps_the_duplicate_search_skip(self) -> None:
+        det = _detector(_WriterStub([], []))
+        assert det._va_compilation_without_release(
+            "Bonnie Tyler",
+            [{"id": "t1", "artist": "Bonnie Tyler",
+              "title": "Holding Out for a Hero"}],
+        ) is False
+
+    def test_the_track_is_matched_with_artist_and_title(self, monkeypatch) -> None:
+        results = self._run(monkeypatch, {
+            "id": "t1", "title": "Tainted Love", "artist": "Soft Cell",
+            "album_artist": ALBUM_ARTIST, "album": self.ALBUM,
+        })
+
+        assert results, "a VA playlist compilation produced no cover verdict"
+        assert results[0]["original_artist"] == "Gloria Jones"
+
+    def test_the_search_query_names_the_track_artist(self, monkeypatch) -> None:
+        mb = _WriterStub([COVER_REC], [])
+        det = _detector(mb)
+        det._collect_track_writers = lambda *a, **k: {}
+        monkeypatch.setattr(impl, "apply_cover_metadata_batch", lambda conn, ups: [])
+        queries: list[str] = []
+        _real_search = mb.search_recordings
+        mb.search_recordings = (
+            lambda query, limit=15: queries.append(query)
+            or _real_search(query, limit=limit)
+        )
+
+        det.detect_covers_for_album(
+            self.ALBUM, ALBUM_ARTIST,
+            [{"id": "t1", "title": "Tainted Love", "artist": "Soft Cell",
+              "album_artist": ALBUM_ARTIST, "album": self.ALBUM}],
+            force=True,
+        )
+
+        assert any(
+            'recording:"Tainted Love"' in query and 'artist:"Soft Cell"' in query
+            for query in queries
+        ), queries
+
+
+# ---------------------------------------------------------------------------
+# 5. Wiring — every step names the performer, none names the album artist
 # ---------------------------------------------------------------------------
 
 

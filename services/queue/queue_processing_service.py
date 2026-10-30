@@ -878,6 +878,8 @@ def build_organize_group_target_path(
     title: str,
     track_number: Any,
     source_file: str | os.PathLike[str],
+    disc_number: Any = None,
+    multi_disc: bool | None = None,
 ) -> Path:
     """Destination path for a queue group's track — ONE layout, not two.
 
@@ -913,6 +915,8 @@ def build_organize_group_target_path(
             title,
             track_number,
             str(source_file),
+            disc_number=disc_number,
+            multi_disc=multi_disc,
         )
     )
 
@@ -925,6 +929,12 @@ def organize_group_sync(group_id: Any, metadata: dict[str, Any] | None = None) -
     items = get_completed_group_queue_items(group_id)
     if not items:
         return {"success": False, "error": "No completed items found for this group"}
+
+    # Multi-disc albums share one folder, so every disc needs its prefix
+    # (101, 102, 201…). The whole group is in hand here — use it.
+    from services.downloads.download_organize_helpers import _any_multi_disc
+
+    group_multi_disc = _any_multi_disc([item.get("disc_number") for item in items])
 
     album_artist = str(metadata.get("album_artist") or metadata.get("artist", "") or "").strip()
     year = str(metadata.get("year", "") or "").strip()
@@ -962,7 +972,8 @@ def organize_group_sync(group_id: Any, metadata: dict[str, Any] | None = None) -
                     result = session.execute(
                         text("""
                             SELECT r.release_title, r.artist, r.release_year,
-                                   rt.track_number, rt.track_title, rt.track_artist
+                                   rt.track_number, rt.track_title, rt.track_artist,
+                                   rt.disc_number
                             FROM musicbrainz_release_tracks rt
                             JOIN musicbrainz_releases r ON r.release_id = rt.release_id
                             WHERE rt.queue_id = :id
@@ -979,6 +990,10 @@ def organize_group_sync(group_id: Any, metadata: dict[str, Any] | None = None) -
                     item_track_number = mapping.get("track_number") if mapping else mb_row[3]
                     item_title = (mapping.get("track_title") if mapping else mb_row[4]) or item_title
                     item_artist = (mapping.get("track_artist") if mapping else mb_row[5]) or item_artist
+                    item_disc_number = (
+                        (mapping.get("disc_number") if mapping else mb_row[6])
+                        or item_disc_number
+                    )
             except Exception:
                 pass
 
@@ -1016,6 +1031,7 @@ def organize_group_sync(group_id: Any, metadata: dict[str, Any] | None = None) -
                 album_artist=resolved_album_artist,
                 year=resolved_year,
                 track_number=item_track_number,
+                disc_number=item_disc_number,
             )
 
             file_metadata = {
@@ -1044,6 +1060,8 @@ def organize_group_sync(group_id: Any, metadata: dict[str, Any] | None = None) -
                 title=item_title,
                 track_number=item_track_number,
                 source_file=file_path,
+                disc_number=item_disc_number,
+                multi_disc=group_multi_disc,
             )
             target_path.parent.mkdir(parents=True, exist_ok=True)
             if not target_path.exists():

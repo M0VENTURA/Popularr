@@ -1103,6 +1103,16 @@ def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
             release_mbid=release_mbid,
         )
 
+        from services.downloads.download_organize_helpers import _any_multi_disc
+
+        folder_multi_disc = _any_multi_disc(
+            [
+                (applied_metadata.get(a["file_path"]) or {}).get("disc_number")
+                or a.get("disc_number")
+                for a in audio_files
+            ]
+        )
+
         for audio in audio_files:
             src = audio["file_path"]
             track_meta = {
@@ -1130,6 +1140,7 @@ def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
                     "title": title or Path(src).stem,
                     "track_number": number,
                     "disc_number": disc_number,
+                    "multi_disc": folder_multi_disc,
                 },
                 {
                     "album_artist": album_artist,

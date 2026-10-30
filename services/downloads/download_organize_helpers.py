@@ -51,18 +51,91 @@ def _extract_year_for_path(year: Any) -> str:
     return m.group(0) if m else "Unknown"
 
 
-def _format_track_number_for_rename(track_number: Any, disc_number: Any = None) -> str:
-    """Format a track number for use in path format strings (2-digit, disc-aware)."""
+def _disc_number_int(value: Any) -> int:
+    """Parse a disc number, tolerating ``1/2`` / ``"Disc 2"`` style values."""
     try:
-        disc_num = int(str(disc_number).split("/")[0]) if disc_number else 1
+        num = int(str(value).split("/")[0].strip())
+    except Exception:
+        return 1
+    return num if num > 0 else 1
+
+
+def _any_multi_disc(disc_values: Any) -> bool:
+    """True when the given disc numbers describe a multi-disc album.
+
+    A missing disc number is treated as disc 1, so ``[None, 2]`` is multi-disc.
+    An empty sequence is NOT multi-disc — callers that need to distinguish
+    "unknown" from "single disc" must check for rows themselves.
+    """
+    numbers = {_disc_number_int(value) for value in disc_values or []}
+    return len(numbers) > 1 or any(num > 1 for num in numbers)
+
+
+def _format_track_number_for_rename(
+    track_number: Any,
+    disc_number: Any = None,
+    multi_disc: bool | None = None,
+) -> str:
+    """Format a track number for use in path format strings.
+
+    ``multi_disc=True`` prefixes the disc for EVERY disc, so a two-disc album
+    yields ``101``, ``102``, ``201``, ``202``. This matters because all discs
+    share one album folder: without the disc-1 prefix both discs start at
+    ``01`` and the numbers repeat.
+
+    ``multi_disc=False`` always uses a plain 2-digit number. ``None`` keeps the
+    legacy behaviour (prefix only disc 2+) for callers that have no album-wide
+    disc information.
+    """
+    try:
+        disc_num = _disc_number_int(disc_number)
         track_num = int(str(track_number).split("/")[0]) if track_number else 0
-        if disc_num <= 0:
-            disc_num = 1
-        if disc_num > 1:
+        if track_num < 0:
+            track_num = 0
+        if multi_disc is None:
+            multi_disc = disc_num > 1
+        if multi_disc:
             return f"{disc_num}{track_num:02d}"
         return f"{track_num:02d}"
     except Exception:
         return "00"
+
+
+def _detect_multi_disc(album: Any, album_artist: Any) -> bool | None:
+    """Look up whether an album has more than one disc in the library/queue.
+
+    Returns ``None`` when neither table has rows for the album (unknown), so
+    the caller can fall back to the legacy per-track rule instead of wrongly
+    declaring a fresh multi-disc import single-disc.
+    """
+    album_text = str(album or "").strip()
+    if not album_text:
+        return None
+    artist_text = str(album_artist or "").strip()
+    try:
+        from sqlalchemy import text
+
+        from db.engine import db_session
+
+        artist_clause = "COALESCE(NULLIF(album_artist, ''), artist) = :artist"
+        params = {"album": album_text, "artist": artist_text}
+        with db_session() as session:
+            found_rows = False
+            for table in ("tracks", "download_queue"):
+                rows = session.execute(
+                    text(
+                        f"SELECT disc_number FROM {table} "
+                        f"WHERE album = :album AND ({artist_clause})"
+                    ),
+                    params,
+                ).fetchall()
+                if rows:
+                    found_rows = True
+                    if _any_multi_disc([row[0] for row in rows]):
+                        return True
+        return False if found_rows else None
+    except Exception:
+        return None
 
 
 def _build_target_path(
@@ -75,6 +148,7 @@ def _build_target_path(
     track_number: Any,
     source_file: str,
     disc_number: Any = None,
+    multi_disc: bool | None = None,
 ) -> str:
     """Build the destination path using ``downloads.file_name_format`` from config."""
     ext = os.path.splitext(source_file)[1]
@@ -83,11 +157,16 @@ def _build_target_path(
     track_artist = artist or "Unknown Artist"
     album_artist_val = _normalize_album_artist_for_path(album_artist) or track_artist
 
+    if multi_disc is None:
+        multi_disc = _detect_multi_disc(album, album_artist_val)
+
     format_vars = {
         "album_artist": _sanitize_path_component(album_artist_val),
         "year": _extract_year_for_path(year),
         "album": _sanitize_path_component(album or "Unknown Album"),
-        "track_number": _format_track_number_for_rename(track_number, disc_number),
+        "track_number": _format_track_number_for_rename(
+            track_number, disc_number, multi_disc=multi_disc
+        ),
         "artist": _sanitize_path_component(track_artist),
         "title": _sanitize_path_component(title or "Unknown Title"),
     }
@@ -322,6 +401,10 @@ def move_track_to_library(track: dict[str, Any], release_metadata: dict[str, Any
         and source_ext == ".flac"
     )
 
+    multi_disc = track.get("multi_disc")
+    if multi_disc is None:
+        multi_disc = release_metadata.get("multi_disc")
+
     target_path = _build_target_path(
         music_root,
         release_metadata.get("album_artist"),
@@ -332,6 +415,7 @@ def move_track_to_library(track: dict[str, Any], release_metadata: dict[str, Any
         track.get("track_number"),
         file_path,
         disc_number=track.get("disc_number"),
+        multi_disc=multi_disc,
     )
 
     if converting and target_format:

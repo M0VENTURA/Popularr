@@ -450,6 +450,43 @@ class CoverDetector:
             ).strip()
         )
 
+    @staticmethod
+    def _va_compilation_without_release(
+        album_artist: str, tracks: list[dict[str, Any]]
+    ) -> bool:
+        """True for a Various-Artists album that is not an official release.
+
+        ⭐ Reported: *"Various Artists compilations are struggling to match the
+        cover detection when it wasn't an official album release. It should
+        match these using artist name and track name."*
+
+        A VA compilation assembled from a playlist (or any folder that never
+        matched a MusicBrainz release) has no release MBID, so the metadata
+        pass had nothing to resolve its tracks against and every row lacks a
+        logged recording/work identity. Applying the "the metadata pass already
+        tried" skip would then silence the WHOLE album; the track ARTIST and
+        TITLE are enough to find the recording, so the deep pass must fall back
+        to them.
+        """
+        if not (
+            is_track_artist_placeholder(album_artist)
+            or str(album_artist or "").strip().casefold() in _COMPILATION_ARTIST_NAMES
+        ):
+            return False
+        for track in tracks or []:
+            if not isinstance(track, dict):
+                continue
+            if str(
+                track.get("musicbrainz_album_mbid")
+                or track.get("musicbrainz_albumid")
+                or track.get("musicbrainz_releasegroupid")
+                or ""
+            ).strip():
+                # An official release IS known, so the metadata pass had
+                # something to resolve against — keep the duplicate-search skip.
+                return False
+        return True
+
     # -- search helpers ---------------------------------------------------
 
     def _search_recordings_by_title(
@@ -1032,6 +1069,8 @@ class CoverDetector:
         _step_done("ISRC lookup", 2)
 
         # Step 3: MusicBrainz recording-relation detection
+        # Computed once for the album — see the identity gate below.
+        _va_without_release = self._va_compilation_without_release(artist, tracks)
         for track in tracks:
             tid = track.get("id")
             if not tid or tid in seen_track_ids:
@@ -1040,8 +1079,19 @@ class CoverDetector:
             # the recording here would search MusicBrainz for a track the
             # metadata pass already failed to resolve — the exact duplicate
             # network work this pass is meant to avoid.
+            #
+            # ⚠️ EXCEPT on a VA compilation that is NOT an official release
+            # (a playlist-derived folder, for example): there was no release
+            # for the metadata pass to resolve against, so it never logged an
+            # identity and there is no duplicate search to avoid. The track's
+            # own ARTIST + TITLE are enough to find the recording, which is the
+            # only route cover detection has for these albums.
             if not self._track_has_logged_identity(track):
-                continue
+                if not _va_without_release:
+                    continue
+                if not comparison_artist(track, artist):
+                    # No real performer to search with or compare against.
+                    continue
             mbid = self._resolve_recording_mbid(track, artist, album)
             if not mbid:
                 continue
@@ -1292,14 +1342,31 @@ class CoverDetector:
         self._persist_checked(tracks, _fresh_skipped)
 
         _checked = len(_to_check)
+        # ⭐ Report the covers the ALBUM HAS, not only the ones this pass wrote.
+        # A re-scanned album re-confirms every stored verdict through the same
+        # six techniques and then skips the write, so counting writes alone made
+        # an 11-cover album report "0 cover(s)" — the operator read that as a
+        # failed detection even though the breakdown said already-confirmed=11.
+        # ``new`` keeps the distinction visible; the leading number is the total.
+        _already_confirmed = len(_verified_existing_ids) + sum(
+            1 for tid in _confirmed_skipped
+            if self._is_cover_flagged(tracks_by_id.get(tid) or {})
+        )
+        _cover_total = len(cover_results) + _already_confirmed
         log_unified(
-            f"[COVER_DETECT] {artist} - {album}: {len(cover_results)} cover(s) | "
+            f"[COVER_DETECT] {artist} - {album}: {_cover_total} cover(s) "
+            f"(new={len(cover_results)}) | "
             f"checked={_checked}, settled-in-window={len(_fresh_skipped)}, "
-            f"already-confirmed={len(_confirmed_skipped) + len(_verified_existing_ids)}"
+            f"already-confirmed={_already_confirmed}"
             + (f", titles-repaired={len(_repaired_titles)}" if _repaired_titles else "")
         )
 
-        logger.info("Cover detection complete", album=album, found_count=len(cover_results))
+        logger.info(
+            "Cover detection complete",
+            album=album,
+            found_count=_cover_total,
+            new_count=len(cover_results),
+        )
         _repair_results = [
             {
                 "track_id": u["track_id"],
@@ -2601,7 +2668,12 @@ class CoverDetector:
         if not title:
             return None
 
-        search_artist = str(track.get("artist") or album_artist or "").strip()
+        # ⭐ The PERFORMER, never the album placeholder. A search constrained
+        # to ``artist:"Various Artists"`` returns nothing (every compilation
+        # track searched that way came back empty); with no usable performer the
+        # title alone still finds candidates, which the title/artist check below
+        # filters.
+        search_artist = comparison_artist(track, album_artist or "")
         release_mbid = str(track.get("musicbrainz_album_mbid") or "").strip()
 
         def _titles_match(left: str, right: str) -> bool:

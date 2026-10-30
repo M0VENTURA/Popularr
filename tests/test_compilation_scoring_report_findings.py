@@ -175,7 +175,9 @@ class TestTheTierGateIsAConjunction:
             track, [70.27], [70.27] * 3,
             album_model={"has_benchmark": True, "era": "solid", "catalog_cutoff": 99.0,
                          "max_5star_slots": 3, "album_top_n": 3},
-            is_compilation=True, compilation_raw_scores=[70.27] * 5,
+            # A VA compilation: the absolute bars are VA-only now.
+            is_compilation=True, is_va_compilation=True,
+            compilation_raw_scores=[70.27] * 5,
         )
         assert stars == 4, "a 19k-listener track must not hold 5★"
         assert track.get("_compilation_top_tier_gated") is True
@@ -212,7 +214,8 @@ class TestTheTierGateIsAConjunction:
             track, [70.27], [70.27] * 3,
             album_model={"has_benchmark": True, "era": "solid", "catalog_cutoff": 99.0,
                          "max_5star_slots": 3, "album_top_n": 3},
-            is_compilation=True, compilation_raw_scores=[70.27] * 5,
+            is_compilation=True, is_va_compilation=True,
+            compilation_raw_scores=[70.27] * 5,
         )
         assert stars == 5
 
@@ -322,6 +325,9 @@ class TestACompilationTrackWithNoEvidenceCannotHoldFourStars:
                          "catalog_cutoff": 99.0, "max_5star_slots": 3,
                          "album_top_n": 3},
             is_compilation=True,
+            # The absolute evidence bars are VA-only; this fixture models the
+            # reported VA compilation ("Triple J's Hottest 100").
+            is_va_compilation=True,
             compilation_online_rules=dict(rules or TestACompilationTrackWithNoEvidenceCannotHoldFourStars.RULES),
             compilation_raw_scores=[score] * 5,
         )

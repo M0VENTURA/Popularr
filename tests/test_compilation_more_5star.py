@@ -59,13 +59,10 @@ class TestCompilationQualifiesAlbumUsesArtistReference:
         # albums (which sit lower).
         artist = [92.0, 60.0, 58.0, 55.0, 50.0, 45.0, 40.0, 38.0, 35.0, 30.0]
 
-        # ⚠️ EXPLICIT reach. The compilation 5★ tier requires BOTH the artist
-        # rank AND absolute reach (``top_tier_min_listeners``, default 250,000)
-        # — see tests/test_compilation_tier_guards.py. The fixture's default
-        # 500x multiplier put this "hit" at 46,000 listeners, so the absolute
-        # guard demoted it and the test measured the GUARD rather than the
-        # artist-catalogue rule it is named for. A real best-of hit has reach.
-        track = _track(92.0, lastfm_listeners=460_000)
+        # The absolute reach bars are VA-only; a single-artist compilation is
+        # rated on the artist catalogue, so the fixture's default reach must
+        # not matter here.
+        track = _track(92.0)
         assert self._assign(track, compilation, artist) == 5
 
     def test_regular_album_still_uses_album_rank(self):
@@ -115,10 +112,9 @@ class TestCompilationSlotCapSkipped:
         from services.popularity.stages import finalise_stage as fs
 
         results = [
-            # ⚠️ EXPLICIT reach (see the note in the sibling test): these are
-            # the artist's GENUINE HITS, so they must clear the absolute 5★
-            # listener bar or the guard, not the catalogue rule, decides.
-            _track(score, title=f"Hit {i}", lastfm_listeners=int(score * 3000))
+            # The absolute reach bars are VA-only, so the fixture's default
+            # reach is fine — the CAT-Z band decides.
+            _track(score, title=f"Hit {i}")
             for i, score in enumerate([95.0, 94.0, 93.0, 92.0, 91.0, 90.0])
         ]
         # All are high-confidence singles, all clear the catalog cutoff.

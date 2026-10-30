@@ -140,6 +140,10 @@ class TestCoverIsNeverTheTracksOwnArtist:
         monkeypatch.setattr(det, "_load_cover_checked_map", lambda ids: {})
         monkeypatch.setattr(det, "_collect_track_writers", lambda *a, **k: {})
         monkeypatch.setattr(det, "_get_track_writers", lambda t: [])
+        # Keep the test hermetic: this fixture is a VA compilation with no
+        # release MBID, so the artist+title fallback would otherwise reach the
+        # real MusicBrainz client. The funnel guard under test does not need it.
+        monkeypatch.setattr(det, "_resolve_recording_mbid", lambda *a, **k: None)
 
         tracks = [
             {"id": "t1", "title": "Cave", "artist": "Muse", "isrc": "X1",

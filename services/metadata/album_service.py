@@ -115,6 +115,8 @@ def rename_album_files_service(
     from helpers.config_helpers import conversion_target, get_config, is_flac_conversion
     from services.downloads.download_organize_helpers import (
         _AUDIO_EXTS,
+        _any_multi_disc,
+        _format_track_number_for_rename,
         _sanitize_path_component,
         _normalize_album_artist_for_path,
     )
@@ -145,13 +147,6 @@ def rename_album_files_service(
         or "/music"
     )
     music_root = os.path.realpath(str(music_root or "/music").strip() or "/music")
-
-    def _safe_track_number(value: Any) -> str:
-        try:
-            num = int(str(value or "").strip() or 0)
-            return f"{num:02d}" if num > 0 else "00"
-        except (TypeError, ValueError):
-            return "00"
 
     def _resolve_existing(path_value: Any) -> str | None:
         raw = str(path_value or "").strip()
@@ -184,7 +179,7 @@ def rename_album_files_service(
             rows = session.execute(
                 text("""
                     SELECT CAST(id AS TEXT) AS id, title, artist, album_artist,
-                           album, year, track_number, file_path
+                           album, year, track_number, disc_number, file_path
                     FROM tracks
                     WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
                       AND album = :album
@@ -197,6 +192,13 @@ def rename_album_files_service(
     except Exception as exc:
         logger.error("Failed to load tracks for rename", artist=artist, album=album, error=str(exc), exc_info=True)
         return {"success": False, "error": f"Failed to load album tracks: {exc}"}
+
+    # ⚠️ Determine multi-disc from the WHOLE album BEFORE narrowing to the
+    # user's selection: renaming only disc 2 must still produce "201", and
+    # disc 1 must keep "101" rather than dropping back to "01".
+    multi_disc = _any_multi_disc(
+        [r._mapping.get("disc_number") for r in rows]
+    )
 
     if track_ids is not None:
         # Selection mode: only the tracks the user ticked. An empty selection
@@ -237,7 +239,11 @@ def rename_album_files_service(
 
         ext = os.path.splitext(src_path)[1]
         fmt_vars = {
-            "track_number": _safe_track_number(track.get("track_number")),
+            "track_number": _format_track_number_for_rename(
+                track.get("track_number"),
+                track.get("disc_number"),
+                multi_disc=multi_disc,
+            ),
             "artist": _sanitize_path_component(track.get("artist") or "Unknown Artist") or "Unknown Artist",
             "album_artist": _normalize_album_artist_for_path(
                 _sanitize_path_component(track.get("album_artist") or "")

@@ -831,16 +831,23 @@ _DEFAULT_COMPILATION_ONLINE_CATALOGUE: dict[str, Any] = {
     "rank_percentile_3star": 0.35,
     "rank_percentile_2star": 0.65,
     "min_catalogue_size": 5,
-    # Absolute bar a compilation's 5★ must ALSO clear. The artist-catalogue
-    # percentile is scale-free, so "#1 of 9 songs" reached 5★ at 713 listeners
-    # while the album's real hits sat below it. BOTH bars must be cleared
-    # (2026-10-27: they used to be alternatives, which made the listener bar
-    # unreachable — see the changelog).
+    # Absolute bar a VA compilation's 5★ must ALSO clear. The online
+    # artist-catalogue percentile is scale-free, so "#1 of 9 songs" reached 5★
+    # at 713 listeners while the album's real hits sat below it. BOTH bars must
+    # be cleared (2026-10-27: they used to be alternatives, which made the
+    # listener bar unreachable — see the changelog).
+    #
+    # ⚠️ VA ONLY. A single-artist compilation (greatest hits / covers record)
+    # is rated on the artist's own local CAT-Z bands, not the online chart, so
+    # these bars are NOT applied to it. Measured on Feuerschwanz "Todsünden":
+    # every CAT-Z 5★ candidate sat at 7.6k-25.3k Last.fm listeners and the
+    # listener floor demoted all of them to 4★.
     "top_tier_min_score": 55.0,
     "top_tier_min_listeners": 250000,
-    # ⭐⭐ THE SAME GUARD ONE TIER DOWN. Demoting a 5★ to 4★ on the top-tier bar
-    # left tracks with NO popularity evidence holding 4★: measured on "Triple
-    # J's Hottest 100 (1996)", Allen Ginsberg's "Ballad of the Skeletons"
+    # ⭐⭐ THE SAME GUARD ONE TIER DOWN (also VA only). Demoting a 5★ to 4★ on
+    # the top-tier bar left tracks with NO popularity evidence holding 4★:
+    # measured on "Triple J's Hottest 100 (1996)", Allen Ginsberg's "Ballad of
+    # the Skeletons"
     # (final_score 0.0, 26 Last.fm listeners, 0 ListenBrainz listens) was 4★
     # because a scale-free "#1 of N" rank reached 5★ and the gate shaved one
     # tier off. A track clearing neither of these bars drops to the ABSOLUTE

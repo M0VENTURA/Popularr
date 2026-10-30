@@ -1,4 +1,7 @@
-"""Compilation star rating: the two absolute guards on the top tier.
+"""VA compilation star rating: the two absolute guards on the top tier.
+
+These guards are VA-ONLY: a single-artist compilation is rated on the artist's
+own CAT-Z bands and skips them (see ``TestTheGuardsAreVaOnly``).
 
 Reported on an 81-track playlist compilation ("Spotify - New Nu Metal")
 ------------------------------------------------------------------------
@@ -80,10 +83,14 @@ def _track(title, artist, *, score, lf, lb=0, raw=None, **overrides):
 
 
 def _assign(monkeypatch, track, *, rank, total, raw_scores=None, rules=None, **kwargs):
-    """Rate one compilation track against a stubbed online catalogue."""
+    """Rate one VA compilation track against a stubbed online catalogue."""
     import services.popularity.popularity_sources as ps
     from services.popularity.stages import finalise_stage as fs
 
+    # The guards under test are VA-only (a single-artist compilation is rated
+    # on the artist's own CAT-Z bands and skips them — see
+    # ``TestTheGuardsAreVaOnly``).
+    kwargs.setdefault("is_va_compilation", True)
     _rules = dict(RULES if rules is None else rules)
     monkeypatch.setattr(
         "helpers.config_helpers.get_compilation_online_catalogue_config",
@@ -237,6 +244,80 @@ class TestTheTopTierGate:
         )
 
         assert stars == 5
+
+
+# ===========================================================================
+# 1b. The guards are VA-only
+# ===========================================================================
+
+
+class TestTheGuardsAreVaOnly:
+    """⭐ Absolute reach bars belong to the VA (online) rating model.
+
+    A single-artist compilation is rated on the artist's own catalogue bands.
+    The listener floor there suppressed genuine catalogue hits: measured on
+    Feuerschwanz "Todsünden" (a covers album — ``va_compilation=False``), every
+    CAT-Z 5★ candidate sat at 7.6k-25.3k Last.fm listeners, so the album
+    produced ZERO 5★ ratings.
+    """
+
+    #: The hit sits at the top of a long tail, so CAT-Z is well past the band.
+    ARTIST_SCORES = [86.5, 60.0, 55.0, 50.0, 45.0, 40.0]
+
+    def test_a_catalogue_rated_artist_compilation_keeps_five(self, monkeypatch):
+        import services.popularity.popularity_sources as ps
+        from services.popularity.stages import finalise_stage as fs
+
+        called: list[str] = []
+        monkeypatch.setattr(
+            ps, "get_online_artist_track_rank",
+            lambda artist, title, lastfm_client=None: called.append(title) or {},
+        )
+        track = _track("Dragostea Din Tei", "Feuerschwanz", score=86.5, lf=25_290)
+
+        stars = fs._assign_stars(
+            track, [86.5], list(self.ARTIST_SCORES),
+            album_model=dict(ALBUM_MODEL),
+            is_compilation=True,
+            is_va_compilation=False,
+            compilation_raw_scores=[86.5] * 5,
+        )
+
+        assert track["_compilation_rating_mode"] == "track_artist_catalogue"
+        assert called == [], "a healthy local catalogue must not go online"
+        assert stars == 5, "the VA-only listener floor must not demote it"
+        assert track.get("_compilation_top_tier_gated") is None
+
+    def test_a_thin_catalogue_artist_compilation_is_not_gated(self, monkeypatch):
+        """The online fallback is still the ARTIST's own record, not a VA one."""
+        import services.popularity.popularity_sources as ps
+        from services.popularity.stages import finalise_stage as fs
+
+        monkeypatch.setattr(
+            "helpers.config_helpers.get_compilation_online_catalogue_config",
+            lambda: dict(RULES),
+        )
+        monkeypatch.setattr(
+            ps, "get_online_artist_track_rank",
+            lambda artist, title, lastfm_client=None: {
+                "rank": 1, "total": 200, "percentile": 0.005,
+                "listeners": 10_000, "top_listeners": 10_000,
+                "source": "lastfm_artist_top_tracks",
+            },
+        )
+        track = _track("Global Hit", "Feuerschwanz", score=86.5, lf=10_000)
+
+        stars = fs._assign_stars(
+            track, [86.5], [60.0, 55.0],
+            album_model=dict(ALBUM_MODEL),
+            is_compilation=True,
+            is_va_compilation=False,
+            compilation_raw_scores=[86.5] * 5,
+        )
+
+        assert track["_compilation_rating_mode"] == "track_artist_online_catalogue"
+        assert stars == 5
+        assert track.get("_compilation_top_tier_gated") is None
 
 
 # ===========================================================================

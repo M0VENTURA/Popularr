@@ -213,7 +213,10 @@ async def api_track_audio(track_id: str) -> Any:
 def api_track_rename_file(track_id: str) -> Any:
     """Rename/move a single track's file using the configured naming format."""
     try:
-        from services.downloads.download_organize_helpers import _build_target_path
+        from services.downloads.download_organize_helpers import (
+            _any_multi_disc,
+            _build_target_path,
+        )
 
         with db_session() as session:
             result = session.execute(
@@ -237,6 +240,21 @@ def api_track_rename_file(track_id: str) -> Any:
             track_number = mapping.get("track_number")
             disc_number = mapping.get("disc_number")
             year = mapping.get("year")
+
+            # A multi-disc album shares one folder, so disc 1 must be numbered
+            # 101/102 too — otherwise both discs start at 01. Determine that
+            # from the whole album, not just this track's disc number.
+            multi_disc = False
+            if album:
+                disc_rows = session.execute(
+                    text("""
+                        SELECT DISTINCT disc_number FROM tracks
+                        WHERE album = :album
+                          AND COALESCE(NULLIF(album_artist, ''), artist) = :artist
+                    """),
+                    {"album": album, "artist": album_artist or artist},
+                ).fetchall()
+                multi_disc = _any_multi_disc([r[0] for r in disc_rows])
             
         cfg = get_config() or {}
         music_root = os.path.realpath(
@@ -259,6 +277,7 @@ def api_track_rename_file(track_id: str) -> Any:
             track_number,
             src_resolved,
             disc_number=disc_number,
+            multi_disc=multi_disc,
         )
         dest = os.path.realpath(dest)
         if not is_path_under_directory(dest, music_root):

@@ -268,6 +268,33 @@ class TestTheFindingsAndSummary:
         assert "settled-in-window=" in line, line
         assert "already-confirmed=" in line, line
 
+    def test_a_reconfirmed_album_reports_its_covers_not_zero(self, monkeypatch, logged):
+        """⭐ A re-scan re-confirms stored verdicts WITHOUT writing them.
+
+        Counting only the writes made a fully-covered album log "0 cover(s)" —
+        which reads exactly like a detection failure even though the breakdown
+        said ``already-confirmed=11``. The leading number is the album's cover
+        total; ``new=`` keeps the distinction visible.
+        """
+        unified, _ = logged
+        _run(
+            monkeypatch,
+            [{"id": "t1", "title": "Song One", "artist": "Alestorm",
+              "work_mbid": "work-1", "is_cover": True,
+              "original_cover_artist": "The Original"}],
+            work_recordings=[
+                _recording("rec-orig", "Song One", "The Original", 1969),
+                _recording("rec-self", "Song One", "Alestorm", 2017),
+            ],
+        )
+
+        line = [l for l in unified if "cover(s)" in l][-1]
+        assert "1 cover(s)" in line, (
+            f"a re-confirmed cover must still be counted as a cover: {line}"
+        )
+        assert "new=0" in line, f"the summary must say nothing was newly written: {line}"
+        assert "already-confirmed=1" in line, line
+
     def test_it_announces_the_file_tag_write(self, monkeypatch, logged):
         """The remaining slow part after detection: one mutagen write per cover."""
         unified, _ = logged
