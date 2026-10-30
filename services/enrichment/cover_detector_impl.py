@@ -1339,6 +1339,7 @@ class CoverDetector:
             force=force,
         )
 
+        log_scan_detail("[COVER_DETECT] persisting cover_last_checked timestamps…")
         self._persist_checked(tracks, _fresh_skipped)
 
         _checked = len(_to_check)
@@ -1451,8 +1452,19 @@ class CoverDetector:
 
         from sqlalchemy import text as _text
         from db.engine import db_session as _db_session
+        from helpers.logging_config import log_scan_detail, log_unified
+
+        # ⭐ This phase used to be completely silent until it finished, so a
+        # slow music volume (each cleared verdict rewrites a whole audio file)
+        # was indistinguishable from a hung scan. Announce it.
+        log_unified(
+            f"[COVER_DETECT] clearing {len(to_clear)} unconfirmed cover "
+            f"verdict(s)…"
+        )
 
         cleared = 0
+        #: ``(file_path, title)`` for rows this pass actually cleared.
+        cleared_files: list[tuple[str, str | None]] = []
         for track in to_clear:
             tid = str(track.get("id") or "")
             raw_title = str(track.get("title") or "").strip()
@@ -1499,22 +1511,42 @@ class CoverDetector:
                                 "id": tid,
                             },
                         )
-                    if (result.rowcount or 0) > 0:
-                        cleared += 1
-                        fp = str(track.get("file_path") or "").strip()
-                        if fp:
-                            # ⚠️ THE FILE TAG MUST GO TOO. Clearing only the
-                            # DB row leaves ``IS_COVER`` on disk; the next
-                            # Navidrome import reads it back (OpenSubsonic's
-                            # ``tags``) and re-flags the track, so the false
-                            # verdict survives every scan and keeps showing up
-                            # in the Great Covers playlist.
-                            self._clear_cover_file_tags(
-                                fp, clean_title if title_changed else None
-                            )
+                    rowcount = int(result.rowcount or 0)
+                # ⚠️ THE FILE WORK RUNS AFTER THE TRANSACTION COMMITS.
+                #
+                # ``_clear_cover_file_tags`` copies and rewrites the WHOLE audio
+                # file, and it used to run INSIDE the ``with _db_session()``
+                # block: the UPDATE's row lock and a pooled connection stayed
+                # held for the entire file copy. On a slow/network music volume
+                # that kept the ``tracks`` row locked for seconds per track,
+                # stalling the scan's own writes and cancelling autovacuum's
+                # truncate — the "stuck after step 6" report and the noisy
+                # ``canceling autovacuum task`` lines.
+                if rowcount > 0:
+                    cleared += 1
+                    fp = str(track.get("file_path") or "").strip()
+                    if fp:
+                        cleared_files.append(
+                            (fp, clean_title if title_changed else None)
+                        )
             except Exception as exc:
                 logger.debug("Cover verdict clear failed", track_id=tid, error=str(exc))
 
+        for index, (fp, cleared_title) in enumerate(cleared_files, 1):
+            log_scan_detail(
+                f"[COVER_DETECT] clearing file tags {index}/{len(cleared_files)}: {fp}"
+            )
+            # The FILE TAG MUST GO TOO. Clearing only the DB row leaves
+            # ``IS_COVER`` on disk; the next Navidrome import reads it back
+            # (OpenSubsonic's ``tags``) and re-flags the track, so the false
+            # verdict survives every scan and keeps showing up in the Great
+            # Covers playlist.
+            self._clear_cover_file_tags(fp, cleared_title)
+
+        if cleared_files:
+            log_unified(
+                f"[COVER_DETECT] cleared file tags for {len(cleared_files)} track(s)"
+            )
         if cleared:
             logger.info(
                 "Cleared unconfirmed cover verdicts",
