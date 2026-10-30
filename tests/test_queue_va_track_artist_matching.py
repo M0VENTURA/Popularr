@@ -26,6 +26,7 @@ import pytest
 from sqlalchemy import text
 
 from db.engine import db_session
+from queue_schema_helpers import ensure_queue_table
 from db.repositories.queue import (
     get_album_queue_tracks,
     get_queue_tracks_for_artists,
@@ -37,44 +38,9 @@ _ALBUM = "2002 - MTV2 Handpicked"
 _OTHER_ALBUM = "Parachutes"
 
 
-def _ensure_queue_table() -> None:
-    """Create/repair the shared ``download_queue`` table for these tests."""
-    columns = {
-        "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
-        "title": "TEXT",
-        "artist": "TEXT",
-        "album": "TEXT",
-        "album_artist": "TEXT",
-        "track_number": "TEXT",
-        "disc_number": "TEXT",
-        "status": "TEXT",
-        "file_path": "TEXT",
-        "created_at": "TEXT",
-    }
-    with db_session() as session:
-        session.execute(text(
-            "CREATE TABLE IF NOT EXISTS download_queue ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, artist TEXT, "
-            "album TEXT, album_artist TEXT, track_number TEXT, "
-            "disc_number TEXT, status TEXT, file_path TEXT, created_at TEXT)"
-        ))
-        existing = {
-            str(row[1])
-            for row in session.execute(text("PRAGMA table_info(download_queue)")).fetchall()
-        }
-    for name, sql_type in columns.items():
-        if name in existing or name == "id":
-            continue
-        with db_session() as session:
-            try:
-                session.execute(text(f"ALTER TABLE download_queue ADD COLUMN {name} {sql_type}"))
-            except Exception:
-                pass
-
-
 @pytest.fixture(autouse=True)
 def _isolated_rows():
-    _ensure_queue_table()
+    ensure_queue_table()
 
     def _wipe() -> None:
         with db_session() as session:

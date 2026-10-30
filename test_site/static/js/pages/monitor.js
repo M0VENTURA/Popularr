@@ -615,7 +615,7 @@
   /**
    * Open the shared MusicBrainz search to associate a folder with a release.
    */
-  function openFolderMbSearch(folderPath, isChange, detectedArtist, detectedAlbum) {
+  async function openFolderMbSearch(folderPath, isChange, detectedArtist, detectedAlbum) {
     if (typeof global.openGlobalMbSearch !== 'function') {
       global.toast.error('The MusicBrainz search component is not loaded on this page.');
       return;
@@ -624,6 +624,18 @@
     // Captured in the closure rather than parked on window._folderMatchTarget,
     // which a second search could overwrite mid-flight.
     const target = folderPath;
+
+    // Albums already in the queue carry a release id, so they can be matched
+    // without searching MusicBrainz again — the reported "pick a release
+    // that's already there in case it was missed". A failure must not block
+    // the normal search.
+    let queueAlbums = [];
+    try {
+      const data = await global.api.getJson('/api/downloads/queue/albums');
+      queueAlbums = (data && data.albums) || [];
+    } catch (error) {
+      console.error('[monitor] queue album list failed:', error);
+    }
 
     global._mbSearchIncludeOwned = true;
     global.openGlobalMbSearch(detectedArtist, detectedAlbum, async function (selected) {
@@ -640,7 +652,7 @@
       } catch (error) {
         global.toast.error('Could not associate folder: ' + error.message);
       }
-    });
+    }, undefined, undefined, { queueAlbums });
   }
 
   // ── Disk actions ────────────────────────────────────────────────────────

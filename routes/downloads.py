@@ -121,6 +121,92 @@ def api_get_unmatched_folders() -> Any:
     return jsonify(get_unmatched_folders())
 
 
+@downloads_bp.route("/api/downloads/queue/albums")
+def api_queue_albums() -> Any:
+    """Distinct albums currently in the download queue, for folder matching.
+
+    Matching a folder to a release used to start from a blank MusicBrainz
+    search, so an album that was already queued (and therefore already has a
+    release id) had to be found again by hand. The monitor shows these first,
+    with the search underneath for anything else.
+    """
+    statuses = [
+        "queued", "searching", "downloading", "processing", "moving",
+        "matched", "completed", "imported", "in_collection", "backed_off",
+        "pending_release", "pending_match", "possible_duplicate", "duplicate",
+        "queried", "copy_recommended",
+    ]
+    try:
+        from sqlalchemy import bindparam
+
+        with db_session() as session:
+            rows = session.execute(
+                text("""
+                    SELECT album, album_artist, artist, release_mbid,
+                           release_id, release_source,
+                           musicbrainz_releasegroupid, cover_art_url
+                    FROM download_queue
+                    WHERE COALESCE(TRIM(album), '') <> ''
+                      AND status IN :statuses
+                """).bindparams(bindparam("statuses", expanding=True)),
+                {"statuses": statuses},
+            ).mappings().all() or []
+    except Exception as exc:
+        logger.error("Failed to list queue albums", error=str(exc))
+        return jsonify({"success": False, "albums": [], "error": str(exc)}), 500
+
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw in rows:
+        row = dict(raw)
+        album = str(row.get("album") or "").strip()
+        if not album:
+            continue
+        artist = str(row.get("album_artist") or row.get("artist") or "").strip()
+        key = (artist.casefold(), album.casefold())
+        entry = groups.setdefault(key, {
+            "artist": artist,
+            "album": album,
+            "release_mbid": "",
+            "release_group_mbid": "",
+            "release_id": "",
+            "mb_id": "",
+            "cover_art_url": "",
+            "track_count": 0,
+        })
+        entry["track_count"] += 1
+        if not entry["release_mbid"] and str(row.get("release_mbid") or "").strip():
+            entry["release_mbid"] = str(row["release_mbid"]).strip()
+        if (
+            not entry["release_group_mbid"]
+            and str(row.get("musicbrainz_releasegroupid") or "").strip()
+        ):
+            entry["release_group_mbid"] = str(row["musicbrainz_releasegroupid"]).strip()
+        # Older / other queueing paths store the release id in ``release_id``
+        # and do not fill ``release_mbid``. Only a MUSICBRAINZ id is usable for
+        # association (a Discogs id would be resolved as a MusicBrainz id).
+        _source = str(row.get("release_source") or "").strip().lower()
+        _release_id = str(row.get("release_id") or "").strip()
+        if _release_id and _source in ("", "musicbrainz") and not entry["release_id"]:
+            entry["release_id"] = _release_id
+        if not entry["cover_art_url"] and str(row.get("cover_art_url") or "").strip():
+            entry["cover_art_url"] = str(row["cover_art_url"]).strip()
+
+    albums: list[dict[str, Any]] = []
+    for entry in groups.values():
+        entry["mb_id"] = (
+            entry["release_mbid"] or entry["release_group_mbid"] or entry["release_id"]
+        )
+        # No MusicBrainz id means the folder cannot be associated with it; it
+        # would only be an unselectable row.
+        if not entry["mb_id"]:
+            continue
+        albums.append(entry)
+    albums.sort(key=lambda item: (
+        item["artist"].casefold(), item["album"].casefold(),
+    ))
+    return jsonify({"success": True, "albums": albums, "count": len(albums)})
+
+
 @downloads_bp.route("/api/downloads/folder/match", methods=["POST"])
 async def api_match_folder_to_release() -> Any:
     """Copy an unmatched folder into the library as a MusicBrainz release."""

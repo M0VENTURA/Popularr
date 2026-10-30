@@ -213,14 +213,25 @@
     const subtitleHtml = s.subtitleHtml || '';
     const metaHtml = s.metaHtml || '';
 
+    // ⚠️ MOBILE: the action cluster used to be `flex-shrink-0` in a row that
+    // never wrapped. On a phone the "Change Match / Confirm Match / Delete"
+    // cluster took almost the whole width, leaving the text column ~one
+    // character wide — the reported single-letter vertical column. The row now
+    // WRAPS the actions below the text when they do not fit, and a
+    // non-collapsible row (which carries a subtitle and a meta line) keeps a
+    // usable minimum width so flexbox shrinks the ACTIONS, not the words.
+    const titleStyle = s.collapsible ? 'min-width:0;' : 'min-width:12rem;';
+    const actionsClass = (s.actionsClass
+      || 'd-flex align-items-center gap-1 flex-shrink-0') + ' ms-auto';
+
     return `
       <div class="list-group-item${extraClass}"${attrsHtml}>
-        <div class="d-flex justify-content-between ${align} gap-2">
+        <div class="d-flex flex-wrap justify-content-between ${align} gap-2">
           ${toggleHtml}
-          <div class="${titleColumnClass}" style="min-width:0;">
+          <div class="${titleColumnClass}" style="${titleStyle}">
             ${titleHtml}${subtitleHtml}${metaHtml}
           </div>
-          ${actionsCluster(s.actionsHtml, { className: s.actionsClass })}
+          ${actionsCluster(s.actionsHtml, { className: actionsClass })}
         </div>
         ${bodyHtml}
       </div>`;

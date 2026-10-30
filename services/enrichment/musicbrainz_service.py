@@ -36,6 +36,7 @@ from api_clients.musicbrainz_http import (
 from helpers.normalization_service import (
     edition_annotations_compatible as Edition_annotations_compatible,
     extract_edition_annotation as Extract_edition_annotation,
+    extract_version_info as Extract_version_info,
     format_duration_mmss as Format_duration_mmss,
     is_track_artist_placeholder,
     normalize_string as Normalize_string,
@@ -567,6 +568,45 @@ def _recording_live_affinity(recording: Any) -> bool | None:
             return True
     return False
 
+
+#: Title tokens that identify a remix rather than the original recording.
+_REMIX_TITLE_TOKENS = frozenset({"remix", "remixed", "re-mix", "re-mixed", "mix"})
+
+
+def _recording_remix_affinity(recording: Any) -> bool | None:
+    """Is this search candidate a REMIX recording, an original, or unknown?
+
+    ``None`` means "no evidence either way" — a candidate with no releases and
+    an unannotated title must not vote, exactly like a blank live affinity.
+
+    Evidence, strongest first:
+    * the recording's own title carries a remix/mix token;
+    * one of its releases belongs to a release group whose MusicBrainz
+      secondary type is ``remix`` (the normal way a remix album is tagged).
+    """
+    if not isinstance(recording, dict):
+        return None
+
+    title = str(recording.get("title") or "")
+    try:
+        _base, versions = Extract_version_info(title)
+        if versions & _REMIX_TITLE_TOKENS:
+            return True
+    except Exception:
+        pass
+
+    releases = [r for r in (recording.get("releases") or []) if isinstance(r, dict)]
+    if not releases:
+        return None
+    for release in releases:
+        secondary = {
+            str(s).strip().casefold()
+            for s in _release_group_secondary_types_of(release)
+        }
+        if "remix" in secondary:
+            return True
+    return False
+
 def _client_available(client: Any) -> bool:
     checker = getattr(client, "is_available", None)
     if not callable(checker):
@@ -639,16 +679,34 @@ class MusicBrainzService:
         self._maybe_flush_cache(force=True)
 
     @staticmethod
-    def _cache_key(title: str, artist: str, is_live: bool = False, annotation: str | None = None) -> str:
+    def _cache_key(
+        title: str,
+        artist: str,
+        is_live: bool = False,
+        annotation: str | None = None,
+        is_remix: bool = False,
+    ) -> str:
         base = f"{artist.casefold().strip()}::{title.casefold().strip()}"
         if is_live:
             base = f"{base}::live"
+        if is_remix:
+            base = f"{base}::remix"
         if annotation:
             base = f"{base}::{annotation}"
         return base
 
     def get_suggested_mbid(self, title: str, artist: str, limit: int = 5, **kwargs: Any) -> tuple[str, float]:
         is_live_release = bool(kwargs.get("is_live_release"))
+        is_remix_release = bool(kwargs.get("is_remix_release"))
+        if not is_remix_release:
+            # A title that NAMES a remix is proof on its own. Callers such as
+            # ``get_genres`` pass no album context, and without this they would
+            # penalise the very remix recording the title points at.
+            try:
+                _base_title, _variants = Extract_version_info(title)
+                is_remix_release = bool(_variants & _REMIX_TITLE_TOKENS)
+            except Exception:
+                pass
         edition_annotation = str(kwargs.get("edition_annotation") or "").strip() or None
         on_miss = kwargs.get("on_miss")
         context = {
@@ -656,13 +714,18 @@ class MusicBrainzService:
             "track": title,
             "limit": limit,
             "is_live_release": is_live_release,
+            "is_remix_release": is_remix_release,
             "edition_annotation": edition_annotation,
         }
         if not self.enabled or not title or not artist:
             return "", 0.0
 
         cache_key = self._cache_key(
-            title, artist, is_live=is_live_release, annotation=edition_annotation,
+            title,
+            artist,
+            is_live=is_live_release,
+            annotation=edition_annotation,
+            is_remix=is_remix_release,
         )
         now = time.time()
         with self._mem_lock:
@@ -702,7 +765,7 @@ class MusicBrainzService:
                 log_context=context,
             ) or []
             best_mbid, best_score = "", 0.0
-            best_rank: tuple[int, int, float] | None = None
+            best_rank: tuple[int, int, int, float] | None = None
             normalized_title = Normalize_title_for_mbid_match(title)
             track_annotation = Extract_edition_annotation(title)
             album_annotation = edition_annotation if track_annotation is None else None
@@ -727,7 +790,25 @@ class MusicBrainzService:
                     _live_rank = 1
                 else:
                     _live_rank = 2 if _affinity == is_live_release else 0
-                _rank = (_live_rank, 1 if annotation_ok else 0, score)
+
+                # ⭐ A remix album must match its REMIX recordings, not the
+                # original song. Without this, a track on "New Old Songs"
+                # (Limp Bizkit's remix collection) matched the studio original
+                # whenever the local title carried only a remixer's name:
+                # the live/annotation/score ranking had no remix preference,
+                # and the original often won on title similarity.
+                _remix_affinity = _recording_remix_affinity(recording)
+                if _remix_affinity is None:
+                    _remix_rank = 1
+                else:
+                    _remix_rank = 2 if _remix_affinity == is_remix_release else 0
+
+                _rank = (
+                    _live_rank,
+                    _remix_rank,
+                    1 if annotation_ok else 0,
+                    score,
+                )
 
                 if best_rank is None or _rank > best_rank:
                     best_rank = _rank
@@ -748,12 +829,23 @@ class MusicBrainzService:
         except Exception:
             return "", 0.0
 
-    def lookup_recording_metadata(self, title: str, artist: str, *, album: str | None = None, is_live_release: bool = False, edition_annotation: str | None = None, **kwargs: Any) -> dict[str, Any]:
+    def lookup_recording_metadata(
+        self,
+        title: str,
+        artist: str,
+        *,
+        album: str | None = None,
+        is_live_release: bool = False,
+        is_remix_release: bool = False,
+        edition_annotation: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         context = {
             "title": title,
             "artist": artist,
             "album": album,
             "is_live_release": bool(is_live_release),
+            "is_remix_release": bool(is_remix_release),
             "edition_annotation": edition_annotation,
         }
         if not title or not artist:
@@ -768,6 +860,7 @@ class MusicBrainzService:
                     title,
                     artist,
                     is_live_release=is_live_release,
+                    is_remix_release=is_remix_release,
                     edition_annotation=edition_annotation,
                     on_miss=on_miss,
                 )
@@ -785,6 +878,7 @@ class MusicBrainzService:
                     title,
                     artist,
                     is_live_release=is_live_release,
+                    is_remix_release=is_remix_release,
                     edition_annotation=edition_annotation,
                     on_miss=on_miss,
                 )
@@ -1624,6 +1718,7 @@ def lookup_recording_metadata(
     *,
     album: str | None = None,
     is_live_release: bool = False,
+    is_remix_release: bool = False,
     edition_annotation: str | None = None,
     mbid: str | None = None,
     on_miss: Any = None,
@@ -1633,6 +1728,7 @@ def lookup_recording_metadata(
         artist,
         album=album,
         is_live_release=is_live_release,
+        is_remix_release=is_remix_release,
         edition_annotation=edition_annotation,
         mbid=mbid,
         on_miss=on_miss,

@@ -111,13 +111,18 @@
    * @param {Function} [callback] receives the chosen release object
    * @param {string} [track]
    * @param {string} [year]
+   * @param {Object} [opts]
+   * @param {Array} [opts.queueAlbums] albums already in the download queue,
+   *        rendered ABOVE the search so a missed release can be picked without
+   *        searching for it again
    */
-  function openGlobalMbSearch(artist, album, callback, track, year) {
+  function openGlobalMbSearch(artist, album, callback, track, year, opts) {
     const modalEl = document.getElementById(MODAL_ID);
     if (!modalEl) {
       console.error('MusicBrainz modal not found in DOM.');
       return;
     }
+    const options = opts || {};
 
     // Every field is CLEARED when no value is supplied. The old guard was
     // `if (el && value)`, so a stale value from a previous open survived:
@@ -139,6 +144,8 @@
     const panel = document.getElementById('mbSelectedRelease');
     if (panel) panel.classList.add('d-none');
 
+    renderQueueAlbums(options.queueAlbums);
+
     if (global.modal) global.modal.show(modalEl);
     else if (global.bootstrap) global.bootstrap.Modal.getOrCreateInstance(modalEl).show();
 
@@ -148,6 +155,74 @@
     modalEl.addEventListener('shown.bs.modal', function runOnce() {
       performSearch();
     }, { once: true });
+  }
+
+  /**
+   * Render the "albums already in your download queue" block above the search.
+   *
+   * ⚠️ This is a MATCH-ONLY affordance: callers that pass no ``queueAlbums``
+   * (the album page's lookup, bulk downloads) get no block, and a stale list
+   * from a previous folder is removed. Selecting a queued album stages it
+   * through the SAME confirmation panel as a search result, so "Apply Match"
+   * still has to be pressed.
+   */
+  function renderQueueAlbums(albums) {
+    const modalEl = document.getElementById(MODAL_ID);
+    const body = modalEl ? modalEl.querySelector('.modal-body') : null;
+    if (!body) return;
+
+    let section = document.getElementById('mbQueueAlbumsSection');
+    if (!Array.isArray(albums) || !albums.length) {
+      if (section) section.remove();
+      return;
+    }
+
+    if (!section) {
+      section = document.createElement('div');
+      section.id = 'mbQueueAlbumsSection';
+      section.className = 'mb-3';
+      body.insertBefore(section, body.firstChild);
+    }
+
+    section.innerHTML = `
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h6 class="mb-0 fw-bold">
+          <i class="bi bi-download me-1"></i>In your download queue
+        </h6>
+        <small class="text-muted">${albums.length} album(s)</small>
+      </div>
+      <div class="list-group mb-2" style="max-height:15rem;overflow-y:auto;">
+        ${albums.map((album, index) => `
+          <button type="button" class="list-group-item list-group-item-action bg-dark text-light border-secondary mb-queue-album" data-index="${index}">
+            <div class="d-flex justify-content-between align-items-center gap-2">
+              <div class="min-w-0">
+                <div class="fw-semibold text-truncate">${esc(album.album || '')}</div>
+                <small class="text-muted d-block text-truncate">
+                  ${esc(album.artist || '')}${album.track_count ? ` · ${Number(album.track_count) || 0} track(s)` : ''}
+                </small>
+              </div>
+              <span class="badge bg-info text-dark flex-shrink-0">In queue</span>
+            </div>
+          </button>`).join('')}
+      </div>
+      <div class="text-muted extra-small mb-3">
+        Pick a queued album above — or search MusicBrainz below for a different release.
+      </div>`;
+
+    section.querySelectorAll('.mb-queue-album').forEach((button) => {
+      button.addEventListener('click', function () {
+        const album = albums[parseInt(this.dataset.index, 10)];
+        if (!album || !album.mb_id) return;
+        stageSelection({
+          id: album.mb_id,
+          title: album.album || '',
+          artist: album.artist || '',
+          category: 'queue',
+          cover_art_url: album.cover_art_url || '',
+          _from_queue: true,
+        });
+      });
+    });
   }
 
   /**

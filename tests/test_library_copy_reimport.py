@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy import text
 
 from db.engine import db_session
+from queue_schema_helpers import ensure_queue_table
 from services.downloads import library_copy_service as lcs
 from services.queue import queue_processing_service as qps
 
@@ -27,70 +28,9 @@ _ALBUM = "2002 - MTV2 Handpicked"
 _SOURCE_ALBUM = "Parachutes"
 
 
-def _ensure_queue_table() -> None:
-    columns = {
-        "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
-        "title": "TEXT",
-        "artist": "TEXT",
-        "album": "TEXT",
-        "album_artist": "TEXT",
-        "track_number": "TEXT",
-        "disc_number": "TEXT",
-        "duration": "TEXT",
-        "status": "TEXT",
-        "source": "TEXT",
-        "file_path": "TEXT",
-        "found_filename": "TEXT",
-        "music_file_path": "TEXT",
-        "created_at": "TEXT",
-        "updated_at": "TEXT",
-        # Columns other queue tests touch; keeping the shared table useful
-        # avoids leaving a reduced shape behind for the rest of the session.
-        "priority": "INTEGER",
-        "source_id": "TEXT",
-        "search_query": "TEXT",
-        "import_group": "TEXT",
-        "import_type": "TEXT",
-        "year": "TEXT",
-        "release_year": "INTEGER",
-        "release_date": "TEXT",
-        "retry_count": "INTEGER",
-        "retry_delay_minutes": "INTEGER",
-        "next_retry_at": "TIMESTAMP",
-        "last_failure_time": "TIMESTAMP",
-        "failure_reason": "TEXT",
-        "metadata": "TEXT",
-    }
-    with db_session() as session:
-        session.execute(text(
-            "CREATE TABLE IF NOT EXISTS download_queue ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, artist TEXT, "
-            "album TEXT, album_artist TEXT, track_number TEXT, disc_number TEXT, "
-            "duration TEXT, status TEXT, source TEXT, file_path TEXT, "
-            "found_filename TEXT, music_file_path TEXT, created_at TEXT, "
-            "updated_at TEXT, priority INTEGER, source_id TEXT, search_query TEXT, "
-            "import_group TEXT, import_type TEXT, year TEXT, release_year INTEGER, "
-            "release_date TEXT, retry_count INTEGER, retry_delay_minutes INTEGER, "
-            "next_retry_at TIMESTAMP, last_failure_time TIMESTAMP, "
-            "failure_reason TEXT, metadata TEXT)"
-        ))
-        existing = {
-            str(row[1])
-            for row in session.execute(text("PRAGMA table_info(download_queue)")).fetchall()
-        }
-    for name, sql_type in columns.items():
-        if name in existing or name == "id":
-            continue
-        with db_session() as session:
-            try:
-                session.execute(text(f"ALTER TABLE download_queue ADD COLUMN {name} {sql_type}"))
-            except Exception:
-                pass
-
-
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path, monkeypatch):
-    _ensure_queue_table()
+    ensure_queue_table()
     monkeypatch.setenv("DOWNLOADS_DIR", str(tmp_path / "downloads"))
 
     def _wipe() -> None:

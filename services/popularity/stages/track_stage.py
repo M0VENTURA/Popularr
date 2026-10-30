@@ -90,6 +90,7 @@ from services.enrichment.genre_aggregation_service import (
 from db.repositories.tracks import insert_or_update_track
 from helpers.normalization_service import (
     edition_annotations_compatible,
+    extract_version_info,
     safe_int,
     safe_str,
     is_track_artist_placeholder,
@@ -169,6 +170,47 @@ def _album_type_indicates_live(
             if raw and "live" in str(raw).strip().lower():
                 return True
     return False
+
+
+def _album_type_indicates_remix(
+    *sources: dict[str, Any] | None,
+) -> bool:
+    """True if any known album-type field reads as a REMIX release.
+
+    Mirrors ``_album_type_indicates_live`` (same fields, same "varies by scan
+    mode" reasoning): MusicBrainz composes secondary types as ``album+remix``,
+    so this is a substring match. The raw secondary type is included because
+    the display/persisted type can be downgraded when local evidence does not
+    corroborate it — but the MusicBrainz classification still means the tracks
+    are remixes.
+    """
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        if source.get("remix_album_type"):
+            return True
+        for field in _ALBUM_LIVE_TYPE_FIELDS:
+            raw = source.get(field)
+            if not raw:
+                continue
+            value = str(raw).strip().lower()
+            if "remix" in value or "re-mix" in value:
+                return True
+    return False
+
+
+#: Variation tokens that make a TRACK a remix. ``mix`` is included because a
+#: remix album routinely names the version after its remixer ("... (P. Diddy
+#: Mix)") without ever writing the word "remix".
+_REMIX_TITLE_TOKENS = frozenset({"remix", "remixed", "re-mix", "re-mixed", "mix"})
+
+
+def _track_title_indicates_remix(title: str) -> bool:
+    try:
+        _base, variants = extract_version_info(str(title or ""))
+    except Exception:
+        return False
+    return bool(variants & _REMIX_TITLE_TOKENS)
 
 
 def _has_safe_live_recording_tag(payload: dict[str, Any]) -> bool:
@@ -1080,6 +1122,13 @@ def _resolve_track_mb_metadata(
                     _album_type_indicates_live(track, album_context, album_result)
                     or is_live_or_alternate_track_title(title)
                 )
+                # The album stage already classified a remix collection
+                # ("album+remix"); carry that into the recording search, plus a
+                # per-track title marker for a remix queued outside one.
+                _is_remix_release = bool(
+                    _album_type_indicates_remix(track, album_context, album_result)
+                    or _track_title_indicates_remix(title)
+                )
 
                 # ── Durable "search completed, no result" stamp ────────────
                 # Fired ONLY when lookup_recording_metadata's search CONFIRMS a
@@ -1099,6 +1148,7 @@ def _resolve_track_mb_metadata(
                     artist,
                     album=_album_anchor or None,
                     is_live_release=_is_live_release,
+                    is_remix_release=_is_remix_release,
                     edition_annotation=edition_annotation,
                     mbid=_track_mbid or None,
                     on_miss=_stamp_recording_mbid_miss,
