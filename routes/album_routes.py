@@ -850,7 +850,17 @@ async def api_album_tracklist_csv() -> Any:
         return jsonify({"error": "csv is empty"}), 400
     try:
         from services.metadata.album_missing_service import import_csv_tracklist
-        result = import_csv_tracklist(artist, album, csv_text)
+
+        # ⚠️ OFF THE EVENT LOOP. The import issues several DB statements (a
+        # flag write on ``tracks``, the library read, the queue scan, the
+        # persist), and while a scan is running any of them can WAIT for a
+        # pooled connection (``db_pool_timeout`` is 30s) or for a row lock on
+        # the album's tracks. Run inline, that wait froze every other request
+        # in this process — the page saw a bare "Request timed out after 30s"
+        # with no server-side error, because the client gave up first.
+        # ``to_thread`` matches the hub/lookup endpoints below and lets the
+        # import finish even if the browser stops waiting.
+        result = await asyncio.to_thread(import_csv_tracklist, artist, album, csv_text)
         return jsonify(result)
     except Exception as exc:
         logger.error("CSV tracklist import failed", artist=artist, album=album, error=str(exc))

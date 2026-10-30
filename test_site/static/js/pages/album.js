@@ -3197,7 +3197,16 @@
     if (btn) btn.disabled = true;
     if (status) status.innerHTML = '<span class="text-muted">Importing tracklist…</span>';
     try {
-      const data = await global.api.postJson('/api/album/tracklist-csv', { artist, album, csv: text });
+      // The import is a DB WRITE, not a read. While a scan runs it can queue
+      // behind pooled connections / row locks on the album's tracks (the pool
+      // timeout alone is 30s), so the generic 30s abort reported "failed" for
+      // imports the server then completed anyway. Give a user-initiated write
+      // a real ceiling.
+      const data = await global.api.postJson(
+        '/api/album/tracklist-csv',
+        { artist, album, csv: text },
+        { timeoutMs: 120000 },
+      );
       if (status) {
         if (data && data.success) {
           const n = Number(data.missing_count || 0);
@@ -3211,7 +3220,13 @@
         }
       }
     } catch (err) {
-      if (status) status.innerHTML = `<span class="text-danger">Import failed: ${esc(err && err.message ? err.message : err)}</span>`;
+      const msg = err && err.message ? err.message : String(err);
+      // A client abort does not cancel the server's DB work: say so, or the
+      // operator re-uploads a list that is already being persisted.
+      const hint = /timed out/i.test(msg)
+        ? ' The server may still finish the import — reload the page in a moment to check the missing list.'
+        : '';
+      if (status) status.innerHTML = `<span class="text-danger">Import failed: ${esc(msg)}${hint}</span>`;
     } finally {
       if (btn) btn.disabled = false;
     }

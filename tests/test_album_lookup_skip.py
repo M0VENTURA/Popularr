@@ -329,6 +329,32 @@ class TestWiring:
         assert '"/tracklist-csv"' in src
         assert "import_csv_tracklist" in src
 
+    def test_endpoint_runs_the_import_off_the_event_loop(self):
+        """The import is DB work that can WAIT (pool/lock) while a scan runs.
+
+        Run inline in the async handler it froze every other request in the
+        process for the whole wait — the page saw only "Request timed out
+        after 30s".
+        """
+        src = (REPO_ROOT / "routes" / "album_routes.py").read_text(encoding="utf-8")
+        block = src[src.index("async def api_album_tracklist_csv"):]
+        block = block[: block.index("@album_bp.route", 1)]
+        assert "await asyncio.to_thread(import_csv_tracklist" in block, (
+            "the CSV import must not block the Quart event loop"
+        )
+
+    def test_the_upload_allows_for_a_slow_write(self):
+        js = (
+            REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
+        ).read_text(encoding="utf-8")
+        block = js[js.index("async function uploadAlbumCsvTracklist"):]
+        block = block[: block.index("async function loadAlbumMissingTracks")]
+        assert "'/api/album/tracklist-csv'" in block
+        assert "timeoutMs: 120000" in block, (
+            "aborting a write at the generic 30s reported failure for imports "
+            "the server completed anyway"
+        )
+
     def test_test_site_template_and_js_have_the_controls(self):
         html = (REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html").read_text(encoding="utf-8")
         # The checkbox moved OUT of #albumMetadataForm into its OWN card with

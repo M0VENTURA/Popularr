@@ -702,7 +702,23 @@ def import_csv_tracklist(artist: str, album: str, csv_text: str) -> dict[str, An
     Returns ``{"success", "imported", "missing_count", "missing_tracks",
     "library_count", "rows_read", "errors"}``.
     """
+    # Stage timings: the import is a handful of DB round trips, so a slow one
+    # is a wait (pool checkout / row lock behind a running scan), not CPU. The
+    # summary line names which stage paid it instead of leaving the operator
+    # with a bare "Request timed out".
+    import time as _time
+
+    timings: dict[str, int] = {}
+    _t = _time.perf_counter()
+
+    def _lap(name: str) -> None:
+        nonlocal _t
+        _now = _time.perf_counter()
+        timings[f"{name}_ms"] = round((_now - _t) * 1000)
+        _t = _now
+
     rows, errors = _parse_csv_tracklist(csv_text)
+    _lap("parse")
 
     # Reserve the skip flag BEFORE the persist: even a 0-row CSV must stop the
     # scan's MB refresh from wiping the album's existing missing list.
@@ -711,6 +727,7 @@ def import_csv_tracklist(artist: str, album: str, csv_text: str) -> dict[str, An
         set_album_lookup_skip(artist, album, True)
     except Exception as exc:
         logger.debug("Album lookup-skip flag write failed during CSV import", error=str(exc))
+    _lap("flag")
 
     with db_session() as session:
         album_key = _album_key(album)
@@ -727,6 +744,7 @@ def import_csv_tracklist(artist: str, album: str, csv_text: str) -> dict[str, An
         ).mappings().all()
         library_rows = _rows_in_album(library_rows)
         library_count = len(library_rows)
+    _lap("library")
 
     (
         queued_titles,
@@ -742,6 +760,7 @@ def import_csv_tracklist(artist: str, album: str, csv_text: str) -> dict[str, An
             if str(row.get("artist") or "").strip()
         },
     )
+    _lap("queue")
 
     lib_norm = {_title_match_key(str(r.get("title") or "")) for r in library_rows if r.get("title")}
     lib_by_position: dict[tuple[int, str], str] = {}
@@ -783,11 +802,14 @@ def import_csv_tracklist(artist: str, album: str, csv_text: str) -> dict[str, An
             "release_id": None,
             "recording_mbid": None,
         })
+    _lap("match")
 
     _persist_missing_tracks(artist, album, missing)
+    _lap("persist")
     logger.info(
         "Persisted missing tracks from uploaded CSV",
         artist=artist, album=album, rows_read=len(rows), missing=len(missing),
+        library_count=library_count, total_ms=sum(timings.values()), **timings,
     )
     return {
         "success": True,

@@ -422,3 +422,108 @@ class TestEveryDetectionStepIsGivenThePerformer:
         sig2 = inspect.signature(impl.CoverDetector._check_release_for_cover)
         assert "performer" in sig2.parameters
         assert "album_artist" not in sig2.parameters
+
+
+# ---------------------------------------------------------------------------
+# 6. A row that still carries the album placeholder gets its performer
+# ---------------------------------------------------------------------------
+
+
+class TestAPlaceholderRowIsGivenThePerformerItsFileNames:
+    """REPORTED: Ghost's "It's a Sin" came back "not a cover" on a VA
+    compilation, although MusicBrainz models it as a cover of the Pet Shop
+    Boys' work (a ``performance`` work relation carrying the ``cover``
+    attribute).
+
+    The DB row still carried the album placeholder — the track stage only
+    replaces it when the metadata scan RESOLVED the track — so
+    ``comparison_artist`` was empty and every step silently bailed: the pass
+    reported 0 cover(s) with all six steps settling nothing.
+    """
+
+    @staticmethod
+    def _run(
+        monkeypatch, track: dict, *, recording_credit: str = "",
+    ) -> tuple[list[dict], dict]:
+        det = _detector(_WriterStub([], []))
+        det._collect_track_writers = lambda *a, **k: {}
+        det._resolve_recording_mbid = lambda *a, **k: "rec-ghost"
+        det._get_recording = lambda mbid, inc: {
+            "id": mbid,
+            "artist-credit": [
+                {"artist": {"id": "a-ghost", "name": recording_credit}}
+            ],
+        }
+        seen: dict = {}
+
+        def _detect(**kwargs):
+            seen.update(kwargs)
+            return {"artist": "Pet Shop Boys", "year": 1987, "confidence": "high"}
+
+        det._detect_via_recording_relation = _detect
+        monkeypatch.setattr(
+            impl, "apply_cover_metadata_batch",
+            lambda conn, ups: [str(u["track_id"]) for u in ups],
+        )
+        results = det.detect_covers_for_album(
+            "Spotify - Metal Covers", ALBUM_ARTIST, [track], force=True,
+        )
+        return results, seen
+
+    def test_the_files_artist_is_used_as_the_performer(self, monkeypatch) -> None:
+        import helpers.metadata_reader as metadata_reader
+
+        monkeypatch.setattr(
+            metadata_reader, "read_mp3_metadata",
+            lambda path: {"artist": "Ghost", "title": "It's a Sin"},
+        )
+        track = {
+            "id": "t1", "title": "It's a Sin", "artist": ALBUM_ARTIST,
+            "album_artist": ALBUM_ARTIST, "album": "Spotify - Metal Covers",
+            "file_path": "/music/Spotify - Metal Covers/It's a Sin.mp3",
+        }
+
+        results, seen = self._run(monkeypatch, track)
+
+        assert seen.get("performer") == "Ghost", (
+            "the pass compared against the placeholder, so the confirmed cover "
+            "was discarded by the _record funnel"
+        )
+        assert results and results[0]["original_artist"] == "Pet Shop Boys"
+
+    def test_the_recordings_credit_is_the_fallback(self, monkeypatch) -> None:
+        import helpers.metadata_reader as metadata_reader
+
+        monkeypatch.setattr(metadata_reader, "read_mp3_metadata", lambda path: {})
+        track = {
+            "id": "t1", "title": "It's a Sin", "artist": ALBUM_ARTIST,
+            "album_artist": ALBUM_ARTIST, "album": "Spotify - Metal Covers",
+            "file_path": "/music/missing.mp3",
+            "recording_mbid": "rec-ghost",
+        }
+
+        results, seen = self._run(monkeypatch, track, recording_credit="Ghost")
+
+        assert seen.get("performer") == "Ghost"
+        assert results and results[0]["original_artist"] == "Pet Shop Boys"
+
+    def test_a_real_track_artist_never_opens_the_file(self, monkeypatch) -> None:
+        """CONTROL: ordinary tracks must not pay a file read."""
+        import helpers.metadata_reader as metadata_reader
+
+        opened: list[str] = []
+        monkeypatch.setattr(
+            metadata_reader, "read_mp3_metadata",
+            lambda path: opened.append(path) or {"artist": "Ghost"},
+        )
+        track = {
+            "id": "t1", "title": "It's a Sin", "artist": "Ghost",
+            "album_artist": ALBUM_ARTIST, "album": "Spotify - Metal Covers",
+            "file_path": "/music/Spotify - Metal Covers/It's a Sin.mp3",
+        }
+
+        results, seen = self._run(monkeypatch, track)
+
+        assert opened == [], "an ordinary track paid a file read"
+        assert seen.get("performer") == "Ghost"
+        assert results

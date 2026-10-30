@@ -42,6 +42,26 @@ class _FakeDetector:
         }]
 
 
+class _ReconfirmingDetector:
+    """A pass that re-confirmed the stored verdicts and wrote nothing.
+
+    The real detector returns only the verdicts it WROTE and publishes the
+    album's cover total separately in ``last_pass_counts``.
+    """
+
+    def __init__(self, db_connection=None):
+        self.db_connection = db_connection
+        self.last_pass_counts: dict[str, int] = {}
+
+    def detect_covers_for_album(self, album, artist, tracks, force=False):
+        self.last_pass_counts = {
+            "cover_total": len(tracks),
+            "new_count": 0,
+            "repaired_count": 0,
+        }
+        return []
+
+
 @pytest.fixture(autouse=True)
 def _isolated_tracks(monkeypatch):
     _FakeDetector.calls = []
@@ -148,6 +168,45 @@ class TestArtistScope:
         _seed()
 
         assert cds.detect_covers_for_artist("Album Artist") == 2
+
+
+class TestAlreadyConfirmedCoversAreStillReported:
+    """REPORTED: a forced re-scan of a 27-track compilation with 17 stored
+    covers logged "27 track(s), 0 cover(s)".
+
+    The detector returns only the verdicts it WROTE — a re-confirmed cover is
+    not rewritten — so counting that list made an album full of covers look
+    coverless. The pass publishes the total instead.
+    """
+
+    @staticmethod
+    def _use_reconfirming_detector(monkeypatch) -> None:
+        monkeypatch.setattr(cds, "CoverDetector", _ReconfirmingDetector)
+
+    def test_the_album_summary_reports_the_covers_the_album_has(self, monkeypatch):
+        _seed()
+        self._use_reconfirming_detector(monkeypatch)
+
+        summary = cds.detect_covers_for_album_name("Album One", "Album Artist")
+
+        assert summary["track_count"] == 2
+        assert summary["cover_count"] == 2, (
+            "already-confirmed covers were dropped from the summary because "
+            "only newly written verdicts were counted"
+        )
+        assert summary["results"] == []
+
+    def test_the_artist_summary_reports_the_covers_the_artist_has(self, monkeypatch):
+        _seed()
+        self._use_reconfirming_detector(monkeypatch)
+
+        summary = cds.detect_covers_for_artist_report("Album Artist")
+
+        assert summary["track_count"] == 3
+        assert summary["cover_count"] == 3, (
+            "the artist summary counted only newly written verdicts"
+        )
+        assert summary["results"] == []
 
 
 class TestEndpoints:

@@ -124,20 +124,25 @@ def _detect_for_tracks(
     *,
     conn: Any = None,
     force: bool = False,
-) -> list[dict[str, Any]]:
-    """Run the deep detector album-by-album and return every result.
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Run the deep detector album-by-album.
 
-    The detector persists each verdict itself (``apply_cover_metadata_batch``),
-    so callers use the results for reporting only.
+    Returns ``(results, counts)``. ``results`` holds only the verdicts the
+    detector WROTE this pass; ``counts`` holds the totals it published
+    (``cover_total`` includes covers that were merely re-confirmed). The
+    detector persists each verdict itself, so callers use both for reporting.
+
+    ``counts`` is empty when the detector does not publish them (test doubles),
+    and callers then fall back to counting ``results``.
     """
     if not tracks:
-        return []
+        return [], {}
 
     try:
         detector = CoverDetector(db_connection=conn)
     except Exception as exc:
         logger.warning("CoverDetector unavailable", error=str(exc))
-        return []
+        return [], {}
 
     # Group by album so the detector's per-album context and caching apply.
     albums: dict[str, list[dict[str, Any]]] = {}
@@ -146,6 +151,8 @@ def _detect_for_tracks(
         albums.setdefault(album_key, []).append(track)
 
     results: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    published = False
     for album_name, album_tracks in albums.items():
         # Prefer the artist the scan was requested for; the first track's
         # artist can be a featured or per-track credit.
@@ -161,6 +168,11 @@ def _detect_for_tracks(
                     tracks=album_tracks, force=force,
                 ) or []
             )
+            summary = getattr(detector, "last_pass_counts", None) or {}
+            if summary:
+                published = True
+                for key in ("cover_total", "new_count", "repaired_count"):
+                    counts[key] = counts.get(key, 0) + int(summary.get(key) or 0)
         except Exception as exc:
             logger.warning(
                 "Cover detection failed for album",
@@ -168,7 +180,7 @@ def _detect_for_tracks(
                 album=album_name,
                 error=str(exc),
             )
-    return results
+    return results, (counts if published else {})
 
 
 def detect_covers_for_artist_report(
@@ -179,8 +191,10 @@ def detect_covers_for_artist_report(
     """Run the full cover pipeline for every track of *artist_name*.
 
     Returns a summary dict (``track_count``, ``cover_count`` and the raw
-    ``results``). ``conn`` is kept for backward compatibility — DB access runs
-    on SQLAlchemy sessions.
+    ``results``). ``cover_count`` is the covers the artist HAS — including the
+    ones this pass only re-confirmed — while ``results`` holds the verdicts it
+    wrote. ``conn`` is kept for backward compatibility — DB access runs on
+    SQLAlchemy sessions.
     """
     try:
         tracks = _load_tracks(
@@ -195,7 +209,7 @@ def detect_covers_for_artist_report(
         )
         return {"track_count": 0, "cover_count": 0, "results": []}
 
-    results = _detect_for_tracks(tracks, artist_name, conn=conn, force=force)
+    results, counts = _detect_for_tracks(tracks, artist_name, conn=conn, force=force)
     # Results carry ``track_id`` and ``original_artist``; a repair is counted
     # separately by the detector. This is the same count the old implementation
     # reported as "updated".
@@ -203,13 +217,18 @@ def detect_covers_for_artist_report(
         res for res in results
         if str(res.get("track_id") or "").strip() and not res.get("repaired")
     ]
+    # The detector reports the covers the ARTIST HAS (new + already confirmed).
+    # Counting only the writes made an artist whose covers were all re-confirmed
+    # report 0. Fall back to the written results when no count was published.
+    cover_count = int(counts["cover_total"]) if "cover_total" in counts else len(covers)
     logger.info(
         "Cover detection complete for artist",
         artist=artist_name,
         updated_count=len(covers),
+        cover_count=cover_count,
         album_count=len({track["album"] or "_no_album" for track in tracks}),
     )
-    return {"track_count": len(tracks), "cover_count": len(covers), "results": results}
+    return {"track_count": len(tracks), "cover_count": cover_count, "results": results}
 
 
 def detect_covers_for_artist(
@@ -221,8 +240,9 @@ def detect_covers_for_artist(
 
     Uses the full ``CoverDetector`` pipeline (ISRC, MB relations, writer
     analysis, heuristics) for each track individually. Returns the number
-    of covers found. ``conn`` is kept for backward compatibility — DB
-    access runs on SQLAlchemy sessions.
+    of covers the artist has, including ones this pass only re-confirmed.
+    ``conn`` is kept for backward compatibility — DB access runs on
+    SQLAlchemy sessions.
     """
     return int(detect_covers_for_artist_report(
         artist_name, conn=conn, force=force,
@@ -251,16 +271,21 @@ def detect_covers_for_album_name(
         )
         return {"track_count": 0, "cover_count": 0, "results": []}
 
-    results = _detect_for_tracks(tracks, artist, conn=conn, force=force)
-    covers = [res for res in results if res.get("is_cover")]
+    results, counts = _detect_for_tracks(tracks, artist, conn=conn, force=force)
+    # ``results`` holds only the verdicts written this pass. A re-scanned album
+    # re-confirms its stored covers without writing them, so counting the
+    # results reported 0 covers for an album that has many. The detector
+    # publishes the album's total; fall back to the writes for test doubles.
+    written = [res for res in results if res.get("is_cover")]
+    cover_count = int(counts["cover_total"]) if "cover_total" in counts else len(written)
     logger.info(
         "Cover detection complete for album",
         artist=artist,
         album=album,
         track_count=len(tracks),
-        cover_count=len(covers),
+        cover_count=cover_count,
     )
-    return {"track_count": len(tracks), "cover_count": len(covers), "results": results}
+    return {"track_count": len(tracks), "cover_count": cover_count, "results": results}
 
 
 def detect_covers_for_track(
@@ -288,7 +313,7 @@ def detect_covers_for_track(
         return None
 
     track = tracks[0]
-    results = _detect_for_tracks(
+    results, _counts = _detect_for_tracks(
         tracks,
         track.get("album_artist") or track.get("artist") or "",
         conn=conn,

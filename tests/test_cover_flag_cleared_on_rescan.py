@@ -199,6 +199,15 @@ class TestReconfirmedVerdictsAreNotRewritten:
         assert "t1" in captured["confirmed_ids"], (
             "the re-confirmed verdict must still be protected from the clear step"
         )
+        assert det.last_pass_counts == {
+            "cover_total": 1,
+            "new_count": 0,
+            "repaired_count": 0,
+        }, (
+            "the pass must publish the album's cover TOTAL: its returned list "
+            "holds only the verdicts it wrote, so reporting callers that counted "
+            "the list logged a re-scanned album as having 0 covers"
+        )
 
     def test_a_reconfirmed_verdict_restores_a_lost_suffix(self, monkeypatch):
         """The suffix repair belongs AFTER confirmation, never before it."""

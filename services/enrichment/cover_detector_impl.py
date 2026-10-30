@@ -425,6 +425,11 @@ class CoverDetector:
         self._artist_band_cache: dict[str, list[dict[str, str]]] = {}
         self._work_recording_cache: "OrderedDict[str, list[dict[str, Any]]]" = OrderedDict()
         self._mem_lock = threading.Lock()
+        #: Counts from the most recent ``detect_covers_for_album`` pass. The
+        #: returned list holds only the verdicts WRITTEN this pass, so reporting
+        #: callers that want the album's cover total (not just the new ones) read
+        #: it here — see ``detect_covers_for_album_name``.
+        self.last_pass_counts: dict[str, int] = {}
 
     @staticmethod
     def _track_has_logged_identity(track: dict[str, Any]) -> bool:
@@ -486,6 +491,44 @@ class CoverDetector:
                 # something to resolve against — keep the duplicate-search skip.
                 return False
         return True
+
+    @staticmethod
+    def _file_tag_performer(track: dict[str, Any]) -> str:
+        """The ARTIST written in the track's own file, or ``""``.
+
+        The DB row is not always the performer: a VA compilation keeps the
+        album placeholder in ``artist`` until the metadata scan RESOLVES the
+        track, so an unresolved row says "Various Artists" while its file (and
+        the UI the operator reads) names the real performer. Only consulted for
+        placeholder rows, so ordinary detections never open a file.
+        """
+        file_path = str(track.get("file_path") or "").strip()
+        if not file_path:
+            return ""
+        try:
+            from helpers.metadata_reader import read_mp3_metadata
+
+            tags = read_mp3_metadata(file_path) or {}
+        except Exception as exc:
+            logger.debug("File tag read failed", file_path=file_path, error=str(exc))
+            return ""
+        artist = str(tags.get("artist") or "").strip()
+        if artist and not is_track_artist_placeholder(artist):
+            return artist
+        return ""
+
+    def _recording_performer(self, recording_mbid: str) -> str:
+        """The artist MusicBrainz credits on this recording, or ``""``."""
+        mbid = str(recording_mbid or "").strip()
+        if not mbid:
+            return ""
+        recording = self._get_recording(mbid, "artist-credits")
+        performer = str(
+            artist_from_credit(recording.get("artist-credit", []) or []) or ""
+        ).strip()
+        if performer and not is_track_artist_placeholder(performer):
+            return performer
+        return ""
 
     # -- search helpers ---------------------------------------------------
 
@@ -745,6 +788,10 @@ class CoverDetector:
         """
         from helpers.logging_config import log_scan_detail, log_unified
 
+        # Reset first: a pass that raises before the summary must not leave the
+        # previous album's numbers in place for the caller to read.
+        self.last_pass_counts = {}
+
         logger.info(
             "Starting cover detection",
             album=album,
@@ -818,6 +865,35 @@ class CoverDetector:
                     track[_column] = _state[_column]
             if _state.get("cover_last_checked") is not None:
                 track["cover_last_checked"] = _state["cover_last_checked"]
+
+        # ── Give a placeholder row the performer its file already knows ────
+        # A VA compilation's DB row can still carry the album placeholder in
+        # ``artist``: the track stage only replaces it when the metadata scan
+        # RESOLVED the track, so an unresolved one keeps "Various Artists".
+        # Every heuristic below is phrased relative to the performer, so such a
+        # track was silently unassessable — the reported "It's a Sin" by Ghost
+        # (MusicBrainz models it as a cover of the Pet Shop Boys' work) came
+        # back "not a cover" with every step settling nothing. The file's own
+        # ARTIST tag is the performer the operator sees, so it wins; the logged
+        # recording's own artist credit is the network fallback.
+        for track in tracks:
+            if comparison_artist(track, artist):
+                continue
+            performer = self._file_tag_performer(track) or self._recording_performer(
+                str(
+                    track.get("recording_mbid")
+                    or track.get("musicbrainz_trackid")
+                    or track.get("mbid")
+                    or ""
+                )
+            )
+            if performer:
+                track["artist"] = performer
+                logger.debug(
+                    "Placeholder track artist resolved for cover detection",
+                    track=track.get("title"),
+                    artist=performer,
+                )
 
         if not force:
             for track in tracks:
@@ -1354,6 +1430,14 @@ class CoverDetector:
             if self._is_cover_flagged(tracks_by_id.get(tid) or {})
         )
         _cover_total = len(cover_results) + _already_confirmed
+        # Published for reporting callers: the returned list below carries only
+        # the verdicts WRITTEN this pass, so a re-confirmed album would look
+        # coverless to anyone counting it.
+        self.last_pass_counts = {
+            "cover_total": _cover_total,
+            "new_count": len(cover_results),
+            "repaired_count": len(_repaired_titles),
+        }
         log_unified(
             f"[COVER_DETECT] {artist} - {album}: {_cover_total} cover(s) "
             f"(new={len(cover_results)}) | "
