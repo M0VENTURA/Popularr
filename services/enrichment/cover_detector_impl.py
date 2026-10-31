@@ -377,6 +377,15 @@ def _has_cover_annotation(title: str) -> bool:
     return bool(_COVER_SUFFIX_RE.search(title or ""))
 
 
+def _titles_match(left: str, right: str) -> bool:
+    """Canonical title equality, or one side being a prefix of the other."""
+    lt = canonical_track_title(left)
+    rt = canonical_track_title(right)
+    if not lt or not rt:
+        return False
+    return lt == rt or lt.startswith(rt) or rt.startswith(lt)
+
+
 def _same_artist(left: str, right: str) -> bool:
     """True when two credits name the same artist.
 
@@ -458,6 +467,9 @@ class CoverDetector:
         self._band_members_cache: dict[str, list[str]] = {}
         self._artist_band_cache: dict[str, list[dict[str, str]]] = {}
         self._work_recording_cache: "OrderedDict[str, list[dict[str, Any]]]" = OrderedDict()
+        #: (album artist, album) -> release MBID resolved by name, for albums
+        #: whose rows never logged one. One search per album per pass.
+        self._album_release_cache: dict[tuple[str, str], str] = {}
         self._mem_lock = threading.Lock()
         #: Counts from the most recent ``detect_covers_for_album`` pass. The
         #: returned list holds only the verdicts WRITTEN this pass, so reporting
@@ -1187,6 +1199,24 @@ class CoverDetector:
         # Per-track identity gate below — one VA album can mix resolved and
         # unresolved rows.
         _va_album = self._is_va_compilation(artist)
+        # Rows with no identity but an album release known (stored or resolved
+        # by name for this pass) can be resolved from the release tracklist.
+        _needs_release_lookup = any(
+            t.get("id")
+            and str(t.get("id")) not in seen_track_ids
+            and not self._track_has_logged_identity(t)
+            for t in tracks
+        )
+        _album_release_mbid = (
+            self._resolve_album_release_mbid(album, artist, tracks)
+            if _needs_release_lookup
+            else ""
+        )
+        if _album_release_mbid:
+            logger.debug(
+                "Cover detection resolved the album release for unresolved rows",
+                album=album, release_mbid=_album_release_mbid,
+            )
         for track in tracks:
             tid = track.get("id")
             if not tid or tid in seen_track_ids:
@@ -1196,20 +1226,22 @@ class CoverDetector:
             # metadata pass already failed to resolve — the exact duplicate
             # network work this pass is meant to avoid.
             #
-            # ⚠️ EXCEPT on a VA compilation (a playlist-derived folder, for
-            # example): there may have been no release for the metadata pass to
-            # resolve THIS row against, so it logged no identity and there is no
-            # duplicate search to avoid. The track's own ARTIST + TITLE are
-            # enough to find the recording, which is the only route cover
-            # detection has for these rows. This is decided per ROW: a sibling
-            # file that happens to carry a release MBID must not silence it.
+            # ⚠️ EXCEPT when a release tracklist IS available — a VA
+            # compilation (a playlist-derived folder that is not an official
+            # release) or an album whose release was just resolved above. There
+            # may have been no release for the metadata pass to resolve THIS row
+            # against, so it logged no identity and there is no duplicate search
+            # to avoid. The release tracklist (or, on a VA compilation, the
+            # row's own ARTIST + TITLE) is the only route those rows have.
             if not self._track_has_logged_identity(track):
-                if not _va_album:
+                if not _va_album and not _album_release_mbid:
                     continue
                 if not comparison_artist(track, artist):
                     # No real performer to search with or compare against.
                     continue
-            mbid = self._resolve_recording_mbid(track, artist, album)
+            mbid = self._resolve_recording_mbid(
+                track, artist, album, default_release_mbid=_album_release_mbid,
+            )
             if not mbid:
                 continue
             track["mbid"] = mbid
@@ -1393,12 +1425,17 @@ class CoverDetector:
             else:
                 # Same per-row identity gate as Step 3: without any logged
                 # identity the recording needs an online search. A VA
-                # compilation's unresolved row is allowed to make it; one
-                # tagged sibling does not silence the row.
+                # compilation's unresolved row, or a row whose album release
+                # was resolved, is allowed to make it; one tagged sibling does
+                # not silence the row.
                 if not self._track_has_logged_identity(track):
-                    if not _va_album or not _performer:
+                    if not _va_album and not _album_release_mbid:
                         continue
-                mbid = self._resolve_recording_mbid(track, artist, album)
+                    if not _performer:
+                        continue
+                mbid = self._resolve_recording_mbid(
+                    track, artist, album, default_release_mbid=_album_release_mbid,
+                )
                 if not mbid:
                     continue
                 track["mbid"] = mbid
@@ -2837,11 +2874,68 @@ class CoverDetector:
 
     # -- mbid resolution --------------------------------------------------
 
+    def _resolve_album_release_mbid(
+        self, album: str, artist: str, tracks: list[dict[str, Any]]
+    ) -> str:
+        """The release this album belongs to, resolved ONCE per pass.
+
+        Rows the metadata pass could not resolve carry no release MBID, so
+        ``_resolve_recording_mbid`` has no tracklist to match against and falls
+        back to a bare title search — and a NON-Various-Artists album was then
+        skipped entirely by step 3's identity gate. Resolving the release from
+        the album artist + title gives every row a tracklist, which is more
+        reliable than a bare title search and is the only route for those
+        albums.
+        """
+        for track in tracks or []:
+            if not isinstance(track, dict):
+                continue
+            rid = str(
+                track.get("musicbrainz_album_mbid")
+                or track.get("musicbrainz_albumid")
+                or ""
+            ).strip()
+            if rid:
+                return rid
+
+        album = str(album or "").strip()
+        artist = str(artist or "").strip()
+        if not album or not artist or is_track_artist_placeholder(artist):
+            # A VA compilation's "release" is the folder; only the per-track
+            # ARTIST + TITLE route can identify its recordings.
+            return ""
+
+        key = (artist.casefold(), album.casefold())
+        with self._mem_lock:
+            cached = self._album_release_cache.get(key, _MISS)
+        if cached is not _MISS:
+            return cached
+
+        resolved = ""
+        try:
+            query = (
+                f'artist:"{escape_lucene_special_chars(artist)}" '
+                f'AND release:"{escape_lucene_special_chars(album)}"'
+            )
+            releases = self.mb.search_releases(query, limit=5) or []
+            for release in releases:
+                rid = str(release.get("id") or "").strip()
+                if rid and _titles_match(album, release.get("title", "")):
+                    resolved = rid
+                    break
+        except Exception as exc:
+            logger.debug("Album release lookup failed", album=album, error=str(exc))
+
+        with self._mem_lock:
+            self._album_release_cache[key] = resolved
+        return resolved
+
     def _resolve_recording_mbid(
         self,
         track: dict[str, Any],
         album_artist: str | None = None,
         album_title: str | None = None,
+        default_release_mbid: str = "",
     ) -> str | None:
         del album_title  # retained for signature compatibility
 
@@ -2864,14 +2958,12 @@ class CoverDetector:
         # title alone still finds candidates, which the title/artist check below
         # filters.
         search_artist = comparison_artist(track, album_artist or "")
-        release_mbid = str(track.get("musicbrainz_album_mbid") or "").strip()
-
-        def _titles_match(left: str, right: str) -> bool:
-            lt = canonical_track_title(left)
-            rt = canonical_track_title(right)
-            if not lt or not rt:
-                return False
-            return lt == rt or lt.startswith(rt) or rt.startswith(lt)
+        release_mbid = str(
+            track.get("musicbrainz_album_mbid")
+            or track.get("musicbrainz_albumid")
+            or default_release_mbid
+            or ""
+        ).strip()
 
         def _artist_matches(artist_credit: list[dict[str, Any]]) -> bool:
             if not search_artist:

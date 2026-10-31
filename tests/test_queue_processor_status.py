@@ -331,6 +331,31 @@ class TestBothDriversStampTheHeartbeat:
         assert queue_heartbeat.read_queue_processor_health() is None
 
 
+class TestALongCycleStaysAlive:
+    """A cycle is a batch of searches and can run for minutes. The heartbeat
+    must cover the WHOLE cycle, not just its end, or the dashboard/watchdog
+    treat a working processor as stopped."""
+
+    def test_the_heartbeat_is_fresh_while_the_cycle_is_running(self, health):
+        from services.queue import queue_heartbeat as hb
+        from services.queue.queue_diagnostics_service import queue_processor_status
+
+        with hb.queue_processor_alive("standalone-worker"):
+            payload, _ = queue_processor_status()
+            assert payload["status"] == "running"
+            assert payload["running"] is True
+
+    def test_a_raising_cycle_still_leaves_no_stamp(self, health):
+        from services.queue import queue_heartbeat as hb
+
+        with pytest.raises(RuntimeError):
+            with hb.queue_processor_alive("standalone-worker"):
+                raise RuntimeError("cycle exploded")
+
+        assert not health.exists()
+        assert hb.read_queue_processor_health() is None
+
+
 # ---------------------------------------------------------------------------
 # The UI must render the payload and unlock the button
 # ---------------------------------------------------------------------------

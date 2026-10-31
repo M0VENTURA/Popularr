@@ -343,10 +343,14 @@ def _kick_queue_cycle() -> dict[str, Any]:
     """
     def _run() -> None:
         try:
-            from services.queue.queue_heartbeat import record_queue_processor_cycle
+            from services.queue.queue_heartbeat import (
+                queue_processor_alive,
+                record_queue_processor_cycle,
+            )
             from services.queue.queue_orchestrator import process_cycle
 
-            process_cycle()
+            with queue_processor_alive("restart-kick"):
+                process_cycle()
             record_queue_processor_cycle("restart-kick")
         except Exception as exc:
             # stdlib logger (this module's `logger`), so %-style formatting —

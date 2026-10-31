@@ -259,16 +259,34 @@ def _same_trigger(existing: Any, trigger: Any) -> bool:
 
 
 # ✅ EXTRACTED TO MODULE LEVEL FOR PICKLING/SERIALIZATION
+#: Single-flight guard for the in-process queue tick. APScheduler's
+#: ``max_instances`` does NOT cover the cycle: the tick returns immediately
+#: after spawning its thread, so a slow cycle (minutes) used to get one new
+#: thread per interval. They all waited on the cross-process cycle lock and
+#: returned — wasted work and extra heartbeat writes.
+_QUEUE_CYCLE_THREAD: threading.Thread | None = None
+_QUEUE_CYCLE_THREAD_LOCK = threading.Lock()
+
+
 def _download_queue_processor_tick() -> None:
     """Module-level function so APScheduler can serialize it by reference."""
+    global _QUEUE_CYCLE_THREAD
     try:
         import threading as _th
-        from services.queue.queue_heartbeat import record_queue_processor_cycle
+        from services.queue.queue_heartbeat import (
+            queue_processor_alive,
+            record_queue_processor_cycle,
+        )
         from services.queue.queue_orchestrator import process_cycle
-        
+
         def _run_cycle() -> None:
             try:
-                process_cycle()
+                # Keep the heartbeat fresh WHILE the cycle runs: a batch of
+                # searches can take minutes, and a stamp written only
+                # afterwards made the processor look stopped for the whole
+                # batch (dashboard "Restart Processor" on a live queue).
+                with queue_processor_alive("scheduler"):
+                    process_cycle()
                 # Stamped only AFTER a successful cycle — this tick and the
                 # standalone queue_worker are the two drivers whose liveness
                 # /api/queue-processor/status reports (queue_heartbeat.py).
@@ -280,11 +298,16 @@ def _download_queue_processor_tick() -> None:
                 # needs it too — "the queue stopped" is a queue.log question.
                 log_queue("[QUEUE] cycle failed", error=str(_exc))
 
-        _th.Thread(
-            target=_run_cycle,
-            name="queue-cycle",
-            daemon=True,
-        ).start()
+        with _QUEUE_CYCLE_THREAD_LOCK:
+            if _QUEUE_CYCLE_THREAD is not None and _QUEUE_CYCLE_THREAD.is_alive():
+                logger.debug("Previous queue cycle still running — skipping tick")
+                return
+            _QUEUE_CYCLE_THREAD = _th.Thread(
+                target=_run_cycle,
+                name="queue-cycle",
+                daemon=True,
+            )
+            _QUEUE_CYCLE_THREAD.start()
     except Exception as _exc:
         logger.warning("download_queue_processor spawn failed", error=str(_exc))
         log_queue("[QUEUE] cycle spawn failed", error=str(_exc))

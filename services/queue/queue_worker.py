@@ -26,7 +26,10 @@ import structlog
 from sqlalchemy import text
 
 from helpers.config_helpers import get_queue_worker_config
-from services.queue.queue_heartbeat import record_queue_processor_cycle
+from services.queue.queue_heartbeat import (
+    queue_processor_alive,
+    record_queue_processor_cycle,
+)
 from services.queue.queue_orchestrator import (
     database_available,
     is_db_outage_error,
@@ -326,10 +329,16 @@ def run(interval: int | None = None, batch_size: int | None = None) -> None:
             try:
                 start_time = time.monotonic()
 
-                payload, status = process_cycle(
-                    batch_size=effective_batch,
-                    run_maintenance_hooks=True,
-                )
+                # Keep the heartbeat fresh WHILE the cycle runs: this batch can
+                # take minutes (one search per track, 35-145s each), and a stamp
+                # written only afterwards made the processor look stopped for the
+                # whole batch — the dashboard offered "Restart Processor" and the
+                # watchdog could kick a live processor.
+                with queue_processor_alive("standalone-worker"):
+                    payload, status = process_cycle(
+                        batch_size=effective_batch,
+                        run_maintenance_hooks=True,
+                    )
 
                 # A finished cycle is this worker's ONLY cross-process proof of
                 # life (the WebUI reads the heartbeat stamped here).

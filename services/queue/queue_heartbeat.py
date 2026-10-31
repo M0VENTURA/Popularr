@@ -40,8 +40,10 @@ queue cycle down, so failures are logged at debug level and swallowed.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -124,6 +126,66 @@ def record_queue_processor_cycle(driver: str, *, outcome: str = "completed") -> 
             driver=payload["driver"],
             error=str(exc),
         )
+
+
+def refresh_interval_seconds() -> float:
+    """How often a long cycle should re-stamp while it is still working.
+
+    Half the staleness window, floored so a very short worker interval cannot
+    produce a heartbeat write storm. The window itself never goes below
+    ``_MIN_STALE_AFTER_SECONDS`` (60s), so this is ``>= 30s`` in practice.
+    """
+    return max(15.0, stale_after_seconds() / 2.0)
+
+
+def _remove_heartbeat(path: str) -> None:
+    """Best-effort removal, used to preserve "a failed cycle leaves no stamp"."""
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        logger.debug("Queue processor heartbeat not removed", path=path, error=str(exc))
+
+
+@contextlib.contextmanager
+def queue_processor_alive(driver: str):
+    """Keep the heartbeat fresh for as long as a queue cycle is RUNNING.
+
+    A cycle is a batch of Soulseek searches and can legitimately run for many
+    minutes (the queue's own search log shows single tracks taking
+    35-145 seconds). Stamping only AFTER ``process_cycle`` returns made the
+    processor look **stopped** for the whole batch: the dashboard offered
+    "Restart Processor" while the queue was working, and the auto-restart
+    watchdog could kick a live processor. This keeps the stamp fresh during the
+    cycle, so "running" means "a cycle is in flight" — which is what the status
+    endpoint claims to report.
+
+    ⚠️ A cycle that RAISES still leaves no stamp (the original contract): the
+    "running" stamp is removed on the way out, because a genuinely crashing
+    processor must not read as alive.
+    """
+    record_queue_processor_cycle(driver, outcome="running")
+    stop = threading.Event()
+
+    def _beat() -> None:
+        while not stop.wait(refresh_interval_seconds()):
+            record_queue_processor_cycle(driver, outcome="running")
+
+    beat = threading.Thread(target=_beat, name="queue-heartbeat", daemon=True)
+    beat.start()
+    failed = True
+    try:
+        yield
+        failed = False
+    finally:
+        stop.set()
+        try:
+            beat.join(timeout=1.0)
+        except Exception:
+            pass
+        if failed:
+            _remove_heartbeat(health_file_path())
 
 
 def read_queue_processor_health() -> dict[str, Any] | None:

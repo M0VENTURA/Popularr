@@ -1080,15 +1080,15 @@ def _warn_closest_search_miss(
     title: str,
     album: str | None,
     queries_tried: int,
-) -> None:
+) -> dict[str, Any] | None:
     if not misses:
-        return
+        return None
     best_miss = max(
         misses,
         key=lambda m: (int(m.get("candidates") or 0), float(m.get("top_score") or 0.0)),
     )
     if not int(best_miss.get("candidates") or 0):
-        return
+        return None
     logger.warning(
         "No result met min_score — no qualifying download candidate",
         artist=artist,
@@ -1101,6 +1101,7 @@ def _warn_closest_search_miss(
         top_candidate=best_miss.get("top_candidate"),
         queries_tried=queries_tried,
     )
+    return best_miss
 
 
 def _attempt_candidate_downloads(
@@ -1297,13 +1298,23 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
 
         if not best:
             logger.info("No qualifying result for queue item", queue_id=queue_id, artist=expected_artist, title=expected_title)
-            _warn_closest_search_miss(
+            _best_miss = _warn_closest_search_miss(
                 _misses,
                 artist=expected_artist,
                 title=expected_title,
                 album=expected_album,
                 queries_tried=len(searched_queries),
             )
+            # Carry WHY the candidates failed into the search event itself.
+            # Otherwise "no_qualifying_result: candidates=112" is indistinguishable
+            # from a parsing bug: the reject breakdown lives only in the warning
+            # line, which is easy to miss in a busy log.
+            _miss_note = ""
+            if _best_miss:
+                _miss_note = (
+                    f", top_score={_best_miss.get('top_score')}"
+                    f", rejected={_best_miss.get('rejected')}"
+                )
             _log_search_event(
                 search_type="automatic",
                 query=query,
@@ -1311,7 +1322,10 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                 item=item,
                 result_count=len(all_results),
                 duration_seconds=elapsed,
-                notes=f"no_qualifying_result: candidates={len(all_results)}, queries={len(searched_queries)}",
+                notes=(
+                    f"no_qualifying_result: candidates={len(all_results)}, "
+                    f"queries={len(searched_queries)}{_miss_note}"
+                ),
                 selected_result=best,
                 results=all_results,
             )
