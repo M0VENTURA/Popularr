@@ -304,51 +304,116 @@
   }
 
   // ── MusicBrainz recording lookup ────────────────────────────────────────
+  //
+  // The first attempt uses the track's CURRENT artist and title. If nothing
+  // matches, the same modal keeps both fields editable so they can be
+  // corrected and searched again — no need to close it, edit the main form and
+  // reopen.
+
+  const TRACK_MB_LOOKUP_MODAL_ID = 'trackMBLookupModal';
+
+  function ensureTrackMBLookupModal() {
+    // Created on first use rather than living in the template, so it is not
+    // shipped on every page load for a control most visits ignore.
+    let modalEl = document.getElementById(TRACK_MB_LOOKUP_MODAL_ID);
+    if (modalEl) return modalEl;
+
+    document.body.insertAdjacentHTML('beforeend', `
+      <div class="modal fade" id="${TRACK_MB_LOOKUP_MODAL_ID}" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title">MusicBrainz Track Lookup</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <div class="row g-2 align-items-end mb-2">
+                <div class="col-12 col-sm-5">
+                  <label class="form-label small fw-semibold text-muted mb-1" for="trackMBLookupArtist">Artist</label>
+                  <input type="text" class="form-control form-control-sm" id="trackMBLookupArtist" autocomplete="off">
+                </div>
+                <div class="col-12 col-sm-5">
+                  <label class="form-label small fw-semibold text-muted mb-1" for="trackMBLookupTitle">Title</label>
+                  <input type="text" class="form-control form-control-sm" id="trackMBLookupTitle" autocomplete="off">
+                </div>
+                <div class="col-12 col-sm-2">
+                  <button type="button" class="btn btn-sm btn-primary w-100"
+                          data-action="track-mb-lookup-search">
+                    <i class="bi bi-search"></i> Search
+                  </button>
+                </div>
+              </div>
+              <div class="form-text mb-3">
+                Searching with the track's current artist and title. Correct either field and search again.
+              </div>
+              <div id="trackMBLookupResults"></div>
+            </div>
+          </div>
+        </div>
+      </div>`);
+
+    modalEl = document.getElementById(TRACK_MB_LOOKUP_MODAL_ID);
+    // Enter in either field re-runs the search.
+    modalEl.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && event.target && event.target.tagName === 'INPUT') {
+        event.preventDefault();
+        runTrackMusicBrainzSearch();
+      }
+    });
+    return modalEl;
+  }
 
   async function lookupTrackMusicBrainz() {
     const titleEl = document.getElementById('title');
     const artistEl = document.getElementById('artist');
+    const mbidEl = document.getElementById('mbid');
     const title = titleEl ? titleEl.value.trim() : '';
     const artist = artistEl ? artistEl.value.trim() : '';
-    if (!title || !artist) {
-      notifyError('Please enter both title and artist');
+    const mbid = mbidEl ? mbidEl.value.trim() : '';
+
+    const modalEl = ensureTrackMBLookupModal();
+    const artistInput = document.getElementById('trackMBLookupArtist');
+    const titleInput = document.getElementById('trackMBLookupTitle');
+    if (artistInput) artistInput.value = artist;
+    if (titleInput) titleInput.value = title;
+
+    showModal(modalEl);
+    // Title/artist is always the first attempt. The stored recording id is only
+    // a fallback when there is no text to search with (e.g. an empty form).
+    await runTrackMusicBrainzSearch({ fallbackMbid: (!title && !artist) ? mbid : '' });
+  }
+
+  async function runTrackMusicBrainzSearch(options) {
+    const fallbackMbid = (options && options.fallbackMbid) || '';
+    const artistInput = document.getElementById('trackMBLookupArtist');
+    const titleInput = document.getElementById('trackMBLookupTitle');
+    const resultsEl = document.getElementById('trackMBLookupResults');
+    if (!resultsEl) return;
+
+    const artist = artistInput ? artistInput.value.trim() : '';
+    const title = titleInput ? titleInput.value.trim() : '';
+    if (!title && !artist && !fallbackMbid) {
+      resultsEl.innerHTML =
+        '<div class="alert alert-info mb-0">Enter an artist and title to search.</div>';
       return;
     }
 
-    // The modal is created on first use rather than living in the template,
-    // so it is not shipped on every page load for a button most visits ignore.
-    let modalEl = document.getElementById('trackMBLookupModal');
-    if (!modalEl) {
-      document.body.insertAdjacentHTML('beforeend', `
-        <div class="modal fade" id="trackMBLookupModal" tabindex="-1" aria-hidden="true">
-          <div class="modal-dialog modal-lg modal-dialog-scrollable">
-            <div class="modal-content">
-              <div class="modal-header">
-                <h5 class="modal-title">MusicBrainz Track Lookup</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-              </div>
-              <div class="modal-body" id="trackMBLookupResults">
-                <div class="text-center py-4"><span class="spinner-border text-primary"></span></div>
-              </div>
-            </div>
-          </div>
-        </div>`);
-      modalEl = document.getElementById('trackMBLookupModal');
-    }
-
-    const resultsEl = document.getElementById('trackMBLookupResults');
     resultsEl.innerHTML =
       '<div class="text-center py-4"><span class="spinner-border text-primary me-2"></span> ' +
       'Searching MusicBrainz…</div>';
-    showModal(modalEl);
 
     try {
+      const payload = { title, artist };
+      if (fallbackMbid) payload.mbid = fallbackMbid;
       const data = await global.api.postJson(
-        '/api/track/musicbrainz', { title, artist }, { timeoutMs: SEARCH_TIMEOUT_MS }
+        '/api/track/musicbrainz', payload, { timeoutMs: SEARCH_TIMEOUT_MS }
       );
       const results = data.results || [];
       if (!results.length) {
-        resultsEl.innerHTML = '<div class="alert alert-info mb-0">No results found</div>';
+        resultsEl.innerHTML =
+          '<div class="alert alert-info mb-0">' +
+          'No matches. Adjust the artist or title above and search again.' +
+          '</div>';
         return;
       }
 
@@ -643,6 +708,7 @@
       }
     },
     'track-lookup-recording': () => lookupTrackMusicBrainz(),
+    'track-mb-lookup-search': () => runTrackMusicBrainzSearch(),
     'track-find-releases': () => findAlbumReleases(),
     'track-fetch-lyrics': () => fetchLyricsFromLrclib(),
     'track-cover-search': () => searchCoverSong(),

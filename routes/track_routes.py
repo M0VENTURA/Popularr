@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import os
 import re
@@ -13,6 +14,7 @@ from quart import Blueprint, Response, jsonify, request, send_file
 from sqlalchemy import text
 
 from api_clients.lrclib import fetch_lyrics
+from api_clients.musicbrainz_http import escape_lucene_special_chars
 from db.engine import db_session
 from helpers.config_helpers import get_config
 from services.enrichment.musicbrainz_service import get_shared_mb_client
@@ -137,6 +139,187 @@ def _normalize_track_updates(
             normalized[column_name] = value
 
     return normalized
+
+
+# ---------------------------------------------------------------------------
+# POST /api/track/musicbrainz
+# ---------------------------------------------------------------------------
+#
+# ⚠️ THIS STATIC PATH MUST EXIST. The track page's "MusicBrainz Recording ID"
+# Search button POSTs here. Without a POST rule, the URL falls through to the
+# dynamic ``/<track_id>`` route (GET only), so Quart answers with an HTML
+# "405 Method Not Allowed" page — which the JSON api client reports as
+# "Server returned HTML instead of JSON". Ported from the old monolithic app.
+
+_WRITER_RELATION_TYPES = {"writer", "lyricist", "composer"}
+
+
+def _mb_recording_writers(recording: dict[str, Any]) -> list[str]:
+    """Writer/lyricist/composer names from a recording, including work links."""
+    names: list[str] = []
+
+    def _add(name: Any) -> None:
+        value = str(name or "").strip()
+        if value and value not in names:
+            names.append(value)
+
+    def _collect(relations: Any) -> None:
+        for rel in relations or []:
+            if not isinstance(rel, dict):
+                continue
+            if str(rel.get("type") or "").lower() in _WRITER_RELATION_TYPES:
+                _add((rel.get("artist") or {}).get("name") or rel.get("target-credit"))
+            work = rel.get("work") or {}
+            for work_rel in work.get("relations") or work.get("artist-relation-list") or []:
+                if not isinstance(work_rel, dict):
+                    continue
+                if str(work_rel.get("type") or "").lower() in _WRITER_RELATION_TYPES:
+                    _add(
+                        (work_rel.get("artist") or {}).get("name")
+                        or work_rel.get("target-credit")
+                    )
+
+    _collect(recording.get("relations"))
+    _collect(recording.get("artist-relation-list"))
+    return names
+
+
+def _format_mb_recording(
+    recording: dict[str, Any],
+    *,
+    expected_title: str = "",
+    expected_artist: str = "",
+    confidence_override: float | None = None,
+) -> dict[str, Any]:
+    """Flatten a MusicBrainz recording for the track page's picker."""
+    rec_title = str(recording.get("title") or "")
+    credits = recording.get("artist-credit") or []
+    rec_artist = ""
+    if credits and isinstance(credits[0], dict):
+        rec_artist = str(
+            (credits[0].get("artist") or {}).get("name")
+            or credits[0].get("name")
+            or ""
+        )
+
+    releases = recording.get("releases") or []
+    release_list = [
+        {"id": str(rel.get("id") or ""), "title": str(rel.get("title") or "")}
+        for rel in releases[:5]
+        if isinstance(rel, dict)
+    ]
+    best_album = ""
+    if releases and isinstance(releases[0], dict):
+        best_album = str(releases[0].get("title") or "")
+    best_year = ""
+    for rel in releases:
+        if not isinstance(rel, dict):
+            continue
+        date = str(rel.get("date") or "")
+        if len(date) >= 4 and date[:4].isdigit():
+            best_year = date[:4]
+            break
+    if not best_year:
+        first = str(recording.get("first-release-date") or "")
+        if len(first) >= 4 and first[:4].isdigit():
+            best_year = first[:4]
+
+    if confidence_override is not None:
+        title_similarity = artist_similarity = overall = float(confidence_override)
+    else:
+        title_similarity = difflib.SequenceMatcher(
+            None, expected_title.lower(), rec_title.lower()
+        ).ratio()
+        artist_similarity = difflib.SequenceMatcher(
+            None, expected_artist.lower(), rec_artist.lower()
+        ).ratio()
+        overall = title_similarity * 0.7 + artist_similarity * 0.3
+
+    writers = _mb_recording_writers(recording)
+    return {
+        "mbid": str(recording.get("id") or ""),
+        "title": rec_title,
+        "artist": rec_artist,
+        "album": best_album,
+        "year": best_year,
+        "length": recording.get("length") or 0,
+        "releases": release_list,
+        "writers": writers,
+        "composer": ", ".join(writers),
+        "confidence": round(overall, 3),
+        "title_similarity": round(title_similarity, 3),
+        "artist_similarity": round(artist_similarity, 3),
+        "source": "musicbrainz",
+    }
+
+
+@track_bp.route("/musicbrainz", methods=["POST"])
+async def api_track_musicbrainz_lookup() -> Any:
+    """Search MusicBrainz recordings for the track page's Search button."""
+    data = (await request.get_json(silent=True)) or {}
+    title = str(data.get("title") or "").strip()
+    artist = str(data.get("artist") or "").strip()
+    mbid = str(data.get("mbid") or "").strip()
+
+    if not mbid and (not title or not artist):
+        return jsonify(
+            {"error": "title and artist are required unless an mbid is given"}
+        ), 400
+
+    client = get_shared_mb_client()
+    results: list[dict[str, Any]] = []
+
+    # A pasted recording ID is resolved directly, so entering only the ID
+    # works and the result is always the definitive top entry.
+    if mbid:
+        try:
+            recording = client.get_recording(
+                mbid, inc="releases+artist-credits+work-rels+work-level-rels"
+            ) or {}
+        except Exception as exc:
+            logger.debug(
+                "Direct MusicBrainz recording lookup failed", mbid=mbid, error=str(exc)
+            )
+            recording = {}
+        if isinstance(recording, dict) and recording.get("id"):
+            results.append(
+                _format_mb_recording(
+                    recording,
+                    expected_title=title,
+                    expected_artist=artist,
+                    confidence_override=1.0,
+                )
+            )
+
+    if title and artist:
+        query = (
+            f'recording:"{escape_lucene_special_chars(title)}" AND '
+            f'artist:"{escape_lucene_special_chars(artist)}"'
+        )
+        try:
+            recordings = client.search_recordings(
+                query, limit=10, inc="releases+artist-credits"
+            ) or []
+        except Exception as exc:
+            logger.warning(
+                "MusicBrainz track lookup failed",
+                title=title,
+                artist=artist,
+                error=str(exc),
+            )
+            recordings = []
+        seen = {row["mbid"] for row in results if row.get("mbid")}
+        found = [
+            _format_mb_recording(row, expected_title=title, expected_artist=artist)
+            for row in recordings
+            if isinstance(row, dict)
+            and str(row.get("id") or "")
+            and str(row.get("id")) not in seen
+        ]
+        found.sort(key=lambda row: row["confidence"], reverse=True)
+        results.extend(found)
+
+    return jsonify({"results": results[:10]})
 
 
 # ---------------------------------------------------------------------------
