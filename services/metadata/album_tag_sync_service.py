@@ -51,6 +51,22 @@ def _num(value: Any, default: int) -> int:
         return default
 
 
+#: Verified identifier tags. A title/genre differs when the user chose a
+#: spelling; an identifier differs when the FILE is stale. Navidrome echoes the
+#: file's tag back as the song's MBID, so a stale identifier can never be
+#: confirmed by a rescan — the import preserves the DB correction and warns on
+#: every pass ("local correction preserved … mbid"). Fill-if-missing therefore
+#: cannot self-heal an identifier; a differing one is CORRECTED.
+_FILE_IDENTITY_TAGS = frozenset({
+    "musicbrainz_trackid",
+    "musicbrainz_albumid",
+    "musicbrainz_releasegroupid",
+    "musicbrainz_artistid",
+    "musicbrainz_releasetrackid",
+    "musicbrainz_workid",
+})
+
+
 # ---------------------------------------------------------------------------
 # File-tag readers
 # ---------------------------------------------------------------------------
@@ -834,7 +850,8 @@ def sync_album_file_tags(
     # Applied HERE — after the genre blend, the album year and the
     # perfect-match check have all seen the WHOLE album (see the docstring).
     # A track is kept when the scan wrote it, its title was corrected, it was
-    # never synced, or its genres differ from what it held before this pass.
+    # never synced, its genres differ from what it held before this pass, or a
+    # local correction is still waiting for Navidrome to confirm it.
     _file_tracks = tracks
     _genre_changed = 0
     if changed_track_ids is not None:
@@ -850,6 +867,11 @@ def sync_album_file_tags(
                 _tid in _changed
                 or not t.get("file_tags_synced_at")
                 or _genres_moved
+                # A dirty row is an UNCONFIRMED correction. Re-reading its
+                # file is what lets a stale identifier be corrected and its
+                # Navidrome conflict finally clear — otherwise the row never
+                # enters this pass again and the import warns on every scan.
+                or bool(t.get("metadata_dirty_for_navidrome"))
             ):
                 _file_tracks.append(t)
         if not _file_tracks:
@@ -899,6 +921,20 @@ def sync_album_file_tags(
             edition_year=album_edition_year,
         )
 
+        # A dirty row is a local correction the import has not been able to
+        # confirm. Its recording identity is what Navidrome echoes as the
+        # song's MBID, so it MUST reach the file even when the album is not a
+        # perfect tracklist match — the perfect gate protects a MASS sync, not
+        # a row the app already corrected. Without this, the conflict is
+        # unresolvable: the import preserves the DB value, Navidrome keeps the
+        # stale tag, and every scan warns again.
+        if track.get("metadata_dirty_for_navidrome"):
+            _rec_mbid = str(
+                track.get("recording_mbid") or track.get("mbid") or ""
+            ).strip()
+            if _rec_mbid:
+                db_candidates["musicbrainz_trackid"] = _rec_mbid
+
         # A track whose title the scan just corrected must have the TITLE tag
         # rewritten even if the file already holds a value (a deliberately
         # chosen local spelling is never clobbered — only the ids in this set
@@ -914,6 +950,11 @@ def sync_album_file_tags(
                     fill[k] = v
             elif k == "title" and _title_was_corrected:
                 # The scan corrected this title; the file must follow.
+                if _norm(file_val) != _norm(v):
+                    fill[k] = v
+            elif k in _FILE_IDENTITY_TAGS:
+                # Verified IDs are corrected, never merely filled: a stale
+                # tag is what keeps the Navidrome import warning forever.
                 if _norm(file_val) != _norm(v):
                     fill[k] = v
             elif k == "year" and _date_needs_correction and _norm(file_val) == _norm(album_year):
@@ -949,6 +990,12 @@ def sync_album_file_tags(
         # We auto-overwrite genres, so explicitly remove it before recording manual corrections
         if "genres" in fill:
             db_candidates.pop("genres", None)
+
+        # Identifiers we just corrected in the FILE are no longer a conflict:
+        # recording them would re-open the very discrepancy this pass healed.
+        for _key in list(fill):
+            if _key in _FILE_IDENTITY_TAGS:
+                db_candidates.pop(_key, None)
 
         corrections_recorded += _record_corrections(track, file_values, db_candidates)
 

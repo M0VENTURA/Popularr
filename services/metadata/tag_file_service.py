@@ -932,6 +932,13 @@ _COLUMN_TO_TAG_FIELD: dict[str, str] = {
     "mbid": "mbid",
     "musicbrainz_trackid": "mbid",
     "beets_mbid": "mbid",
+    # ⭐ ``recording_mbid`` is the CANONICAL recording-id column every consumer
+    # reads. Without this mapping an edit/save that corrected it was DB-only:
+    # the file kept the old MUSICBRAINZ_TRACKID, Navidrome echoed it back, and
+    # the import preserved the DB correction on every scan — the reported
+    # repeating "local correction preserved … mbid" warning. Listed LAST so it
+    # wins over the legacy ``mbid``/``musicbrainz_trackid`` aliases.
+    "recording_mbid": "mbid",
     "isrc": "isrc",
     "iswc": "iswc",
     "original_title": "original_title",

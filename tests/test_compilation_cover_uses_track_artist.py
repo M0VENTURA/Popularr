@@ -315,28 +315,40 @@ class TestAPlaylistCompilationMatchesByArtistAndTitle:
             self.ALBUM, ALBUM_ARTIST, [track], force=True,
         )
 
-    def test_a_va_album_without_a_release_is_recognised(self) -> None:
+    def test_a_va_album_is_recognised(self) -> None:
         det = _detector(_WriterStub([], []))
-        assert det._va_compilation_without_release(
-            ALBUM_ARTIST,
-            [{"id": "t1", "artist": "Soft Cell", "title": "Tainted Love"}],
-        ) is True
+        assert det._is_va_compilation(ALBUM_ARTIST) is True
 
-    def test_a_known_release_keeps_the_duplicate_search_skip(self) -> None:
+    def test_a_non_va_album_is_not_a_compilation(self) -> None:
         det = _detector(_WriterStub([], []))
-        assert det._va_compilation_without_release(
-            ALBUM_ARTIST,
-            [{"id": "t1", "artist": "Soft Cell", "title": "Tainted Love",
-              "musicbrainz_album_mbid": "rel-1"}],
-        ) is False
+        assert det._is_va_compilation("Bonnie Tyler") is False
 
-    def test_a_non_va_album_keeps_the_duplicate_search_skip(self) -> None:
+    def test_one_resolved_sibling_does_not_silence_an_unresolved_row(
+        self, monkeypatch
+    ) -> None:
+        """⭐ The gate is per ROW. A mixed folder — the importer tagged one file
+        with a release, the others not — used to skip every unresolved row."""
         det = _detector(_WriterStub([], []))
-        assert det._va_compilation_without_release(
-            "Bonnie Tyler",
-            [{"id": "t1", "artist": "Bonnie Tyler",
-              "title": "Holding Out for a Hero"}],
-        ) is False
+        det._collect_track_writers = lambda *a, **k: {}
+        monkeypatch.setattr(impl, "apply_cover_metadata_batch", lambda conn, ups: [])
+        asked: list[str] = []
+        det._resolve_recording_mbid = (
+            lambda track, *a, **k: asked.append(str(track.get("id"))) or None
+        )
+
+        det.detect_covers_for_album(
+            self.ALBUM, ALBUM_ARTIST,
+            [
+                {"id": "resolved", "title": "Tainted Love", "artist": "Soft Cell",
+                 "album_artist": ALBUM_ARTIST, "album": self.ALBUM,
+                 "musicbrainz_album_mbid": "rel-1", "recording_mbid": "rec-1"},
+                {"id": "unresolved", "title": "Tainted Love", "artist": "Soft Cell",
+                 "album_artist": ALBUM_ARTIST, "album": self.ALBUM},
+            ],
+            force=True,
+        )
+
+        assert "unresolved" in asked
 
     def test_the_track_is_matched_with_artist_and_title(self, monkeypatch) -> None:
         results = self._run(monkeypatch, {

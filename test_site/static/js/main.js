@@ -125,12 +125,29 @@
   // `main` (body is overflow:hidden), so the document's own client width tells
   // us nothing. `scrollbar-gutter: stable` on main means the value does NOT
   // change as content grows or shrinks, so measuring on resize/load is enough.
-  // On mobile the scrollbar is an overlay occupying no layout width, so this
-  // resolves to 0 and the inset is a no-op.
+  //
+  // ⚠️ OVERLAY SCROLLBARS CONSUME NO LAYOUT WIDTH, so `offsetWidth - clientWidth`
+  // is 0 even on a scrollable page (macOS, Chrome's overlay mode, mobile). The
+  // browser then paints the bar OVER main's right edge, UNDER the fixed
+  // navbar — the reported "side scroll bar gets covered by the banner". Reserve
+  // an explicit strip in that case so the bar is not painted beneath the
+  // navbar. Only for a fine pointer: a touch scrollbar is transient, and a
+  // permanent gap would just narrow the header.
+  const OVERLAY_SCROLLBAR_WIDTH = 15;
+
   function syncScrollbarWidth() {
     const main = document.querySelector('main.container-fluid');
     if (!main) return;
-    const width = Math.max(0, main.offsetWidth - main.clientWidth);
+
+    let width = Math.max(0, main.offsetWidth - main.clientWidth);
+    if (
+      !width &&
+      main.scrollHeight > main.clientHeight + 1 &&
+      global.matchMedia &&
+      global.matchMedia('(hover: hover) and (pointer: fine)').matches
+    ) {
+      width = OVERLAY_SCROLLBAR_WIDTH;
+    }
     document.documentElement.style.setProperty('--scrollbar-width', width + 'px');
   }
 
@@ -144,6 +161,12 @@
     if (typeof ResizeObserver !== 'undefined') {
       const nav = document.querySelector('nav.navbar.fixed-top');
       if (nav) new ResizeObserver(syncNavbarHeight).observe(nav);
+
+      // A classic scrollbar appearing/disappearing shrinks/grows main's
+      // content box, so this also re-measures the width when the page first
+      // becomes scrollable (e.g. async content landing after DOMContentLoaded).
+      const main = document.querySelector('main.container-fluid');
+      if (main) new ResizeObserver(syncScrollbarWidth).observe(main);
     } else {
       global.addEventListener('resize', syncNavbarHeight);
     }

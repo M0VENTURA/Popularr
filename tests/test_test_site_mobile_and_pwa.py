@@ -99,6 +99,29 @@ class TestNavbarDoesNotCoverTheScrollbar:
         idx = js.index("global.popularr = {")
         assert "syncScrollbarWidth," in js[idx: idx + 200]
 
+    def test_overlay_scrollbars_reserve_an_explicit_strip(self) -> None:
+        """Overlay scrollbars consume NO layout width, so the measured width is
+        0 and the navbar would still paint over the bar. When the page is
+        scrollable on a fine-pointer device, a strip is reserved anyway."""
+        js = _read(MAIN_JS)
+        idx = js.index("function syncScrollbarWidth()")
+        window = js[idx - 500: idx + 900]
+        assert "OVERLAY_SCROLLBAR_WIDTH" in window
+        assert "main.scrollHeight > main.clientHeight" in window
+        assert "pointer: fine" in window, (
+            "the fallback must not reserve a strip for transient touch "
+            "scrollbars"
+        )
+
+    def test_the_scroll_container_is_observed(self) -> None:
+        js = _read(MAIN_JS)
+        idx = js.index("function initNavbarHeight()")
+        window = js[idx: idx + 900]
+        assert "new ResizeObserver(syncScrollbarWidth)" in window, (
+            "the bar can appear after async content lands; main's content box "
+            "shrinks when it does, so observe it"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 2. PWA shell

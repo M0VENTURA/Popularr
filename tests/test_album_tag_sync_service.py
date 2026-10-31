@@ -203,3 +203,88 @@ def test_mp3_writer_frame_map_has_new_frames():
 
     assert tfs._MB_TXXX_DESC["musicbrainz_releasegroupid"] == _canonical_tag_name("musicbrainz_releasegroupid")
     assert tfs._MB_TXXX_DESC["musicbrainz_releasegroupid"] == "MUSICBRAINZ_RELEASEGROUPID"
+
+
+# ---------------------------------------------------------------------------
+# Stale MusicBrainz identifiers must be CORRECTED, not merely filled
+# ---------------------------------------------------------------------------
+
+class TestBuildTagUpdatesWritesTheRecordingMbid:
+    """The save path (``build_tag_updates``) is how "update metadata on save"
+    reaches the file. ``recording_mbid`` is the canonical column, and it was
+    missing from the map — so a save corrected the DB but left the file's
+    ``MUSICBRAINZ_TRACKID`` stale, and the Navidrome import preserved the DB
+    value on every scan."""
+
+    def test_recording_mbid_maps_to_the_recording_tag(self):
+        from services.metadata.tag_file_service import build_tag_updates
+
+        tags = build_tag_updates({"recording_mbid": "rec-new"})
+        assert tags["mbid"] == "rec-new"
+
+    def test_the_canonical_column_wins_over_a_stale_alias(self):
+        from services.metadata.tag_file_service import build_tag_updates
+
+        tags = build_tag_updates({"mbid": "rec-old", "recording_mbid": "rec-new"})
+        assert tags["mbid"] == "rec-new"
+
+
+class TestStaleIdentityTagsAreCorrected:
+    """A dirty row is an unconfirmed correction. If its file still carries a
+    different recording MBID, fill-if-missing can never self-heal it: the
+    import preserves the DB value, Navidrome echoes the stale tag, and the same
+    conflict is warned on every scan."""
+
+    def _run(self, monkeypatch, tmp_path, *, dirty: bool, file_mbid: str):
+        from services.metadata import album_tag_sync_service as svc
+
+        mp3 = tmp_path / "1.mp3"
+        mp3.write_bytes(b"x")
+
+        track = {
+            "id": "t1", "title": "Song", "artist": "A", "album": "Album",
+            "album_artist": "A", "track_number": "1", "disc_number": "1",
+            "file_path": str(mp3), "recording_mbid": "rec-db",
+            "metadata_dirty_for_navidrome": dirty,
+        }
+        monkeypatch.setattr(svc, "_load_fresh_tracks", lambda a, b: [track])
+        monkeypatch.setattr(
+            svc, "_read_file_values",
+            lambda p: {"musicbrainz_trackid": file_mbid},
+        )
+        monkeypatch.setattr(svc, "_fetch_artist_genres", lambda a: {})
+        # A 2-track release for a 1-track local album -> NOT a perfect match,
+        # so the identity fields are not offered by _db_tag_candidates.
+        monkeypatch.setattr(
+            svc, "_resolve_mb_release",
+            lambda tracks: (
+                "rel-1",
+                {(1, 1): {"recording_mbid": "r1"}, (1, 2): {"recording_mbid": "r2"}},
+                2,
+            ),
+        )
+        monkeypatch.setattr(svc, "_record_corrections", lambda *a, **k: 0)
+        monkeypatch.setattr(svc.os.path, "exists", lambda p: True)
+
+        import services.metadata.tag_file_service as tfs
+        written: dict = {}
+        monkeypatch.setattr(
+            tfs, "write_tags_to_file", lambda p, tags: written.update(tags) or True
+        )
+
+        svc.sync_album_file_tags("A", "Album", changed_track_ids=set())
+        return written
+
+    def test_a_dirty_rows_stale_recording_mbid_is_corrected(
+        self, monkeypatch, tmp_path, _tagging_on
+    ):
+        written = self._run(monkeypatch, tmp_path, dirty=True, file_mbid="rec-old")
+        assert written.get("musicbrainz_trackid") == "rec-db"
+
+    def test_a_clean_row_keeps_fill_if_missing_semantics(
+        self, monkeypatch, tmp_path, _tagging_on
+    ):
+        """CONTROL: the perfect-match safety gate still protects an ordinary
+        album from having identifiers stamped into it."""
+        written = self._run(monkeypatch, tmp_path, dirty=False, file_mbid="rec-old")
+        assert "musicbrainz_trackid" not in written

@@ -94,6 +94,40 @@ logger = structlog.get_logger(__name__)
 # Matches a trailing "(X Cover)" annotation in a track title.
 _COVER_SUFFIX_RE = re.compile(r"\s*\([^)]+\s+cover\)\s*$", re.IGNORECASE)
 
+
+def _recording_query_titles(title: str) -> list[str]:
+    """MusicBrainz query forms for a library title, most-canonical first.
+
+    MusicBrainz is queried with a quoted Lucene *phrase*, so every token in the
+    supplied text must appear in the recording's title. A library title that
+    carries a ``(X Cover)`` annotation, a ``- Version`` suffix or a trailing
+    ``— Artist`` therefore matches **nothing** — reported on the *Spotify -
+    Metal Covers* compilation, where "Doomed (Bring Me the Horizon Cover)" and
+    "Everytime We Touch - TEKKNO Version" both returned zero recordings while
+    the bare song titles returned the exact recordings.
+
+    The first variant strips bracketed annotations and a dash-delimited suffix
+    (the same annotations ``canonical_track_title`` drops, but case-preserving
+    so the emitted query stays readable in logs). The raw folded title is kept
+    as a fallback for titles whose brackets are part of the real name.
+    """
+    text = normalize_unicode_punctuation(str(title or "").strip())
+    if not text:
+        return []
+
+    cleaned = re.sub(r"\[[^\]]*\]", " ", text)
+    cleaned = re.sub(r"\([^)]*\)", " ", cleaned)
+    cleaned = re.sub(r"\s+-\s+.*$", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    variants: list[str] = []
+    for value in (cleaned, text):
+        value = re.sub(r"\s+", " ", value or "").strip()
+        if value and value.casefold() not in {v.casefold() for v in variants}:
+            variants.append(value)
+    return variants
+
+
 # Word-boundary "cover" match, used instead of a bare substring test so that
 # "Cover Me", "Undercover" and "Discover" are not treated as annotations.
 _COVER_WORD_RE = re.compile(
@@ -456,41 +490,27 @@ class CoverDetector:
         )
 
     @staticmethod
-    def _va_compilation_without_release(
-        album_artist: str, tracks: list[dict[str, Any]]
-    ) -> bool:
-        """True for a Various-Artists album that is not an official release.
+    def _is_va_compilation(album_artist: str) -> bool:
+        """True when the album artist names a compilation, not a performer.
 
         ⭐ Reported: *"Various Artists compilations are struggling to match the
         cover detection when it wasn't an official album release. It should
         match these using artist name and track name."*
 
-        A VA compilation assembled from a playlist (or any folder that never
-        matched a MusicBrainz release) has no release MBID, so the metadata
-        pass had nothing to resolve its tracks against and every row lacks a
-        logged recording/work identity. Applying the "the metadata pass already
-        tried" skip would then silence the WHOLE album; the track ARTIST and
-        TITLE are enough to find the recording, so the deep pass must fall back
-        to them.
+        The decision is PER TRACK, not per album. A cover verdict is a statement
+        about one recording, and the fallback to the track's own ARTIST + TITLE
+        is the only route an unresolved row has. This used to require that NO
+        row on the album carried a release MBID, so on a mixed folder — one
+        file tagged with a release by the importer, the others not — a single
+        tagged row disabled the search for every unresolved row. That is the
+        reported "some tracks match, the others don't".
         """
-        if not (
-            is_track_artist_placeholder(album_artist)
-            or str(album_artist or "").strip().casefold() in _COMPILATION_ARTIST_NAMES
-        ):
+        if not album_artist:
             return False
-        for track in tracks or []:
-            if not isinstance(track, dict):
-                continue
-            if str(
-                track.get("musicbrainz_album_mbid")
-                or track.get("musicbrainz_albumid")
-                or track.get("musicbrainz_releasegroupid")
-                or ""
-            ).strip():
-                # An official release IS known, so the metadata pass had
-                # something to resolve against — keep the duplicate-search skip.
-                return False
-        return True
+        return bool(
+            is_track_artist_placeholder(album_artist)
+            or str(album_artist).strip().casefold() in _COMPILATION_ARTIST_NAMES
+        )
 
     @staticmethod
     def _file_tag_performer(track: dict[str, Any]) -> str:
@@ -543,18 +563,37 @@ class CoverDetector:
         The previous keyword form (``recording=``, ``artist=``) did not match
         the client signature and raised ``TypeError`` inside a bare ``except``,
         so recording lookups silently returned nothing.
+
+        The title is NOT sent verbatim: ``_recording_query_titles`` strips the
+        annotations a library title carries (``(X Cover)``, ``- Version``) that
+        a MusicBrainz phrase query would otherwise require to be present. The
+        artist clause is retried unconstrained when the constrained search
+        finds nothing — a file's ARTIST tag can name a performer MusicBrainz
+        credits differently, and the caller re-filters candidates with
+        ``_artist_matches`` anyway.
         """
-        title = str(title or "").strip()
-        if not title:
+        query_titles = _recording_query_titles(title)
+        if not query_titles:
             return []
-        query = f'recording:"{escape_lucene_special_chars(title)}"'
-        if artist:
-            query += f' AND artist:"{escape_lucene_special_chars(str(artist).strip())}"'
-        try:
-            return self.mb.search_recordings(query, limit=limit) or []
-        except Exception as exc:
-            logger.debug("Recording search failed", title=title, error=str(exc))
-            return []
+
+        artist_text = str(artist or "").strip()
+        for require_artist in ((True, False) if artist_text else (False,)):
+            for query_title in query_titles:
+                query = f'recording:"{escape_lucene_special_chars(query_title)}"'
+                if require_artist:
+                    query += (
+                        f' AND artist:"{escape_lucene_special_chars(artist_text)}"'
+                    )
+                try:
+                    results = self.mb.search_recordings(query, limit=limit) or []
+                except Exception as exc:
+                    logger.debug(
+                        "Recording search failed", title=query_title, error=str(exc)
+                    )
+                    continue
+                if results:
+                    return results
+        return []
 
     def _get_recording(self, mbid: str, inc: str) -> dict[str, Any]:
         try:
@@ -1145,8 +1184,9 @@ class CoverDetector:
         _step_done("ISRC lookup", 2)
 
         # Step 3: MusicBrainz recording-relation detection
-        # Computed once for the album — see the identity gate below.
-        _va_without_release = self._va_compilation_without_release(artist, tracks)
+        # Per-track identity gate below — one VA album can mix resolved and
+        # unresolved rows.
+        _va_album = self._is_va_compilation(artist)
         for track in tracks:
             tid = track.get("id")
             if not tid or tid in seen_track_ids:
@@ -1156,14 +1196,15 @@ class CoverDetector:
             # metadata pass already failed to resolve — the exact duplicate
             # network work this pass is meant to avoid.
             #
-            # ⚠️ EXCEPT on a VA compilation that is NOT an official release
-            # (a playlist-derived folder, for example): there was no release
-            # for the metadata pass to resolve against, so it never logged an
-            # identity and there is no duplicate search to avoid. The track's
-            # own ARTIST + TITLE are enough to find the recording, which is the
-            # only route cover detection has for these albums.
+            # ⚠️ EXCEPT on a VA compilation (a playlist-derived folder, for
+            # example): there may have been no release for the metadata pass to
+            # resolve THIS row against, so it logged no identity and there is no
+            # duplicate search to avoid. The track's own ARTIST + TITLE are
+            # enough to find the recording, which is the only route cover
+            # detection has for these rows. This is decided per ROW: a sibling
+            # file that happens to carry a release MBID must not silence it.
             if not self._track_has_logged_identity(track):
-                if not _va_without_release:
+                if not _va_album:
                     continue
                 if not comparison_artist(track, artist):
                     # No real performer to search with or compare against.
@@ -1350,11 +1391,13 @@ class CoverDetector:
                     track_year=_extract_track_year(track),
                 )
             else:
-                # Same skip rule as Step 3: without any logged identity the
-                # recording would need an online search the metadata pass has
-                # already tried — skip instead of re-searching.
+                # Same per-row identity gate as Step 3: without any logged
+                # identity the recording needs an online search. A VA
+                # compilation's unresolved row is allowed to make it; one
+                # tagged sibling does not silence the row.
                 if not self._track_has_logged_identity(track):
-                    continue
+                    if not _va_album or not _performer:
+                        continue
                 mbid = self._resolve_recording_mbid(track, artist, album)
                 if not mbid:
                     continue
@@ -2016,29 +2059,39 @@ class CoverDetector:
                     return
                 if _all_cover_work_ids(rec) & {work_id}:
                     return
-                for credit in rec.get("artist-credit") or []:
-                    if not isinstance(credit, dict):
-                        continue
-                    artist = credit.get("artist") or {}
-                    aid = str(artist.get("id") or "")
-                    if aid not in candidates:
-                        continue
-                    name = str(artist.get("name") or credit.get("name") or candidates[aid]).strip()
-                    if not name:
-                        return
-                    key = _release_date_key(rec)
-                    if performer and _same_artist(name, performer):
-                        if key < performer_best_key:
-                            performer_best_key = key
-                        return
-                    if best is None or key < best_key:
-                        best_key = key
-                        best = {
-                            "artist": name,
-                            "year": year_from_recording(rec),
-                            "confidence": "medium",
-                        }
+                # ⚠️ ONLY the FIRST credit is the performing artist. Scanning
+                # every credit let a GUEST turn into the "original artist":
+                # MusicBrainz credits some Metallica live performances of
+                # "So What" as "Metallica feat. Animal" / "Metallica & vocals
+                # by Animal". "Animal" is Nick Culmer's performing alias and a
+                # writer of the work, so it WAS in the writer-candidate set and
+                # the verdict came back as "<title> (Animal Cover)" instead of
+                # Anti-Nowhere League. ``_detect_via_work_id`` and
+                # ``_earliest_across_pages`` already read the first credit only.
+                credits = rec.get("artist-credit") or []
+                if not credits or not isinstance(credits[0], dict):
                     return
+                credit = credits[0]
+                artist = credit.get("artist") or {}
+                aid = str(artist.get("id") or "")
+                if aid not in candidates:
+                    return
+                name = str(artist.get("name") or credit.get("name") or candidates[aid]).strip()
+                if not name:
+                    return
+                key = _release_date_key(rec)
+                if performer and _same_artist(name, performer):
+                    if key < performer_best_key:
+                        performer_best_key = key
+                    return
+                if best is None or key < best_key:
+                    best_key = key
+                    best = {
+                        "artist": name,
+                        "year": year_from_recording(rec),
+                        "confidence": "medium",
+                    }
+                return
 
             page = self._work_recordings(work_id)
             for rec in page:
@@ -2204,20 +2257,41 @@ class CoverDetector:
         *,
         performer: str,
     ) -> dict[str, Any] | None:
-        """Last resort for a STATED cover whose original recording is unknown."""
+        """Last resort for a STATED cover whose original recording is unknown.
+
+        ⚠️ A WORK's writer is not necessarily its PERFORMER. "So What?" credits
+        Nick Culmer, whose performing alias is "Animal" — reporting the writer
+        produced a "(Animal Cover)" verdict instead of the band that released
+        it. So the writer's BAND is preferred; the writer's own name is used
+        only when no performing identity is linked at all.
+        """
         for work_id in sorted(work_ids or ()):
             try:
                 work = _ngs_relations(self.mb.get_work(work_id, inc="artist-rels") or {})
             except Exception as exc:
                 logger.debug("Cover-work writer lookup failed", work_mbid=work_id, error=str(exc))
                 continue
+
+            writers: list[dict[str, str]] = []
             for rel in work.get("artist-relation-list", []) or []:
                 if str(rel.get("type", "")).lower() not in _WRITER_RELATION_TYPES:
                     continue
                 artist = rel.get("artist") or {}
-                name = str(
-                    artist.get("name") or rel.get("target-credit") or ""
-                ).strip()
+                name = str(artist.get("name") or rel.get("target-credit") or "").strip()
+                wid = str(artist.get("id") or "").strip()
+                if name and all(w["id"] != wid for w in writers):
+                    writers.append({"id": wid, "name": name})
+
+            for writer in writers:
+                for linked in self._artist_bands(writer["id"]):
+                    if linked.get("kind") != "band":
+                        continue
+                    band = str(linked.get("name") or "").strip()
+                    if band and not (performer and _same_artist(band, performer)):
+                        return {"artist": band, "year": None, "confidence": "medium"}
+
+            for writer in writers:
+                name = writer["name"]
                 if name and not (performer and _same_artist(name, performer)):
                     return {"artist": name, "year": None, "confidence": "medium"}
         return None
