@@ -6,7 +6,6 @@ catalogue cap exists so a weak album's best track is not crowned a hit.
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import pytest
@@ -168,8 +167,12 @@ class TestCurveMetricIsMonotonic:
     """
 
     def test_metric_matches_the_log_scale(self):
+        from services.popularity.popularity_math import (
+            calculate_lastfm_popularity_score,
+        )
+
         assert _curve_metric({"lastfm_listeners": 1_000_000}) == pytest.approx(
-            min(100.0, math.log10(1_000_001) * 16.0), abs=0.01
+            calculate_lastfm_popularity_score(1_000_000), abs=0.01
         )
 
     def test_metric_increases_with_listeners(self):

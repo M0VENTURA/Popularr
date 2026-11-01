@@ -513,6 +513,77 @@ def _track_proposals(
         if rec:
             enrichment[rec] = mb_track
 
+    # ⭐ WHICH MusicBrainz genre source the SCAN would write. ``track_stage``
+    # uses the release GROUP on a single-artist release and the RECORDING on a
+    # VA compilation. The review must compare against the same source, or a
+    # completed scan is immediately re-proposed: the local column holds the
+    # group list and the review offered the recording's single genre — the
+    # reported spurious "Genres" edits after matching another release.
+    from services.catalog.album_classification_service import (
+        classify_compilation_category,
+        joined_album_type_from_rows,
+    )
+
+    _album_artist = next(
+        (
+            str(row.get("album_artist") or "").strip()
+            for row in local_tracks
+            if str(row.get("album_artist") or "").strip()
+        ),
+        "",
+    )
+    _base_artist = _album_artist or next(
+        (
+            str(row.get("artist") or "").strip()
+            for row in local_tracks
+            if str(row.get("artist") or "").strip()
+        ),
+        "",
+    )
+    _album_name = next(
+        (
+            str(row.get("album") or "").strip()
+            for row in local_tracks
+            if str(row.get("album") or "").strip()
+        ),
+        "",
+    )
+    try:
+        _is_va_album = (
+            classify_compilation_category(
+                artist=_base_artist,
+                album=_album_name,
+                tracks=local_tracks,
+                album_artist=_album_artist or _base_artist,
+                type_text=joined_album_type_from_rows(local_tracks),
+            )
+            == "va"
+        )
+    except Exception:
+        _is_va_album = False
+    _album_mb_genres = _as_text(
+        metadata.get("release_group_genres")
+        or metadata.get("release_genres")
+        or ""
+    )
+    # Same release GROUP means the album-level genres cannot have changed. Keep
+    # the source mirroring below as the primary rule, but this guard does not
+    # depend on the release lookup having populated the embedded group's genres.
+    _stored_group_mbid = next(
+        (
+            str(row.get("musicbrainz_releasegroupid") or "").strip()
+            for row in local_tracks
+            if str(row.get("musicbrainz_releasegroupid") or "").strip()
+        ),
+        "",
+    )
+    _new_group_mbid = _as_text(metadata.get("release_group_mbid"))
+    _same_release_group = bool(
+        _stored_group_mbid
+        and _new_group_mbid
+        and _stored_group_mbid.casefold() == _new_group_mbid.casefold()
+    )
+
     proposals: list[dict[str, Any]] = []
     for entry in comparison:
         track_id = _as_text(entry.get("library_track_id"))
@@ -579,7 +650,15 @@ def _track_proposals(
             "disc_number": _as_text(entry.get("mb_disc_number")),
             "mbid": rec_mbid,
             "writer": _genres_text(mb_track.get("writer")),
-            "musicbrainz_genres": _genres_text(mb_track.get("musicbrainz_genres")),
+            # Mirror the SCAN's source: release-GROUP genres for a single-artist
+            # release, the RECORDING's genres for a VA compilation. Comparing
+            # the group list the scan stored against the recording's single
+            # genre proposed the same edit after every completed scan.
+            "musicbrainz_genres": _genres_text(
+                (mb_track.get("musicbrainz_genres") or "")
+                if _is_va_album
+                else (_album_mb_genres or mb_track.get("musicbrainz_genres") or "")
+            ),
             "artist": _as_text(mb_track.get("artist")),
         }
 
@@ -588,6 +667,15 @@ def _track_proposals(
                 continue
             proposed = proposed_map.get(field, "")
             if not proposed:
+                continue
+            # Matching another RELEASE in the same GROUP cannot change a
+            # single-artist album's genres. On a VA compilation the field is the
+            # recording's own genre, so the guard does not apply there.
+            if (
+                field == "musicbrainz_genres"
+                and not _is_va_album
+                and _same_release_group
+            ):
                 continue
             # A track artist equal to the ALBUM artist is either the flatten's
             # fallback (a compilation's recording had no credit of its own, so

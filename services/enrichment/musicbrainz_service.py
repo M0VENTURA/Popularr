@@ -982,6 +982,19 @@ class MusicBrainzService:
         version_release_year = _year_of(specific_release.get("date"))
 
         release_group_title = _release_group_title_of(specific_release)
+        _rg_secondary_types = (
+            {
+                str(item).strip().casefold()
+                for item in (_release_group.get("secondary-types") or [])
+                if str(item).strip()
+            }
+            if isinstance(_release_group, dict)
+            else set()
+        )
+        #: A live release's recordings often carry no "(Live)" in their own
+        #: title (the album title/type carries it). This is what lets the track
+        #: stage persist `is_live` and apply the live popularity penalty.
+        is_live_recording = "live" in _rg_secondary_types
         effective_album = authoritative_album or release_group_title or specific_title
         effective_year = (
             original_release_year
@@ -1060,6 +1073,7 @@ class MusicBrainzService:
             # recording from a release tracklist.
             "release_mbid": specific_release_mbid or None,
             "release_group_mbid": specific_release_group_mbid or None,
+            "is_live": is_live_recording,
             "confidence": confidence,
             "writer": ", ".join(dict.fromkeys(writers)),
             "work_mbid": work_mbid,

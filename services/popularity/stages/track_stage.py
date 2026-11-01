@@ -257,6 +257,26 @@ _as_str = safe_str
 _as_int = safe_int
 
 
+def _as_bool(value: Any) -> bool:
+    """SQLite/Postgres can hand back ``0``, ``"0"`` or ``False``."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+#: Explicit LIVE wording only. ``is_live_or_alternate_track_title`` also accepts
+#: acoustic/unplugged/orchestral/demo, which are separate columns — persisting
+#: those as `is_live` would mislabel them.
+_LIVE_TITLE_RE = re.compile(
+    r"(?:[\(\[]\s*live\b[^)\]]*[\)\]]|[-–—]\s*live\s*$)",
+    re.IGNORECASE,
+)
+
+
+def _is_live_title(title: Any) -> bool:
+    return bool(_LIVE_TITLE_RE.search(str(title or "")))
+
+
 def _safe_duration(value: Any) -> float | None:
     try:
         dur = float(value or 0)
@@ -723,7 +743,15 @@ def _coerce_writer_list(raw: Any) -> list[str]:
                 value = json.loads(stripped)
                 continue
             except Exception:
-                value = [stripped]
+                # A plain comma/semicolon string (the per-track MusicBrainz
+                # writer is built with ", ".join) is a NAME LIST, not one name.
+                # Keeping it whole made the scan write a single writer and the
+                # review then propose a "change" that was only the split.
+                value = [
+                    part.strip()
+                    for part in re.split(r"\s*[,;]\s*", stripped)
+                    if part.strip()
+                ]
                 break
         else:
             return []
@@ -776,6 +804,7 @@ def _score_track_popularity(
     is_featured_track: bool,
     is_live_track: bool,
     is_instrumental_track: bool = False,
+    lastfm_playcount_available: bool = True,
     artist_lf_context: dict[str, Any] | None,
     track_duration: float | None = None,
 ) -> tuple[dict[str, Any], float]:
@@ -885,6 +914,7 @@ def _score_track_popularity(
         is_featured_track=is_featured_track,
         is_live_track=is_live_track,
         is_instrumental_track=is_instrumental_track,
+        lastfm_playcount_available=lastfm_playcount_available,
         lastfm_weight_override=lastfm_weight_override,
         source_audit=_audit_verdict,
         single_boost=cfg_single_boost,
@@ -1206,13 +1236,6 @@ def _resolve_track_mb_metadata(
             if recording_mbid:
                 payload["recording_mbid"] = recording_mbid
                 payload["mbid"] = recording_mbid
-            # The release THIS recording belongs to (from the same lookup).
-            # A VA compilation's tracks can each come from a different release,
-            # so the album-level release id cannot stand in for it; cover
-            # detection uses this one to resolve the recording from a release
-            # tracklist rather than an artist+title search.
-            if mb_data.get("release_mbid"):
-                payload["recording_release_mbid"] = mb_data["release_mbid"]
             if confidence is not None:
                 payload["musicbrainz_confidence"] = confidence
 
@@ -1237,31 +1260,61 @@ def _resolve_track_mb_metadata(
             if mb_data.get("is_remix"):
                 payload["is_remix"] = True
 
-            if recording_mbid and not _from_batch:
+            if recording_mbid:
+                # ⭐ When the config says APPLY during the scan, MusicBrainz's
+                # writers are authoritative — including the album release's own
+                # (``_from_batch``), which used to be discarded entirely: this
+                # block was gated on ``not _from_batch``, so a completed scan
+                # never applied the release writers and every later release
+                # match re-proposed the same writer change.
+                # When applying is OFF, the recommendation panel/stash owns the
+                # change and the local writer is left untouched.
+                _apply_metadata = _metadata_update_allowed()
                 _raw_existing_writer = track.get("writer")
-                _sanitized_existing_writer = _coerce_writer_list(_raw_existing_writer) if _raw_existing_writer else []
-                _existing_writer_already_clean = False
-                if _raw_existing_writer:
+                _sanitized_existing_writer = (
+                    _coerce_writer_list(_raw_existing_writer)
+                    if _raw_existing_writer else []
+                )
+                _mb_writers = _coerce_writer_list((mb_data or {}).get("writer"))
+                if (
+                    not _mb_writers
+                    and not _from_batch
+                    and not _sanitized_existing_writer
+                    and _apply_metadata
+                ):
+                    # Only a track with NOTHING to keep pays for the extra
+                    # request — a resolved/curated row must not fetch composers
+                    # on every scan.
                     try:
-                        _parsed_existing = json.loads(_raw_existing_writer) if isinstance(_raw_existing_writer, str) else _raw_existing_writer
-                        _existing_writer_already_clean = isinstance(_parsed_existing, list) and _parsed_existing == _sanitized_existing_writer
+                        _mb_writers = _coerce_writer_list(
+                            mb_service.get_composers_for_recording(recording_mbid) or []
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "Composer fetch failed", track_id=track_id, error=str(exc)
+                        )
+
+                if _apply_metadata and _mb_writers:
+                    payload["writer"] = json.dumps(_mb_writers, ensure_ascii=False)
+                elif _raw_existing_writer:
+                    # Keep (and format-sanitise) the local writer; never blank it.
+                    _existing_writer_already_clean = False
+                    try:
+                        _parsed_existing = (
+                            json.loads(_raw_existing_writer)
+                            if isinstance(_raw_existing_writer, str)
+                            else _raw_existing_writer
+                        )
+                        _existing_writer_already_clean = (
+                            isinstance(_parsed_existing, list)
+                            and _parsed_existing == _sanitized_existing_writer
+                        )
                     except Exception:
                         _existing_writer_already_clean = False
-
-                if _raw_existing_writer and not _existing_writer_already_clean:
-                    payload["writer"] = json.dumps(_sanitized_existing_writer, ensure_ascii=False)
-
-                if recording_mbid and not _sanitized_existing_writer:
-                    _batch_writer = (mb_data or {}).get("writer") or []
-                    if not _batch_writer and not _from_batch:
-                        try:
-                            _batch_writer = mb_service.get_composers_for_recording(recording_mbid) or []
-                        except Exception as exc:
-                            logger.debug("Composer fetch failed", track_id=track_id, error=str(exc))
-
-                    flat_writers = _coerce_writer_list(_batch_writer)
-                    if flat_writers:
-                        payload["writer"] = json.dumps(flat_writers, ensure_ascii=False)
+                    if not _existing_writer_already_clean:
+                        payload["writer"] = json.dumps(
+                            _sanitized_existing_writer, ensure_ascii=False
+                        )
 
             if mb_data.get("title"):
                 payload["musicbrainz_title"] = mb_data["title"]
@@ -1667,6 +1720,10 @@ def process_track(
     _album_annotation = _album_edition_annotation(album_context, album_tracks)
 
     _mb_meta = None
+    #: The recording lookup's release-group secondary type. A track on a live
+    #: release can carry no "(Live)" title at all, so the title check alone is
+    #: not enough to classify/penalise it.
+    _mb_is_live = False
     _genre_lookup_artist = None
     _genre_lookup_title = None
     if not popularity_only and not singles_detection_only:
@@ -1692,6 +1749,9 @@ def process_track(
             _genre_lookup_artist = _mb_meta.get("artist")
             _genre_lookup_title = _mb_meta.get("title")
             update_payload.update(_mb_meta.get("payload") or {})
+            _mb_is_live = bool((_mb_meta.get("mb_data") or {}).get("is_live"))
+            if _mb_is_live:
+                _resolved_is_live = True
 
             # An UNCONFIRMED release-tracklist title (a batch identity that was
             # NOT position+length verified) must never be auto-applied — it is
@@ -1773,7 +1833,14 @@ def process_track(
                 or effective_track.get("album_context_live")
                 or album_context.get("is_live_album")
                 or _album_type_indicates_live(track, effective_track, album_context, album_result)
-                or bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", str(raw_title or title).lower()))
+                or _mb_is_live
+                # ⭐ The SAME predicate the result flag uses. The old
+                # bracketed-only regex missed "About A Girl - Live" (dash
+                # form), so the track was persisted/scored as studio while
+                # `_resolved_is_live` said live. `is_live_or_alternate_track_title`
+                # handles brackets AND a trailing "- Live" without matching a
+                # bare "Live ..." title or "Alive".
+                or is_live_or_alternate_track_title(str(raw_title or title or ""))
             )
 
             _alt_rendition = _is_alternate_performance_title(
@@ -1982,8 +2049,11 @@ def process_track(
                             )
                         if _prefetch_playcount_available:
                             lastfm_playcount = _as_int(_prefetch_entry.get("lastfm_playcount") or 0)
+                            update_payload["lastfm_playcount_available"] = True
                         else:
-                            lastfm_playcount = _stored_lf_play
+                            # Missing is UNKNOWN, not a measured zero.
+                            lastfm_playcount = None
+                            update_payload["lastfm_playcount_available"] = False
                         update_payload["lastfm_listeners"] = lastfm_listeners
                         update_payload["lastfm_playcount"] = lastfm_playcount
                         update_payload["lastfm_last_updated"] = now_ts
@@ -2015,8 +2085,10 @@ def process_track(
                                         lastfm_playcount = _as_int(
                                             agg.get("track_play") or agg.get("playcount") or 0
                                         )
+                                        update_payload["lastfm_playcount_available"] = True
                                     else:
-                                        lastfm_playcount = _stored_lf_play
+                                        lastfm_playcount = None
+                                        update_payload["lastfm_playcount_available"] = False
                                     if agg.get("match_type") == "canonical_remaster_fallback":
                                         logger.debug(
                                             "[POPULARITY_MATCH]",
@@ -2047,6 +2119,7 @@ def process_track(
                                 elif is_live_release:
                                     lastfm_listeners = 0
                                     lastfm_playcount = 0
+                                    update_payload["lastfm_playcount_available"] = False
                                 else:
                                     # ⚠️ ``_perf_title``, not the local title: this
                                     # fallback ran whenever the aggregate came back
@@ -2081,8 +2154,10 @@ def process_track(
                                         lastfm_playcount = _as_int(
                                             lf_result.get("track_play") or lf_result.get("playcount") or 0
                                         )
+                                        update_payload["lastfm_playcount_available"] = True
                                     else:
-                                        lastfm_playcount = _stored_lf_play
+                                        lastfm_playcount = None
+                                        update_payload["lastfm_playcount_available"] = False
 
                                     toptags = lf_result.get("toptags", {}) if isinstance(lf_result, dict) else {}
                                     tag_list = toptags.get("tag", []) if isinstance(toptags, dict) else []
@@ -2125,6 +2200,9 @@ def process_track(
                                 lastfm_listeners = _search_listeners
                                 if _search_agg.get("playcount_available", True):
                                     lastfm_playcount = _as_int(_search_agg.get("track_play") or 0)
+                                    update_payload["lastfm_playcount_available"] = True
+                                else:
+                                    update_payload["lastfm_playcount_available"] = False
                                 update_payload["lastfm_listeners"] = lastfm_listeners
                                 update_payload["lastfm_playcount"] = lastfm_playcount
                                 update_payload["lastfm_last_updated"] = now_ts
@@ -2266,6 +2344,12 @@ def process_track(
                     is_featured_track=is_featured_flag,
                     is_live_track=is_live_flag,
                     is_instrumental_track=is_instrumental_flag,
+                    lastfm_playcount_available=_as_bool(
+                        update_payload.get(
+                            "lastfm_playcount_available",
+                            track.get("lastfm_playcount_available", True),
+                        )
+                    ),
                     artist_lf_context=artist_lf_context,
                     track_duration=_safe_duration(effective_track.get("duration")),
                 )
@@ -2990,13 +3074,31 @@ def process_track(
     _playcount_value = update_payload.get(
         "lastfm_playcount", track.get("lastfm_playcount")
     )
-    if _playcount_value is not None:
+    _playcount_available = update_payload.get("lastfm_playcount_available")
+    if _playcount_available is None:
+        _playcount_available = track.get("lastfm_playcount_available")
+    if _playcount_available is None:
         try:
-            update_payload["lastfm_playcount_available"] = int(
-                _playcount_value or 0
-            ) > 0
+            _playcount_available = int(_playcount_value or 0) > 0
         except (TypeError, ValueError):
-            update_payload["lastfm_playcount_available"] = False
+            _playcount_available = False
+    # ⭐ The SOURCE flag wins. Deriving it from the value alone conflated
+    # "Last.fm did not return a playcount" (NULL, unknown) with a measured zero,
+    # and a listener-only row could still be scored as full-confidence.
+    update_payload["lastfm_playcount_available"] = _as_bool(_playcount_available)
+
+    # ⭐ PERSIST the live verdict. `_resolved_is_live` was only returned in the
+    # result dict; the column was written by the album stage for LIVE ALBUMS
+    # only, so an explicit "Song (Live)" / "Song - Live" track on a studio album
+    # stayed `is_live = 0` and received studio popularity with no live penalty.
+    if _resolved_is_live and (
+        _is_live_title(track.get("title"))
+        or _mb_is_live
+        or bool(track.get("album_context_live"))
+        or bool(album_context.get("is_live_album"))
+        or _album_type_indicates_live(track, album_context, album_result)
+    ):
+        update_payload["is_live"] = 1
 
     effective_track = _strip_album_type_columns(track, update_payload)
 

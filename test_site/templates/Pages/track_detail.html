@@ -518,6 +518,7 @@
                                                 <span class="badge bg-secondary">No</span>
                                             {% endif %}
                                             <button type="button" class="btn btn-outline-info btn-sm py-0 px-2" data-bs-toggle="modal" data-bs-target="#coverSearchModal"><i class="bi bi-search"></i> Detect</button>
+                                            <button type="button" class="btn btn-outline-danger btn-sm py-0 px-2" data-action="track-clear-cover" title="Clear the cover flag and lock it against automatic re-detection"><i class="bi bi-x-circle"></i> Clear &amp; Lock</button>
                                         </div>
                                         <div class="form-check">
                                             <input type="checkbox" class="form-check-input" id="cover_manual_override" name="cover_manual_override" {% if track.cover_manual_override %}checked{% endif %}>

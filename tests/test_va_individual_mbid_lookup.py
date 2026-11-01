@@ -56,12 +56,20 @@ def _track(**overrides) -> dict:
     return track
 
 
-def _resolve(monkeypatch, service, **overrides) -> dict:
+def _resolve(
+    monkeypatch,
+    service,
+    *,
+    options=None,
+    apply: bool = True,
+    album_context=None,
+    **overrides,
+) -> dict:
     from services.popularity.stages import track_stage
 
     track = _track(**overrides)
     monkeypatch.setattr(track_stage, "get_shared_mb_service", lambda: service)
-    monkeypatch.setattr(track_stage, "_metadata_update_allowed", lambda: True)
+    monkeypatch.setattr(track_stage, "_metadata_update_allowed", lambda: apply)
     monkeypatch.setattr(track_stage, "_has_real_genres", lambda _t: False)
     return track_stage._resolve_track_mb_metadata(
         track_id=track["id"],
@@ -70,7 +78,8 @@ def _resolve(monkeypatch, service, **overrides) -> dict:
         track_artist=track["artist"],
         frozen_track=False,
         force_meta=False,
-        options={},
+        options=options or {},
+        album_context=album_context,
     )
 
 
@@ -117,12 +126,15 @@ class TestTheScanUsesThatPerformer:
         service = _StubMBService()
         monkeypatch.setattr(track_stage, "_file_tag_artist", lambda track: "Bushido")
 
-        result = _resolve(monkeypatch, service)
+        result = _resolve(
+            monkeypatch,
+            service,
+            album_context={"is_va_compilation": True},
+        )
 
         assert service.calls == [("The One", "Bushido")]
         assert result["payload"].get("recording_mbid") == "rec-individual"
-        # The recording's own release rides along; cover detection uses it.
-        assert result["payload"].get("recording_release_mbid") == "rel-individual"
+        assert result["payload"].get("mbid") == "rec-individual"
 
     def test_a_real_track_artist_never_reads_the_file(self, monkeypatch):
         from services.popularity.stages import track_stage
@@ -138,7 +150,6 @@ class TestTheScanUsesThatPerformer:
 
         assert service.calls == [("The One", "Mothica")]
         assert result["payload"].get("recording_mbid") == "rec-individual"
-        assert result["payload"].get("recording_release_mbid") == "rel-individual"
 
     def test_no_performer_means_no_search_and_no_durable_miss(self, monkeypatch):
         """Without a usable performer the search is skipped, and no
@@ -153,3 +164,48 @@ class TestTheScanUsesThatPerformer:
 
         assert service.calls == []
         assert "recording_mbid_checked_at" not in result["payload"]
+
+
+class TestTheWriterFollowsTheApplySetting:
+    """Reported: after a completed scan, matching another release still
+    proposed the same Writer edit. The album release's writers were carried in
+    the batch and then DISCARDED (the write was gated on ``not _from_batch``),
+    and an existing local writer was never replaced. When the config says apply,
+    MusicBrainz's writers now win."""
+
+    @staticmethod
+    def _options(writer: str) -> dict:
+        from services.popularity.popularity_sources import (
+            album_recording_batch_key,
+        )
+
+        key = album_recording_batch_key("Various Artists", "The One")
+        return {
+            "mb_batch_metadata": {
+                key: {"recording_mbid": "rec-batch", "writer": writer}
+            }
+        }
+
+    def test_the_batch_writer_is_applied_when_updates_are_on(self, monkeypatch):
+        service = _StubMBService()
+
+        result = _resolve(
+            monkeypatch,
+            service,
+            options=self._options('["Bom", "Nick Furlong"]'),
+        )
+
+        assert result["payload"].get("writer") == '["Bom", "Nick Furlong"]'
+
+    def test_the_local_writer_stays_when_updates_are_off(self, monkeypatch):
+        service = _StubMBService()
+
+        result = _resolve(
+            monkeypatch,
+            service,
+            options=self._options('["Bom", "Nick Furlong"]'),
+            apply=False,
+            writer='["Local Writer"]',
+        )
+
+        assert "Bom" not in str(result["payload"].get("writer") or "")

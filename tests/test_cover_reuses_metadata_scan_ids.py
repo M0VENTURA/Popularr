@@ -180,7 +180,10 @@ class TestChainSkipsSeedRefetch:
         got = det._detect_via_recording_relation(
             "rec-1", "Song", "Artist"
         )
-        assert got is None
+        # A recording with no work relationship is a conclusive NEGATIVE: the
+        # work-based flow must not fall through to title/writer heuristics (the
+        # reported "Swerve" -> Dub Sex false positive).
+        assert got == {}
         # seed fetched once by _detect_via_recording_relation; the chain walk
         # reuses it instead of fetching again.
         assert mb.get_recording_calls.count("rec-1") == 1

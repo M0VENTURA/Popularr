@@ -47,6 +47,21 @@ ADAPTIVE_MIN_SPREAD_FRACTION = 0.10
 Z_SCORE_LOGISTIC_K = Z_SCORE_TO_POPULARITY_SCALE / 25.0
 LOG_SCALE_MULTIPLIER = 16.0
 
+#: Listener count that reaches Last.fm score 100 on the ABSOLUTE curve.
+#:
+#: The old curve (``16 * log10(n)``) saturated at ~1.78M listeners, so every
+#: track from a 1.8M-listener album track to a 64M-listener global hit scored
+#: exactly 100 — the reported "The Unforgiven II / Just Like Heaven /
+#: Comfortably Numb → LF: 100.0" rows. Extending the reference to 100M keeps
+#: the whole top of the catalogue ordered and leaves headroom above 1M.
+LASTFM_SCORE_LISTENER_CEILING = 100_000_000
+_LASTFM_SCORE_LOG_DENOMINATOR = math.log10(LASTFM_SCORE_LISTENER_CEILING)
+
+#: A Last.fm result with listeners but NO playcount is lower-confidence: it can
+#: still rank, but it cannot claim the full-confidence ceiling.
+LISTENER_ONLY_LASTFM_CEILING = 85.0
+
+
 #: Log-space noise floors for the robust listener z.  On a UNIFORM album (all
 #: counts near-identical) the MAD collapses toward zero, so tiny scrobble gaps
 #: would otherwise become enormous z values.  Mirrors
@@ -370,12 +385,23 @@ def album_ratio_standout(
 
 
 def calculate_lastfm_popularity_score(listeners: int, artist_max_listeners: int = 0) -> float:
-    """Calculate normalized Last.fm popularity from listener count."""
+    """Calculate normalized Last.fm popularity from listener count.
+
+    The absolute curve reaches 100 at ``LASTFM_SCORE_LISTENER_CEILING`` (100M)
+    rather than the old ~1.78M, so very popular tracks keep their ordering
+    instead of all tying at 100.
+    """
     if listeners is None or listeners <= 0:
         return 0.0
     if artist_max_listeners and artist_max_listeners > 0:
         return min(100.0, max(0.0, (listeners / artist_max_listeners) * 100.0))
-    return min(100.0, math.log10(listeners + 1) * LOG_SCALE_MULTIPLIER)
+    return min(
+        100.0,
+        max(
+            0.0,
+            100.0 * math.log10(listeners + 1) / _LASTFM_SCORE_LOG_DENOMINATOR,
+        ),
+    )
 
 
 def calculate_lastfm_zscore_popularity(
@@ -867,6 +893,7 @@ def calculate_combined_popularity_score(
     is_featured_track: bool = False,
     is_live_track: bool = False,
     is_instrumental_track: bool = False,
+    lastfm_playcount_available: bool = True,
     lastfm_weight_override: float | None = None,
     source_audit: str = "VALID",
     single_boost: float = 1.15,
@@ -884,14 +911,32 @@ def calculate_combined_popularity_score(
     has_album_context = bool(album_lf_listeners) or bool(album_lb_listens)
 
     if album_lf_listeners:
-        lastfm_score = calculate_lastfm_zscore_popularity(
+        relative_lf = calculate_lastfm_zscore_popularity(
             lastfm_listeners,
             lastfm_listeners,
             album_lf_listeners,
             album_lf_listeners,
         )
+        # ⭐ THE ABSOLUTE CURVE IS THE CEILING. The album-relative z handed the
+        # top track of EVERY album a score near/at 100, regardless of audience:
+        # a 16k-listener album lead and a 4M-listener single both logged
+        # "LF: 100.0". Capping at the absolute curve keeps the within-album
+        # ordering but stops a small album's lead from claiming global-hit
+        # confidence.
+        lastfm_score = (
+            min(relative_lf, lastfm_log) if lastfm_log > 0 else relative_lf
+        )
     else:
         lastfm_score = lastfm_log
+
+    if int(lastfm_listeners or 0) <= 0:
+        # No listener evidence: the album-relative z can still return a
+        # non-zero "relative" value for a zero count; it is not evidence.
+        lastfm_score = 0.0
+
+    if not lastfm_playcount_available:
+        # Listeners-only evidence: lower confidence, never the full ceiling.
+        lastfm_score = min(lastfm_score, LISTENER_ONLY_LASTFM_CEILING)
 
     lb_score = lb_log
 

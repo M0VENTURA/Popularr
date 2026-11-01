@@ -555,8 +555,11 @@ def _curve_metric(track: dict[str, Any], fallback: float = 0.0) -> float:
     if listeners <= 0:
         return float(fallback or 0)
     try:
-        from services.popularity.popularity_math import LOG_SCALE_MULTIPLIER
-        return min(100.0, math.log10(listeners + 1) * float(LOG_SCALE_MULTIPLIER))
+        from services.popularity.popularity_math import (
+            calculate_lastfm_popularity_score,
+        )
+
+        return calculate_lastfm_popularity_score(int(listeners))
     except Exception:
         return float(fallback or 0)
 

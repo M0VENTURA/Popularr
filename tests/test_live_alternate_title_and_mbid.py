@@ -131,7 +131,14 @@ class TestTrackStageLiveTitleWiring:
                           "confidence_score": 0.0, "single_status": "none",
                           "sources": [], "reasons": []},
         )
-        monkeypatch.setattr(ts, "insert_or_update_track", lambda *a, **k: None)
+
+        persisted: dict = {}
+
+        def _persist(track_id, row):
+            persisted.update(row)
+
+        monkeypatch.setattr(ts, "insert_or_update_track", _persist)
+        seen["persisted"] = persisted
 
         # Record the live flag passed into the scoring call.
         original_score = ts.calculate_combined_popularity_score
@@ -181,8 +188,23 @@ class TestTrackStageLiveTitleWiring:
         # as is_live so the star rating caps at 4★.
         assert seen["is_live_track"] is True
         assert result["is_live"] is True
+        # ⭐ The verdict must reach the ROW, not only the returned dict: the
+        # album stage was the only writer of `is_live`, so a live bonus cut on a
+        # studio album stayed 0 and was scored/tagged as studio.
+        assert seen["persisted"].get("is_live") == 1
         # The live recording's own counts flowed in.
         assert result["listenbrainz_listens"] == 1234
+
+    def test_dash_live_title_is_scored_and_persisted_live(self, monkeypatch):
+        """`About A Girl - Live` is the dash form the old bracket regex missed."""
+        result, seen = self._run(
+            monkeypatch,
+            track_title="About A Girl - Live",
+            lastfm_title="About A Girl",
+        )
+        assert seen["is_live_track"] is True
+        assert result["is_live"] is True
+        assert seen["persisted"].get("is_live") == 1
 
     def test_plain_title_scores_without_live_flag(self, monkeypatch):
         result, seen = self._run(
@@ -193,3 +215,4 @@ class TestTrackStageLiveTitleWiring:
         assert seen["suggested_title"] == "Time Is Running Out"
         assert seen["is_live_track"] is False
         assert result["is_live"] is False
+        assert not seen["persisted"].get("is_live")

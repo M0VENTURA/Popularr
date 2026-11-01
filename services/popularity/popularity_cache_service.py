@@ -122,6 +122,11 @@ def _row_to_entry(row: dict[str, Any]) -> dict[str, Any]:
     _source = str(row.get("source") or "")
     if not any(entry.values()) and _source != "album_tracklist":
         return {}
+
+    _playcount_available = row.get("lastfm_playcount_available")
+    if _playcount_available is None:
+        _playcount_available = int(row.get("lastfm_playcount") or 0) > 0
+    entry["_playcount_available"] = bool(_playcount_available)
         
     if _source == "album_tracklist":
         # Release-first entries are authoritative
@@ -569,6 +574,10 @@ def _sibling_entry(row: dict[str, Any]) -> dict[str, Any]:
         # over the network (a shared 1 req/s MusicBrainz budget).
         "recording_mbid": str(row.get("recording_mbid") or "").strip() or None,
     }
+    _playcount_available = row.get("lastfm_playcount_available")
+    if _playcount_available is None:
+        _playcount_available = int(row.get("lastfm_playcount") or 0) > 0
+    entry["_playcount_available"] = bool(_playcount_available)
     tags = row.get("lastfm_tags")
     if tags:
         entry["lastfm_tags"] = tags

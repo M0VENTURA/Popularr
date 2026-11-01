@@ -490,6 +490,7 @@
                                                 <span class="badge bg-secondary">No</span>
                                             {% endif %}
                                             <button type="button" class="btn btn-outline-info btn-sm py-0 px-2" data-bs-toggle="modal" data-bs-target="#coverSearchModal"><i class="bi bi-search"></i> Detect</button>
+                                            <button type="button" class="btn btn-outline-danger btn-sm py-0 px-2" onclick="clearCoverAndLock()" title="Clear the cover flag and lock it against automatic re-detection"><i class="bi bi-x-circle"></i> Clear &amp; Lock</button>
                                         </div>
                                         <div class="form-check">
                                             <input type="checkbox" class="form-check-input" id="cover_manual_override" name="cover_manual_override" {% if track.cover_manual_override %}checked{% endif %}>
@@ -746,6 +747,21 @@
                 }
             })
             .catch(err => alert('Request failed: ' + err));
+    }
+
+    function clearCoverAndLock() {
+        if (!confirm('Mark this track as NOT a cover and lock it?\n\nThe "(X Cover)" title suffix and the file cover tags are removed, and automatic cover detection will no longer overwrite this verdict.')) return;
+        fetch('/api/track/' + encodeURIComponent(CURRENT_TRACK_ID) + '/cover-verdict', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ is_cover: false, lock: true })
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (!data.success) { alert('Could not clear the cover verdict: ' + (data.error || 'Unknown error')); return; }
+            location.reload();
+        })
+        .catch(err => alert('Request failed: ' + err));
     }
 
     function searchCoverSong() {

@@ -73,10 +73,6 @@ _ARTIST_TRACK_COLUMNS = (
     "recording_mbid",           # 18
     "is_cover_reason",          # 19
     "musicbrainz_trackid",      # 20
-    # The release specific to this recording (each VA track can come from a
-    # different release). Cover detection resolves the recording from this
-    # release's tracklist instead of an artist+title search.
-    "recording_release_mbid",   # 21
 )
 
 
@@ -107,7 +103,6 @@ def _track_from_row(row: Any) -> dict[str, Any]:
         "recording_mbid": row_get(row, "recording_mbid", 18, ""),
         "is_cover_reason": row_get(row, "is_cover_reason", 19, ""),
         "musicbrainz_trackid": row_get(row, "musicbrainz_trackid", 20, ""),
-        "recording_release_mbid": row_get(row, "recording_release_mbid", 21, ""),
     }
 
 
@@ -340,6 +335,91 @@ def detect_covers_for_track(
         is_cover=verdict["is_cover"],
     )
     return verdict
+
+
+def clear_track_cover_verdict(
+    track_id: str,
+    *,
+    lock: bool = True,
+) -> dict[str, Any] | None:
+    """Clear one track's cover verdict and (by default) LOCK it.
+
+    The track page's Scan Flags card offered only "Detect" plus a lock
+    checkbox, so an incorrect verdict could not be cleared there. Clearing also
+    removes the scanner's "(X Cover)" title suffix and the file's
+    ``IS_COVER``/``ORIGINAL_COVER_ARTIST`` tags — otherwise a later Navidrome
+    import reads the stale tag back and restores the flag.
+
+    Returns ``None`` when the track does not exist.
+    """
+    from db.repositories.cover_detection_repository import COVER_SUFFIX_RE
+
+    title = ""
+    clean_title = ""
+    file_path = ""
+    try:
+        with db_session() as session:
+            row = session.execute(
+                text(
+                    "SELECT title, file_path FROM tracks "
+                    "WHERE CAST(id AS TEXT) = :id LIMIT 1"
+                ),
+                {"id": str(track_id)},
+            ).fetchone()
+            if not row:
+                return None
+            title = str(row._mapping.get("title") or "")
+            file_path = str(row._mapping.get("file_path") or "")
+            clean_title = COVER_SUFFIX_RE.sub("", title).strip() or title
+            session.execute(
+                text(
+                    "UPDATE tracks SET "
+                    "is_cover = 0, "
+                    "original_cover_artist = NULL, "
+                    "is_cover_reason = :reason, "
+                    "cover_manual_override = :lock, "
+                    "title = :title "
+                    "WHERE CAST(id AS TEXT) = :id"
+                ),
+                {
+                    "reason": "Manually cleared" + (" and locked" if lock else ""),
+                    "lock": bool(lock),
+                    "title": clean_title,
+                    "id": str(track_id),
+                },
+            )
+            session.commit()
+    except Exception as exc:
+        logger.error(
+            "Clearing cover verdict failed", track_id=track_id, error=str(exc)
+        )
+        raise
+
+    if file_path:
+        try:
+            from services.metadata.tag_file_service import write_tags_to_file
+
+            write_tags_to_file(
+                file_path,
+                {
+                    "is_cover": "",
+                    "original_cover_artist": "",
+                    "title": clean_title,
+                },
+            )
+        except Exception as exc:
+            logger.debug(
+                "Could not clear cover tags from file",
+                track_id=track_id,
+                error=str(exc),
+            )
+
+    return {
+        "track_id": str(track_id),
+        "is_cover": False,
+        "locked": bool(lock),
+        "title": clean_title,
+    }
 
 
 #: Runtime-registry key guarding concurrent manual cover-detection passes.

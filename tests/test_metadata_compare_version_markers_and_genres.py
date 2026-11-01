@@ -752,5 +752,56 @@ class TestWriterUsesTheNameListRule:
         assert not change["proposed"].startswith("[")
 
     def test_an_empty_stored_writer_is_still_filled(self):
-        """CONTROL — set-equality must not swallow a real addition."""
+        """CONTROL â€” set-equality must not swallow a real addition."""
         assert "writer" in self._writer_fields("", self.PROPOSED)
+
+
+class TestTheGenreSourceMatchesTheScan:
+    """Reported: an album that had completed a full metadata scan still showed
+    recommended Genres edits after matching another release in the same group.
+    The scan stores the release-GROUP genres for a single-artist release and the
+    RECORDING's genres for a VA compilation; the review compared the group list
+    it stored against the recording's single genre, so the same edit came back
+    every time."""
+
+    @staticmethod
+    def _genre_fields(local, metadata) -> set[str]:
+        out = _track_proposals([local], _comparison(), metadata)
+        return {c["field"] for c in (out[0]["changes"] if out else [])}
+
+    def test_a_single_artist_release_compares_the_release_group(self):
+        local = _local(
+            artist="Papa Roach",
+            album_artist="Papa Roach",
+            musicbrainz_genres='["alternative metal", "rock"]',
+        )
+        metadata = _metadata_with({"musicbrainz_genres": "hard rock"})
+        metadata["release_group_genres"] = "alternative metal, rock"
+
+        assert "musicbrainz_genres" not in self._genre_fields(local, metadata)
+
+    def test_a_va_compilation_compares_the_recording(self):
+        local = _local(
+            artist="Bushido",
+            album_artist="Various Artists",
+            musicbrainz_genres='["metal", "rock"]',
+        )
+        metadata = _metadata_with({"musicbrainz_genres": "hard rock"})
+        metadata["release_group_genres"] = "metal, rock"
+
+        assert "musicbrainz_genres" in self._genre_fields(local, metadata)
+
+    def test_a_second_release_in_the_same_group_proposes_no_genres(self):
+        """The reported Ego Trip case. Deliberately WITHOUT
+        ``release_group_genres`` so the group-MBID guard is what suppresses it."""
+        local = _local(
+            artist="Papa Roach",
+            album_artist="Papa Roach",
+            album="Ego Trip",
+            musicbrainz_releasegroupid="rg-ego-trip",
+            musicbrainz_genres='["alternative metal", "rock"]',
+        )
+        metadata = _metadata_with({"musicbrainz_genres": "hard rock"})
+        metadata["release_group_mbid"] = "rg-ego-trip"
+
+        assert "musicbrainz_genres" not in self._genre_fields(local, metadata)

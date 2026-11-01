@@ -102,6 +102,44 @@ def title_variants_compatible(title_a: str, title_b: str) -> bool:
 #: becomes "fur hunde") while other callers pass raw text.
 _NOVELTY_PHRASE_RE = re.compile(r"\b(?:for dogs|f[üu]r hunde)\b", re.IGNORECASE)
 
+#: Tokens that name a SEQUEL, not an annotation.  "The Unforgiven" and "The
+#: Unforgiven II" are different songs, and "Song Part 2" is not "Song".  The
+#: aggregation key deliberately keeps them (``normalize_for_aggregation`` never
+#: removed numerals) — but ``fuzzy_match_score`` is ``token_set_ratio``, which
+#: returns a perfect 1.0 for a strict SUBSET, so the gate below used to accept
+#: "The Unforgiven" as a match for "The Unforgiven II" and hand the sequel the
+#: original's Last.fm totals.
+_SEQUEL_TOKENS = frozenset({
+    "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x",
+    "pt", "part", "no", "number",
+    "2", "3", "4", "5", "6", "7", "8", "9", "10",
+})
+
+#: Wording that legitimately extends a PROVIDER bucket without naming another
+#: song: Last.fm files "100 Words (from Sing the Sorrow sessions 2003)" as a
+#: separate row, and those two must still sum.  Without these anchors the
+#: strict-subset rejection below would split every session/provenance spelling.
+_PROVENANCE_ANCHORS = frozenset({
+    "from", "session", "sessions", "outtake", "outtakes", "take", "takes",
+})
+
+#: Extras that do not change the performance: soft version words and framing.
+_IDENTITY_EXTRA_TOKENS = frozenset({
+    "the", "a", "an", "recording", "recordings",
+    "reissue", "edition", "deluxe", "bonus",
+}) | _SOFT_VARIANT_TOKENS
+
+#: Version markers are deliberately NOT judged here — ``title_variants_compatible``
+#: and ``_alt_status_matches_ctx`` do that WITH release context (a plainly
+#: titled track on an unplugged release still matches). This gate only needs to
+#: know that marker words are annotations, not another song's title.
+_MARKER_EXTRA_TOKENS = (
+    _HARD_VARIANT_TOKENS
+    | _SOFT_VARIANT_TOKENS
+    | frozenset({"unplugged", "version", "versions"})
+)
+
+
 
 def aggregation_keys_compatible(key_a: str, key_b: str, *, min_similarity: float = 0.90) -> bool:
     """True when two ``normalize_for_aggregation`` keys denote the same RECORDING.
@@ -159,6 +197,34 @@ def aggregation_keys_compatible(key_a: str, key_b: str, *, min_similarity: float
     # A novelty phrase on ONE side only: one of the two is a gimmick
     # re-recording, so the pair is not the same recording.
     if bool(_NOVELTY_PHRASE_RE.search(key_a)) != bool(_NOVELTY_PHRASE_RE.search(key_b)):
+        return False
+
+    # ⭐ STRICT SUBSETS ARE NOT AUTOMATIC MATCHES.
+    #
+    # ``token_set_ratio`` scores 1.0 whenever every token of one key appears in
+    # the other, which is exactly the class of error reported:
+    #
+    #   "the unforgiven"      ⊂ "the unforgiven ii"   → sequel inherited counts
+    #   "black"               ⊂ "spin the black circle" → unrelated songs
+    #   "maniac"              ⊂ "maniac japanese ver" → version inherited counts
+    #
+    # The provider aggregator DOES legitimately sum session/provenance spellings
+    # ("100 Words" + "100 Words from Sing the Sorrow sessions 2003"), so the
+    # exception is explicit rather than a similarity threshold.
+    if tokens_a < tokens_b or tokens_b < tokens_a:
+        shorter, longer = (
+            (tokens_a, tokens_b) if tokens_a < tokens_b else (tokens_b, tokens_a)
+        )
+        extra = longer - shorter
+        if extra & _SEQUEL_TOKENS:
+            return False
+        # Marker words are the upstream's call (see the module note above).
+        if extra <= (_MARKER_EXTRA_TOKENS | _IDENTITY_EXTRA_TOKENS):
+            return True
+        if extra & _PROVENANCE_ANCHORS:
+            return True
+        # A one-word title must match EXACTLY: "Black" is not
+        # "Spin the Black Circle". Unknown extra words are not annotations.
         return False
 
     from services.popularity.popularity_math import fuzzy_match_score

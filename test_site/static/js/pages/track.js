@@ -295,6 +295,49 @@
     }
   }
 
+  /**
+   * Clear the stored cover verdict and LOCK it (Scan Flags → Clear & Lock).
+   *
+   * A wrong verdict could previously only be re-detected, never cleared from
+   * this page. Clearing also removes the scanner's "(X Cover)" title suffix
+   * and the file's cover tags so a later Navidrome import cannot restore it.
+   */
+  async function clearCoverAndLock(button) {
+    if (!trackId) return;
+
+    const confirmed = global.ui && global.ui.confirm
+      ? await global.ui.confirm({
+          title: 'Clear cover verdict?',
+          message: 'Mark this track as NOT a cover and lock it?',
+          detail: 'The "(X Cover)" title suffix and file cover tags are removed, and automatic cover detection will no longer overwrite this verdict.',
+          tone: 'warning',
+          confirmLabel: 'Clear & Lock',
+        })
+      : window.confirm('Mark this track as NOT a cover and lock it?');
+    if (!confirmed) return;
+
+    const withBusy = (global.buttonState && global.buttonState.withBusy)
+      ? global.buttonState.withBusy
+      : ((_btn, _label, fn) => fn());
+
+    try {
+      await withBusy(button, 'Clearing…', async () => {
+        const data = await global.api.postJson(
+          `/api/track/${encodeURIComponent(trackId)}/cover-verdict`,
+          { is_cover: false, lock: true }
+        );
+        if (data && data.success) {
+          notifyInfo('Cover verdict cleared and locked.');
+          setTimeout(() => global.location.reload(), 1000);
+        } else {
+          notifyError((data && data.error) || 'Could not clear the cover verdict.');
+        }
+      });
+    } catch (error) {
+      notifyError('Could not clear the cover verdict: ' + error.message);
+    }
+  }
+
   /** Copy a cover-search result into the "original artist" field. */
   function selectCoverMatch(button) {
     const writerEl = document.getElementById('coverSearchWriter');
@@ -699,6 +742,7 @@
     'track-artist-nav': (button) => navigateToArtist(button.dataset.artist),
     'track-rename': () => renameTrackFile(),
     'track-cover-detection': (button) => runCoverDetection(button),
+    'track-clear-cover': (button) => clearCoverAndLock(button),
     'track-slskd-search': () => openSlskdSearchTrack(),
     'track-add-playlist': (button) => {
       if (typeof global.openAddToPlaylistModal === 'function') {

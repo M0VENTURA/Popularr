@@ -1,15 +1,18 @@
-"""The recording lookup's release MBID is kept, and cover detection uses it.
+"""The recording lookup returns its release, but identity stays the RECORDING id.
 
 Reported: *"Can you confirm that the track release MBID is fetched during the
-metadata lookup for each track? Or saved during the popularity matching? Then
-that MBID can be used for cover detection rather than a simple artist and track
-lookup, as it's creating some false positives."*
+metadata lookup for each track? … Then that MBID can be used for cover detection
+rather than a simple artist and track lookup, as it's creating some false
+positives."*
 
 Confirmed: the recording lookup FETCHED the releases (its ``inc`` includes
 ``releases``) and selected one for the release title/year — but it never
-returned or saved that release's MBID. Cover detection therefore had no
-deterministic route on an unmatched VA compilation and fell back to a broad
-artist+title search.
+returned or saved that release's MBID.
+
+It now returns it, but nothing persists a per-track release: the track page's
+**MusicBrainz Recording ID** is the identity, and cover detection keys on it.
+The release is only a fallback when a row has no recording id, and it already
+lives in the album-level fields.
 """
 
 from __future__ import annotations
@@ -96,8 +99,8 @@ class _ReleaseStub:
         return []
 
 
-class TestCoverDetectionPrefersTheTracksOwnRelease:
-    def test_the_per_track_release_is_resolved_before_the_album_release(self):
+class TestCoverDetectionResolvesFromTheStoredAlbumRelease:
+    def test_the_tracks_album_release_is_used_before_a_title_search(self):
         from services.enrichment.cover_detector_impl import CoverDetector
 
         stub = _ReleaseStub()
@@ -110,19 +113,11 @@ class TestCoverDetectionPrefersTheTracksOwnRelease:
                 "title": "The One",
                 "artist": "Bushido",
                 "album_artist": "Various Artists",
-                # Both exist; the recording's OWN release must win.
-                "recording_release_mbid": "rel-per-track-va",
-                "musicbrainz_album_mbid": "rel-album-va",
+                # The track page's MusicBrainz Album ID field.
+                "musicbrainz_album_mbid": "rel-from-album-field",
             },
             "Various Artists",
         )
 
         assert got == "rec-from-release"
-        assert stub.get_release_calls[0] == "rel-per-track-va"
-
-    def test_a_per_track_release_counts_as_a_logged_identity(self):
-        from services.enrichment.cover_detector_impl import CoverDetector
-
-        assert CoverDetector._track_has_logged_identity(
-            {"recording_release_mbid": "rel-per-track-va"}
-        ) is True
+        assert stub.get_release_calls[0] == "rel-from-album-field"

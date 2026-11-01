@@ -467,6 +467,10 @@ class CoverDetector:
         self._band_members_cache: dict[str, list[str]] = {}
         self._artist_band_cache: dict[str, list[dict[str, str]]] = {}
         self._work_recording_cache: "OrderedDict[str, list[dict[str, Any]]]" = OrderedDict()
+        #: work MBID -> (title, writers). The same work is consulted by the
+        #: work-first step, the writer check and the original selection; without
+        #: this cache each of those paid a separate ``get_work`` request.
+        self._work_writer_cache: "OrderedDict[str, tuple[str, list[dict[str, str]]]]" = OrderedDict()
         #: (album artist, album) -> release MBID resolved by name, for albums
         #: whose rows never logged one. One search per album per pass.
         self._album_release_cache: dict[tuple[str, str], str] = {}
@@ -497,9 +501,6 @@ class CoverDetector:
                 or track.get("work_mbid")
                 or track.get("musicbrainz_workid")
                 or track.get("musicbrainz_album_mbid")
-                # The release specific to this recording — a VA compilation's
-                # per-track route (see ``_resolve_recording_mbid``).
-                or track.get("recording_release_mbid")
                 or ""
             ).strip()
         )
@@ -639,6 +640,10 @@ class CoverDetector:
             "original_year": core.get("year"),
             "writer": writer,
             "confidence": core.get("confidence", "medium"),
+            # Work-based detections name the work and keep its writers in the
+            # ``writer`` column; the source rides into ``is_cover_reason``.
+            "cover_detection_source": core.get("source", ""),
+            "work": core.get("work", ""),
         }
 
     # -- work-first ------------------------------------------------------
@@ -710,8 +715,9 @@ class CoverDetector:
 
         Return contract (the caller treats these differently):
 
-        * ``{"artist", "year", "confidence"}`` — the earliest recording of the
-          work credited to an artist OTHER than *performer*: a cover.
+        * ``{"artist", "year", "confidence", "work", "source"}`` — the earliest
+          recording of the work credited to a PERFORMER other than *performer*
+          (writers' own score recordings are ranked separately): a cover.
         * ``{}`` — conclusive negative: the performer wrote the work or
           originated the earliest recording of the song. The caller skips the
           track's deep fan-out.
@@ -740,19 +746,37 @@ class CoverDetector:
             if self._performer_wrote_work(work_mbid, performer):
                 return {}
 
+        work_title, writers = self._work_writers(work_mbid)
+        writer_names = [
+            str(w.get("name") or "").strip()
+            for w in writers
+            if str(w.get("name") or "").strip()
+        ]
+
+        def _is_work_writer(name: str) -> bool:
+            return any(_same_artist(name, writer_name) for writer_name in writer_names)
+
         earliest: dict[str, Any] | None = None
         earliest_key = "9999-99-99"
+        #: A writer's own performance (a composer's score recording, e.g. James
+        #: Horner's "My Heart Will Go On") is kept SEPARATE from performed
+        #: originals. The original ARTIST is the earliest PERFORMER, not the
+        #: person who wrote it; writers stay in the ``writer`` column.
+        writer_earliest: dict[str, Any] | None = None
+        writer_earliest_key = "9999-99-99"
         performer_key = (
             f"{int(track_year):04d}-99-99"
             if isinstance(track_year, int) and 1900 <= track_year <= 2100
             else "9999-99-99"
         )
         credited = 0
+        performer_on_work = False
         for rec in recordings:
             if not isinstance(rec, dict) or not rec.get("id"):
                 continue
             rec_id = str(rec.get("id") or "").strip()
             if rec_id and rec_id == exclude_mbid:
+                performer_on_work = True
                 key = _release_date_key(rec)
                 if key < performer_key:
                     performer_key = key
@@ -771,17 +795,35 @@ class CoverDetector:
             credited += 1
             key = _release_date_key(rec)
             if _same_artist(rec_artist, performer):
+                performer_on_work = True
                 if key < performer_key:
                     performer_key = key
                 continue
-            if _undated(key) or key >= earliest_key:
+            if _undated(key):
                 continue
-            earliest_key = key
-            earliest = {
+            candidate = {
                 "artist": rec_artist,
                 "year": year_from_recording(rec),
                 "confidence": "medium",
             }
+            if _is_work_writer(rec_artist):
+                if key < writer_earliest_key:
+                    writer_earliest_key = key
+                    writer_earliest = candidate
+                continue
+            if key < earliest_key:
+                earliest_key = key
+                earliest = candidate
+
+        if earliest is None and writer_earliest is not None:
+            # No performer recording at all — fall back to the writer's own.
+            earliest = writer_earliest
+            earliest_key = writer_earliest_key
+
+        # ⭐ Did we find a PERFORMED original? If so it IS the original artist;
+        # the writer-linked fallback below must not replace it with the person
+        # who composed the song.
+        performed_original = earliest if earliest is not writer_earliest else None
 
         # The performer recorded it FIRST (or in the same year when month/day
         # is unknown): they originated the song.
@@ -790,6 +832,11 @@ class CoverDetector:
                 return {}
             if performer_key[:4] == earliest_key[:4] and performer_key.endswith("-99-99"):
                 return {}
+        elif earliest and performer_on_work and _undated(performer_key):
+            # The performer's own recording IS on the work but carries no date;
+            # nothing proves the other recording came first. Do not invent a
+            # cover from an undated comparison.
+            return {}
 
         if earliest:
             by_writer = self._original_by_writer(
@@ -798,9 +845,26 @@ class CoverDetector:
             if by_writer == {}:
                 # _original_by_writer determined the performer is the writer/originator
                 return {}
+            if performed_original is not None:
+                return {
+                    **performed_original,
+                    "confidence": "medium",
+                    "work": work_title,
+                    "source": "musicbrainz_work",
+                }
             if by_writer:
-                return {**by_writer, "confidence": "medium"}
-            return earliest
+                return {
+                    **by_writer,
+                    "confidence": "medium",
+                    "work": work_title,
+                    "source": "musicbrainz_work",
+                }
+            return {
+                **earliest,
+                "confidence": "medium",
+                "work": work_title,
+                "source": "musicbrainz_work",
+            }
         # The work HAS recordings bearing a credit and none of them differs
         # from the performer — the performer originated the song.
         return {} if credited else None
@@ -1260,16 +1324,17 @@ class CoverDetector:
                 recording_mbid=mbid,
                 title=track.get("title", ""),
                 performer=_performer,
-                release_mbid=str(
-                    track.get("recording_release_mbid")
-                    or track.get("musicbrainz_album_mbid")
-                    or ""
-                ).strip(),
+                release_mbid=str(track.get("musicbrainz_album_mbid") or "").strip(),
                 track_year=_extract_track_year(track),
             )
             if core:
                 logger.debug("Cover detected via recording relation", track=track.get("title"), mbid=mbid)
                 _record(self._result(tid, track.get("title", ""), core), track)
+            elif core is not None:
+                # A conclusive NEGATIVE: the recording's work (or its absence)
+                # says this is not a cover. Settle it so the writer/title
+                # heuristics below cannot re-open the question.
+                seen_track_ids.add(tid)
 
         _step_done("recording relations", 3)
 
@@ -1999,7 +2064,11 @@ class CoverDetector:
         return bands
 
     def _work_writers(self, work_id: str) -> tuple[str, list[dict[str, str]]]:
-        """``(work title, [{"id", "name"}] writers)`` for a work."""
+        """``(work title, [{"id", "name"} writers])`` for a work."""
+        with self._mem_lock:
+            cached = self._work_writer_cache.get(work_id)
+        if cached is not None:
+            return cached[0], [dict(w) for w in cached[1]]
         try:
             work = _ngs_relations(self.mb.get_work(work_id, inc="artist-rels") or {})
         except Exception as exc:
@@ -2013,7 +2082,16 @@ class CoverDetector:
             wid = str(artist.get("id") or "").strip()
             if wid and all(w["id"] != wid for w in writers):
                 writers.append({"id": wid, "name": str(artist.get("name") or "").strip()})
-        return str(work.get("title") or "").strip(), writers
+        title = str(work.get("title") or "").strip()
+        # Only cache a usable answer: an empty result is far more often a
+        # throttled/failed request than a work with no writers, and caching it
+        # would hide the writers for the rest of the pass.
+        if writers:
+            with self._mem_lock:
+                self._work_writer_cache[work_id] = (title, [dict(w) for w in writers])
+                while len(self._work_writer_cache) > _WORK_RECORDING_CACHE_MAX:
+                    self._work_writer_cache.popitem(last=False)
+        return title, writers
 
     def _ranked_writer_candidates(
         self, writers: list[dict[str, str]]
@@ -2295,6 +2373,42 @@ class CoverDetector:
                 return best
         return None
 
+    def _earliest_performed_recording(
+        self,
+        work_mbid: str,
+        performer: str,
+        writer_names: list[str],
+    ) -> dict[str, Any] | None:
+        """The earliest recording of a work by a PERFORMER, not a writer.
+
+        Used by the last-resort writer path: a work's composer is not its
+        original artist. Recordings credited to a writer are kept out of this
+        selection — ``_writer_from_cover_work`` still uses them only when the
+        work has no performed recording at all.
+        """
+        best: dict[str, Any] | None = None
+        best_key = "9999-99-99"
+        for rec in self._work_recordings(work_mbid):
+            if not isinstance(rec, dict) or not rec.get("id"):
+                continue
+            if _has_cover_annotation(str(rec.get("title") or "")):
+                continue
+            if _all_cover_work_ids(rec) & {work_mbid}:
+                continue
+            rec_artist = str(
+                artist_from_credit(rec.get("artist-credit", []) or []) or ""
+            ).strip()
+            if not rec_artist or (performer and _same_artist(rec_artist, performer)):
+                continue
+            if any(_same_artist(rec_artist, name) for name in writer_names if name):
+                continue
+            key = _release_date_key(rec)
+            if _undated(key) or key >= best_key:
+                continue
+            best_key = key
+            best = {"artist": rec_artist, "year": year_from_recording(rec)}
+        return best
+
     def _writer_from_cover_work(
         self,
         work_ids: set[str],
@@ -2325,6 +2439,17 @@ class CoverDetector:
                 wid = str(artist.get("id") or "").strip()
                 if name and all(w["id"] != wid for w in writers):
                     writers.append({"id": wid, "name": name})
+
+            written = [w["name"] for w in writers if w.get("name")]
+            # ⭐ The work's own PERFORMANCES before its writers. A composer is
+            # not an artist: "My Heart Will Go On" is written by James Horner
+            # (and Will Jennings), but the original ARTIST is Céline Dion. The
+            # writer fallback below is only for a work with no usable recording.
+            performed = self._earliest_performed_recording(
+                work_id, performer, written,
+            )
+            if performed:
+                return {**performed, "confidence": "medium"}
 
             for writer in writers:
                 for linked in self._artist_bands(writer["id"]):
@@ -2388,7 +2513,29 @@ class CoverDetector:
                     return result
 
             if not cover_work_ids:
-                return chain_result
+                # ⭐ Work-based detection. MusicBrainz may not mark the cover
+                # performance explicitly, but the recording's WORK relationship
+                # still names the composition; the work's recordings are then
+                # the complete candidate set. A same-titled song by a different
+                # artist is NOT a cover just because the title matches (the
+                # reported "Swerve" -> Dub Sex false positive).
+                work_ids = extract_work_ids(seed)
+                if work_ids:
+                    for work_id in sorted(work_ids):
+                        verdict = self._detect_via_work_id(
+                            work_mbid=work_id,
+                            performer=performer,
+                            exclude_mbid=recording_mbid,
+                            track_year=track_year,
+                            allow_writer_check=True,
+                        )
+                        if verdict is not None:
+                            return verdict
+                    return None
+                # No work relationship at all: there is no evidence this
+                # recording performs someone else's composition. Do not let the
+                # writer/title heuristics override a resolved recording.
+                return {}
 
             from_work = self._original_from_cover_work(
                 cover_work_ids,
@@ -2937,6 +3084,26 @@ class CoverDetector:
             self._album_release_cache[key] = resolved
         return resolved
 
+    def _recording_matches_track(
+        self, recording_mbid: str, title: str, performer: str
+    ) -> bool:
+        """Whether a STORED recording MBID actually names this track.
+
+        A fetch failure is NOT evidence the id is wrong; only a successful fetch
+        whose title or first artist credit disagrees is.
+        """
+        seed = self._get_recording(recording_mbid, "artist-credits")
+        if not seed:
+            return True
+        seed_title = str(seed.get("title") or "").strip()
+        if seed_title and not _titles_match(title, seed_title):
+            return False
+        if performer:
+            first_credit = artist_from_credit(seed.get("artist-credit") or [])
+            if first_credit and not _same_artist(first_credit, performer):
+                return False
+        return True
+
     def _resolve_recording_mbid(
         self,
         track: dict[str, Any],
@@ -2952,26 +3119,35 @@ class CoverDetector:
             or track.get("musicbrainz_trackid")
             or ""
         ).strip()
-        if existing:
-            return existing
 
         title = str(track.get("title") or "").strip()
         if not title:
-            return None
+            return existing or None
 
-        # ⭐ The PERFORMER, never the album placeholder. A search constrained
+        # â­ The PERFORMER, never the album placeholder. A search constrained
         # to ``artist:"Various Artists"`` returns nothing (every compilation
         # track searched that way came back empty); with no usable performer the
         # title alone still finds candidates, which the title/artist check below
         # filters.
         search_artist = comparison_artist(track, album_artist or "")
-        # ⭐ The recording's OWN release first. It is what the metadata lookup
-        # that resolved this track actually read; on a VA compilation it is more
-        # precise than the album-level release and gives cover detection a
-        # tracklist instead of a broad artist+title search.
+
+        if existing:
+            if self._recording_matches_track(existing, title, search_artist):
+                return existing
+            # A STORED MBID is not automatically THIS track's recording.
+            # Reported: Papa Roach's "Swerve" carried a Rise Against recording
+            # id; trusting it followed the wrong work and the leftover writer/
+            # title heuristics attributed the track to a same-titled Dub Sex
+            # song. A fetch FAILURE is not evidence the id is wrong; only a
+            # successful fetch whose title or first credit disagrees is.
+            logger.debug(
+                "Stored recording MBID does not match the track — resolving again",
+                track=title,
+                stored_mbid=existing,
+            )
+
         release_mbid = str(
-            track.get("recording_release_mbid")
-            or track.get("musicbrainz_album_mbid")
+            track.get("musicbrainz_album_mbid")
             or track.get("musicbrainz_albumid")
             or default_release_mbid
             or ""
@@ -3151,10 +3327,22 @@ class CoverDetector:
     @staticmethod
     def _build_update(result: dict[str, Any], track: dict[str, Any]) -> dict[str, Any]:
         original_artist = result.get("original_artist", "")
+        source = str(result.get("cover_detection_source") or "").strip()
+        work = str(result.get("work") or "").strip()
 
         # Actively strip out the " (X Cover)" suffix if it was previously added by the scanner
         raw_title = track.get("title", "")
         clean_title = _COVER_SUFFIX_RE.sub("", raw_title).strip()
+
+        reason = (
+            f"Cover detection: {result.get('confidence', 'low')} confidence, "
+            f"originally by {original_artist or 'unknown'}"
+        )
+        if source:
+            reason += f" (source: {source}"
+            if work:
+                reason += f", work: {work}"
+            reason += ")"
 
         return {
             "track_id": result["track_id"],
@@ -3165,10 +3353,9 @@ class CoverDetector:
             "confidence": result.get("confidence", "low"),
             "is_cover": True,
             "file_path": (track or {}).get("file_path"),
-            "is_cover_reason": (
-                f"Cover detection: {result.get('confidence', 'low')} confidence, "
-                f"originally by {original_artist or 'unknown'}"
-            ),
+            "cover_detection_source": source,
+            "work": work,
+            "is_cover_reason": reason,
         }
 
     @staticmethod

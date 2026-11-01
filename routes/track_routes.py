@@ -1089,6 +1089,43 @@ async def api_run_track_cover_detection(track_id: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/track/<track_id>/cover-verdict
+# ---------------------------------------------------------------------------
+
+@track_bp.route("/<track_id>/cover-verdict", methods=["POST"])
+async def api_set_track_cover_verdict(track_id: str) -> Any:
+    """Clear a track's cover verdict and lock it against re-detection.
+
+    The Scan Flags card could only DETECT a cover; a wrong verdict (e.g. Papa
+    Roach's "Swerve" attributed to Dub Sex) had no way to be cleared from the
+    track page. Clearing also strips the scanner's "(X Cover)" title suffix and
+    the file's cover tags.
+    """
+    body = await request.get_json(silent=True) or {}
+    is_cover = bool(body.get("is_cover", False))
+    lock = bool(body.get("lock", True))
+    if is_cover:
+        return jsonify({"error": "Only clearing a cover verdict is supported"}), 400
+
+    try:
+        from services.enrichment.cover_detection_service import (
+            clear_track_cover_verdict,
+        )
+
+        result = await asyncio.to_thread(
+            clear_track_cover_verdict, str(track_id), lock=lock,
+        )
+        if result is None:
+            return jsonify({"error": "Track not found"}), 404
+        return jsonify({"success": True, **result})
+    except Exception as exc:
+        logger.error(
+            "Clearing cover verdict failed", track_id=track_id, error=str(exc)
+        )
+        return jsonify({"error": str(exc)}), 500
+
+
+# ---------------------------------------------------------------------------
 # POST /api/track/<track_id>/fetch-credits
 # ---------------------------------------------------------------------------
 

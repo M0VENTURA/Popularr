@@ -1,68 +1,64 @@
-# The recording lookup now returns and saves the track's release MBID
+# Track identity is the MusicBrainz Recording ID, not a release ID
 
 **Date:** 2026-10-31
-**Area:** `enrichment` / `popularity` (metadata scan) / cover detection
-**Files:** `services/enrichment/musicbrainz_service.py`,
-`services/popularity/stages/track_stage.py`,
-`services/enrichment/cover_detector_impl.py`,
-`services/enrichment/cover_detection_service.py`,
-`db/models.py`, `db/schema.py`,
-`migrations/versions/031_tracks_recording_release_mbid.py`,
-`tests/test_recording_release_mbid.py` (new),
-`tests/test_va_individual_mbid_lookup.py`
+**Area:** `enrichment` / cover detection / popularity scan
+**Files:** `services/enrichment/cover_detector_impl.py`,
+`services/enrichment/musicbrainz_service.py`,
+`tests/test_recording_release_mbid.py`,
+`tests/test_cover_work_original_artist_and_mbid_validation.py` (new)
 
 ## Question
 
 > Can you confirm that the track release MBID is fetched during the metadata
-> lookup for each track? Or saved during the popularity matching? Then that MBID
-> can be used for cover detection rather than a simple artist and track lookup,
-> as it's creating some false positives.
+> lookup for each track? … Then that MBID can be used for cover detection rather
+> than a simple artist and track lookup, as it's creating some false positives.
 
 ## Answer
 
-**Fetched: yes. Saved before this change: no.**
+**Fetched: yes. Persisted: no — and it should not be.**
 
 `lookup_recording_metadata` requests the recording with
-`inc="…releases+release-groups…"`, and `_recording_to_metadata` already SELECTED
-one of the recording's releases (`_select_primary_release`) for the release
-title/year. It returned `release_title`/`release_year` but **discarded the
-release's MBID** (and the release-group MBID). Popularity matching never saved
-it either.
+`inc="…releases+release-groups…"` and `_recording_to_metadata` selects one
+release for the release title/year. The **identity** the app stores (and the
+track page's **MusicBrainz Recording ID**) is the recording MBID; a per-track
+release MBID is not needed and would fight the album-level
+`musicbrainz_album_mbid`.
 
-## Fix
+An interim revision added `tracks.recording_release_mbid`; it was redundant.
+Migration `032_drop_tracks_recording_release_mbid` removes it (031 stays in the
+chain for databases that already ran it). Nothing writes a release MBID for the
+track any more.
 
-* `_recording_to_metadata` now returns the selected release's
-  `release_mbid` and `release_group_mbid`.
-* New per-track column **`tracks.recording_release_mbid`** (model, runtime
-  schema bootstrap, migration 031). `track_stage` persists it whenever the
-  per-track lookup resolved one. It is deliberately separate from the album's
-  `musicbrainz_album_mbid`: a VA compilation's tracks can each come from a
-  different release, and writing them into the album column would make the
-  album identity inconsistent.
-* Cover detection:
-  * loads `recording_release_mbid` (`cover_detection_service._ARTIST_TRACK_COLUMNS`);
-  * counts it as a logged identity;
-  * `_resolve_recording_mbid` prefers it over the album release and over a
-    default album release resolved by name;
-  * step 3 passes it to `_detect_via_recording_relation`
-    (`_check_release_for_cover`).
-  So a VA compilation with no album release now resolves each recording from
-  its own release's tracklist instead of a broad artist+title search.
+## The real defect behind the "Swerve" false positive
 
-The file's `MUSICBRAINZ_ALBUMID` tag is NOT rewritten with the per-track
-release: keeping the album-level tag avoids splitting a compilation into
-per-release albums in Navidrome. The value is a DB-side resolution aid.
+Papa Roach's **"Swerve"** carried a *wrong* stored recording MBID:
+`3bcdd7e1-0d28-440e-a6fb-fd1b13be4d3e` is Rise Against's "Historia calamitatum".
+Cover detection trusted a stored MBID unconditionally, followed that recording's
+work, and then the leftover writer/title heuristics matched the shared title of
+Dub Sex's 1988 song "Swerve" — so the track was attributed to Dub Sex.
+
+`_resolve_recording_mbid` now **validates** a stored recording MBID against the
+track's title and first artist credit (`_recording_matches_track`). A successful
+fetch that disagrees is ignored and the id is resolved again from the release
+tracklist/title search. A fetch failure still trusts the stored id.
+
+## Work-based cover detection
+
+The deep pass now treats the recording's **work relationship** as the evidence:
+
+* no explicit cover annotation but a work relation → the work's recordings are
+  the candidate set (`_detect_via_work_id`);
+* **no work relation at all → conclusive negative**, settled before the writer
+  and title heuristics can run. A same-titled song by a different artist is not
+  a cover.
+
+This is why the cover detector no longer needs a release MBID: the recording
+MBID leads to the work, and the work names the composition.
 
 ## Verification
 
-`tests/test_recording_release_mbid.py`:
+`tests/test_recording_release_mbid.py` — the lookup returns the release ids;
+cover detection resolves from a known release when it has one.
 
-| Test | Pins |
-|---|---|
-| `test_the_selected_release_mbid_and_group_are_returned` | the lookup returns both ids |
-| `test_a_recording_without_releases_returns_no_release_id` | no data → no id |
-| `test_the_per_track_release_is_resolved_before_the_album_release` | ⭐ the row's own release wins and resolves the recording |
-| `test_a_per_track_release_counts_as_a_logged_identity` | the step-3 gate accepts it |
-
-`tests/test_va_individual_mbid_lookup.py` asserts the scan persists
-`recording_release_mbid` alongside `recording_mbid`.
+`tests/test_cover_work_original_artist_and_mbid_validation.py` — ⭐ the Swerve
+validation and the no-work negative.
