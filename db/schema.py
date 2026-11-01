@@ -444,6 +444,10 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         # verdict per track; it was previously memory-only.
         "exclude_from_stats": "BOOLEAN DEFAULT FALSE",
         "mbid": "TEXT", "suggested_mbid": "TEXT", "recording_mbid": "TEXT",
+        # The release specific to THIS recording (VA tracks can each come from
+        # a different release). Cover detection uses it to resolve the
+        # recording from a release tracklist instead of a title search.
+        "recording_release_mbid": "TEXT",
         "musicbrainz_id": "TEXT", "musicbrainz_trackid": "TEXT", "musicbrainz_albumid": "TEXT",
         "musicbrainz_album_mbid": "TEXT", "musicbrainz_artistid": "TEXT", "musicbrainz_albumartistid": "TEXT",
         "musicbrainz_releasegroupid": "TEXT", "musicbrainz_releasetrackid": "TEXT",

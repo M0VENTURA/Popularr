@@ -968,6 +968,17 @@ class MusicBrainzService:
 
         specific_release = _select_primary_release(releases, authoritative_album)
         specific_title = str(specific_release.get("title") or "").strip()
+        # ⭐ The release THIS recording belongs to. Fetched by the lookup's
+        # ``releases`` include and previously discarded — which left cover
+        # detection on an unmatched VA compilation with no deterministic
+        # route to the recording (it fell back to an artist+title search).
+        specific_release_mbid = str(specific_release.get("id") or "").strip()
+        _release_group = specific_release.get("release-group") or {}
+        specific_release_group_mbid = (
+            str(_release_group.get("id") or "").strip()
+            if isinstance(_release_group, dict)
+            else ""
+        )
         version_release_year = _year_of(specific_release.get("date"))
 
         release_group_title = _release_group_title_of(specific_release)
@@ -1044,6 +1055,11 @@ class MusicBrainzService:
             "release_title": specific_title,
             "release_year": version_release_year,
             "recording_mbid": mbid,
+            # The release specific to this recording (NOT the album's release
+            # group). Persisted per track so cover detection can resolve the
+            # recording from a release tracklist.
+            "release_mbid": specific_release_mbid or None,
+            "release_group_mbid": specific_release_group_mbid or None,
             "confidence": confidence,
             "writer": ", ".join(dict.fromkeys(writers)),
             "work_mbid": work_mbid,

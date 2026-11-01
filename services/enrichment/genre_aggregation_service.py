@@ -1198,8 +1198,18 @@ _ARTIST_GENRE_FALLBACK_CACHE: "OrderedDict[str, list[str]]" = OrderedDict()
 _ARTIST_GENRE_FALLBACK_MAX = 2048
 
 
-def _artist_genres_from_library(artist: str, *, exclude_track_id: str = "") -> list[str]:
-    """The artist's genres that are ALREADY in this database."""
+def _artist_genres_from_library(
+    artist: str, *, exclude_track_id: str = "", exclude_album: str = ""
+) -> list[str]:
+    """The artist's genres that are ALREADY in this database.
+
+    ``exclude_album`` keeps a VA compilation from borrowing genre evidence from
+    its own SIBLING tracks. On a compilation several rows can share the same
+    ``artist`` value (the folder's credit, an unresolved placeholder variant,
+    or the same performer appearing twice); without this, a sparse track was
+    given genres "matched" from the other tracks on that compilation instead of
+    from its own sources or its performer's catalogue elsewhere.
+    """
     genres: list[str] = []
 
     try:
@@ -1210,9 +1220,17 @@ def _artist_genres_from_library(artist: str, *, exclude_track_id: str = "") -> l
                     WHERE LOWER(TRIM(artist)) = LOWER(TRIM(:artist))
                       AND genres IS NOT NULL AND TRIM(genres) <> ''
                       AND CAST(id AS TEXT) <> :exclude_id
+                      AND (
+                        :exclude_album = ''
+                        OR LOWER(TRIM(COALESCE(album, ''))) <> LOWER(TRIM(:exclude_album))
+                      )
                     LIMIT 25
                 """),
-                {"artist": artist, "exclude_id": str(exclude_track_id or "")},
+                {
+                    "artist": artist,
+                    "exclude_id": str(exclude_track_id or ""),
+                    "exclude_album": str(exclude_album or ""),
+                },
             ).fetchall()
         for row in rows:
             genres.extend(_parse_genre_input(row[0]))
@@ -1357,9 +1375,16 @@ def fallback_genres_for_artist(
     artist: str,
     *,
     exclude_track_id: str = "",
+    exclude_album: str = "",
     max_genres: int = 2,
 ) -> list[str]:
-    """Genres for the PERFORMER, for a VA track that has none of its own."""
+    """Genres for the PERFORMER, for a VA track that has none of its own.
+
+    ``exclude_album`` is the compilation being synced. The artist's genre
+    evidence is read from its OTHER albums, never from sibling tracks on this
+    one — otherwise a sparse VA track borrowed whatever its neighbours on the
+    compilation carried.
+    """
     artist = str(artist or "").strip()
     if not artist:
         return []
@@ -1372,7 +1397,8 @@ def fallback_genres_for_artist(
     except Exception:
         pass
 
-    key = artist.casefold()
+    # The excluded album changes the answer, so it is part of the cache key.
+    key = f"{artist.casefold()}::{str(exclude_album or '').casefold()}"
     with _ARTIST_GENRE_FALLBACK_LOCK:
         cached = _ARTIST_GENRE_FALLBACK_CACHE.get(key)
         if cached is not None:
@@ -1380,7 +1406,11 @@ def fallback_genres_for_artist(
             return list(cached)
 
     sources: dict[str, list[str]] = {}
-    library = _artist_genres_from_library(artist, exclude_track_id=exclude_track_id)
+    library = _artist_genres_from_library(
+        artist,
+        exclude_track_id=exclude_track_id,
+        exclude_album=exclude_album,
+    )
     if library:
         sources["library"] = library
     else:
@@ -1454,6 +1484,7 @@ def sync_various_artists_track_genres(
             top_genres = fallback_genres_for_artist(
                 str(track.get("artist") or ""),
                 exclude_track_id=str(track_id),
+                exclude_album=str(album or ""),
             )
             origin = "track artist"
 

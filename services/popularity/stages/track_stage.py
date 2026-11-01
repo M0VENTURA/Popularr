@@ -1042,6 +1042,38 @@ def _metadata_update_allowed() -> bool:
         return True
 
 
+def _file_tag_artist(track: dict[str, Any]) -> str:
+    """The ARTIST written in this track's own file, or ``""``.
+
+    ⭐ REPORTED: individual recording MBIDs were not looked up on a Various
+    Artists compilation that never matched a MusicBrainz release. Its rows can
+    still carry the album placeholder as ``artist`` ("Various Artists"), and
+    searching ``artist:"Various Artists"`` finds nothing — then the miss is
+    stamped durably and locks the track out of the per-track lookup for the
+    negative-cache TTL. The file's own ARTIST tag is the performer the operator
+    sees, so it becomes the search artist.
+    """
+    file_path = str(track.get("file_path") or "").strip()
+    if not file_path:
+        return ""
+    try:
+        from helpers.metadata_reader import read_mp3_metadata
+        from services.metadata.tag_file_service import resolve_music_file_path
+
+        resolved = resolve_music_file_path(file_path) or file_path
+        tags = read_mp3_metadata(resolved) or {}
+    except Exception as exc:
+        logger.debug(
+            "Track MBID lookup: file artist read failed",
+            file_path=file_path,
+            error=str(exc),
+        )
+        return ""
+    artist = str(tags.get("artist") or "").strip()
+    if artist and not is_track_artist_placeholder(artist):
+        return artist
+    return ""
+
 
 def _resolve_track_mb_metadata(
     *,
@@ -1130,6 +1162,16 @@ def _resolve_track_mb_metadata(
                     or _track_title_indicates_remix(title)
                 )
 
+                # ⭐ The performer to SEARCH with. A VA compilation's row can
+                # still say "Various Artists" — searching that finds nothing and
+                # would stamp a durable miss. The file's own ARTIST tag is the
+                # performer the operator sees. Computed LAZILY (only when a
+                # search is actually needed) so an already-resolved album never
+                # opens its files.
+                _lookup_artist = artist
+                if not _lookup_artist or is_track_artist_placeholder(_lookup_artist):
+                    _lookup_artist = _file_tag_artist(track)
+
                 # ── Durable "search completed, no result" stamp ────────────
                 # Fired ONLY when lookup_recording_metadata's search CONFIRMS a
                 # miss (never on a transient error): the same moment the
@@ -1137,22 +1179,24 @@ def _resolve_track_mb_metadata(
                 # means a later scan can skip a track whose MusicBrainz
                 # recording search already returned nothing — the in-memory
                 # cache is per-process, so the queue worker and web worker
-                # re-searched it on every pass.
+                # re-searched it on every pass. No performer means no search,
+                # so no miss is stamped (the miss would be uninformative).
                 def _stamp_recording_mbid_miss() -> None:
                     from datetime import datetime, timezone
 
                     payload["recording_mbid_checked_at"] = datetime.now(timezone.utc)
 
-                mb_data = mb_service.lookup_recording_metadata(
-                    title,
-                    artist,
-                    album=_album_anchor or None,
-                    is_live_release=_is_live_release,
-                    is_remix_release=_is_remix_release,
-                    edition_annotation=edition_annotation,
-                    mbid=_track_mbid or None,
-                    on_miss=_stamp_recording_mbid_miss,
-                )
+                if _lookup_artist:
+                    mb_data = mb_service.lookup_recording_metadata(
+                        title,
+                        _lookup_artist,
+                        album=_album_anchor or None,
+                        is_live_release=_is_live_release,
+                        is_remix_release=_is_remix_release,
+                        edition_annotation=edition_annotation,
+                        mbid=_track_mbid or None,
+                        on_miss=_stamp_recording_mbid_miss,
+                    )
                 _from_batch = False
 
         if mb_data:
@@ -1162,6 +1206,13 @@ def _resolve_track_mb_metadata(
             if recording_mbid:
                 payload["recording_mbid"] = recording_mbid
                 payload["mbid"] = recording_mbid
+            # The release THIS recording belongs to (from the same lookup).
+            # A VA compilation's tracks can each come from a different release,
+            # so the album-level release id cannot stand in for it; cover
+            # detection uses this one to resolve the recording from a release
+            # tracklist rather than an artist+title search.
+            if mb_data.get("release_mbid"):
+                payload["recording_release_mbid"] = mb_data["release_mbid"]
             if confidence is not None:
                 payload["musicbrainz_confidence"] = confidence
 
@@ -2494,31 +2545,44 @@ def process_track(
             if title and artist and (not _has_source_genres("musicbrainz_genres") or _force_meta):
                 try:
                     mb_raw = get_shared_mb_client()
-                    mb_genres: list[Any] = []
-
                     _rg_mbid = str(track.get("musicbrainz_releasegroupid") or "").strip()
-                    if _rg_mbid:
-                        _cached_rg = _bounded_cache_get(_MB_RG_GENRE_CACHE, _rg_mbid)
-                        if _cached_rg is _MISSING:
-                            _rg = mb_raw.get_release_group(_rg_mbid, inc="genres+tags") or {}
-                            _cached_rg = (_rg.get("genres") or [], _rg.get("tags") or [])
-                            _bounded_cache_put(_MB_RG_GENRE_CACHE, _rg_mbid, _cached_rg)
-                        mb_genres, _ = _cached_rg
+                    _rec_mbid = str(
+                        (mb_data or {}).get("recording_mbid")
+                        or track.get("recording_mbid")
+                        or track.get("mbid")
+                        or ""
+                    ).strip()
 
-                    if not mb_genres:
-                        _rec_mbid = str(
-                            (mb_data or {}).get("recording_mbid")
-                            or track.get("recording_mbid")
-                            or track.get("mbid")
-                            or ""
-                        ).strip()
-                        if _rec_mbid:
-                            _cached_rec = _bounded_cache_get(_MB_RECORDING_GENRE_CACHE, _rec_mbid)
-                            if _cached_rec is _MISSING:
-                                _rec = mb_raw.get_recording(_rec_mbid, inc="genres+tags") or {}
-                                _cached_rec = (_rec.get("genres") or [], _rec.get("tags") or [])
-                                _bounded_cache_put(_MB_RECORDING_GENRE_CACHE, _rec_mbid, _cached_rec)
-                            mb_genres, _ = _cached_rec
+                    def _release_group_genres() -> list[Any]:
+                        if not _rg_mbid:
+                            return []
+                        cached = _bounded_cache_get(_MB_RG_GENRE_CACHE, _rg_mbid)
+                        if cached is _MISSING:
+                            rg = mb_raw.get_release_group(_rg_mbid, inc="genres+tags") or {}
+                            cached = (rg.get("genres") or [], rg.get("tags") or [])
+                            _bounded_cache_put(_MB_RG_GENRE_CACHE, _rg_mbid, cached)
+                        return list(cached[0] or [])
+
+                    def _recording_genres() -> list[Any]:
+                        if not _rec_mbid:
+                            return []
+                        cached = _bounded_cache_get(_MB_RECORDING_GENRE_CACHE, _rec_mbid)
+                        if cached is _MISSING:
+                            rec = mb_raw.get_recording(_rec_mbid, inc="genres+tags") or {}
+                            cached = (rec.get("genres") or [], rec.get("tags") or [])
+                            _bounded_cache_put(_MB_RECORDING_GENRE_CACHE, _rec_mbid, cached)
+                        return list(cached[0] or [])
+
+                    # ⭐ On a VA COMPILATION the release group is the album, not
+                    # the recording: preferring it painted every track with the
+                    # same album genres — the reported "genres matched to other
+                    # tracks on these compilations". Prefer the RECORDING's own
+                    # genres there. Single-artist albums keep the release-group-
+                    # first order (it is the album context the track belongs to).
+                    if bool((album_context or {}).get("is_va_compilation")):
+                        mb_genres = _recording_genres() or _release_group_genres()
+                    else:
+                        mb_genres = _release_group_genres() or _recording_genres()
 
                     if mb_genres:
                         _mb_names = [g.get("name") for g in mb_genres if isinstance(g, dict) and g.get("name")]

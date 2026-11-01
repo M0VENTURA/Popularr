@@ -73,6 +73,10 @@ _ARTIST_TRACK_COLUMNS = (
     "recording_mbid",           # 18
     "is_cover_reason",          # 19
     "musicbrainz_trackid",      # 20
+    # The release specific to this recording (each VA track can come from a
+    # different release). Cover detection resolves the recording from this
+    # release's tracklist instead of an artist+title search.
+    "recording_release_mbid",   # 21
 )
 
 
@@ -103,6 +107,7 @@ def _track_from_row(row: Any) -> dict[str, Any]:
         "recording_mbid": row_get(row, "recording_mbid", 18, ""),
         "is_cover_reason": row_get(row, "is_cover_reason", 19, ""),
         "musicbrainz_trackid": row_get(row, "musicbrainz_trackid", 20, ""),
+        "recording_release_mbid": row_get(row, "recording_release_mbid", 21, ""),
     }
 
 

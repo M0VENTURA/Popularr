@@ -37,6 +37,7 @@ from helpers.config_helpers import (
 )
 from helpers.logging_config import log_unified
 from helpers.normalization_service import (
+    is_track_artist_placeholder,
     safe_album_rename,
     strip_featured_artist,
 )
@@ -620,7 +621,19 @@ def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
             # album may skip. The stamp ages out with the negative-cache TTL
             # (matching ``_MBID_NEGATIVE_TTL_SECONDS``), at which point the
             # track is re-searchable again (and the completeness gate re-applies).
-            if _recording_mbid_checked_recently(track):
+            # A miss stamped while the search used a compilation PLACEHOLDER
+            # ("Various Artists") is uninformative: track_stage now retries with
+            # the file's own ARTIST tag when the row has a file. Do not let such
+            # a stamp hide the album from the pass that can finally resolve it.
+            _row_artist = str(track.get("artist") or "").strip()
+            _placeholder_with_file = (
+                (
+                    not _row_artist
+                    or is_track_artist_placeholder(_row_artist)
+                )
+                and bool(str(track.get("file_path") or "").strip())
+            )
+            if _recording_mbid_checked_recently(track) and not _placeholder_with_file:
                 pass
             else:
                 return True, f"track '{title}' missing recording MBID"

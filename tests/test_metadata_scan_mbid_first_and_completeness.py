@@ -336,6 +336,34 @@ class TestTheExternalIdsAreGatedOnFillability:
         assert incomplete is True
         assert "recording MBID" in reason
 
+    def test_a_placeholder_artist_miss_is_not_terminal_with_a_file(self):
+        """REPORTED: individual MBIDs were not resolved on a VA compilation.
+
+        The miss was stamped while the search ran as ``artist:"Various
+        Artists"``, which can never match. The row has a file, whose ARTIST tag
+        the scan now uses, so the album must go through again.
+        """
+        incomplete, reason = _incomplete(_complete_track(
+            artist="Various Artists",
+            file_path="/music/Various Artists/Comp/01 - The One.mp3",
+            recording_mbid="",
+            recording_mbid_checked_at="2026-10-13T09:00:00+00:00",
+            mbid="",
+        ))
+        assert incomplete is True
+        assert "recording MBID" in reason
+
+    def test_a_real_artist_miss_stays_terminal_with_a_file(self):
+        """CONTROL: the relief still applies once the artist is a real one."""
+        incomplete, reason = _incomplete(_complete_track(
+            artist="Mothica",
+            file_path="/music/Mothica/Album/01 - The One.mp3",
+            recording_mbid="",
+            recording_mbid_checked_at="2026-10-13T09:00:00+00:00",
+            mbid="",
+        ))
+        assert incomplete is False, reason
+
     def test_a_confirmed_miss_does_not_cover_other_missing_fields(self):
         """CONTROL — the relief is scoped to the MBID, not the whole track."""
         incomplete, reason = _incomplete(_complete_track(

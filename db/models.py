@@ -203,6 +203,12 @@ class Track(Base):
     mbid: Mapped[str | None] = mapped_column(String)
     suggested_mbid: Mapped[str | None] = mapped_column(String)
     recording_mbid: Mapped[str | None] = mapped_column(String)
+    # The release SPECIFIC to this recording. A VA compilation's tracks can
+    # each come from a different release, so the album-level
+    # ``musicbrainz_album_mbid`` cannot describe them; cover detection uses
+    # this to resolve the recording from a release tracklist instead of an
+    # artist+title search (the reported false positives).
+    recording_release_mbid: Mapped[str | None] = mapped_column(String)
     musicbrainz_id: Mapped[str | None] = mapped_column(String)
     musicbrainz_trackid: Mapped[str | None] = mapped_column(String)
     musicbrainz_albumid: Mapped[str | None] = mapped_column(String)

@@ -497,6 +497,9 @@ class CoverDetector:
                 or track.get("work_mbid")
                 or track.get("musicbrainz_workid")
                 or track.get("musicbrainz_album_mbid")
+                # The release specific to this recording — a VA compilation's
+                # per-track route (see ``_resolve_recording_mbid``).
+                or track.get("recording_release_mbid")
                 or ""
             ).strip()
         )
@@ -1257,7 +1260,11 @@ class CoverDetector:
                 recording_mbid=mbid,
                 title=track.get("title", ""),
                 performer=_performer,
-                release_mbid=str(track.get("musicbrainz_album_mbid") or "").strip(),
+                release_mbid=str(
+                    track.get("recording_release_mbid")
+                    or track.get("musicbrainz_album_mbid")
+                    or ""
+                ).strip(),
                 track_year=_extract_track_year(track),
             )
             if core:
@@ -2958,8 +2965,13 @@ class CoverDetector:
         # title alone still finds candidates, which the title/artist check below
         # filters.
         search_artist = comparison_artist(track, album_artist or "")
+        # ⭐ The recording's OWN release first. It is what the metadata lookup
+        # that resolved this track actually read; on a VA compilation it is more
+        # precise than the album-level release and gives cover detection a
+        # tracklist instead of a broad artist+title search.
         release_mbid = str(
-            track.get("musicbrainz_album_mbid")
+            track.get("recording_release_mbid")
+            or track.get("musicbrainz_album_mbid")
             or track.get("musicbrainz_albumid")
             or default_release_mbid
             or ""
