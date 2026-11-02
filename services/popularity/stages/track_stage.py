@@ -1616,7 +1616,11 @@ def _resolve_track_mb_metadata(
                     _mb_vocalists = [
                         part.strip() for part in _mb_vocalists.split(",")
                     ]
-            if _mb_vocalists and not _batch_artist_untrustworthy:
+            # Only overwrite the stored list when MusicBrainz actually returned
+            # the field. Writing the empty list is deliberate: it clears the old
+            # artist-credit/band fallback ("Pantera" as a vocalist) once a track
+            # is re-enriched, so a band cannot keep a false vocalist playlist.
+            if not _batch_artist_untrustworthy and "vocalists" in mb_data:
                 payload["vocalists"] = json.dumps(
                     [
                         str(name).strip()

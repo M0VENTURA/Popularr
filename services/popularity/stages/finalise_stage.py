@@ -2795,7 +2795,10 @@ def _filter_christmas_rows(
         kept.append(row)
 
     if removed:
-        logger.info(
+        # Per-playlist exclusion counts are routine, not scan events. There can
+        # be one line per vocalist/artist collection (dozens per rebuild), so
+        # this belongs in DEBUG only.
+        logger.debug(
             "Excluded Christmas tracks from playlist",
             playlist=playlist_name,
             excluded=removed,
@@ -3352,14 +3355,22 @@ def _row_is_vocalist(
         return False
     if is_instrumental_track_title(str(row.get("title") or "")):
         return False
+
+    # Confirmed performer relations are authoritative. In particular, the
+    # album artist being "Lacuna Coil" does NOT mean "Lacuna Coil" sang on the
+    # track: MusicBrainz may name Cristina Scabbia as the vocalist. Checking
+    # the own-credit first turned every band album into a vocalist collection.
+    confirmed = _row_vocalist_names(row)
+    if confirmed:
+        return any(_normalise_artist_key(name) == target for name in confirmed)
+
+    # Rows scanned before the vocalist column existed have no confirmed data.
+    # Fall back to their own credits / guest credits so existing collections do
+    # not disappear before the next metadata pass backfills the column.
     if _normalise_artist_key(row.get("artist")) == target:
         return True
     if _normalise_artist_key(row.get("album_artist")) == target:
         return True
-
-    confirmed = _row_vocalist_names(row)
-    if confirmed:
-        return any(_normalise_artist_key(name) == target for name in confirmed)
     if not include_featured:
         return False
     return _track_has_featured_artist(
@@ -3421,7 +3432,13 @@ def _fetch_essential_vocalist_rows() -> list[dict[str, Any]]:
 def _vocalist_candidates_from_rows(
     rows: list[dict[str, Any]],
 ) -> dict[str, str]:
-    """``{casefolded name: display name}`` of possible vocalists."""
+    """``{casefolded name: display name}`` of CONFIRMED vocalists.
+
+    Only recording-level vocal relations may create a collection. Deriving
+    candidates from an artist/album-artist credit produced band playlists
+    ("Lacuna Coil - Essential Vocalist Collection") instead of their singer,
+    because a band credit is not evidence that the band sang the track.
+    """
     from helpers.normalization_service import is_track_artist_placeholder
 
     names: dict[str, str] = {}
@@ -3430,27 +3447,38 @@ def _vocalist_candidates_from_rows(
         name = str(value or "").strip()
         if not name or is_track_artist_placeholder(name):
             return
-        key = name.casefold()
+        key = _normalise_artist_key(name)
         # Prefer the longest spelling as the display ("Melissa Bonny" over
         # "Melissa"), while the key remains the casefolded name.
         if key not in names or len(name) > len(names[key]):
             names[key] = name
 
+    # A name that only ever appears as the row's own artist/album artist is
+    # not cross-project vocal evidence. This is what keeps old artist-credit
+    # fallback values ("Pantera", "Lacuna Coil") out of the vocalist family:
+    # those names equal the credit on every row, while a real singer's name
+    # (Cristina Scabbia on a Lacuna Coil track) does not. A solo artist with
+    # guest appearances still qualifies through the outside-credit rows.
+    outside_own: set[str] = set()
     for row in rows:
         confirmed = _row_vocalist_names(row)
-        if confirmed:
-            for name in confirmed:
-                _add(name)
+        if not confirmed:
             continue
-        primary = _essential_strip_guest_credit(str(row.get("artist") or ""))
-        _add(primary or row.get("artist"))
-        album_artist = _essential_strip_guest_credit(
-            str(row.get("album_artist") or "")
-        )
-        _add(album_artist)
-        for guest in _row_featured_names(row):
-            _add(guest)
-    return names
+        own = {
+            _normalise_artist_key(row.get("artist")),
+            _normalise_artist_key(row.get("album_artist")),
+        }
+        for name in confirmed:
+            key = _normalise_artist_key(name)
+            if key and key not in own:
+                outside_own.add(key)
+            _add(name)
+
+    return {
+        key: display
+        for key, display in names.items()
+        if key in outside_own
+    }
 
 
 def _essential_vocalist_meets_thresholds(
@@ -3653,6 +3681,7 @@ def _refresh_all_essential_vocalist_collections() -> int:
                 index[key].append(row)
 
     refreshed = 0
+    keep_playlist_names: set[str] = set()
     for name in candidates.values():
         if _is_excluded_essential_artist(name):
             continue
@@ -3675,6 +3704,7 @@ def _refresh_all_essential_vocalist_collections() -> int:
             # are reconciled (and cleaned up if they fail another threshold).
             if len(qualifying) < min_tracks:
                 continue
+            keep_playlist_names.add(_essential_vocalist_playlist_name(name))
             if _sync_essential_vocalist_collection(name, rows=qualifying):
                 refreshed += 1
         except Exception as exc:
@@ -3683,7 +3713,60 @@ def _refresh_all_essential_vocalist_collections() -> int:
                 vocalist=name,
                 error=str(exc),
             )
+
+    # Old artist-credit fallback values produced band playlists (for example
+    # "Pantera - Essential Vocalist Collection"). Those names are no longer
+    # candidates, so reconcile the family by removing managed vocalist
+    # playlists this pass did not produce. Ownership still comes from the
+    # playlist index; an unavailable index deletes nothing.
+    _sweep_orphaned_vocalist_playlists(keep_playlist_names)
     return refreshed
+
+
+def _sweep_orphaned_vocalist_playlists(
+    keep_playlist_names: set[str],
+) -> int:
+    """Delete managed vocalist playlists no current confirmed vocalist owns."""
+    from services.playlists.playlist_taxonomy import ESSENTIAL_VOCALIST
+
+    index_types, index_available = _managed_type_map_for_cleanup()
+    if not index_available:
+        logger.info(
+            "Vocalist sweep skipped — ownership index unavailable; "
+            "refusing to delete on a name alone"
+        )
+        return 0
+
+    keep = {
+        str(name).strip().casefold()
+        for name in keep_playlist_names
+        if str(name).strip()
+    }
+    swept = 0
+    for client in _navidrome_clients():
+        try:
+            playlists = client.fetch_all_playlists() or []
+        except Exception as exc:
+            logger.debug("Vocalist sweep listing failed", error=str(exc))
+            continue
+        for playlist in playlists:
+            name = str(playlist.get("name") or "").strip()
+            name_cf = name.casefold()
+            if not name_cf or name_cf in keep:
+                continue
+            if index_types.get(name_cf) != ESSENTIAL_VOCALIST:
+                continue
+            playlist_id = str(playlist.get("id") or "").strip()
+            if playlist_id and client.delete_playlist(playlist_id):
+                _forget_playlist_push(name)
+                swept += 1
+                logger.info("Swept orphaned vocalist playlist", name=name)
+    if swept:
+        log_unified(
+            f"🧹 Playlist: swept {swept} orphaned vocalist playlist(s) "
+            "from Navidrome"
+        )
+    return swept
 
 
 def _vocalist_for_essential_vocalist_playlist(playlist_name: str) -> str:

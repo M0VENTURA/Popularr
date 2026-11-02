@@ -1958,17 +1958,18 @@ def _join_genre_names(raw: Any) -> str:
 
 
 def _vocalists_from_recording(recording: dict[str, Any]) -> list[str]:
-    """Confirmed recording-level vocalists, or the artist credit as fallback.
+    """Confirmed recording-level vocalists.
 
     MusicBrainz performer relations carry the ROLE in ``attributes``
     (``vocals``, ``lead vocals``, ``background vocals``, …). A performer relation
     without a vocal role (guitar, drums) does NOT make someone a vocalist.
 
-    When the recording has no performer relations at all, the recording's own
-    artist credit is the only evidence available; in practice the credited
-    performer of a song is its vocalist, and this includes featured guests. The
-    fallback is deliberately only used when there are NO relations — a recording
-    with confirmed non-vocal performers must not be credited to them.
+    When the recording has no performer relations at all, the only fallback is
+    an artist credit that MusicBrainz marks as a **Person**. A band/group credit
+    is not a vocalist — treating it as one created "Pantera"/"Queen" style
+    Essential Vocalist playlists. Credits with no artist type are also ignored:
+    the old behaviour of assuming "credited artist == vocalist" is exactly what
+    produced those false collections.
     """
     names: list[str] = []
 
@@ -2006,11 +2007,15 @@ def _vocalists_from_recording(recording: dict[str, Any]) -> list[str]:
         return []
 
     for credit in recording.get("artist-credit") or []:
-        if isinstance(credit, dict):
-            _add(credit.get("name"))
-            artist = credit.get("artist") or {}
-            if isinstance(artist, dict):
-                _add(artist.get("name"))
+        if not isinstance(credit, dict):
+            continue
+        artist = credit.get("artist") or {}
+        if not isinstance(artist, dict):
+            continue
+        if str(artist.get("type") or "").strip().casefold() != "person":
+            continue
+        _add(credit.get("name"))
+        _add(artist.get("name"))
     return names
 
 

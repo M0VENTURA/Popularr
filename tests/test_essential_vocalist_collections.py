@@ -144,6 +144,47 @@ class TestVocalParticipation:
         row = _row(project="Melissa Bonny", group="rg", title="Solo", vocalists=["Melissa Bonny"])
         assert fs._row_is_vocalist(row, "Melissa Bonny")
 
+    def test_confirmed_relations_override_the_album_artist(self) -> None:
+        """A band album is not a vocalist credit.
+
+        Confirmed relations list the singer; the album artist (the band) must
+        not therefore create a "Lacuna Coil - Essential Vocalist Collection".
+        """
+        row = _row(
+            project="Lacuna Coil",
+            group="rg",
+            title="Song",
+            vocalists=["Cristina Scabbia"],
+        )
+        assert fs._row_is_vocalist(row, "Cristina Scabbia")
+        assert not fs._row_is_vocalist(row, "Lacuna Coil")
+
+    def test_unconfirmed_credits_do_not_create_vocalist_candidates(self) -> None:
+        rows = [
+            _row(project="Pantera", group="rg", title="Song", vocalists=[]),
+        ]
+        rows[0]["vocalists"] = ""
+        assert fs._vocalist_candidates_from_rows(rows) == {}
+
+    def test_a_band_name_is_not_a_candidate_from_its_own_credit(self) -> None:
+        rows = [
+            _row(project="Pantera", group="rg", title="Song", vocalists=["Pantera"]),
+        ]
+        assert fs._vocalist_candidates_from_rows(rows) == {}
+
+    def test_a_singer_on_a_band_track_is_a_candidate(self) -> None:
+        rows = [
+            _row(
+                project="Lacuna Coil",
+                group="rg",
+                title="Song",
+                vocalists=["Cristina Scabbia"],
+            ),
+        ]
+        assert fs._vocalist_candidates_from_rows(rows) == {
+            "cristina scabbia": "Cristina Scabbia"
+        }
+
     def test_instrumental_titles_are_not_vocal_tracks(self) -> None:
         row = _row(project="Melissa Bonny", group="rg", title="Intro (Instrumental)")
         assert not fs._row_is_vocalist(row, "Melissa Bonny")
@@ -185,19 +226,38 @@ class TestMusicBrainzVocalRelations:
         )
         assert got == []
 
-    def test_without_relations_the_artist_credit_is_the_fallback(self) -> None:
+    def test_without_relations_only_a_person_credit_is_a_fallback(self) -> None:
         from services.enrichment.musicbrainz_service import _vocalists_from_recording
 
         got = _vocalists_from_recording(
             {
                 "relations": [],
                 "artist-credit": [
-                    {"artist": {"name": "Host"}, "name": "Host"},
-                    {"artist": {"name": "Melissa Bonny"}, "name": "Melissa Bonny"},
+                    {
+                        "artist": {"name": "Host", "type": "Group"},
+                        "name": "Host",
+                    },
+                    {
+                        "artist": {"name": "Melissa Bonny", "type": "Person"},
+                        "name": "Melissa Bonny",
+                    },
                 ],
             }
         )
-        assert got == ["Host", "Melissa Bonny"]
+        assert got == ["Melissa Bonny"]
+
+    def test_a_group_credit_is_not_a_vocalist_without_relations(self) -> None:
+        from services.enrichment.musicbrainz_service import _vocalists_from_recording
+
+        got = _vocalists_from_recording(
+            {
+                "relations": [],
+                "artist-credit": [
+                    {"artist": {"name": "Pantera", "type": "Group"}, "name": "Pantera"}
+                ],
+            }
+        )
+        assert got == []
 
 
 class TestThePlaylistNameIsManaged:

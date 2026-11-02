@@ -49,14 +49,37 @@ threshold the playlist is deleted, exactly like the per-artist family.
 `musicbrainz_service._vocalists_from_recording` reads the recording's performer
 relations and keeps only roles containing `vocal` (`vocals`, `lead vocals`,
 `background vocals`, …). A performer relation with a non-vocal role is NOT a
-vocalist. Only when the recording has **no performer relations at all** does it
-fall back to the recording's artist credit.
+vocalist.
+
+Only when the recording has **no performer relations at all** does it fall back
+to the recording's artist credit — and then only to credits MusicBrainz marks as
+a **Person**. A group credit (Pantera, Queen) or an untyped credit is not
+vocalist evidence. The old "credited artist == vocalist" assumption created
+band vocalist playlists that did not describe who sang.
 
 The list is persisted in the new `tracks.vocalists` column (migration 034) by
-the metadata scan (`track_stage`). Rows scanned before this change have no
-column value; the builder falls back to the guest credits in
-`artist` / `album_artist` / `title` for those rows. A re-scan populates the
-confirmed list.
+the metadata scan (`track_stage`). The scan writes the empty list when
+MusicBrainz returns the field, which clears old band/artist-credit values as
+tracks are re-enriched.
+
+## Candidate and match rules
+
+A name may become a vocalist candidate only when at least one confirmed
+`vocalists` entry is **outside that row's own `artist` / `album_artist`** (for
+example Cristina Scabbia on a Lacuna Coil track, or a guest on another artist's
+release). A name that only ever appears as its own album credit is either a band
+or a solo act's ordinary Essential collection, not cross-project vocal work.
+
+When `vocalists` is present it is authoritative; the builder no longer accepts
+the row's `artist`/`album_artist` as a substitute ("Lacuna Coil" cannot match
+its own album once MusicBrainz says Cristina Scabbia sang). Rows scanned before
+the column existed still fall back to their credits/guest credits for matching,
+but they no longer create new candidates.
+
+The refresh also sweeps app-managed vocalist playlists that no current candidate
+produced. Ownership still comes from the playlist index, so an unavailable index
+deletes nothing. A re-scan/global playlist rebuild is required to clear old
+band-named collections.
 
 ## Projects and breadth
 
@@ -99,7 +122,10 @@ the test-site and live Config trees. The existing config-surface ratchet
 | `test_fewer_than_five_outside_the_dominant_project_fails` | ⭐ outside share |
 | `test_confirmed_vocalists_are_authoritative` | vocal confirmation |
 | `test_confirmed_relations_override_the_credit_string` | strictness |
-| `test_a_guest_credit_is_used_when_the_row_was_never_scanned` | fallback |
-| MB relation tests | vocals vs guitar, credit fallback |
+| `test_confirmed_relations_override_the_album_artist` | ⭐ band album ≠ vocalist |
+| `test_a_band_name_is_not_a_candidate_from_its_own_credit` | ⭐ candidate gate |
+| `test_a_singer_on_a_band_track_is_a_candidate` | positive candidate |
+| `test_a_guest_credit_is_used_when_the_row_was_never_scanned` | legacy match fallback |
+| MB relation tests | vocals vs guitar, Person-only credit fallback, Group rejection |
 | taxonomy tests | new name type + reverse value |
 | config tests | defaults + partial overrides + both UI trees |
