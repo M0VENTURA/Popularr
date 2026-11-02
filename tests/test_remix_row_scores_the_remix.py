@@ -141,6 +141,19 @@ class TestResolvePerformanceTitle:
         """Every reported row resolves to one of the two inputs, never a mix."""
         assert resolve_performance_title(local, release) in {local, release}
 
+    def test_a_plain_release_title_uses_the_recording_rendition(self) -> None:
+        """The release calls both tracks plain; the recording names the remix."""
+        assert (
+            resolve_performance_title(
+                "Break Stuff", "Break Stuff (DJ Lethal remix)"
+            )
+            == "Break Stuff (DJ Lethal remix)"
+        )
+        assert (
+            resolve_performance_title("My Way", "My Way (DJ Lethal remix)")
+            == "My Way (DJ Lethal remix)"
+        )
+
     def test_a_live_marker_is_honoured_too(self) -> None:
         """The rule is about PERFORMANCE identity, not just remixes."""
         assert (

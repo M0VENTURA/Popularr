@@ -112,3 +112,19 @@ annotations. `"Hey Ya! (Kidz Bop Cover)"` names the Kidz Bop performer, not a
 cover OF Kidz Bop, so it is deferred to the work/recording evidence rather than
 becoming `originally by Kidz Bop`.
 
+## Remix popularity identity
+
+On Limp Bizkit's *New Old Songs* the release track titles for "Break Stuff" and
+"My Way" are plain, but their MusicBrainz **recordings** are
+"Break Stuff (DJ Lethal remix)" and "My Way (DJ Lethal remix)". The album
+tracklist payload used the release title, so `resolve_performance_title()` saw
+no marker and Last.fm was queried with the studio title; the title-keyed
+prefetch also returned the studio hit's ~1.2M/2.0M listeners.
+
+The tracklist payload now prefers the recording title when it adds a
+performance marker, version compatibility compares recording titles, and
+`track_stage` no longer reuses a title-keyed Last.fm prefetch once the row is
+known to be an alternate rendition. Forced/rescans query the remix title
+instead.
+
+

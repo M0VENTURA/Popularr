@@ -697,9 +697,21 @@ def get_listenbrainz_album_tracklist_with_release(
     def payload(row: dict[str, Any], track: dict[str, Any], method: str,
                 unique: bool = False) -> AlbumRecordingMatch:
         total, users = _sum_counts(counts, [row.get("mbid")])
+        # The RELEASE track title can be plain while the RECORDING title names
+        # the rendition ("Break Stuff" on the release vs "Break Stuff (DJ Lethal
+        # remix)" on the recording). The provider identity must use the
+        # recording title when it adds a performance marker, or a remix is
+        # scored as the studio original.
+        release_title = str(row.get("title") or "").strip()
+        recording_title = str(row.get("recording_title") or "").strip()
+        identity_title = release_title or recording_title
+        if recording_title and (
+            _performance_types(recording_title) - _performance_types(release_title)
+        ):
+            identity_title = recording_title
         return {"listenbrainz_listens": total, "listenbrainz_users": users,
                 "recording_mbid": row.get("mbid") or None,
-                "release_track_title": str(row.get("title") or ""),
+                "release_track_title": identity_title,
                 "local_disc_number": max(1, _parse_number(track.get("disc_number"), 1)),
                 "local_track_number": _parse_number(track.get("track_number")),
                 "length_verified": _length_agreement(track.get("duration"), row.get("length_ms")) is True,
@@ -719,7 +731,9 @@ def get_listenbrainz_album_tracklist_with_release(
             if not _artist_matches(local_artist, credit):
                 return False
         local_types = _performance_types(str(track.get("title") or ""))
-        release_types = _performance_types(str(row.get("title") or ""))
+        release_types = _performance_types(
+            str(row.get("recording_title") or row.get("title") or "")
+        )
         if local_types and local_types != release_types:
             return False
         return True

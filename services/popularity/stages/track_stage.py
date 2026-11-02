@@ -2198,6 +2198,11 @@ def process_track(
                         _prefetch_entry
                         and _prefetch_entry.get("lastfm_listeners")
                         and not is_live_release
+                        # The prefetch key is the LOCAL title. Once the release/
+                        # recording identity proves this row is an alternate
+                        # rendition, that count belongs to the studio original,
+                        # so ask the provider again with the performance title.
+                        and not _alt_rendition
                     ):
                         lastfm_listeners = _as_int(_prefetch_entry.get("lastfm_listeners") or 0)
                         _prefetch_playcount_available = _prefetch_entry.get(
