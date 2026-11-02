@@ -1590,6 +1590,8 @@ def _lb_search_recording_ids(
         for rec in client.search_recordings(query, limit=20) or []:
             if not isinstance(rec, dict) or not rec.get("id"):
                 continue
+            if bool(rec.get("video")):
+                continue
             if not _artist_matches(artist, _release_credit_text(rec)):
                 continue
             if not _alt_status_matches_ctx(

@@ -40,6 +40,7 @@ from helpers.normalization_service import (
     format_duration_mmss as Format_duration_mmss,
     is_track_artist_placeholder,
     normalize_string as Normalize_string,
+    normalize_core_title as Normalize_core_title,
     normalize_title_for_lookup as Normalize_title_for_lookup,
     normalize_title_for_lucene_query as Normalize_title_for_lucene_query,
     normalize_title_for_mbid_match as Normalize_title_for_mbid_match,
@@ -685,6 +686,7 @@ class MusicBrainzService:
         is_live: bool = False,
         annotation: str | None = None,
         is_remix: bool = False,
+        length_bucket: int | None = None,
     ) -> str:
         base = f"{artist.casefold().strip()}::{title.casefold().strip()}"
         if is_live:
@@ -693,6 +695,8 @@ class MusicBrainzService:
             base = f"{base}::remix"
         if annotation:
             base = f"{base}::{annotation}"
+        if length_bucket is not None:
+            base = f"{base}::len{length_bucket}"
         return base
 
     def get_suggested_mbid(self, title: str, artist: str, limit: int = 5, **kwargs: Any) -> tuple[str, float]:
@@ -709,6 +713,13 @@ class MusicBrainzService:
                 pass
         edition_annotation = str(kwargs.get("edition_annotation") or "").strip() or None
         on_miss = kwargs.get("on_miss")
+        try:
+            duration_seconds = float(kwargs.get("duration_seconds") or 0) or None
+        except (TypeError, ValueError):
+            duration_seconds = None
+        length_bucket = (
+            int(round(duration_seconds / 5.0) * 5) if duration_seconds else None
+        )
         context = {
             "artist": artist,
             "track": title,
@@ -726,6 +737,7 @@ class MusicBrainzService:
             is_live=is_live_release,
             annotation=edition_annotation,
             is_remix=is_remix_release,
+            length_bucket=length_bucket,
         )
         now = time.time()
         with self._mem_lock:
@@ -765,13 +777,24 @@ class MusicBrainzService:
                 log_context=context,
             ) or []
             best_mbid, best_score = "", 0.0
-            best_rank: tuple[int, int, int, float] | None = None
+            best_rank: tuple[int, int, int, int, int, float] | None = None
             normalized_title = Normalize_title_for_mbid_match(title)
             track_annotation = Extract_edition_annotation(title)
             album_annotation = edition_annotation if track_annotation is None else None
+            try:
+                _requested_core = Normalize_core_title(title)
+                _requested_variants = Extract_version_info(title)[1]
+            except Exception:
+                _requested_core = ""
+                _requested_variants = set()
             
             for recording in recordings:
                 if not isinstance(recording, dict):
+                    continue
+                # A music-video recording is not the audio track. It has no LB
+                # audience (the reported Placebo "Every You Every Me" MBID) and
+                # must never win a recording search for an audio row.
+                if bool(recording.get("video")):
                     continue
                 candidate_title = str(recording.get("title") or "")
                 candidate_annotation = Extract_edition_annotation(candidate_title)
@@ -803,10 +826,47 @@ class MusicBrainzService:
                 else:
                     _remix_rank = 2 if _remix_affinity == is_remix_release else 0
 
+                # Title/version intent: a candidate with extra words or an
+                # unrequested live/remix marker must not outrank the plain
+                # studio recording just because its title is similar.
+                try:
+                    _candidate_core = Normalize_core_title(candidate_title)
+                    _candidate_variants = Extract_version_info(candidate_title)[1]
+                except Exception:
+                    _candidate_core = ""
+                    _candidate_variants = set()
+                _unrequested_variants = (
+                    set(_candidate_variants) - set(_requested_variants)
+                )
+                _title_rank = int(
+                    (
+                        not _requested_core
+                        or not _candidate_core
+                        or _candidate_core == _requested_core
+                    )
+                    and not _unrequested_variants
+                )
+
+                # Length is a strong identity signal when the album batch did
+                # not already supply a position-verified recording.
+                _length_rank = 1
+                if duration_seconds and recording.get("length"):
+                    try:
+                        _recording_seconds = float(recording.get("length")) / 1000.0
+                        _length_rank = (
+                            2
+                            if abs(_recording_seconds - float(duration_seconds)) <= 5.0
+                            else 0
+                        )
+                    except (TypeError, ValueError):
+                        _length_rank = 1
+
                 _rank = (
                     _live_rank,
                     _remix_rank,
                     1 if annotation_ok else 0,
+                    _title_rank,
+                    _length_rank,
                     score,
                 )
 
@@ -851,6 +911,7 @@ class MusicBrainzService:
         if not title or not artist:
             return {}
         on_miss = kwargs.get("on_miss")
+        duration_seconds = kwargs.get("duration_seconds")
         try:
             _known_mbid = str(kwargs.get("mbid") or "").strip()
             if _known_mbid:
@@ -862,6 +923,7 @@ class MusicBrainzService:
                     is_live_release=is_live_release,
                     is_remix_release=is_remix_release,
                     edition_annotation=edition_annotation,
+                    duration_seconds=duration_seconds,
                     on_miss=on_miss,
                 )
             if not mbid:
@@ -893,6 +955,30 @@ class MusicBrainzService:
                 )
             if not recording:
                 return {}
+            if bool(recording.get("video")):
+                # A stored/searched music-video MBID is not the audio track.
+                # Discard it and re-resolve with the video-filtered search.
+                if _known_mbid:
+                    mbid, confidence = self.get_suggested_mbid(
+                        title,
+                        artist,
+                        is_live_release=is_live_release,
+                        is_remix_release=is_remix_release,
+                        edition_annotation=edition_annotation,
+                        duration_seconds=duration_seconds,
+                        on_miss=on_miss,
+                    )
+                    if not mbid:
+                        return {}
+                    recording = _call_with_heartbeat(
+                        "recording.get",
+                        self.http.get_recording,
+                        mbid,
+                        inc="artist-credits+releases+release-groups+work-rels+genres",
+                        log_context={**context, "mbid": mbid},
+                    )
+                if not recording or bool(recording.get("video")):
+                    return {}
             return self._recording_to_metadata(recording, mbid, confidence, album_name=album)
         except Exception:
             return {}
@@ -1074,6 +1160,7 @@ class MusicBrainzService:
             "release_mbid": specific_release_mbid or None,
             "release_group_mbid": specific_release_group_mbid or None,
             "is_live": is_live_recording,
+            "video": bool(recording.get("video")),
             "vocalists": _vocalists_from_recording(recording),
             "confidence": confidence,
             "writer": ", ".join(dict.fromkeys(writers)),

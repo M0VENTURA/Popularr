@@ -117,6 +117,7 @@
   const trackTitle = pageData.title || '';
   const trackArtist = pageData.artistName || '';
   const trackAlbum = pageData.album || '';
+  const trackDuration = Number(pageData.duration) || 0;
 
   function esc(value) {
     return (global.escapeHtml || ((v) => String(v == null ? '' : v)))(value);
@@ -446,7 +447,7 @@
       'Searching MusicBrainz…</div>';
 
     try {
-      const payload = { title, artist };
+      const payload = { title, artist, duration: trackDuration };
       if (fallbackMbid) payload.mbid = fallbackMbid;
       const data = await global.api.postJson(
         '/api/track/musicbrainz', payload, { timeoutMs: SEARCH_TIMEOUT_MS }
@@ -460,19 +461,48 @@
         return;
       }
 
-      resultsEl.innerHTML = '<div class="list-group">' + results.map((result) => {
+      const omittedVideo = Number(data.omitted_video) || 0;
+      const videoNote = omittedVideo
+        ? `<div class="form-text mb-2">${omittedVideo} music-video result(s) hidden. Audio recordings are shown first.</div>`
+        : '';
+      resultsEl.innerHTML = videoNote + '<div class="list-group">' + results.map((result, index) => {
         const confidence = Number(result.confidence) || 0;
         const tone = confidence > 0.8 ? 'success' : (confidence > 0.5 ? 'warning' : 'secondary');
+        const length = result.length_seconds
+          ? `${Math.floor(result.length_seconds / 60)}:${String(Math.round(result.length_seconds % 60)).padStart(2, '0')}`
+          : '';
+        const lengthNote = result.length_match
+          ? '<span class="badge bg-success ms-1">Length match</span>'
+          : (result.length_delta_seconds != null
+            ? `<span class="badge bg-secondary ms-1">Δ ${result.length_delta_seconds}s</span>`
+            : '');
+        const kindBadge = result.video
+          ? '<span class="badge bg-danger">Video</span>'
+          : (result.is_live
+            ? '<span class="badge bg-warning text-dark">Live</span>'
+            : '<span class="badge bg-success">Studio</span>');
+        const releaseLine = [result.album, result.year].filter(Boolean).join(' · ');
         return `
           <div class="list-group-item p-3">
             <div class="d-flex justify-content-between align-items-start mb-2">
               <div>
                 <h6 class="mb-1 fw-bold">${esc(result.title)}</h6>
                 <small class="text-muted">by ${esc(result.artist)}</small>
+                <div class="mt-1 d-flex flex-wrap gap-1 align-items-center">
+                  ${index === 0 ? '<span class="badge bg-primary">Best match</span>' : ''}
+                  ${kindBadge}
+                  ${result.release_type ? `<span class="badge bg-dark border border-secondary">${esc(result.release_type)}</span>` : ''}
+                  ${lengthNote}
+                </div>
               </div>
               <span class="badge bg-${tone}">${(confidence * 100).toFixed(1)}%</span>
             </div>
-            <div class="small text-muted mb-2"><strong>MBID:</strong> <code>${esc(result.mbid)}</code></div>
+            ${releaseLine ? `<div class="small text-muted">Release: ${esc(releaseLine)}</div>` : ''}
+            ${result.disambiguation ? `<div class="small text-muted fst-italic">${esc(result.disambiguation)}</div>` : ''}
+            <div class="small text-muted mb-2">
+              ${length ? `Length: ${length}` : ''}
+              <strong class="ms-2">MBID:</strong> <code>${esc(result.mbid)}</code>
+            </div>
             <button type="button" class="btn btn-sm btn-primary mb-recording-select-btn"
                     data-mbid="${esc(result.mbid || '')}">Select</button>
           </div>`;

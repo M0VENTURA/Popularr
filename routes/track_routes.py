@@ -184,12 +184,45 @@ def _mb_recording_writers(recording: dict[str, Any]) -> list[str]:
     return names
 
 
+def _mb_release_info(rel: dict[str, Any]) -> dict[str, Any]:
+    """Flatten the release/release-group fields the picker shows and ranks on."""
+    group = rel.get("release-group") if isinstance(rel.get("release-group"), dict) else {}
+    secondary = [
+        str(value).strip().casefold()
+        for value in (group.get("secondary-types") or [])
+        if str(value or "").strip()
+    ]
+    media = rel.get("media") or []
+    formats = sorted({
+        str(item.get("format") or "").strip()
+        for item in media
+        if isinstance(item, dict) and str(item.get("format") or "").strip()
+    })
+    return {
+        "id": str(rel.get("id") or ""),
+        "title": str(rel.get("title") or ""),
+        "date": str(rel.get("date") or ""),
+        "country": str(rel.get("country") or ""),
+        "status": str(rel.get("status") or ""),
+        "primary_type": str(group.get("primary-type") or "").strip(),
+        "secondary_types": secondary,
+        "formats": formats,
+        "is_live": "live" in secondary,
+        "is_compilation": "compilation" in secondary,
+        "is_video": any(
+            fmt.casefold() in {"dvd", "dvd-video", "blu-ray", "vhs"}
+            for fmt in formats
+        ),
+    }
+
+
 def _format_mb_recording(
     recording: dict[str, Any],
     *,
     expected_title: str = "",
     expected_artist: str = "",
     confidence_override: float | None = None,
+    expected_duration_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Flatten a MusicBrainz recording for the track page's picker."""
     rec_title = str(recording.get("title") or "")
@@ -203,19 +236,38 @@ def _format_mb_recording(
         )
 
     releases = recording.get("releases") or []
-    release_list = [
-        {"id": str(rel.get("id") or ""), "title": str(rel.get("title") or "")}
-        for rel in releases[:5]
+    release_infos = [
+        _mb_release_info(rel)
+        for rel in releases
         if isinstance(rel, dict)
     ]
-    best_album = ""
-    if releases and isinstance(releases[0], dict):
-        best_album = str(releases[0].get("title") or "")
+    release_list = release_infos[:5]
+
+    # Choose the release the picker DISPLAYS: a studio release first unless the
+    # request itself is a live version.
+    try:
+        from helpers.normalization_service import extract_version_info
+
+        _, _requested_variants = extract_version_info(expected_title or "")
+    except Exception:
+        _requested_variants = set()
+    _requested_is_live = "live" in _requested_variants
+    _display_release = next(
+        (
+            rel for rel in release_infos
+            if not rel["is_live"] and not rel["is_video"]
+        ),
+        release_infos[0] if release_infos else {},
+    )
+    if _requested_is_live:
+        _display_release = next(
+            (rel for rel in release_infos if rel["is_live"]),
+            _display_release,
+        )
+    best_album = str((_display_release or {}).get("title") or "")
     best_year = ""
-    for rel in releases:
-        if not isinstance(rel, dict):
-            continue
-        date = str(rel.get("date") or "")
+    for rel in ([_display_release] if _display_release else []) + release_infos:
+        date = str((rel or {}).get("date") or "")
         if len(date) >= 4 and date[:4].isdigit():
             best_year = date[:4]
             break
@@ -223,6 +275,76 @@ def _format_mb_recording(
         first = str(recording.get("first-release-date") or "")
         if len(first) >= 4 and first[:4].isdigit():
             best_year = first[:4]
+
+    # ── Title/version evidence ────────────────────────────────────────────
+    # The requested title owns the version intent. A candidate with extra words
+    # or a live/remix marker the request did not ask for ranks below a plain
+    # studio recording with the same core title.
+    try:
+        from helpers.normalization_service import (
+            extract_version_info,
+            normalize_core_title,
+        )
+
+        _, _candidate_variants = extract_version_info(rec_title)
+        _requested_core = normalize_core_title(expected_title or "")
+        _candidate_core = normalize_core_title(rec_title)
+        _title_core_match = bool(
+            _requested_core and _candidate_core
+            and _requested_core == _candidate_core
+        )
+    except Exception:
+        _candidate_variants = set()
+        _requested_core = _candidate_core = ""
+        _title_core_match = bool(
+            expected_title and rec_title
+            and expected_title.strip().casefold() == rec_title.strip().casefold()
+        )
+    _unrequested_variants = sorted(
+        set(_candidate_variants) - set(_requested_variants)
+    )
+    _missing_requested_variants = sorted(
+        set(_requested_variants) - set(_candidate_variants)
+    )
+
+    _release_is_live = any(rel.get("is_live") for rel in release_infos)
+    _recording_is_video = bool(recording.get("video"))
+    _release_is_video = any(rel.get("is_video") for rel in release_infos)
+    _is_live = bool(
+        _release_is_live
+        or "live" in _candidate_variants
+        or "live" in str(recording.get("disambiguation") or "").casefold()
+    )
+    _is_video = bool(_recording_is_video or _release_is_video)
+    _studio_primary = {
+        "album", "single", "ep", "other",
+    }
+    _is_studio = bool(
+        not _is_live
+        and not _is_video
+        and (
+            any(
+                str(rel.get("primary_type") or "").casefold() in _studio_primary
+                for rel in release_infos
+            )
+            or not release_infos
+        )
+    )
+
+    # ── Length evidence ──────────────────────────────────────────────────
+    try:
+        _length_seconds = (
+            float(recording.get("length") or 0) / 1000.0
+            if recording.get("length")
+            else None
+        )
+    except (TypeError, ValueError):
+        _length_seconds = None
+    _length_delta = None
+    _length_match = None
+    if _length_seconds and expected_duration_seconds:
+        _length_delta = round(abs(_length_seconds - float(expected_duration_seconds)), 1)
+        _length_match = _length_delta <= 5.0
 
     if confidence_override is not None:
         title_similarity = artist_similarity = overall = float(confidence_override)
@@ -243,6 +365,31 @@ def _format_mb_recording(
         "album": best_album,
         "year": best_year,
         "length": recording.get("length") or 0,
+        "length_seconds": round(_length_seconds, 1) if _length_seconds else None,
+        "length_delta_seconds": _length_delta,
+        "length_match": _length_match,
+        "disambiguation": str(recording.get("disambiguation") or ""),
+        "video": _is_video,
+        "is_live": _is_live,
+        "is_studio": _is_studio,
+        "release_type": (
+            " · ".join(
+                part for part in (
+                    str((_display_release or {}).get("primary_type") or "").title(),
+                    ", ".join(
+                        value.title()
+                        for value in (_display_release or {}).get("secondary_types") or []
+                    ),
+                )
+                if part
+            )
+            or ("Video" if _is_video else "")
+        ),
+        "release_formats": (_display_release or {}).get("formats") or [],
+        "title_core_match": _title_core_match,
+        "unrequested_variants": _unrequested_variants,
+        "missing_requested_variants": _missing_requested_variants,
+        "requested_is_live": _requested_is_live,
         "releases": release_list,
         "writers": writers,
         "composer": ", ".join(writers),
@@ -253,6 +400,33 @@ def _format_mb_recording(
     }
 
 
+def _mb_lookup_sort_key(row: dict[str, Any]) -> tuple:
+    """Studio/exact-title/length-first ordering for the manual picker.
+
+    Requested version intent wins: a plain title prefers a studio recording with
+    no extra markers; a live/remix request prefers the matching variant.
+    """
+    title_rank = 0 if row.get("title_core_match") and not row.get("unrequested_variants") else (
+        1 if row.get("title_core_match") else 2
+    )
+    type_rank = 0 if bool(row.get("is_live")) == bool(row.get("requested_is_live")) else 1
+    variant_rank = 0 if not row.get("missing_requested_variants") else 1
+    length_rank = (
+        0 if row.get("length_match")
+        else (1 if row.get("length_delta_seconds") is not None else 2)
+    )
+    return (
+        1 if row.get("video") else 0,
+        title_rank,
+        variant_rank,
+        type_rank,
+        length_rank,
+        0 if row.get("is_studio") else 1,
+        row.get("length_delta_seconds") if row.get("length_delta_seconds") is not None else 9999.0,
+        -float(row.get("confidence") or 0),
+    )
+
+
 @track_bp.route("/musicbrainz", methods=["POST"])
 async def api_track_musicbrainz_lookup() -> Any:
     """Search MusicBrainz recordings for the track page's Search button."""
@@ -260,6 +434,16 @@ async def api_track_musicbrainz_lookup() -> Any:
     title = str(data.get("title") or "").strip()
     artist = str(data.get("artist") or "").strip()
     mbid = str(data.get("mbid") or "").strip()
+    include_video = bool(data.get("include_video"))
+    try:
+        duration_seconds = float(data.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration_seconds = 0.0
+    if duration_seconds > 10000:
+        # Some callers send milliseconds.
+        duration_seconds = duration_seconds / 1000.0
+    if duration_seconds <= 0:
+        duration_seconds = None
 
     if not mbid and (not title or not artist):
         return jsonify(
@@ -274,7 +458,11 @@ async def api_track_musicbrainz_lookup() -> Any:
     if mbid:
         try:
             recording = client.get_recording(
-                mbid, inc="releases+artist-credits+work-rels+work-level-rels"
+                mbid,
+                inc=(
+                    "releases+release-groups+artist-credits+work-rels+"
+                    "work-level-rels"
+                ),
             ) or {}
         except Exception as exc:
             logger.debug(
@@ -288,6 +476,7 @@ async def api_track_musicbrainz_lookup() -> Any:
                     expected_title=title,
                     expected_artist=artist,
                     confidence_override=1.0,
+                    expected_duration_seconds=duration_seconds,
                 )
             )
 
@@ -298,7 +487,9 @@ async def api_track_musicbrainz_lookup() -> Any:
         )
         try:
             recordings = client.search_recordings(
-                query, limit=10, inc="releases+artist-credits"
+                query,
+                limit=15,
+                inc="releases+release-groups+artist-credits",
             ) or []
         except Exception as exc:
             logger.warning(
@@ -309,15 +500,30 @@ async def api_track_musicbrainz_lookup() -> Any:
             )
             recordings = []
         seen = {row["mbid"] for row in results if row.get("mbid")}
-        found = [
-            _format_mb_recording(row, expected_title=title, expected_artist=artist)
-            for row in recordings
-            if isinstance(row, dict)
-            and str(row.get("id") or "")
-            and str(row.get("id")) not in seen
-        ]
-        found.sort(key=lambda row: row["confidence"], reverse=True)
+        _omitted_video = 0
+        found = []
+        for row in recordings:
+            if not isinstance(row, dict) or not str(row.get("id") or ""):
+                continue
+            if str(row.get("id")) in seen:
+                continue
+            if bool(row.get("video")) and not include_video:
+                _omitted_video += 1
+                continue
+            found.append(
+                _format_mb_recording(
+                    row,
+                    expected_title=title,
+                    expected_artist=artist,
+                    expected_duration_seconds=duration_seconds,
+                )
+            )
+        found.sort(key=_mb_lookup_sort_key)
         results.extend(found)
+        return jsonify({
+            "results": results[:10],
+            "omitted_video": _omitted_video,
+        })
 
     return jsonify({"results": results[:10]})
 

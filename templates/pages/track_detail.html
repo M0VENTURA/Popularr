@@ -825,23 +825,56 @@
         fetch('/api/track/musicbrainz', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title: title, artist: artist })
+            body: JSON.stringify({ title: title, artist: artist, duration: {{ track.duration or 0 }} })
         })
         .then(response => response.json())
         .then(data => {
             if (data.error) { resultsDiv.innerHTML = '<div class="alert alert-danger">Error: ' + data.error + '</div>'; return; }
             if (!data.results || data.results.length === 0) { resultsDiv.innerHTML = '<div class="alert alert-info">No results found</div>'; return; }
 
-            let html = '<div class="list-group">';
-            data.results.forEach(result => {
+            let html = '';
+            const omittedVideo = Number(data.omitted_video) || 0;
+            if (omittedVideo) {
+                html += '<div class="form-text mb-2">' + omittedVideo + ' music-video result(s) hidden. Audio recordings are shown first.</div>';
+            }
+            html += '<div class="list-group">';
+            data.results.forEach((result, index) => {
                 const confClass = result.confidence > 0.8 ? 'success' : result.confidence > 0.5 ? 'warning' : 'secondary';
+                const length = result.length_seconds
+                    ? Math.floor(result.length_seconds / 60) + ':' + String(Math.round(result.length_seconds % 60)).padStart(2, '0')
+                    : '';
+                const lengthNote = result.length_match
+                    ? '<span class="badge bg-success ms-1">Length match</span>'
+                    : (result.length_delta_seconds != null
+                        ? '<span class="badge bg-secondary ms-1">&Delta; ' + escapeHtml(String(result.length_delta_seconds)) + 's</span>'
+                        : '');
+                const kindBadge = result.video
+                    ? '<span class="badge bg-danger">Video</span>'
+                    : (result.is_live
+                        ? '<span class="badge bg-warning text-dark">Live</span>'
+                        : '<span class="badge bg-success">Studio</span>');
+                const releaseLine = [result.album, result.year].filter(Boolean).join(' · ');
                 html += `
                     <div class="list-group-item list-group-item-action p-3">
                         <div class="d-flex justify-content-between align-items-start mb-2">
-                            <div><h6 class="mb-1 fw-bold">${result.title}</h6><small class="text-muted">by ${result.artist}</small></div>
+                            <div>
+                                <h6 class="mb-1 fw-bold">${escapeHtml(result.title)}</h6>
+                                <small class="text-muted">by ${escapeHtml(result.artist)}</small>
+                                <div class="mt-1 d-flex flex-wrap gap-1 align-items-center">
+                                    ${index === 0 ? '<span class="badge bg-primary">Best match</span>' : ''}
+                                    ${kindBadge}
+                                    ${result.release_type ? '<span class="badge bg-dark border border-secondary">' + escapeHtml(result.release_type) + '</span>' : ''}
+                                    ${lengthNote}
+                                </div>
+                            </div>
                             <span class="badge bg-${confClass}">${(result.confidence * 100).toFixed(1)}%</span>
                         </div>
-                        <div class="small text-muted mb-2"><strong>MBID:</strong> <code>${result.mbid}</code></div>
+                        ${releaseLine ? '<div class="small text-muted">Release: ' + escapeHtml(releaseLine) + '</div>' : ''}
+                        ${result.disambiguation ? '<div class="small text-muted fst-italic">' + escapeHtml(result.disambiguation) + '</div>' : ''}
+                        <div class="small text-muted mb-2">
+                            ${length ? 'Length: ' + length : ''}
+                            <strong class="ms-2">MBID:</strong> <code>${escapeHtml(result.mbid)}</code>
+                        </div>
                         <button class="btn btn-sm btn-primary" onclick="document.getElementById('mbid').value='${result.mbid}'; bootstrap.Modal.getInstance(document.getElementById('trackMBLookupModal')).hide();">Select</button>
                     </div>
                 `;

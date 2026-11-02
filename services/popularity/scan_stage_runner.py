@@ -1036,6 +1036,17 @@ def _build_album_recording_batch(
     batch: dict[str, dict[str, Any]] = {}
     for identity in identities:
         entry = dict(metadata.get(identity["recording_mbid"]) or {})
+        if bool(entry.get("video")):
+            # A music-video recording is never the audio track's identity.
+            # Leave this row to the normal audio-recording search.
+            logger.debug(
+                "Album recording identity skipped",
+                reason="video recording",
+                title=identity.get("title"),
+                album=album,
+                recording_mbid=identity.get("recording_mbid"),
+            )
+            continue
         entry["recording_mbid"] = identity["recording_mbid"]
         if identity["release_track_title"]:
             # The RELEASE's own title for this position is what carries the

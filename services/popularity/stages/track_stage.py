@@ -833,6 +833,26 @@ LB_SECONDARY_MIN_LF_LISTENERS = 5000
 LB_SECONDARY_LF_RATIO = 0.05
 
 
+def _lb_zero_fallback_enabled() -> bool:
+    """Whether a zero MBID-scoped LB count may be retried by title/artist.
+
+    A compilation-only recording MBID often has no LB audience while the
+    canonical recording does; the fallback finds it. Set
+    ``api_integrations.listenbrainz.zero_mbid_fallback: false`` to avoid the
+    extra MusicBrainz search on large scans.
+    """
+    try:
+        from helpers.config_helpers import get_config
+
+        cfg = (
+            (get_config() or {}).get("api_integrations", {}).get("listenbrainz", {})
+            or {}
+        )
+        return bool(cfg.get("zero_mbid_fallback", True))
+    except Exception:
+        return True
+
+
 def _score_track_popularity(
     *,
     track_id: str,
@@ -1309,6 +1329,7 @@ def _resolve_track_mb_metadata(
                         is_remix_release=_is_remix_release,
                         edition_annotation=edition_annotation,
                         mbid=_track_mbid or None,
+                        duration_seconds=_safe_duration(track.get("duration")),
                         on_miss=_stamp_recording_mbid_miss,
                     )
                 _from_batch = False
@@ -2347,6 +2368,7 @@ def process_track(
                 # --- ListenBrainz ---
                 listenbrainz_listens = _as_int(effective_track.get("listenbrainz_listens") or 0)
                 listenbrainz_users = _as_int(effective_track.get("listenbrainz_users") or 0)
+                _lb_source = "stored_fresh"
 
                 if _force or not has_fresh_lb or listenbrainz_listens == 0:
                     _lb_source = "none"
@@ -2411,6 +2433,9 @@ def process_track(
                                             artist,
                                             is_live_release=is_live_release,
                                             edition_annotation=_album_annotation,
+                                            duration_seconds=_safe_duration(
+                                                effective_track.get("duration")
+                                            ),
                                             on_miss=_stamp_lb_mbid_miss,
                                         )
 
@@ -2437,6 +2462,44 @@ def process_track(
                                     listenbrainz_listens = _as_int(lb_result.get("total_listen_count") or 0)
                                     listenbrainz_users = _as_int(lb_result.get("total_user_count") or 0)
                                 # An empty answer keeps the stored counts.
+
+                                # ⚠️ A recording MBID can be a compilation-only
+                                # recording with no LB audience, while the
+                                # canonical recording of the same performance has
+                                # plenty. LF is title/artist-scoped and still
+                                # matches, so this shows up as LB=0 with a healthy
+                                # LF score. When the MBID-scoped count is zero,
+                                # resolve by title/artist as a fallback and use it
+                                # only if it finds a real count.
+                                if listenbrainz_listens == 0 and _lb_zero_fallback_enabled():
+                                    _lb_fallback = get_aggregated_listenbrainz_popularity(
+                                        str(raw_title or title or ""),
+                                        artist,
+                                        primary_mbid=None,
+                                        # Force the title/artist search: an ISRC
+                                        # can resolve to the same compilation-only
+                                        # recording that just returned zero.
+                                        isrc=None,
+                                        is_live_release=is_live_release,
+                                        target_is_alt_rendition=_alt_rendition,
+                                    ) or {}
+                                    _fallback_listens = _as_int(
+                                        _lb_fallback.get("total_listen_count") or 0
+                                    )
+                                    if _fallback_listens > 0:
+                                        listenbrainz_listens = _fallback_listens
+                                        listenbrainz_users = _as_int(
+                                            _lb_fallback.get("total_user_count") or 0
+                                        )
+                                        _lb_source = "title_fallback"
+                                        logger.debug(
+                                            "[POPULARITY_MATCH] LB zero-mbid fallback",
+                                            track_id=track_id,
+                                            recording_mbid=recording_mbid,
+                                            fallback_mbids=_lb_fallback.get("mbids"),
+                                            listens=listenbrainz_listens,
+                                            match_type=_lb_fallback.get("match_type"),
+                                        )
                             except Exception as exc:
                                 # Keep the stored counts and do NOT stamp, so
                                 # the next pass retries. Zeroing them saved a
@@ -2461,6 +2524,23 @@ def process_track(
                 is_featured_flag = _is_featured(artist, raw_title or title)
                 has_mb_meta = bool(recording_mbid)
                 prior_single = bool(effective_track.get("is_single"))
+
+                try:
+                    from helpers.scan_log import log_evidence
+
+                    log_evidence(
+                        "listenbrainz.identity",
+                        f"ListenBrainz identity: {title}",
+                        track_id=track_id,
+                        artist=artist,
+                        recording_mbid=recording_mbid or None,
+                        lastfm_listeners=lastfm_listeners,
+                        listenbrainz_listens=listenbrainz_listens,
+                        listenbrainz_source=_lb_source,
+                        has_fresh_lb=bool(has_fresh_lb),
+                    )
+                except Exception:
+                    pass
 
                 score_data, lb_percentile = _score_track_popularity(
                     track_id=track_id,
