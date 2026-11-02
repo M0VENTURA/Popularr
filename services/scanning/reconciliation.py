@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from typing import Any, Iterable
 
 import structlog
@@ -430,7 +431,98 @@ def _authority_value(field: str, source: dict[str, Any]) -> str:
         return "|".join(
             _genre_values(source.get(field) or source.get("genres") or source.get("genre"))
         )
+    if field in _PEOPLE_FIELDS or field in _LIST_FIELDS:
+        return "|".join(_delimited_tokens(source.get(field)))
+    if field in _CASEFOLD_FIELDS:
+        return _text(source.get(field)).casefold()
+    if field == "album_artist":
+        # "Various Artists • HIM" and "Various Artists" are the same album
+        # artist identity; a multi-artist view string must not keep a dirty row
+        # from being confirmed after the importer normalises it to VA.
+        raw = source.get(field)
+        if _is_various_artist_value(raw):
+            return "various artists"
+        return _text(raw).casefold()
     return _text(source.get(field))
+
+
+#: Multi-value credits: file tags join with ", " while Navidrome joins with
+#: "; ". Compare as a set of names, not as a raw delimiter-formatted string.
+_PEOPLE_FIELDS: frozenset[str] = frozenset({"composer", "lyricist"})
+_LIST_FIELDS: frozenset[str] = frozenset({"recordlabel"})
+#: Fields whose only meaningful difference is letter case.
+_CASEFOLD_FIELDS: frozenset[str] = frozenset({
+    "releasestatus", "releasecountry", "media", "script", "language", "copyright",
+})
+_DATE_FIELDS: frozenset[str] = frozenset({"originaldate", "releasedate"})
+_VARIOUS_ARTIST_VALUES: frozenset[str] = frozenset({
+    "various artists", "various", "v/a", "va", "compilation",
+    "original soundtrack",
+})
+
+
+def _is_various_artist_value(value: Any) -> bool:
+    parts = re.split(
+        r"\s*[•·]+\s*|\s+[/|;]+\s+", _text(value)
+    )
+    return any(
+        part.strip().casefold() in _VARIOUS_ARTIST_VALUES
+        for part in parts
+        if part.strip()
+    )
+
+
+def _delimited_tokens(value: Any) -> list[str]:
+    """Order-insensitive tokens from a comma/semicolon/slash-separated credit."""
+    text = _text(value)
+    if not text:
+        return []
+    parts = re.split(r"\s*(?:;|,|/|\||\s&\s|\band\b)\s*", text, flags=re.IGNORECASE)
+    return sorted({
+        strip_diacritics(part).casefold().strip()
+        for part in parts
+        if str(part or "").strip()
+    })
+
+
+def _date_parts(value: Any) -> tuple[int | None, int | None, int | None] | None:
+    """Year/month/day from a date-looking value; None when not a date."""
+    text = _text(value)
+    if not text:
+        return (None, None, None)
+    match = re.search(
+        r"(\d{4})(?:[-/.](\d{1,2})(?:[-/.](\d{1,2}))?)?", text
+    )
+    if not match:
+        return None
+    year = int(match.group(1))
+    month = int(match.group(2)) if match.group(2) else None
+    day = int(match.group(3)) if match.group(3) else None
+    # ID3/Vorbis writers often use 0000/00 placeholders for unknown parts.
+    if year == 0:
+        year = None
+    if month == 0:
+        month = None
+    if day == 0:
+        day = None
+    return (year, month, day)
+
+
+def _dates_compatible(left: Any, right: Any) -> bool:
+    """Compare dates at the precision both sides actually carry.
+
+    A file tag may hold ``2000`` while Navidrome's album object holds
+    ``2000-05-23``; that is not a conflict. A different month or day at the
+    same precision is.
+    """
+    a = _date_parts(left)
+    b = _date_parts(right)
+    if a is None or b is None:
+        return _text(left).casefold() == _text(right).casefold()
+    for a_part, b_part in zip(a, b):
+        if a_part is not None and b_part is not None and a_part != b_part:
+            return False
+    return True
 
 
 def local_authority_conflicts(
@@ -439,6 +531,15 @@ def local_authority_conflicts(
     conflicts: list[str] = []
     for field in LOCAL_AUTHORITY_FIELDS:
         if field not in payload:
+            continue
+        # A provider that echoes an EMPTY field is not asserting a value. This
+        # is what made ``releasestatus``/``composer`` conflict forever when
+        # Navidrome did not expose the tag on that object.
+        if _text(payload.get(field)) == "":
+            continue
+        if field in _DATE_FIELDS:
+            if not _dates_compatible(existing.get(field), payload.get(field)):
+                conflicts.append(field)
             continue
         if _authority_value(field, existing) != _authority_value(field, payload):
             conflicts.append(field)

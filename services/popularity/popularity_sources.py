@@ -1093,12 +1093,27 @@ def _lastfm_result(items: list[dict[str, Any]]) -> dict[str, Any]:
         )
         for item in chosen
     )
-    return {
+    result = {
         "listeners": sum(_count(i.get("listeners")) for i in chosen),
         "track_play": sum(_count(i.get("playcount") or i.get("track_play")) for i in chosen),
         "matched_tracks": chosen,
         "playcount_available": playcount_available,
     }
+    try:
+        from helpers.scan_log import log_evidence
+
+        log_evidence(
+            "provider.result",
+            "Last.fm aggregate",
+            source="lastfm",
+            listeners=result["listeners"],
+            track_play=result["track_play"],
+            playcount_available=playcount_available,
+            candidates=len(chosen),
+        )
+    except Exception:
+        pass
+    return result
 
 
 #: Same "credible data" floor the cache policy and track stage use. Below it,
@@ -1209,23 +1224,50 @@ def _lastfm_candidate_ok(
     require_artist: bool = True,
 ) -> bool:
     item_title = str(item.get("name") or item.get("title") or "")
+
+    # Decision evidence is DEBUG-only; it never changes the gate.
+    def _evidence(event: str, message: str, **context: Any) -> None:
+        try:
+            from helpers.scan_log import log_evidence
+
+            log_evidence(
+                event,
+                message,
+                source="lastfm",
+                requested=title,
+                candidate=item_title,
+                **context,
+            )
+        except Exception:
+            pass
+
+    def _reject(reason: str) -> bool:
+        _evidence("provider.candidate_rejected", f"Rejected Last.fm candidate: {item_title}", reason=reason)
+        return False
+
     if item.get("_raw_title_verified") is False:
-        return False
+        return _reject("unverified provider title")
     if not item_title:
-        return False
+        return _reject("no candidate title")
     if require_artist:
         item_artist = _search_item_artist(item)
         # A search hit may omit the artist entirely; it came from a query for
         # THIS artist, so absence is not a mismatch. A PRESENT different
         # artist is decisive.
         if item_artist and not _artist_matches(artist, item_artist):
-            return False
+            return _reject("artist mismatch")
     if not _alt_status_matches_ctx(title, item_title, target_is_live=is_live,
                                    target_is_alt_rendition=is_alt):
-        return False
+        return _reject("studio/live or alternate-version conflict")
     left, right = normalize_for_aggregation(title), normalize_for_aggregation(item_title)
-    return bool(left and right and title_variants_compatible(title, item_title)
-                and aggregation_keys_compatible(left, right))
+    if not left or not right:
+        return _reject("empty normalized title")
+    if not title_variants_compatible(title, item_title):
+        return _reject("version markers incompatible")
+    if not aggregation_keys_compatible(left, right):
+        return _reject("normalized titles are not the same recording")
+    _evidence("provider.candidate_accepted", f"Accepted Last.fm candidate: {item_title}")
+    return True
 
 
 def _lastfm_direct(client: Any, artist: str, title: str, mbid: str | None = None) -> dict[str, Any]:
@@ -1243,7 +1285,7 @@ def _lastfm_direct(client: Any, artist: str, title: str, mbid: str | None = None
             is_live=False, is_alt=False,
         ):
             return _empty_lastfm()
-        return {
+        result = {
             "listeners": _count(info.get("listeners")),
             "track_play": _count(info.get("track_play") or info.get("playcount")),
             "matched_tracks": [],
@@ -1253,6 +1295,22 @@ def _lastfm_direct(client: Any, artist: str, title: str, mbid: str | None = None
             ),
             "lookup_path": "direct",
         }
+        try:
+            from helpers.scan_log import log_evidence
+
+            log_evidence(
+                "provider.result",
+                f"Last.fm direct: {title}",
+                source="lastfm",
+                artist=artist,
+                listeners=result["listeners"],
+                track_play=result["track_play"],
+                playcount_available=result["playcount_available"],
+                match_type="direct",
+            )
+        except Exception:
+            pass
+        return result
     except Exception as exc:
         logger.debug("Last.fm direct lookup failed", artist=artist, track=title, error=str(exc))
         return _empty_lastfm()

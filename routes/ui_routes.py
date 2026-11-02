@@ -4614,10 +4614,10 @@ async def logs() -> Any:
     # (GET /api/logs/list) cannot drift apart. The route enriches it with the
     # absolute path its template renders into `data-path` — deliberately NOT
     # part of the API payload, which the modal does not need.
-    from services.log_service import list_log_files
+    from services.log_service import viewer_log_files
 
     log_dir = resolve_log_dir()
-    log_files = list_log_files()
+    log_files = viewer_log_files()
     for entry in log_files:
         entry["path"] = os.path.join(log_dir, entry["name"])
 

@@ -342,7 +342,7 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "artist_id": "TEXT", "artist": "TEXT", "album_artist": "TEXT", "album": "TEXT",
         "title": "TEXT", "duration": "DOUBLE PRECISION", "file_path": "TEXT",
         "track_number": "TEXT", "disc_number": "TEXT", "year": "TEXT", "release_year": "INTEGER",
-        "releasecountry": "TEXT", "releasetype": "TEXT", "writer": "TEXT", 
+        "releasecountry": "TEXT", "releasetype": "TEXT", "writer": "TEXT", "vocalists": "TEXT", 
         # Release-detail fields. The album form posts these and the scan
         # extracts them from file tags, but they had no column — so
         # save_to_db's "only known columns" filter silently discarded every

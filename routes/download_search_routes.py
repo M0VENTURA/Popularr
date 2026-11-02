@@ -40,15 +40,32 @@ def _log_manual_search_event(
     duration_seconds: float | None = None,
     notes: str | None = None,
     selected_result: dict[str, Any] | None = None,
+    search_id: str | None = None,
 ) -> None:
-    """Record a manual Soulseek search to ``search.log`` and the search DB."""
+    """Record a manual Soulseek search to ``search.log`` and the search DB.
+
+    A search is not "0 results" merely because it has just started. The visible
+    wording distinguishes Searching / results received so far / complete.
+    """
     try:
-        suffix = f" ({notes})" if notes else ""
-        msg = f"[{search_type.upper()}] {query} → {result_count} results"
-        if duration_seconds:
-            msg += f" in {round(duration_seconds, 1)}s"
-        msg += suffix
-        log_search(msg)
+        if notes == "search_started":
+            msg = f"[MANUAL] Searching: {query}"
+        elif notes == "search_complete":
+            msg = f"[MANUAL] Search complete: {result_count} results for {query}"
+        elif notes == "results_returned":
+            msg = f"[MANUAL] {result_count} results received so far for {query}"
+        else:
+            suffix = f" ({notes})" if notes else ""
+            msg = f"[{search_type.upper()}] {query} → {result_count} results"
+            if duration_seconds:
+                msg += f" in {round(duration_seconds, 1)}s"
+            msg += suffix
+        log_search(
+            msg,
+            search_id=search_id,
+            result_count=result_count,
+            notes=notes,
+        )
     except Exception as exc:
         logger.debug("Failed to write to search log", error=str(exc))
 
@@ -69,7 +86,12 @@ def _normalize_slskd_query(value: str) -> str:
     text_val = str(value or "")
     text_val = text_val.replace("\\u0026", " ").replace("&amp;", " ").replace("&", " ")
     text_val = re.sub(r"\s+", " ", text_val)
-    return text_val.strip()
+    text_val = text_val.strip()
+    # The UI can send the literal string "undefined"/"null" when a field was
+    # not populated. Searching for it is never meaningful.
+    if text_val.lower() in {"undefined", "null", "none", "nan"}:
+        return ""
+    return text_val
 
 
 def _file_meets_quality(
@@ -165,6 +187,7 @@ async def slskd_search() -> Any:
                 result_count=0,
                 duration_seconds=round(time.time() - started, 1),
                 notes="search_started",
+                search_id=search_id,
             )
             return jsonify({"searchId": search_id, "status": "searching"})
 
@@ -302,11 +325,24 @@ def slskd_search_results(search_id: str) -> Any:
             if state_entry is not None:
                 if count != state_entry.get("last_result_count", -1):
                     state_entry["last_result_count"] = count
+                    _notes = "search_complete" if is_complete else "results_returned"
                     _log_manual_search_event(
                         search_type="manual",
                         query=state_entry.get("query") or search_id,
                         result_count=count,
-                        notes="results_returned",
+                        notes=_notes,
+                        search_id=search_id,
+                    )
+                    if is_complete:
+                        state_entry["_complete_logged"] = True
+                elif is_complete and not state_entry.get("_complete_logged"):
+                    state_entry["_complete_logged"] = True
+                    _log_manual_search_event(
+                        search_type="manual",
+                        query=state_entry.get("query") or search_id,
+                        result_count=count,
+                        notes="search_complete",
+                        search_id=search_id,
                     )
                 if is_complete:
                     _term_count = state_entry.get("_terminal_seen", 0) + 1

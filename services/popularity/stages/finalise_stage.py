@@ -2627,6 +2627,13 @@ def _essential_strip_guest_credit(artist: str) -> str:
 
 
 def _refresh_all_essential_collections() -> int:
+    try:
+        from helpers import scan_log as _scan_log
+
+        _scan_log.reset_playlist_outcomes()
+        _scan_log.set_playlist_batch(True)
+    except Exception:
+        pass
     artists: list[str] = []
     # ⭐ An artist who only ever appears as the TRACK artist still earns a
     # collection. The track-artist branch carries the builder's own 12-track
@@ -2679,6 +2686,19 @@ def _refresh_all_essential_collections() -> int:
                 refreshed += 1
         except Exception as exc:
             logger.debug("Essential collection refresh failed", artist=artist, error=str(exc))
+    # Cross-project vocalist collections are reconciled in the same pass. A
+    # failure here must not abort the per-artist collections already synced.
+    try:
+        _refresh_all_essential_vocalist_collections()
+    except Exception as exc:
+        logger.debug("Essential vocalist collection refresh failed", error=str(exc))
+    try:
+        from helpers import scan_log as _scan_log
+
+        _scan_log.set_playlist_batch(False)
+        _scan_log.emit_playlist_summary()
+    except Exception as exc:
+        logger.debug("Playlist summary emit failed", error=str(exc))
     return refreshed
 
 
@@ -3208,7 +3228,6 @@ def _sync_essential_playlist(
             return False
         if sync_res.get("skipped"):
             return True
-        log_unified(f"📄 Playlist: Synced '{playlist_name}' to Navidrome ({len(_song_ids)} tracks)")
         try:
             from services.playlists.playlist_service import attach_playlist_cover
             attach_playlist_cover(
@@ -3225,8 +3244,460 @@ def _sync_essential_playlist(
 
 
 # ---------------------------------------------------------------------------
-# Genre top-tracks playlists
+# Essential VOCALIST collections (cross-project best-ofs)
 # ---------------------------------------------------------------------------
+#
+# An Essential Collection belongs to ONE album artist. A VOCALIST collection is
+# different: it gathers the 4★/5★ recordings a vocalist sang on across every
+# project — their own releases AND guest appearances on other artists' releases.
+# The thresholds below are the product requirements: a collection is only built
+# when the vocalist is genuinely cross-project, so a one-off guest or a
+# single-band artist cannot produce one.
+
+def _essential_vocalists_config() -> dict[str, Any]:
+    try:
+        from helpers.config_helpers import get_playlists_config
+
+        return get_playlists_config() or {}
+    except Exception:
+        return {}
+
+
+def _essential_vocalist_playlist_name(vocalist: str) -> str:
+    cfg = _essential_vocalists_config()
+    template = str(
+        cfg.get("essential_vocalists_name_template")
+        or "{artist} - Essential Vocalist Collection"
+    )
+    try:
+        from helpers.normalization_service import normalize_the_prefix
+
+        display = normalize_the_prefix(vocalist)
+    except Exception:
+        display = vocalist
+    return (
+        str(template).replace("{artist}", display).strip()
+        or f"{display} - Essential Vocalist Collection"
+    )
+
+
+def _row_vocalist_names(row: dict[str, Any]) -> list[str]:
+    """The CONFIRMED vocalists stored on the row (JSON list)."""
+    raw = row.get("vocalists")
+    if isinstance(raw, (list, tuple, set)):
+        parsed: Any = list(raw)
+    else:
+        text_value = str(raw or "").strip()
+        if not text_value:
+            return []
+        try:
+            parsed = json.loads(text_value)
+        except Exception:
+            parsed = [part.strip() for part in text_value.split(",")]
+    if not isinstance(parsed, (list, tuple)):
+        parsed = [parsed]
+    names: list[str] = []
+    for value in parsed:
+        if isinstance(value, dict):
+            value = value.get("name")
+        name = str(value or "").strip()
+        if name and name.casefold() not in {n.casefold() for n in names}:
+            names.append(name)
+    return names
+
+
+def _row_featured_names(row: dict[str, Any]) -> list[str]:
+    """Guest names parsed from the artist / album artist / title fields."""
+    names: list[str] = []
+    for source in (
+        row.get("artist") or "",
+        row.get("album_artist") or "",
+        row.get("title") or "",
+    ):
+        text_value = str(source or "")
+        for match in _ESSENTIAL_FEAT_RE.finditer(text_value):
+            tail = re.split(r"[\)\]]", text_value[match.end():], maxsplit=1)[0]
+            for guest in _ESSENTIAL_FEAT_SPLIT_RE.split(tail):
+                guest = re.sub(
+                    r"^(?:and|with)\s+",
+                    "",
+                    str(guest or "").strip(),
+                    flags=re.IGNORECASE,
+                )
+                guest = re.sub(r"\s+", " ", guest).strip()
+                if guest and guest.casefold() not in {n.casefold() for n in names}:
+                    names.append(guest)
+    return names
+
+
+def _row_is_vocalist(
+    row: dict[str, Any],
+    vocalist: str,
+    *,
+    include_featured: bool = True,
+) -> bool:
+    """Whether *vocalist* sang on this recording.
+
+    Confirmed ``vocalists`` (MB performer/vocal relations) are authoritative when
+    present. Their own album/track credit also counts (a solo/band project).
+    Rows scanned before the vocalist column existed fall back to the guest
+    credits in artist/album artist/title.
+    """
+    from services.catalog.album_classification_service import (
+        is_instrumental_track_title,
+    )
+
+    target = _normalise_artist_key(vocalist)
+    if not target:
+        return False
+    if is_instrumental_track_title(str(row.get("title") or "")):
+        return False
+    if _normalise_artist_key(row.get("artist")) == target:
+        return True
+    if _normalise_artist_key(row.get("album_artist")) == target:
+        return True
+
+    confirmed = _row_vocalist_names(row)
+    if confirmed:
+        return any(_normalise_artist_key(name) == target for name in confirmed)
+    if not include_featured:
+        return False
+    return _track_has_featured_artist(
+        str(row.get("artist") or ""),
+        vocalist,
+        title_field=str(row.get("title") or ""),
+        album_artist_field=str(row.get("album_artist") or ""),
+    )
+
+
+def _vocalist_project_key(row: dict[str, Any]) -> str:
+    """The PROJECT a row belongs to for cross-project depth."""
+    from helpers.normalization_service import is_track_artist_placeholder
+
+    album_artist = _essential_strip_guest_credit(
+        str(row.get("album_artist") or "")
+    ) or ""
+    if not album_artist or is_track_artist_placeholder(album_artist):
+        album_artist = _essential_strip_guest_credit(
+            str(row.get("artist") or "")
+        ) or ""
+    return _normalise_artist_key(album_artist)
+
+
+def _vocalist_release_group_key(row: dict[str, Any]) -> str:
+    group = str(row.get("musicbrainz_releasegroupid") or "").strip()
+    if group:
+        return group.casefold()
+    album = _normalise_essential_title(str(row.get("album") or ""))
+    project = _vocalist_project_key(row)
+    return f"{project}::{album}" if album else ""
+
+
+def _fetch_essential_vocalist_rows() -> list[dict[str, Any]]:
+    try:
+        with db_session() as session:
+            result = session.execute(
+                text("""
+                    SELECT id, title, album, file_path, duration,
+                           COALESCE(stars, star_rating) AS stars,
+                           COALESCE(is_live, 0) AS is_live,
+                           COALESCE(is_compilation, 0) AS is_compilation,
+                           COALESCE(popularity, final_score, 0) AS popularity_score,
+                           COALESCE(final_score, popularity, 0) AS final_score,
+                           COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
+                           COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
+                           year, release_year, artist, album_artist, genres,
+                           vocalists, musicbrainz_releasegroupid
+                    FROM tracks
+                    WHERE COALESCE(stars, star_rating) >= 4
+                """),
+            )
+            return [dict(r._mapping) for r in result.fetchall() or []]
+    except Exception as exc:
+        logger.debug("Essential vocalist row fetch failed", error=str(exc))
+        return []
+
+
+def _vocalist_candidates_from_rows(
+    rows: list[dict[str, Any]],
+) -> dict[str, str]:
+    """``{casefolded name: display name}`` of possible vocalists."""
+    from helpers.normalization_service import is_track_artist_placeholder
+
+    names: dict[str, str] = {}
+
+    def _add(value: Any) -> None:
+        name = str(value or "").strip()
+        if not name or is_track_artist_placeholder(name):
+            return
+        key = name.casefold()
+        # Prefer the longest spelling as the display ("Melissa Bonny" over
+        # "Melissa"), while the key remains the casefolded name.
+        if key not in names or len(name) > len(names[key]):
+            names[key] = name
+
+    for row in rows:
+        confirmed = _row_vocalist_names(row)
+        if confirmed:
+            for name in confirmed:
+                _add(name)
+            continue
+        primary = _essential_strip_guest_credit(str(row.get("artist") or ""))
+        _add(primary or row.get("artist"))
+        album_artist = _essential_strip_guest_credit(
+            str(row.get("album_artist") or "")
+        )
+        _add(album_artist)
+        for guest in _row_featured_names(row):
+            _add(guest)
+    return names
+
+
+def _essential_vocalist_meets_thresholds(
+    winners: list[dict[str, Any]],
+    cfg: dict[str, Any],
+) -> bool:
+    if len(winners) < int(cfg.get("essential_vocalists_min_tracks", 15) or 15):
+        return False
+
+    release_groups = {
+        group
+        for group in (
+            _vocalist_release_group_key(row) for row in winners
+            if not int(row.get("is_compilation") or 0)
+        )
+        if group
+    }
+    if len(release_groups) < int(
+        cfg.get("essential_vocalists_min_release_groups", 4) or 4
+    ):
+        return False
+
+    projects: dict[str, int] = {}
+    for row in winners:
+        project = _vocalist_project_key(row)
+        if project:
+            projects[project] = projects.get(project, 0) + 1
+    if not projects:
+        return False
+
+    min_project_tracks = int(
+        cfg.get("essential_vocalists_min_project_tracks", 5) or 5
+    )
+    projects_with_depth = sum(
+        1 for count in projects.values() if count >= min_project_tracks
+    )
+    min_projects_with_five = int(
+        cfg.get("essential_vocalists_min_projects_with_five", 2) or 2
+    )
+    min_projects = int(cfg.get("essential_vocalists_min_projects", 3) or 3)
+    if projects_with_depth < min_projects_with_five and len(projects) < min_projects:
+        return False
+
+    dominant = max(projects.values())
+    outside = len(winners) - dominant
+    if outside < int(
+        cfg.get("essential_vocalists_min_outside_dominant", 5) or 5
+    ):
+        return False
+    ratio = float(cfg.get("essential_vocalists_min_outside_ratio", 0.25) or 0.25)
+    return (outside / len(winners)) >= ratio
+
+
+def _sync_essential_vocalist_collection(
+    vocalist: str,
+    rows: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Build ONE vocalist's cross-project Essential Vocalist collection."""
+    cfg = _essential_vocalists_config()
+    if not cfg.get("essential_vocalists_enabled", True):
+        return False
+    vocalist = str(vocalist or "").strip()
+    if not vocalist or _is_excluded_essential_artist(vocalist):
+        return False
+    try:
+        from helpers.config_helpers import is_artist_excluded_from_playlists
+
+        if is_artist_excluded_from_playlists(vocalist):
+            return False
+    except Exception:
+        pass
+
+    playlist_name = _essential_vocalist_playlist_name(vocalist)
+    include_featured = bool(cfg.get("essential_vocalists_include_featured", True))
+
+    if rows is None:
+        rows = _fetch_essential_vocalist_rows()
+
+    matched = [
+        row for row in rows
+        if int(row.get("stars") or 0) >= 4
+        and _row_is_vocalist(row, vocalist, include_featured=include_featured)
+    ]
+    matched = _filter_christmas_rows(matched, playlist_name)
+
+    try:
+        from helpers.config_helpers import get_excluded_playlist_artists
+
+        excluded_artists = get_excluded_playlist_artists()
+    except Exception:
+        excluded_artists = set()
+    if excluded_artists:
+        matched = [
+            row for row in matched
+            if not _row_artist_is_excluded(row, excluded_artists)
+        ]
+
+    winners: list[dict[str, Any]] = []
+    for group in _group_duplicate_tracks(matched):
+        group.sort(
+            key=lambda r: (
+                int(r.get("is_live") or 0),
+                -int(r.get("stars") or 0),
+                -float(
+                    r.get("popularity_score")
+                    or r.get("popularity")
+                    or r.get("final_score")
+                    or 0
+                ),
+                -float(cross_album_track_score(r)),
+                int(r.get("is_compilation") or 0),
+                str(r.get("title") or "").casefold(),
+            ),
+        )
+        winners.append(group[0])
+
+    if not _essential_vocalist_meets_thresholds(winners, cfg):
+        _delete_playlist_from_navidrome(playlist_name)
+        return False
+
+    winners = _ordered_playlist_rows(winners, order_mode="popularity_score")
+    winners = winners[: int(cfg.get("essential_vocalists_max_tracks", 50) or 50)]
+    song_ids = [
+        str(row.get("id") or "").strip()
+        for row in winners
+        if str(row.get("id") or "").strip()
+    ]
+    if not song_ids:
+        return False
+
+    try:
+        sync_res = _sync_playlist_to_navidrome(
+            playlist_name, song_ids, rows=winners
+        )
+        if not _playlist_sync_succeeded(sync_res):
+            return False
+        if sync_res.get("skipped"):
+            return True
+        try:
+            from services.playlists.playlist_service import attach_playlist_cover
+
+            attach_playlist_cover(
+                playlist_name,
+                vocalist,
+                playlist_id=str(sync_res.get("playlist_id") or "") or None,
+            )
+        except Exception as cover_exc:
+            logger.debug(
+                "Vocalist playlist cover attach failed",
+                playlist=playlist_name,
+                error=str(cover_exc),
+            )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "Essential vocalist collection API sync failed",
+            vocalist=vocalist,
+            error=str(exc),
+        )
+        return False
+
+
+def _refresh_all_essential_vocalist_collections() -> int:
+    """Reconcile every cross-project vocalist collection in one pass."""
+    cfg = _essential_vocalists_config()
+    if not cfg.get("essential_vocalists_enabled", True):
+        return 0
+    rows = _fetch_essential_vocalist_rows()
+    if not rows:
+        return 0
+
+    include_featured = bool(cfg.get("essential_vocalists_include_featured", True))
+    min_tracks = int(cfg.get("essential_vocalists_min_tracks", 15) or 15)
+    candidates = _vocalist_candidates_from_rows(rows)
+
+    # Index rows by vocalist ONCE. The naive loop below was O(candidates x
+    # rows) — a large library has thousands of featured names, so it multiplied
+    # out to tens of millions of comparisons per refresh.
+    index: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        names: set[str] = set()
+        confirmed = _row_vocalist_names(row)
+        if confirmed:
+            names.update(confirmed)
+        else:
+            primary = _essential_strip_guest_credit(str(row.get("artist") or ""))
+            names.add(primary or str(row.get("artist") or ""))
+            names.add(
+                _essential_strip_guest_credit(str(row.get("album_artist") or ""))
+            )
+            if include_featured:
+                names.update(_row_featured_names(row))
+        # Their own album/track credit is accepted by ``_row_is_vocalist`` even
+        # when confirmed performer relations list someone else.
+        names.add(str(row.get("artist") or ""))
+        names.add(str(row.get("album_artist") or ""))
+        for name in names:
+            key = _normalise_artist_key(name)
+            if key:
+                index[key].append(row)
+
+    refreshed = 0
+    for name in candidates.values():
+        if _is_excluded_essential_artist(name):
+            continue
+        try:
+            from helpers.config_helpers import is_artist_excluded_from_playlists
+
+            if is_artist_excluded_from_playlists(name):
+                continue
+        except Exception:
+            pass
+        try:
+            qualifying = [
+                row for row in index.get(_normalise_artist_key(name), [])
+                if _row_is_vocalist(
+                    row, name, include_featured=include_featured
+                )
+            ]
+            # Do not pay a Navidrome delete round-trip for a name that cannot
+            # possibly have a collection; only names clearing the track floor
+            # are reconciled (and cleaned up if they fail another threshold).
+            if len(qualifying) < min_tracks:
+                continue
+            if _sync_essential_vocalist_collection(name, rows=qualifying):
+                refreshed += 1
+        except Exception as exc:
+            logger.debug(
+                "Essential vocalist collection refresh failed",
+                vocalist=name,
+                error=str(exc),
+            )
+    return refreshed
+
+
+def _vocalist_for_essential_vocalist_playlist(playlist_name: str) -> str:
+    wanted = str(playlist_name or "").strip().casefold()
+    if not wanted:
+        return ""
+    rows = _fetch_essential_vocalist_rows()
+    for name in _vocalist_candidates_from_rows(rows).values():
+        if _essential_vocalist_playlist_name(name).casefold() == wanted:
+            return name
+    return ""
+
+
+
 
 _GENRE_PLAYLIST_DEFAULT_MAX_TRACKS = 300
 
@@ -3848,6 +4319,14 @@ def _sync_playlist_to_navidrome(
         _forget_playlist_push(playlist_name)
     elif _playlist_already_pushed(playlist_name, signature):
         synced["skipped"] = 1
+        try:
+            from helpers import scan_log as _scan_log
+
+            _scan_log.playlist_outcome(
+                playlist_name, synced, track_count=len(song_ids)
+            )
+        except Exception:
+            pass
         return synced
 
     try:
@@ -3855,11 +4334,28 @@ def _sync_playlist_to_navidrome(
     except Exception as exc:
         logger.warning("Playlist sync service import failed", name=playlist_name, error=str(exc))
         synced["failed"] = 1
+        try:
+            from helpers import scan_log as _scan_log
+
+            _scan_log.playlist_outcome(
+                playlist_name, synced, track_count=len(song_ids)
+            )
+        except Exception:
+            pass
         return synced
 
     clients = _navidrome_clients()
     if not clients:
         logger.debug("No Navidrome clients configured; playlist sync skipped", name=playlist_name)
+        synced["skipped"] = 1
+        try:
+            from helpers import scan_log as _scan_log
+
+            _scan_log.playlist_outcome(
+                playlist_name, synced, track_count=len(song_ids)
+            )
+        except Exception:
+            pass
         return synced
 
     for client in clients:
@@ -3928,6 +4424,15 @@ def _sync_playlist_to_navidrome(
         and not synced["failed"]
     ):
         _record_playlist_push(playlist_name, signature)
+
+    try:
+        from helpers import scan_log as _scan_log
+
+        _scan_log.playlist_outcome(
+            playlist_name, synced, track_count=len(song_ids)
+        )
+    except Exception as exc:
+        logger.debug("Playlist outcome log failed", name=playlist_name, error=str(exc))
 
     return synced
 
@@ -5950,8 +6455,28 @@ def post_album_star_ratings(
                         navidrome_synced += 1
                         _synced += 1
                         _consecutive_failures = 0
+                        try:
+                            from helpers.scan_log import SCAN_WARNINGS
+
+                            SCAN_WARNINGS.recovered(
+                                "navidrome.rating_sync",
+                                "Navidrome rating sync recovered.",
+                                artist=str(artist or "").strip(),
+                            )
+                        except Exception:
+                            pass
                     else:
                         _consecutive_failures += 1
+                        try:
+                            from helpers.scan_log import SCAN_WARNINGS
+
+                            SCAN_WARNINGS.warn(
+                                "navidrome.rating_sync",
+                                "Could not save ratings to the server.",
+                                artist=str(artist or "").strip(),
+                            )
+                        except Exception:
+                            pass
                         if _consecutive_failures >= 3:
                             logger.warning(
                                 "Aborting Navidrome rating sync after consecutive failures — Navidrome unreachable?",
@@ -5960,10 +6485,24 @@ def post_album_star_ratings(
                             break
 
             _failed = _attempted - _synced
-            if _skipped > 0:
-                log_unified(f"🔗 Navidrome: skipped {_skipped} unchanged rating(s) for '{artist}'")
-            if _synced > 0:
-                log_unified(f"🔗 Navidrome: synced {_synced} rating(s) for '{artist}'")
+            try:
+                from helpers import scan_log as _scan_log
+
+                _scan_log.log_event(
+                    "ratings.updated",
+                    f"🔗 Navidrome ratings: {_synced} synced · {_failed} failed · "
+                    f"{_skipped} unchanged for '{artist}'.",
+                    level="warn" if _failed else "info",
+                    attempted=_attempted,
+                    synced=_synced,
+                    failed=_failed,
+                    unchanged=_skipped,
+                )
+            except Exception:
+                if _skipped > 0:
+                    log_unified(f"🔗 Navidrome: skipped {_skipped} unchanged rating(s) for '{artist}'")
+                if _synced > 0:
+                    log_unified(f"🔗 Navidrome: synced {_synced} rating(s) for '{artist}'")
             if _failed > 0:
                 logger.warning(
                     "Navidrome rating syncs failed — check credentials",
@@ -6885,6 +7424,13 @@ def regenerate_managed_playlist(
 
     synced = False
     try:
+        from helpers import scan_log as _scan_log
+
+        _scan_log.reset_playlist_outcomes()
+        _scan_log.set_playlist_batch(False)
+    except Exception:
+        pass
+    try:
         with _playlist_mutation_lock():
             if resolved_type == taxonomy.GENRE:
                 genre = taxonomy.managed_name_value(name, taxonomy.GENRE, config=cfg)
@@ -6900,6 +7446,10 @@ def regenerate_managed_playlist(
                 artist = _artist_for_essential_playlist(name)
                 if artist:
                     synced = bool(_sync_essential_playlist(artist))
+            elif resolved_type == taxonomy.ESSENTIAL_VOCALIST:
+                vocalist = _vocalist_for_essential_vocalist_playlist(name)
+                if vocalist:
+                    synced = bool(_sync_essential_vocalist_collection(vocalist))
             elif resolved_type == taxonomy.FAVOURITES:
                 from services.playlists.favourite_playlist_service import (
                     sync_favourite_playlists,
@@ -6914,6 +7464,13 @@ def regenerate_managed_playlist(
     except Exception as exc:
         logger.warning("Managed playlist regenerate failed", name=name, error=str(exc))
         return {"ok": False, "name": name, "managed_type": resolved_type, "error": str(exc)}
+
+    try:
+        from helpers import scan_log as _scan_log
+
+        _scan_log.emit_playlist_summary()
+    except Exception:
+        pass
 
     return {
         "ok": True,
@@ -7412,6 +7969,16 @@ def finalise_scan(*, results: list[dict[str, Any]], options: dict[str, Any]) -> 
                         f"[FINALISE_STAGE] ISRC sync: {_isrc_updated} track(s) updated; "
                         f"affected star ratings will be recalculated during the next rating pass"
                     )
+                # Vocalist collections span projects, so they are reconciled
+                # once per scan (not per artist) and only for a real pass.
+                if results:
+                    try:
+                        _refresh_all_essential_vocalist_collections()
+                    except Exception as vocalist_exc:
+                        logger.debug(
+                            "Essential vocalist refresh failed",
+                            error=str(vocalist_exc),
+                        )
         except Exception as exc:
             logger.warning("ISRC sync commit failed", error=str(exc))
 

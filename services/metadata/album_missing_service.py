@@ -252,6 +252,51 @@ def _queued_coverage(
     return title_keys, positions, artist_title_keys, generic_title_keys
 
 
+#: A track the release labels as a bonus/extra. The title marker is enough on
+#: its own; the position rule below handles unlabelled bonus cuts.
+_BONUS_TITLE_RE = re.compile(r"\bbonus\b", re.IGNORECASE)
+
+
+def _numeric_track_number(value: Any) -> int | None:
+    try:
+        number = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def is_bonus_missing_track(
+    mb_track: dict[str, Any],
+    max_library_position: dict[int, int],
+) -> bool:
+    """True when a missing MB track is a trailing/bonus track.
+
+    Reported: a compilation's bonus cuts at the END of the release were listed
+    as corrections. A missing track is bonus when:
+
+    * its own title says "bonus"; or
+    * it sits AFTER the last track the library has on that disc. A gap BEFORE
+      the last track is a genuine missing album track, not a bonus.
+
+    ``max_library_position`` is ``{disc: highest numeric track number}`` for the
+    tracks the library already has. An album with no numbered rows has no
+    positional evidence and falls back to the title marker.
+    """
+    title = str(mb_track.get("title") or "")
+    if _BONUS_TITLE_RE.search(title):
+        return True
+
+    try:
+        disc = int(mb_track.get("disc_number") or 1)
+    except (TypeError, ValueError):
+        disc = 1
+    number = _numeric_track_number(mb_track.get("track_number"))
+    if number is None:
+        return False
+    last_present = max_library_position.get(disc)
+    return last_present is not None and number > last_present
+
+
 def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None) -> dict[str, Any]:
     """Check which tracks are in the MusicBrainz release but missing from the library.
 
@@ -349,6 +394,16 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
             # tell "same recording, differently titled" from "a different song
             # sitting at the same number".
             lib_by_position[(disc, tn)] = (title or "", r.get("duration"))
+
+    # The highest position the library actually has per disc. A missing MB track
+    # AFTER it is a trailing/bonus cut; one BEFORE it is a gap in the album.
+    max_library_position: dict[int, int] = {}
+    for (disc, tn) in lib_by_position:
+        number = _numeric_track_number(tn)
+        if number is not None:
+            max_library_position[disc] = max(
+                max_library_position.get(disc, 0), number
+            )
 
     # ── Download-queue coverage ───────────────────────────────────────────
     # Two different questions, deliberately answered differently:
@@ -481,6 +536,7 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
             "year": mb_release.get("release_year") or mb_release.get("year"),
             "release_id": mb_mbid,
             "duration": mt.get("duration"),
+            "is_bonus": is_bonus_missing_track(mt, max_library_position),
         }
         if queue_status:
             entry["queue_status"] = queue_status
@@ -511,6 +567,8 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
     return {
         "missing_tracks": visible,
         "missing_count": len(visible),
+        "bonus_count": sum(1 for m in visible if m.get("is_bonus")),
+        "missing_core_count": sum(1 for m in visible if not m.get("is_bonus")),
         "mb_total": mb_total,
         "library_count": library_count,
         # WHY the rest of the release is not listed, so the arithmetic is
@@ -979,7 +1037,8 @@ def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
             rows = session.execute(
                 text(
                     "SELECT title, track_number, disc_number, track_artist, year, "
-                    "       release_id, recording_mbid, duration "
+                    "       release_id, recording_mbid, duration, "
+                    "       COALESCE(is_bonus, FALSE) AS is_bonus "
                     "FROM missing_album_tracks "
                     "WHERE LOWER(artist_name) = LOWER(:artist) "
                     "  AND LOWER(album_name) = LOWER(:album) "
@@ -1026,6 +1085,8 @@ def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
     return {
         "missing_tracks": missing,
         "missing_count": len(missing),
+        "bonus_count": sum(1 for m in missing if m.get("is_bonus")),
+        "missing_core_count": sum(1 for m in missing if not m.get("is_bonus")),
         "mb_total": int(library_count) + len(missing),
         "library_count": int(library_count),
         # Only the gate this path can actually KNOW about — the others need a
@@ -1068,7 +1129,8 @@ def _persist_missing_tracks(artist: str, album: str, missing: list[dict[str, Any
     with db_session() as session:
         existing = session.execute(
             text(
-                "SELECT id, title, track_number, disc_number, track_artist, ignored "
+                "SELECT id, title, track_number, disc_number, track_artist, ignored, "
+                "       COALESCE(is_bonus, FALSE) AS is_bonus "
                 "FROM missing_album_tracks "
                 "WHERE LOWER(artist_name) = LOWER(:artist) "
                 "  AND LOWER(album_name) = LOWER(:album)"
@@ -1133,6 +1195,20 @@ def _persist_missing_tracks(artist: str, album: str, missing: list[dict[str, Any
                         },
                     )
                     refreshed += 1
+                _new_bonus = bool(m.get("is_bonus"))
+                _old_bonus = bool(existing_by_key[key].get("is_bonus"))
+                if _new_bonus != _old_bonus:
+                    session.execute(
+                        text(
+                            "UPDATE missing_album_tracks "
+                            "SET is_bonus = :is_bonus WHERE id = :id"
+                        ),
+                        {
+                            "is_bonus": _new_bonus,
+                            "id": existing_by_key[key].get("id"),
+                        },
+                    )
+                    refreshed += 1
                 continue
 
             tn = str(m.get("track_number") or "").strip()
@@ -1145,10 +1221,12 @@ def _persist_missing_tracks(artist: str, album: str, missing: list[dict[str, Any
                 text("""
                     INSERT INTO missing_album_tracks
                         (artist_name, album_name, title, track_number, disc_number,
-                         track_artist, year, release_id, recording_mbid, duration)
+                         track_artist, year, release_id, recording_mbid, duration,
+                         is_bonus)
                     VALUES
                         (:artist, :album, :title, :track_number, :disc_number,
-                         :track_artist, :year, :release_id, :recording_mbid, :duration)
+                         :track_artist, :year, :release_id, :recording_mbid, :duration,
+                         :is_bonus)
                     ON CONFLICT DO NOTHING
                 """),
                 {
@@ -1162,6 +1240,7 @@ def _persist_missing_tracks(artist: str, album: str, missing: list[dict[str, Any
                     "release_id": m.get("release_id"),
                     "recording_mbid": m.get("recording_mbid"),
                     "duration": m.get("duration"),
+                    "is_bonus": bool(m.get("is_bonus")),
                 },
             )
             existing_keys.add(key)

@@ -284,10 +284,17 @@
           </div>
           <div class="d-flex align-items-center gap-1 overflow-x-auto pb-1 flex-nowrap" style="scrollbar-width: none;">
             <button type="button" class="btn btn-sm btn-dark border-secondary log-source-tab active" data-source="scanner" onclick="switchLogSource('scanner')"><i class="bi bi-lightning-charge me-1"></i>Scanner</button>
-            <button type="button" class="btn btn-sm btn-dark border-secondary log-source-tab" data-source="queue" onclick="switchLogSource('queue')"><i class="bi bi-list-task me-1"></i>Queue</button>
-            <button type="button" class="btn btn-sm btn-dark border-secondary log-source-tab" data-source="soulseek" onclick="switchLogSource('soulseek')"><i class="bi bi-search me-1"></i>Soulseek</button>
-            <button type="button" class="btn btn-sm btn-dark border-secondary log-source-tab" data-source="navidrome" onclick="switchLogSource('navidrome')"><i class="bi bi-cloud-arrow-down me-1"></i>Navidrome</button>
+            <button type="button" class="btn btn-sm btn-dark border-secondary log-source-tab" data-source="activity" onclick="switchLogSource('activity')"><i class="bi bi-list-task me-1"></i>Activity</button>
+            <button type="button" class="btn btn-sm btn-dark border-secondary log-source-tab" data-source="navidrome_import" onclick="switchLogSource('navidrome_import')"><i class="bi bi-cloud-arrow-down me-1"></i>Navidrome Import</button>
             <button type="button" class="btn btn-sm btn-dark border-secondary log-source-tab" data-source="system" onclick="switchLogSource('system')"><i class="bi bi-gear me-1"></i>System</button>
+            <select id="activityCategoryFilter" class="form-select form-select-sm bg-dark text-light border-secondary ms-2" style="display:none; width:auto;" onchange="setActivityCategory(this.value)" title="Activity filter">
+              <option value="all">All activity</option>
+              <option value="search">Searches</option>
+              <option value="download">Downloads</option>
+              <option value="verification">Verification/import</option>
+              <option value="retries">Retries/failures</option>
+              <option value="infrastructure">Infrastructure</option>
+            </select>
           </div>
         </div>
 

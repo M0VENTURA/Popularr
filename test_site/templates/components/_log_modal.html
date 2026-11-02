@@ -129,6 +129,17 @@
             <button type="button" class="btn btn-outline-secondary" data-level="debug" title="DEBUG"><i class="bi bi-bug d-none d-md-inline"></i> Debug</button>
           </div>
 
+          {# Activity categories: queue + search now share activity.log. Hidden
+             for the Scanner/Import files; logs.js shows it only for Activity. #}
+          <select id="activityCategoryFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="display:none; width:auto;" title="Activity filter">
+            <option value="all">All activity</option>
+            <option value="search">Searches</option>
+            <option value="download">Downloads</option>
+            <option value="verification">Verification/import</option>
+            <option value="retries">Retries/failures</option>
+            <option value="infrastructure">Infrastructure</option>
+          </select>
+
           <div class="d-flex align-items-center gap-3 ms-auto">
             {# Wrap is ON by default — the whole point of the consolidation's
                fourth item. Checked here AND applied by logs.js on init, so the

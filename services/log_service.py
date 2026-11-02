@@ -194,8 +194,11 @@ def _filter_lines_last_hour(lines: list[str]) -> list[str]:
 
 _LOG_SOURCE_FILES = {
     "scanner": "unified_scan.log",
-    "soulseek": "search.log",
-    "navidrome": "info.log",
+    "activity": "activity.log",
+    "queue": "activity.log",
+    "soulseek": "activity.log",
+    "navidrome": "navidrome_import.log",
+    "navidrome_import": "navidrome_import.log",
     "system": "error.log",
 }
 
@@ -215,6 +218,8 @@ _LOG_SOURCE_FILES = {
 #: the picker for the same reason they belong on the /logs page.
 LOG_FILE_ALLOWLIST: tuple[str, ...] = (
     "unified_scan.log",
+    "activity.log",
+    "navidrome_import.log",
     "queue.log",
     "search.log",
     "info.log",
@@ -234,15 +239,29 @@ LOG_FILE_ALLOWLIST: tuple[str, ...] = (
 #: the picker never shows a file twice.
 LOG_VIEW_LABELS: dict[str, str] = {
     "unified_scan.log": "Scanner",
+    "activity.log": "Activity (Queue + Search)",
+    "navidrome_import.log": "Navidrome Import",
     "queue.log": "Queue",
     "search.log": "Soulseek",
     "info.log": "Navidrome",
     "error.log": "System",
 }
 
+#: Legacy files kept on disk for compatibility but no longer offered in the
+#: viewer. Queue + search now share ``activity.log``.
+LOG_VIEW_HIDDEN: frozenset[str] = frozenset({"queue.log", "search.log"})
+
 #: Presentation order: the curated views first (in tab order), then everything
 #: else alphabetically. Declared once so the route and the API cannot disagree.
-_LOG_VIEW_ORDER: tuple[str, ...] = ("unified_scan.log", "queue.log", "search.log", "info.log", "error.log")
+_LOG_VIEW_ORDER: tuple[str, ...] = (
+    "unified_scan.log",
+    "queue.log",
+    "search.log",
+    "activity.log",
+    "navidrome_import.log",
+    "info.log",
+    "error.log",
+)
 
 
 def list_log_files() -> list[dict]:
@@ -279,6 +298,14 @@ def list_log_files() -> list[dict]:
     ordered = [name for name in _LOG_VIEW_ORDER if name in found]
     ordered += sorted(name for name in found if name not in _LOG_VIEW_ORDER)
     return [found[name] for name in ordered]
+
+
+def viewer_log_files() -> list[dict]:
+    """Files the VIEWER offers: ``list_log_files`` minus retired legacy files."""
+    return [
+        entry for entry in list_log_files()
+        if entry.get("name") not in LOG_VIEW_HIDDEN
+    ]
 
 
 
@@ -341,6 +368,8 @@ def _resolve_log_path(log_type: str) -> str | None:
     log_dir = resolve_log_dir()
     mapping = {
         "unified": "unified_scan.log",
+        "activity": "activity.log",
+        "navidrome_import": "navidrome_import.log",
         "info": "info.log",
         "debug": "debug.log",
     }
@@ -382,7 +411,7 @@ def _scan_activity_filter() -> re.Pattern:
     Soulseek Search logs, not the dashboard's scanning panel.
     """
     return re.compile(
-        r'\[POPULARITY\]|\[POPULARITY_PIPELINE\]|'
+        r'\[POPULARITY\]|\[POPULARITY_PIPELINE\]|\[SCAN\]|\[PLAYLIST\]|'
         r'\[TRACK_STAGE\]|\[TRACK\]|\[TRACK_RESULT\]|'
         r'\[ALBUM_STAGE\]|\[FINALISE_STAGE\]|\[LOAD_STAGE\]|'
         r'\[FULL_SCAN\]|\[SCAN_PIPELINE\]|'

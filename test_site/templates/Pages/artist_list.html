@@ -182,8 +182,10 @@
                                 {% if artist.five_star_count and artist.five_star_count > 0 %}
                                 <span class="badge bg-warning-subtle text-warning border border-warning-subtle fw-bold">★ {{ artist.five_star_count }}</span>
                                 {% endif %}
-                                {# Filled in (or removed) by pages/artists.js. #}
-                                <span class="badge bg-danger-subtle text-danger border border-danger-subtle artist-needs-fixing fw-semibold"></span>
+                                {# Filled in (or removed) by pages/artists.js.
+                                   One badge per correction type, plus a GREEN
+                                   "bonus tracks to download" badge. #}
+                                <span class="artist-correction-labels d-inline-flex flex-wrap gap-1"></span>
                             </div>
                         </div>
                     </div>

@@ -3273,6 +3273,30 @@
 
       <div class="setting-card">
         <div class="setting-info">
+          <label class="setting-title" for="playlists_essential_vocalists_enabled">Create Essential Vocalist Collections</label>
+          <p class="setting-description">Cross-project best-ofs for a vocalist: their own releases plus guest appearances on other artists' tracks (e.g. “Melissa Bonny - Essential Vocalist Collection”). Only built when the thresholds below are met.</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_essential_vocalists_enabled" {% if config.get('playlists', {}).get('essential_vocalists_enabled', True) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_essential_vocalists_include_featured">Vocalist: Include Guest Appearances</label>
+          <p class="setting-description">Include 4★/5★ tracks where the vocalist is a featured guest on another artist's release.</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_essential_vocalists_include_featured" {% if config.get('playlists', {}).get('essential_vocalists_include_featured', True) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info">
           <label class="setting-title" for="playlists_genre_playlists_enabled">Create Genre Top-Tracks Playlists</label>
           <p class="setting-description">Library-wide <code>{Genre} - Top Tracks.m3u</code> playlists generated once per scan (and refreshed per album when its tracks change): every track at or above the Minimum Stars is assigned its top weighted genres, each genre pool is ranked by <strong>global</strong> popularity (see Track Ordering below), a playlist is only created when the genre clears the Create Threshold, and every qualifying track is included up to <strong>Max Tracks Per Playlist</strong> (0 = no cap).</p>
         </div>
@@ -3494,6 +3518,22 @@
         <div class="input-card">
           <label for="playlists_essential_max_tracks">Essential Playlist Max Tracks</label>
           <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_max_tracks" placeholder="50" value="{{ config.get('playlists', {}).get('essential_max_tracks', 50) }}">
+          <label for="playlists_essential_vocalists_min_tracks" class="mt-2">Vocalist: Min Qualifying Tracks</label>
+          <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_vocalists_min_tracks" placeholder="15" value="{{ config.get('playlists', {}).get('essential_vocalists_min_tracks', 15) }}">
+          <label for="playlists_essential_vocalists_min_release_groups" class="mt-2">Vocalist: Min Release Groups</label>
+          <input type="number" step="1" min="1" max="100" class="form-control form-control-sm" id="playlists_essential_vocalists_min_release_groups" placeholder="4" value="{{ config.get('playlists', {}).get('essential_vocalists_min_release_groups', 4) }}">
+          <label for="playlists_essential_vocalists_min_projects_with_five" class="mt-2">Vocalist: Projects With N Tracks</label>
+          <input type="number" step="1" min="1" max="20" class="form-control form-control-sm" id="playlists_essential_vocalists_min_projects_with_five" placeholder="2" value="{{ config.get('playlists', {}).get('essential_vocalists_min_projects_with_five', 2) }}">
+          <label for="playlists_essential_vocalists_min_project_tracks" class="mt-2">Vocalist: Tracks Per Project</label>
+          <input type="number" step="1" min="1" max="100" class="form-control form-control-sm" id="playlists_essential_vocalists_min_project_tracks" placeholder="5" value="{{ config.get('playlists', {}).get('essential_vocalists_min_project_tracks', 5) }}">
+          <label for="playlists_essential_vocalists_min_projects" class="mt-2">Vocalist: Min Projects (alternative)</label>
+          <input type="number" step="1" min="1" max="20" class="form-control form-control-sm" id="playlists_essential_vocalists_min_projects" placeholder="3" value="{{ config.get('playlists', {}).get('essential_vocalists_min_projects', 3) }}">
+          <label for="playlists_essential_vocalists_min_outside_dominant" class="mt-2">Vocalist: Min Tracks Outside Dominant Project</label>
+          <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_vocalists_min_outside_dominant" placeholder="5" value="{{ config.get('playlists', {}).get('essential_vocalists_min_outside_dominant', 5) }}">
+          <label for="playlists_essential_vocalists_min_outside_ratio" class="mt-2">Vocalist: Min Share Outside Dominant Project</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="playlists_essential_vocalists_min_outside_ratio" placeholder="0.25" value="{{ config.get('playlists', {}).get('essential_vocalists_min_outside_ratio', 0.25) }}">
+          <label for="playlists_essential_vocalists_max_tracks" class="mt-2">Vocalist Playlist Max Tracks</label>
+          <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_vocalists_max_tracks" placeholder="50" value="{{ config.get('playlists', {}).get('essential_vocalists_max_tracks', 50) }}">
           <span class="help-text">Cap on tracks in each artist's Essential Collection, applied after the list is ordered and spread across artists. Default: <strong>50</strong></span>
         </div>
         <div class="input-card">
@@ -3786,6 +3826,8 @@
       <div class="input-card naming-card">
         <label for="playlists_essential_name_template">Essential Playlist Name Template</label>
         <input type="text" class="form-control" id="playlists_essential_name_template" placeholder="{artist} - Essential Collection" value="{{ config.get('playlists', {}).get('essential_name_template', '{artist} - Essential Collection') }}">
+        <label for="playlists_essential_vocalists_name_template" class="mt-2">Essential Vocalist Name Template</label>
+        <input type="text" class="form-control" id="playlists_essential_vocalists_name_template" placeholder="{artist} - Essential Vocalist Collection" value="{{ config.get('playlists', {}).get('essential_vocalists_name_template', '{artist} - Essential Vocalist Collection') }}">
         <span class="help-text">Supports the <code>{artist}</code> placeholder. Default: <strong>{artist} - Essential Collection</strong></span>
       </div>
 

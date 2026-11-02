@@ -1074,6 +1074,7 @@ class MusicBrainzService:
             "release_mbid": specific_release_mbid or None,
             "release_group_mbid": specific_release_group_mbid or None,
             "is_live": is_live_recording,
+            "vocalists": _vocalists_from_recording(recording),
             "confidence": confidence,
             "writer": ", ".join(dict.fromkeys(writers)),
             "work_mbid": work_mbid,
@@ -1869,6 +1870,63 @@ def _join_genre_names(raw: Any) -> str:
     return ", ".join(names)
 
 
+def _vocalists_from_recording(recording: dict[str, Any]) -> list[str]:
+    """Confirmed recording-level vocalists, or the artist credit as fallback.
+
+    MusicBrainz performer relations carry the ROLE in ``attributes``
+    (``vocals``, ``lead vocals``, ``background vocals``, …). A performer relation
+    without a vocal role (guitar, drums) does NOT make someone a vocalist.
+
+    When the recording has no performer relations at all, the recording's own
+    artist credit is the only evidence available; in practice the credited
+    performer of a song is its vocalist, and this includes featured guests. The
+    fallback is deliberately only used when there are NO relations — a recording
+    with confirmed non-vocal performers must not be credited to them.
+    """
+    names: list[str] = []
+
+    def _add(name: Any) -> None:
+        text = str(name or "").strip()
+        if text and text.casefold() not in {n.casefold() for n in names}:
+            names.append(text)
+
+    has_performer_relation = False
+    for relation in recording.get("relations") or []:
+        if not isinstance(relation, dict):
+            continue
+        if str(relation.get("type") or "").casefold() not in {"performer", "vocalist"}:
+            continue
+        has_performer_relation = True
+        roles = " ".join(
+            [
+                str(attr).casefold()
+                for attr in (relation.get("attributes") or [])
+                if str(attr).strip()
+            ]
+            + [str(relation.get("instrument") or "").casefold()]
+        )
+        if "vocal" not in roles:
+            continue
+        artist = relation.get("artist") or {}
+        _add(artist.get("name") if isinstance(artist, dict) else "")
+        _add(relation.get("target-credit"))
+
+    if names:
+        return names
+
+    if has_performer_relation:
+        # Roles were provided and none was vocal: this is an instrumental credit.
+        return []
+
+    for credit in recording.get("artist-credit") or []:
+        if isinstance(credit, dict):
+            _add(credit.get("name"))
+            artist = credit.get("artist") or {}
+            if isinstance(artist, dict):
+                _add(artist.get("name"))
+    return names
+
+
 def _flatten_release(release: dict[str, Any], release_id: str) -> dict[str, Any]:
     artist_credit = release.get("artist-credit") or []
     release_group = release.get("release-group") or {}
@@ -1957,6 +2015,8 @@ def _flatten_release(release: dict[str, Any], release_id: str) -> dict[str, Any]
                 "artist_mbid": credit_artist_mbid(
                     recording.get("artist-credit")
                 ),
+                "vocalists": _vocalists_from_recording(recording)
+                or ([track_artist] if track_artist else []),
                 "is_remix": bool(remix_of_recording_id(recording)),
                 "remix_of_recording_mbid": remix_of_recording_id(recording),
             }

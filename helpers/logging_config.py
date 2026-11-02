@@ -118,13 +118,22 @@ class UnifiedLogFilter(logging.Filter):
 
 def log_unified(message: str, **kwargs: Any) -> None:
     """Write a progress message to the unified scan log."""
+    log_unified_level(message, level="info", **kwargs)
+
+
+def log_unified_level(message: str, *, level: str = "info", **kwargs: Any) -> None:
+    """Write a progress message at an explicit level to the unified scan log.
+
+    The unified logger's records are plain text (the Scan panel parses lines), so
+    the severity is also reflected by the caller's ``[WARN]``/``[ERROR]`` prefix.
+    """
     if kwargs:
         rendered = message + " " + " ".join(f"{k}={v!r}" for k, v in kwargs.items())
     else:
         rendered = message
     _lg = logging.getLogger("popularr.unified")
     _lg.propagate = False  # unified_scan.log ONLY (see log_queue)
-    _lg.info(rendered)
+    getattr(_lg, str(level or "info").lower(), _lg.info)(rendered)
 
 
 def debug_enabled() -> bool:
@@ -154,32 +163,77 @@ def log_scan_detail(message: str, **kwargs: Any) -> None:
     log_unified(message, **kwargs)
 
 
-def log_queue(message: str, **kwargs: Any) -> None:
-    """Write a download-queue event to ``queue.log``.
+def log_queue(message: str, *, _activity: bool = True, **kwargs: Any) -> None:
+    """Write a download-queue event to ``queue.log`` (legacy) and ``activity.log``.
 
-    ``propagate`` is re-asserted before every emit: these lines must live in
-    ``queue.log`` ONLY — a third-party logging reconfiguration (or a stale
-    build) that flipped propagation back on would otherwise duplicate every
-    queue/search line into ``info.log``/``debug.log`` via the root handlers.
+    Queue and search now share one correlated activity timeline. The legacy file
+    is still written so existing tooling/tests do not lose the line; the viewer
+    offers only ``activity.log``.
     """
+    legacy = message
     if kwargs:
-        message = message + " " + " ".join(f"{k}={v!r}" for k, v in kwargs.items())
+        legacy = message + " " + " ".join(f"{k}={v!r}" for k, v in kwargs.items())
     _lg = logging.getLogger("popularr.queue")
     _lg.propagate = False
-    _lg.info(message)
+    _lg.info(legacy)
+    if _activity:
+        legacy_kwargs = {k: v for k, v in kwargs.items()}
+        log_activity("infrastructure", message, **legacy_kwargs)
 
 
-def log_search(message: str, **kwargs: Any) -> None:
-    """Write a Soulseek search event to ``search.log``.
-
-    Same emit-time guard as :func:`log_queue` — search lines belong in
-    ``search.log`` ONLY, never in the info/debug logs.
-    """
+def log_search(message: str, *, _activity: bool = True, **kwargs: Any) -> None:
+    """Write a Soulseek search event to ``search.log`` (legacy) and ``activity.log``."""
+    legacy = message
     if kwargs:
-        message = message + " " + " ".join(f"{k}={v!r}" for k, v in kwargs.items())
+        legacy = message + " " + " ".join(f"{k}={v!r}" for k, v in kwargs.items())
     _lg = logging.getLogger("popularr.search")
     _lg.propagate = False
-    _lg.info(message)
+    _lg.info(legacy)
+    if _activity:
+        log_activity("search", message, **kwargs)
+
+
+def log_activity(category: str, message: str, *, level: str = "info", **fields: Any) -> None:
+    """Write one correlated queue/search lifecycle line to ``activity.log``.
+
+    ``category`` is one of search, selection, download, verification, import,
+    retry, failure, manual or infrastructure. Applicable identifiers
+    (``request_id``, ``queue_id``, ``attempt_id``, ``search_id``,
+    ``candidate_id``, ``transfer_id``) are appended so the same item can be
+    followed across the whole journey.
+    """
+    try:
+        suffix = ""
+        rendered_fields = []
+        for key, value in fields.items():
+            if value is None or value == "":
+                continue
+            rendered_fields.append(f"{key}={value!r}")
+        if rendered_fields:
+            suffix = " | " + " ".join(rendered_fields)
+        line = f"[ACTIVITY] [{str(category or 'infrastructure').upper()}] {message}{suffix}"
+        _lg = logging.getLogger("popularr.activity")
+        _lg.propagate = False
+        getattr(_lg, str(level or "info").lower(), _lg.info)(line)
+    except Exception:
+        pass
+
+
+def log_navidrome_import(message: str, **kwargs: Any) -> None:
+    """Write a Navidrome import line to ``navidrome_import.log`` only.
+
+    Keeping the background import out of the scan log means a popularity scan
+    remains readable while an import is running. The line is still available in
+    the same log viewer via the Navidrome Import source.
+    """
+    try:
+        if kwargs:
+            message = message + " " + " ".join(f"{k}={v!r}" for k, v in kwargs.items())
+        _lg = logging.getLogger("popularr.navidrome_import")
+        _lg.propagate = False
+        _lg.info(message)
+    except Exception:
+        pass
 
 
 class SafePrefixFormatter(logging.Formatter):
@@ -546,6 +600,24 @@ def _build_logging_config(service_name: str, log_dir: str, use_structlog: bool =
                 "formatter": "unified",
                 "level": "INFO",
             },
+            "activity_file": {
+                "class": "helpers.logging_config.SharedRotatingFileHandler",
+                "filename": os.path.join(log_dir, "activity.log"),
+                "maxBytes": _LOG_MAX_BYTES,
+                "backupCount": _LOG_BACKUP_COUNT,
+                "encoding": "utf-8",
+                "formatter": "unified",
+                "level": "INFO",
+            },
+            "navidrome_import_file": {
+                "class": "helpers.logging_config.SharedRotatingFileHandler",
+                "filename": os.path.join(log_dir, "navidrome_import.log"),
+                "maxBytes": _LOG_MAX_BYTES,
+                "backupCount": _LOG_BACKUP_COUNT,
+                "encoding": "utf-8",
+                "formatter": "unified",
+                "level": "INFO",
+            },
         },
         "loggers": {
             "": {
@@ -567,6 +639,26 @@ def _build_logging_config(service_name: str, log_dir: str, use_structlog: bool =
                 "level": "INFO",
                 "propagate": False,
             },
+            "popularr.activity": {
+                "handlers": ["activity_file"],
+                "level": "INFO",
+                "propagate": False,
+            },
+            "popularr.navidrome_import": {
+                "handlers": ["navidrome_import_file", "error_file"],
+                "level": "INFO",
+                "propagate": False,
+            },
+            "services.scanning.navidrome_import": {
+                "handlers": ["navidrome_import_file", "error_file"],
+                "level": "INFO",
+                "propagate": False,
+            },
+            "services.scanning.pipelines.navidrome_pipeline": {
+                "handlers": ["navidrome_import_file", "error_file"],
+                "level": "INFO",
+                "propagate": False,
+            },
             "services.musicbrainz": {
                 "level": "DEBUG",
                 "propagate": True,
@@ -580,23 +672,23 @@ def _build_logging_config(service_name: str, log_dir: str, use_structlog: bool =
                 "propagate": True,
             },
             "services.queue": {
-                "handlers": ["queue_file", "error_file"],
-                "level": "INFO",
+                "handlers": ["queue_file", "activity_file", "debug_file", "error_file"],
+                "level": "DEBUG",
                 "propagate": False,
             },
             "services.downloads": {
-                "handlers": ["queue_file", "error_file"],
-                "level": "INFO",
+                "handlers": ["queue_file", "activity_file", "debug_file", "error_file"],
+                "level": "DEBUG",
                 "propagate": False,
             },
             "db.repositories.queue": {
-                "handlers": ["queue_file", "error_file"],
-                "level": "INFO",
+                "handlers": ["queue_file", "activity_file", "debug_file", "error_file"],
+                "level": "DEBUG",
                 "propagate": False,
             },
             "db.repositories.queue_admin": {
-                "handlers": ["queue_file", "error_file"],
-                "level": "INFO",
+                "handlers": ["queue_file", "activity_file", "debug_file", "error_file"],
+                "level": "DEBUG",
                 "propagate": False,
             },
             "urllib3": {"level": "ERROR"},

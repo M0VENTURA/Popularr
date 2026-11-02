@@ -133,7 +133,11 @@
     disc_inconsistent_count: 'disc number inconsistency',
     mbid_inconsistent_count: 'missing MusicBrainz ID',
     missing_tracks_count: 'missing audio file',
+    // A genuine MusicBrainz gap INSIDE the album. Trailing/extra cuts come in
+    // as `bonus_tracks_count` and get their own GREEN badge — never this one.
+    missing_mb_tracks_count: 'missing track',
   };
+  const BONUS_LABEL = 'bonus track';
 
   /** lowercase artist name -> API entry */
   let correctionsByArtist = new Map();
@@ -143,16 +147,34 @@
     return String(value || '').trim().toLowerCase();
   }
 
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function plural(count, label) {
+    return `${count} ${label}${count === 1 ? '' : 's'}`;
+  }
+
+  function problemEntries(entry) {
+    return Object.keys(PROBLEM_LABELS)
+      .map((field) => ({
+        field,
+        label: PROBLEM_LABELS[field],
+        count: Number(entry[field]) || 0,
+      }))
+      .filter((problem) => problem.count > 0);
+  }
+
   /** Human-readable list of what is wrong with one artist. */
   function describeProblems(entry) {
-    return Object.keys(PROBLEM_LABELS)
-      .map((field) => {
-        const count = Number(entry[field]) || 0;
-        if (!count) return null;
-        const label = PROBLEM_LABELS[field];
-        return `${count} ${label}${count === 1 ? '' : 's'}`;
-      })
-      .filter(Boolean);
+    return problemEntries(entry).map((problem) =>
+      plural(problem.count, problem.label)
+    );
   }
 
   function entryForRow(row) {
@@ -170,24 +192,58 @@
   function annotateRows() {
     document.querySelectorAll('[data-artist-key]').forEach((row) => {
       const entry = entryForRow(row);
-      const badge = row.querySelector('.artist-needs-fixing');
-      if (!badge) return;
+      const host = row.querySelector(
+        '.artist-correction-labels, .artist-needs-fixing'
+      );
+      if (!host) return;
 
-      const problems = entry ? describeProblems(entry) : [];
-      if (!problems.length) {
-        // Hide rather than remove: this function is safe to re-run (e.g. after a
-        // refresh), and a removed element could never be shown again.
-        badge.style.display = 'none';
-        badge.textContent = '';
-        badge.removeAttribute('title');
+      host.innerHTML = '';
+      if (!entry) {
+        host.style.display = 'none';
+        host.removeAttribute('title');
         row.removeAttribute('data-needs-fixing');
         return;
       }
 
-      badge.style.display = '';
-      badge.textContent = problems.length === 1 ? problems[0] : `${problems.length} issues`;
-      badge.title = `Needs fixing: ${problems.join(', ')}`;
-      row.setAttribute('data-needs-fixing', '1');
+      const problems = problemEntries(entry);
+      const bonus = Number(entry.bonus_tracks_count) || 0;
+      if (!problems.length && !bonus) {
+        // Hide rather than remove: this function is safe to re-run (e.g. after a
+        // refresh), and a removed element could never be shown again.
+        host.style.display = 'none';
+        host.removeAttribute('title');
+        row.removeAttribute('data-needs-fixing');
+        return;
+      }
+
+      host.style.display = '';
+      const badges = problems.map(
+        (problem) =>
+          '<span class="badge bg-danger-subtle text-danger border ' +
+          'border-danger-subtle artist-needs-fixing fw-semibold">' +
+          escapeHtml(plural(problem.count, problem.label)) +
+          '</span>'
+      );
+      if (bonus) {
+        // ⭐ GREEN, and NOT part of `problems`: trailing/bonus tracks are worth
+        // downloading, but they are not an incomplete-album correction and must
+        // not put the artist in "needs fixing".
+        badges.push(
+          '<span class="badge bg-success-subtle text-success border ' +
+          'border-success-subtle artist-bonus-tracks fw-semibold" ' +
+          'title="Bonus tracks to download — not an album gap">' +
+          escapeHtml(plural(bonus, BONUS_LABEL)) + ' to download</span>'
+        );
+      }
+      host.innerHTML = badges.join('');
+
+      if (problems.length) {
+        host.title = `Needs fixing: ${describeProblems(entry).join(', ')}`;
+        row.setAttribute('data-needs-fixing', '1');
+      } else {
+        host.removeAttribute('title');
+        row.removeAttribute('data-needs-fixing');
+      }
     });
   }
 

@@ -34,6 +34,8 @@ class _StubMBService:
             "recording_mbid": "rec-individual",
             # The recording's own release, from the same lookup.
             "release_mbid": "rel-individual",
+            "artist": "Bushido",
+            "artist_mbid": "a-bushido",
             "confidence": 0.9,
         }
 
@@ -63,6 +65,7 @@ def _resolve(
     options=None,
     apply: bool = True,
     album_context=None,
+    registered: list | None = None,
     **overrides,
 ) -> dict:
     from services.popularity.stages import track_stage
@@ -71,6 +74,18 @@ def _resolve(
     monkeypatch.setattr(track_stage, "get_shared_mb_service", lambda: service)
     monkeypatch.setattr(track_stage, "_metadata_update_allowed", lambda: apply)
     monkeypatch.setattr(track_stage, "_has_real_genres", lambda _t: False)
+    if registered is not None:
+        monkeypatch.setattr(
+            track_stage,
+            "_ensure_track_artist_registered",
+            lambda name, mbid=None: registered.append((name, mbid)),
+        )
+    else:
+        monkeypatch.setattr(
+            track_stage,
+            "_ensure_track_artist_registered",
+            lambda *a, **k: None,
+        )
     return track_stage._resolve_track_mb_metadata(
         track_id=track["id"],
         track=track,
@@ -164,6 +179,32 @@ class TestTheScanUsesThatPerformer:
 
         assert service.calls == []
         assert "recording_mbid_checked_at" not in result["payload"]
+
+
+class TestTrackArtistRegistry:
+    def test_a_track_artist_different_from_the_album_artist_is_registered(
+        self, monkeypatch
+    ):
+        registered: list = []
+        service = _StubMBService()
+
+        _resolve(monkeypatch, service, registered=registered)
+
+        assert ("Bushido", "a-bushido") in registered
+
+    def test_the_same_album_artist_is_not_registered(self, monkeypatch):
+        registered: list = []
+        service = _StubMBService()
+
+        _resolve(
+            monkeypatch,
+            service,
+            registered=registered,
+            artist="Bushido",
+            album_artist="Bushido",
+        )
+
+        assert registered == []
 
 
 class TestTheWriterFollowsTheApplySetting:

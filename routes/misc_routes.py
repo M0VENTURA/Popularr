@@ -1036,6 +1036,8 @@ def _has_duplicate_artist_variants(
 
 def _collapse_duplicate_artist_rows(
     raw_rows: list[dict[str, Any]],
+    *,
+    permissive: bool = False,
 ) -> list[dict[str, Any]]:
     """Collapse raw ``(artist, track_count)`` rows onto their bare act name.
 
@@ -1046,11 +1048,11 @@ def _collapse_duplicate_artist_rows(
     the same act, differently credited. Grouping on the raw column therefore
     reported every featured track as "1 duplicate artist".
 
-    The strip is guest-only (``feat.``/``ft.``/``featuring``). It deliberately
-    does NOT use the permissive ``strip_featured_artist``, which also folds
-    "&", "and" and "with": "Simon & Garfunkel" is two artists, and the merge
-    action rewrites every track of a variant to the canonical name, so treating
-    them as one spelling would make the merge button delete a real artist.
+    ``permissive=True`` is used ONLY for the "is there a duplicate at all?"
+    decision and folds the same credit forms the MBID writer strips
+    (``strip_featured_artist``: feat./ft./featuring/with/w/&/and). The merge
+    LIST stays on the narrow ``strip_guest_credit`` so a genuine co-credit
+    ("Simon & Garfunkel") is never offered for a destructive merge into one act.
 
     Where several spellings collapse to the same act the SHORTEST is kept as the
     display name, because the longer one is the credit-bearing form. Track
@@ -1059,7 +1061,14 @@ def _collapse_duplicate_artist_rows(
     Returned in descending track-count order, the order the caller relies on to
     pick its first entry as the working canonical name.
     """
-    from helpers.normalization_service import strip_guest_credit
+    if permissive:
+        from helpers.normalization_service import strip_featured_artist
+
+        strip = strip_featured_artist
+    else:
+        from helpers.normalization_service import strip_guest_credit
+
+        strip = strip_guest_credit
 
     counts: dict[str, int] = {}
     display: dict[str, str] = {}
@@ -1067,7 +1076,7 @@ def _collapse_duplicate_artist_rows(
         name = str(raw.get("artist") or "").strip()
         if not name:
             continue
-        key = strip_guest_credit(name) or name
+        key = strip(name) or name
         if key not in display or len(name) < len(display[key]):
             display[key] = name
         counts[key] = counts.get(key, 0) + int(raw.get("track_count") or 0)
@@ -1110,10 +1119,17 @@ def api_get_duplicate_artists(artist: str) -> Any:
                 raw_rows = [dict(r._mapping) for r in rows]
 
                 # Collapse guest credits BEFORE deciding whether this is a
-                # duplicate — see ``_collapse_duplicate_artist_rows``.
+                # duplicate — see ``_collapse_duplicate_artist_rows``. The
+                # decision is PERMISSIVE (feat/ft/featuring/with/w/&/and) so a
+                # credit-bearing spelling the MBID writer resolved to the
+                # primary act never raises a false alert; the merge list stays
+                # narrow so a genuine co-credit is not offered for a merge.
                 variations_data = _collapse_duplicate_artist_rows(raw_rows)
+                decision_data = _collapse_duplicate_artist_rows(
+                    raw_rows, permissive=True
+                )
 
-                if _has_duplicate_artist_variants(variations_data):
+                if _has_duplicate_artist_variants(decision_data):
                     canonical_mb = variations_data[0].get("artist") or ""
                     try:
                         mb_artist = get_shared_mb_client().get_artist(artist_mbid) or {}

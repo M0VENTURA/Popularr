@@ -188,13 +188,18 @@ document.addEventListener("DOMContentLoaded", () => {
 // ==========================================================================
 const LOG_SOURCE_FILES = {
   scanner: 'unified_scan.log',
-  queue: 'queue.log',
-  soulseek: 'search.log',
-  navidrome: 'info.log',
+  activity: 'activity.log',
+  // Legacy names are aliased to the merged timeline so old bookmarks/callers
+  // still land on the right file.
+  queue: 'activity.log',
+  soulseek: 'activity.log',
+  navidrome_import: 'navidrome_import.log',
+  navidrome: 'navidrome_import.log',
   system: 'error.log',
 };
 
 let activeLogSource = 'scanner';
+let activeActivityCategory = 'all';
 let logPaused = false;
 let logModalVisible = false;
 let logShowTimestamps = false;
@@ -236,13 +241,42 @@ function _formatLogLine(line) {
   return s.replace(/(★+)/g, '<span class="log-stars">$1</span>');
 }
 
+function _activityCategoryOf(line) {
+  const m = String(line || '').match(/\[ACTIVITY\]\s+\[([A-Z_]+)\]/);
+  return m ? m[1].toLowerCase() : '';
+}
+
+function _lineMatchesActivityFilter(line) {
+  if (LOG_SOURCE_FILES[activeLogSource] !== 'activity.log') return true;
+  if (activeActivityCategory === 'all') return true;
+  const category = _activityCategoryOf(line);
+  if (activeActivityCategory === 'verification') {
+    return category === 'verification' || category === 'import';
+  }
+  if (activeActivityCategory === 'retries') {
+    return category === 'retry' || category === 'failure';
+  }
+  if (activeActivityCategory === 'download') {
+    return category === 'download' || category === 'selection';
+  }
+  return category === activeActivityCategory;
+}
+
 function renderLogLines() {
   const logEl = document.getElementById('unifiedLog');
   if (!logEl) return;
   let html = '';
-  for (const line of _logRawLines) html += _formatLogLine(line) + '\n';
+  for (const line of _logRawLines) {
+    if (!_lineMatchesActivityFilter(line)) continue;
+    html += _formatLogLine(line) + '\n';
+  }
   logEl.innerHTML = html || '<span class="text-muted">— no output —</span>';
   if (logModalVisible && !logPaused) logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setActivityCategory(value) {
+  activeActivityCategory = String(value || 'all');
+  renderLogLines();
 }
 
 function toggleLogPause() {
@@ -269,6 +303,11 @@ function switchLogSource(source) {
   document.querySelectorAll('.log-source-tab').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.source === activeLogSource);
   });
+  const activityFilter = document.getElementById('activityCategoryFilter');
+  if (activityFilter) {
+    activityFilter.style.display =
+      LOG_SOURCE_FILES[activeLogSource] === 'activity.log' ? '' : 'none';
+  }
   updateUnifiedLog();
 }
 
@@ -352,7 +391,7 @@ function smartSelectLogSource() {
         .then((r) => r.json())
         .then((q) => {
           const counts = q.counts || {};
-          if ((Number(counts.downloading) || 0) > 0) switchLogSource('soulseek');
+          if ((Number(counts.downloading) || 0) > 0) switchLogSource('activity');
         })
         .catch(() => {});
     })

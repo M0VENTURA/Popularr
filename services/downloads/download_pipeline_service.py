@@ -444,6 +444,19 @@ def _schedule_search_retry(queue_id: int, item: dict, reason: str) -> None:
     schedule_queue_retry(queue_id, status, next_run.isoformat(), note)
     log_unified(f"[QUEUE] {artist} - {title} → {note}")
     _log_queue_event(status, f"{artist} - {title} → {note}", queue_id)
+    try:
+        from helpers.logging_config import log_activity
+
+        log_activity(
+            "retry",
+            f"Retry scheduled: {note}",
+            queue_id=queue_id,
+            attempt_id=f"{queue_id}-a{retry_count + 1}",
+            reason=reason,
+            next_retry_at=next_run.isoformat(),
+        )
+    except Exception:
+        pass
 
 
 #: How long a row waits when slskd is disconnected. Without a wait the row
@@ -466,6 +479,19 @@ def search_disconnected(item: dict, queue_id: int, artist: str, title: str) -> N
         pass
     log_unified(f"[QUEUE] {artist} - {title} → slskd disconnected, search skipped")
     _log_queue_event("queued", f"{artist} - {title} → slskd disconnected, search skipped", queue_id)
+    try:
+        from helpers.logging_config import log_activity
+
+        log_activity(
+            "infrastructure",
+            "Waiting for search service — search not attempted.",
+            queue_id=queue_id,
+            artist=artist,
+            title=title,
+            retry_in_seconds=_DISCONNECTED_RETRY_MINUTES * 60,
+        )
+    except Exception:
+        pass
 
 
 def _sanitize_slskd_query(query: str) -> str:
@@ -744,6 +770,28 @@ def _score_result(
             )
             _note_reject(rejects, "variant_mismatch")
             return 0.0
+
+        # ⚠️ Asymmetry matters: a requested LIVE/ACOUSTIC/REMIX track must not
+        # silently accept the plain studio original. The old check only rejected
+        # a candidate carrying an UNREQUESTED variant; a candidate with NO
+        # variant marker passed. That is how "End of You" could download the
+        # original version when the requested recording was a versioned one.
+        # Only the TITLE-level variant is decisive here. An album name such as
+        # "Live Through This" is not a version marker for every track, so the
+        # album-level variants stay in the unrequested check above.
+        _missing_variants = (
+            (_exp_title_v & _HARD_VARIANT_TOKENS) - _cand_variants
+        )
+        if _missing_variants:
+            logger.debug(
+                "Rejected candidate — requested version missing",
+                filename=filename[:180],
+                expected_title=expected_title,
+                parsed_title=parsed_title,
+                missing_variants=sorted(_missing_variants),
+            )
+            _note_reject(rejects, "variant_mismatch")
+            return 0.0
     except Exception:
         pass
 
@@ -856,7 +904,13 @@ def _score_result(
         _exp_meaningful = {w for w in exp_title_words if len(w) >= 3 and w not in _TITLE_STOP_WORDS}
         _cand_meaningful = {w for w in cand_title_words if len(w) >= 3 and w not in _TITLE_STOP_WORDS}
         if _exp_meaningful:
-            if not (_exp_meaningful & _cand_meaningful):
+            # Require at least HALF of the requested meaningful words, not
+            # merely one. "I Could Give You (A Mirror)" shares no meaningful
+            # word with "Would I Lie to You?"; a partial overlap is still a
+            # different song, not a loose title match.
+            _shared_meaningful = _exp_meaningful & _cand_meaningful
+            _required = max(1, (len(_exp_meaningful) + 1) // 2)
+            if len(_shared_meaningful) < _required:
                 title_ok = False
         elif exp_title_words:
             if not (set(exp_title_words) & set(cand_title_words)):
@@ -1022,6 +1076,11 @@ def _select_best_result(
         scored.append((s, r))
 
     scored.sort(key=lambda pair: -pair[0])
+    for _score, _result in scored:
+        try:
+            _result["_match_score"] = round(float(_score), 1)
+        except Exception:
+            pass
     if qualifying_sink is not None:
         qualifying_sink.extend(r for s, r in scored if s >= min_score)
 
@@ -1179,6 +1238,52 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
     if item.get("duration"):
         expected_duration = queue_duration_seconds(item.get("duration"))
 
+    # A compilation row often stores "Various Artists" in ``artist``. Matching
+    # on that is meaningless: any artist's recording with the same title passes
+    # the (skipped) artist gate. Recover the real performer from the queue
+    # metadata when it exists, or from a non-generic album artist.
+    _generic_artists = {
+        "various", "various artists", "va", "v/a", "unknown",
+        "unidentified", "unidentified artist", "-", "compilation",
+    }
+    if (expected_artist or "").casefold() in _generic_artists:
+        _meta = item.get("metadata")
+        if isinstance(_meta, str):
+            try:
+                import json as _json
+
+                _meta = _json.loads(_meta or "{}")
+            except Exception:
+                _meta = {}
+        if isinstance(_meta, dict):
+            for _key in ("track_artist", "artist_credit", "performer", "artist"):
+                _candidate_artist = str(_meta.get(_key) or "").strip()
+                if (
+                    _candidate_artist
+                    and _candidate_artist.casefold() not in _generic_artists
+                ):
+                    expected_artist = _candidate_artist
+                    break
+        if (
+            (expected_artist or "").casefold() in _generic_artists
+            and expected_album_artist
+            and expected_album_artist.casefold() not in _generic_artists
+        ):
+            expected_artist = expected_album_artist
+
+    # Use the recovered performer in the primary query as well; the stored
+    # generic artist must not make the search title-only when the real
+    # performer is known.
+    try:
+        if (
+            expected_artist
+            and str(item.get("artist") or "").strip().casefold() in _generic_artists
+        ):
+            item = dict(item)
+            item["artist"] = expected_artist
+    except Exception:
+        pass
+
     query = build_search_query(item)
     fallback_queries = _build_fallback_search_queries(item, query)
     started_at = time.time()
@@ -1280,6 +1385,17 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                 queue_id=queue_id,
                 skipped=_rejected_dropped,
             )
+            try:
+                from helpers.logging_config import log_activity
+
+                log_activity(
+                    "search",
+                    f"Skipped {_rejected_dropped} previously rejected candidate(s).",
+                    queue_id=queue_id,
+                    skipped=_rejected_dropped,
+                )
+            except Exception:
+                pass
 
         if not all_results:
             _log_search_event(
@@ -1339,6 +1455,52 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
             return {"success": False, "status": "item_removed"}
 
         update_queue_item(queue_id, status="downloading")
+        # Correlated selection event: the same queue_id follows the candidate
+        # into the transfer/verification/import stages. For a compilation the
+        # album artist and the requested track artist are both shown so the
+        # performer is never implied by a generic "Various Artists".
+        try:
+            from helpers.logging_config import log_activity
+
+            _generic_artists = {
+                "various", "various artists", "va", "unknown",
+                "unidentified", "unidentified artist", "-",
+            }
+            _track_artist = (expected_artist or "").strip()
+            _album_artist = (expected_album_artist or "").strip()
+            _performer = (
+                _track_artist
+                if _track_artist.casefold() not in _generic_artists
+                else "unknown"
+            )
+            log_activity(
+                "selection",
+                f"Match selected: {expected_artist or _performer} – {expected_title}",
+                queue_id=queue_id,
+                candidate_id=f"{best.get('username') or ''}:{best.get('filename') or ''}",
+                score=best.get("_match_score"),
+                album_artist=_album_artist or "unknown",
+                requested_track_artist=_performer,
+                match_basis=(
+                    "title/album/filename; performer unknown"
+                    if _performer == "unknown"
+                    else "artist + title + album/duration evidence"
+                ),
+                filename=str(best.get("filename") or "")[:200],
+            )
+        except Exception:
+            pass
+        try:
+            from helpers.logging_config import log_activity
+
+            log_activity(
+                "download",
+                "Download requested.",
+                queue_id=queue_id,
+                candidate_id=f"{best.get('username') or ''}:{best.get('filename') or ''}",
+            )
+        except Exception:
+            pass
         # Fallback candidates are ONLY other results that met ``min_score``.
         # The old code took the next raw search results UNSCORED, so when the
         # best peer failed it could download a different song, a remix or
@@ -1359,6 +1521,23 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
             return {"success": False, "status": "item_removed"}
 
         if not success:
+            try:
+                from helpers.logging_config import log_activity
+
+                log_activity(
+                    "failure",
+                    f"Download rejected: {fail_reason}",
+                    level="warning",
+                    queue_id=queue_id,
+                    candidate_id=(
+                        f"{chosen.get('username') or ''}:{chosen.get('filename') or ''}"
+                        if chosen
+                        else None
+                    ),
+                    reason=fail_reason,
+                )
+            except Exception:
+                pass
             _log_search_event(
                 search_type="automatic",
                 query=query,
@@ -1383,6 +1562,21 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
         )
         
         _fallback_note = " (low-quality fallback)" if used_low_quality_fallback else ""
+        try:
+            from helpers.logging_config import log_activity
+
+            log_activity(
+                "download",
+                f"Download started: {expected_artist} – {expected_title}",
+                queue_id=queue_id,
+                candidate_id=f"{chosen.get('username') or ''}:{_stored_filename}",
+                transfer_id=chosen.get("transfer_id") or chosen.get("id"),
+                peer=chosen.get("username"),
+                path=_stored_filename[:200],
+                fallback=bool(used_low_quality_fallback),
+            )
+        except Exception:
+            pass
         log_unified(
             f"[QUEUE] {expected_artist} - {expected_title} → downloading from {chosen.get('username')} "
             f"({_stored_filename}){_fallback_note}"
@@ -1457,7 +1651,10 @@ def _log_search_event(
         log_search(
             f"[{search_type.upper()}] {query}"
             + (f" :: {context}" if context else "")
-            + f" → {result_count} results in {round(duration_seconds or 0, 1)}s{suffix}"
+            + f" → {result_count} results in {round(duration_seconds or 0, 1)}s{suffix}",
+            queue_id=queue_id,
+            search_type=search_type,
+            result_count=result_count,
         )
     except Exception:
         pass

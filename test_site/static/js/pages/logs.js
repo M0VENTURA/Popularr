@@ -96,6 +96,7 @@
 
   let rawLines = [];
   let levelFilter = 'all';
+  let activityCategory = 'all';
   let streamSource = null;
   let loadingAll = false;
 
@@ -269,7 +270,28 @@
     return `<div class="log-line log-level-${esc(level)}">${html}${esc(rest)}</div>`;
   }
 
+  function _activityCategoryOf(line) {
+    const match = String(line || '').match(/\[ACTIVITY\]\s+\[([A-Z_]+)\]/);
+    return match ? match[1].toLowerCase() : '';
+  }
+
+  function matchesActivityCategory(line) {
+    if (currentFile() !== 'activity.log' || activityCategory === 'all') return true;
+    const category = _activityCategoryOf(line);
+    if (activityCategory === 'verification') {
+      return category === 'verification' || category === 'import';
+    }
+    if (activityCategory === 'retries') {
+      return category === 'retry' || category === 'failure';
+    }
+    if (activityCategory === 'download') {
+      return category === 'download' || category === 'selection';
+    }
+    return category === activityCategory;
+  }
+
   function matchesFilters(line, level) {
+    if (!matchesActivityCategory(line)) return false;
     if (filterText) {
       if (filterRegex) {
         // An invalid pattern matches NOTHING rather than everything: showing
@@ -325,6 +347,11 @@
   // ── Render ──────────────────────────────────────────────────────────────
 
   function render() {
+    const activityFilter = byId('activityCategoryFilter');
+    if (activityFilter) {
+      activityFilter.style.display =
+        currentFile() === 'activity.log' ? '' : 'none';
+    }
     const { output } = el();
     if (!output) return 0;
 
@@ -439,7 +466,9 @@
     pickerPromise = global.api
       .getJson(LIST_ENDPOINT)
       .then((data) => {
-        const files = (data && data.files) || [];
+        const files = ((data && data.files) || []).filter(
+          (file) => file.name !== 'queue.log' && file.name !== 'search.log'
+        );
         const selector = byId('logSelector');
         if (!selector) return;
 
@@ -501,7 +530,7 @@
       }
       const queue = await global.api.getJson('/api/queue/status?limit=1');
       if ((Number((queue.counts || {}).downloading) || 0) > 0) {
-        return selectFileByName('search.log');
+        return selectFileByName('activity.log');
       }
     } catch (_error) {
       /* transient — the picker keeps whatever it had */
@@ -735,6 +764,12 @@
     if (copyBtn) copyBtn.addEventListener('click', () => copyLog(copyBtn));
 
     bind('wrapLinesCheck', 'change', function () { setWrap(this.checked); });
+
+    bind('activityCategoryFilter', 'change', function () {
+      activityCategory = String(this.value || 'all');
+      render();
+      updateJumpButton();
+    });
 
     bind('logFilterInput', 'input', function () {
       // The raw and pre-folded forms are both derived here, at the single

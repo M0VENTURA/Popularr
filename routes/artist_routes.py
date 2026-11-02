@@ -267,6 +267,65 @@ ARTIST_CORRECTIONS_SQL = f"""
 """
 
 
+#: MusicBrainz missing tracks are a different question from a missing FILE.
+#: ``missing_tracks_count`` above is "track rows with no file_path"; this query
+#: counts the persisted MB gaps, split into bonus/extra cuts and genuine
+#: in-album gaps. Bonus-only artists get a green label and are NOT "needs
+#: fixing"; a real gap still flags them.
+ARTIST_MISSING_MB_SQL = """
+    SELECT
+        LOWER(artist_name) AS artist_key,
+        MIN(artist_name) AS artist_name,
+        SUM(CASE WHEN COALESCE(is_bonus, FALSE) THEN 1 ELSE 0 END)
+            AS bonus_tracks_count,
+        SUM(CASE WHEN COALESCE(is_bonus, FALSE) THEN 0 ELSE 1 END)
+            AS missing_mb_tracks_count
+    FROM missing_album_tracks
+    WHERE COALESCE(ignored, FALSE) = FALSE
+    GROUP BY LOWER(artist_name)
+"""
+
+
+def _merge_artist_missing_mb_counts(
+    corrections_out: dict[str, dict[str, Any]],
+    mb_rows: list[Any],
+) -> None:
+    """Merge the persisted MB-gap counts into the per-artist entries.
+
+    Bonus/extra cuts are stored so the page can show a GREEN label, but they
+    do NOT set ``needs_correction``; a genuine in-album gap
+    (``missing_mb_tracks_count``) still does.
+    """
+    for row in mb_rows:
+        row_dict = dict(row._mapping)
+        key = str(row_dict.get("artist_key") or "").strip().lower()
+        if not key:
+            continue
+        entry = corrections_out.setdefault(
+            key,
+            {
+                "needs_correction": False,
+                "duplicate_track_count": 0,
+                "disc_inconsistent_count": 0,
+                "mbid_inconsistent_count": 0,
+                "missing_tracks_count": 0,
+                "missing_mb_tracks_count": 0,
+                "bonus_tracks_count": 0,
+                "_display_name": row_dict.get("artist_name") or "",
+            },
+        )
+        entry["missing_mb_tracks_count"] = int(
+            row_dict.get("missing_mb_tracks_count") or 0
+        )
+        entry["bonus_tracks_count"] = int(
+            row_dict.get("bonus_tracks_count") or 0
+        )
+        entry["needs_correction"] = bool(
+            entry.get("needs_correction")
+            or entry["missing_mb_tracks_count"] > 0
+        )
+
+
 @artist_bp.route("/api/artists/corrections")
 def api_artists_corrections() -> Any:
     """Return per-artist correction indicators for the artist list page.
@@ -279,6 +338,11 @@ def api_artists_corrections() -> Any:
 
     See ``ARTIST_CORRECTIONS_SQL`` for why the rule is rolled up from an inner
     per-album group rather than applied at artist level.
+
+    ``missing_mb_tracks_count`` / ``bonus_tracks_count`` come from the
+    persisted MB missing-track rows. Bonus-only artists are returned so the
+    page can show a GREEN "Bonus Tracks to Download" label, but
+    ``needs_correction`` stays false for them.
     """
     try:
         with db_session() as session:
@@ -288,21 +352,34 @@ def api_artists_corrections() -> Any:
         for row in rows:
             row_dict = dict(row._mapping)
             artist_name = row_dict.get("artist_name") or ""
-            needs_correction = False
             dup_count = int(row_dict.get("duplicate_track_count") or 0)
             disc_ic = int(row_dict.get("disc_inconsistent_count") or 0)
             mbid_ic = int(row_dict.get("mbid_inconsistent_count") or 0)
             missing_ic = int(row_dict.get("missing_tracks_count") or 0)
-            if any([dup_count, disc_ic, mbid_ic, missing_ic]):
-                needs_correction = True
             corrections_out[artist_name.lower()] = {
-                "needs_correction": needs_correction,
+                "needs_correction": any([dup_count, disc_ic, mbid_ic, missing_ic]),
                 "duplicate_track_count": dup_count,
                 "disc_inconsistent_count": disc_ic,
                 "mbid_inconsistent_count": mbid_ic,
                 "missing_tracks_count": missing_ic,
+                "missing_mb_tracks_count": 0,
+                "bonus_tracks_count": 0,
                 "_display_name": artist_name,
             }
+
+        # MusicBrainz gaps are persisted per album; merge them in, including
+        # artists whose ONLY gap is a bonus track (they are absent from the
+        # main HAVING-filtered rows).
+        try:
+            with db_session() as session:
+                mb_rows = session.execute(text(ARTIST_MISSING_MB_SQL)).fetchall()
+        except Exception as exc:
+            logger.debug(
+                "Artist missing-MB aggregate failed", error=str(exc)
+            )
+            mb_rows = []
+        _merge_artist_missing_mb_counts(corrections_out, mb_rows)
+
         return jsonify({"success": True, "corrections": corrections_out})
     except Exception as exc:
         logger.error("Failed to fetch artist corrections list", error=str(exc))

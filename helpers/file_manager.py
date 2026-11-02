@@ -14,7 +14,15 @@ def ensure_default_log_files(config_path, log_path):
         from helpers.logging_config import resolve_log_dir
         log_dir = resolve_log_dir()
         os.makedirs(log_dir, exist_ok=True)
-        for name in ("unified_scan.log", "info.log", "debug.log", "queue.log", "search.log"):
+        for name in (
+            "unified_scan.log",
+            "info.log",
+            "debug.log",
+            "queue.log",
+            "search.log",
+            "activity.log",
+            "navidrome_import.log",
+        ):
             path = os.path.join(log_dir, name)
             if not os.path.exists(path):
                 with open(path, 'w', encoding='utf-8') as f:

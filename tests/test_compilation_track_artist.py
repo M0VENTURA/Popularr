@@ -107,6 +107,12 @@ class TestThePlaceholderArtistIsReplacedFromMusicBrainz:
             track_stage, "get_shared_mb_service",
             lambda: pytest.fail("a batch hit must not search or fetch"),
         )
+        # The registry upsert is a side effect on the `artists` table; unit
+        # tests of the resolver must not open the app DB for it.
+        monkeypatch.setattr(
+            track_stage, "_ensure_track_artist_registered",
+            lambda *a, **k: None,
+        )
         return track_stage._resolve_track_mb_metadata(
             track_id="t1",
             track={

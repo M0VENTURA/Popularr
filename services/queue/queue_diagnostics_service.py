@@ -32,7 +32,7 @@ from db.repositories.queue import (
 from db.repositories.tracks import (
     find_library_track,
 )
-from helpers.logging_config import log_queue
+from helpers.logging_config import log_activity, log_queue
 from helpers.response_helpers import _ok, _fail, _safe_int
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,17 @@ def strip_log_line_prefix(line: str) -> str:
 # EVENT STORE
 # =============================================================================
 
+#: Which activity-filter category a queue event belongs to.
+_ACTIVITY_CATEGORY = {
+    "queued": "search",
+    "searching": "search",
+    "downloading": "download",
+    "completed": "download",
+    "failed": "failure",
+    "processor_restart": "infrastructure",
+}
+
+
 def log_queue_event(
     event_type: str,
     message: str,
@@ -129,10 +140,32 @@ def log_queue_event(
         if len(_queue_events) > 5000:
             del _queue_events[:-5000]
 
-    # Persist to the dedicated queue log so the full history is available on
-    # the /logs page (and survives worker/WebUI restarts).
+    # Legacy queue.log (kept for old tooling) plus the correlated activity
+    # timeline. The IDs live on the event; put them in the activity line.
     try:
-        log_queue(f"[{event_type.upper()}] {message}")
+        log_queue(
+            f"[{event_type.upper()}] {message}",
+            _activity=False,
+            **extra,
+        )
+    except Exception:
+        pass
+    try:
+        _ids = {
+            key: extra.get(key)
+            for key in (
+                "request_id", "queue_id", "attempt_id",
+                "search_id", "candidate_id", "transfer_id",
+            )
+            if extra.get(key) not in (None, "")
+        }
+        log_activity(
+            _ACTIVITY_CATEGORY.get(event_type, "infrastructure"),
+            message,
+            level="warning" if event_type == "failed" else "info",
+            event=event_type,
+            **_ids,
+        )
     except Exception:
         pass
 

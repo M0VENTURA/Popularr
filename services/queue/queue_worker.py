@@ -16,6 +16,7 @@ Features:
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
 import threading
@@ -220,6 +221,18 @@ def run(interval: int | None = None, batch_size: int | None = None) -> None:
         interval_seconds=effective_interval,
         batch_size=effective_batch,
     )
+    try:
+        from helpers.logging_config import log_activity
+
+        log_activity(
+            "infrastructure",
+            "Queue worker started.",
+            pid=os.getpid(),
+            interval_seconds=effective_interval,
+            batch_size=effective_batch,
+        )
+    except Exception:
+        pass
 
     _reset_abandoned("startup")
 
@@ -301,6 +314,17 @@ def run(interval: int | None = None, batch_size: int | None = None) -> None:
                     "Database is back — queue worker resuming",
                     outage_seconds=round(time.monotonic() - _db_outage_since, 1),
                 )
+                try:
+                    from helpers.logging_config import log_activity
+
+                    log_activity(
+                        "infrastructure",
+                        "Database connection restored.",
+                        pid=os.getpid(),
+                        outage_seconds=round(time.monotonic() - _db_outage_since, 1),
+                    )
+                except Exception:
+                    pass
                 _db_outage_since = None
                 _db_backoff = _DB_OUTAGE_BACKOFF_START
                 # Rows claimed when the database went away are still in
@@ -354,6 +378,18 @@ def run(interval: int | None = None, batch_size: int | None = None) -> None:
                         "Database unavailable — pausing queue processing until it returns",
                         loop=loop_count,
                     )
+                    if _db_outage_since is None:
+                        try:
+                            from helpers.logging_config import log_activity
+
+                            log_activity(
+                                "infrastructure",
+                                "Database unavailable — waiting for it to return.",
+                                level="warning",
+                                pid=os.getpid(),
+                            )
+                        except Exception:
+                            pass
                     _db_outage_since = time.monotonic()
                     continue
                 if status >= 500:
@@ -385,6 +421,18 @@ def run(interval: int | None = None, batch_size: int | None = None) -> None:
             except Exception as exc:
                 if is_db_outage_error(exc):
                     logger.warning("Database unavailable — pausing queue processing", error=str(exc))
+                    if _db_outage_since is None:
+                        try:
+                            from helpers.logging_config import log_activity
+
+                            log_activity(
+                                "infrastructure",
+                                "Database unavailable — waiting for it to return.",
+                                level="warning",
+                                pid=os.getpid(),
+                            )
+                        except Exception:
+                            pass
                     _db_outage_since = time.monotonic()
                     continue
                 logger.exception("Queue worker cycle crashed")

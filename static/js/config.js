@@ -369,6 +369,21 @@ function buildConfigObject() {
         const raw = parseInt(getValue('playlists_essential_max_tracks', '50'), 10);
         return Number.isFinite(raw) && raw > 0 ? raw : 50;
       })(),
+      // ── Essential VOCALIST collections (cross-project) ────────────────
+      essential_vocalists_enabled: getChecked('playlists_essential_vocalists_enabled', true),
+      essential_vocalists_include_featured: getChecked('playlists_essential_vocalists_include_featured', true),
+      essential_vocalists_name_template: getValue('playlists_essential_vocalists_name_template', '{artist} - Essential Vocalist Collection') || '{artist} - Essential Vocalist Collection',
+      essential_vocalists_min_tracks: parseInt(getValue('playlists_essential_vocalists_min_tracks', '15'), 10) || 15,
+      essential_vocalists_min_release_groups: parseInt(getValue('playlists_essential_vocalists_min_release_groups', '4'), 10) || 4,
+      essential_vocalists_min_projects_with_five: parseInt(getValue('playlists_essential_vocalists_min_projects_with_five', '2'), 10) || 2,
+      essential_vocalists_min_project_tracks: parseInt(getValue('playlists_essential_vocalists_min_project_tracks', '5'), 10) || 5,
+      essential_vocalists_min_projects: parseInt(getValue('playlists_essential_vocalists_min_projects', '3'), 10) || 3,
+      essential_vocalists_min_outside_dominant: parseInt(getValue('playlists_essential_vocalists_min_outside_dominant', '5'), 10) || 5,
+      essential_vocalists_min_outside_ratio: (() => {
+        const raw = parseFloat(getValue('playlists_essential_vocalists_min_outside_ratio', '0.25'));
+        return Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 0.25;
+      })(),
+      essential_vocalists_max_tracks: parseInt(getValue('playlists_essential_vocalists_max_tracks', '50'), 10) || 50,
       favourite_playlists_enabled: getChecked('playlists_favourite_enabled', true),
       favourite_min_stars: parseInt(getValue('playlists_favourite_min_stars', '4'), 10) || 4,
       favourite_artists_name: getValue('playlists_favourite_artists_name', 'Favourite Artists') || 'Favourite Artists',

@@ -410,17 +410,33 @@
         mbAlbums.map((alb, idx) => checkAlbumMbTracks(alb, idx + 1))
       );
       let total = 0;
-      results.forEach((r) => { if (r.status === 'fulfilled') total += (r.value || 0); });
+      let bonusTotal = 0;
+      results.forEach((r) => {
+        if (r.status !== 'fulfilled' || !r.value) return;
+        total += Number(r.value.core || 0);
+        bonusTotal += Number(r.value.bonus || 0);
+      });
 
       const badge = document.getElementById('missing-tracks-badge');
       if (badge) {
+        const parts = [];
         if (total > 0) {
-          badge.textContent = `${total} missing MB track${total !== 1 ? 's' : ''}`;
-          badge.className = 'badge bg-warning text-dark shadow-sm py-2';
-        } else {
-          badge.textContent = 'No missing MB tracks';
-          badge.className = 'badge bg-success shadow-sm py-2';
+          parts.push(
+            `<span class="badge bg-warning text-dark">${total} missing MB track${total !== 1 ? 's' : ''}</span>`
+          );
         }
+        if (bonusTotal > 0) {
+          // ⭐ GREEN: bonus/extra cuts are a download opportunity, not a
+          // broken album, so they never make the artist "need fixes".
+          parts.push(
+            `<span class="badge bg-success">${bonusTotal} bonus track${bonusTotal !== 1 ? 's' : ''} to download</span>`
+          );
+        }
+        if (!parts.length) {
+          parts.push('<span class="badge bg-success">No missing MB tracks</span>');
+        }
+        badge.innerHTML = parts.join(' ');
+        badge.className = 'shadow-sm py-2';
         badge.style.display = 'inline-block';
       }
     };
@@ -448,11 +464,26 @@
 
       const mbTotal = data.mb_total || 0;
       const missingCount = data.missing_count || 0;
+      const bonusCount = Number(data.bonus_count) || 0;
+      const coreCount = Number.isFinite(Number(data.missing_core_count))
+        ? Number(data.missing_core_count)
+        : Math.max(0, missingCount - bonusCount);
       if (totalEl) totalEl.textContent = mbTotal || '—';
 
       if (missingCount > 0) {
         if (badgeEl) {
-          badgeEl.innerHTML = `<span class="badge bg-warning text-dark">${missingCount} missing</span>`;
+          const badges = [];
+          if (coreCount > 0) {
+            badges.push(
+              `<span class="badge bg-warning text-dark">${coreCount} missing</span>`
+            );
+          }
+          if (bonusCount > 0) {
+            badges.push(
+              `<span class="badge bg-success">${bonusCount} bonus to download</span>`
+            );
+          }
+          badgeEl.innerHTML = badges.join(' ');
         }
         if (detailEl) {
           const missingTracks = data.missing_tracks || [];
@@ -472,12 +503,15 @@
               durationStr = `<span class="badge bg-dark border border-secondary text-muted ms-2">` +
                 `<i class="bi bi-clock me-1"></i>${mins}:${String(secs).padStart(2, '0')}</span>`;
             }
+            const bonusTag = t.is_bonus
+              ? '<span class="badge bg-success-subtle text-success border border-success-subtle ms-2">Bonus</span>'
+              : '';
 
             return `
               <div class="list-group-item bg-transparent px-2 py-2 border-secondary d-flex flex-wrap align-items-center justify-content-between gap-2">
                 <div class="min-w-0">
                   <span class="badge bg-secondary me-2"># ${esc(String(t.track_number || '?'))}</span>
-                  <span class="fw-semibold">${esc(t.title)}</span>${durationStr}
+                  <span class="fw-semibold">${esc(t.title)}</span>${durationStr}${bonusTag}
                 </div>
                 <div class="d-flex gap-1 flex-shrink-0">
                   <button type="button" class="btn btn-sm btn-outline-success py-0 px-2"
@@ -505,12 +539,12 @@
         badgeEl.innerHTML = '<span class="badge bg-success">Complete</span>';
       }
 
-      return missingCount;
+      return { core: coreCount, bonus: bonusCount };
     } catch (error) {
       if (spinner) spinner.style.display = 'none';
       if (badgeEl) badgeEl.innerHTML = '<span class="badge bg-danger">Error</span>';
       console.error(`[artist-corrections] MB track check failed for ${alb.album}:`, error);
-      return 0;
+      return { core: 0, bonus: 0 };
     }
   }
 

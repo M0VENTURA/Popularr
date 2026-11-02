@@ -16,7 +16,7 @@ from difflib import SequenceMatcher
 from typing import Any, Callable, TypeVar
 
 import structlog
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 # Enforce a global OS-level socket timeout for the entire worker process.
 # This acts as an absolute kill-switch for any standard library socket calls
@@ -2105,12 +2105,6 @@ def run_scan(
 
     _banner_artist = str(options.get("artist_filter") or "").strip()
     _banner_album = str(options.get("album_filter") or "").strip()
-    if _banner_album:
-        _banner_title = f"ALBUM SCAN: {_banner_artist} — {_banner_album}"
-    elif _banner_artist:
-        _banner_title = f"ARTIST SCAN: {_banner_artist}"
-    else:
-        _banner_title = "LIBRARY SCAN"
 
     # Readable section report framing. The detailed per-call instrumentation
     # ([MB] call started/completed, [ENRICH]/[SCAN] section tracing) is
@@ -2123,19 +2117,6 @@ def run_scan(
     )
     if _banner_album:
         _scan_mode_label += " (single album)"
-    try:
-        from helpers.scan_report import scan_started as _report_started
-
-        _report_started(
-            artist=_banner_artist,
-            albums=total_albums,
-            mode=_scan_mode_label,
-        )
-    except Exception as exc:
-        logger.debug("Scan report banner failed", error=str(exc))
-        log_unified("=" * 80)
-        log_unified(f"🚀 {_banner_title} ({total_albums} Album(s) Queued)")
-        log_unified("=" * 80)
 
     # Genre orphan deletion is a GLOBAL operation. It runs in the global
     # playlist rebuild (daily/manual/full-scan end), never at the start of an
@@ -2151,6 +2132,40 @@ def run_scan(
     results: list[dict[str, Any]] = []
     last_checkpoint_artist: str | None = None
     scan_type = _resolve_scan_type(options)
+
+    # ── Unified scan events / heartbeat ────────────────────────────────────
+    # Presentation only: these never alter a scan decision. The heartbeat is a
+    # single coordinator (not one per worker), and every emit is fail-safe.
+    _scan_log = None
+    _scan_heartbeat = None
+    _preserved_tracks = 0
+    _scan_started_monotonic = time.monotonic()
+    try:
+        from helpers import scan_log as _scan_log_mod
+
+        _scan_log = _scan_log_mod
+        _scan_scope = (
+            f"{_banner_artist} — {_banner_album}" if _banner_album
+            else (_banner_artist or "library")
+        )
+        _scan_log.reset_playlist_outcomes()
+        _scan_log.SCAN_WARNINGS.reset()
+        _scan_log.set_playlist_batch(True)
+        _scan_log.scan_started(
+            scope=_scan_scope,
+            mode=_scan_mode_label,
+            albums=total_albums,
+            tracks=sum(
+                len(c.get("tracks") or []) if isinstance(c, dict) else 0
+                for c in albums
+            ),
+            scan_id=f"scan-{int(_scan_started_monotonic)}",
+            force=bool(force),
+        )
+    except Exception as _scan_log_exc:
+        logger.debug("Scan event setup failed", error=str(_scan_log_exc))
+        _scan_log = None
+        _scan_heartbeat = None
 
     _scan_threads = 4
     try:
@@ -2509,40 +2524,74 @@ def run_scan(
         )
 
     def _report_album_summary(report: dict[str, Any], album_results: list[dict[str, Any]]) -> None:
-        """Emit the closing ALBUM SUMMARY block for one album.
+        """Emit the one authoritative per-track result block for this album.
 
-        Called right after the album's star ratings are assigned, so the
-        Ratings block reflects what was actually persisted. Every field falls
-        back to a safe default: the report must never raise into a scan.
+        Called right after the album's star ratings are assigned, so every
+        rating shown is finalised. The decorative ALBUM SUMMARY block was
+        removed: its star counts duplicated this per-track list, and its genre
+        columns were never populated. Every field falls back safely.
         """
         if not report:
             return
         try:
-            from helpers.scan_report import album_summary
-
-            _star_counts: dict[int, int] = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
-            for _r in album_results:
+            # Context-only siblings are used for album-relative scoring; they
+            # are not tracks on this album and must not appear as results.
+            album_results = [
+                r for r in album_results if not r.get("_context_only")
+            ]
+            # One authoritative per-track result block, AFTER stars are final.
+            # Genres live on the DB row (the finalisation/tag pass owns them),
+            # so attach them before rendering rather than guessing from the
+            # track-stage payload.
+            _genre_by_id: dict[str, Any] = {}
+            _genre_lookup_failed = False
+            _ids = [
+                str(r.get("track_id") or r.get("id") or "").strip()
+                for r in album_results
+                if str(r.get("track_id") or r.get("id") or "").strip()
+            ]
+            if _ids:
                 try:
-                    _s = int(_r.get("stars") or 0)
-                except (TypeError, ValueError):
-                    _s = 0
-                if 1 <= _s <= 5:
-                    _star_counts[_s] += 1
+                    with db_session() as _session:
+                        _rows = _session.execute(
+                            text(
+                                "SELECT CAST(id AS TEXT) AS id, genres FROM tracks "
+                                "WHERE CAST(id AS TEXT) IN :ids"
+                            ).bindparams(bindparam("ids", expanding=True)),
+                            {"ids": list(dict.fromkeys(_ids))},
+                        ).fetchall()
+                    _genre_by_id = {
+                        str(_r[0]): _r[1] for _r in (_rows or [])
+                    }
+                except Exception as _genre_exc:
+                    _genre_lookup_failed = True
+                    logger.debug(
+                        "Final-results genre fetch failed", error=str(_genre_exc)
+                    )
+            for _r in album_results:
+                _tid = str(_r.get("track_id") or _r.get("id") or "").strip()
+                if _tid and _tid in _genre_by_id and not _r.get("genres"):
+                    _r["genres"] = _genre_by_id[_tid]
 
-            _started = report.get("started_at")
-            _duration = (time.monotonic() - _started) if isinstance(_started, (int, float)) else None
+            try:
+                from helpers import scan_log as _scan_log_mod
 
-            album_summary(
-                album=str(report.get("album") or ""),
-                tracks_processed=int(report.get("tracks_processed") or 0),
-                metadata_corrections=int(report.get("metadata_corrections") or 0),
-                genres_added=int(report.get("genres_added") or 0),
-                genres_removed=int(report.get("genres_removed") or 0),
-                singles_detected=int(report.get("singles_detected") or 0),
-                star_counts=_star_counts,
-                playlists_updated=int(report.get("playlists_updated") or 0),
-                duration_s=_duration,
-            )
+                if _genre_lookup_failed:
+                    _scan_log_mod.log_event(
+                        "genres.unavailable",
+                        "Final genres unavailable for this album — database read failed.",
+                        level="warn",
+                        album=str(report.get("album") or ""),
+                    )
+                _scan_log_mod.album_final_results(
+                    str(report.get("album") or ""),
+                    album_results,
+                    show_genres=not _genre_lookup_failed,
+                )
+            except Exception as _results_exc:
+                logger.debug(
+                    "Final results block failed", error=str(_results_exc)
+                )
         except Exception as exc:
             logger.debug("Album summary report failed", error=str(exc))
 
@@ -2600,11 +2649,40 @@ def run_scan(
         if _essential_featured_rows is not None:
             options["_essential_featured_rows"] = _essential_featured_rows
 
+    # The heartbeat starts immediately before the album loop — after every
+    # pre-loop setup step — so a setup exception cannot leave a daemon thread
+    # emitting after the scan.
+    try:
+        if _scan_log:
+            _scan_heartbeat = _scan_log.ScanHeartbeat(
+                activity=lambda: f"{albums_processed}/{total_albums} albums complete",
+            )
+            _scan_heartbeat.start()
+    except Exception as _heartbeat_exc:
+        logger.debug("Scan heartbeat start failed", error=str(_heartbeat_exc))
+        _scan_heartbeat = None
+
     try:
         for album_index, album_row in enumerate(albums, start=1):
             if effective_stop_file and is_stop_requested(effective_stop_file):
                 _close_artist_section(_section_artist)
                 log_unified("Scan stopped by user request")
+                try:
+                    if _scan_log:
+                        _scan_log.scan_completed(
+                            scope=locals().get("_scan_scope") or _banner_artist or "library",
+                            outcome="cancelled",
+                            albums=albums_processed,
+                            tracks=tracks_processed,
+                            preserved=_preserved_tracks,
+                            failed=abandoned_albums,
+                            duration_s=time.monotonic() - _scan_started_monotonic,
+                            playlists=_scan_log.playlist_outcome_summary(),
+                        )
+                        _scan_log.SCAN_WARNINGS.emit_summary()
+                        _scan_log.set_playlist_batch(False)
+                except Exception:
+                    pass
                 finish(success=False)
                 return False
 
@@ -2627,6 +2705,22 @@ def run_scan(
                     f"Scan cancelled for artist '{album_row.get('artist') or artist_filter}' "
                     "— abandoned after exceeding its time budget; moving on"
                 )
+                try:
+                    if _scan_log:
+                        _scan_log.scan_completed(
+                            scope=locals().get("_scan_scope") or _banner_artist or "library",
+                            outcome="cancelled",
+                            albums=albums_processed,
+                            tracks=tracks_processed,
+                            preserved=_preserved_tracks,
+                            failed=abandoned_albums,
+                            duration_s=time.monotonic() - _scan_started_monotonic,
+                            playlists=_scan_log.playlist_outcome_summary(),
+                        )
+                        _scan_log.SCAN_WARNINGS.emit_summary()
+                        _scan_log.set_playlist_batch(False)
+                except Exception:
+                    pass
                 finish(success=False)
                 return False
 
@@ -3465,13 +3559,22 @@ def run_scan(
                         artist_max_lf = 0
 
                 album_count = len(track_contexts)
-                log_unified(f"[POPULARITY] Album {album_index}/{total_albums} ({scan_type}): {artist} - {album} ({album_count} tracks)")
                 try:
-                    from helpers.scan_report import album_started as _report_album
-
-                    _report_album(index=album_index, total=total_albums, album=f"{artist} — {album}")
-                except Exception as exc:
-                    logger.debug("Album report header failed", error=str(exc))
+                    if _scan_log:
+                        _scan_log.album_started(
+                            index=album_index,
+                            total=total_albums,
+                            album=f"{artist} — {album}",
+                            tracks=album_count,
+                            artist=artist,
+                        )
+                    if _scan_heartbeat:
+                        _scan_heartbeat.touch()
+                        _scan_heartbeat.set_activity(
+                            f"{album_index}/{total_albums} albums · {artist} — {album}"
+                        )
+                except Exception as _event_exc:
+                    logger.debug("Album start event failed", error=str(_event_exc))
 
                 # -------------------------------------------------------------
                 # MusicBrainz recording identity for this album's tracks.
@@ -3814,6 +3917,12 @@ def run_scan(
                 try:
                     _deferred_payloads = _deferred_persist.drain()
                     if _deferred_payloads:
+                        if _scan_log:
+                            _scan_log.log_event(
+                                "saving.started",
+                                f"Saving results for {album}...",
+                                count=len(_deferred_payloads),
+                            )
                         # ⚠️ The return value is CHECKED. It was discarded, so a
                         # wholly refused batch (e.g. a JSONB genre column rejecting
                         # a CSV string) was indistinguishable from success — the
@@ -3824,10 +3933,33 @@ def run_scan(
                                 "refused by the database",
                                 artist=artist, album=album, count=len(_deferred_payloads),
                             )
+                            if _scan_log:
+                                _scan_log.log_event(
+                                    "saving.failed",
+                                    f"Results NOT fully saved for {album} — database refused rows.",
+                                    level="warn",
+                                    count=len(_deferred_payloads),
+                                )
                         else:
                             logger.debug("Bulk-persisted track(s)", count=len(_deferred_payloads), artist=artist, album=album)
+                            if _scan_log:
+                                _scan_log.log_event(
+                                    "saving.completed",
+                                    f"Results saved: {len(_deferred_payloads)} track(s) for {album}.",
+                                    count=len(_deferred_payloads),
+                                )
                 except Exception as exc:
                     logger.warning("Bulk track persist failed", artist=artist, album=album, error=str(exc))
+                    try:
+                        if _scan_log:
+                            _scan_log.log_event(
+                                "saving.failed",
+                                f"Results NOT saved for {album} — database error.",
+                                level="warn",
+                                error=str(exc),
+                            )
+                    except Exception:
+                        pass
 
                 for _track_i, ((_prepared, _tc, _opts, _frozen), track_result) in enumerate(zip(_track_jobs, _track_results_ordered)):
                     if track_result is not None:
@@ -3838,10 +3970,38 @@ def run_scan(
                             _lf = float(track_result.get('lastfm_score') or 0.0)
                             _lb = float(track_result.get('listenbrainz_score') or 0.0)
                             if _frozen:
-                                log_unified(f"[TRACK_RESULT] '{_tt}' -> Final: {float(_fs or 0.0):.1f} (frozen | LF: {_lf:.1f} | LB: {_lb:.1f})")
-                            else:
-                                log_unified(f"[TRACK_RESULT] '{_tt}' -> Final: {float(_fs or 0.0):.1f} (LF: {_lf:.1f} | LB: {_lb:.1f})")
+                                _preserved_tracks += 1
+                            try:
+                                if _scan_log:
+                                    _scan_log.track_checked(
+                                        index=_track_i + 1,
+                                        total=len(_track_jobs),
+                                        title=_tt,
+                                        preserved=bool(_frozen),
+                                        score=float(_fs or 0.0),
+                                        lastfm_score=_lf,
+                                        listenbrainz_score=_lb,
+                                        track_id=str(track_result.get("track_id") or ""),
+                                    )
+                            except Exception as _track_log_exc:
+                                logger.debug("Track completion event failed", error=str(_track_log_exc))
+                    else:
+                        try:
+                            if _scan_log:
+                                _scan_log.log_event(
+                                    "track.skipped",
+                                    "Skipped "
+                                    f"{_track_i + 1}/{len(_track_jobs)}: "
+                                    f"{_prepared.get('title', 'Unknown Track')}",
+                                )
+                        except Exception:
+                            pass
                     tracks_processed += 1
+                    try:
+                        if _scan_heartbeat:
+                            _scan_heartbeat.touch()
+                    except Exception:
+                        pass
 
                     try:
                         _track_denom = max(1, len(_track_jobs) - 1)
@@ -4062,6 +4222,19 @@ def run_scan(
                         )
                         if _tag_sync and (_tag_sync.get("files_updated") or _tag_sync.get("corrections_recorded")):
                             _album_report["metadata_corrections"] = int(_tag_sync.get("corrections_recorded") or 0)
+                            try:
+                                if _scan_log and int(_tag_sync.get("files_updated") or 0) > 0:
+                                    _scan_log.log_event(
+                                        "files.tags",
+                                        "File tags updated: "
+                                        f"{int(_tag_sync.get('files_updated') or 0)} changed "
+                                        f"· {int(_tag_sync.get('corrections_recorded') or 0)} correction(s) "
+                                        f"for {album}.",
+                                        files_updated=int(_tag_sync.get("files_updated") or 0),
+                                        corrections=int(_tag_sync.get("corrections_recorded") or 0),
+                                    )
+                            except Exception as _tag_log_exc:
+                                logger.debug("File-tag event failed", error=str(_tag_log_exc))
                             # The per-album file-tag result is DETAIL; the section
                             # report's TAG SYNCHRONISATION block carries the totals.
                             logger.debug(
@@ -4321,6 +4494,12 @@ def run_scan(
                 artist=_section_artist, error=str(exc),
             )
 
+        try:
+            if _scan_heartbeat:
+                _scan_heartbeat.stop()
+        except Exception as exc:
+            logger.debug("Scan heartbeat stop failed", error=str(exc))
+
     update(stage="finalising", progress=98, message="Finalising popularity scan...", processed=total_albums, total_items=total_albums)
 
     if not options.get("metadata_only"):
@@ -4342,6 +4521,36 @@ def run_scan(
             "[FINALISE_STAGE] Metadata-only scan — no rating changes to refresh; "
             "curated playlists are reconciled at scan end"
         )
+
+    # ── Completion (one authoritative outcome) ─────────────────────────────
+    _scan_outcome = "completed"
+    if total_albums and abandoned_albums >= total_albums and tracks_processed == 0:
+        _scan_outcome = "failed"
+    elif abandoned_albums:
+        _scan_outcome = "completed_with_errors"
+    try:
+        if _scan_heartbeat:
+            _scan_heartbeat.stop()
+        if _scan_log:
+            _playlist_counts = _scan_log.emit_playlist_summary()
+            _scan_log.SCAN_WARNINGS.emit_summary()
+            _scan_log.set_playlist_batch(False)
+            _scan_log.scan_completed(
+                scope=(
+                    locals().get("_scan_scope")
+                    or _banner_artist
+                    or "library"
+                ),
+                outcome=_scan_outcome,
+                albums=albums_processed,
+                tracks=tracks_processed,
+                preserved=_preserved_tracks,
+                failed=abandoned_albums,
+                duration_s=time.monotonic() - _scan_started_monotonic,
+                playlists=_playlist_counts,
+            )
+    except Exception as _completion_exc:
+        logger.debug("Scan completion event failed", error=str(_completion_exc))
 
     update(stage="complete", progress=100, message="Popularity scan complete.", processed=total_albums, total_items=total_albums)
     finish(success=True)

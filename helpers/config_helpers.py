@@ -1780,6 +1780,49 @@ def get_playlists_config() -> dict[str, Any]:
             p.get("essential_name_template") or "{artist} - Essential Collection"
         ),
         "essential_include_featured": bool(p.get("essential_include_featured", True)),
+        # ── Essential Vocalist Collections ────────────────────────────────
+        # Cross-project vocalist best-ofs (a vocalist's own project plus guest
+        # appearances on other artists' releases). Defaults are the requirements:
+        # 15 distinct 4–5★ recordings, 4 release groups, cross-project depth and
+        # a meaningful share outside the dominant project.
+        "essential_vocalists_enabled": _as_truthy(
+            p.get("essential_vocalists_enabled", True)
+        ),
+        "essential_vocalists_name_template": str(
+            p.get("essential_vocalists_name_template")
+            or "{artist} - Essential Vocalist Collection"
+        ),
+        "essential_vocalists_include_featured": _as_truthy(
+            p.get("essential_vocalists_include_featured", True)
+        ),
+        "essential_vocalists_min_tracks": max(
+            1, int(p.get("essential_vocalists_min_tracks", 15) or 15)
+        ),
+        "essential_vocalists_min_release_groups": max(
+            1, int(p.get("essential_vocalists_min_release_groups", 4) or 4)
+        ),
+        "essential_vocalists_min_projects_with_five": max(
+            1, int(p.get("essential_vocalists_min_projects_with_five", 2) or 2)
+        ),
+        "essential_vocalists_min_project_tracks": max(
+            1, int(p.get("essential_vocalists_min_project_tracks", 5) or 5)
+        ),
+        "essential_vocalists_min_projects": max(
+            1, int(p.get("essential_vocalists_min_projects", 3) or 3)
+        ),
+        "essential_vocalists_min_outside_dominant": max(
+            1, int(p.get("essential_vocalists_min_outside_dominant", 5) or 5)
+        ),
+        "essential_vocalists_min_outside_ratio": max(
+            0.0,
+            min(
+                1.0,
+                float(p.get("essential_vocalists_min_outside_ratio", 0.25) or 0.25),
+            ),
+        ),
+        "essential_vocalists_max_tracks": max(
+            1, int(p.get("essential_vocalists_max_tracks", 50) or 50)
+        ),
         "genre_playlists_enabled": bool(p.get("genre_playlists_enabled", True)),
         "genre_playlists_delete_enabled": bool(p.get("genre_playlists_delete_enabled", True)),
         "genre_playlists_name_template": str(
@@ -2900,6 +2943,101 @@ def is_flac_conversion(mode: Any) -> bool:
 _DEFAULT_FEATURE_FLAGS: dict[str, Any] = {
     "repair_album_annotations": True,
 }
+
+
+_DEFAULT_SCAN_LOGGING: dict[str, Any] = {
+    "progress": {
+        "show_track_starts": True,
+        "show_track_completions": True,
+        "heartbeat_seconds": 15,
+    },
+    "results": {
+        "show_final_ratings": True,
+        "show_final_genres": True,
+        "genre_display": "defaults_with_exceptions",
+        "show_provisional_scores": False,
+    },
+    "playlists": {
+        "show_created": True,
+        "show_updated": True,
+        "show_failed": True,
+        "show_unchanged_individually": False,
+    },
+    "diagnostics": {"provider_payloads": False},
+}
+
+
+def get_scan_logging_config(config: dict | None = None) -> dict[str, Any]:
+    """Resolved ``logging.progress/results/playlists/diagnostics`` block.
+
+    Defaults keep the normal scan readable without tuning: track starts and
+    completions on, final ratings/genres on, playlist created/updated/failed on,
+    unchanged playlists only in DEBUG, provider payload tracing off.
+    """
+    cfg = config if isinstance(config, dict) else (get_config() or {})
+    block = cfg.get("logging") if isinstance(cfg, dict) else None
+    block = block if isinstance(block, dict) else {}
+
+    def _merged(name: str) -> dict[str, Any]:
+        merged = dict(_DEFAULT_SCAN_LOGGING[name])
+        user = block.get(name)
+        if isinstance(user, dict):
+            merged.update(user)
+        return merged
+
+    progress = _merged("progress")
+    results = _merged("results")
+    playlists = _merged("playlists")
+    diagnostics = _merged("diagnostics")
+
+    try:
+        heartbeat = int(progress.get("heartbeat_seconds", 15) or 15)
+    except (TypeError, ValueError):
+        heartbeat = 15
+    heartbeat = max(1, min(3600, heartbeat))
+
+    genre_display = str(
+        results.get("genre_display") or "defaults_with_exceptions"
+    ).strip().lower()
+    if genre_display not in {"defaults_with_exceptions", "per_track", "none"}:
+        genre_display = "defaults_with_exceptions"
+
+    return {
+        "progress": {
+            "show_track_starts": _as_truthy(
+                progress.get("show_track_starts", True)
+            ),
+            "show_track_completions": _as_truthy(
+                progress.get("show_track_completions", True)
+            ),
+            "heartbeat_seconds": heartbeat,
+        },
+        "results": {
+            "show_final_ratings": _as_truthy(
+                results.get("show_final_ratings", True)
+            ),
+            "show_final_genres": _as_truthy(
+                results.get("show_final_genres", True)
+            ),
+            "genre_display": genre_display,
+            "show_provisional_scores": _as_truthy(
+                results.get("show_provisional_scores", False)
+            ),
+        },
+        "playlists": {
+            "show_created": _as_truthy(playlists.get("show_created", True)),
+            "show_updated": _as_truthy(playlists.get("show_updated", True)),
+            "show_failed": _as_truthy(playlists.get("show_failed", True)),
+            "show_unchanged_individually": _as_truthy(
+                playlists.get("show_unchanged_individually", False)
+            ),
+        },
+        "diagnostics": {
+            "provider_payloads": _as_truthy(
+                diagnostics.get("provider_payloads", False)
+            )
+        },
+    }
 
 
 def get_features_config() -> dict[str, Any]:

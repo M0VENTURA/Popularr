@@ -19,7 +19,10 @@ import structlog
 
 from helpers.logging_config import log_unified
 from services.scanning.scan_history_service import record_scan
-from services.scanning.navidrome_import import scan_artist_to_db
+from services.scanning.navidrome_import import (
+    reset_album_dedupe,
+    scan_artist_to_db,
+)
 from services.scanning.scan_state import (
     clear_scan_checkpoint,
     clear_stop_request,
@@ -31,7 +34,7 @@ from services.scanning.scan_state import (
     write_progress_with_current_artist,
 )
 
-logger = structlog.get_logger(__name__)
+logger = structlog.get_logger("popularr.navidrome_import")
 
 # Default worker count for parallel artist import.
 # Can be overridden via config or env var.
@@ -379,6 +382,7 @@ def run_navidrome_import_scan(
 
         artists = list(artist_map.items())
         total = len(artists)
+        reset_album_dedupe()
         logger.info(
             "Navidrome import starting",
             artist_count=total,
@@ -423,6 +427,7 @@ def run_navidrome_import_scan(
                 diff_mode=not force_rescan and not _metadata_dirty,
                 client=nav_client,
                 freshness_verified=True,
+                dedupe_albums=True,
             )
             if isinstance(_artist_result, dict):
                 if _artist_result.get("success") is False:
@@ -434,10 +439,14 @@ def run_navidrome_import_scan(
                         reason=_artist_result.get("reason"),
                     )
                 if int(_artist_result.get("metadata_conflicts") or 0) > 0:
-                    _import_success[0] = False
+                    # A preserved local correction is NOT a failed import: the
+                    # verified Navidrome state was read and the dirty rows stay
+                    # protected. Blocking the checkpoint here made every later
+                    # import re-read the same artists forever (the reported
+                    # repeated conflict/import loop).
                     logger.warning(
-                        "Artist import preserved local corrections that Navidrome "
-                        "has not confirmed; successful-import checkpoint will not advance",
+                        "Artist import preserved local corrections; checkpoint "
+                        "advances, rows remain dirty until Navidrome confirms",
                         artist=artist_name,
                         conflicts=_artist_result.get("metadata_conflicts"),
                     )

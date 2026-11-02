@@ -272,9 +272,56 @@ _LIVE_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Process-level memo so a VA compilation's many tracks do not each open a DB
+#: session to upsert the same performer. Bounded by the number of distinct
+#: track artists in one process run (the scan's worker pool).
+_TRACK_ARTIST_REGISTRY_CACHE: set[str] = set()
+_TRACK_ARTIST_REGISTRY_LOCK = threading.Lock()
+
 
 def _is_live_title(title: Any) -> bool:
     return bool(_LIVE_TITLE_RE.search(str(title or "")))
+
+
+def _ensure_track_artist_registered(name: str, mbid: str | None = None) -> None:
+    """Make a track-only performer visible in the artists registry.
+
+    The album stage inserts the ALBUM artist; a performer who only exists as a
+    track credit (a VA compilation, a guest, a split release) previously had no
+    ``artists`` row at all. This upserts the PRIMARY track artist by name, with
+    its MusicBrainz id when one was resolved.
+    """
+    name = str(name or "").strip()
+    if not name:
+        return
+    key = name.casefold()
+    with _TRACK_ARTIST_REGISTRY_LOCK:
+        if key in _TRACK_ARTIST_REGISTRY_CACHE:
+            return
+    try:
+        from sqlalchemy import text as _text
+
+        from db.engine import db_session as _db_session
+
+        with _db_session() as session:
+            session.execute(
+                _text(
+                    "INSERT INTO artists (id, name, musicbrainz_artistid) "
+                    "VALUES (:name, :name, :mbid) "
+                    "ON CONFLICT (name) DO UPDATE SET "
+                    "musicbrainz_artistid = COALESCE("
+                    "NULLIF(EXCLUDED.musicbrainz_artistid, ''), "
+                    "artists.musicbrainz_artistid)"
+                ),
+                {"name": name, "mbid": str(mbid or "")},
+            )
+            session.commit()
+        with _TRACK_ARTIST_REGISTRY_LOCK:
+            _TRACK_ARTIST_REGISTRY_CACHE.add(key)
+    except Exception as exc:
+        logger.debug(
+            "Track artist registry upsert failed", artist=name, error=str(exc)
+        )
 
 
 def _safe_duration(value: Any) -> float | None:
@@ -936,6 +983,43 @@ def _score_track_popularity(
         )
         score_data = {}
 
+    # Actual calculation values for DEBUG (never a reconstructed formula).
+    try:
+        from helpers.scan_log import log_evidence
+        from services.popularity.popularity_math import (
+            LASTFM_SCORE_LISTENER_CEILING,
+            LISTENER_ONLY_LASTFM_CEILING,
+            calculate_lastfm_popularity_score,
+        )
+
+        _base_lf_w, _base_lb_w, _base_age_w = resolve_weights()
+        log_evidence(
+            "score.calculation",
+            f"Score: {title}",
+            track_id=track_id,
+            artist=artist,
+            lastfm_listeners=lastfm_listeners,
+            listenbrainz_listens=listenbrainz_listens,
+            lastfm_absolute_curve=round(
+                calculate_lastfm_popularity_score(int(lastfm_listeners or 0)), 3
+            ),
+            lastfm_component=score_data.get("lastfm_score"),
+            listenbrainz_component=score_data.get("listenbrainz_score"),
+            combined=score_data.get("combined_score"),
+            lastfm_ceiling_listeners=LASTFM_SCORE_LISTENER_CEILING,
+            listener_only_ceiling=LISTENER_ONLY_LASTFM_CEILING,
+            lastfm_playcount_available=lastfm_playcount_available,
+            base_weights={"lastfm": _base_lf_w, "listenbrainz": _base_lb_w, "age": _base_age_w},
+            is_live=is_live_track,
+            is_instrumental=is_instrumental_track,
+            single_boost=cfg_single_boost,
+            live_weight_penalty=cfg_live_penalty,
+            instrumental_weight_penalty=cfg_instrumental_penalty,
+            source_audit=_audit_verdict,
+        )
+    except Exception as exc:
+        logger.debug("Score evidence failed", track_id=track_id, error=str(exc))
+
     try:
         lb_percentile = calculate_listenbrainz_percentile(_score_lb, album_lb_listens) if album_lb_listens else 0.0
     except Exception:
@@ -1436,6 +1520,7 @@ def _resolve_track_mb_metadata(
                 from helpers.normalization_service import (
                     is_track_artist_placeholder,
                     normalize_artist,
+                    strip_featured_artist,
                 )
 
                 # ── Batch-artist trust gate ───────────────────────────────
@@ -1480,6 +1565,45 @@ def _resolve_track_mb_metadata(
                             old=_existing_artist,
                             new=_mb_artist,
                         )
+
+                # ⭐ The album stage only registers the ALBUM artist. A performer
+                # who exists solely as a track credit (VA compilation, guest,
+                # split release) had no `artists` row at all. Register the
+                # PRIMARY track artist when it differs from the album artist.
+                if not _batch_artist_untrustworthy:
+                    _primary_track_artist = strip_featured_artist(_mb_artist).strip()
+                    _album_artist_for_registry = _as_str(
+                        (album_context or {}).get("album_artist")
+                        or (album_context or {}).get("artist")
+                        or track.get("album_artist")
+                        or ""
+                    ).strip()
+                    if _primary_track_artist and (
+                        not _album_artist_for_registry
+                        or normalize_artist(_primary_track_artist)
+                        != normalize_artist(_album_artist_for_registry)
+                    ):
+                        _ensure_track_artist_registered(
+                            _primary_track_artist, _artist_mbid or None
+                        )
+
+            _mb_vocalists = mb_data.get("vocalists") or []
+            if isinstance(_mb_vocalists, str):
+                try:
+                    _mb_vocalists = json.loads(_mb_vocalists)
+                except Exception:
+                    _mb_vocalists = [
+                        part.strip() for part in _mb_vocalists.split(",")
+                    ]
+            if _mb_vocalists and not _batch_artist_untrustworthy:
+                payload["vocalists"] = json.dumps(
+                    [
+                        str(name).strip()
+                        for name in _mb_vocalists
+                        if str(name).strip()
+                    ],
+                    ensure_ascii=False,
+                )
 
             _existing_year = _as_str(track.get("year") or "").strip()
             _mb_year = _as_str(mb_data.get("year") or "").strip()
@@ -1564,6 +1688,17 @@ def process_track(
     )
 
     from helpers.logging_config import log_scan_detail, log_unified
+    try:
+        from helpers import scan_log as _scan_log
+
+        _scan_log.track_started(
+            track_title or "Unknown Track",
+            artist=track_artist,
+            album=_as_str(track.get("album")),
+            track_id=track_id,
+        )
+    except Exception:
+        pass
     _track_started = time.monotonic()
     # Per-track progress chatter. One line per track per stage meant a 13-track
     # album produced ~26 of these before any result was visible; the section
@@ -3198,6 +3333,7 @@ def process_track(
         f"{_isrc_part}"
         f" | {_single_summary}"
         f" | {_track_total_elapsed:.1f}s"
+        f" | provisional"
     )
     if _src_names:
         _consolidated += f" | Matched: {', '.join(_src_names)}"

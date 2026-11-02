@@ -1588,12 +1588,46 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
                 except Exception:
                     pass
 
+        try:
+            from helpers.logging_config import log_activity
+
+            log_activity(
+                "verification",
+                "Download complete. Verifying the file...",
+                queue_id=queue_id,
+                transfer_id=item.get("slskd_transfer_id"),
+                path=str(target_path or "")[:200],
+            )
+        except Exception:
+            pass
         verify_result = verify_file_in_music(queue_id, target_path)
         file_exists = (
             bool(target_path)
             and os.path.isfile(target_path)
             and os.path.getsize(target_path) > 0
         )
+        try:
+            from helpers.logging_config import log_activity
+
+            _activity_ids = {
+                "queue_id": queue_id,
+                "transfer_id": item.get("slskd_transfer_id"),
+                "path": str(target_path or "")[:200],
+            }
+            if verify_result.get("success") or file_exists:
+                log_activity(
+                    "verification",
+                    "Verification passed.",
+                    **_activity_ids,
+                )
+            else:
+                log_activity(
+                    "verification",
+                    f"Verification failed: {verify_result.get('error') or 'unknown reason'}",
+                    **_activity_ids,
+                )
+        except Exception:
+            pass
 
         if verify_result.get("success") or file_exists:
             try:
@@ -1617,6 +1651,18 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
                 _reset_to_downloading(f"status update failed: {exc}")
                 return {"success": False, "error": str(exc)}
 
+            try:
+                from helpers.logging_config import log_activity
+
+                log_activity(
+                    "import",
+                    "Imported successfully.",
+                    queue_id=queue_id,
+                    transfer_id=item.get("slskd_transfer_id"),
+                    path=str(target_path or "")[:200],
+                )
+            except Exception:
+                pass
             return {"success": True, "target_path": target_path}
 
         try:

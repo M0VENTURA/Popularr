@@ -19,6 +19,8 @@ Architecture:
 from __future__ import annotations
 
 import os
+import re
+import threading
 import time
 from typing import Any
 
@@ -28,9 +30,9 @@ logger = structlog.get_logger(__name__)
 
 from api_clients.navidrome import NavidromeClient
 from db.repositories.tracks import upsert_track_payload, upsert_tracks_bulk
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from db.engine import db_session
-from helpers.logging_config import log_unified
+from helpers.logging_config import log_navidrome_import
 from helpers.normalization_service import (
     strip_album_edition_marker,
     strip_appended_album_version,
@@ -62,9 +64,94 @@ from services.scanning.reconciliation import (
 from services.scanning.scan_state import is_stop_requested
 from services.scanning.payload_builder import build_track_payload
 
+# Compatibility name for tests/older callers: the emit target is the split
+# Navidrome import log, not the unified scan log.
+log_unified = log_navidrome_import
+
 VA_ALBUM_ARTIST_VARIANTS = frozenset({
     "various artists", "various", "v/a", "va", "compilation", "original soundtrack",
 })
+
+# ── Album-level dedupe for one full import run ──────────────────────────────
+# A Navidrome VA album can appear once per multi-artist view
+# ("Various Artists • HIM", "Various Artists • Martyr AD", …). Importing each
+# view repeats the same album/tracks and races the album_artist value. The
+# pipeline passes dedupe_albums=True; the set is reset at run start.
+_ALBUM_DEDUPE_LOCK = threading.Lock()
+_PROCESSED_ALBUM_IDS: set[str] = set()
+_PROCESSED_ALBUM_CONTENT: set[tuple[str, frozenset[str]]] = set()
+
+
+def reset_album_dedupe() -> None:
+    with _ALBUM_DEDUPE_LOCK:
+        _PROCESSED_ALBUM_IDS.clear()
+        _PROCESSED_ALBUM_CONTENT.clear()
+
+
+def _claim_album_id(album_id: str) -> bool:
+    if not album_id:
+        return True
+    with _ALBUM_DEDUPE_LOCK:
+        if album_id in _PROCESSED_ALBUM_IDS:
+            return False
+        _PROCESSED_ALBUM_IDS.add(album_id)
+        return True
+
+
+def _claim_album_content(album_name: str, track_ids: set[str]) -> bool:
+    if not track_ids:
+        return True
+    key = (
+        strip_album_edition_marker(str(album_name or "")).casefold().strip(),
+        frozenset(track_ids),
+    )
+    with _ALBUM_DEDUPE_LOCK:
+        if key in _PROCESSED_ALBUM_CONTENT:
+            return False
+        _PROCESSED_ALBUM_CONTENT.add(key)
+        return True
+
+
+def _normalise_va_album_artist(
+    track_payloads: list[dict[str, Any]], album_artist: str,
+) -> int:
+    """Repair an existing "Various Artists • HIM" album_artist to plain VA.
+
+    The upsert deliberately preserves dirty local-authority fields, so a row
+    carrying a multi-artist view string would otherwise keep it forever even
+    though the incoming value is the same VA identity.
+    """
+    if not _has_various_artist_part(album_artist):
+        return 0
+    canonical = "Various Artists"
+    ids = [
+        str(payload.get("id"))
+        for payload in track_payloads
+        if payload.get("id")
+    ]
+    if not ids:
+        return 0
+    try:
+        with db_session() as session:
+            result = session.execute(
+                text(
+                    "UPDATE tracks SET album_artist = :value "
+                    "WHERE CAST(id AS TEXT) IN :ids "
+                    "AND COALESCE(album_artist, '') <> :value"
+                ).bindparams(bindparam("ids", expanding=True)),
+                {"value": canonical, "ids": ids},
+            )
+            changed = int(result.rowcount or 0)
+        if changed:
+            logger.info(
+                "Normalised Various Artists album artist",
+                album_artist=canonical,
+                tracks=changed,
+            )
+        return changed
+    except Exception as exc:
+        logger.debug("VA album artist normalisation failed", error=str(exc))
+        return 0
 
 #: Columns ``prefetch_artist_state`` must read for the per-track authority check.
 #: ``local_authority_conflicts`` treats a missing key as an empty stored value,
@@ -231,6 +318,24 @@ def compute_artist_album_diff(
     return (not changed), changed, removed
 
 
+def _has_various_artist_part(value: str) -> bool:
+    """True when a multi-artist field contains a Various Artists component.
+
+    Navidrome joins multiple album artists with ``" • "`` (e.g.
+    ``"Various Artists • HIM"``). The album endpoint may return only one
+    component (``"HIM"``), which used to win the resolution and made a VA
+    compilation look like HIM's album.
+    """
+    parts = re.split(
+        r"\s*[•·]+\s*|\s+[/|;]+\s+", str(value or "")
+    )
+    return any(
+        part.strip().casefold() in VA_ALBUM_ARTIST_VARIANTS
+        for part in parts
+        if part.strip()
+    )
+
+
 def album_artist_from_sources(
     *,
     api_album_artist: str,
@@ -240,18 +345,31 @@ def album_artist_from_sources(
     existing_album_artists: dict[str, str],
 ) -> str:
     """Resolve album_artist while preserving existing Various Artists-style values."""
+    existing_album_artist = existing_album_artists.get(album_name, "")
+    existing_is_va = _has_various_artist_part(existing_album_artist)
+
+    # A VA component is authoritative even when the album endpoint reports
+    # only one of the multiple album artists. Cleaning "Various Artists • HIM"
+    # already picks "Various Artists", but "HIM" is truthy and used to win
+    # before that cleaning ran.
+    if existing_is_va:
+        return "Various Artists"
+    if any(
+        _has_various_artist_part(value)
+        for value in (
+            api_album_artist,
+            album_artist_from_artist_view,
+            canonical_artist_name,
+        )
+    ):
+        return "Various Artists"
+
     album_artist_value = (
-        _clean_artist_name_for_storage(api_album_artist or album_artist_from_artist_view or canonical_artist_name)
+        _clean_artist_name_for_storage(
+            api_album_artist or album_artist_from_artist_view or canonical_artist_name
+        )
         or canonical_artist_name
     )
-
-    existing_album_artist = existing_album_artists.get(album_name, "")
-    existing_is_va = existing_album_artist.lower().strip() in VA_ALBUM_ARTIST_VARIANTS
-    new_is_va = album_artist_value.lower().strip() in VA_ALBUM_ARTIST_VARIANTS
-
-    if existing_album_artist and existing_is_va and not new_is_va:
-        return existing_album_artist
-
     return album_artist_value
 
 
@@ -486,15 +604,24 @@ def scan_artist_to_db(
     client: NavidromeClient | None = None,
     allow_cleanup: bool = True,
     freshness_verified: bool | None = None,
+    dedupe_albums: bool = False,
 ):
     """Scan one Navidrome artist and upsert local PostgreSQL track rows efficiently."""
-    log_unified(f"[NAVIDROME_IMPORT] Importing artist: {artist_name} (artist_id={artist_id or 'none'}, force={force}, processed={processed_artists})")
 
     if not artist_id:
         logger.warning("[NAVIDROME_SCAN] No artist_id", artist=artist_name)
         return None
 
-    canonical_artist_name = _clean_artist_name_for_storage(artist_name) or artist_name
+    canonical_artist_name = (
+        "Various Artists"
+        if _has_various_artist_part(artist_name)
+        else (_clean_artist_name_for_storage(artist_name) or artist_name)
+    )
+    log_unified(
+        f"[NAVIDROME_IMPORT] Importing artist: {canonical_artist_name} "
+        f"(view={artist_name}, artist_id={artist_id or 'none'}, force={force}, "
+        f"processed={processed_artists})"
+    )
     active_client = client
 
     # Direct callers (album page, targeted pipeline, library sync) do not go
@@ -685,15 +812,16 @@ def scan_artist_to_db(
             album_id = album.get("id")
             if not album_id:
                 continue
+            if dedupe_albums and not _claim_album_id(str(album_id)):
+                logger.debug(
+                    "Skipping album entry already imported for another artist view",
+                    artist=artist_name,
+                    album=album_name,
+                    album_id=album_id,
+                )
+                continue
 
             _albums_matched_filter += 1
-            logger.info(
-                "Importing album",
-                album_index=album_index,
-                album_total=len(albums),
-                album=album_name,
-            )
-            log_unified(f"Navidrome Import - {artist_name} - Album {album_index}/{len(albums)}: {album_name}")
 
             album_context = detect_live_album(album_name)
             tracks, api_album_artist = fetch_album_tracks_safe(
@@ -701,6 +829,22 @@ def scan_artist_to_db(
                 album_name=album_name,
                 client=active_client,
             )
+
+            if dedupe_albums:
+                _content_ids = {
+                    str(track.get("id"))
+                    for track in tracks
+                    if track.get("id")
+                }
+                if not _claim_album_content(album_name, _content_ids):
+                    logger.debug(
+                        "Skipping duplicate album content from another artist view",
+                        artist=artist_name,
+                        album=album_name,
+                        album_id=album_id,
+                        tracks=len(_content_ids),
+                    )
+                    continue
 
             for track in tracks:
                 if track.get("id"):
@@ -718,6 +862,22 @@ def scan_artist_to_db(
                 canonical_artist_name=canonical_artist_name,
                 album_name=album_name,
                 existing_album_artists=existing_album_artists,
+            )
+            logger.info(
+                "Importing album",
+                album_index=album_index,
+                album_total=len(albums),
+                album=album_name,
+                artist=album_artist_value,
+                view_artist=(
+                    artist_name
+                    if str(artist_name) != str(album_artist_value)
+                    else None
+                ),
+            )
+            log_unified(
+                f"Navidrome Import - {album_artist_value} - Album "
+                f"{album_index}/{len(albums)}: {album_name}"
             )
             for track in tracks:
                 new_id = str(track.get("id") or "").strip()
@@ -844,7 +1004,7 @@ def scan_artist_to_db(
             _album_payloads: list[dict[str, Any]] = []
             _confirmed_ids: list[str] = []
             _seen_ids: list[str] = []
-            _dirty_conflicts: list[tuple[str, list[str]]] = []
+            _dirty_conflicts: list[tuple[str, list[str], dict[str, Any]]] = []
 
             for track in tracks:
                 if not track.get("id"):
@@ -884,7 +1044,7 @@ def scan_artist_to_db(
                 if _existing and bool(_existing.get("metadata_dirty_for_navidrome")):
                     _conflicts = local_authority_conflicts(_existing, payload)
                     if _conflicts:
-                        _dirty_conflicts.append((_tid, _conflicts))
+                        _dirty_conflicts.append((_tid, _conflicts, payload))
                     else:
                         _confirmed_ids.append(_tid)
                 elif _tid:
@@ -892,14 +1052,24 @@ def scan_artist_to_db(
 
                 _album_payloads.append(payload)
 
-            for _tid, _fields in _dirty_conflicts[:5]:
+            for _tid, _fields, _payload in _dirty_conflicts[:5]:
                 _row = known_rows_by_id.get(_tid) or {}
                 logger.warning(
                     "[NAVIDROME_IMPORT] metadata conflict — local correction preserved",
-                    artist=artist_name,
+                    artist=album_artist_value,
+                    view_artist=(
+                        artist_name
+                        if str(artist_name) != str(album_artist_value)
+                        else None
+                    ),
                     album=album_name,
                     track=_row.get("title") or _tid,
                     fields=",".join(sorted(_fields)),
+                    values=" | ".join(
+                        f"{field}: local={_row.get(field)!r} "
+                        f"remote={_payload.get(field)!r}"
+                        for field in sorted(_fields)[:3]
+                    )[:500],
                     winner="existing",
                     reason="local correction newer than last verified import",
                 )
@@ -928,6 +1098,9 @@ def scan_artist_to_db(
                             mark_navidrome_import_confirmed(_confirmed_ids)
                         if _seen_ids:
                             mark_navidrome_import_seen(_seen_ids)
+                        _normalise_va_album_artist(
+                            _album_payloads, album_artist_value
+                        )
                         for _tid in _confirmed_ids:
                             _row = known_rows_by_id.get(_tid)
                             if _row is not None:

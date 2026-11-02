@@ -28,18 +28,20 @@ GENRE = "genre"
 DECADE = "decade"
 NEW_MUSIC = "new_music"
 ESSENTIAL = "essential"
+ESSENTIAL_VOCALIST = "essential_vocalist"
 FAVOURITES = "favourites"
 CURATED = "curated"
 MOOD = "mood"
 
 MANAGED_TYPES = frozenset(
-    {GENRE, DECADE, NEW_MUSIC, ESSENTIAL, FAVOURITES, CURATED, MOOD}
+    {GENRE, DECADE, NEW_MUSIC, ESSENTIAL, ESSENTIAL_VOCALIST, FAVOURITES, CURATED, MOOD}
 )
 
 _DECADE_RE = re.compile(r"^(?:19|20)\d{2}$")
 _DEFAULT_GENRE_TEMPLATE = "{genre} - Top Tracks"
 _DEFAULT_DECADE_TEMPLATE = "{decade}s - Top Tracks"
 _DEFAULT_ESSENTIAL_TEMPLATE = "{artist} - Essential Collection"
+_DEFAULT_ESSENTIAL_VOCALIST_TEMPLATE = "{artist} - Essential Vocalist Collection"
 _DEFAULT_MOOD_TEMPLATE = "{mood} - Mix"
 
 
@@ -117,6 +119,15 @@ def managed_name_value(
         return _template_value(
             text,
             str(cfg.get("essential_name_template") or _DEFAULT_ESSENTIAL_TEMPLATE),
+            "{artist}",
+        )
+    if managed_type == ESSENTIAL_VOCALIST:
+        return _template_value(
+            text,
+            str(
+                cfg.get("essential_vocalists_name_template")
+                or _DEFAULT_ESSENTIAL_VOCALIST_TEMPLATE
+            ),
             "{artist}",
         )
     if managed_type == MOOD:
@@ -199,7 +210,19 @@ def classify_managed_playlist(
         if covers_genre_value is not None and not _DECADE_RE.match(covers_genre_value):
             return CURATED
 
-    # 3. Essential collection ---------------------------------------------
+    # 3. Essential collections ---------------------------------------------
+    # Vocalist first: its suffix is longer, so it cannot be mistaken for the
+    # per-artist collection, but checking the more specific shape first keeps
+    # the order explicit.
+    if _template_value(
+        text,
+        str(
+            cfg.get("essential_vocalists_name_template")
+            or _DEFAULT_ESSENTIAL_VOCALIST_TEMPLATE
+        ),
+        "{artist}",
+    ) is not None:
+        return ESSENTIAL_VOCALIST
     if _template_value(
         text,
         str(cfg.get("essential_name_template") or _DEFAULT_ESSENTIAL_TEMPLATE),

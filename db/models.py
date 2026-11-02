@@ -218,6 +218,11 @@ class Track(Base):
 
     # System & Sync
     writer: Mapped[str | None] = mapped_column(String)
+    #: Confirmed recording-level VOCALISTS (JSON list). Populated from
+    #: MusicBrainz performer/vocal relations, with the recording artist credit
+    #: as the fallback. The Essential Vocalist collection uses it to include a
+    #: vocalist's guest performances on other artists' releases.
+    vocalists: Mapped[str | None] = mapped_column(String)
     isrc: Mapped[str | None] = mapped_column(String)
     work: Mapped[str | None] = mapped_column(String)
     pending_mb_updates: Mapped[str | None] = mapped_column(Text)
@@ -600,6 +605,9 @@ class MissingAlbumTrack(Base):
     
     duration: Mapped[int | None] = mapped_column(Integer)
     disc_number: Mapped[int | None] = mapped_column(Integer, server_default=text("1"))
+    #: A trailing/bonus track on the release. Bonus tracks are still offered for
+    #: download, but they are not an "album is incomplete" correction.
+    is_bonus: Mapped[bool] = mapped_column(Boolean, server_default=text("FALSE"), nullable=False)
     ignored: Mapped[bool] = mapped_column(Boolean, server_default=text("FALSE"), nullable=False)
     
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
