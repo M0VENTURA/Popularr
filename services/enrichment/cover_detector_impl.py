@@ -762,6 +762,30 @@ class CoverDetector:
         # for a709fc25…), and that must not hide the base-work relationship.
         base_works = self._work_base_ids(work_mbid)
         if base_works:
+            # ⚠️ MusicBrainz can carry the SAME titled work-to-work relation in
+            # both directions (Scar Tissue: RHCP's work says "based on" NTO's
+            # work, while NTO's says it is based on RHCP's). Following it
+            # blindly made the ORIGINAL track report the later remixer as the
+            # original artist. A derived work cannot predate its base: when this
+            # work has an earlier recording, ignore the relation.
+            current_key = self._work_earliest_date_key(work_mbid)
+            kept_bases: list[dict[str, str]] = []
+            for base in base_works:
+                base_key = self._work_earliest_date_key(
+                    str(base.get("id") or "").strip()
+                )
+                if current_key and base_key and current_key <= base_key:
+                    log_unified_safe(
+                        "[COVER_DETECT] ignoring derivative relation "
+                        f"{work_mbid} → {base.get('id')}: this work's earliest "
+                        f"recording ({current_key[:10]}) is not later than the "
+                        f"base's ({base_key[:10]})"
+                    )
+                    continue
+                kept_bases.append(base)
+            base_works = kept_bases
+
+        if base_works:
             log_unified_safe(
                 "[COVER_DETECT] derivative work "
                 f"{work_mbid} is based on "
@@ -2550,6 +2574,26 @@ class CoverDetector:
             if best:
                 return best
         return None
+
+    def _work_earliest_date_key(self, work_id: str) -> str:
+        """Earliest dated recording of a work, as a sortable date key.
+
+        Used only to reject a reversed/reciprocal ``based on`` relation: an
+        original work cannot be derived from a work whose first recording is
+        later. Returns ``""`` when the work has no dated recording on its first
+        page, in which case the relation is left alone.
+        """
+        work_id = str(work_id or "").strip()
+        if not work_id:
+            return ""
+        best = "9999-99-99"
+        for rec in self._work_recordings(work_id):
+            if not isinstance(rec, dict):
+                continue
+            key = _release_date_key(rec)
+            if not _undated(key) and key < best:
+                best = key
+        return "" if best == "9999-99-99" else best
 
     def _earliest_writer_recording(
         self,

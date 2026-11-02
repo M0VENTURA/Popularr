@@ -86,9 +86,11 @@ class TestWorkBaseRelations:
         detector._work_base_cache["fob-work"] = [
             {"id": "billy-work", "title": "We Didn’t Start the Fire"}
         ]
-        detector._work_recordings = lambda work_id, limit=100: [
-            _recording("fob-rec", "Fall Out Boy", year="2023")
-        ]
+        detector._work_recordings = lambda work_id, limit=100: (
+            [_recording("fob-rec", "Fall Out Boy", year="2023")]
+            if work_id == "fob-work"
+            else [_recording("billy-rec", "Billy Joel", year="1989")]
+        )
         detector._earliest_across_pages = lambda *a, **k: {
             "artist": "Billy Joel", "year": 1989, "confidence": "medium"
         }
@@ -113,10 +115,14 @@ class TestWorkBaseRelations:
             "We Didn’t Start the Fire",
             [{"id": "billy", "name": "Billy Joel"}],
         )
-        detector._work_recordings = lambda work_id, limit=100: [
-            _recording("elton", "Elton John Band", year="2020"),
-            _recording("billy-rec", "Billy Joel", year="1989"),
-        ]
+        detector._work_recordings = lambda work_id, limit=100: (
+            [_recording("fob-rec", "Fall Out Boy", year="2023")]
+            if work_id == "fob-work"
+            else [
+                _recording("elton", "Elton John Band", year="2020"),
+                _recording("billy-rec", "Billy Joel", year="1989"),
+            ]
+        )
         detector._earliest_across_pages = lambda *a, **k: {
             "artist": "Elton John Band", "year": 2020, "confidence": "medium"
         }
@@ -131,6 +137,29 @@ class TestWorkBaseRelations:
         assert result is not None
         assert result["artist"] == "Billy Joel"
         assert result["source"] == "musicbrainz_work_based_on"
+
+    def test_a_reciprocal_relation_does_not_cover_the_original(self):
+        """RHCP's Scar Tissue work is not a cover of NTO's later remix work."""
+        detector = CoverDetector()
+        detector.mb = type("FakeMB", (), {})()
+        detector._work_base_cache["rhcp-work"] = [
+            {"id": "nto-work", "title": "Scar Tissue"}
+        ]
+
+        def _recordings(work_id, limit=100):
+            if work_id == "rhcp-work":
+                return [_recording("rhcp-rec", "Red Hot Chili Peppers", year="1999",
+                                   title="Scar Tissue")]
+            return [_recording("nto-rec", "NTO", year="2021", title="Scar Tissue")]
+
+        detector._work_recordings = _recordings
+        detector._performer_wrote_work = lambda *a, **k: True
+
+        result = detector._detect_via_work_id(
+            "rhcp-work", "Red Hot Chili Peppers", exclude_mbid="rhcp-rec",
+        )
+
+        assert result == {}, "a later work must not become the original artist"
 
 
 class TestCoverActTitleHints:

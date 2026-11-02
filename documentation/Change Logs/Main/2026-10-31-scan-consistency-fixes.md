@@ -150,6 +150,14 @@ the canonical one, and the recording carrying the real ListenBrainz audience
 can sit past the first page (measured on "Scar Tissue": the 2.6M-listen
 recording was outside the first 20).
 
+## Reciprocal derivative work (Scar Tissue)
+
+MusicBrainz has both work-to-work directions for RHCP's "Scar Tissue" and NTO's
+later remix. The derivative path followed RHCP's relation to NTO and named NTO
+as the original. It now compares the earliest recording date of both works: a
+derived work cannot predate its base, so a relation pointing at a later work is
+ignored and the track stays an original.
+
 ## My Heart Will Go On
 
 The title search preferred a writer-verified recording over an earlier
