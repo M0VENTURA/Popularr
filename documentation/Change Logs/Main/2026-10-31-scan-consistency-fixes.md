@@ -165,6 +165,12 @@ Benjamin does not list OutKast directly; his "André 3000" alias does. The
 candidate builder now follows one alias level to its band memberships, so the
 OutKast recording can be found as the original of "Hey Ya!".
 
+On a VA row whose artist is still the "Various Artists" placeholder, the
+album-wide self-cover guard rejected the found original and wrote nothing. A
+usable original is now accepted even when the track performer is unknown. A
+stored suffix that names the wrong act — "(Kidz Bop Cover)" with OutKast as the
+original — is rebuilt too, instead of being treated as already repaired.
+
 ## My Heart Will Go On
 
 The title search preferred a writer-verified recording over an earlier

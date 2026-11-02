@@ -239,6 +239,31 @@ class TestHugeWorkTitleSearch:
 
         assert ("outkast", "OutKast") in ranked
 
+    def test_a_wrong_existing_cover_suffix_is_rebuilt(self):
+        detector = CoverDetector()
+        track = {
+            "id": "t",
+            "title": "Hey Ya! (Kidz Bop Cover)",
+            "artist": "Various Artists",
+            "is_cover": 1,
+            "original_cover_artist": "OutKast",
+        }
+        update = detector._suffix_repair_update(track)
+        assert update is not None
+        assert update["title"] == "Hey Ya!"
+        assert update["original_artist"] == "OutKast"
+
+    def test_a_matching_cover_suffix_is_not_rewritten(self):
+        detector = CoverDetector()
+        track = {
+            "id": "t",
+            "title": "Hey Ya! (OutKast Cover)",
+            "artist": "Various Artists",
+            "is_cover": 1,
+            "original_cover_artist": "OutKast",
+        }
+        assert detector._suffix_repair_update(track) is None
+
     def test_title_search_finds_the_performed_original(self):
         detector = CoverDetector()
         detector.mb = type("FakeMB", (), {})()

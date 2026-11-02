@@ -1344,14 +1344,26 @@ class CoverDetector:
                     artist=_performer,
                 )
                 return
+            if _orig and not _orig_usable:
+                logger.debug(
+                    "Cover result discarded: original artist is a placeholder",
+                    track=track.get("title"),
+                    original_artist=_orig,
+                )
+                return
             if _orig and not _performer_usable:
-                logger.info(
-                    "Cover result discarded: track artist is not a usable performer",
+                # A VA compilation row can still carry the "Various Artists"
+                # placeholder when neither the file tag nor the recording
+                # supplied a performer. The work evidence still names a concrete
+                # original (OutKast for "Hey Ya!"), so save it rather than
+                # discarding the only useful fact. The self-cover guard above
+                # already ran for a usable performer.
+                logger.debug(
+                    "Cover original accepted despite unusable track artist",
                     track=track.get("title"),
                     track_artist=_performer or None,
                     original_artist=_orig,
                 )
-                return
             _tid = str(result["track_id"])
             _stored_orig = str(track.get("original_cover_artist") or "").strip()
             if (
@@ -1879,7 +1891,15 @@ class CoverDetector:
             return None
         original = str(track.get("original_cover_artist") or "").strip()
         title = str(track.get("title") or "").strip()
-        if not original or not title or _has_cover_annotation(title):
+        if not original or not title:
+            return None
+        # An existing suffix is only acceptable when it names THIS original.
+        # "(Kidz Bop Cover)" on a track whose stored original is OutKast is a
+        # stale attribution and must be rebuilt, not treated as already repaired.
+        _suffix_match = re.search(r"\(([^)]+?)\s+cover\)\s*$", title, re.IGNORECASE)
+        if _suffix_match and _same_artist(_suffix_match.group(1), original):
+            return None
+        if _has_cover_annotation(title) and not _suffix_match:
             return None
         if is_track_artist_placeholder(original):
             return None
