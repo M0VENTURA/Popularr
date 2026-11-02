@@ -83,6 +83,8 @@ from services.catalog.album_classification_service import (
 from services.enrichment.genre_aggregation_service import (
     _parse_genre_input,
     aggregate_genres,
+    is_admin_genre,
+    is_junk_genre,
     is_track_affiliation_tag,
 )
 
@@ -3261,6 +3263,47 @@ def process_track(
                         artist=_genre_fallback_artist,
                         added=_fallback_genres,
                     )
+                # ⭐ Last-resort musical fallback from the PROVIDER evidence.
+                # If selection rejected every candidate (confidence floors) and
+                # the artist catalogue had nothing, do not let a marker such as
+                # "Soundtrack" become the whole genre list while the detected
+                # "alternative rock"/"rock" chips are present.
+                _musical_now = [
+                    g for g in (aggregated or [])
+                    if not is_track_affiliation_tag(g)
+                ]
+                if not _musical_now:
+                    _raw_counts: dict[str, int] = {}
+                    _raw_order: dict[str, int] = {}
+                    for _src_key, _raw_values in (source_map or {}).items():
+                        _parsed_values = _parse_genre_input(_raw_values)
+                        for _raw_genre in _parsed_values:
+                            _g = str(_raw_genre or "").strip()
+                            if (
+                                not _g
+                                or is_track_affiliation_tag(_g)
+                                or is_admin_genre(_g)
+                                or is_junk_genre(_g)
+                            ):
+                                continue
+                            _raw_counts[_g] = _raw_counts.get(_g, 0) + 1
+                            _raw_order.setdefault(_g, len(_raw_order))
+                    _raw_musical = sorted(
+                        _raw_counts,
+                        key=lambda g: (-_raw_counts[g], _raw_order[g]),
+                    )[:_genre_track_limit()]
+                    if _raw_musical:
+                        _markers = [
+                            g for g in (aggregated or [])
+                            if is_track_affiliation_tag(g)
+                        ]
+                        aggregated = list(dict.fromkeys([*_raw_musical, *_markers]))
+                        logger.debug(
+                            "Track genres selected no musical entry — used raw provider genres",
+                            track_id=track_id,
+                            added=_raw_musical,
+                            markers=_markers,
+                        )
             # ⚠️ The album tag sync OWNS ``genres`` during a scan: it runs after
             # this stage and replaces the column with the album blend (or each
             # various-artists track's own list). Writing this stage's list
@@ -3293,10 +3336,24 @@ def process_track(
             _new_markers = {
                 str(g).casefold() for g in (aggregated or []) if is_track_affiliation_tag(g)
             }
+            _stored_musical = {
+                str(g).casefold()
+                for g in _stored_genre_list
+                if not is_track_affiliation_tag(g)
+            }
+            _new_musical = {
+                str(g).casefold()
+                for g in (aggregated or [])
+                if not is_track_affiliation_tag(g)
+            }
             if aggregated and (
                 not _sync_owns_genres
                 or not _stored_genre_list
                 or _new_markers != _stored_markers
+                # A stored marker-only list ("Soundtrack") must not suppress
+                # the musical genres this pass just found. The old check
+                # compared MARKERS only, so the list stayed Soundtrack-only.
+                or _new_musical != _stored_musical
             ):
                 update_payload["genres"] = ", ".join(aggregated)
         except Exception as e:

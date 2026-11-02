@@ -175,6 +175,16 @@ The cover verdict funnel and suffix repair now compare against
 `comparison_artist(track, album_artist)`: the TRACK artist first, with the album
 artist only as a fallback for a single-artist release.
 
+## Marker-only final genre (Soundtrack)
+
+The track stage only wrote `genres` when the affiliation MARKERS changed. A row
+already storing only `Soundtrack` therefore kept that list when the new
+aggregation found `alternative rock`/`rock`; the markers were unchanged, so the
+write was skipped. The persistence check now also compares the MUSICAL set.
+If selection produced no musical genre, the stage falls back to the strongest
+raw provider genres before appending markers, so a marker cannot be the whole
+final genre list by itself.
+
 ## Double-click / duplicate scan starts
 
 Hypercorn runs four workers, and the runtime registry is per process. Two clicks
