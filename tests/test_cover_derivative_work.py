@@ -133,6 +133,20 @@ class TestWorkBaseRelations:
         assert result["source"] == "musicbrainz_work_based_on"
 
 
+class TestCoverActTitleHints:
+    def test_kidz_bop_suffix_is_not_an_original_artist_hint(self):
+        detector = CoverDetector()
+        assert detector._detect_cover_hint_from_text(
+            "Hey Ya! (Kidz Bop Cover)"
+        ) is None
+
+    def test_a_real_original_artist_suffix_is_still_used(self):
+        detector = CoverDetector()
+        assert detector._detect_cover_hint_from_text(
+            "Hey Ya! (Outkast Cover)"
+        ) == "Outkast"
+
+
 class TestHugeWorkTitleSearch:
     def test_title_search_finds_the_performed_original(self):
         detector = CoverDetector()

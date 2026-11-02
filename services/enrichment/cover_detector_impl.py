@@ -94,6 +94,26 @@ logger = structlog.get_logger(__name__)
 # Matches a trailing "(X Cover)" annotation in a track title.
 _COVER_SUFFIX_RE = re.compile(r"\s*\([^)]+\s+cover\)\s*$", re.IGNORECASE)
 
+#: Acts whose name in "(X Cover)" names the COVER ARTIST, not the original.
+#: "Hey Ya! (Kidz Bop Cover)" means a Kidz Bop performance, not a cover OF
+#: Kidz Bop; treating the annotation as an original-artist hint produced
+#: "originally by Kidz Bop".
+_COVER_ACT_HINT_RE = re.compile(
+    r"\b(?:"
+    r"kidz\s*bop|"
+    r"vitamin\s*string\s*quartet|"
+    r"rockabye\s*baby|"
+    r"postmodern\s*jukebox|"
+    r"the\s*piano\s*guys|"
+    r"8[-\s]?bit|"
+    r"piano\s*tribute|"
+    r"tribute\s*(?:band|players)|"
+    r"lullaby\s*(?:players|renditions)|"
+    r"cover\s*(?:band|project)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def _recording_query_titles(title: str) -> list[str]:
     """MusicBrainz query forms for a library title, most-canonical first.
@@ -3019,6 +3039,14 @@ class CoverDetector:
             if match:
                 artist_name = match.group(1).strip(" -.,")
                 if artist_name:
+                    if _COVER_ACT_HINT_RE.search(artist_name):
+                        logger.debug(
+                            "Ignoring cover-act title hint — it names the "
+                            "performer, not the original",
+                            track_title=track_title,
+                            extracted_artist=artist_name,
+                        )
+                        return None
                     logger.debug("Cover hint extracted from title", track_title=track_title, extracted_artist=artist_name)
                     return artist_name
         return None

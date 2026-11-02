@@ -107,3 +107,8 @@ A title-search result is accepted only when the candidate is actually a base
 work writer. See `_earliest_writer_recording` in
 `services/enrichment/cover_detector_impl.py`.
 
+The title-hint parser also now ignores cover-act names in `(X Cover)`
+annotations. `"Hey Ya! (Kidz Bop Cover)"` names the Kidz Bop performer, not a
+cover OF Kidz Bop, so it is deferred to the work/recording evidence rather than
+becoming `originally by Kidz Bop`.
+
