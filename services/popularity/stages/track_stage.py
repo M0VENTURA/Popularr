@@ -2378,6 +2378,7 @@ def process_track(
                 listenbrainz_listens = _as_int(effective_track.get("listenbrainz_listens") or 0)
                 listenbrainz_users = _as_int(effective_track.get("listenbrainz_users") or 0)
                 _lb_source = "stored_fresh"
+                _lb_fallback_tried = False
 
                 if _force or not has_fresh_lb or listenbrainz_listens == 0:
                     _lb_source = "none"
@@ -2481,6 +2482,7 @@ def process_track(
                                 # resolve by title/artist as a fallback and use it
                                 # only if it finds a real count.
                                 if listenbrainz_listens == 0 and _lb_zero_fallback_enabled():
+                                    _lb_fallback_tried = True
                                     _lb_fallback = get_aggregated_listenbrainz_popularity(
                                         str(raw_title or title or ""),
                                         artist,
@@ -2518,6 +2520,51 @@ def process_track(
                                     track_id=track_id, error=str(exc),
                                 )
                                 _lb_source = "error"
+
+                    # ⭐ A VA/compilation track with NO MusicBrainz match has no
+                    # recording MBID, so the block above never asks ListenBrainz
+                    # at all. The artist and title are still known; a title+
+                    # artist search is exactly the fallback that finds the
+                    # canonical recording for these rows.
+                    if (
+                        listenbrainz_listens == 0
+                        and not _lb_fallback_tried
+                        and _lb_source != "error"
+                        and _lb_zero_fallback_enabled()
+                    ):
+                        _lb_fallback_tried = True
+                        try:
+                            _lb_fallback = get_aggregated_listenbrainz_popularity(
+                                str(raw_title or title or ""),
+                                artist,
+                                primary_mbid=None,
+                                isrc=None,
+                                is_live_release=is_live_release,
+                                target_is_alt_rendition=_alt_rendition,
+                            ) or {}
+                            _fallback_listens = _as_int(
+                                _lb_fallback.get("total_listen_count") or 0
+                            )
+                            if _fallback_listens > 0:
+                                listenbrainz_listens = _fallback_listens
+                                listenbrainz_users = _as_int(
+                                    _lb_fallback.get("total_user_count") or 0
+                                )
+                                _lb_source = "title_fallback_no_mbid"
+                                logger.debug(
+                                    "[POPULARITY_MATCH] LB no-mbid title fallback",
+                                    track_id=track_id,
+                                    artist=artist,
+                                    title=str(raw_title or title or ""),
+                                    fallback_mbids=_lb_fallback.get("mbids"),
+                                    listens=listenbrainz_listens,
+                                )
+                        except Exception as exc:
+                            logger.debug(
+                                "ListenBrainz no-mbid fallback failed",
+                                track_id=track_id,
+                                error=str(exc),
+                            )
 
                     if _lb_source != "error":
                         update_payload["listenbrainz_listens"] = listenbrainz_listens
@@ -2844,9 +2891,27 @@ def process_track(
                     stripped = raw.strip()
                     if not stripped or stripped.lower() in ("[]", "{}", "null", "none"):
                         return False
+                    # A list containing ONLY affiliation markers ("Cover",
+                    # "Remaster") is not source genre evidence. Treating it as
+                    # "already fetched" skipped the provider call and left the
+                    # track with no musical genre at all.
+                    parsed = _parse_genre_input(raw)
+                    if parsed:
+                        return any(
+                            name and not is_track_affiliation_tag(name)
+                            for name in parsed
+                        )
                     return True
-                elif isinstance(raw, (list, dict)) and len(raw) > 0:
-                    return True
+                elif isinstance(raw, (list, tuple, set)):
+                    if not raw:
+                        return False
+                    return any(
+                        str(name).strip()
+                        and not is_track_affiliation_tag(str(name))
+                        for name in raw
+                    )
+                elif isinstance(raw, dict):
+                    return bool(raw)
                 return False
 
             # MusicBrainz Genres
@@ -3136,13 +3201,24 @@ def process_track(
                 ("lastfm_tags", "lastfm@track"),
                 ("listenbrainz_genres", "listenbrainz@track"),
                 ("spotify_genres", "spotify@track"),
+                # Navidrome is a LOW-AUTHORITY fallback for musical genres, but
+                # it echoes the file tags this pipeline writes. Never let its
+                # stored Cover/Remaster (or other affiliation) marker enter the
+                # vote — those are re-derived from the track's own evidence.
                 ("navidrome_genres", "navidrome@track"),
                 ("audiodb_genres", "audiodb@track"),
                 ("wikidata_genres", "wikidata@track"),
             ]:
                 raw = effective_track.get(key) or track.get(key)
                 if raw:
-                    source_map[source_name] = raw
+                    if key == "navidrome_genres":
+                        parsed = _parse_genre_input(raw)
+                        raw = [
+                            g for g in parsed
+                            if g and not is_track_affiliation_tag(str(g))
+                        ]
+                    if raw:
+                        source_map[source_name] = raw
 
             aggregated = aggregate_genres(
                 source_map,

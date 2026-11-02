@@ -1601,7 +1601,12 @@ def _lb_search_recording_ids(
             f'AND artist:"{escape_lucene_special_chars(artist)}"'
         )
         target = normalize_for_aggregation(lookup_title)
-        for rec in client.search_recordings(query, limit=20) or []:
+        # ⚠️ 20 is too small for a well-covered song: MusicBrainz ranks many
+        # compilation/duplicate recordings above the canonical one, and the
+        # recording that actually carries the ListenBrainz audience can sit
+        # past the first page (measured on "Scar Tissue": the 2.6M-listen
+        # recording was outside the first 20). Fetch up to the batch ceiling.
+        for rec in client.search_recordings(query, limit=100) or []:
             if not isinstance(rec, dict) or not rec.get("id"):
                 continue
             if bool(rec.get("video")):

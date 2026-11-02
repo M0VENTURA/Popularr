@@ -148,6 +148,49 @@ class TestCoverActTitleHints:
 
 
 class TestHugeWorkTitleSearch:
+    def test_an_earlier_performed_original_beats_a_later_writer_score(self):
+        """Céline Dion (1997, no writer relation) beats James Horner (2004)."""
+        detector = CoverDetector()
+
+        celine = _recording("celine", "Céline Dion", year="1997")
+        celine["first-release-date"] = "1997-11-24"
+        james = _recording("james", "James Horner", year="2004")
+        james["first-release-date"] = "2004-01-01"
+        james["artist-relation-list"] = [
+            {"type": "writer", "artist": {"name": "James Horner"}}
+        ]
+
+        detector._search_recordings_by_title = lambda title, limit=10: [
+            celine, james,
+        ]
+        detector._get_recording = lambda rid, inc: (
+            celine if rid == "celine" else james
+        )
+
+        result = detector._find_original_recording(
+            "My Heart Will Go On",
+            "James Horner",
+            album_artist="DragonForce",
+            track_year=2019,
+        )
+
+        assert result is not None
+        assert result["artist"] == "Céline Dion"
+
+    def test_a_performed_recording_excludes_the_writer(self):
+        detector = CoverDetector()
+        detector._work_recordings = lambda work_id: [
+            _recording("james", "James Horner", year="2004"),
+            _recording("celine", "Céline Dion", year="1997"),
+        ]
+
+        result = detector._earliest_performed_recording(
+            "mh-work", "DragonForce", ["James Horner", "Will Jennings"]
+        )
+
+        assert result is not None
+        assert result["artist"] == "Céline Dion"
+
     def test_title_search_finds_the_performed_original(self):
         detector = CoverDetector()
         detector.mb = type("FakeMB", (), {})()

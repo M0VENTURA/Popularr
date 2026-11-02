@@ -323,12 +323,34 @@ def detect_covers_for_track(
         (res for res in results if str(res.get("track_id") or "") == str(track_id)),
         None,
     )
-    verdict = {
-        "track_id": str(track_id),
-        "is_cover": bool((result or {}).get("is_cover")),
-        "original_artist": str((result or {}).get("original_artist") or ""),
-        "reason": str((result or {}).get("reason") or ""),
-    }
+    if result is None:
+        # A confirmed cover that the deep pass merely RE-VERIFIED writes no
+        # result, so the old fallback reported ``is_cover=False`` for a track
+        # that is still a cover. Re-read the stored verdict (the pass may also
+        # have cleared a false one) and report that.
+        try:
+            refreshed = _load_tracks(
+                "CAST(id AS TEXT) = :track_id", {"track_id": str(track_id)}
+            )
+            if refreshed:
+                track = refreshed[0]
+        except Exception as exc:
+            logger.debug(
+                "Cover verdict reload failed", track_id=track_id, error=str(exc)
+            )
+        verdict = {
+            "track_id": str(track_id),
+            "is_cover": bool(track.get("is_cover")),
+            "original_artist": str(track.get("original_cover_artist") or ""),
+            "reason": str(track.get("is_cover_reason") or "already_confirmed"),
+        }
+    else:
+        verdict = {
+            "track_id": str(track_id),
+            "is_cover": bool(result.get("is_cover")),
+            "original_artist": str(result.get("original_artist") or ""),
+            "reason": str(result.get("reason") or ""),
+        }
     logger.info(
         "Cover detection complete for track",
         track_id=track_id,

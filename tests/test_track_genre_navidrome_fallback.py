@@ -30,9 +30,8 @@ class TestTrackGenreAggregationIncludesNavidrome:
         assert "Electronic" in result or "electronic" in result
         assert len(result) >= 1
 
-    def test_external_source_participates_with_navidrome(self, monkeypatch):
-        """An external MB genre must participate in the same vote as the
-        Navidrome tags (it is not discarded)."""
+    def test_online_sources_win_when_they_produce_a_genre(self, monkeypatch):
+        """Navidrome must not change an answer the online sources made."""
         import helpers.config_helpers as ch
         monkeypatch.setattr(ch, "get_config", lambda: {"genres": {"min_weight": 0.0}})
 
@@ -45,10 +44,22 @@ class TestTrackGenreAggregationIncludesNavidrome:
             },
             max_genres=5,
         )
-        # The MB genre is present in the output (weight 0.40).
         assert any(g.lower() == "nu metal" for g in result)
-        # Navidrome tags also present.
-        assert any(g.lower() in ("electronic", "industrial") for g in result)
+        assert not any(
+            g.lower() in ("electronic", "industrial") for g in result
+        ), "Navidrome must only vote when online evidence is empty"
+
+    def test_navidrome_is_used_when_online_evidence_is_empty(self, monkeypatch):
+        import helpers.config_helpers as ch
+        monkeypatch.setattr(ch, "get_config", lambda: {"genres": {"min_weight": 0.0}})
+
+        from services.enrichment.genre_aggregation_service import aggregate_genres
+
+        result = aggregate_genres(
+            {"musicbrainz": [], "navidrome": ["Electronic"]},
+            max_genres=3,
+        )
+        assert any(g.lower() == "electronic" for g in result)
 
     def test_track_stage_builds_source_map_with_navidrome(self, monkeypatch):
         """The track_stage aggregation loop must treat navidrome_genres as a

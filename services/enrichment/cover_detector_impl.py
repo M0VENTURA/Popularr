@@ -1004,6 +1004,36 @@ class CoverDetector:
                     )
                 break
 
+        # A huge work's first page can be mostly covers and a writer's score
+        # recording. Scan another page for the earliest PERFORMED original
+        # (Céline Dion for "My Heart Will Go On") and let it replace the
+        # writer-score fallback. Writers are excluded by the helper.
+        if writer_names and (earliest is None or earliest is writer_earliest):
+            _performed_work = self._earliest_performed_recording(
+                work_mbid,
+                performer,
+                writer_names,
+                max_pages=2,
+            )
+            if _performed_work:
+                _performed_year = _performed_work.get("year")
+                _performed_key = (
+                    f"{int(_performed_year):04d}-99-99"
+                    if isinstance(_performed_year, int)
+                    else "9999-99-99"
+                )
+                if _performed_key <= earliest_key:
+                    earliest = {
+                        "artist": _performed_work["artist"],
+                        "year": _performed_year,
+                        "confidence": "medium",
+                    }
+                    earliest_key = _performed_key
+                    log_unified_safe(
+                        "[COVER_DETECT] original lookup: performed recording "
+                        f"{_performed_work['artist']} for work {work_mbid}"
+                    )
+
         # ⭐ Did we find a PERFORMED original? If so it IS the original artist;
         # the writer-linked fallback below must not replace it with the person
         # who composed the song.
@@ -2698,6 +2728,8 @@ class CoverDetector:
         work_mbid: str,
         performer: str,
         writer_names: list[str],
+        *,
+        max_pages: int = 1,
     ) -> dict[str, Any] | None:
         """The earliest recording of a work by a PERFORMER, not a writer.
 
@@ -2705,28 +2737,56 @@ class CoverDetector:
         original artist. Recordings credited to a writer are kept out of this
         selection — ``_writer_from_cover_work`` still uses them only when the
         work has no performed recording at all.
+
+        ``max_pages`` lets the huge-work path look past the first 100
+        recordings. "My Heart Will Go On" has a writer's score recording on the
+        first page and Céline Dion may not be the earliest *writer-linked*
+        recording, so the writer-only fallback must not win.
         """
         best: dict[str, Any] | None = None
         best_key = "9999-99-99"
-        for rec in self._work_recordings(work_mbid):
-            if not isinstance(rec, dict) or not rec.get("id"):
-                continue
-            if _has_cover_annotation(str(rec.get("title") or "")):
-                continue
-            if _all_cover_work_ids(rec) & {work_mbid}:
-                continue
-            rec_artist = str(
-                artist_from_credit(rec.get("artist-credit", []) or []) or ""
-            ).strip()
-            if not rec_artist or (performer and _same_artist(rec_artist, performer)):
-                continue
-            if any(_same_artist(rec_artist, name) for name in writer_names if name):
-                continue
-            key = _release_date_key(rec)
-            if _undated(key) or key >= best_key:
-                continue
-            best_key = key
-            best = {"artist": rec_artist, "year": year_from_recording(rec)}
+        for page in range(max(1, max_pages)):
+            try:
+                if page == 0:
+                    recordings = self._work_recordings(work_mbid)
+                else:
+                    recordings = self.mb.browse_work_recordings(
+                        work_mbid,
+                        inc="artist-credits+releases",
+                        limit=100,
+                        offset=page * 100,
+                    ) or []
+            except TypeError:
+                break
+            except Exception as exc:
+                logger.debug(
+                    "Performed-recording work page browse failed",
+                    work_mbid=work_mbid,
+                    page=page,
+                    error=str(exc),
+                )
+                break
+            for rec in recordings:
+                if not isinstance(rec, dict) or not rec.get("id"):
+                    continue
+                if _has_cover_annotation(str(rec.get("title") or "")):
+                    continue
+                if _all_cover_work_ids(rec) & {work_mbid}:
+                    continue
+                rec_artist = str(
+                    artist_from_credit(rec.get("artist-credit", []) or []) or ""
+                ).strip()
+                if not rec_artist or (performer and _same_artist(rec_artist, performer)):
+                    continue
+                if any(_same_artist(rec_artist, name) for name in writer_names if name):
+                    continue
+                key = _release_date_key(rec)
+                if _undated(key) or key >= best_key:
+                    continue
+                best_key = key
+                best = {"artist": rec_artist, "year": year_from_recording(rec)}
+            if len(recordings) < 100:
+                break
         return best
 
     def _writer_from_cover_work(
@@ -3143,8 +3203,16 @@ class CoverDetector:
                         "confidence": "low",
                     }
 
-            # A writer-verified match always wins over unverified.
-            best = verified or unverified
+            # A writer-verified match normally beats an unverified one, but a
+            # WRITER'S OWN SCORE RECORDING must not beat an EARLIER performed
+            # original. "My Heart Will Go On" is the reported case: Céline
+            # Dion's 1997 recording often has no writer relation on the
+            # recording, while James Horner's 2004 score recording does, so
+            # "verified wins" returned the composer as the original artist.
+            if verified and unverified:
+                best = unverified if unverified_year < verified_year else verified
+            else:
+                best = verified or unverified
             if best and best.get("year") and performer_earliest_year <= best["year"]:
                 return None
             return best

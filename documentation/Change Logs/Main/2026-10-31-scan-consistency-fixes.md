@@ -127,4 +127,36 @@ performance marker, version compatibility compares recording titles, and
 known to be an alternate rendition. Forced/rescans query the remix title
 instead.
 
+## Cover/Remaster markers and source refresh
+
+A source column containing only `Cover`/`Remaster` was treated as already
+fetched, so the provider genre call was skipped and a cover could end up with
+only markers. Marker-only lists now count as missing evidence and are
+re-fetched. Navidrome is now a FALLBACK source: online sources decide whenever
+they produce a musical genre; Navidrome is consulted only when they produce
+none. Its affiliation markers are stripped before any vote (Navidrome echoes
+the tags this pipeline wrote), and a stale `Remaster` in the stored `genres`
+display list is not reused as fresh marker evidence. `Cover` remains an
+intercepted marker appended outside the genre vote.
+
+## VA albums with no MusicBrainz match
+
+ListenBrainz was only retried by title/artist when a recording MBID existed but
+returned zero. A VA compilation with no MusicBrainz release match has no
+recording MBID at all, so every track stayed at `LB: 0`. The title/artist
+fallback now runs for those rows too. The candidate search was also raised from
+20 to 100 recordings: MusicBrainz ranks duplicate/compilation recordings above
+the canonical one, and the recording carrying the real ListenBrainz audience
+can sit past the first page (measured on "Scar Tissue": the 2.6M-listen
+recording was outside the first 20).
+
+## My Heart Will Go On
+
+The title search preferred a writer-verified recording over an earlier
+performed one. Céline Dion's 1997 recording often has no writer relation on the
+recording, while James Horner's 2004 score recording does, so the composer won.
+`_find_original_recording` now compares years first and uses writer
+verification only as a tie-break at the same date.
+
+
 

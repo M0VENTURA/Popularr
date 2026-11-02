@@ -879,33 +879,32 @@ def _aggregate_genres_v2(
     )
 
 
-def aggregate_genres(
+def _split_navidrome_sources(
     source_map: dict[str, Any],
-    max_genres: int = 2,
-    context_title: str = "",
-    context_album: str = "",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Separate online evidence from Navidrome's file-tag echo.
+
+    Navidrome is a LOW-AUTHORITY fallback, not a peer of MusicBrainz/Discogs/
+    ListenBrainz. It must not change an answer the online sources already made.
+    """
+    online: dict[str, Any] = {}
+    navidrome: dict[str, Any] = {}
+    for key, value in (source_map or {}).items():
+        source = str(key or "").split("@", 1)[0].strip().casefold()
+        target = navidrome if source == "navidrome" else online
+        target[key] = value
+    return online, navidrome
+
+
+def _aggregate_from_sources(
+    source_map: dict[str, Any],
+    *,
+    max_genres: int,
+    context_title: str,
+    context_album: str,
     nav_genres: Any = None,
 ) -> list[str]:
-    """Top genres for one track or album.
-
-    Two engines, one switch (``genres.selection.enabled``):
-
-    * **canonical (v2, default)** — ``services/enrichment/genre_selection.py``.
-      Classifies every value, weights evidence by entity level, condenses the
-      hierarchy, and requires each position to earn its place.
-    * **legacy** — the vote-counting path below, kept intact so the switch is a
-      real way back rather than a promise.
-
-    The filter-tag append is shared: Live/Cover/Acoustic/Christmas markers are
-    not genres and must survive either way.
-
-    ⚠️ Callers SHOULD declare an entity level with the ``source@entity`` key
-    convention (``"lastfm@track"``, ``"musicbrainz@album"``, ``"wikidata@artist"``).
-    A bare source key is treated as ``track``, which is both the previous
-    behaviour and usually the truth — but it means a caller passing pooled
-    artist data under a bare key will have it weighted as the most reliable
-    evidence rather than as support.
-    """
+    """Run one engine over one evidence map."""
     if _selection_engine_v2_enabled():
         v2 = _aggregate_genres_v2(
             source_map,
@@ -923,6 +922,68 @@ def aggregate_genres(
     nav_keys = _normalize_nav_keys(nav_genres)
     top_genres = _rank_genres(votes, spellings, source_hits, max_genres=max_genres, nav_keys=nav_keys)
     return _append_extra_genres(top_genres, context_title, context_album, intercepted_filters)
+
+
+def aggregate_genres(
+    source_map: dict[str, Any],
+    max_genres: int = 2,
+    context_title: str = "",
+    context_album: str = "",
+    nav_genres: Any = None,
+) -> list[str]:
+    """Top genres for one track or album.
+
+    Two engines, one switch (``genres.selection.enabled``):
+
+    * **canonical (v2, default)** — ``services/enrichment/genre_selection.py``.
+      Classifies every value, weights evidence by entity level, condenses the
+      hierarchy, and requires each position to earn its place.
+    * **legacy** — the vote-counting path below, kept intact so the switch is a
+      real way back rather than a promise.
+
+    ⭐ NAVIDROME IS A FALLBACK, NOT A VOTER. It serves the tags of the files this
+    pipeline writes, so it must never change a result the online sources
+    already produced. It is consulted only when the online sources yield no
+    musical genre at all; otherwise its low-weight tie-breaker role belongs to
+    ``get_top_genres_with_navidrome``.
+
+    ⚠️ Callers SHOULD declare an entity level with the ``source@entity`` key
+    convention (``"lastfm@track"``, ``"musicbrainz@album"``, ``"wikidata@artist"``).
+    A bare source key is treated as ``track``, which is both the previous
+    behaviour and usually the truth — but it means a caller passing pooled
+    artist data under a bare key will have it weighted as the most reliable
+    evidence rather than as support.
+    """
+    online_map, navidrome_map = _split_navidrome_sources(source_map)
+    if online_map:
+        online_result = _aggregate_from_sources(
+            online_map,
+            max_genres=max_genres,
+            context_title=context_title,
+            context_album=context_album,
+            nav_genres=nav_genres,
+        )
+        if any(
+            genre and not is_track_affiliation_tag(genre)
+            for genre in online_result
+        ):
+            return online_result
+        # Online evidence was empty or markers-only: let Navidrome break the
+        # tie / provide the missing musical evidence.
+        return _aggregate_from_sources(
+            {**online_map, **navidrome_map},
+            max_genres=max_genres,
+            context_title=context_title,
+            context_album=context_album,
+            nav_genres=nav_genres,
+        )
+    return _aggregate_from_sources(
+        navidrome_map,
+        max_genres=max_genres,
+        context_title=context_title,
+        context_album=context_album,
+        nav_genres=nav_genres,
+    )
 
 
 def get_top_genres_with_navidrome(

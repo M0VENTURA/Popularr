@@ -572,10 +572,13 @@ def _track_affiliation_markers(track: dict[str, Any]) -> list[str]:
         if value in (1, True, "1", "true", "True"):
             _add(marker)
 
-    # The track's OWN source columns. ``genres`` is deliberately included: it is
-    # what the track stage wrote for this recording before this pass ran.
+    # The track's OWN source columns. ``navidrome_genres`` is deliberately NOT
+    # read: it echoes the file tags this pipeline wrote, so re-reading it would
+    # keep re-applying a marker no provider supplied. ``genres`` is kept for
+    # hand-tagged markers (a user can set "Live" there); the marker list is
+    # deduplicated against the flags above.
     for column in (
-        "genres", "musicbrainz_genres", "manual_genres", "navidrome_genres",
+        "genres", "musicbrainz_genres", "manual_genres",
         "lastfm_tags", "lastfm_genres", "listenbrainz_genres", "discogs_genres",
         "spotify_genres", "essentia_genres", "audiodb_genres", "wikidata_genres",
     ):
@@ -596,6 +599,14 @@ def _track_affiliation_markers(track: dict[str, Any]) -> list[str]:
                 values = [g for g in re.split(r"[,;/\\|]+", text_value) if g]
         for value in values:
             name = str(value).strip()
+            if (
+                column == "genres"
+                and name.casefold() == "remaster"
+            ):
+                # "Remaster" in the stored display list is previous OUTPUT (the
+                # last album blend), not fresh evidence. Keep the marker only
+                # when a provider source or the title/album context supplies it.
+                continue
             if name and name.casefold() in {m.casefold() for m in _AFFILIATION_MARKERS}:
                 _add(name)
 
