@@ -18,6 +18,27 @@ from sqlalchemy.orm import sessionmaker
 from conftest import register_sqlite_regexp_replace
 
 
+def test_year_precision_is_preserved_for_future_release_groups():
+    """A year-only MB date must stay "2026", not become 2026-01-01."""
+    from services.upcoming_releases.musicbrainz_fetcher_service import (
+        _prepare_release_for_persistence,
+    )
+
+    values = _prepare_release_for_persistence(
+        "Artist",
+        {
+            "title": "Album",
+            "first_release_date": "2026",
+            "primary_type": "album",
+        },
+        artist_in_collection=False,
+    )
+
+    assert values is not None
+    assert values["release_date"] == "2026"
+    assert values["release_year"] == 2026
+
+
 @pytest.fixture()
 def mb_fetcher_env(monkeypatch):
     """Fresh SQLite DB with upcoming_releases + tracks tables."""

@@ -211,6 +211,25 @@ and reported 1.28M listeners for a remix whose recording credits E-40 and
 cannot satisfy the request and contributor catalogues cannot substitute the
 original artist's track.
 
+## Queue/search activity across worker processes
+
+Queue events were kept in a per-process in-memory list. The standalone queue
+worker wrote them in its own process, while the web worker serving
+`/api/queue/events` had an empty list (and its log fallback did not include
+`activity.log`). The queue and search viewers now fall back to the shared
+`activity.log`, and the search fallback filters it to `[ACTIVITY] [SEARCH]` /
+`[MANUAL]` lines. Scheduler startup also no longer logs a second
+"Download scheduler started" when the same process calls it twice.
+
+## Upcoming releases only showing a couple of albums
+
+MusicBrainz release-group search returns **year precision** for most future
+releases (`"2026"`). The fetcher expanded that to `"2026-01-01"` before storing
+it, so the page's September→March window treated those rows as past January
+releases. Only the few with exact day dates survived. The stored value now
+keeps the precision MusicBrainz supplied; the route already handles a 4-digit
+release date in its year branch.
+
 ## My Heart Will Go On
 
 The title search preferred a writer-verified recording over an earlier

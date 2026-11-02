@@ -494,6 +494,10 @@ def _tail_queue_log(limit: int = 100) -> list[dict[str, Any]]:
         "[START_DOWNLOAD]",
         "[RETRY_SCHEDULER]",
         "[AUTO_DISCOVERY]",
+        # The queue worker is a separate process: its events land in the
+        # shared activity log, not in this process's in-memory event list.
+        "[ACTIVITY]",
+        "[DOWNLOAD]",
         "Soulseek",
         "slskd",
         "download_queue",
@@ -518,7 +522,7 @@ def _tail_queue_log(limit: int = 100) -> list[dict[str, Any]]:
             reverse=True,
         )
         fallback_candidates = []
-        for name in ("unified_scan.log", "info.log"):
+        for name in ("unified_scan.log", "info.log", "activity.log"):
             base = os.path.join(log_dir, name)
             fallback_candidates.extend(_glob.glob(base + "*"))
         fallback_candidates.sort(
@@ -691,7 +695,8 @@ def _tail_search_log(limit: int = 100) -> list[dict[str, Any]]:
 
         log_dir = resolve_log_dir()
         candidates = sorted(
-            _glob.glob(os.path.join(log_dir, "search.log") + "*"),
+            _glob.glob(os.path.join(log_dir, "search.log") + "*")
+            + _glob.glob(os.path.join(log_dir, "activity.log") + "*"),
             key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
             reverse=True,
         )
@@ -710,6 +715,11 @@ def _tail_search_log(limit: int = 100) -> list[dict[str, Any]]:
                     line = line.strip()
                     if not line:
                         continue
+                    # activity.log also carries queue/import/infrastructure
+                    # lines; this fallback is only for SEARCH events.
+                    if "activity.log" in os.path.basename(path):
+                        if "[ACTIVITY] [SEARCH]" not in line and "[MANUAL]" not in line:
+                            continue
                     if any(n in line for n in (
                         "APScheduler", "registered ", "job store", "parameters:",
                         "job_state", "next_run_time", "Binary object",

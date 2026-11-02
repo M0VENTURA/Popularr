@@ -23,6 +23,11 @@ def run_due_tasks() -> dict[str, int]:
 
 def start_scheduler() -> dict[str, Any]:
     global _scheduler
+    if _scheduler["running"]:
+        # Hypercorn workers and app factories can call this more than once per
+        # process; the second call is not another scheduler.
+        logger.debug("Download retry scheduler already running")
+        return {"success": True, "message": "already running"}
     _scheduler["running"] = True
     logger.info("Download scheduler started")
     return {"success": True, "message": "started"}

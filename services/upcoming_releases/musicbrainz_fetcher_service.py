@@ -1245,11 +1245,17 @@ def _prepare_release_for_persistence(
     if not cleaned_artist or not cleaned_album:
         return None
 
-    normalised_release_date = _normalize_release_date(
+    # ⚠️ Preserve the PRECISION MusicBrainz returned. Most future release
+    # groups only carry a year ("2026"); expanding that to "2026-01-01" made the
+    # page's September→March window treat it as a past January release, so a
+    # global pass that found thousands of 2026 albums persisted only the few
+    # with exact day dates. The route already has a LENGTH(release_date)=4
+    # branch; it needs the year kept as a year.
+    release_date = _parse_release_date(
         release.get("first_release_date")
     )
 
-    if not normalised_release_date:
+    if not release_date:
         return None
 
     release_group_mbid = str(
@@ -1267,9 +1273,9 @@ def _prepare_release_for_persistence(
     return {
         "artist": cleaned_artist,
         "album": cleaned_album,
-        "release_date": normalised_release_date,
+        "release_date": release_date,
         "release_year": _release_year(
-            normalised_release_date
+            release_date
         ),
         "source": SOURCE_NAME,
         "primary_type": primary_type,
