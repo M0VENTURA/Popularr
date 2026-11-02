@@ -177,6 +177,33 @@
   background-color: rgba(220, 53, 69, 0.12);
 }
 
+/* ── Log source / activity <select> ────────────────────────────────────────
+   Native select controls and their popup option lists are painted by the OS,
+   which can be a LIGHT theme even while the app is dark. The app's light text
+   then lands on the native popup's white background (and the closed control
+   can inherit a low-contrast native colour too). Pin both the control and
+   every option to the app surfaces so the label is readable in either OS
+   theme. */
+#logSelector,
+#activityCategoryFilter {
+  color-scheme: dark;
+  background-color: var(--secondary-bg, #212529) !important;
+  color: var(--text-primary, #f8f9fa) !important;
+  border-color: var(--border-color, #495057) !important;
+}
+
+#logSelector option,
+#activityCategoryFilter option {
+  background-color: var(--secondary-bg, #212529) !important;
+  color: var(--text-primary, #f8f9fa) !important;
+}
+
+#logSelector option:checked,
+#activityCategoryFilter option:checked {
+  background-color: var(--accent-color, #0d6efd) !important;
+  color: #ffffff !important;
+}
+
 .log-level-critical {
   font-weight: 800;
 }

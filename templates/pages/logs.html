@@ -19,7 +19,7 @@
     <!-- Controls Row -->
     <div class="mb-3 d-flex flex-wrap align-items-center justify-content-between gap-2 flex-shrink-0">
         <div class="d-flex align-items-center gap-2 flex-wrap">
-            <select id="logSelector" class="form-select form-select-sm" style="min-width: 180px; max-width: 300px; font-weight: 600;">
+            <select id="logSelector" class="form-select form-select-sm bg-dark text-light border-secondary" style="min-width: 180px; max-width: 300px; font-weight: 600;">
                 {% for f in log_files %}
                 <option value="{{ f.name }}" data-path="{{ f.path }}">{{ f.name }} ({{ '{:.1f}'.format(f.size / 1024) }} KB)</option>
                 {% endfor %}
