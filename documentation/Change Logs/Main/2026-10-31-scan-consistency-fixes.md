@@ -198,6 +198,19 @@ It covers the popularity/full, album, artist, library, and Navidrome start
 routes. A second click gets “A scan is already running”; the OS releases the
 lock automatically if a worker dies.
 
+## Remix album with a plain recording title
+
+"Take a Look Around" on Limp Bizkit's *New Old Songs* has a plain release and
+recording title, so `resolve_performance_title()` could not see a version
+marker. Last.fm then matched the studio hit / the primary artist's catalogue
+and reported 1.28M listeners for a remix whose recording credits E-40 and
+8-Ball.
+
+`track_stage` now raises `_alt_rendition` when the ALBUM type is
+`album+remix`. Every Last.fm path uses that flag, so a plain studio recording
+cannot satisfy the request and contributor catalogues cannot substitute the
+original artist's track.
+
 ## My Heart Will Go On
 
 The title search preferred a writer-verified recording over an earlier

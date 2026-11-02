@@ -2005,8 +2005,18 @@ def process_track(
                 or is_live_or_alternate_track_title(str(raw_title or title or ""))
             )
 
-            _alt_rendition = _is_alternate_performance_title(
-                _as_str(effective_track.get("musicbrainz_title") or "")
+            _album_is_remix = _album_type_indicates_remix(
+                track, album_context, album_result
+            )
+            _alt_rendition = bool(
+                _is_alternate_performance_title(
+                    _as_str(effective_track.get("musicbrainz_title") or "")
+                )
+                # A remix ALBUM can list a remix under a plain recording title
+                # ("Take a Look Around" on New Old Songs). The release type is
+                # then the only identity evidence; without it Last.fm matched
+                # the studio hit's ~1.3M listeners.
+                or _album_is_remix
             )
 
             if isrc.startswith("[") and isrc.endswith("]"):
