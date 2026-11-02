@@ -83,6 +83,23 @@ def _track(title, raw_score, *, track_id=None, disc=None, **overrides):
 
 
 class TestSameTitleOnAnotherDiscIsNotLocked:
+    def test_a_compilation_track_is_not_a_global_lock_candidate(self):
+        """A VA/compilation track is rated per track artist, not album artist."""
+        from services.popularity.scan_stage_runner import _compute_global_5star_locked_ids
+
+        results = [
+            _track(
+                "Battery",
+                90.0,
+                track_id="comp-1",
+                is_compilation=True,
+                artist="Various Artists",
+            )
+        ]
+        assert _compute_global_5star_locked_ids(
+            "Various Artists", results, {}
+        ) == set()
+
     def test_a_weaker_same_titled_track_does_not_inherit_the_lock(self):
         """THE REGRESSION — the Dactylis Glomerata case."""
         from services.popularity.scan_stage_runner import _compute_global_5star_locked_ids

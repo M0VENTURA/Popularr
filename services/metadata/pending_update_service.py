@@ -164,7 +164,7 @@ def stash_album_recommendations(
         session.commit()
 
     logger.info(
-        "Stashed MusicBrainz recommendations for review",
+        "[BACKGROUND_METADATA] Stashed MusicBrainz recommendations for review",
         artist=artist, album=album, stashed=stashed, cleared=cleared,
     )
     return {"stashed": stashed, "cleared": cleared, "reason": ""}

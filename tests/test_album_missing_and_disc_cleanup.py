@@ -352,6 +352,7 @@ class TestAPersistedRowNeverKeepsTheAlbumArtist:
         )
 
         assert any(
-            name == "Refreshed stale missing-track artists" and kw.get("refreshed") == 1
+            name == "[BACKGROUND_METADATA] Refreshed stale missing-track artists"
+            and kw.get("refreshed") == 1
             for name, kw in calls
         ), "a silent repair leaves the next report unanswerable"

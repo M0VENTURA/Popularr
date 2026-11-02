@@ -3150,6 +3150,36 @@ def process_track(
                 context_title=_as_str(effective_track.get("title")),
                 context_album=_as_str(album_context.get("album"))
             )
+            # ⭐ A track must not end up with ONLY an edition/performance
+            # marker ("Cover, Remaster"). If every sourced genre was filtered
+            # out, inherit the track artist's dominant musical genres instead
+            # of letting the marker become the album default. ``Remaster`` is
+            # an attribute, not a genre.
+            _musical = [
+                g for g in (aggregated or [])
+                if not is_track_affiliation_tag(g)
+            ]
+            if not _musical:
+                _genre_fallback_artist = _as_str(
+                    effective_track.get("artist")
+                    or effective_track.get("album_artist")
+                    or track.get("artist")
+                    or track.get("album_artist")
+                ).strip()
+                _fallback_genres = _artist_dominant_genres(
+                    _genre_fallback_artist,
+                    max_genres=_genre_track_limit(),
+                ) if _genre_fallback_artist else []
+                if _fallback_genres:
+                    aggregated = list(dict.fromkeys(
+                        [*_fallback_genres, *(aggregated or [])]
+                    ))
+                    logger.debug(
+                        "Track genres had no musical entry — inherited from artist",
+                        track_id=track_id,
+                        artist=_genre_fallback_artist,
+                        added=_fallback_genres,
+                    )
             # ⚠️ The album tag sync OWNS ``genres`` during a scan: it runs after
             # this stage and replaces the column with the album blend (or each
             # various-artists track's own list). Writing this stage's list

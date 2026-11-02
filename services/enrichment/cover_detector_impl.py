@@ -752,55 +752,40 @@ class CoverDetector:
                 if not base_id:
                     continue
                 # A writer's own earliest recording is the normal original of
-                # a song (Billy Joel sings the song he wrote). Search by the
-                # base title + writer first; fall back to the base work's
-                # recording page.
+                # a song (Billy Joel sings the song he wrote). The base work's
+                # own recording pages are checked first; a title search is only
+                # a fallback for a work whose browse returned nothing.
                 base_title, base_writers = self._work_writers(base_id)
                 base_title = base_title or str(base.get("title") or "").strip()
-                for _base_writer in (base_writers or [])[:3]:
-                    _writer_name = str(_base_writer.get("name") or "").strip()
-                    if not _writer_name:
-                        continue
-                    _searched_base = self._find_original_recording(
-                        base_title,
-                        _writer_name,
-                        album_artist=performer,
-                        track_year=None,
+
+                # The base work's own recordings are the authoritative original
+                # set. Prefer a recording by one of the base work's WRITERS
+                # (Billy Joel performing "We Didn't Start the Fire"), before
+                # falling back to the earliest recording of the work. A title
+                # search can surface a later cover credited with the writer
+                # relation — Elton John Band's version — as the "original".
+                _writer_original = self._earliest_writer_recording(
+                    base_id,
+                    base_writers,
+                    performer=performer,
+                    exclude_mbid=exclude_mbid,
+                    max_pages=2,
+                )
+                if _writer_original and not _same_artist(
+                    str(_writer_original.get("artist") or ""), performer
+                ):
+                    log_unified_safe(
+                        "[COVER_DETECT] original lookup: derivative work "
+                        f"{work_mbid} based on {base_id} → "
+                        f"{_writer_original.get('artist')} (writer recording)"
                     )
-                    if (
-                        _searched_base
-                        and _searched_base.get("artist")
-                        and not _same_artist(
-                            str(_searched_base.get("artist") or ""), performer
-                        )
-                    ):
-                        # A low-confidence result is still trustworthy when the
-                        # candidate IS the base work's writer (e.g. Billy Joel
-                        # performing his own song): MusicBrainz does not always
-                        # repeat writer relations on every recording.
-                        _is_base_writer = any(
-                            _same_artist(
-                                str(_searched_base.get("artist") or ""),
-                                str(_bw.get("name") or ""),
-                            )
-                            for _bw in (base_writers or [])
-                            if _bw.get("name")
-                        )
-                        if (
-                            str(_searched_base.get("confidence") or "") != "low"
-                            or _is_base_writer
-                        ):
-                            log_unified_safe(
-                                "[COVER_DETECT] original lookup: derivative work "
-                                f"{work_mbid} based on {base_id} → "
-                                f"{_searched_base.get('artist')}"
-                            )
-                            return {
-                                **_searched_base,
-                                "confidence": "medium",
-                                "work": base_title,
-                                "source": "musicbrainz_work_based_on",
-                            }
+                    return {
+                        **_writer_original,
+                        "confidence": "medium",
+                        "work": base_title,
+                        "source": "musicbrainz_work_based_on",
+                    }
+
                 base_original = self._earliest_across_pages(
                     {base_id}, performer=performer, exclude_mbid=exclude_mbid,
                     max_pages=2,
@@ -819,6 +804,47 @@ class CoverDetector:
                         "work": base_title,
                         "source": "musicbrainz_work_based_on",
                     }
+
+                for _base_writer in (base_writers or [])[:3]:
+                    _writer_name = str(_base_writer.get("name") or "").strip()
+                    if not _writer_name:
+                        continue
+                    _searched_base = self._find_original_recording(
+                        base_title,
+                        _writer_name,
+                        album_artist=performer,
+                        track_year=None,
+                    )
+                    if (
+                        _searched_base
+                        and _searched_base.get("artist")
+                        and not _same_artist(
+                            str(_searched_base.get("artist") or ""), performer
+                        )
+                    ):
+                        # A derivative work's base is a different work; only a
+                        # recording by one of ITS writers is the original. A
+                        # writer RELATION on a later cover is not enough.
+                        _is_base_writer = any(
+                            _same_artist(
+                                str(_searched_base.get("artist") or ""),
+                                str(_bw.get("name") or ""),
+                            )
+                            for _bw in (base_writers or [])
+                            if _bw.get("name")
+                        )
+                        if _is_base_writer:
+                            log_unified_safe(
+                                "[COVER_DETECT] original lookup: derivative work "
+                                f"{work_mbid} based on {base_id} → "
+                                f"{_searched_base.get('artist')}"
+                            )
+                            return {
+                                **_searched_base,
+                                "confidence": "medium",
+                                "work": base_title,
+                                "source": "musicbrainz_work_based_on",
+                            }
 
         recordings = self._work_recordings(work_mbid)
         if not recordings:
@@ -2474,6 +2500,96 @@ class CoverDetector:
             if best:
                 return best
         return None
+
+    def _earliest_writer_recording(
+        self,
+        work_id: str,
+        writers: list[dict[str, str]],
+        *,
+        performer: str,
+        exclude_mbid: str = "",
+        max_pages: int = 2,
+    ) -> dict[str, Any] | None:
+        """Earliest recording of *work_id* performed by one of its writers.
+
+        This is the derivative-work case's strongest signal: the base work's
+        writer performing it is the original, even if a later cover carries a
+        writer relation and a title search ranks it first. The scan is bounded
+        to a couple of work pages; a work whose original is not on those pages
+        falls through to ``_earliest_across_pages``.
+        """
+        writer_names = [
+            str(w.get("name") or "").strip()
+            for w in (writers or [])
+            if str(w.get("name") or "").strip()
+        ]
+        if not writer_names:
+            return None
+
+        best: dict[str, Any] | None = None
+        best_key = "9999-99-99"
+        pages_read = 0
+        for page in range(max_pages):
+            try:
+                if page == 0:
+                    recordings = self._work_recordings(work_id)
+                else:
+                    recordings = self.mb.browse_work_recordings(
+                        work_id,
+                        inc="artist-credits+releases",
+                        limit=100,
+                        offset=page * 100,
+                    ) or []
+            except TypeError:
+                break
+            except Exception as exc:
+                logger.debug(
+                    "Writer-recording work page browse failed",
+                    work_mbid=work_id,
+                    page=page,
+                    error=str(exc),
+                )
+                break
+            pages_read += 1
+            for rec in recordings:
+                if not isinstance(rec, dict) or not rec.get("id"):
+                    continue
+                if exclude_mbid and str(rec.get("id")) == exclude_mbid:
+                    continue
+                if _has_cover_annotation(str(rec.get("title") or "")):
+                    continue
+                if _all_cover_work_ids(rec) & {work_id}:
+                    continue
+                name = str(
+                    artist_from_credit(rec.get("artist-credit", []) or []) or ""
+                ).strip()
+                if not name or is_track_artist_placeholder(name):
+                    continue
+                if performer and _same_artist(name, performer):
+                    continue
+                if not any(_same_artist(name, writer) for writer in writer_names):
+                    continue
+                key = _release_date_key(rec)
+                if _undated(key):
+                    continue
+                if best is None or key < best_key:
+                    best_key = key
+                    best = {
+                        "artist": name,
+                        "year": year_from_recording(rec),
+                        "confidence": "medium",
+                    }
+            if len(recordings) < 100:
+                break
+
+        logger.debug(
+            "Writer-recording original lookup",
+            work_mbid=work_id,
+            writers=writer_names,
+            pages=pages_read,
+            result=(best or {}).get("artist"),
+        )
+        return best
 
     def _earliest_across_pages(
         self,

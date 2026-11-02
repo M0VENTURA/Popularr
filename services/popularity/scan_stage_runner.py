@@ -1565,6 +1565,13 @@ def _lock_identity(track: dict[str, Any]) -> str:
     return "title:" + str(track.get("title") or "").strip().lower()
 
 
+def _lock_flag(value: Any) -> bool:
+    """Interpret DB-ish booleans without treating the string ``"0"`` as true."""
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _compute_global_5star_locked_ids(artist: str, all_results: list[dict[str, Any]], options: dict[str, Any]) -> set[str]:
     """The artist's catalogue-top track IDENTITIES, for the 5★ lock.
 
@@ -1583,6 +1590,13 @@ def _compute_global_5star_locked_ids(artist: str, all_results: list[dict[str, An
     eligible: list[dict[str, Any]] = []
     for _tr in all_results:
         if bool(_tr.get("exclude_from_stats")) or bool(_tr.get("is_live")):
+            continue
+        # A compilation is rated against each track artist's catalogue, so a
+        # lock computed from the album artist's catalogue ("Various Artists")
+        # is meaningless. The finalise stage deliberately refuses to honour a
+        # 5★ lock on a compilation; selecting one here only produced the
+        # contradictory "GLOBAL 5★ LOCKED" followed by a 3★ result.
+        if _lock_flag(_tr.get("is_compilation")):
             continue
         _raw = float(_tr.get("_raw_combined") or 0)
         if _raw <= 0:
@@ -2348,15 +2362,31 @@ def run_scan(
             # 4★. A studio-album track therefore cannot reach 5★ in this mode.
             # Logging "LOCKED" without saying so made the log contradict the
             # stored rating.
-            _lock_applies = not bool(options.get("popularity_only"))
+            _lock_applies = (
+                not bool(options.get("popularity_only"))
+                and not bool(is_compilation)
+                and not bool(is_va_compilation)
+            )
             for _tr in album_results:
                 if _lock_identity(_tr) in _locked_set:
+                    if not _lock_applies:
+                        # Never set the flag when finalise will refuse it. The
+                        # old code still logged (and stored) a lock that the
+                        # compilation rules then overrode.
+                        if is_compilation or is_va_compilation:
+                            log_unified(
+                                f"[scan_runner] '{_tr.get('title')}' → catalog top "
+                                "(5★ lock NOT applied: compilation rated per track artist)"
+                            )
+                        elif bool(options.get("popularity_only")):
+                            log_unified(
+                                f"[scan_runner] '{_tr.get('title')}' → catalog top "
+                                "(5★ lock NOT applied: popularity-only scan caps regular albums at 4★)"
+                            )
+                        continue
                     _tr["_global_5star_locked"] = True
                     if not bool(_tr.get("exclude_from_stats")) and not bool(_tr.get("is_live")):
-                        if _lock_applies:
-                            log_unified(f"[scan_runner] '{_tr.get('title')}' → GLOBAL 5★ LOCKED (raw {float(_tr.get('_raw_combined') or 0):.1f}, catalog top)")
-                        else:
-                            log_unified(f"[scan_runner] '{_tr.get('title')}' → catalog top (5★ lock NOT applied: popularity-only scan caps regular albums at 4★)")
+                        log_unified(f"[scan_runner] '{_tr.get('title')}' → GLOBAL 5★ LOCKED (raw {float(_tr.get('_raw_combined') or 0):.1f}, catalog top)")
 
         try:
             _sd = get_config().get("single_detection") or {}
@@ -2434,7 +2464,15 @@ def run_scan(
 
         try:
             _all_artist_results = _artist_scan_results.get(artist, [])
-            if len(_all_artist_results) >= 5:
+            # A VA/compilation pending album has no artist-wide catalogue to
+            # lock against: its tracks are rated per resolved track artist in
+            # finalise. Do not announce a "Various Artists" pre-pass lock.
+            _has_non_compilation_album = any(
+                not _lock_flag(p.get("is_compilation"))
+                and not _lock_flag(p.get("is_va_compilation"))
+                for p in pending
+            )
+            if len(_all_artist_results) >= 5 and _has_non_compilation_album:
                 _locked_ids = _compute_global_5star_locked_ids(artist, _all_artist_results, options)
                 if _locked_ids:
                     _artist_5star_locked_ids[artist] = _locked_ids
@@ -2446,6 +2484,11 @@ def run_scan(
         # The cover pass below needs them: they are the albums whose tracks
         # can feed a genre playlist, and therefore the playlists that owe a
         # cover check.
+        if pending:
+            log_unified(
+                f"[GLOBAL_RECONCILIATION] Cross-album caps and locks for "
+                f"'{artist}' ({len(pending)} pending album(s))"
+            )
         _updated_albums: list[str] = []
         _previous_genres_by_album: dict[str, set[str]] = {}
         _finalise_timings: dict[str, float] = {}

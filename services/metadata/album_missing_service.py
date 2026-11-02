@@ -1253,7 +1253,7 @@ def _persist_missing_tracks(artist: str, album: str, missing: list[dict[str, Any
         # than wonder why the queue is still searching for "Various Artists"
         # after a scan.
         logger.info(
-            "Refreshed stale missing-track artists",
+            "[BACKGROUND_METADATA] Refreshed stale missing-track artists",
             artist=artist,
             album=album,
             refreshed=refreshed,

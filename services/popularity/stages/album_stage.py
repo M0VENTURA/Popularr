@@ -510,7 +510,7 @@ def _mb_type_is_corroborated(
     except Exception:
         bound_release_group = ""
     if bound_release_group:
-        Logger.info(
+        Logger.debug(
             "[ENRICH] MusicBrainz secondary type accepted — album is bound to "
             "its release group by MBID",
             musicbrainz_type=mb_type,
@@ -680,7 +680,7 @@ def _fetch_album_art_with_fallback(
     clean_album = _sanitize_release_name(album)
     context = {"artist": artist, "album": album}
 
-    Logger.info("[ENRICH] album-art pipeline started", **context)
+    Logger.debug("[ENRICH] album-art pipeline started", **context)
 
     _cached_blob = None
     _cached_source = ""

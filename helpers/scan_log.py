@@ -240,6 +240,14 @@ def scan_completed(
 # Heartbeat
 # ---------------------------------------------------------------------------
 
+def _format_elapsed(seconds: float) -> str:
+    total = max(0, int(seconds))
+    minutes, secs = divmod(total, 60)
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
 class ScanHeartbeat:
     """One coordinator heartbeat for quiet, long-running work.
 
@@ -247,6 +255,11 @@ class ScanHeartbeat:
     operation remains active. It never decides that work is "stalled" — it only
     proves activity monitoring is alive. ``stop()`` is safe from any thread and
     from the completion/cancellation/failure paths.
+
+    ``quiet`` is the time since the last visible progress; ``total`` is the
+    lifetime of this heartbeat. They are reported separately because the old
+    line labelled the quiet interval as "elapsed", so a scan that had run for
+    minutes appeared to reset to 15s on every heartbeat.
     """
 
     def __init__(
@@ -261,7 +274,8 @@ class ScanHeartbeat:
             1.0, float(interval or cfg["progress"]["heartbeat_seconds"] or 15)
         )
         self._activity = activity
-        self._last_progress = time.monotonic()
+        self._started_at = time.monotonic()
+        self._last_progress = self._started_at
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -298,10 +312,13 @@ class ScanHeartbeat:
             label = str(label or "working")
             if not label.lower().startswith(("waiting", "checking", "still")):
                 label = f"checking {label}"
+            total = time.monotonic() - self._started_at
             log_event(
                 "scan.heartbeat",
-                f"Still {label}... · elapsed {int(quiet)}s",
+                f"Still {label}... · no new result for {int(quiet)}s "
+                f"· total elapsed {_format_elapsed(total)}",
                 quiet_seconds=round(quiet, 1),
+                elapsed_seconds=round(total, 1),
                 activity=label,
             )
             self._last_progress = time.monotonic()

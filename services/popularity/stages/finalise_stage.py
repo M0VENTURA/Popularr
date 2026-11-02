@@ -113,7 +113,7 @@ from sqlalchemy import bindparam, text
 from db.engine import db_session
 from db.utils import row_get
 from helpers.config_helpers import get_standout_config
-from helpers.logging_config import log_unified
+from helpers.logging_config import log_unified, log_scan_detail
 from helpers.normalization_service import normalize_unicode_punctuation
 from services.catalog.album_classification_service import (
     METAL_GENRE_FAMILY,
@@ -1695,7 +1695,7 @@ def _assign_stars(
                     _online_detail.get("percentile") or 0.0
                 )
                 track["_compilation_online_source"] = str(_online_detail.get("source") or "")
-                logger.info(
+                logger.debug(
                     "Compilation track rated on artist's online catalogue",
                     title=track.get("title"),
                     artist=_compilation_track_artist(track),
@@ -5605,6 +5605,8 @@ def _log_scan_weights(
     album: str,
     album_model: dict[str, Any],
     is_live_album: bool = False,
+    *,
+    detail: bool = False,
 ) -> None:
     try:
         from services.popularity.popularity_config import resolve_weights
@@ -5613,7 +5615,8 @@ def _log_scan_weights(
         era = str(album_model.get("era") or "?")
         reff = float(album_model.get("reff") or 0)
         era_rules = rules.get(era) or {}
-        log_unified(
+        _emit = log_scan_detail if detail else log_unified
+        _emit(
             f"⚖️ WEIGHTS: {str(artist or '').strip()} — {str(album or '').strip()} "
             f"| blend: LF={lf:.2f} LB={lb:.2f} Age={age:.2f} "
             f"| era={era} (R_eff={reff:.2f}, peak≥{peak_min:.2f}, solid≥{solid_min:.2f}) "
@@ -5625,7 +5628,7 @@ def _log_scan_weights(
 
         if is_live_album:
             lr = _live_album_rules()
-            log_unified(
+            _emit(
                 f"🎤 LIVE ALBUM: {str(artist or '').strip()} — {str(album or '').strip()} "
                 f"| mode={lr['mode']} (artist-z driven) "
                 f"| bands: 5★≥{float(lr['artist_z_star5']):.2f} 4★≥{float(lr['artist_z_star4']):.2f} "
@@ -5813,6 +5816,16 @@ def post_album_star_ratings(
     if not album_results:
         return {"star_ratings": 0, "navidrome_synced": 0}
 
+    if provisional:
+        log_unified(
+            f"[RATING_PASS_1] Provisional ratings for '{artist} — {album}' "
+            "(reconciled at the artist boundary)"
+        )
+    elif stars_reconciled:
+        log_unified(
+            f"[RATING_PASS_2] Final reconciled ratings for '{artist} — {album}'"
+        )
+
     # The release verdict is carried on the rows by the scan runner. A single
     # RELEASE (as opposed to an album track that was also issued as a single)
     # has no meaningful album distribution, so it is rated against the artist
@@ -5842,15 +5855,21 @@ def post_album_star_ratings(
             is_compilation = bool(is_compilation or is_va_compilation)
 
         if is_compilation:
-            logger.info(
-                "Compilation detected — rating on per-track-artist catalogues",
-                artist=artist,
-                album=album,
-                va_compilation=bool(is_va_compilation),
-            )
+            if not provisional:
+                log_unified(
+                    f"[COMPILATION] {artist} — {album}: rating each track on "
+                    f"its resolved artist's catalogue"
+                    + (" (VA)" if is_va_compilation else "")
+                )
+            else:
+                logger.debug(
+                    "Compilation detected — provisional pass",
+                    artist=artist, album=album,
+                )
         is_live_album = _detect_live_album(album_results)
         if is_live_album:
-            logger.info(
+            _live_log = logger.debug if provisional else logger.info
+            _live_log(
                 "Live album detected — rating on artist-z",
                 artist=artist, album=album, tracks=len(album_results),
             )
@@ -5904,9 +5923,22 @@ def post_album_star_ratings(
 
         album_model: dict[str, Any] = {}
         try:
-            album_model = _build_album_model(artist, album_results, artist_scores)
+            _model_cache = options.setdefault("_album_model_cache", {})
+            _model_key = (
+                str(artist or "").casefold(),
+                str(album or "").casefold(),
+                tuple(sorted(
+                    str(r.get("track_id") or "") for r in album_results
+                )),
+            )
+            if _model_key in _model_cache:
+                album_model = _model_cache[_model_key]
+            else:
+                album_model = _build_album_model(artist, album_results, artist_scores)
+                _model_cache[_model_key] = album_model
             if album_model.get("has_benchmark"):
-                logger.info(
+                _era_log = logger.debug if provisional else logger.info
+                _era_log(
                     "Album era mapped",
                     artist=artist, album=album, era=album_model.get("era"),
                     m_peak=float(album_model.get("m_peak") or 0),
@@ -5917,14 +5949,32 @@ def post_album_star_ratings(
         except Exception as exc:
             logger.debug("Album model build failed", artist=artist, album=album, error=str(exc))
 
-        _log_scan_weights(artist, album, album_model, is_live_album=is_live_album)
+        _log_scan_weights(
+            artist, album, album_model,
+            is_live_album=is_live_album,
+            detail=provisional,
+        )
 
         compilation_track_artist_scores: dict[str, list[float]] = {}
         compilation_raw_scores: list[float] = []
         if is_compilation:
-            compilation_track_artist_scores = _build_compilation_track_artist_scores(
-                album_results, exclude_album=album
+            # The provisional pass and the artist-boundary reconcile pass rate
+            # the same album. Reuse the per-track-artist catalogue evidence so
+            # the second pass does not repeat DB/online catalogue lookups.
+            _comp_cache = options.setdefault("_compilation_artist_scores_cache", {})
+            _comp_key = (
+                str(album or "").casefold(),
+                tuple(sorted(
+                    str(r.get("track_id") or "") for r in album_results
+                )),
             )
+            if _comp_key in _comp_cache:
+                compilation_track_artist_scores = _comp_cache[_comp_key]
+            else:
+                compilation_track_artist_scores = _build_compilation_track_artist_scores(
+                    album_results, exclude_album=album
+                )
+                _comp_cache[_comp_key] = compilation_track_artist_scores
             compilation_raw_scores = [
                 float(r.get("_raw_combined") or 0)
                 for r in album_results
@@ -6443,6 +6493,7 @@ def post_album_star_ratings(
                     t_conf = str(t.get("single_confidence") or "low").lower()
                     t_title = str(t.get("title") or "Unknown").strip()
                     t_score = float(t.get("popularity_score") or t.get("final_score") or 0)
+                    t_final = float(t.get("final_score") or t_score or 0)
 
                     if t.get("_computed_album_z") is not None:
                         album_z = float(t["_computed_album_z"])
@@ -6476,31 +6527,43 @@ def post_album_star_ratings(
 
                     rows.append({
                         "stars": max(1, min(t_stars, 5)),
-                        "title": t_title[:34],
+                        "title": t_title[:30],
                         "z": album_z,
-                        "score": t_score,
+                        "final": t_final,
+                        "pop": t_score,
                         "lf": _fmt_count(t.get("lastfm_listeners")),
                         "conf": t_conf.upper() if t_conf in ("high", "medium") else "LOW",
                         "note": note,
                     })
 
-                rows.sort(key=lambda r: (-r["stars"], -r["score"]))
+                rows.sort(key=lambda r: (-r["stars"], -r["final"]))
 
                 _header_suffix = " [LIVE]" if is_live_album else ""
                 if is_compilation:
                     _header_suffix += " [COMPILATION: per-track-artist rating]"
-                log_unified("=" * 80)
+                log_unified("=" * 88)
                 log_unified(f"📊 SCAN RESULTS: {str(artist or '').strip()} — {str(album or '').strip()}{_header_suffix} ({len(album_results)} Tracks)")
-                log_unified("=" * 80)
+                log_unified("=" * 88)
                 _z_header = "CAT-Z" if is_compilation else "Z-SCORE"
-                log_unified(f"{'RATING':<7} {'TRACK TITLE':<34} {_z_header:>7} {'SCORE':>6} {'LF LISTENS':>10}  SINGLE CONF")
-                log_unified("-" * 80)
+                log_unified(
+                    f"{'RATING':<7} {'TRACK TITLE':<30} {'FINAL':>6} {'POP':>6} "
+                    f"{_z_header:>7} {'LF LISTENS':>10}  SINGLE CONF"
+                )
+                log_unified(
+                    "FINAL = persisted final_score | POP = album-relative "
+                    "popularity_score | CAT-Z/Z-SCORE = rating context"
+                )
+                log_unified("-" * 88)
                 for r in rows:
                     star_str = "★" * r["stars"] + "☆" * (5 - r["stars"])
-                    log_unified(f"{star_str:<7} {r['title']:<34} {r['z']:>+7.2f} {r['score']:>6.1f} {r['lf']:>10}  {r['conf']}{r['note']}")
-                log_unified("-" * 80)
+                    log_unified(
+                        f"{star_str:<7} {r['title']:<30} {r['final']:>6.1f} "
+                        f"{r['pop']:>6.1f} {r['z']:>+7.2f} {r['lf']:>10}  "
+                        f"{r['conf']}{r['note']}"
+                    )
+                log_unified("-" * 88)
                 log_unified(f"⭐ Distribution: 5★: {star_counts[5]} | 4★: {star_counts[4]} | 3★: {star_counts[3]} | 2★: {star_counts[2]} | 1★: {star_counts[1]}")
-                log_unified("=" * 80)
+                log_unified("=" * 88)
         except Exception as log_exc:
             logger.debug("Album progress log failed", artist=artist, album=album, error=str(log_exc))
 
@@ -7742,13 +7805,17 @@ def run_global_playlist_rebuild(*, reason: str = "manual") -> dict[str, float]:
 # Main entrypoint
 # ---------------------------------------------------------------------------
 
-def _sync_isrc_popularity() -> int:
+def _sync_isrc_popularity() -> tuple[int, list[dict[str, str]]]:
     """Sync popularity stats across tracks sharing the same ISRC **and title**.
 
     Preserves existing album-relative ``final_score`` / ``popularity`` on already
     scored albums (only backfilling unscored rows) while syncing recording-level
     raw signals (``raw_score``, ``lastfm_listeners``, ``listenbrainz_listens``,
     and ``is_single``).
+
+    Returns ``(updated_count, affected_albums)``. The album list lets a forced
+    scan re-rate exactly the albums whose ISRC-derived inputs changed, instead
+    of ending with "will be recalculated next time".
     """
     try:
         with db_session() as session:
@@ -7797,12 +7864,22 @@ def _sync_isrc_popularity() -> int:
                           OR COALESCE(target.is_single, FALSE)
                               IS DISTINCT FROM source.max_single_status
                       )
+                    RETURNING id, album,
+                              COALESCE(NULLIF(album_artist, ''), artist) AS artist
                 """)
             )
-            return max(0, int(result.rowcount or 0))
+            rows = result.fetchall() or []
+            affected: list[dict[str, str]] = []
+            for row in rows:
+                mapping = row._mapping
+                artist = str(mapping.get("artist") or "").strip()
+                album = str(mapping.get("album") or "").strip()
+                if artist and album:
+                    affected.append({"artist": artist, "album": album})
+            return len(rows), affected
     except Exception as exc:
         logger.warning("ISRC popularity sync failed", error=str(exc))
-        return 0
+        return 0, []
 
 
 def finalise_scan(*, results: list[dict[str, Any]], options: dict[str, Any]) -> None:
@@ -8045,13 +8122,75 @@ def finalise_scan(*, results: list[dict[str, Any]], options: dict[str, Any]) -> 
             from services.popularity.scan_scope import global_playlists_deferred
 
             if not global_playlists_deferred():
-                _isrc_updated = _sync_isrc_popularity()
+                _isrc_updated, _isrc_affected = _sync_isrc_popularity()
                 if _isrc_updated:
                     invalidate_genre_playlist_rows()
-                    log_unified(
-                        f"[FINALISE_STAGE] ISRC sync: {_isrc_updated} track(s) updated; "
-                        f"affected star ratings will be recalculated during the next rating pass"
-                    )
+                    if (
+                        options.get("force")
+                        and not options.get("metadata_only")
+                        and _isrc_affected
+                    ):
+                        _isrc_keys = {
+                            (str(item.get("artist") or "").strip(),
+                             str(item.get("album") or "").strip())
+                            for item in _isrc_affected
+                            if str(item.get("artist") or "").strip()
+                            and str(item.get("album") or "").strip()
+                        }
+                        log_unified(
+                            f"ISRC metadata changed for {_isrc_updated} track(s); "
+                            f"recalculating {len(_isrc_keys)} affected album(s)…"
+                        )
+                        _recalculated = 0
+                        _failed = 0
+                        try:
+                            from services.popularity.star_resync_service import (
+                                resync_star_ratings,
+                            )
+
+                            for _isrc_artist, _isrc_album in sorted(_isrc_keys):
+                                try:
+                                    _res = resync_star_ratings(
+                                        artist=_isrc_artist,
+                                        album=_isrc_album,
+                                        write_file_tags=options.get("write_file_tags"),
+                                        sync_navidrome=options.get("sync_navidrome", True),
+                                    )
+                                    if _res.get("ok"):
+                                        _recalculated += int(
+                                            _res.get("changed") or 0
+                                        ) or 1
+                                    else:
+                                        _failed += 1
+                                except Exception as _isrc_rr_exc:
+                                    _failed += 1
+                                    logger.warning(
+                                        "ISRC forced re-rating failed",
+                                        artist=_isrc_artist,
+                                        album=_isrc_album,
+                                        error=str(_isrc_rr_exc),
+                                    )
+                        except Exception as _isrc_resync_exc:
+                            logger.warning(
+                                "ISRC forced re-rating unavailable",
+                                error=str(_isrc_resync_exc),
+                            )
+                        if _failed:
+                            log_unified(
+                                f"ISRC recalculation incomplete: "
+                                f"{_recalculated} recalculated, {_failed} failed"
+                            )
+                        else:
+                            log_unified(
+                                f"ISRC recalculation complete: "
+                                f"{_isrc_updated} track(s), "
+                                f"{len(_isrc_keys)} album(s) re-rated"
+                            )
+                    else:
+                        log_unified(
+                            f"[FINALISE_STAGE] ISRC sync: {_isrc_updated} track(s) updated; "
+                            f"affected star ratings will be recalculated during the next rating pass"
+                        )
                 # Vocalist collections span projects, so they are reconciled
                 # once per scan (not per artist) and only for a real pass.
                 if results:

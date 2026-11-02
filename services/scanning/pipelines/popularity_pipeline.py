@@ -784,7 +784,7 @@ def _run_full_scan_as_artist_pipeline(
                 )
 
                 try:
-                    _isrc_updated = _sync_isrc_popularity()
+                    _isrc_updated, _isrc_affected = _sync_isrc_popularity()
                     if _isrc_updated:
                         invalidate_genre_playlist_rows()
                         log_unified(

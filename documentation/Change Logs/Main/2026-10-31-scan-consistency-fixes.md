@@ -1,0 +1,109 @@
+# Scan consistency fixes
+
+**Date:** 2026-10-31
+**Area:** popularity scan / rating passes / scan log
+**Files:** `services/popularity/scan_stage_runner.py`,
+`services/popularity/stages/finalise_stage.py`,
+`services/popularity/stages/track_stage.py`,
+`services/popularity/stages/album_stage.py`,
+`services/scanning/pipelines/popularity_pipeline.py`,
+`helpers/scan_log.py`,
+`services/metadata/album_missing_service.py`,
+`services/metadata/pending_update_service.py`
+
+## 5★ global pre-pass and compilations
+
+The global catalogue-top pre-pass now excludes compilation rows and does not
+run for a pending VA/compilation album. A compilation is rated against each
+track's resolved artist, so a lock derived from the album artist ("Various
+Artists") can never be honoured by the finalise stage.
+
+The runner also refuses to set `_global_5star_locked` when the lock cannot be
+applied (compilation or popularity-only scan). If a legacy lock is present it
+logs `catalog top (5★ lock NOT applied: ...)` instead of `GLOBAL 5★ LOCKED`.
+This removes the "LOCKED then 3★" contradiction.
+
+## Score columns agree
+
+The SCAN RESULTS table now prints both scores explicitly:
+
+```
+RATING  TRACK TITLE  FINAL  POP  CAT-Z/Z-SCORE  LF LISTENS  SINGLE CONF
+FINAL = persisted final_score | POP = album-relative popularity_score
+```
+
+Previously the table printed `popularity_score` under the generic `SCORE`
+heading, while `[TRACK_RESULT]` printed `final_score`, so the same track
+appeared to have two different values (for example 80.6 vs 71.1).
+
+## Rating passes are named
+
+Two-phase rating is intentional, but the log now says so:
+
+* `[RATING_PASS_1] Provisional ratings ...`
+* `[GLOBAL_RECONCILIATION] Cross-album caps and locks ...`
+* `[RATING_PASS_2] Final reconciled ratings ...`
+
+Provisional `Compilation detected`, album-era, and weights lines are DEBUG;
+the final pass emits the user-facing compilation and weights lines once.
+The provisional pass's album model and per-track-artist catalogue evidence are
+cached in `options` and reused by reconciliation, avoiding duplicate catalogue
+lookups for the same album.
+
+## Forced ISRC recalculation
+
+`_sync_isrc_popularity()` now returns `(updated_count, affected_albums)` using
+`RETURNING`. On a forced scan, the affected albums are re-rated immediately via
+`resync_star_ratings` and the log reports the recalculation. A non-forced scan
+keeps the previous "next rating pass" message.
+
+## Heartbeat wording
+
+`ScanHeartbeat` now reports both clocks:
+
+```
+Still checking MusicBrainz... · no new result for 15s · total elapsed 1m 24s
+```
+
+`quiet_seconds` is no longer labelled `elapsed`. The structured record carries
+`quiet_seconds` and `elapsed_seconds`.
+
+## Genre fallback
+
+If a track's genre aggregation produces only affiliation markers
+(`Cover`, `Remaster`, …), the track stage now inherits the resolved track
+artist's dominant musical genres. This prevents an album default of
+`Remaster` and leaves Leper Messiah with a real musical genre alongside
+`Cover`/`Remaster`.
+
+## Log noise
+
+These moved from INFO/unified to DEBUG:
+
+* `[ENRICH] MusicBrainz secondary type accepted ...`
+* `[ENRICH] album-art pipeline started`
+* `Compilation track rated on artist's online catalogue ...`
+
+Background metadata maintenance lines are now prefixed
+`[BACKGROUND_METADATA]`, so a separate DragonForce job is visibly not part of
+the current album scan.
+
+## Not changed in this pass
+
+* Cover detection pipeline/duplicate lookups (the derivative-work original
+  lookup was fixed below).
+* Navidrome's initial scan + tag-change follow-up ordering.
+* Single-detection source identity for tribute covers (the detector still
+  records `MusicBrainz`/`Discogs` without the release artist identity in the
+  unified line).
+
+## Follow-up: derivative-work original artist
+
+The derivative-work path was returning Elton John Band for Fall Out Boy's
+"We Didn't Start the Fire" because a title search accepted a later cover that
+carried a writer relation. It now checks the **base work's own recordings**
+first and prefers a recording by one of the base work's writers (Billy Joel).
+A title-search result is accepted only when the candidate is actually a base
+work writer. See `_earliest_writer_recording` in
+`services/enrichment/cover_detector_impl.py`.
+

@@ -172,7 +172,7 @@ class TestFinaliseSkipsRunnerHandledArtists:
         monkeypatch.setattr(fs, "_essential_playlists_enabled", lambda opts: True)
         monkeypatch.setattr(fs, "_genre_playlists_active", lambda: False)
         monkeypatch.setattr(fs, "_new_music_playlist_enabled", lambda: False)
-        monkeypatch.setattr(fs, "_sync_isrc_popularity", lambda: 0)
+        monkeypatch.setattr(fs, "_sync_isrc_popularity", lambda: (0, []))
         monkeypatch.setattr(fs, "log_unified", lambda msg: None)
         monkeypatch.setattr(
             fs, "post_album_star_ratings",

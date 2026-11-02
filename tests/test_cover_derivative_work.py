@@ -102,6 +102,36 @@ class TestWorkBaseRelations:
         assert result["source"] == "musicbrainz_work_based_on"
         assert result["work"] == "We Didn’t Start the Fire"
 
+    def test_base_work_writer_recording_beats_a_later_cover(self):
+        """Elton John Band covered the song later; Billy Joel is the base writer."""
+        detector = CoverDetector()
+        detector.mb = type("FakeMB", (), {})()
+        detector._work_base_cache["fob-work"] = [
+            {"id": "billy-work", "title": "We Didn’t Start the Fire"}
+        ]
+        detector._work_writers = lambda work_id: (
+            "We Didn’t Start the Fire",
+            [{"id": "billy", "name": "Billy Joel"}],
+        )
+        detector._work_recordings = lambda work_id, limit=100: [
+            _recording("elton", "Elton John Band", year="2020"),
+            _recording("billy-rec", "Billy Joel", year="1989"),
+        ]
+        detector._earliest_across_pages = lambda *a, **k: {
+            "artist": "Elton John Band", "year": 2020, "confidence": "medium"
+        }
+        detector._find_original_recording = lambda *a, **k: {
+            "artist": "Elton John Band", "year": 2020, "confidence": "medium"
+        }
+
+        result = detector._detect_via_work_id(
+            "fob-work", "Fall Out Boy", exclude_mbid="fob-rec",
+        )
+
+        assert result is not None
+        assert result["artist"] == "Billy Joel"
+        assert result["source"] == "musicbrainz_work_based_on"
+
 
 class TestHugeWorkTitleSearch:
     def test_title_search_finds_the_performed_original(self):
