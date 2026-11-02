@@ -220,6 +220,25 @@ class TestHugeWorkTitleSearch:
         assert result is not None
         assert result["artist"] == "Céline Dion"
 
+    def test_a_writer_alias_contributes_its_band_identity(self):
+        """André Benjamin -> André 3000 alias -> OutKast band."""
+        detector = CoverDetector()
+
+        def _bands(artist_id):
+            if artist_id == "andre":
+                return [{"id": "andre3000", "name": "André 3000", "kind": "alias"}]
+            if artist_id == "andre3000":
+                return [{"id": "outkast", "name": "OutKast", "kind": "band"}]
+            return []
+
+        detector._artist_bands = _bands
+
+        ranked = detector._ranked_writer_candidates(
+            [{"id": "andre", "name": "André Benjamin"}]
+        )
+
+        assert ("outkast", "OutKast") in ranked
+
     def test_title_search_finds_the_performed_original(self):
         detector = CoverDetector()
         detector.mb = type("FakeMB", (), {})()

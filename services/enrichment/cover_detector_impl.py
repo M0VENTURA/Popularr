@@ -2387,13 +2387,31 @@ class CoverDetector:
         band_name: dict[str, str] = {}
         for writer in writers[:4]:
             own: list[tuple[str, str]] = []
-            for linked in self._artist_bands(writer["id"]):
+            linked_names = self._artist_bands(writer["id"])
+            for linked in linked_names:
                 if linked.get("kind") == "alias":
                     aliases.append((linked["id"], linked["name"]))
                 else:
                     own.append((linked["id"], linked["name"]))
                     band_count[linked["id"]] = band_count.get(linked["id"], 0) + 1
                     band_name[linked["id"]] = linked["name"]
+
+            # A writer's stage alias often owns the band membership: André
+            # Benjamin's direct relations do not list OutKast, but his
+            # "André 3000" alias is a member of OutKast. Without this second
+            # hop the original "Hey Ya!" could not be found and the cover
+            # stayed "originally unknown".
+            for linked in linked_names:
+                if linked.get("kind") != "alias":
+                    continue
+                for alias_link in self._artist_bands(linked["id"]):
+                    if alias_link.get("kind") != "band":
+                        continue
+                    own.append((alias_link["id"], alias_link["name"]))
+                    band_count[alias_link["id"]] = (
+                        band_count.get(alias_link["id"], 0) + 1
+                    )
+                    band_name[alias_link["id"]] = alias_link["name"]
             band_lists.append(own)
 
         ordered: list[tuple[str, str]] = []

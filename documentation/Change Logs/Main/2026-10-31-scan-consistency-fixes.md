@@ -158,6 +158,13 @@ as the original. It now compares the earliest recording date of both works: a
 derived work cannot predate its base, so a relation pointing at a later work is
 ignored and the track stays an original.
 
+## Writer aliases and band identities (Hey Ya!)
+
+The writer-candidate graph stopped at the writer's direct relations. André
+Benjamin does not list OutKast directly; his "André 3000" alias does. The
+candidate builder now follows one alias level to its band memberships, so the
+OutKast recording can be found as the original of "Hey Ya!".
+
 ## My Heart Will Go On
 
 The title search preferred a writer-verified recording over an earlier
