@@ -6,6 +6,8 @@ stable service function without importing old helpers directly.
 
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 
 from helpers.logging_config import log_unified
@@ -13,7 +15,11 @@ from helpers.logging_config import log_unified
 logger = structlog.get_logger(__name__)
 
 
-def run_artist_pipeline(artist_name: str, force: bool = False) -> None:
+def run_artist_pipeline(
+    artist_name: str,
+    force: bool = False,
+    **scan_options: Any,
+) -> None:
     """Run the complete scan pipeline for one artist.
 
     Delegates to ``services.scanning.pipeline.run_artist_scan_pipeline``,
@@ -23,7 +29,11 @@ def run_artist_pipeline(artist_name: str, force: bool = False) -> None:
     """
     try:
         from services.scanning.pipeline import run_artist_scan_pipeline
-        run_artist_scan_pipeline(artist_name, force=force)
+        run_artist_scan_pipeline(
+            artist_name,
+            force=force,
+            scan_options=scan_options,
+        )
     except Exception as exc:
         log_unified(f"❌ Artist scan failed for {artist_name}: {exc}")
         logger.error(

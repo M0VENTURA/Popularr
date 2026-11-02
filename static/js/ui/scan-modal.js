@@ -110,6 +110,18 @@
   const DEFAULT_TYPE = 'full';
 
   /**
+   * Advanced FULL-scan stage switches. The checkbox being UNCHECKED means
+   * "skip this stage"; the payload carries the positive `skip_*` flag.
+   */
+  const STAGE_OPTIONS = [
+    { id: 'scanStagePopularity', field: 'skip_popularity' },
+    { id: 'scanStageSingles', field: 'skip_singles' },
+    { id: 'scanStageCovers', field: 'skip_covers' },
+    { id: 'scanStageGenres', field: 'skip_genres' },
+    { id: 'scanStageEssentia', field: 'skip_essentia' },
+  ];
+
+  /**
    * Scope → the label, the families it supports, and HOW it dispatches.
    *
    * `submit` is the important field:
@@ -208,6 +220,10 @@
   function optionApplies(type, option) {
     if (!type) return false;
 
+    if (STAGE_OPTIONS.some((stage) => stage.id === option)) {
+      return type.id === 'full';
+    }
+
     // ⚠️ RESTART CANNOT FLOW THROUGH THE TARGETED ENDPOINTS.
     //
     // `/scan/artist-custom` and `/scan/album-custom` read `scan_type` and
@@ -233,6 +249,9 @@
    */
   function optionReason(type, option) {
     if (!type) return 'Choose a scan type first';
+    if (STAGE_OPTIONS.some((stage) => stage.id === option)) {
+      return 'Stage choices apply to a Full Scan only';
+    }
     if (option === 'restart' && (_scope === 'artist' || _scope === 'album')) {
       return 'A scan for one artist or album always starts at that target, so '
         + 'there is nothing to restart from. Use a Library scan to restart a '
@@ -303,6 +322,20 @@
     restart.closest('.form-check').classList.toggle('opacity-50', !restartApplies);
     force.title = forceApplies ? '' : optionReason(type, 'force');
     restart.title = restartApplies ? '' : optionReason(type, 'restart');
+
+    STAGE_OPTIONS.forEach((stage) => {
+      const box = el(stage.id);
+      if (!box) return;
+      const applies = optionApplies(type, stage.id);
+      box.disabled = !applies;
+      box.title = applies ? '' : optionReason(type, stage.id);
+      const row = box.closest('.form-check');
+      if (row) row.classList.toggle('opacity-50', !applies);
+    });
+    const stageGroup = el('scanStageOptions');
+    if (stageGroup) {
+      stageGroup.classList.toggle('opacity-50', !(type && type.id === 'full'));
+    }
 
     // The Navidrome server rescan belongs to the Navidrome type only — it is a
     // different action from the import (rescan WITHOUT importing), and offering
@@ -376,7 +409,7 @@
    * type ids above are spelled to match. `restart` is deliberately NOT sent:
    * the route does not read it (see `optionApplies`).
    */
-  function submitTargetedScan(type, force) {
+  function submitTargetedScan(type, force, stages) {
     const scopeMeta = SCOPES[_scope] || {};
     const action = scopeMeta.action;
     if (!action) return;
@@ -398,6 +431,9 @@
     add('artist', _context.artist || '');
     if (_scope === 'album') add('album', _context.album || '');
     if (force) add('force', '1');
+    Object.entries(stages || {}).forEach(([name, enabled]) => {
+      if (enabled) add(name, '1');
+    });
 
     document.body.appendChild(form);
     form.submit();
@@ -429,6 +465,7 @@
     // anything. Declared above because both branches need them.
     const force = !!(el('scanForceOption') || {}).checked;
     const restart = !!(el('scanRestartOption') || {}).checked;
+    const stages = stageOptions();
 
     // ── Targeted scans dispatch as a FORM, before any family branch ──
     //
@@ -447,7 +484,7 @@
         scanName: type.label,
       })) return;
 
-      submitTargetedScan(type, force);
+      submitTargetedScan(type, force, stages);
       return;   // the page navigates away; nothing below can run
     }
 
@@ -477,7 +514,7 @@
             mode: force ? 'force' : 'all',
           });
         } else {
-          const body = { mode: type.mode || 'all', force, restart };
+          const body = { mode: type.mode || 'all', force, restart, ...stages };
           if (_context.artist) body.artist = _context.artist;
           if (_context.album) body.album = _context.album;
 
@@ -567,6 +604,10 @@
     // would silently re-scan the world.
     if (el('scanForceOption')) el('scanForceOption').checked = !!config.force;
     if (el('scanRestartOption')) el('scanRestartOption').checked = false;
+    STAGE_OPTIONS.forEach((stage) => {
+      const box = el(stage.id);
+      if (box) box.checked = true;
+    });
     syncOptionState();
 
     if (!sheet && global.bootstrap && global.bootstrap.Offcanvas) {

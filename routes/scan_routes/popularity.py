@@ -97,6 +97,7 @@ async def scan_popularity_route():
             "force",
             "resume_force",
             "metadata_force",
+            "genres_force",
             "singles_resume_force",
             "singles_detection_force",
         }
@@ -104,6 +105,9 @@ async def scan_popularity_route():
         if mode in {"metadata", "metadata_force"}:
             scan_mode = "metadata"
             progress_file = progress_path("metadata_lookup_scan_progress.json")
+        elif mode in {"genres", "genres_force"}:
+            scan_mode = "genres"
+            progress_file = progress_path("genre_scan_progress.json")
         elif mode in {"singles", "singles_resume", "singles_resume_force"}:
             scan_mode = "singles"
             progress_file = progress_path("singles_scan_progress.json")
@@ -126,6 +130,9 @@ async def scan_popularity_route():
             "progress_file": progress_file,
         }
         if scan_mode == "metadata":
+            scan_kwargs["metadata_only"] = True
+        elif scan_mode == "genres":
+            scan_kwargs["genres_only"] = True
             scan_kwargs["metadata_only"] = True
         elif scan_mode == "singles":
             scan_kwargs["singles_only"] = True

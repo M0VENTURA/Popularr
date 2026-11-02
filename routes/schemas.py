@@ -43,3 +43,11 @@ class ScanRequest(BaseModel):
     #: had already finished, the caller passes the artist AFTER it — the scan
     #: loop processes the named artist itself (see resume_options_service).
     resume_from: str | None = Field(default=None)
+    #: Advanced full-scan stage switches. ``True`` means SKIP that stage, so
+    #: the other paths still run (and Force still applies to them).
+    skip_metadata: bool = Field(default=False)
+    skip_popularity: bool = Field(default=False)
+    skip_singles: bool = Field(default=False)
+    skip_covers: bool = Field(default=False)
+    skip_genres: bool = Field(default=False)
+    skip_essentia: bool = Field(default=False)

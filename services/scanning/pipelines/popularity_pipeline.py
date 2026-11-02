@@ -110,6 +110,7 @@ def run_popularity_mode(
     progress_file: str | None = None,
     force_rescan: bool = False,
     resume_from: str | None = None,
+    stage_options: dict[str, Any] | None = None,
 ) -> None:
     """
     Run a popularity-related scan mode.
@@ -130,6 +131,7 @@ def run_popularity_mode(
         _run_full_scan_as_artist_pipeline(
             force=force_rescan,
             resume_from=resume_from,
+            scan_options=stage_options,
         )
         return
 
@@ -146,11 +148,24 @@ def run_popularity_mode(
         if resume_from:
             kwargs["resume_from"] = resume_from
 
+        # Advanced full-scan switches are intentionally carried by every mode:
+        # a targeted artist/album run may use the same sheet. Unknown switches
+        # are ignored by ``run_scan`` (it has **extra_kwargs).
+        if stage_options:
+            for _key, _value in stage_options.items():
+                if _value:
+                    kwargs[_key] = True
+
         # ---------------------------------------------------------------------
         # Mode mapping
         # ---------------------------------------------------------------------
         if mode == "metadata":
             scan_type = "metadata_lookup_scan"
+            kwargs["metadata_only"] = True
+
+        elif mode == "genres":
+            scan_type = "genre_scan"
+            kwargs["genres_only"] = True
             kwargs["metadata_only"] = True
 
         elif mode == "singles":
@@ -266,6 +281,7 @@ def _run_full_scan_as_artist_pipeline(
     *,
     force: bool = False,
     resume_from: str | None = None,
+    scan_options: dict[str, Any] | None = None,
 ) -> None:
     """Dashboard 'All' scan: iterate over every artist, running the full
     artist pipeline (Navidrome import → metadata → combined → essentia) for
@@ -622,6 +638,7 @@ def _run_full_scan_as_artist_pipeline(
                     force=force,
                     progress_callback=_cb,
                     freshness_verified=_freshness_verified,
+                    scan_options=scan_options,
                 )
 
             from services.popularity.scan_stage_runner import _bounded_call_report
@@ -853,6 +870,7 @@ def _build_targeted_popularity_kwargs(
     track_id: str | None = None,
     force: bool = False,
     scan_type: str = "popularity",
+    **scan_options: Any,
 ) -> dict[str, Any]:
     """Build kwargs for targeted artist/album/track scans."""
 
@@ -874,7 +892,17 @@ def _build_targeted_popularity_kwargs(
     if track_id:
         kwargs["track_id_filter"] = str(track_id).strip()
 
+    for _key, _value in (scan_options or {}).items():
+        if _value:
+            kwargs[_key] = True
+
     if scan_type == "metadata":
+        kwargs["metadata_only"] = True
+
+    elif scan_type == "genres":
+        # Provider genre refresh only: metadata_only suppresses popularity,
+        # singles and finalise; genres_only marks the distinct scan family.
+        kwargs["genres_only"] = True
         kwargs["metadata_only"] = True
 
     elif scan_type == "singles":
@@ -911,6 +939,7 @@ def run_popularity_artist_scan(
     *,
     force: bool = False,
     scan_type: str = "popularity",
+    **scan_options: Any,
 ) -> Any:
     """Run a scan for a single artist."""
 
@@ -918,6 +947,7 @@ def run_popularity_artist_scan(
         artist=artist,
         force=force,
         scan_type=scan_type,
+        **scan_options,
     )
 
     return run_popularity_scan(**kwargs)
@@ -929,6 +959,7 @@ def run_popularity_album_scan(
     *,
     force: bool = False,
     scan_type: str = "popularity",
+    **scan_options: Any,
 ) -> Any:
     """Run a scan for a single album."""
 
@@ -937,6 +968,7 @@ def run_popularity_album_scan(
         album=album,
         force=force,
         scan_type=scan_type,
+        **scan_options,
     )
 
     return run_popularity_scan(**kwargs)

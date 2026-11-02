@@ -549,7 +549,11 @@ def _zero_track_summary(abandoned_albums: int, skipped_albums: int) -> str:
     )
 
 
-def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
+def is_album_incomplete(
+    tracks: list[dict[str, Any]],
+    *,
+    require_all_genre_sources: bool = False,
+) -> tuple[bool, str]:
     """Is any track of this album still missing something a re-run could fill?
 
     Every rule here has the same shape: *only require what a metadata re-run
@@ -595,6 +599,22 @@ def is_album_incomplete(tracks: list[dict[str, Any]]) -> tuple[bool, str]:
         )
         if not genres and not sources_tried:
             return True, f"track '{title}' is missing genres/tags"
+
+        # ⭐ A dedicated GENRE refresh retries every configured online source
+        # that is still empty. Ordinary scans keep the cheaper "some genre
+        # exists" rule above; this pass exists to fill the individual gaps.
+        if require_all_genre_sources:
+            _online_sources = (
+                "musicbrainz_genres",
+                "discogs_genres",
+                "listenbrainz_genres",
+                "lastfm_tags",
+            )
+            for _source_field in _online_sources:
+                if track.get(_source_field) in _EMPTY_GENRE_MARKERS:
+                    return True, (
+                        f"track '{title}' is missing {_source_field}"
+                    )
 
         for field in required_single_fields:
             val = track.get(field)
@@ -773,7 +793,11 @@ def _pass_runs_singles(options: dict[str, Any]) -> bool:
     or popularity-only pass runs no singles detection, so backfilling one is
     not something it could do.
     """
-    return not options.get("metadata_only") and not options.get("popularity_only")
+    return (
+        not options.get("metadata_only")
+        and not options.get("popularity_only")
+        and not options.get("skip_singles_detection")
+    )
 
 
 def _singles_gap_fill(
@@ -1165,6 +1189,8 @@ def _resolve_album_authoritative_year(
 
 
 def _resolve_scan_type(options: dict[str, Any]) -> str:
+    if options.get("genres_only"):
+        return "genres"
     if options.get("metadata_only"):
         return "metadata"
     if options.get("singles_only") or options.get("singles_with_missing_popularity"):
@@ -1367,6 +1393,8 @@ def _run_album_cover_detection(artist: str, album: str, tracks: list[dict[str, A
     if not artist or not tracks:
         return set()
     if options.get("singles_only") or options.get("singles_with_missing_popularity") or options.get("popularity_only"):
+        return set()
+    if options.get("skip_cover_detection"):
         return set()
 
     try:
@@ -2061,6 +2089,7 @@ def run_scan(
     singles_with_missing_popularity: bool = False,
     popularity_only: bool = False,
     metadata_only: bool = False,
+    genres_only: bool = False,
     finalise_only: bool = False,
     clear_single_detection_sources: list | None = None,
     stop_progress_file: str | None = None,
@@ -2081,6 +2110,7 @@ def run_scan(
         "singles_with_missing_popularity": singles_with_missing_popularity,
         "popularity_only": popularity_only,
         "metadata_only": metadata_only,
+        "genres_only": genres_only,
         "finalise_only": finalise_only,
         "clear_single_detection_sources": clear_single_detection_sources,
         "stop_progress_file": stop_progress_file,
@@ -2136,7 +2166,8 @@ def run_scan(
     # debug-gated, so at the default log level this banner plus the per-stage
     # sections below are the whole scan narrative.
     _scan_mode_label = (
-        "Finalise Pass" if options.get("finalise_only")
+        "Genre Refresh" if options.get("genres_only")
+        else "Finalise Pass" if options.get("finalise_only")
         else "Forced Scan" if force
         else ("Singles Pass" if _singles_pass else "Normal Scan")
     )
@@ -2892,6 +2923,7 @@ def run_scan(
             discogs_cached_promos = artist_discogs_promo_cache.get(artist) or set()
 
             _mode_meta = bool(options.get("metadata_only"))
+            _mode_genres = bool(options.get("genres_only"))
             _mode_pop = bool(options.get("popularity_only"))
             _mode_singles = bool(options.get("singles_only") or options.get("singles_with_missing_popularity"))
             _mode_finalise = bool(options.get("finalise_only"))
@@ -2924,9 +2956,40 @@ def run_scan(
             # DELIBERATE TRADE-OFF: an album skipped here does NOT get its file-tag
             # sync on this pass. That is what "skip" means, and it is the rule the
             # user configured.
+            if not album_filter:
+                # ⭐ A FORCED pass may still be rate-limited. "Force" means
+                # bypass the normal skip windows, not "run the same expensive
+                # finalise/singles pass every time the button is pressed".
+                if force:
+                    try:
+                        if _mode_finalise:
+                            _forced_days = int(
+                                get_feature("forced_finalise_skip_days", 0) or 0
+                            )
+                        elif _mode_singles:
+                            _forced_days = int(
+                                get_feature("forced_singles_skip_days", 0) or 0
+                            )
+                        else:
+                            _forced_days = 0
+                    except Exception:
+                        _forced_days = 0
+                    if _forced_days > 0 and was_album_scanned(
+                        artist, album, scan_type, _forced_days
+                    ):
+                        skip_album = True
+                        log_unified(
+                            f"Popularity Scan - Skipping forced "
+                            f"{'finalise' if _mode_finalise else 'singles'} pass for "
+                            f"\"{str(album or '').strip()}\" "
+                            f"(ran within last {_forced_days} days)"
+                        )
+
             if not force and not album_filter:
                 try:
-                    if _mode_meta:
+                    if _mode_genres:
+                        skip_days = int(get_feature("genre_skip_days", 7) or 0)
+                    elif _mode_meta:
                         skip_days = int(get_feature("metadata_skip_days", 0) or 0)
                         if _album_is_old:
                             skip_days = int(get_feature("metadata_old_album_skip_days", 30) or 0)
@@ -2972,11 +3035,38 @@ def run_scan(
                 # Completeness override: never skip an album that is still missing
                 # genres/tags, scores, album type, or recording MBIDs.
                 if skip_album:
-                    incomplete, reason = is_album_incomplete(tracks)
+                    incomplete, reason = is_album_incomplete(
+                        tracks,
+                        require_all_genre_sources=_mode_genres,
+                    )
                     if incomplete:
                         skip_album = False
                         force_metadata_for_this_album = True
                         log_unified(f"Popularity Scan - Album recently scanned but incomplete — forcing rerun ({reason})")
+
+                # ── Finalise: missing popularity evidence ───────────────
+                # A finalise pass normally reuses stored scores. But a track
+                # with LF=0 or LB=0 has no evidence for that provider; look it
+                # up instead of skipping the album as already finalised.
+                if skip_album and _mode_finalise:
+                    try:
+                        from services.popularity.popularity_cache_policy import (
+                            popularity_sources_are_complete,
+                        )
+
+                        _missing_popularity = [
+                            _t for _t in tracks
+                            if not popularity_sources_are_complete(_t)
+                        ]
+                    except Exception:
+                        _missing_popularity = []
+                    if _missing_popularity:
+                        skip_album = False
+                        log_unified(
+                            f"Popularity Scan - Album \"{str(album or '').strip()}\" "
+                            f"has {len(_missing_popularity)} track(s) missing a "
+                            "Last.fm/ListenBrainz count — finalise will look it up"
+                        )
 
                 # ── Opt-in singles gap fill (features.run_singles_on_skipped_albums)
                 #
@@ -4572,8 +4662,13 @@ def run_scan(
         # (covers, moods, …) are reconciled by the scan runner's end-of-scan
         # curated refresh.
         log_unified(
-            "[FINALISE_STAGE] Metadata-only scan — no rating changes to refresh; "
+            "[FINALISE_STAGE] Genre-only scan — no rating changes to refresh; "
             "curated playlists are reconciled at scan end"
+            if options.get("genres_only")
+            else (
+                "[FINALISE_STAGE] Metadata-only scan — no rating changes to refresh; "
+                "curated playlists are reconciled at scan end"
+            )
         )
 
     # ── Completion (one authoritative outcome) ─────────────────────────────

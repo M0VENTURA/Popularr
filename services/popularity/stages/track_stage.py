@@ -1751,6 +1751,11 @@ def process_track(
     refresh_popularity = bool(options.get("refresh_popularity_if_due"))
     singles_detection_only = bool(options.get("singles_detection_only"))
     singles_pass = bool(options.get("singles_only")) or bool(options.get("singles_with_missing_popularity"))
+    # Advanced full-scan switches (True = skip THAT stage only).
+    _skip_popularity = bool(options.get("skip_popularity_scoring"))
+    _skip_singles = bool(options.get("skip_singles_detection"))
+    _skip_covers = bool(options.get("skip_cover_detection"))
+    _skip_genres = bool(options.get("skip_genre_detection"))
 
     _has_stored_popularity = (
         float(track.get("final_score") or track.get("popularity") or 0) > 0
@@ -1768,7 +1773,21 @@ def process_track(
     _pop_summary: str = ""
     _single_summary: str = ""
 
-    if singles_detection_only or (singles_pass and _has_stored_popularity and not refresh_popularity):
+    # ⭐ FINALISE is not "skip all scoring": if EITHER provider count is still
+    # zero, the track is missing popularity evidence and this pass must look it
+    # up. If both are present, the stored score is reused and the whole scoring
+    # block is skipped as before.
+    _finalise_sources_incomplete = bool(
+        options.get("finalise_only")
+        and not popularity_sources_are_complete(track)
+    )
+
+    if singles_detection_only or (
+        singles_pass
+        and _has_stored_popularity
+        and not refresh_popularity
+        and not _finalise_sources_incomplete
+    ):
         score_data = {
             "combined_score": float(
                 track.get("final_score") or track.get("popularity") or track.get("popularity_score") or 0
@@ -1955,6 +1974,7 @@ def process_track(
     if (
         not metadata_only
         and not singles_detection_only
+        and not _skip_popularity
         and not (singles_pass and _has_stored_popularity and not refresh_popularity)
     ):
         try:
@@ -2688,7 +2708,7 @@ def process_track(
         update_payload["single_sources"] = track.get("single_sources") or "[]"
         _single_summary = f"Single: {str(update_payload['single_confidence']).upper()} (cached)"
 
-    if not metadata_only and not popularity_only and not _sd_fresh:
+    if not metadata_only and not popularity_only and not _sd_fresh and not _skip_singles:
         try:
             from datetime import datetime as _dt, timezone as _tz
             sd_now = _dt.now(_tz.utc)
@@ -3036,7 +3056,7 @@ def process_track(
     # -------------------------------------------------------------------------
     # 4. COVER DETECTION
     # -------------------------------------------------------------------------
-    if not popularity_only and not singles_detection_only:
+    if not popularity_only and not singles_detection_only and not _skip_covers:
         try:
             effective_track = _build_effective_track(track, update_payload)
             title = _as_str(effective_track.get("title") or track.get("title") or "")
@@ -3199,7 +3219,7 @@ def process_track(
     # -------------------------------------------------------------------------
     # 5. GENRE AGGREGATION
     # -------------------------------------------------------------------------
-    if not popularity_only and not singles_detection_only:
+    if not popularity_only and not singles_detection_only and not _skip_genres:
         try:
             effective_track = _build_effective_track(track, update_payload)
             source_map = {}
@@ -3531,6 +3551,23 @@ def process_track(
         _persist_row = _changed_columns(effective_track, _snapshot)
     else:
         _persist_row = effective_track
+
+    # ⭐ A genre or popularity change invalidates the album's last FINALISE
+    # pass. Persist that fact on the row, so the next finalise/rating pass
+    # cannot skip the album as "unchanged" while its tags/playlists still
+    # reflect the old data. The finalise stage sets this back to TRUE.
+    _FINALISE_AFFECTING_COLUMNS = (
+        "genres", "musicbrainz_genres", "discogs_genres",
+        "listenbrainz_genres", "lastfm_tags", "spotify_genres",
+        "essentia_genres", "audiodb_genres", "wikidata_genres",
+        "popularity", "final_score", "raw_score",
+        "is_cover", "original_cover_artist", "is_live", "is_compilation",
+        "year", "release_year",
+    )
+    if _persist_row and any(
+        _col in _persist_row for _col in _FINALISE_AFFECTING_COLUMNS
+    ):
+        _persist_row["stars_reconciled"] = False
 
     _persist_sink = options.get("_deferred_persist")
     if not _persist_row:

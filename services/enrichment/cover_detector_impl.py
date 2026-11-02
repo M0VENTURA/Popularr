@@ -101,6 +101,14 @@ _COVER_SUFFIX_RE = re.compile(r"\s*\([^)]+\s+cover\)\s*$", re.IGNORECASE)
 _COVER_ACT_HINT_RE = re.compile(
     r"\b(?:"
     r"kidz\s*bop|"
+    r"peter\s+hollens|"
+    r"lindsey\s+stirling|"
+    r"jonathan\s+young|"
+    r"caleb\s+hyles|"
+    r"leo\s+moracchioli|"
+    r"boyce\s+avenue|"
+    r"walk\s+off\s+the\s+earth|"
+    r"scott\s+bradlee|"
     r"vitamin\s*string\s*quartet|"
     r"rockabye\s*baby|"
     r"postmodern\s*jukebox|"
@@ -1083,6 +1091,19 @@ class CoverDetector:
             if by_writer == {}:
                 # _original_by_writer determined the performer is the writer/originator
                 return {}
+            # ⭐ A writer-linked PERFORMER/BAND is stronger evidence than an
+            # arbitrary earlier recording with the same title. "Hey Ya!" has a
+            # misdated Kidz Bop recording from 2000 in the work page; OutKast
+            # (via André 3000 -> the writer's band) is the actual original.
+            if by_writer and not _is_work_writer(
+                str(by_writer.get("artist") or "")
+            ):
+                return {
+                    **by_writer,
+                    "confidence": "medium",
+                    "work": work_title,
+                    "source": "musicbrainz_work",
+                }
             if performed_original is not None:
                 return {
                     **performed_original,
@@ -1689,7 +1710,8 @@ class CoverDetector:
             # Album text is deliberately excluded: an album-level annotation
             # previously applied the same hint artist to every track.
             hint = self._detect_cover_hint_from_text(title)
-            if not hint:
+            has_annotation = _has_cover_annotation(title)
+            if not hint and not has_annotation:
                 continue
 
             # ⭐ THE TRACK'S OWN ARTIST. Every test below asks "is this the
@@ -1706,7 +1728,10 @@ class CoverDetector:
             ):
                 continue
 
-            resolved = {"artist": hint, "year": None, "confidence": "low"}
+            resolved = (
+                {"artist": hint, "year": None, "confidence": "low"}
+                if hint else None
+            )
             resolved_writer = ""
             writers_for_track = (track_writers.get(tid) or {}).get("writers", [])
 
@@ -1724,6 +1749,12 @@ class CoverDetector:
                         resolved = mb_orig
                         resolved_writer = wr
                         break
+
+            if resolved is None:
+                # The suffix named a cover act, not an original. Writer
+                # evidence above is the only reliable identity; do not invent
+                # one when it found nothing.
+                continue
 
             logger.debug("Cover detected via title hint", track=title, original_artist=resolved.get("artist"))
             _record(self._result(tid, title, resolved, writer=resolved_writer), track)
@@ -3250,6 +3281,11 @@ class CoverDetector:
                     details.get("artist-credit", []) or rec.get("artist-credit", [])
                 )
                 if not rec_artist:
+                    continue
+                # A known cover act can never be the ORIGINAL artist of a
+                # title it covers, even when MusicBrainz carries an earlier or
+                # wrong release date for its recording.
+                if _COVER_ACT_HINT_RE.search(rec_artist):
                     continue
 
                 year = year_from_recording(details)

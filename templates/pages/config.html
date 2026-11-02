@@ -307,8 +307,9 @@
       <div id="featuresWeightsForm">
         <div class="row g-3">
           {# Keys that moved to dedicated cards (Scan Behaviour / Single Detection / User Interface) — never shown here #}
-          {% set moved_feature_keys = ['album_skip_days', 'popularity_skip_days', 'singles_skip_days', 'metadata_skip_days', 'album_skip_min_tracks', 'skip_unchanged_albums', 'run_singles_on_skipped_albums', 'cover_detection_enabled', 'mature_track_min_age_years',
+          {% set moved_feature_keys = ['album_skip_days', 'popularity_skip_days', 'singles_skip_days', 'genre_skip_days', 'metadata_skip_days', 'album_skip_min_tracks', 'skip_unchanged_albums', 'run_singles_on_skipped_albums', 'cover_detection_enabled', 'mature_track_min_age_years',
             'old_album_age_months', 'album_old_album_skip_days', 'popularity_old_album_skip_days', 'singles_old_album_skip_days', 'metadata_old_album_skip_days', 'missing_release_tracklist_limit', 'prefetch_cache_days',
+            'forced_finalise_skip_days', 'forced_singles_skip_days',
             'deep_genre_search', 'use_test_site',
             'search_fuzzy_enabled', 'retry_scheduler', 'download_queue_cleanup_scheduler', 'downloads_duplicate_cleanup', 'sync_ratings_to_all_users',
             'daily_musicbrainz_release_scan_enabled', 'daily_musicbrainz_release_lookback_days', 'daily_musicbrainz_release_lookahead_days',
@@ -1913,6 +1914,21 @@
           <label class="form-label form-label-sm" for="feature_singles_skip_days">Singles Scan Window (days)</label>
           <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_singles_skip_days" value="{{ config.get('features', {}).get('singles_skip_days', 7) }}" id="feature_singles_skip_days">
           <small class="form-text text-muted">Albums whose <strong>Singles</strong> scan ran within this many days are skipped (verdicts are also reused per-track inside their freshness TTL). Set to <strong>0 to always run</strong>. Default: <strong>7</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_genre_skip_days">Genre Scan Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_genre_skip_days" value="{{ config.get('features', {}).get('genre_skip_days', 7) }}" id="feature_genre_skip_days">
+          <small class="form-text text-muted">Albums whose <strong>Genres</strong> scan ran within this many days are skipped. A genre pass retries any empty online source (MusicBrainz, Discogs, ListenBrainz, Last.fm). Default: <strong>7</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_forced_finalise_skip_days">Forced Finalise Minimum Interval (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_forced_finalise_skip_days" value="{{ config.get('features', {}).get('forced_finalise_skip_days', 0) }}" id="feature_forced_finalise_skip_days">
+          <small class="form-text text-muted">Even a <strong>forced</strong> finalise pass skips an album finalised within this many days. Set to <strong>0 to always force</strong>. Default: <strong>0</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_forced_singles_skip_days">Forced Singles Minimum Interval (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_forced_singles_skip_days" value="{{ config.get('features', {}).get('forced_singles_skip_days', 0) }}" id="feature_forced_singles_skip_days">
+          <small class="form-text text-muted">Even a <strong>forced</strong> singles pass skips an album checked within this many days. Set to <strong>0 to always force</strong>. Default: <strong>0</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-4">
           <label class="form-label form-label-sm" for="feature_metadata_skip_days">Metadata Scan Window (days)</label>

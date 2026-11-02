@@ -2409,6 +2409,21 @@ def lookup_musicbrainz_album(artist: str, album: str, existing_mbid: str = "") -
     return {"results": (stored_results + other_results)[:11]}
 
 
+def _release_format_preference(release: dict[str, Any]) -> int:
+    """Tie-break identical tracklists: Digital Media > CD > Vinyl > other."""
+    formats = " ".join(
+        str(value or "").casefold()
+        for value in (release.get("formats") or [])
+    )
+    if any(token in formats for token in ("digital media", "digital", "download", "streaming", "file")):
+        return 3
+    if "cd" in formats:
+        return 2
+    if "vinyl" in formats or " lp" in f" {formats}" or "12\"" in formats:
+        return 1
+    return 0
+
+
 def _release_summary(release: dict[str, Any]) -> dict[str, Any]:
     media = release.get("media") or []
     release_id = str(release.get("id") or "")
@@ -2570,6 +2585,10 @@ def get_musicbrainz_best_release(
                 value += max(0.0, 2100.0 - int(date[:4])) * 0.01
             if album and item.get("title"):
                 value += _similarity(album.casefold(), str(item["title"]).casefold()) * 30.0
+            # Same tracklist → prefer the practical digital edition, then CD,
+            # then vinyl. The count term above still dominates, so this never
+            # prefers an incomplete edition over a complete one.
+            value += _release_format_preference(item) * 5.0
             return value
 
         best = max(releases, key=score)

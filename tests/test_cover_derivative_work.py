@@ -169,6 +169,12 @@ class TestCoverActTitleHints:
             "Hey Ya! (Kidz Bop Cover)"
         ) is None
 
+    def test_a_named_cover_artist_is_not_an_original_hint(self):
+        detector = CoverDetector()
+        assert detector._detect_cover_hint_from_text(
+            "I See Fire (Peter Hollens Cover)"
+        ) is None
+
     def test_a_real_original_artist_suffix_is_still_used(self):
         detector = CoverDetector()
         assert detector._detect_cover_hint_from_text(
@@ -219,6 +225,31 @@ class TestHugeWorkTitleSearch:
 
         assert result is not None
         assert result["artist"] == "Céline Dion"
+
+    def test_a_writer_linked_band_beats_a_misdated_earlier_cover(self):
+        """Kidz Bop's misdated 2000 Hey Ya entry must not beat OutKast."""
+        detector = CoverDetector()
+        detector.mb = type("FakeMB", (), {})()
+        detector._work_base_cache["hey-work"] = []
+        detector._work_recordings = lambda work_id, limit=100: [
+            _recording("kidz", "Kidz Bop", year="2000", title="Hey Ya!"),
+            _recording("outkast", "OutKast", year="2003", title="Hey Ya!"),
+        ]
+        detector._work_writers = lambda work_id: (
+            "Hey Ya!",
+            [{"id": "andre", "name": "André Benjamin"}],
+        )
+        detector._performer_wrote_work = lambda *a, **k: False
+        detector._original_by_writer = lambda *a, **k: {
+            "artist": "OutKast", "year": 2003, "confidence": "medium",
+        }
+
+        result = detector._detect_via_work_id(
+            "hey-work", "Kidz Bop", exclude_mbid="track-rec",
+        )
+
+        assert result is not None
+        assert result["artist"] == "OutKast"
 
     def test_a_writer_alias_contributes_its_band_identity(self):
         """André Benjamin -> André 3000 alias -> OutKast band."""

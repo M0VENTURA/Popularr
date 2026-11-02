@@ -112,6 +112,20 @@ annotations. `"Hey Ya! (Kidz Bop Cover)"` names the Kidz Bop performer, not a
 cover OF Kidz Bop, so it is deferred to the work/recording evidence rather than
 becoming `originally by Kidz Bop`.
 
+The guard now includes Peter Hollens, Lindsey Stirling, Jonathan Young, Caleb
+Hyles, Leo Moracchioli, Boyce Avenue, Walk off the Earth and Scott Bradlee.
+When the suffix names a cover act and there is no author hint, the title step
+still runs the writer search (so `"I See Fire (Peter Hollens Cover)"` can
+resolve to Ed Sheeran) instead of skipping the track entirely.
+
+For "Hey Ya!", the work page contains a misdated **Kidz Bop** recording from
+2000. The work path preferred the earliest recording and therefore reported
+Kidz Bop. A writer-linked performer/band (André Benjamin → André 3000 →
+OutKast) is now preferred over an arbitrary earlier title match, and known
+cover acts are excluded as original candidates in the title search.
+
+
+
 ## Remix popularity identity
 
 On Limp Bizkit's *New Old Songs* the release track titles for "Break Stuff" and
@@ -229,6 +243,54 @@ it, so the page's September→March window treated those rows as past January
 releases. Only the few with exact day dates survived. The stored value now
 keeps the precision MusicBrainz supplied; the route already handles a 4-digit
 release date in its year branch.
+
+## Config: forced intervals, genre scan, finalise invalidation
+
+New Scan Behaviour settings (both Config trees):
+
+* `genre_skip_days` (default 7) — the Genres scan window.
+* `forced_finalise_skip_days` (default 0) — a forced finalise still skips an
+  album finalised within this many days.
+* `forced_singles_skip_days` (default 0) — the same protection for a forced
+  singles pass.
+
+A new **Genres** scan type refreshes provider genre sources without running
+popularity/singles/finalise. It retries any online source column that is still
+empty (MusicBrainz, Discogs, ListenBrainz, Last.fm) and forces such albums
+through the completeness gate.
+
+When the track stage changes a genre, popularity count/score, cover/live or
+release-year field, it now persists `stars_reconciled = FALSE`. The next
+finalise/rating pass cannot skip that album as unchanged, and finalise sets the
+flag back to TRUE once it has written the resolved ratings/tags.
+
+## Advanced Full Scan stages
+
+The scanner sheet now exposes per-run stage tickboxes for **Popularity**,
+**Singles**, **Covers**, **Genres**, and **Essentia**. Unticking one skips only
+that path; Force still applies to every stage left ticked. The flags flow
+through library, artist, album, and targeted full scans.
+
+## Finalise fills missing popularity
+
+A Finalise pass normally reuses stored scores. If either provider count is zero
+(Last.fm or ListenBrainz), the album is no longer skipped: `track_stage` runs
+the popularity lookup for the missing source while still reusing any present
+stored score. Albums with both counts present skip the scoring step as before.
+
+## Release format preference when linking an album
+
+When several releases in a group have the same tracklist, the best-release
+scorer and the release picker now prefer:
+
+1. Digital Media
+2. CD
+3. Vinyl
+4. other formats
+
+Track count still dominates the score, so a complete edition always beats an
+incomplete one. The preference is only a tie-break between equivalent
+tracklists.
 
 ## My Heart Will Go On
 

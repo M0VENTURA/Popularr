@@ -129,6 +129,7 @@ def run_artist_scan_pipeline(
     force: bool = False,
     progress_callback: Callable[[str, int, int, str | None, float | None], None] | None = None,
     freshness_verified: bool | None = None,
+    scan_options: dict[str, Any] | None = None,
 ) -> None:
     if not _try_claim_artist(artist_name):
         log_unified(f"⏭️ Artist scan already running for: {artist_name} — skipping duplicate trigger")
@@ -139,6 +140,7 @@ def run_artist_scan_pipeline(
             force,
             progress_callback=progress_callback,
             freshness_verified=freshness_verified,
+            scan_options=scan_options,
         )
     finally:
         _release_artist(artist_name)
@@ -149,6 +151,7 @@ def _run_artist_scan_pipeline_inner(
     force: bool = False,
     progress_callback: Callable[[str, int, int, str | None, float | None], None] | None = None,
     freshness_verified: bool | None = None,
+    scan_options: dict[str, Any] | None = None,
 ) -> None:
     def _cb(stage: str, idx: int, total: int, item: str | None = None, track_fraction: float | None = None) -> None:
         if callable(progress_callback):
@@ -229,6 +232,7 @@ def _run_artist_scan_pipeline_inner(
             progress_file=popularity_progress_file,
             stop_progress_file=stop_progress_file,
             progress_callback=_stage_band_cb,
+            **(scan_options or {}),
         )
 
         # ⭐ ``features.run_essentia`` is the operator's switch. This pass used
@@ -242,7 +246,7 @@ def _run_artist_scan_pipeline_inner(
         except Exception:
             _essentia_enabled = False
 
-        if _essentia_enabled:
+        if _essentia_enabled and not bool((scan_options or {}).get("skip_essentia")):
             if callable(progress_callback):
                 _cb("essentia", 0, 1, artist_name)
             try:

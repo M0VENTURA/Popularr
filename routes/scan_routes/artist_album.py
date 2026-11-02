@@ -40,6 +40,17 @@ from services.scanning.pipelines.popularity_pipeline import (
 from helpers.logging_config import log_unified
 
 
+def _stage_options_from_form(form) -> dict[str, bool]:
+    """Read the advanced full-scan stage checkboxes (True = skip)."""
+    return {
+        "skip_popularity_scoring": bool(form.get("skip_popularity")),
+        "skip_singles_detection": bool(form.get("skip_singles")),
+        "skip_cover_detection": bool(form.get("skip_covers")),
+        "skip_genre_detection": bool(form.get("skip_genres")),
+        "skip_essentia": bool(form.get("skip_essentia")),
+    }
+
+
 def _launch_guarded(runner, *args) -> bool:
     """Start a non-popularity scan under the cross-process scan lock."""
     from services.scanning.scan_start_lock import (
@@ -86,6 +97,7 @@ async def scan_artist_custom():
             artist,
             force=force,
             scan_type="full",
+            **_stage_options_from_form(form),
         )
         if not started:
             await flash("A popularity scan is already running — skipped duplicate trigger", "warning")
@@ -96,7 +108,7 @@ async def scan_artist_custom():
             await flash("A scan is already running — skipped duplicate trigger", "warning")
             return redirect_for_artist(artist)
 
-    elif scan_type in {"popularity", "metadata", "singles", "finalise"}:
+    elif scan_type in {"popularity", "metadata", "singles", "finalise", "genres"}:
         started = guard_and_launch_popularity_scan(
             run_popularity_artist_scan,
             artist,
@@ -154,6 +166,7 @@ async def scan_album_custom():
             album,
             force=force,
             scan_type="full",
+            **_stage_options_from_form(form),
         )
         if not started:
             await flash("A popularity scan is already running — skipped duplicate trigger", "warning")
@@ -164,7 +177,7 @@ async def scan_album_custom():
             await flash("A scan is already running — skipped duplicate trigger", "warning")
             return redirect_for_album(artist, album)
 
-    elif scan_type in {"popularity", "metadata", "singles", "finalise"}:
+    elif scan_type in {"popularity", "metadata", "singles", "finalise", "genres"}:
         started = guard_and_launch_popularity_scan(
             run_popularity_album_scan,
             artist,

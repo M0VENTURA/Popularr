@@ -125,6 +125,34 @@
             </span>
           </label>
         </div>
+
+        <div class="border-top border-secondary border-opacity-25 mt-3 pt-3" id="scanStageOptions">
+          <p class="fw-semibold small mb-2">Full scan stages</p>
+          <p class="text-muted mb-2" style="font-size:0.72rem;">
+            Untick a stage to skip only that path. Force still applies to every
+            stage left ticked.
+          </p>
+          <div class="form-check mb-1">
+            <input class="form-check-input" type="checkbox" id="scanStagePopularity" checked>
+            <label class="form-check-label" for="scanStagePopularity">Popularity scoring</label>
+          </div>
+          <div class="form-check mb-1">
+            <input class="form-check-input" type="checkbox" id="scanStageSingles" checked>
+            <label class="form-check-label" for="scanStageSingles">Singles detection</label>
+          </div>
+          <div class="form-check mb-1">
+            <input class="form-check-input" type="checkbox" id="scanStageCovers" checked>
+            <label class="form-check-label" for="scanStageCovers">Cover detection</label>
+          </div>
+          <div class="form-check mb-1">
+            <input class="form-check-input" type="checkbox" id="scanStageGenres" checked>
+            <label class="form-check-label" for="scanStageGenres">Genre detection</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="scanStageEssentia" checked>
+            <label class="form-check-label" for="scanStageEssentia">Essentia analysis</label>
+          </div>
+        </div>
       </div>
     </div>
 

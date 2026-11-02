@@ -1037,6 +1037,21 @@ def _picker_formats(release: dict[str, Any]) -> str:
     return ", ".join(dict.fromkeys(formats)) or "Digital/CD"
 
 
+def _picker_format_preference(release: dict[str, Any]) -> int:
+    """Tie-break identical tracklists: Digital Media > CD > Vinyl > other."""
+    formats = " ".join(
+        str(m.get("format") or "").casefold()
+        for m in (release.get("media") or [])
+    )
+    if any(token in formats for token in ("digital media", "digital", "download", "streaming", "file")):
+        return 3
+    if "cd" in formats:
+        return 2
+    if "vinyl" in formats or " lp" in f" {formats}" or '12"' in formats:
+        return 1
+    return 0
+
+
 def _picker_group_editions(processed: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse releases that differ only by PRESSING into one choice.
 
@@ -1163,11 +1178,17 @@ async def api_musicbrainz_release_picker() -> Any:
             "date": rel.get("date") or "Unknown Date",
             "track_count": _picker_total_tracks(rel),
             "format": _picker_formats(rel),
+            "format_preference": _picker_format_preference(rel),
             "artist": artist,
         })
 
     processed.sort(
-        key=lambda r: (str(r["status"]).lower() != "official", -r["track_count"])
+        key=lambda r: (
+            str(r["status"]).lower() != "official",
+            -r["track_count"],
+            -r["format_preference"],
+            str(r["date"]),
+        )
     )
 
     if request.args.get("format", "").strip().lower() == "json":

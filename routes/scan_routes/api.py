@@ -355,6 +355,26 @@ async def api_popularity_run_compat():
 
     force = bool(params.force or raw.get("force", False))
     restart = bool(getattr(params, "restart", False) or raw.get("restart", False))
+    _stage_options = {
+        "skip_metadata_lookup": bool(
+            raw.get("skip_metadata", getattr(params, "skip_metadata", False))
+        ),
+        "skip_popularity_scoring": bool(
+            raw.get("skip_popularity", getattr(params, "skip_popularity", False))
+        ),
+        "skip_singles_detection": bool(
+            raw.get("skip_singles", getattr(params, "skip_singles", False))
+        ),
+        "skip_cover_detection": bool(
+            raw.get("skip_covers", getattr(params, "skip_covers", False))
+        ),
+        "skip_genre_detection": bool(
+            raw.get("skip_genres", getattr(params, "skip_genres", False))
+        ),
+        "skip_essentia": bool(
+            raw.get("skip_essentia", getattr(params, "skip_essentia", False))
+        ),
+    }
 
     # Resume semantics:
     #   default  → resume from the last checkpoint (skip already-scanned
@@ -493,6 +513,7 @@ async def api_popularity_run_compat():
                     mode=mode,
                     force_rescan=force,
                     resume_from=resume_from,
+                    stage_options=_stage_options,
                 )
                 log_unified(f"[POPULARITY] Worker finished mode={mode}")
             except Exception as exc:

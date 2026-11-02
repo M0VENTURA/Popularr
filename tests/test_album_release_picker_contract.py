@@ -22,6 +22,41 @@ from __future__ import annotations
 import pytest
 
 
+class TestReleaseFormatPreference:
+    def test_digital_beats_cd_and_vinyl_on_equal_tracklists(self, monkeypatch):
+        from services.enrichment import musicbrainz_service as mbs
+
+        releases = [
+            {
+                "id": "vinyl", "title": "The Album", "date": "2024-01-01",
+                "status": "Official", "track_count": 10,
+                "formats": ["Vinyl"],
+            },
+            {
+                "id": "cd", "title": "The Album", "date": "2024-01-01",
+                "status": "Official", "track_count": 10,
+                "formats": ["CD"],
+            },
+            {
+                "id": "digital", "title": "The Album", "date": "2024-01-01",
+                "status": "Official", "track_count": 10,
+                "formats": ["Digital Media"],
+            },
+        ]
+        monkeypatch.setattr(
+            mbs, "_browse_group_releases", lambda *a, **k: releases
+        )
+        monkeypatch.setattr(mbs, "_get_local_track_count", lambda *a, **k: 10)
+
+        result = mbs.get_musicbrainz_best_release(
+            "Artist", "The Album", "format-preference-rg"
+        )
+
+        assert result["best_release"]["id"] == "digital"
+        assert mbs._release_format_preference(releases[1]) == 2
+        assert mbs._release_format_preference(releases[0]) == 1
+
+
 class TestReleaseGroupReleasesNormalization:
     def test_returns_normalized_release_shape(self, monkeypatch):
         """Raw MB releases (media arrays) become the picker contract."""

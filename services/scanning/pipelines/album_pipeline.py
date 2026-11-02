@@ -96,7 +96,12 @@ def _maybe_auto_detect_album_type(artist_name: str, album_name: str) -> None:
         )
 
 
-def run_album_pipeline(artist_name: str, album_name: str, force: bool = False) -> None:
+def run_album_pipeline(
+    artist_name: str,
+    album_name: str,
+    force: bool = False,
+    **scan_options: Any,
+) -> None:
     """Run the complete scan pipeline for one album."""
     album_display = f"{artist_name} - {album_name}"
 
@@ -174,6 +179,7 @@ def run_album_pipeline(artist_name: str, album_name: str, force: bool = False) -
             artist_filter=artist_name,
             album_filter=album_name,
             progress_file="popularity_scan",
+            **(scan_options or {}),
         )
 
         # ⭐ The album-filtered popularity pass ALWAYS runs this album (the skip
