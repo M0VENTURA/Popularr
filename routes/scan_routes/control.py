@@ -54,7 +54,26 @@ async def scan_start() -> Any:
             await flash("Error: No artist name provided", "danger")
             return redirect(url_for("ui.dashboard"))
 
-        run_async(run_artist_pipeline, artist, force)
+        from services.scanning.scan_start_lock import (
+            release_scan_start_lock,
+            try_acquire_scan_start_lock,
+        )
+
+        if not try_acquire_scan_start_lock():
+            await flash("A scan is already running", "warning")
+            return redirect(url_for("ui.dashboard"))
+
+        def _artist_worker() -> None:
+            try:
+                run_artist_pipeline(artist, force)
+            finally:
+                release_scan_start_lock()
+
+        try:
+            run_async(_artist_worker)
+        except Exception:
+            release_scan_start_lock()
+            raise
 
         await flash(f"Scan started for artist: {artist}", "success")
         return redirect(url_for("ui.artist_detail", name=artist))
@@ -102,8 +121,26 @@ async def scan_start() -> Any:
                     )
                 finally:
                     clear_runtime("library")
+                    from services.scanning.scan_start_lock import (
+                        release_scan_start_lock,
+                    )
 
-            thread = run_async(_full_scan_worker)
+                    release_scan_start_lock()
+
+            from services.scanning.scan_start_lock import (
+                release_scan_start_lock,
+                try_acquire_scan_start_lock,
+            )
+
+            if not try_acquire_scan_start_lock():
+                await flash("A scan is already running", "warning")
+                return redirect(url_for("ui.dashboard"))
+
+            try:
+                thread = run_async(_full_scan_worker)
+            except Exception:
+                release_scan_start_lock()
+                raise
             set_runtime("library", {"thread": thread, "type": "library"})
 
         mode_desc = "forced restart" if _restart and _force else (
@@ -116,7 +153,26 @@ async def scan_start() -> Any:
     # Navidrome scan
     # -------------------------------------------------
     if scan_type == "navidrome":
-        run_async(run_navidrome_import_scan, mode="all")
+        from services.scanning.scan_start_lock import (
+            release_scan_start_lock,
+            try_acquire_scan_start_lock,
+        )
+
+        if not try_acquire_scan_start_lock():
+            await flash("A scan is already running", "warning")
+            return redirect(url_for("ui.dashboard"))
+
+        def _navidrome_worker() -> None:
+            try:
+                run_navidrome_import_scan(mode="all")
+            finally:
+                release_scan_start_lock()
+
+        try:
+            run_async(_navidrome_worker)
+        except Exception:
+            release_scan_start_lock()
+            raise
 
         await flash("Navidrome import scan started", "success")
         return redirect(url_for("ui.dashboard"))

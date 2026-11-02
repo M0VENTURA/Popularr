@@ -40,6 +40,30 @@ from services.scanning.pipelines.popularity_pipeline import (
 from helpers.logging_config import log_unified
 
 
+def _launch_guarded(runner, *args) -> bool:
+    """Start a non-popularity scan under the cross-process scan lock."""
+    from services.scanning.scan_start_lock import (
+        release_scan_start_lock,
+        try_acquire_scan_start_lock,
+    )
+
+    if not try_acquire_scan_start_lock():
+        return False
+
+    def _worker() -> None:
+        try:
+            runner(*args)
+        finally:
+            release_scan_start_lock()
+
+    try:
+        run_async(_worker)
+    except Exception:
+        release_scan_start_lock()
+        raise
+    return True
+
+
 @scans_bp.route("/scan/artist-custom", methods=["POST"])
 async def scan_artist_custom():
     """Run a specific scan type for an artist."""
@@ -68,7 +92,9 @@ async def scan_artist_custom():
             return redirect_for_artist(artist)
 
     elif scan_type == "navidrome":
-        run_async(run_navidrome_artist_pipeline, artist, force)
+        if not _launch_guarded(run_navidrome_artist_pipeline, artist, force):
+            await flash("A scan is already running — skipped duplicate trigger", "warning")
+            return redirect_for_artist(artist)
 
     elif scan_type in {"popularity", "metadata", "singles", "finalise"}:
         started = guard_and_launch_popularity_scan(
@@ -134,7 +160,9 @@ async def scan_album_custom():
             return redirect_for_album(artist, album)
 
     elif scan_type == "navidrome":
-        run_async(run_navidrome_album_pipeline, artist, album, force)
+        if not _launch_guarded(run_navidrome_album_pipeline, artist, album, force):
+            await flash("A scan is already running — skipped duplicate trigger", "warning")
+            return redirect_for_album(artist, album)
 
     elif scan_type in {"popularity", "metadata", "singles", "finalise"}:
         started = guard_and_launch_popularity_scan(

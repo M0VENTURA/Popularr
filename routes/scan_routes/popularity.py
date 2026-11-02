@@ -134,13 +134,29 @@ async def scan_popularity_route():
         elif scan_mode == "popularity":
             scan_kwargs["popularity_only"] = True
 
-        thread = run_async(
-            run_popularity_scan,
-            daemon=False,
-            **scan_kwargs,
+        from services.scanning.scan_start_lock import (
+            release_scan_start_lock,
+            try_acquire_scan_start_lock,
         )
-        runtime_state.scan_process_popularity = {"thread": thread, "type": "popularity"}
 
+        if not try_acquire_scan_start_lock():
+            return jsonify({
+                "scan_running": True,
+                "message": "A scan is already running.",
+            }), 409
+
+        def _worker() -> None:
+            try:
+                run_popularity_scan(**scan_kwargs)
+            finally:
+                release_scan_start_lock()
+
+        try:
+            thread = run_async(_worker, daemon=False)
+        except Exception:
+            release_scan_start_lock()
+            raise
+        runtime_state.scan_process_popularity = {"thread": thread, "type": "popularity"}
     await flash("✅ Popularity-related scan started", "success")
     return redirect(url_for("ui.dashboard"))
 

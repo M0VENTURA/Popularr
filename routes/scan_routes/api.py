@@ -116,13 +116,29 @@ async def api_scan_single_artist():
                 "error": "An artist scan is already running",
             }), 409
 
+        from services.scanning.scan_start_lock import (
+            release_scan_start_lock,
+            try_acquire_scan_start_lock,
+        )
+
+        if not try_acquire_scan_start_lock():
+            return jsonify({
+                "success": False,
+                "error": "A scan is already running",
+            }), 409
+
         def _worker():
             try:
                 run_artist_pipeline(artist, force)
             finally:
                 clear_runtime("artist")
+                release_scan_start_lock()
 
-        thread = run_async(_worker)
+        try:
+            thread = run_async(_worker)
+        except Exception:
+            release_scan_start_lock()
+            raise
         set_runtime("artist", {"thread": thread, "type": "artist"})
 
     return jsonify({
@@ -441,6 +457,19 @@ async def api_popularity_run_compat():
             except Exception:
                 pass
 
+        # Cross-process guard: two hypercorn workers can both pass the
+        # runtime/DB checks before either writes the shared progress row.
+        from services.scanning.scan_start_lock import (
+            release_scan_start_lock,
+            try_acquire_scan_start_lock,
+        )
+
+        if not try_acquire_scan_start_lock():
+            return jsonify({
+                "success": False,
+                "error": "A scan is already running",
+            }), 409
+
         record_scan(mode, "started", message=f"{mode} scan started", artist="_SCAN_SESSION_", album=mode)
 
         def _worker():
@@ -483,8 +512,13 @@ async def api_popularity_run_compat():
             finally:
                 clear_runtime("popularity")
                 runtime_state.scan_process_popularity = None
+                release_scan_start_lock()
 
-        thread = run_async(_worker)
+        try:
+            thread = run_async(_worker)
+        except Exception:
+            release_scan_start_lock()
+            raise
         set_runtime("popularity", {"thread": thread, "type": mode})
         runtime_state.scan_process_popularity = {"thread": thread, "type": mode}
 

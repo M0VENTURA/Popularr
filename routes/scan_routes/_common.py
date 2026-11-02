@@ -274,8 +274,27 @@ def guard_and_launch_popularity_scan(
                     pass
             finally:
                 clear_runtime("popularity")
+                from services.scanning.scan_start_lock import (
+                    release_scan_start_lock,
+                )
 
-        thread = run_async(_worker)
+                release_scan_start_lock()
+
+        # ⭐ Cross-PROCESS start lock. The runtime registry above is per worker;
+        # two clicks routed to different hypercorn workers both passed the
+        # checks before either wrote the shared progress row, so both scans ran.
+        from services.scanning.scan_start_lock import try_acquire_scan_start_lock
+
+        if not try_acquire_scan_start_lock():
+            return False
+
+        try:
+            thread = run_async(_worker)
+        except Exception:
+            from services.scanning.scan_start_lock import release_scan_start_lock
+
+            release_scan_start_lock()
+            raise
         set_runtime("popularity", {"thread": thread, "type": _scan_type})
     return True
 

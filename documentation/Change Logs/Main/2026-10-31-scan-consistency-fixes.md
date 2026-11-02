@@ -175,6 +175,19 @@ The cover verdict funnel and suffix repair now compare against
 `comparison_artist(track, album_artist)`: the TRACK artist first, with the album
 artist only as a fallback for a single-artist release.
 
+## Double-click / duplicate scan starts
+
+Hypercorn runs four workers, and the runtime registry is per process. Two clicks
+routed to different workers both passed the in-process and DB checks before
+either wrote the shared progress row, so both album pipelines ran (both logged
+`Step 1/3: Navidrome import`).
+
+A cross-process file lock (`services/scanning/scan_start_lock.py`) is now
+acquired before a scan thread starts and released by that thread's `finally`.
+It covers the popularity/full, album, artist, library, and Navidrome start
+routes. A second click gets “A scan is already running”; the OS releases the
+lock automatically if a worker dies.
+
 ## My Heart Will Go On
 
 The title search preferred a writer-verified recording over an earlier
