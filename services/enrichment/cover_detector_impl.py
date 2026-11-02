@@ -1334,7 +1334,10 @@ class CoverDetector:
             # Checked here, at the single funnel every detection path goes
             # through, so no path can reintroduce it.
             _orig = str(result.get("original_artist") or "").strip()
-            _performer = str(track.get("artist") or "").strip()
+            # Compare against the TRACK artist, not the album artist. On a VA
+            # compilation the album artist is "Various Artists"; the track row
+            # (or the file/MB fallback resolved above) is the performer.
+            _performer = comparison_artist(track, artist)
             _performer_usable = bool(_performer) and not is_track_artist_placeholder(_performer)
             _orig_usable = bool(_orig) and not is_track_artist_placeholder(_orig)
             if _orig_usable and _performer_usable and _same_artist(_orig, _performer):
@@ -1383,7 +1386,7 @@ class CoverDetector:
                 # detection has re-confirmed the verdict — doing it first (as
                 # the old code did) stamped a bogus suffix onto a FALSE stored
                 # verdict and then shielded it from re-assessment.
-                _repair = self._suffix_repair_update(track)
+                _repair = self._suffix_repair_update(track, artist)
                 if _repair is not None:
                     pending_updates.append(_repair)
                     _repaired_titles.add(_tid)
@@ -1877,7 +1880,11 @@ class CoverDetector:
         ]
         return cover_results + _repair_results
 
-    def _suffix_repair_update(self, track: dict[str, Any]) -> dict[str, Any] | None:
+    def _suffix_repair_update(
+        self,
+        track: dict[str, Any],
+        album_artist: str = "",
+    ) -> dict[str, Any] | None:
         """An update restoring a confirmed cover's "(X Cover)" title, or None.
 
         Only for a track whose STORED verdict names an original artist, whose
@@ -1903,7 +1910,7 @@ class CoverDetector:
             return None
         if is_track_artist_placeholder(original):
             return None
-        performer = str(track.get("artist") or "").strip()
+        performer = comparison_artist(track, album_artist)
         if performer and _same_artist(original, performer):
             return None
         update = self._build_update(

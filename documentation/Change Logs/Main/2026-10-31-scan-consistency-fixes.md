@@ -171,6 +171,10 @@ usable original is now accepted even when the track performer is unknown. A
 stored suffix that names the wrong act — "(Kidz Bop Cover)" with OutKast as the
 original — is rebuilt too, instead of being treated as already repaired.
 
+The cover verdict funnel and suffix repair now compare against
+`comparison_artist(track, album_artist)`: the TRACK artist first, with the album
+artist only as a fallback for a single-artist release.
+
 ## My Heart Will Go On
 
 The title search preferred a writer-verified recording over an earlier
