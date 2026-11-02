@@ -107,15 +107,17 @@
   const DEFAULT_TYPE = 'full';
 
   /**
-   * Advanced FULL-scan stage switches. The checkbox being UNCHECKED means
-   * "skip this stage"; the payload carries the positive `skip_*` flag.
+   * Advanced FULL-scan stage switches. A TICKED box means "force this stage";
+   * an UNTICKED box means "fill it only if missing, otherwise reuse stored
+   * data". The payload carries the positive `force_*` flags plus a
+   * `stage_selection` marker so the server knows the per-stage intent exists.
    */
   const STAGE_OPTIONS = [
-    { id: 'scanStagePopularity', field: 'skip_popularity' },
-    { id: 'scanStageSingles', field: 'skip_singles' },
-    { id: 'scanStageCovers', field: 'skip_covers' },
-    { id: 'scanStageGenres', field: 'skip_genres' },
-    { id: 'scanStageEssentia', field: 'skip_essentia' },
+    { id: 'scanStagePopularity', field: 'force_popularity' },
+    { id: 'scanStageSingles', field: 'force_singles' },
+    { id: 'scanStageCovers', field: 'force_covers' },
+    { id: 'scanStageGenres', field: 'force_genres' },
+    { id: 'scanStageEssentia', field: 'force_essentia' },
   ];
 
   /**
@@ -402,13 +404,24 @@
     form.submit();
   }
 
+  /**
+   * Build the per-stage force flags for the advanced FULL-scan tickboxes.
+   *
+   * A ticked box means "force this stage"; an unticked box means "run only if
+   * data is missing". These controls only apply to Full Scan; every other scan
+   * type returns `{}` and keeps its existing behaviour.
+   *
+   * `stage_selection` tells the server that the absence of a force flag is
+   * deliberate (fill-only), rather than an old client that never sent the
+   * advanced options at all.
+   */
   function stageOptions() {
     const type = selectedType();
     if (!type || type.id !== 'full') return {};
-    const payload = {};
+    const payload = { stage_selection: true };
     STAGE_OPTIONS.forEach((stage) => {
       const box = el(stage.id);
-      if (box && !box.checked) payload[stage.field] = true;
+      if (box && box.checked) payload[stage.field] = true;
     });
     return payload;
   }

@@ -1948,13 +1948,22 @@ def fetch_musicbrainz_release_metadata(release_id: str) -> dict[str, Any] | None
 
 
 def _join_genre_names(raw: Any) -> str:
-    names: list[str] = []
-    for item in raw or []:
-        if isinstance(item, dict):
-            name = str(item.get("name") or "").strip()
-            if name and name.casefold() not in {n.casefold() for n in names}:
-                names.append(name)
-    return ", ".join(names)
+    ranked: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw or []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        try:
+            count = int(item.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        ranked.append((count, -index, name))
+    ranked.sort(reverse=True)
+    return ", ".join(name for _, _, name in ranked)
 
 
 def _vocalists_from_recording(recording: dict[str, Any]) -> list[str]:

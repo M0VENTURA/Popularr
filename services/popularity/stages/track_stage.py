@@ -345,6 +345,47 @@ def _duration_below_floor(track: dict[str, Any]) -> bool:
     return dur < 30.0
 
 
+def _stage_is_forced(options: dict[str, Any], key: str) -> bool:
+    """Whether one advanced-scan stage should ignore its stored data.
+
+    A forced scan historically forced every stage. The tickboxes refine that:
+    when the UI sent ``stage_selection``, only ticked stages are forced and the
+    rest behave like an ordinary scan (fill missing, reuse present). Without
+    ``stage_selection`` an older caller keeps the old force-everything meaning.
+    """
+    if not bool(options.get("force")):
+        return False
+    if not bool(options.get("stage_selection")):
+        return True
+    return bool(options.get(key))
+
+
+def _genre_entries_by_vote(entries: list[Any]) -> list[str]:
+    """Provider genre/tag names ordered by their vote count.
+
+    MusicBrainz and ListenBrainz expose ``count`` on every genre/tag. That
+    count is real evidence (the release-group page shows ``pop 14``,
+    ``dance-pop 4``, ``alternative rock 2``); discarding it made the scorer
+    treat whichever name sorted first as the strongest. Missing counts keep
+    the provider's original order.
+    """
+    ranked: list[tuple[int, int, str]] = []
+    for index, entry in enumerate(entries or []):
+        if isinstance(entry, dict):
+            name = str(entry.get("tag") or entry.get("name") or "").strip()
+            try:
+                count = int(entry.get("count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+        else:
+            name = str(entry or "").strip()
+            count = 0
+        if name:
+            ranked.append((count, -index, name))
+    ranked.sort(reverse=True)
+    return list(dict.fromkeys(name for _, _, name in ranked))
+
+
 def _genre_track_limit() -> int:
     """How many MUSICAL genres to write onto one track (default 3).
 
@@ -1751,11 +1792,24 @@ def process_track(
     refresh_popularity = bool(options.get("refresh_popularity_if_due"))
     singles_detection_only = bool(options.get("singles_detection_only"))
     singles_pass = bool(options.get("singles_only")) or bool(options.get("singles_with_missing_popularity"))
-    # Advanced full-scan switches (True = skip THAT stage only).
+    # Advanced full-scan switches. The legacy ``skip_*`` keys remain hard
+    # skips for older callers; the UI now sends positive ``force_*`` flags plus
+    # ``stage_selection``. Under a forced scan an UNTICKED stage must still run
+    # when its data is missing, so only the ticked stages are forced.
     _skip_popularity = bool(options.get("skip_popularity_scoring"))
     _skip_singles = bool(options.get("skip_singles_detection"))
     _skip_covers = bool(options.get("skip_cover_detection"))
     _skip_genres = bool(options.get("skip_genre_detection"))
+    _force_popularity = _stage_is_forced(options, "force_popularity_scoring")
+    _force_singles = _stage_is_forced(options, "force_singles_detection")
+    _force_covers = _stage_is_forced(options, "force_cover_detection")
+    _force_genres = _stage_is_forced(options, "force_genre_detection")
+    # Fill-only is stronger than ordinary freshness: an unticked stage during a
+    # forced scan reuses ANY stored result, not just one inside its TTL.
+    _fill_only = bool(options.get("force")) and bool(options.get("stage_selection"))
+    _fill_only_popularity = _fill_only and not bool(options.get("force_popularity_scoring"))
+    _fill_only_singles = _fill_only and not bool(options.get("force_singles_detection"))
+    _fill_only_covers = _fill_only and not bool(options.get("force_cover_detection"))
 
     _has_stored_popularity = (
         float(track.get("final_score") or track.get("popularity") or 0) > 0
@@ -2081,7 +2135,7 @@ def process_track(
                 and (now_ts - _as_utc(effective_track.get("listenbrainz_last_updated"))).total_seconds() < _cache_ttl * 3600
             )
 
-            _force = bool(options.get("force"))
+            _force = _force_popularity
             _has_credible_data = (
                 int(effective_track.get("lastfm_listeners") or 0) >= 25
                 or int(effective_track.get("listenbrainz_listens") or 0) >= 25
@@ -2101,6 +2155,14 @@ def process_track(
                 and bool(effective_track.get("final_score") and _has_credible_data)
                 and (frozen_track or _sources_complete)
             )
+            if _fill_only_popularity and not _cached:
+                _stored_popularity = float(
+                    effective_track.get("final_score")
+                    or effective_track.get("popularity")
+                    or effective_track.get("raw_score")
+                    or 0
+                )
+                _cached = _stored_popularity > 0
 
             if _cached:
                 lastfm_listeners = _as_int(effective_track.get("lastfm_listeners") or 0)
@@ -2693,7 +2755,15 @@ def process_track(
     # ``popularity_cache_policy.singles_detection_is_fresh`` next to the other
     # freshness rules, where it can be tested directly.
     _sd_fresh = False
-    if not bool(options.get("force")):
+    _has_single_data = bool(
+        track.get("single_detection_last_updated")
+        or track.get("single_manual_override")
+        or track.get("is_single")
+        or str(track.get("single_status") or "").strip().lower() not in ("", "none")
+    )
+    if _fill_only_singles and _has_single_data:
+        _sd_fresh = True
+    elif not _force_singles:
         try:
             from services.popularity.popularity_cache_policy import singles_detection_is_fresh
 
@@ -2947,7 +3017,7 @@ def process_track(
                 return False
 
             # MusicBrainz Genres
-            if title and artist and (not _has_source_genres("musicbrainz_genres") or _force_meta):
+            if title and artist and (not _has_source_genres("musicbrainz_genres") or _force_genres):
                 try:
                     mb_raw = get_shared_mb_client()
                     _rg_mbid = str(track.get("musicbrainz_releasegroupid") or "").strip()
@@ -2966,7 +3036,7 @@ def process_track(
                             rg = mb_raw.get_release_group(_rg_mbid, inc="genres+tags") or {}
                             cached = (rg.get("genres") or [], rg.get("tags") or [])
                             _bounded_cache_put(_MB_RG_GENRE_CACHE, _rg_mbid, cached)
-                        return list(cached[0] or [])
+                        return list(cached[0] or cached[1] or [])
 
                     def _recording_genres() -> list[Any]:
                         if not _rec_mbid:
@@ -2976,7 +3046,7 @@ def process_track(
                             rec = mb_raw.get_recording(_rec_mbid, inc="genres+tags") or {}
                             cached = (rec.get("genres") or [], rec.get("tags") or [])
                             _bounded_cache_put(_MB_RECORDING_GENRE_CACHE, _rec_mbid, cached)
-                        return list(cached[0] or [])
+                        return list(cached[0] or cached[1] or [])
 
                     # ⭐ On a VA COMPILATION the release group is the album, not
                     # the recording: preferring it painted every track with the
@@ -2990,13 +3060,13 @@ def process_track(
                         mb_genres = _release_group_genres() or _recording_genres()
 
                     if mb_genres:
-                        _mb_names = [g.get("name") for g in mb_genres if isinstance(g, dict) and g.get("name")]
+                        _mb_names = _genre_entries_by_vote(mb_genres)
                         update_payload["musicbrainz_genres"] = json.dumps(_mb_names, ensure_ascii=False)
                 except Exception as e:
                     logger.debug("MusicBrainz genre fetch failed", track_id=track_id, error=str(e))
 
             # Discogs Genres
-            if title and artist and (not _has_source_genres("discogs_genres") or _force_meta):
+            if title and artist and (not _has_source_genres("discogs_genres") or _force_genres):
                 try:
                     from api_clients.discogs_http import DiscogsHttpClient
                     from helpers.config_helpers import get_config as _get_disc_cfg
@@ -3036,7 +3106,7 @@ def process_track(
                     logger.debug("Discogs genre fetch failed", track_id=track_id, error=str(e))
 
             # ListenBrainz Genres
-            if title and artist and (not _has_source_genres("listenbrainz_genres") or _force_meta):
+            if title and artist and (not _has_source_genres("listenbrainz_genres") or _force_genres):
                 try:
                     _lb_mbid = (mb_data or {}).get("recording_mbid") or track.get("recording_mbid")
                     if _lb_mbid:
@@ -3044,9 +3114,9 @@ def process_track(
                         if lb_tags is _MISSING:
                             lb_tags = get_recording_tags(_lb_mbid) or []
                             _bounded_cache_put(_LB_RECORDING_TAGS_CACHE, str(_lb_mbid), lb_tags)
-                        names = [str(t.get("tag") or t.get("name") or "").strip() for t in lb_tags if isinstance(t, dict)]
+                        names = _genre_entries_by_vote(lb_tags)
                         if names:
-                            update_payload["listenbrainz_genres"] = json.dumps([n for n in names if n], ensure_ascii=False)
+                            update_payload["listenbrainz_genres"] = json.dumps(names, ensure_ascii=False)
                 except Exception as e:
                     logger.debug("ListenBrainz genre fetch failed", track_id=track_id, error=str(e))
 
@@ -3056,7 +3126,16 @@ def process_track(
     # -------------------------------------------------------------------------
     # 4. COVER DETECTION
     # -------------------------------------------------------------------------
-    if not popularity_only and not singles_detection_only and not _skip_covers:
+    _has_cover_data = bool(
+        track.get("cover_last_checked")
+        or track.get("is_cover")
+        or track.get("cover_manual_override")
+        or _as_str(track.get("is_cover_reason"))
+        or _as_str(track.get("original_cover_artist"))
+    )
+    if not popularity_only and not singles_detection_only and not _skip_covers and not (
+        _fill_only_covers and _has_cover_data
+    ):
         try:
             effective_track = _build_effective_track(track, update_payload)
             title = _as_str(effective_track.get("title") or track.get("title") or "")
@@ -3103,7 +3182,7 @@ def process_track(
                         or effective_track.get("musicbrainz_workid")
                     ),
                 }
-                force_cover = bool(options.get("force_cover_detection"))
+                force_cover = _force_covers
 
                 _cover_wording_removed = bool(track.get("title_had_cover_wording"))
                 _cover_manual_override = bool(cover_data.get("cover_manual_override"))
@@ -3219,7 +3298,20 @@ def process_track(
     # -------------------------------------------------------------------------
     # 5. GENRE AGGREGATION
     # -------------------------------------------------------------------------
-    if not popularity_only and not singles_detection_only and not _skip_genres:
+    # An unticked Genre stage under a forced scan still fills a track with no
+    # stored MUSICAL genre, but must not recompute one that already exists. A
+    # marker-only list ("Cover") is not usable genre data.
+    _stored_genres = _parse_genre_input(track.get("genres"))
+    _has_stored_musical_genres = any(
+        genre and not is_track_affiliation_tag(str(genre))
+        for genre in _stored_genres
+    )
+    if (
+        not popularity_only
+        and not singles_detection_only
+        and not _skip_genres
+        and (_force_genres or not _has_stored_musical_genres)
+    ):
         try:
             effective_track = _build_effective_track(track, update_payload)
             source_map = {}

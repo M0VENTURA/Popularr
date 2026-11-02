@@ -247,11 +247,16 @@ def _run_artist_scan_pipeline_inner(
             _essentia_enabled = False
 
         if _essentia_enabled and not bool((scan_options or {}).get("skip_essentia")):
+            _stage_selection = bool((scan_options or {}).get("stage_selection"))
+            _force_essentia = bool(force) and (
+                not _stage_selection
+                or bool((scan_options or {}).get("force_essentia"))
+            )
             if callable(progress_callback):
                 _cb("essentia", 0, 1, artist_name)
             try:
                 from services.scanning.pipelines.essentia_scanner import run_essentia_mood_scan
-                run_essentia_mood_scan(artist_filter=artist_name, force=force)
+                run_essentia_mood_scan(artist_filter=artist_name, force=_force_essentia)
             except Exception as exc:
                 logger.debug("[SCAN_PIPELINE] Essentia scan skipped", artist=artist_name, error=str(exc))
 

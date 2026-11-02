@@ -267,9 +267,23 @@ flag back to TRUE once it has written the resolved ratings/tags.
 ## Advanced Full Scan stages
 
 The scanner sheet now exposes per-run stage tickboxes for **Popularity**,
-**Singles**, **Covers**, **Genres**, and **Essentia**. Unticking one skips only
-that path; Force still applies to every stage left ticked. The flags flow
-through library, artist, album, and targeted full scans.
+**Singles**, **Covers**, **Genres**, and **Essentia**. A ticked stage is fully
+FORCED; an unticked stage still fills missing data but reuses anything already
+stored. `stage_selection` marks that per-stage intent, so an older client that
+sends no such marker keeps the previous force-everything behaviour. The flags
+flow through library, artist, album, and targeted full scans.
+
+The live `static/js/ui/scan-modal.js` was missing the `stageOptions()` helper
+that the rebuilt copy already had, so `run()` threw a `ReferenceError` before
+sending the request and the tickboxes never reached the server. The helper is
+now present in the live tree and sends `force_*` flags instead of hard `skip_*`
+flags.
+
+With Singles unticked, Force no longer bypasses the singles freshness cache:
+a track with a stored verdict reuses it, while a track with no verdict still
+gets detected. "Stored" here means presence of a verdict, not merely a
+still-fresh timestamp, so an old verdict is not re-fetched either. The same
+fill-only presence rule applies to Popularity, Covers, Genres, and Essentia.
 
 ## Finalise fills missing popularity
 
@@ -301,6 +315,12 @@ Alphabetically sorted lists now contribute every tag at equal rank weight,
 family outliers are removed before diversity is enforced, and only the
 **selected** set is condensed. A descendant must reach 80% of its ancestor's
 score before replacing it, so a weaker `synthpop` no longer deletes `pop`.
+
+MusicBrainz and ListenBrainz genre/tag vote counts are now pulled through
+(`pop 14`, `dance-pop 4`, `alternative rock 2`). The provider names are sorted
+by count before storage, so the count drives the rank instead of the API's
+alphabetical order. If a release group has no `genres` array, its scored
+`tags` array is used as the fallback.
 
 ## Release format preference when linking an album
 

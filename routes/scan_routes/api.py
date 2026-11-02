@@ -356,6 +356,12 @@ async def api_popularity_run_compat():
     force = bool(params.force or raw.get("force", False))
     restart = bool(getattr(params, "restart", False) or raw.get("restart", False))
     _stage_options = {
+        "stage_selection": bool(raw.get("stage_selection")),
+        "force_popularity_scoring": bool(raw.get("force_popularity")),
+        "force_singles_detection": bool(raw.get("force_singles")),
+        "force_cover_detection": bool(raw.get("force_covers")),
+        "force_genre_detection": bool(raw.get("force_genres")),
+        "force_essentia": bool(raw.get("force_essentia")),
         "skip_metadata_lookup": bool(
             raw.get("skip_metadata", getattr(params, "skip_metadata", False))
         ),

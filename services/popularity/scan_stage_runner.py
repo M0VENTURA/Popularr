@@ -105,7 +105,7 @@ from services.popularity.stages.finalise_stage import (
     _playlist_genres_from_rows,
 )
 from services.popularity.stages.load_stage import load_candidates
-from services.popularity.stages.track_stage import process_track
+from services.popularity.stages.track_stage import _stage_is_forced, process_track
 from services.scanning.scan_history_service import record_scan, was_album_scanned
 from services.scanning.scan_state import (
     get_scan_progress_path,
@@ -1470,12 +1470,13 @@ def _run_album_cover_detection(artist: str, album: str, tracks: list[dict[str, A
         # and a track list. The single count this function used to log said only
         # "N cover(s) found", so an album where nothing needed checking and one
         # where every track was checked both produced one identical line.
+        _force_covers = _stage_is_forced(options, "force_cover_detection")
         _results = detect_covers_for_album(
             album=album,
             artist=artist,
             tracks=tracks,
             conn=None,
-            force=bool(options.get("force")),
+            force=_force_covers,
         ) or []
         return {
             str(r.get("track_id"))
@@ -3395,7 +3396,7 @@ def run_scan(
                                 _prefetch_state["prefetched_popularity"] = prefetch_artist_popularity(
                                     artist=artist,
                                     tracks=_prefetch_tracks,
-                                    force=bool(options.get("force")),
+                                    force=_stage_is_forced(options, "force_popularity_scoring"),
                                     cache_full_catalogue=True,
                                 )
                             except Exception as exc:
@@ -3500,7 +3501,7 @@ def run_scan(
                 # -------------------------------------------------------------
                 if not _singles_pass:
                     try:
-                        _needs_album_lb = bool(options.get("force"))
+                        _needs_album_lb = _stage_is_forced(options, "force_popularity_scoring")
                         if not _needs_album_lb:
                             for _t in track_dicts:
                                 if not _t.get("title"):
@@ -3924,7 +3925,7 @@ def run_scan(
                     prepared_track = apply_context_fields_to_track(track_context)
                     _frozen = False
 
-                    if not options.get("force") and should_freeze_track(prepared_track):
+                    if not _stage_is_forced(options, "force_popularity_scoring") and should_freeze_track(prepared_track):
                         _frozen = True
                         logger.debug("Freezing mature track", track=prepared_track.get("title", "?"), existing_score=prepared_track.get("final_score", 0))
                         if not prepared_track.get("popularity_frozen"):

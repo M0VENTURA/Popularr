@@ -41,8 +41,19 @@ from helpers.logging_config import log_unified
 
 
 def _stage_options_from_form(form) -> dict[str, bool]:
-    """Read the advanced full-scan stage checkboxes (True = skip)."""
+    """Read the advanced full-scan stage checkboxes.
+
+    A ticked box carries a positive ``force_*`` flag; ``stage_selection`` says
+    the per-stage intent was sent, so an absent flag means "fill missing data
+    only" rather than falling back to forcing every stage.
+    """
     return {
+        "stage_selection": bool(form.get("stage_selection")),
+        "force_popularity_scoring": bool(form.get("force_popularity")),
+        "force_singles_detection": bool(form.get("force_singles")),
+        "force_cover_detection": bool(form.get("force_covers")),
+        "force_genre_detection": bool(form.get("force_genres")),
+        "force_essentia": bool(form.get("force_essentia")),
         "skip_popularity_scoring": bool(form.get("skip_popularity")),
         "skip_singles_detection": bool(form.get("skip_singles")),
         "skip_cover_detection": bool(form.get("skip_covers")),
