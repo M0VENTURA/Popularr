@@ -278,6 +278,30 @@ A Finalise pass normally reuses stored scores. If either provider count is zero
 the popularity lookup for the missing source while still reusing any present
 stored score. Albums with both counts present skip the scoring step as before.
 
+## Genre list order and family outliers
+
+`Baby One More Time` was finalising as `Alternative Rock, Ambient, Contemporary
+R&B` from provider lists that also contained pop, dance-pop, synth-pop, electro,
+europop and teen pop.
+
+Two causes:
+
+- MusicBrainz/ListenBrainz return genre arrays in **alphabetical** order, and the
+  scorer treated that position as a popularity ranking. `alternative rock` and
+  `ambient` therefore received rank-1/rank-2 weight solely because they sort
+  before `pop`.
+- A lone family could still take a slot on specificity even when the rest of the
+  evidence was a large pop/electronic cluster.
+- Worse, `pop` was the highest-scoring candidate but ancestor condensation
+  deleted it because a weaker `synthpop` (76% of Pop's score) also existed.
+  That promoted `alternative rock`, `ambient` and `contemporary R&B` into the
+  three slots.
+
+Alphabetically sorted lists now contribute every tag at equal rank weight,
+family outliers are removed before diversity is enforced, and only the
+**selected** set is condensed. A descendant must reach 80% of its ancestor's
+score before replacing it, so a weaker `synthpop` no longer deletes `pop`.
+
 ## Release format preference when linking an album
 
 When several releases in a group have the same tracklist, the best-release

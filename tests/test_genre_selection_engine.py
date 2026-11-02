@@ -37,6 +37,7 @@ from services.enrichment.genre_vocabulary import (
     normalize_token,
     tokenize_values,
     validate_vocabulary,
+    values_are_alphabetical,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -590,6 +591,73 @@ class TestSelection:
 # ---------------------------------------------------------------------------
 # Stage 8b: family diversity
 # ---------------------------------------------------------------------------
+
+class TestAlphabeticalSourceLists:
+    def test_alphabetical_lists_are_detected(self) -> None:
+        assert values_are_alphabetical(
+            ["alternative rock", "ambient", "pop", "synth-pop"]
+        )
+        assert not values_are_alphabetical(
+            ["synth-pop", "pop", "ambient", "alternative rock"]
+        )
+        assert not values_are_alphabetical(["pop", "rock"])
+
+    def test_alphabetical_order_does_not_create_rank_decay(self) -> None:
+        result = full({
+            "musicbrainz@album": ["ambient", "pop", "rock", "synth-pop"],
+        })
+        weights = [
+            evidence["weight"]
+            for candidate in result["candidates"]
+            for evidence in candidate["evidence"]
+        ]
+        assert weights
+        assert max(weights) == pytest.approx(min(weights), abs=1e-9)
+
+
+class TestFamilyConsensus:
+    def test_a_lone_outlier_family_is_removed(self) -> None:
+        def candidate(genre_id: str, family: str, score: float) -> gs.Candidate:
+            item = gs.Candidate(genre_id, genre_id.title(), family, 1)
+            item.score = score
+            item.confidence = score
+            return item
+
+        candidates = [
+            candidate("pop", "pop", 3.10),
+            candidate("dance_pop", "pop", 2.25),
+            candidate("synth_pop", "pop", 2.25),
+            candidate("europop", "pop", 2.20),
+            candidate("ambient", "electronic", 2.20),
+            candidate("electro", "electronic", 2.25),
+            candidate("electronic", "electronic", 2.15),
+            candidate("alternative_rock", "rock", 2.20),
+        ]
+
+        kept = gs.remove_family_outliers(candidates, settings=SETTINGS)
+
+        assert [c.genre_id for c in kept] == [
+            "pop", "dance_pop", "synth_pop", "europop",
+            "ambient", "electro", "electronic",
+        ]
+
+    def test_pop_survives_a_weaker_synthpop_and_alt_rock_is_dropped(self) -> None:
+        """Regression: alphabetical rank made alt rock win, then a weaker
+        synthpop deleted Pop during ancestor condensation."""
+        tags = [
+            "alternative rock", "ambient", "ballad", "contemporary r&b",
+            "dance-pop", "electro", "electronic", "europop", "hip hop", "jazz",
+            "pop", "synth-pop", "teen pop",
+        ]
+        result = select({
+            "listenbrainz@track": tags,
+            "musicbrainz@album": tags,
+            "discogs@album": ["Pop"],
+        })
+
+        assert "Pop" in result, result
+        assert "Alternative Rock" not in result, result
+
 
 class TestFamilyDiversity:
     def test_three_siblings_in_one_family_are_capped(self) -> None:

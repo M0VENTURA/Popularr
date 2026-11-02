@@ -172,10 +172,17 @@ class SelectionSettings:
     family_slot_limit: int = 2
     #: ...unless the extra one has track-level evidence from this many sources.
     family_override_sources: int = 2
+    #: A family whose total score is below this share of the strongest family
+    #: is treated as an outlier and removed before slots are filled.
+    family_consensus_min_share: float = 0.30
     #: Pairs that must NOT be collapsed to their ancestor.
     keep_together: frozenset[tuple[str, str]] = frozenset()
     #: Pairs collapsed to the broader one ONLY when the narrower is unsupported.
     conditional_keep: frozenset[tuple[str, str]] = frozenset()
+    #: A more specific descendant replaces its ancestor only when it reaches
+    #: this fraction of the ancestor's score. A weaker ``synthpop`` must not
+    #: delete the better-supported ``pop`` tag.
+    ancestor_replace_min_ratio: float = 0.80
 
 
 #: The report's "recommended starting values" for provider trust. Deliberately
@@ -314,6 +321,8 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         relative_floors=(0.0, 0.45, 0.45),
         family_slot_limit=max(1, _int("family_slot_limit", 2)),
         family_override_sources=max(1, _int("family_override_sources", 2)),
+        family_consensus_min_share=_num("family_consensus_min_share", 0.30),
+        ancestor_replace_min_ratio=_num("ancestor_replace_min_ratio", 0.80),
         keep_together=_pairs("keep_together", DEFAULT_KEEP_TOGETHER),
         conditional_keep=_pairs("conditional_keep", DEFAULT_CONDITIONAL_KEEP),
     )
@@ -348,7 +357,10 @@ def collect_candidates(
         is_admin_genre,
         is_junk_genre,
     )
-    from services.enrichment.genre_vocabulary import tokenize_values
+    from services.enrichment.genre_vocabulary import (
+        tokenize_values,
+        values_are_alphabetical,
+    )
 
     candidates: dict[str, Candidate] = {}
     moved: dict[str, list[str]] = {}
@@ -363,6 +375,7 @@ def collect_candidates(
         # ``death/doom`` stays one genre and a pipe-delimited list is split
         # instead of being kept whole and classified as unknown.
         parsed = tokenize_values(raw_values, vocab)
+        alphabetically_sorted = values_are_alphabetical(parsed)
         entity_weight = settings.entity_weights.get(entity, DEFAULT_ENTITY_WEIGHTS[ENTITY_TRACK])
         source_weight = settings.source_weights.get(source, 0.10)
 
@@ -391,7 +404,9 @@ def collect_candidates(
                 continue
             seen_pairs.add(dedupe)
 
-            weight = source_weight * entity_weight * _rank_decay(rank)
+            weight = source_weight * entity_weight * (
+                1.0 if alphabetically_sorted else _rank_decay(rank)
+            )
             candidate = candidates.get(classification.canonical)
             if candidate is None:
                 candidate = Candidate(
@@ -500,6 +515,11 @@ def remove_redundant_ancestors(
                 # evidence rather than on the artist's own broad tags.
                 if other.has_entity(ENTITY_TRACK) or other.has_entity(ENTITY_ALBUM):
                     continue
+            if (
+                candidate.score > 0
+                and other.score < candidate.score * settings.ancestor_replace_min_ratio
+            ):
+                continue
             drop.add(candidate.genre_id)
             break
 
@@ -558,21 +578,63 @@ def rank_and_condense(
     vocab: Vocabulary | None = None,
     settings: SelectionSettings | None = None,
 ) -> list[Candidate]:
-    """Score-order the candidates, then apply the hierarchy rules.
+    """Score-order the candidates.
 
-    Split out from :func:`select_genres` so the FULL considered set stays
-    available: the report's provenance requirement (§15) is that a result be
-    explainable, and "why is my genre missing" is unanswerable if the losers are
-    discarded before anyone can look at them.
+    Condensation and family diversity are applied by the caller AFTER outlier
+    removal, so a family trimmed to two representatives cannot hide the full
+    support it had before trimming. Split out from :func:`select_genres` so the
+    FULL considered set stays available: the report's provenance requirement
+    (§15) is that a result be explainable, and "why is my genre missing" is
+    unanswerable if the losers are discarded before anyone can look at them.
     """
-    settings = settings or _settings_from_config(None)
-    ranked = sorted(
+    return sorted(
         candidates,
         key=lambda c: (c.confidence, c.score, c.specificity),
         reverse=True,
     )
-    ranked = remove_redundant_ancestors(ranked, vocab=vocab, settings=settings)
-    return enforce_family_diversity(ranked, settings=settings)
+
+
+def remove_family_outliers(
+    candidates: list[Candidate],
+    *,
+    settings: SelectionSettings | None = None,
+) -> list[Candidate]:
+    """Drop a genre family that is only a tiny minority of the evidence.
+
+    Providers often return one long, alphabetically sorted tag list. After
+    rank-decay is neutralised those tags are equal evidence, but an unrelated
+    lone tag can still win a slot because it is more specific. A family whose
+    total score is below ``family_consensus_min_share`` of the strongest
+    family is an outlier — the reported ``alternative rock`` beside a large
+    pop/dance-pop/synth-pop cluster — and is removed before selection.
+    """
+    settings = settings or _settings_from_config(None)
+    if not candidates:
+        return []
+
+    family_scores: dict[str, float] = {}
+    for candidate in candidates:
+        family = candidate.family or candidate.genre_id
+        family_scores[family] = family_scores.get(family, 0.0) + max(candidate.score, 0.0)
+
+    strongest = max(family_scores.values(), default=0.0)
+    if strongest <= 0:
+        return candidates
+
+    floor = strongest * settings.family_consensus_min_share
+    kept = [
+        candidate for candidate in candidates
+        if candidate.manual
+        or family_scores.get(candidate.family or candidate.genre_id, 0.0) >= floor
+    ]
+    dropped = [c.display for c in candidates if c not in kept]
+    if dropped:
+        logger.debug(
+            "Genre family outlier removed",
+            dropped=dropped,
+            family_scores={k: round(v, 3) for k, v in family_scores.items()},
+        )
+    return kept
 
 
 def select_genres(
@@ -682,7 +744,10 @@ def select_album_or_track_genres(
     candidates, moved = collect_candidates(source_map, vocab=vocab, settings=settings)
     score_candidates(candidates, settings=settings)
     ranked = rank_and_condense(candidates, vocab=vocab, settings=settings)
+    ranked = remove_family_outliers(ranked, settings=settings)
+    ranked = enforce_family_diversity(ranked, settings=settings)
     selected = select_genres(ranked, settings=settings)
+    selected = remove_redundant_ancestors(selected, vocab=vocab, settings=settings)
     winners = {c.genre_id for c in selected}
 
     return {

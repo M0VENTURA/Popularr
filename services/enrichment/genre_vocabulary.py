@@ -94,6 +94,19 @@ def normalize_token(value: Any) -> str:
     return text
 
 
+def values_are_alphabetical(values: Any) -> bool:
+    """True when a provider returned an alphabetically sorted tag list.
+
+    MusicBrainz/ListenBrainz tag arrays arrive sorted by name, not by
+    popularity. Feeding that order into rank-decay made whichever genre sorts
+    first look like the strongest evidence — e.g. "alternative rock" beat
+    "pop" purely because ``a`` precedes ``p``.
+    """
+    tokens = [normalize_token(value) for value in values or []]
+    tokens = [token for token in tokens if token]
+    return len(tokens) >= 4 and tokens == sorted(tokens)
+
+
 @dataclass(frozen=True)
 class GenreEntry:
     """One canonical genre."""

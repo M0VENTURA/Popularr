@@ -643,6 +643,8 @@ def _vote_genres(
         clean_source = source.split("@", 1)[0] if "@" in source else source
         base_weight = _source_weight(clean_source, weights=weights)
         genres = _parse_genre_input(raw_genres)
+        from services.enrichment.genre_vocabulary import values_are_alphabetical
+        alphabetically_sorted = values_are_alphabetical(genres)
 
         for rank, genre in enumerate(genres or []):
             # Intercept filter tags before junk/admin validation strips them
@@ -657,7 +659,7 @@ def _vote_genres(
             if not key:
                 continue
 
-            decay = 1.0 / math.log2(rank + 2)
+            decay = 1.0 if alphabetically_sorted else 1.0 / math.log2(rank + 2)
             weighted_vote = base_weight * decay
 
             votes[key] += weighted_vote
