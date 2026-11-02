@@ -236,12 +236,13 @@ def test_compare_musicbrainz_release_matches_and_recommends(monkeypatch, mb_env)
     assert by_num[2]["matched"] is True
 
     # Track 3: MB title "Song Three" vs library "Song Three (Radio Edit)" —
-    # matched via fuzzy/core-title, with a title-field recommendation.
+    # matched, and the edit qualifier is a SOFT version marker: it does not
+    # make this a different song and is not proposed as a rename.
     t3 = by_num[3]
     assert t3["matched"] is True
     assert t3["library_title"] == "Song Three (Radio Edit)"
-    assert "title" in t3["diff_fields"]
-    assert t3["needs_update"] is True
+    assert "title" not in t3["diff_fields"]
+    assert t3["needs_update"] is False
 
     # The library-only "Bonus Track" (track 9) is reported as extra.
     extra_titles = [e["library_title"] for e in result["extra_tracks"]]

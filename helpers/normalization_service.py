@@ -557,14 +557,24 @@ def strip_single_release_suffix(value: str) -> str:
 #
 # The bracketed forms are matched case-insensitively and tolerate the
 # qualifiers seen in the wild: "(Live)", "(Recorded Live)", "(Live at Leeds)",
-# "(Stripped Acoustic)", "(Artist Cover)".
+# "(Stripped Acoustic)", "(Artist Cover)", "(Single Edit)".
+#
+# ⭐ "EDIT" IS THE SAME KIND OF MARKER. MusicBrainz routinely titles a release's
+# track "Song (single edit)" / "Song (edit)" while the library holds the plain
+# title (or vice versa). Reporting that as a rename asked the user to overwrite
+# a title with a release-specific qualifier — the reported "tracks with edit or
+# single edit are not matching the main release". It is a SOFT marker in the
+# same sense as the popularity matcher's ``{"version", "edit", "radio"}``: it
+# may be absent from either side without making the two titles different songs.
+# The word-boundary match keeps words that merely CONTAIN it ("Edited",
+# "Edition") out of the rule.
 _VERSION_MARKER_RE = re.compile(
     r"""
     [\(\[]                                  # opening bracket
     [^)\]]*                                 # optional qualifier, e.g. "Recorded"
     \b(?:
         live | acoustic | unplugged | remix | remixed | demo |
-        instrumental | orchestral | karaoke | tribute
+        instrumental | orchestral | karaoke | tribute | edit
     )\b
     [^)\]]*                                 # optional qualifier, e.g. "at Leeds"
     [\)\]]                                  # closing bracket
@@ -590,8 +600,8 @@ def has_version_marker(title: str) -> bool:
     """True when a title carries a version/performance or cover marker.
 
     Detects bracketed markers ("(Live)", "(Recorded Live)", "(Acoustic)",
-    "(Remix)", "(Artist Cover)") and trailing unparenthesised ones
-    ("Song - Live").
+    "(Remix)", "(Single Edit)", "(Artist Cover)") and trailing unparenthesised
+    ones ("Song - Live").
     """
     text = str(title or "").strip()
     if not text:
@@ -648,10 +658,13 @@ def titles_match_for_review(
     the same album — the second independent title rule is precisely what would
     let that drift.
 
-    * A difference that is ONLY a performance marker — ``(Live)``,
-      ``(Acoustic)``, ``(Remix)`` … — is NOT reported: the model already keeps
-      those in ``is_live`` / ``is_acoustic`` / ``is_remix``, so the only
-      outcome of reporting one would be overwriting the marker.
+    * A difference that is ONLY a soft version marker — ``(Live)``,
+      ``(Acoustic)``, ``(Remix)``, ``(Single Edit)``, ``(Edit)`` … — is NOT
+      reported: the model already keeps the performance variants in ``is_live``
+      / ``is_acoustic`` / ``is_remix``, and an edit qualifier is release
+      context rather than different wording. The only outcome of reporting one
+      would be overwriting the marker, so ``(edit)`` / ``(single edit)`` are
+      treated the same way as the performance markers.
 
     * A difference involving a COVER marker IS reported. "(Cover Version)"
       claims who performed the recording, and only the work relationship
