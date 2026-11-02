@@ -285,6 +285,20 @@ TABLES_TO_ENSURE: dict[str, str] = {
             CONSTRAINT uq_correction_ignore UNIQUE (album_artist, album, field)
         )
     """,
+    "navidrome_album_state": """
+        CREATE TABLE IF NOT EXISTS navidrome_album_state (
+            album_id TEXT PRIMARY KEY,
+            album_key TEXT,
+            album_name TEXT,
+            album_artist TEXT,
+            song_count INTEGER,
+            summary_hash TEXT,
+            track_ids_hash TEXT,
+            metadata_fingerprint TEXT,
+            last_scan_marker TEXT,
+            last_imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """,
     "upcoming_releases": """
         CREATE TABLE IF NOT EXISTS upcoming_releases (
             id BIGSERIAL PRIMARY KEY,

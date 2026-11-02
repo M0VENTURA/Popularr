@@ -22,6 +22,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import structlog
@@ -46,6 +47,11 @@ from services.scanning.cleanup import (
     sanitize_artist_rows_safe,
 )
 from services.scanning.filters import should_skip_album, should_skip_cached_album
+from services.scanning.navidrome_album_state import (
+    can_fast_skip_album,
+    load_album_states,
+    save_album_state,
+)
 from services.scanning.metadata_extractor import extract_album_metadata, extract_track_metadata
 from services.scanning.reconciliation import (
     LOCAL_AUTHORITY_FIELDS,
@@ -110,6 +116,34 @@ def _claim_album_content(album_name: str, track_ids: set[str]) -> bool:
             return False
         _PROCESSED_ALBUM_CONTENT.add(key)
         return True
+
+
+def _fast_skip_unchanged_albums_enabled() -> bool:
+    try:
+        from helpers.config_helpers import get_config
+
+        return bool(
+            (get_config().get("navidrome") or {}).get(
+                "fast_skip_unchanged_albums", True
+            )
+        )
+    except Exception:
+        return True
+
+
+def _album_fetch_workers() -> int:
+    """Bounded parallel album-tracklist fetch workers for one artist."""
+    try:
+        from helpers.config_helpers import get_config
+
+        value = int(
+            (get_config().get("navidrome") or {}).get(
+                "album_fetch_workers", 4
+            )
+        )
+    except Exception:
+        value = 4
+    return max(1, min(8, value))
 
 
 def _normalise_va_album_artist(
@@ -605,6 +639,7 @@ def scan_artist_to_db(
     allow_cleanup: bool = True,
     freshness_verified: bool | None = None,
     dedupe_albums: bool = False,
+    scan_marker: str | None = None,
 ):
     """Scan one Navidrome artist and upsert local PostgreSQL track rows efficiently."""
 
@@ -617,6 +652,7 @@ def scan_artist_to_db(
         if _has_various_artist_part(artist_name)
         else (_clean_artist_name_for_storage(artist_name) or artist_name)
     )
+    _fast_skip_unchanged = _fast_skip_unchanged_albums_enabled()
     log_unified(
         f"[NAVIDROME_IMPORT] Importing artist: {canonical_artist_name} "
         f"(view={artist_name}, artist_id={artist_id or 'none'}, force={force}, "
@@ -784,6 +820,106 @@ def scan_artist_to_db(
         duplicate_cached_ids: dict[str, set[str]] = {}
 
         navi_client = active_client or _get_fallback_client()
+        _album_states = load_album_states(
+            str(album.get("id") or "") for album in albums
+        )
+        _fast_skip_album_ids: set[str] = set()
+        if not force and _fast_skip_unchanged and scan_marker:
+            for _album in albums:
+                _album_id = str(_album.get("id") or "").strip()
+                _album_name = clean_navidrome_album_name(_album)
+                if not _album_id or not _album_name:
+                    continue
+                _cached = existing_album_tracks.get(_album_name, set())
+                if can_fast_skip_album(
+                    _album_states.get(_album_id),
+                    _album,
+                    cached_ids=_cached,
+                    scan_marker=scan_marker,
+                    album_dirty=existing_album_dirty.get(_album_name, False),
+                    needs_reimport=_album_name in albums_needing_reimport,
+                ):
+                    _fast_skip_album_ids.add(_album_id)
+                    navidrome_track_ids |= _cached
+                    logger.debug(
+                        "Fast-skipping unchanged album (summary + scan marker)",
+                        artist=artist_name,
+                        album=_album_name,
+                        tracks=len(_cached),
+                    )
+
+        # ── Parallel album-tracklist prefetch ──────────────────────────────
+        # The exact unchanged-album decision needs each album's tracks. Fetching
+        # them one-by-one is the dominant wall-clock cost of a large full
+        # import. Fetch the albums that will actually be considered in
+        # parallel, then the loop below consumes the cached result. The exact
+        # fingerprint skip still avoids all metadata work for unchanged albums.
+        _prefetched_album_tracks: dict[str, tuple[list[dict[str, Any]], str]] = {}
+        _album_workers = _album_fetch_workers()
+        if _album_workers > 1:
+            _to_fetch: list[tuple[str, str]] = []
+            _seen_prefetch_ids: set[str] = set()
+            for _album in albums:
+                _prefetch_id = str(_album.get("id") or "").strip()
+                _prefetch_name = clean_navidrome_album_name(_album)
+                if (
+                    not _prefetch_id
+                    or not _prefetch_name
+                    or _prefetch_id in _seen_prefetch_ids
+                    or _prefetch_id in _fast_skip_album_ids
+                ):
+                    continue
+                if should_skip_album(
+                    album_name=_prefetch_name,
+                    album_filter=album_filter,
+                    filter_missing=filter_missing,
+                    albums_needing_reimport=albums_needing_reimport,
+                    diff_mode=diff_mode,
+                    changed_album_names=changed_album_names,
+                ):
+                    continue
+                _seen_prefetch_ids.add(_prefetch_id)
+                _to_fetch.append((_prefetch_id, _prefetch_name))
+
+            if len(_to_fetch) > 1:
+                _prefetch_started = time.monotonic()
+                log_unified(
+                    f"[NAVIDROME_IMPORT] Prefetching {len(_to_fetch)} album "
+                    f"tracklist(s) for '{artist_name}' with {_album_workers} worker(s)"
+                )
+                try:
+                    with ThreadPoolExecutor(max_workers=_album_workers) as _pool:
+                        _futures = {
+                            _pool.submit(
+                                fetch_album_tracks_safe,
+                                album_id=_album_id,
+                                album_name=_album_name,
+                                client=navi_client,
+                            ): _album_id
+                            for _album_id, _album_name in _to_fetch
+                        }
+                        for _future in as_completed(_futures):
+                            _album_id = _futures[_future]
+                            try:
+                                _prefetched_album_tracks[_album_id] = _future.result()
+                            except Exception as _fetch_exc:
+                                logger.debug(
+                                    "Album tracklist prefetch failed",
+                                    artist=artist_name,
+                                    album_id=_album_id,
+                                    error=str(_fetch_exc),
+                                )
+                except Exception as _prefetch_exc:
+                    logger.debug(
+                        "Album tracklist prefetch pool failed",
+                        artist=artist_name,
+                        error=str(_prefetch_exc),
+                    )
+                log_unified(
+                    f"[NAVIDROME_IMPORT] Album tracklist prefetch for "
+                    f"'{artist_name}' finished in "
+                    f"{time.monotonic() - _prefetch_started:.1f}s"
+                )
 
         _albums_matched_filter = 0
         # Set False if a stop request breaks the loop: the live-id set below
@@ -823,12 +959,22 @@ def scan_artist_to_db(
 
             _albums_matched_filter += 1
 
+            # Fast-skip decision was taken before the prefetch, using the
+            # persisted album summary + the Navidrome scan marker.
+            if str(album_id) in _fast_skip_album_ids:
+                navidrome_track_ids |= existing_album_tracks.get(album_name, set())
+                continue
+
             album_context = detect_live_album(album_name)
-            tracks, api_album_artist = fetch_album_tracks_safe(
-                album_id=album_id,
-                album_name=album_name,
-                client=active_client,
-            )
+            _prefetched_entry = _prefetched_album_tracks.get(str(album_id))
+            if _prefetched_entry is not None:
+                tracks, api_album_artist = _prefetched_entry
+            else:
+                tracks, api_album_artist = fetch_album_tracks_safe(
+                    album_id=album_id,
+                    album_name=album_name,
+                    client=navi_client,
+                )
 
             if dedupe_albums:
                 _content_ids = {
@@ -998,6 +1144,15 @@ def scan_artist_to_db(
                 metadata_fingerprint_equal=_fingerprint_equal,
                 album_metadata_dirty=existing_album_dirty.get(album_name, False),
             ):
+                save_album_state(
+                    album=album,
+                    album_key=album_name,
+                    track_ids=[
+                        track.get("id") for track in tracks if track.get("id")
+                    ],
+                    metadata_fingerprint=_incoming_fingerprint,
+                    scan_marker=scan_marker,
+                )
                 continue
 
             album_mbids_seen: set[str] = set()
@@ -1100,6 +1255,17 @@ def scan_artist_to_db(
                             mark_navidrome_import_seen(_seen_ids)
                         _normalise_va_album_artist(
                             _album_payloads, album_artist_value
+                        )
+                        save_album_state(
+                            album=album,
+                            album_key=album_name,
+                            track_ids=[
+                                track.get("id")
+                                for track in tracks
+                                if track.get("id")
+                            ],
+                            metadata_fingerprint=_incoming_fingerprint,
+                            scan_marker=scan_marker,
                         )
                         for _tid in _confirmed_ids:
                             _row = known_rows_by_id.get(_tid)

@@ -12,7 +12,10 @@ from __future__ import annotations
 import concurrent.futures
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
+
+from db.engine import db_session
+from sqlalchemy import text
 from typing import Any
 
 import structlog
@@ -39,6 +42,52 @@ logger = structlog.get_logger("popularr.navidrome_import")
 # Default worker count for parallel artist import.
 # Can be overridden via config or env var.
 _PARALLEL_WORKERS = int(os.environ.get("POPULARLR_IMPORT_WORKERS", "4"))
+
+
+def _epoch(value: Any) -> float | None:
+    """Epoch seconds for a Navidrome/DB timestamp, or None when unparseable."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, (int, float)):
+        return float(value)
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _latest_dirty_local_write_epoch() -> float | None:
+    """Newest local tag write among dirty rows, or None."""
+    try:
+        with db_session() as session:
+            value = session.execute(
+                text(
+                    "SELECT MAX(local_tags_written_at) FROM tracks "
+                    "WHERE COALESCE(metadata_dirty_for_navidrome, FALSE) = TRUE"
+                )
+            ).scalar()
+        return _epoch(value)
+    except Exception:
+        return None
+
+
+def _skip_scan_after_local_write_enabled() -> bool:
+    try:
+        from helpers.config_helpers import get_config
+
+        return bool(
+            (get_config().get("navidrome") or {}).get(
+                "skip_scan_after_local_write", True
+            )
+        )
+    except Exception:
+        return True
 
 
 def sync_remote_navidrome_before_import(
@@ -83,6 +132,33 @@ def sync_remote_navidrome_before_import(
             has_successful_import = bool(
                 checkpoint.get("last_successful_import_ts")
             )
+            if dirty and _skip_scan_after_local_write_enabled():
+                # Dirty rows do not mean Navidrome has not scanned since the
+                # write. Re-triggering a full library scan on every import is
+                # what made repeated imports slow. If the last completed scan
+                # is at/after the newest local tag write, read that verified
+                # state instead.
+                status = nav_client.get_scan_status()
+                latest_write = _latest_dirty_local_write_epoch()
+                last_scan = _epoch(status.get("lastScan"))
+                if (
+                    status.get("success")
+                    and not status.get("scanning")
+                    and latest_write is not None
+                    and last_scan is not None
+                    and last_scan >= latest_write
+                ):
+                    consume_rescan_required()
+                    logger.info(
+                        "Navidrome already scanned after the latest local tag write",
+                        last_scan=status.get("lastScan"),
+                        latest_local_write=latest_write,
+                    )
+                    log_unified(
+                        "Navidrome Import - Navidrome already scanned after the "
+                        "latest local write; using that verified state"
+                    )
+                    return True
             if not dirty and has_successful_import:
                 status = nav_client.get_scan_status()
                 if status.get("success") and not status.get("scanning"):
@@ -337,6 +413,21 @@ def run_navidrome_import_scan(
             except Exception as exc:
                 logger.debug("Could not check scan marker", error=str(exc))
 
+        # The per-album fast-skip state stores the Navidrome scan marker. Fetch
+        # it even when dirty metadata prevented the marker-based whole-import
+        # skip above; an empty marker simply disables the per-album fast path.
+        if nav_client and current_last_scan is None:
+            try:
+                _status = nav_client.get_scan_status()
+                if _status.get("success"):
+                    current_last_scan = _status.get("lastScan")
+                    current_marker = _status.get("count")
+            except Exception as exc:
+                logger.debug("Could not read scan marker for album state", error=str(exc))
+        _scan_marker = (
+            str(current_last_scan) if current_last_scan not in (None, "") else ""
+        )
+
         # Build artist index
         artist_map: dict[str, dict[str, Any]] = {}
         if nav_client:
@@ -347,7 +438,12 @@ def run_navidrome_import_scan(
                 # describes the wrong baseline and can exclude the very changes
                 # this import is meant to read.
                 delta_since = None
-                if not force_rescan and not _metadata_dirty:
+                # A dirty local correction is not a reason to re-read every
+                # unchanged artist. The correction is preserved in the DB and
+                # will be confirmed when Navidrome actually changes; using the
+                # delta index here avoids a full-library tracklist crawl on
+                # every import while dirty rows exist.
+                if not force_rescan:
                     delta_since = checkpoint.get("last_successful_import_ts")
 
                 if not force_rescan and delta_since is not None:
@@ -428,6 +524,7 @@ def run_navidrome_import_scan(
                 client=nav_client,
                 freshness_verified=True,
                 dedupe_albums=True,
+                scan_marker=_scan_marker,
             )
             if isinstance(_artist_result, dict):
                 if _artist_result.get("success") is False:
