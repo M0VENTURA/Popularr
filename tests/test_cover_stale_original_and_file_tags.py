@@ -225,3 +225,32 @@ class TestTheRepairUsesTheResolvedOriginal:
         assert det._suffix_repair_update(
             _track(title), "Alien Ant Farm", resolved_original="Michael Jackson",
         ) is None
+
+    def test_a_matching_suffix_still_repairs_stale_FILE_tags(self, monkeypatch):
+        """The title was right but the file still said Santana.
+
+        Navidrome reads ``ORIGINAL_COVER_ARTIST`` back, so leaving the file
+        stale re-introduces the wrong verdict on the next import.
+        """
+        det = _detector()
+        monkeypatch.setattr(
+            det, "_file_cover_tags_are_current", lambda path, orig: False
+        )
+        update = det._suffix_repair_update(
+            _track("Smooth Criminal (Michael Jackson Cover)"),
+            "Alien Ant Farm",
+            resolved_original="Michael Jackson",
+        )
+        assert update is not None
+        assert update["original_artist"] == "Michael Jackson"
+
+    def test_current_file_tags_produce_no_update(self, monkeypatch):
+        det = _detector()
+        monkeypatch.setattr(
+            det, "_file_cover_tags_are_current", lambda path, orig: True
+        )
+        assert det._suffix_repair_update(
+            _track("Smooth Criminal (Michael Jackson Cover)"),
+            "Alien Ant Farm",
+            resolved_original="Michael Jackson",
+        ) is None

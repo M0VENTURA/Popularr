@@ -118,7 +118,38 @@ _MBID_CACHE_MAX_SIZE = 5000
 _RELEASE_GROUP_MATCH_FLOOR = 0.6
 
 _TRACK_COUNT_REFINE_LIMIT = 3
+#: Above this many local tracks the release is album-sized, so an EP/Single
+#: release group cannot be the right identity however well its name scores.
+_ALBUM_SIZED_TRACK_COUNT = 6
 _RECORDING_RELATIONSHIP_INC = "artist-rels+work-rels+work-level-rels"
+
+
+def _is_album_sized_track_count(count: Any) -> bool:
+    try:
+        return int(count or 0) > _ALBUM_SIZED_TRACK_COUNT
+    except (TypeError, ValueError):
+        return False
+
+
+def _track_count_penalty(counts: list[int], expected_count: int) -> float:
+    """Score penalty for a candidate release group's track counts.
+
+    Prefer a count at or ABOVE the local count (a deluxe/expanded edition is
+    still the same album) over one BELOW it (a 5-track EP is not an 11-track
+    album). Missing tracks are therefore penalised five times as hard as extra
+    ones.
+    """
+    try:
+        expected = int(expected_count or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    usable = [int(c) for c in counts if int(c or 0) > 0]
+    if not expected or not usable:
+        return 0.0
+    at_or_above = [c for c in usable if c >= expected]
+    if at_or_above:
+        return (min(at_or_above) - expected) * 0.02
+    return (expected - max(usable)) * 0.10
 
 _TRACKLIST_TITLE_FLOOR = 0.55
 _TRACKLIST_MATCH_FLOOR = 0.6
@@ -1503,6 +1534,18 @@ class MusicBrainzService:
                     if not primary_lower:
                         score *= 0.7
 
+                    # ⭐ AN 11-TRACK ALBUM IS NOT AN EP.
+                    #
+                    # MusicBrainz often carries an Album and an EP under the
+                    # SAME title (reported: "The Unauthorized Biography of
+                    # Reinhold Messner"). An EP/Single candidate must not win
+                    # an album-sized local release just because its name
+                    # scores marginally better.
+                    if _is_album_sized_track_count(expected_count) and primary_lower in {
+                        "single", "ep",
+                    }:
+                        score *= 0.5
+
                     sec_lower = {str(t).casefold() for t in secondary_types}
                     if "live" in sec_lower and not is_live_or_alternate_album(album_name):
                         score *= 0.7
@@ -1535,8 +1578,7 @@ class MusicBrainzService:
                 releases = _browse_group_releases(group_id, "release_group.track_count_refine")
                 counts = [_as_int(r.get("track_count"), 0) for r in releases if _as_int(r.get("track_count"), 0) > 0]
                 if counts:
-                    best_diff = min(abs(expected_count - c) for c in counts)
-                    match["match_score"] -= best_diff * 0.05
+                    match["match_score"] -= _track_count_penalty(counts, expected_count)
 
         for match in matches:
             match["match_score"] = round(float(match.get("match_score") or 0.0), 3)

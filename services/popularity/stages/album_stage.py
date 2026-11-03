@@ -99,6 +99,9 @@ _HTTP_TIMEOUT = httpx.Timeout(
 )
 
 _MAX_ARTWORK_BYTES = int(os.getenv("ENRICHMENT_MAX_ARTWORK_BYTES", str(20 * 1024 * 1024)))
+#: Above this many local tracks a release is album-sized, so an EP/Single
+#: release group with the same name cannot be its identity.
+_ALBUM_SIZED_MIN_TRACKS = 6
 
 _ARTIST_MEMBERS_TTL_DAYS = int(os.getenv("ARTIST_MEMBERS_TTL_DAYS", "7"))
 
@@ -395,19 +398,15 @@ def _stored_album_type(tracks: list[dict[str, Any]] | None) -> str:
     return next(iter(values)) if len(values) == 1 else ""
 
 
-def _detect_album_type(
+def _title_detected_album_type(
     artist: str,
     album: str,
     album_artist: str | None,
-    spotify_type: str | None,
 ) -> str:
+    """The TITLE-ONLY heuristic result (no stored type consulted)."""
     artist_lower = (artist or "").casefold().strip()
     album_lower = (album or "").casefold().strip()
     album_artist_lower = (album_artist or "").casefold().strip()
-
-    stored = _rich_stored_album_type(spotify_type)
-    if stored:
-        return stored
 
     if artist_lower in _COMPILATION_ARTISTS or album_artist_lower in _COMPILATION_ARTISTS:
         return "album+compilation"
@@ -431,6 +430,37 @@ def _detect_album_type(
         return "single"
 
     return "album"
+
+
+def _detect_album_type(
+    artist: str,
+    album: str,
+    album_artist: str | None,
+    spotify_type: str | None,
+) -> str:
+    raw_stored = str(spotify_type or "").strip().lower()
+    stored = _rich_stored_album_type(raw_stored)
+    if stored:
+        return stored
+
+    # ⭐ A PLAIN STORED TYPE IS STILL A TYPE TAG.
+    #
+    # ``_rich_stored_album_type`` returns None for plain "album" because it has
+    # no secondary, so a stored "album" used to fall through to the TITLE
+    # heuristic — "ANThology" then became ``album+compilation`` during a
+    # popularity scan even though the tag said album. The exception is a
+    # compilation ARTIST placeholder, whose identity itself is the evidence.
+    if raw_stored in {"album", "ep", "single"}:
+        artist_lower = (artist or "").casefold().strip()
+        album_artist_lower = (album_artist or "").casefold().strip()
+        if (
+            artist_lower in _COMPILATION_ARTISTS
+            or album_artist_lower in _COMPILATION_ARTISTS
+        ):
+            return "album+compilation"
+        return raw_stored
+
+    return _title_detected_album_type(artist, album, album_artist)
 
 
 def _album_title_suggests_live(album: str) -> bool:
@@ -1582,11 +1612,26 @@ def _lookup_musicbrainz_album_type(
 ) -> tuple[str | None, str | None]:
     clean_album = _sanitize_release_name(album)
     context = {"artist": artist, "album": album, "query_album": clean_album}
+    local_track_count = len(
+        [t for t in tracks or [] if str(t.get("title") or "").strip()]
+    )
 
     try:
         stored_type = _rich_stored_album_type(_stored_album_type(tracks))
         stored_rg = _stored_release_group_mbid(tracks)
-        if stored_type and stored_rg:
+        # ⚠️ A stored EP/Single binding on an ALBUM-SIZED local release is
+        # suspect (the reported "The Unauthorized Biography of Reinhold
+        # Messner": 11 tracks, stored as the same-named EP release group).
+        # Re-resolve instead of trusting it forever.
+        stored_primary = normalize_primary_release_type(stored_type or "")
+        if (
+            stored_type
+            and stored_rg
+            and not (
+                local_track_count > _ALBUM_SIZED_MIN_TRACKS
+                and stored_primary in {"ep", "single"}
+            )
+        ):
             return stored_type, stored_rg
     except Exception:
         pass
@@ -1606,6 +1651,30 @@ def _lookup_musicbrainz_album_type(
 
         best = matches[0] if isinstance(matches[0], dict) else {}
         score = float(best.get("match_score") or 0)
+
+        # ⭐ Album-sized local release: never bind it to an EP/Single release
+        # group when an Album candidate of the same name is available.
+        if (
+            local_track_count > _ALBUM_SIZED_MIN_TRACKS
+            and str(best.get("primary_type") or "").casefold() in {"ep", "single"}
+        ):
+            for _candidate in matches:
+                if not isinstance(_candidate, dict):
+                    continue
+                if str(_candidate.get("primary_type") or "").casefold() != "album":
+                    continue
+                _candidate_score = float(_candidate.get("match_score") or 0)
+                if _candidate_score < 0.6:
+                    continue
+                best = _candidate
+                score = _candidate_score
+                Logger.info(
+                    "[ENRICH] Preferring the Album release group over an "
+                    "EP/Single match for an album-sized local release",
+                    local_track_count=local_track_count,
+                    **context,
+                )
+                break
 
         stored_rg = _stored_release_group_mbid(tracks)
         if score < 0.6 and stored_rg:
@@ -1692,9 +1761,32 @@ def _resolve_album_type(
         if not _mb_type_is_corroborated(mb_type, album, tracks or [], context):
             mb_type = "album" if mb_type.startswith("album") else mb_type
 
-        if detected == "album":
-            detected = mb_type
-        elif mb_type in {"single", "ep"} and "+" not in detected:
+        # ⭐ MUSICBRAINZ OUTRANKS A TITLE-ONLY HEURISTIC.
+        #
+        # "ANThology" by Alien Ant Farm matched ``detect_greatest_hits_album``
+        # on its NAME ("anthology") and was classified/persisted as
+        # ``album+compilation`` even though MusicBrainz says plain Album.
+        #
+        # ⚠️ SCOPE: a genuinely STORED rich type keeps its precedence (an EP
+        # answer must not overwrite a stored ``album+live``); only a
+        # ``+compilation`` written by the title heuristic, a title-only guess,
+        # or an MBID-bound album yields to a plain MusicBrainz answer.
+        try:
+            stored_rich = _rich_stored_album_type(effective_stored)
+        except Exception:
+            stored_rich = None
+        title_guess = _title_detected_album_type(artist, album, album_artist)
+        title_only = (not stored_rich) and detected == title_guess
+        try:
+            mbid_bound = bool(_stored_release_group_mbid(tracks or []))
+        except Exception:
+            mbid_bound = False
+
+        if (
+            (mb_type == "album" and detected.casefold().endswith("+compilation"))
+            or detected == "album"
+            or ("+" not in mb_type and (title_only or mbid_bound))
+        ):
             detected = mb_type
 
     return detected, mb_type, release_group_mbid, original_mb_type
@@ -1724,6 +1816,9 @@ def _persist_album_type_to_tracks(
     tracks: list[dict[str, Any]],
     album_type: str,
     release_group_mbid: str | None,
+    *,
+    replace_secondary: bool = False,
+    replace_release_group: bool = False,
 ) -> None:
     context = {"artist": artist, "album": album, "album_type": album_type}
     if not album_type:
@@ -1738,6 +1833,17 @@ def _persist_album_type_to_tracks(
         if track.get("id") and (
             not str(track.get("musicbrainz_albumtype") or "").strip()
             or (is_rich and str(track.get("musicbrainz_albumtype") or "").strip().lower() == "album")
+            # A plain MusicBrainz type must be able to heal a composite written
+            # by an older TITLE heuristic (the reported "ANThology") or a
+            # wrong EP/Single binding on an album-sized local release.
+            or (
+                replace_secondary
+                and (
+                    "+" in str(track.get("musicbrainz_albumtype") or "")
+                    or str(track.get("musicbrainz_albumtype") or "").strip().lower()
+                    in {"ep", "single"}
+                )
+            )
         )
     ]
     if pending:
@@ -1753,6 +1859,13 @@ def _persist_album_type_to_tracks(
                           AND (
                               COALESCE(NULLIF(TRIM(musicbrainz_albumtype), ''), '') = ''
                               OR (:is_rich = TRUE AND LOWER(TRIM(musicbrainz_albumtype)) = 'album')
+                              OR (
+                                  :replace_secondary = TRUE
+                                  AND (
+                                      musicbrainz_albumtype LIKE '%+%'
+                                      OR LOWER(TRIM(musicbrainz_albumtype)) IN ('ep', 'single')
+                                  )
+                              )
                           )
                     """).bindparams(bindparam("track_ids", expanding=True)),
                     {
@@ -1760,6 +1873,7 @@ def _persist_album_type_to_tracks(
                         "primary": primary,
                         "track_ids": pending,
                         "is_rich": is_rich,
+                        "replace_secondary": bool(replace_secondary),
                     },
                 )
             for track in tracks or []:
@@ -1779,12 +1893,21 @@ def _persist_album_type_to_tracks(
                         SET musicbrainz_releasegroupid = :release_group_mbid
                         WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
                           AND LOWER(album) = LOWER(:album)
-                          AND (musicbrainz_releasegroupid IS NULL OR TRIM(musicbrainz_releasegroupid) = '')
+                          AND (
+                              :replace_release_group = TRUE
+                              OR musicbrainz_releasegroupid IS NULL
+                              OR TRIM(musicbrainz_releasegroupid) = ''
+                          )
                     """),
-                    {"release_group_mbid": release_group_mbid, "artist": artist, "album": album},
+                    {
+                        "release_group_mbid": release_group_mbid,
+                        "artist": artist,
+                        "album": album,
+                        "replace_release_group": bool(replace_release_group),
+                    },
                 )
             for track in tracks or []:
-                if not track.get("musicbrainz_releasegroupid"):
+                if replace_release_group or not track.get("musicbrainz_releasegroupid"):
                     track["musicbrainz_releasegroupid"] = release_group_mbid
         except Exception:
             pass
@@ -2007,7 +2130,21 @@ def ensure_album_type(album_row: dict[str, Any], options: dict[str, Any] | None 
         if not detected:
             return None
 
-        _persist_album_type_to_tracks(artist, album, tracks, detected, release_group_mbid)
+        _override = bool(
+            _mb_type and "+" not in _mb_type and detected == _mb_type
+        )
+        _persist_album_type_to_tracks(
+            artist,
+            album,
+            tracks,
+            detected,
+            release_group_mbid,
+            # A plain MusicBrainz answer may replace a composite written by an
+            # older title heuristic, or a wrong EP/Single binding on an
+            # album-sized release; otherwise only blanks are filled.
+            replace_secondary=_override,
+            replace_release_group=_override,
+        )
         return detected
     except Exception:
         return detected
@@ -2635,7 +2772,18 @@ def enrich_album(
                     artist, album, album_artist or None, spotify_type or None, album_tracks
                 )
                 is_heterogeneous = any(marker in detected_type.casefold() for marker in _HETEROGENEOUS_MARKERS)
-                _persist_album_type_to_tracks(artist, album, album_tracks, detected_type, release_group_mbid)
+                _override = bool(
+                    mb_type and "+" not in mb_type and detected_type == mb_type
+                )
+                _persist_album_type_to_tracks(
+                    artist,
+                    album,
+                    album_tracks,
+                    detected_type,
+                    release_group_mbid,
+                    replace_secondary=_override,
+                    replace_release_group=_override,
+                )
 
                 if "+compilation" in detected_type.casefold() or "+soundtrack" in detected_type.casefold():
                     with db_session() as session:

@@ -236,6 +236,29 @@ def run(interval: int | None = None, batch_size: int | None = None) -> None:
 
     _reset_abandoned("startup")
 
+    # ── Startup queue state (activity log) ────────────────────────────────
+    # "No search attempts" needs an answer in the same log the user reads.
+    # These counts distinguish "nothing is ready" from "ready but no slot".
+    try:
+        from db.repositories.queue import (
+            count_ready_for_processing,
+            get_queue_status_counts,
+        )
+        from helpers.logging_config import log_activity
+
+        _counts = get_queue_status_counts()
+        log_activity(
+            "infrastructure",
+            "Queue worker startup state.",
+            pid=os.getpid(),
+            queued=int(_counts.get("queued", 0) or 0),
+            searching=int(_counts.get("searching", 0) or 0),
+            downloading=int(_counts.get("downloading", 0) or 0),
+            ready=int(count_ready_for_processing() or 0),
+        )
+    except Exception as exc:
+        logger.debug("Startup queue state log failed", error=str(exc))
+
     # ── Queue metadata heal ───────────────────────────────────────────────
     # Runs in a DAEMON THREAD so a large first pass cannot delay this worker's
     # first cycle. Idempotent; only the leader reaches this point.

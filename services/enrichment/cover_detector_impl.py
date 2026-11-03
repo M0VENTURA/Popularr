@@ -1968,7 +1968,15 @@ class CoverDetector:
         # stale attribution and must be rebuilt, not treated as already repaired.
         _suffix_match = re.search(r"\(([^)]+?)\s+cover\)\s*$", title, re.IGNORECASE)
         if _suffix_match and _same_artist(_suffix_match.group(1), original):
-            return None
+            # The TITLE is right, but the FILE may still carry an older
+            # ORIGINAL_COVER_ARTIST (e.g. "Santana"). The Navidrome import reads
+            # that tag back, so leaving it stale re-introduces the wrong verdict
+            # on the next scan. Write the whole verdict once; afterwards this is
+            # a no-op and the file is not touched again.
+            if self._file_cover_tags_are_current(
+                str(track.get("file_path") or ""), original
+            ):
+                return None
         if _has_cover_annotation(title) and not _suffix_match:
             return None
         if is_track_artist_placeholder(original):
@@ -3910,6 +3918,42 @@ class CoverDetector:
             "work": work,
             "is_cover_reason": reason,
         }
+
+    @staticmethod
+    def _file_cover_tags_are_current(file_path: str, original: str) -> bool:
+        """Does the AUDIO FILE already carry this cover verdict?
+
+        A re-confirmed cover with the right title suffix used to produce no
+        update at all — so a stale ``ORIGINAL_COVER_ARTIST`` left on disk (the
+        reported "Santana") survived forever and was re-imported by Navidrome
+        on the next scan. Checking the file lets the repair write the full
+        verdict once, then go quiet.
+
+        Returns True (do NOT write) when the path cannot be resolved or the
+        file cannot be read: an unreadable file must not churn on every pass.
+        """
+        path = str(file_path or "").strip()
+        if not path:
+            return True
+        try:
+            import os
+
+            from helpers.metadata_reader import read_release_tag_values
+            from services.metadata.tag_file_service import resolve_music_file_path
+
+            resolved = resolve_music_file_path(path) or path
+            if not os.path.isfile(resolved):
+                return True
+            values = read_release_tag_values(resolved) or {}
+        except Exception:
+            return True
+
+        is_cover = str(values.get("is_cover") or "").strip().lower()
+        stored_original = str(values.get("original_cover_artist") or "").strip()
+        cover_ok = is_cover in {"1", "true", "yes", "y"}
+        return cover_ok and bool(stored_original) and _same_artist(
+            stored_original, original
+        )
 
     @staticmethod
     def _update_file_metadata(

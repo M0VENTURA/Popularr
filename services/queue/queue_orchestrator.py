@@ -133,6 +133,20 @@ _DB_OUTAGE_MARKERS: tuple[str, ...] = (
     "connection to server",
 )
 
+#: A maintenance hook that blocks for ever would hold the cross-process queue
+#: cycle lock for ever, starving the standalone worker. The hooks are
+#: best-effort by contract, so a timeout skips the hook and lets the batch run.
+_MAINTENANCE_HOOK_TIMEOUT_SECONDS = float(
+    os.getenv("QUEUE_MAINTENANCE_HOOK_TIMEOUT_SECONDS", "120")
+)
+
+#: A hook that timed out is not re-run for this long. Without it, a hook that
+#: hangs for ever would leak one thread on EVERY cycle.
+_MAINTENANCE_HOOK_RETRY_SECONDS = float(
+    os.getenv("QUEUE_MAINTENANCE_HOOK_RETRY_SECONDS", "600")
+)
+_STUCK_MAINTENANCE_HOOKS: dict[str, float] = {}
+
 
 def is_db_outage_error(error: Any) -> bool:
     """True when ``error`` (exception or message) looks like a lost database."""
@@ -441,7 +455,17 @@ def process_next_batch(
         def _run_batch() -> tuple[dict[str, Any], int]:
             available_slots = _available_in_flight_slots(max_in_flight)
             if available_slots <= 0:
-                # Every slot is busy: do not even fetch. Waiting is correct.
+                # Every slot is busy: do not even fetch. Waiting is correct —
+                # but SAY SO when work is waiting, otherwise the queue looks
+                # silently dead ("no search attempts since the restart").
+                try:
+                    _ready_waiting = int(
+                        queue_repository.count_ready_for_processing() or 0
+                    )
+                except Exception:
+                    _ready_waiting = 0
+                if _ready_waiting:
+                    _log_in_flight_saturation(max_in_flight, _ready_waiting)
                 return _ok(
                     total=0,
                     processed=0,
@@ -519,6 +543,43 @@ def _resolve_max_in_flight() -> int:
         return int(get_queue_worker_config().get("max_in_flight") or MAX_IN_FLIGHT)
     except Exception:
         return MAX_IN_FLIGHT
+
+
+_LAST_INFLIGHT_WARNING_AT = 0.0
+_INFLIGHT_WARNING_INTERVAL_SECONDS = 300.0
+
+
+def _log_in_flight_saturation(max_in_flight: int, ready: int) -> None:
+    """Surface — in the activity log — why a full queue is starting nothing."""
+    global _LAST_INFLIGHT_WARNING_AT
+    now = time.monotonic()
+    if now - _LAST_INFLIGHT_WARNING_AT < _INFLIGHT_WARNING_INTERVAL_SECONDS:
+        return
+    _LAST_INFLIGHT_WARNING_AT = now
+    try:
+        counts = queue_repository.get_queue_status_counts()
+    except Exception:
+        counts = {}
+    searching = int(counts.get("searching", 0) or 0)
+    downloading = int(counts.get("downloading", 0) or 0)
+    logger.warning(
+        "Queue has ready items but no free in-flight slots",
+        ready=ready,
+        searching=searching,
+        downloading=downloading,
+        max_in_flight=max_in_flight,
+    )
+    try:
+        from services.queue.queue_diagnostics_service import log_queue_event
+
+        log_queue_event(
+            "throttled",
+            f"{ready} queue item(s) ready but every in-flight slot is busy "
+            f"(searching={searching}, downloading={downloading}, "
+            f"max={max_in_flight})",
+        )
+    except Exception:
+        pass
 
 
 def _available_in_flight_slots(max_in_flight: int) -> int:
@@ -624,6 +685,14 @@ def _process_batch(
 
     elapsed_seconds = round(time.time() - started_at, 3)
 
+    if items and processed == 0 and skipped:
+        logger.warning(
+            "Queue cycle fetched ready items but started none",
+            fetched=len(items),
+            skipped=skipped,
+            reached_end=reached_end,
+        )
+
     # More rows may be waiting when the fetch was full and every fetched row
     # was consumed (skipped or started) without filling the slots. The worker
     # uses this to run the next cycle straight away instead of sleeping.
@@ -661,10 +730,30 @@ def run_maintenance() -> tuple[dict[str, Any], int]:
     results: list[dict[str, Any]] = []
     db_outage = False
 
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
     for hook in _iter_maintenance_hooks():
         hook_name = f"{hook.__module__}.{hook.__name__}"
+        _retry_at = _STUCK_MAINTENANCE_HOOKS.get(hook_name, 0.0)
+        if _retry_at > time.monotonic():
+            results.append({
+                "hook": hook_name,
+                "status_code": 504,
+                "success": False,
+                "error": (
+                    "skipped: previous attempt timed out; retrying in "
+                    f"{int(_retry_at - time.monotonic())}s"
+                ),
+            })
+            continue
+        executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="queue-maint"
+        )
+        future = executor.submit(hook)
         try:
-            result = hook()
+            result = future.result(timeout=_MAINTENANCE_HOOK_TIMEOUT_SECONDS)
+            _STUCK_MAINTENANCE_HOOKS.pop(hook_name, None)
             payload, status = normalise_result(result)
             error = payload.get("error")
             results.append({
@@ -676,7 +765,26 @@ def run_maintenance() -> tuple[dict[str, Any], int]:
             if is_db_outage_error(error):
                 db_outage = True
                 break
+        except FuturesTimeoutError:
+            # ⚠️ Do NOT wait for the hook: it is why the cycle lock was stuck.
+            # The worker may still be running, but it no longer blocks the
+            # queue batch or the other queue driver.
+            _STUCK_MAINTENANCE_HOOKS[hook_name] = (
+                time.monotonic() + _MAINTENANCE_HOOK_RETRY_SECONDS
+            )
+            logger.warning(
+                "Maintenance hook timed out — continuing with the queue batch",
+                hook=hook_name,
+                timeout_seconds=_MAINTENANCE_HOOK_TIMEOUT_SECONDS,
+            )
+            results.append({
+                "hook": hook_name,
+                "status_code": 504,
+                "success": False,
+                "error": f"timed out after {_MAINTENANCE_HOOK_TIMEOUT_SECONDS:.0f}s",
+            })
         except Exception as exc:
+            _STUCK_MAINTENANCE_HOOKS.pop(hook_name, None)
             if is_db_outage_error(exc):
                 logger.warning("Maintenance hook hit a database outage", hook=hook_name)
                 db_outage = True
@@ -690,6 +798,9 @@ def run_maintenance() -> tuple[dict[str, Any], int]:
             })
             if db_outage:
                 break
+        finally:
+            # ``wait=False`` is the point: a hung hook must not be joined.
+            executor.shutdown(wait=False, cancel_futures=True)
 
     failures = [row for row in results if not row.get("success")]
 

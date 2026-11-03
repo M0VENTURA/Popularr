@@ -226,6 +226,13 @@ _JOB_LOCK_KEY_MAP = {
 }
 
 
+def _queue_processor_managed_externally() -> bool:
+    """True when the entrypoint/systemd owns the standalone queue worker."""
+    return str(
+        os.environ.get("SPTNR_QUEUE_PROCESSOR_MANAGED_EXTERNALLY") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
 @contextmanager
 def _job_tick_lock(job_id: str):
     """Cross-process mutual exclusion for ONE scheduled job tick."""
@@ -658,7 +665,22 @@ def _register_default_jobs(
             logger.warning("APScheduler failed to register navidrome_import", error=str(exc))
 
     # ── Download queue processor ──
-    if _enabled("download_queue_processor", "downloads_watcher_enabled", True):
+    #
+    # ⚠️ THE STANDALONE WORKER ALREADY DRIVES THE QUEUE.
+    #
+    # ``entrypoint.sh`` sets SPTNR_QUEUE_PROCESSOR_MANAGED_EXTERNALLY=1 before
+    # launching the web app (it starts ``services.queue.queue_worker`` itself).
+    # Registering this job anyway created a SECOND driver that shares the
+    # non-expiring DB cycle lock. When that redundant scheduler cycle hung —
+    # e.g. a filesystem move in ``check_completed_downloads`` — it held the lock
+    # for ever, so the standalone worker skipped every cycle and NO search was
+    # attempted even though items were queued. One driver when one is managed.
+    if _queue_processor_managed_externally():
+        _remove_job("download_queue_processor")
+        logger.info(
+            "Queue processor is managed externally — scheduler queue job disabled"
+        )
+    elif _enabled("download_queue_processor", "downloads_watcher_enabled", True):
         interval_seconds = _interval(
             "download_queue_processor",
             "interval_seconds",

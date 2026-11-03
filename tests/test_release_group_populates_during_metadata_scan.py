@@ -79,8 +79,9 @@ class _Recorder:
         self.persisted: list[tuple] = []
         self._rg = resolved_rg
 
-    def persist(self, artist, album, tracks, album_type, release_group_mbid):
+    def persist(self, artist, album, tracks, album_type, release_group_mbid, **kwargs):
         self.persisted.append((artist, album, album_type, release_group_mbid))
+        self.persist_kwargs = kwargs
 
 
 @pytest.fixture
