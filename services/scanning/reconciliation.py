@@ -412,6 +412,31 @@ def mark_navidrome_import_seen(track_ids: Iterable[Any]) -> int:
         return 0
 
 
+_NON_COMPOSER_ROLES: tuple[str, ...] = (
+    "producer", "engineer", "mixer", "remixer", "performer",
+    "conductor", "djmixer", "artist", "album_artist",
+)
+
+
+def _composer_tokens(source: dict[str, Any]) -> list[str]:
+    """Composer names with non-composer credits removed.
+
+    ``displayComposer`` is a full credit roll, so the SAME composer list can
+    arrive with producers/engineers/the band appended ("Terry Date", "Sam
+    Hofstedt", "Deftones"). Removing every name the same row credits to a
+    non-composer role makes that bloated value compare equal to the cleaned
+    provider value, so the next import HEALS the stored column instead of
+    protecting it as a local correction forever.
+    """
+    names = _delimited_tokens(source.get("composer"))
+    if not names:
+        return []
+    excluded: set[str] = set()
+    for role in _NON_COMPOSER_ROLES:
+        excluded.update(_delimited_tokens(source.get(role)))
+    return [name for name in names if name not in excluded]
+
+
 def _authority_value(field: str, source: dict[str, Any]) -> str:
     if field in ("recording_mbid", "musicbrainz_trackid", "mbid"):
         return _text(
@@ -431,6 +456,8 @@ def _authority_value(field: str, source: dict[str, Any]) -> str:
         return "|".join(
             _genre_values(source.get(field) or source.get("genres") or source.get("genre"))
         )
+    if field == "composer":
+        return "|".join(_composer_tokens(source))
     if field in _PEOPLE_FIELDS or field in _LIST_FIELDS:
         return "|".join(_delimited_tokens(source.get(field)))
     if field in _CASEFOLD_FIELDS:
@@ -473,11 +500,19 @@ def _is_various_artist_value(value: Any) -> bool:
 
 
 def _delimited_tokens(value: Any) -> list[str]:
-    """Order-insensitive tokens from a comma/semicolon/slash-separated credit."""
+    """Order-insensitive tokens from a comma/semicolon/slash/bullet credit.
+
+    ⭐ NAVIDROME JOINS CREDITS WITH ``" • "``. Without it here, the SAME
+    composer list grouped as ``"A, B • A • B"`` compared unequal to
+    ``"A, B"`` (and to itself in another grouping), so a provider-owned credit
+    was reported as a local conflict forever.
+    """
     text = _text(value)
     if not text:
         return []
-    parts = re.split(r"\s*(?:;|,|/|\||\s&\s|\band\b)\s*", text, flags=re.IGNORECASE)
+    parts = re.split(
+        r"\s*(?:;|,|/|\||•|·|\s&\s|\band\b)\s*", text, flags=re.IGNORECASE,
+    )
     return sorted({
         strip_diacritics(part).casefold().strip()
         for part in parts
@@ -537,11 +572,20 @@ def local_authority_conflicts(
         # Navidrome did not expose the tag on that object.
         if _text(payload.get(field)) == "":
             continue
+        # ⭐ AN EMPTY LOCAL VALUE IS NOT A CORRECTION. The row-level dirty flag
+        # covers every authority field, so a single title edit also froze an
+        # empty ``disc_number`` / ``albumversion`` against Navidrome's real
+        # value ("local='' remote=1" in the report). Nothing was locally set
+        # there to protect.
+        existing_value = _authority_value(field, existing)
+        payload_value = _authority_value(field, payload)
+        if not existing_value and payload_value:
+            continue
         if field in _DATE_FIELDS:
             if not _dates_compatible(existing.get(field), payload.get(field)):
                 conflicts.append(field)
             continue
-        if _authority_value(field, existing) != _authority_value(field, payload):
+        if existing_value != payload_value:
             conflicts.append(field)
     return conflicts
 

@@ -340,18 +340,65 @@ def _db_tag_candidates(
     _put("disc_number", track.get("disc_number"))
     _put("isrc", track.get("isrc"))
 
-    writer = track.get("writer")
-    if writer:
-        try:
-            parsed = json.loads(writer) if isinstance(writer, str) else writer
-            if isinstance(parsed, list):
-                names = [str(w).strip() for w in parsed if str(w).strip()]
-                if names:
-                    _put("composer", ", ".join(names))
-            else:
-                _put("composer", writer)
-        except Exception:
-            _put("composer", writer)
+    # ── COMPOSER ──────────────────────────────────────────────────────────
+    # NEVER copy the mixed ``writer`` store into COMPOSER. Since the import
+    # keeps producers/engineers/mixers/performers in ``writer`` (there is no
+    # dedicated column for them), that put "Terry Date", "Sam Hofstedt" and the
+    # performing band itself into the composer tag — the reported bloat.
+    # Prefer ``tracks.composer``; fall back to ``writer`` only when it is empty,
+    # and always drop names credited to a non-composer role.
+    try:
+        from services.scanning.metadata_extractor import (
+            credit_name_key,
+            dedupe_credit_names,
+            split_credit_names,
+        )
+
+        _composer_names = dedupe_credit_names(
+            split_credit_names(track.get("composer") or "")
+        )
+        if not _composer_names:
+            _writer_raw = track.get("writer")
+            if _writer_raw:
+                try:
+                    _parsed_writer = (
+                        json.loads(_writer_raw)
+                        if isinstance(_writer_raw, str)
+                        else _writer_raw
+                    )
+                except Exception:
+                    _parsed_writer = _writer_raw
+                if isinstance(_parsed_writer, list):
+                    _composer_names = [
+                        str(name).strip()
+                        for name in _parsed_writer
+                        if str(name or "").strip()
+                    ]
+                else:
+                    _composer_names = split_credit_names(_parsed_writer)
+                _composer_names = dedupe_credit_names(_composer_names)
+
+        _excluded_names: set[str] = set()
+        for _role in (
+            "producer", "engineer", "mixer", "remixer", "performer",
+            "conductor", "djmixer",
+        ):
+            for _name in split_credit_names(track.get(_role) or ""):
+                _excluded_names.add(credit_name_key(_name))
+        for _name in (
+            split_credit_names(track.get("artist"))
+            + split_credit_names(track.get("album_artist"))
+        ):
+            _excluded_names.add(credit_name_key(_name))
+
+        _composer_names = [
+            name for name in _composer_names
+            if credit_name_key(name) not in _excluded_names
+        ]
+        if _composer_names:
+            _put("composer", ", ".join(_composer_names))
+    except Exception:
+        pass
 
     # Output strictly relies on the active guardrail-cleared db value
     _put("genres", track.get("genres"))

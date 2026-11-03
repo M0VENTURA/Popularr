@@ -55,8 +55,13 @@ logger = structlog.get_logger(__name__)
 _BLOCKED_PEER_TTL_SECONDS = int(
     os.environ.get("SLSKD_BLOCKED_PEER_TTL_SECONDS", "86400")
 )
+#: How long two stalls are considered "repeated". This was 2h, but the
+#: reported mirror peers (AndamentaStanly / InukshukTestar) were retried every
+#: ~2h08–2h51, so the second stall always fell OUTSIDE the window and the
+#: username cooldown never fired — the same dead peers were selected forever.
+#: A day lets the second attempt accumulate regardless of the backoff spacing.
 _PEER_STALL_COOLDOWN_SECONDS = int(
-    os.environ.get("SLSKD_PEER_STALL_COOLDOWN_SECONDS", "7200")
+    os.environ.get("SLSKD_PEER_STALL_COOLDOWN_SECONDS", "86400")
 )
 _PEER_STALL_THRESHOLD = 2
 _blocked_peers: dict[tuple[str, str], float] = {}

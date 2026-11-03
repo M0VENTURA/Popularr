@@ -20,17 +20,23 @@ def bulk_upsert_navidrome_tracks(conn: Any = None, tracks: list[dict[str, Any]] 
                     INSERT INTO tracks (id, title, artist, album, duration)
                     VALUES (:id, :title, :artist, :album, :duration)
                     ON CONFLICT (id) DO UPDATE SET
-                        title = CASE WHEN COALESCE(tracks.metadata_dirty_for_navidrome, FALSE)
+                        title = CASE WHEN tracks.title IS NULL OR TRIM(tracks.title) = ''
+                                     THEN EXCLUDED.title
+                                     WHEN COALESCE(tracks.metadata_dirty_for_navidrome, FALSE)
                                       AND tracks.local_tags_written_at IS NOT NULL
                                       AND (tracks.navidrome_imported_at IS NULL
                                            OR tracks.local_tags_written_at >= tracks.navidrome_imported_at)
                                      THEN tracks.title ELSE EXCLUDED.title END,
-                        artist = CASE WHEN COALESCE(tracks.metadata_dirty_for_navidrome, FALSE)
+                        artist = CASE WHEN tracks.artist IS NULL OR TRIM(tracks.artist) = ''
+                                      THEN EXCLUDED.artist
+                                      WHEN COALESCE(tracks.metadata_dirty_for_navidrome, FALSE)
                                        AND tracks.local_tags_written_at IS NOT NULL
                                        AND (tracks.navidrome_imported_at IS NULL
                                             OR tracks.local_tags_written_at >= tracks.navidrome_imported_at)
                                       THEN tracks.artist ELSE EXCLUDED.artist END,
-                        album = CASE WHEN COALESCE(tracks.metadata_dirty_for_navidrome, FALSE)
+                        album = CASE WHEN tracks.album IS NULL OR TRIM(tracks.album) = ''
+                                     THEN EXCLUDED.album
+                                     WHEN COALESCE(tracks.metadata_dirty_for_navidrome, FALSE)
                                       AND tracks.local_tags_written_at IS NOT NULL
                                       AND (tracks.navidrome_imported_at IS NULL
                                            OR tracks.local_tags_written_at >= tracks.navidrome_imported_at)

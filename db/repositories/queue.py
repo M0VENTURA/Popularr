@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
@@ -25,6 +25,45 @@ from helpers.normalization_service import normalize_match_text
 from services.queue.queue_constraints import COMPLETED_QUEUE_STATUSES
 
 logger = structlog.get_logger(__name__)
+
+
+def _as_utc_naive(value: Any) -> Any:
+    """Store ``next_retry_at`` as a naive UTC wall clock.
+
+    ⚠️ THE RETRY-WINDOW BUG. ``download_queue.next_retry_at`` is a naive
+    ``TIMESTAMP``, and the queue queries compared it with ``CURRENT_TIMESTAMP``
+    (a ``timestamptz``). PostgreSQL casts the column using the SESSION
+    ``TimeZone``, so an aware value written by one process
+    (``2026-11-04T01:24:11+00:00``) was stored as that session's wall clock,
+    and a worker with a different ``TimeZone`` read ``01:24`` as LOCAL — the
+    reported "backed off 12h, retried 80 minutes later".
+
+    Every explicit write goes through here and every due-time comparison binds
+    ``_utc_now_naive()`` (see the queue queries), so both sides are the same
+    UTC wall clock no matter which process/session wrote or read the row. A
+    naive input is taken as already-UTC (all callers pass aware UTC).
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return value
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed.isoformat(sep=" ")
+
+
+def _utc_now_naive() -> datetime:
+    """The due-time comparisons' right-hand side, in the same UTC wall clock."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 UPDATE_ALLOWED_COLUMNS = frozenset({
     "artist", "title", "album", "album_artist", "source", "priority",
@@ -238,6 +277,8 @@ def update_queue_item(queue_id: int, **kwargs: Any) -> dict[str, Any] | None:
 
     for key, value in updates.items():
         set_clauses.append(f"{key} = :{key}")
+        if key == "next_retry_at":
+            value = _as_utc_naive(value)
         params[key] = json.dumps(value) if isinstance(value, (dict, list)) else value
 
     if "copied_individually" in params:
@@ -272,10 +313,10 @@ def claim_queue_item(queue_id: int, status: str = "searching") -> dict[str, Any]
                     WHERE id = :qid
                       AND file_path IS NULL
                       AND status IN ('queued', 'backed_off', 'pending_release')
-                      AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
+                      AND (next_retry_at IS NULL OR next_retry_at <= :now_utc)
                     RETURNING *
                 """),
-                {"qid": queue_id, "status": status},
+                {"qid": queue_id, "status": status, "now_utc": _utc_now_naive()},
             )
             row = result.fetchone()
             return dict(row._mapping) if row else None
@@ -468,7 +509,7 @@ def get_ready_for_processing(limit: int = 100) -> list[dict[str, Any]]:
                     FROM download_queue
                     WHERE file_path IS NULL
                       AND status IN ('queued', 'backed_off', 'pending_release')
-                      AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
+                      AND (next_retry_at IS NULL OR next_retry_at <= :now_utc)
                       AND LOWER(COALESCE(source, '')) NOT IN ('local', 'discovered')
                     ORDER BY priority DESC,
                              COALESCE(retry_count, 0) ASC,
@@ -476,7 +517,7 @@ def get_ready_for_processing(limit: int = 100) -> list[dict[str, Any]]:
                              id ASC
                     LIMIT :limit
                 """),
-                {"limit": limit},
+                {"limit": limit, "now_utc": _utc_now_naive()},
             )
             return [dict(r._mapping) for r in result.fetchall()]
     except Exception as e:
@@ -495,9 +536,10 @@ def count_ready_for_processing() -> int:
                         FROM download_queue
                         WHERE file_path IS NULL
                           AND status IN ('queued', 'backed_off', 'pending_release')
-                          AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
+                          AND (next_retry_at IS NULL OR next_retry_at <= :now_utc)
                           AND LOWER(COALESCE(source, '')) NOT IN ('local', 'discovered')
-                    """)
+                    """),
+                    {"now_utc": _utc_now_naive()},
                 ).scalar()
                 or 0
             )
@@ -530,7 +572,7 @@ def requeue_due_failed_items(limit: int = 50) -> list[dict[str, Any]]:
                         FROM download_queue
                         WHERE status = 'failed'
                           AND file_path IS NULL
-                          AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
+                          AND (next_retry_at IS NULL OR next_retry_at <= :now_utc)
                           AND COALESCE(retry_count, 0) < :max_attempts
                           AND COALESCE(failure_reason, '') <> :cancelled
                           AND LOWER(COALESCE(source, '')) NOT IN ('local', 'discovered')
@@ -541,6 +583,7 @@ def requeue_due_failed_items(limit: int = 50) -> list[dict[str, Any]]:
                         "limit": limit,
                         "max_attempts": _queue_max_attempts(),
                         "cancelled": CANCELLED_REASON,
+                        "now_utc": _utc_now_naive(),
                     },
                 ).fetchall()
             ]
@@ -732,7 +775,7 @@ def schedule_queue_retry(
                 {
                     "qid": queue_id,
                     "status": status,
-                    "next_retry": next_retry_at,
+                    "next_retry": _as_utc_naive(next_retry_at),
                     "reason": reason,
                     "max_attempts": _queue_max_attempts(),
                 },
@@ -774,9 +817,13 @@ def mark_failed(
                     UPDATE download_queue
                     SET failure_reason = :reason,
                         retry_count = COALESCE(retry_count, 0) + :inc,
+                        -- ⚠️ ``:now_utc`` is a naive UTC wall clock, matching
+                        -- ``_as_utc_naive`` writes and every due-time read.
+                        -- Using the session's CURRENT_TIMESTAMP made the value
+                        -- depend on which process scheduled the retry.
                         next_retry_at = GREATEST(
-                            COALESCE(next_retry_at, CURRENT_TIMESTAMP),
-                            CURRENT_TIMESTAMP + (
+                            COALESCE(next_retry_at, :now_utc),
+                            :now_utc + (
                                 LEAST(
                                     :cap,
                                     COALESCE(retry_delay_minutes, :delay)
@@ -803,6 +850,7 @@ def mark_failed(
                     "delay": _queue_retry_delay_minutes(),
                     "cap": _queue_max_delay_minutes(),
                     "max_attempts": _queue_max_attempts(),
+                    "now_utc": _utc_now_naive(),
                 },
             ).fetchone()
         if not row:

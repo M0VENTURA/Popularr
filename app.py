@@ -109,8 +109,17 @@ def _keep_lock_alive(conn) -> None:
         except Exception:
             pass
 
+#: Guards against starting the services twice in ONE process (a reload or a
+#: second serving hook). The advisory lock below is per CONNECTION, so two
+#: checkouts in the same process would both succeed without this.
+_BACKGROUND_SERVICES_STARTED = False
+
+
 def _elect_leader_and_start_services(app_instance: Quart) -> None:
     """Ensure background tasks are only started on a single Hypercorn worker."""
+    global _BACKGROUND_SERVICES_STARTED
+    if _BACKGROUND_SERVICES_STARTED:
+        return
     if not _sqlalchemy_available:
         return
         
@@ -134,6 +143,7 @@ def _elect_leader_and_start_services(app_instance: Quart) -> None:
         
         if result:
             logging.getLogger(__name__).info("Acquired leader lock. Starting background services.")
+            _BACKGROUND_SERVICES_STARTED = True
             
             # Start the background tasks only on this specific worker
             initialize_app_services(app_instance)
@@ -153,8 +163,18 @@ def _elect_leader_and_start_services(app_instance: Quart) -> None:
     except Exception as exc:
         logging.getLogger(__name__).warning("Leader election failed: %s", exc)
 
-# Execute the leader election synchronously during app boot
-_elect_leader_and_start_services(app)
+# Leader election runs when the SERVER starts serving — NOT at import.
+#
+# ⚠️ THE DOUBLE "Download scheduler started" LOG. ``entrypoint.sh`` imports the
+# app for a pre-flight check (``python3 -c "from app import app"``) before
+# Hypercorn starts. Running this at import made that throwaway process take the
+# advisory lock and start the scheduler; it exited seconds later, then the real
+# Hypercorn leader started a second one — two "Download scheduler started"
+# lines per boot. Importing the app (tests, tooling, that pre-flight) must have
+# no background side effects.
+@app.before_serving
+async def _start_background_services_on_serving() -> None:
+    _elect_leader_and_start_services(app)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)

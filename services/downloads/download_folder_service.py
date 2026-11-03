@@ -10,12 +10,15 @@ Uses ``services.infrastructure.filesystem_service`` for all disk I/O.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
+import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 
 import structlog
 from sqlalchemy import text
@@ -1038,7 +1041,129 @@ def _apply_release_metadata_to_files(
     return applied
 
 
+def _folder_import_lock_key(folder_path: str) -> str:
+    """Stable, filesystem-safe lock key for one folder import.
+
+    The key is used in a lock-file name, so it must not contain path
+    separators. A SHA-1 of the normalized absolute path is both stable across
+    threads/processes and safe to use as a filename.
+    """
+    try:
+        normalized = os.path.normcase(os.path.abspath(str(folder_path or "")))
+    except Exception:
+        normalized = str(folder_path or "")
+    digest = hashlib.sha1(normalized.encode("utf-8", "replace")).hexdigest()
+    return f"popularr_folder_import_{digest}"
+
+
+#: Per-folder in-process locks. ``threading.Lock`` is non-reentrant, so a
+#: second thread (the reported race) gets ``False`` immediately instead of
+#: queueing up to repeat the same import.
+_FOLDER_IMPORT_LOCKS: dict[str, threading.Lock] = {}
+_FOLDER_IMPORT_LOCKS_GUARD = threading.Lock()
+
+
+def _try_cross_process_lock(key: str) -> Any:
+    """Best-effort ``flock`` handle for a folder import.
+
+    Returns the open handle on success, ``False`` when another PROCESS holds
+    it, and ``None`` when locking is unavailable (Windows / no state dir) so
+    the caller fails OPEN rather than refusing every import. The kernel
+    releases the lock if the holder crashes.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows dev/tests
+        return None
+    try:
+        from helpers.config_helpers import get_state_directory
+
+        directory = os.path.join(get_state_directory(), "folder_import_locks")
+        os.makedirs(directory, exist_ok=True)
+        handle = open(os.path.join(directory, f"{key}.lock"), "a+b")
+    except Exception:
+        return None
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            handle.close()
+        except Exception:
+            pass
+        return False
+    return handle
+
+
+@contextmanager
+def _folder_import_lock(folder_path: str) -> Iterator[bool]:
+    """Serialize one folder import across threads AND processes."""
+    key = _folder_import_lock_key(folder_path)
+    with _FOLDER_IMPORT_LOCKS_GUARD:
+        lock = _FOLDER_IMPORT_LOCKS.setdefault(key, threading.Lock())
+
+    acquired = lock.acquire(blocking=False)
+    handle: Any = None
+    if acquired:
+        handle = _try_cross_process_lock(key)
+        if handle is False:
+            lock.release()
+            acquired = False
+            handle = None
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            if handle is not None:
+                try:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            lock.release()
+
+
 def match_folder_to_release(folder_path: str, mb_id: str) -> dict[str, Any]:
+    """Import one folder into the library — exactly once at a time.
+
+    ⚠️ THE DOUBLE-IMPORT RACE. Two threads (a manual action and an automatic
+    pass, or two duplicated schedulers) processed the same folder at the same
+    millisecond: both converted the FLAC, the first moved/deleted it, and the
+    second logged ``[Errno 2] No such file or directory``. The same folder even
+    reported ``moved=12`` in one pass and ``moved=8`` in the other.
+
+    The import is now serialised per folder: a non-blocking ``threading.Lock``
+    covers the two-thread race, and a best-effort ``flock`` (fail-open when
+    unavailable) covers a second process. A second caller does NOT wait — it
+    returns immediately as ``skipped``, because the first pass is already
+    doing the work and the folder will be gone/marked when it finishes.
+    """
+    try:
+        folder_abs, _downloads_abs = _resolve_folder_abs(folder_path)
+    except Exception:
+        folder_abs = None
+    lock_target = folder_abs or folder_path
+
+    with _folder_import_lock(lock_target) as acquired:
+        if not acquired:
+            logger.info(
+                "Folder import already in progress — skipping duplicate pass",
+                folder=lock_target,
+            )
+            return {
+                "success": True,
+                "skipped": True,
+                "moved": 0,
+                "reason": "folder import already in progress",
+            }
+        return _match_folder_to_release_locked(folder_path, mb_id)
+
+
+def _match_folder_to_release_locked(folder_path: str, mb_id: str) -> dict[str, Any]:
     try:
         mb_id = _extract_mb_id(mb_id)
         if not mb_id:

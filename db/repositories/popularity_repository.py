@@ -472,7 +472,13 @@ def _execute_save(session, track_data: dict) -> bool:
             # the corrected value. This is deliberately narrow and timestamped:
             # an ordinary Navidrome-owned row still updates normally.
             update_parts.append(
-                f"{k}=CASE WHEN COALESCE(tracks.metadata_dirty_for_navidrome, FALSE) "
+                # An EMPTY local value was never a correction: let the provider
+                # fill it even on a dirty row. Otherwise one title edit froze an
+                # empty disc_number/albumversion against Navidrome's value.
+                f"{k}=CASE WHEN tracks.{k} IS NULL "
+                f"OR TRIM(CAST(tracks.{k} AS TEXT)) = '' "
+                f"THEN EXCLUDED.{k} "
+                f"WHEN COALESCE(tracks.metadata_dirty_for_navidrome, FALSE) "
                 f"AND tracks.local_tags_written_at IS NOT NULL "
                 f"AND (tracks.navidrome_imported_at IS NULL "
                 f"OR tracks.local_tags_written_at >= tracks.navidrome_imported_at) "

@@ -98,6 +98,32 @@ _TRANSIENT_ERROR_NAMES = frozenset({
 })
 
 
+#: slskd answers a search with HTTP 409 while its Soulseek session is
+#: re-authenticating:
+#:     "The server connection must be connected and logged in to perform a
+#:      search (currently: Connected)"
+#: That is an INFRASTRUCTURE outage, not an empty search. Waiting briefly keeps
+#: the search going; if it still fails we report "unavailable" so the queue
+#: takes the disconnected path (5-minute retry, NO attempt counted) instead of
+#: recording ``no_results`` and climbing the 4h/12h/24h backoff ladder.
+_SLSKD_LOGIN_RETRY_SECONDS = 10.0
+_SLSKD_LOGIN_RETRY_ATTEMPTS = 3
+
+
+def _is_not_logged_in_409(resp: Any) -> bool:
+    """True for slskd's 409 "connected but not logged in" search rejection."""
+    try:
+        if int(getattr(resp, "status_code", 0) or 0) != 409:
+            return False
+        body = str(getattr(resp, "text", "") or "").lower()
+    except Exception:
+        return False
+    return (
+        "must be connected and logged in" in body
+        or "not logged in" in body
+    )
+
+
 def _is_transient_error(exc: BaseException) -> bool:
     """Return True when ``exc`` looks like a retryable network/timeout error."""
     if type(exc).__name__ in _TRANSIENT_ERROR_NAMES:
@@ -402,6 +428,11 @@ class SlskdService:
         self._cleanup_interval_override = (
             None if search_cleanup_interval is None else int(search_cleanup_interval)
         )
+        #: Set by ``start_search`` when the search could not be attempted for
+        #: an INFRASTRUCTURE reason (slskd's Soulseek session not logged in).
+        #: ``search_and_filter`` translates this to ``None`` — the caller's
+        #: "disconnected, do not count a failed search" outcome.
+        self.search_unavailable_reason = ""
 
     # ── Search OWNERSHIP (process-wide) ───────────────────────────────────
     # ``clear_stale_searches`` used to cancel EVERY terminal search and any
@@ -532,6 +563,7 @@ class SlskdService:
         failure the server may already have accepted the request: we check
         whether OUR id exists before retrying, and return it if it does.
         """
+        self.search_unavailable_reason = ""
         if not self.http.enabled:
             return None
 
@@ -545,6 +577,28 @@ class SlskdService:
                     return search_id
 
                 body_preview = (resp.text or "")[:200]
+
+                # 409 = "server connection must be connected and logged in".
+                # slskd is re-authenticating; wait and retry rather than
+                # letting the caller record this as a fruitless search.
+                if _is_not_logged_in_409(resp):
+                    self.search_unavailable_reason = "soulseek_not_logged_in"
+                    if attempt < min(max_attempts, _SLSKD_LOGIN_RETRY_ATTEMPTS):
+                        logger.warning(
+                            "slskd not logged in to Soulseek — retrying search",
+                            attempt=attempt,
+                            wait_seconds=_SLSKD_LOGIN_RETRY_SECONDS,
+                            query=query,
+                        )
+                        time.sleep(_SLSKD_LOGIN_RETRY_SECONDS)
+                        continue
+                    logger.warning(
+                        "slskd search unavailable — Soulseek session not logged in",
+                        attempts=attempt,
+                        query=query,
+                    )
+                    break
+
                 retryable_429 = resp.status_code == 429
                 if retryable_429 and attempt < max_attempts:
                     wait_seconds = self._retry_after_or_backoff(resp, attempt)
@@ -973,6 +1027,17 @@ class SlskdService:
             min_bitrate = 0
         search_id = self.start_search(query, timeout=timeout)
         if not search_id:
+            if self.search_unavailable_reason:
+                # slskd's Soulseek session was not logged in even after the
+                # brief retry window. This is the SAME outcome as `is_connected`
+                # being false: the caller must wait and retry the queue item,
+                # not record `no_results` and climb the backoff ladder.
+                logger.warning(
+                    "Soulseek search unavailable — treated as disconnected",
+                    query=query,
+                    reason=self.search_unavailable_reason,
+                )
+                return None
             return []
 
         search_wall_started = time.monotonic()

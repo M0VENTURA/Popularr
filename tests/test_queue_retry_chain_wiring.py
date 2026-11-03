@@ -227,9 +227,10 @@ class TestDownloadFailureReturnsToQueue:
         assert "WHEN status IN ('backed_off', 'pending_release') THEN status" in sql, (
             "a scheduled status must survive a later failure"
         )
-        # The window only ever moves forward.
+        # The window only ever moves forward. ``:now_utc`` is a naive UTC
+        # wall clock, so the floor no longer depends on the session timezone.
         assert "GREATEST" in sql
-        assert "COALESCE(next_retry_at, CURRENT_TIMESTAMP)" in sql
+        assert "COALESCE(next_retry_at, :now_utc)" in sql
 
     def test_mark_failed_increments_retry_count(self, recording_session):
         from db.repositories.queue import mark_failed

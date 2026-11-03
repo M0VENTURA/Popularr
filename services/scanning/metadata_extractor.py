@@ -94,6 +94,82 @@ def _normalize_people(value: Any) -> list[str]:
     return []
 
 
+#: Navidrome/OpenSubsonic joins multiple credits with " • "; files use
+#: comma/semicolon. ONE splitter keeps every people field comparable.
+_CREDIT_SPLIT_RE = re.compile(
+    r"\s*(?:•|·|;|\||,|/|\s&\s|\band\b)\s*", re.IGNORECASE,
+)
+
+
+def split_credit_names(value: Any) -> list[str]:
+    """Split a composer/writer credit string (or list) into individual names."""
+    if isinstance(value, (list, tuple, set)):
+        raw = [
+            str(item.get("name", "")) if isinstance(item, dict) else str(item)
+            for item in value
+        ]
+        value = ", ".join(raw)
+    if value is None:
+        return []
+    return [
+        re.sub(r"\s+", " ", part).strip()
+        for part in _CREDIT_SPLIT_RE.split(str(value))
+        if str(part or "").strip()
+    ]
+
+
+def credit_name_key(name: Any) -> str:
+    return re.sub(r"\s+", " ", str(name or "")).strip().casefold()
+
+
+def dedupe_credit_names(names: list[str]) -> list[str]:
+    """Drop repeated names while keeping first-seen order/spelling."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names or []:
+        key = credit_name_key(name)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(name)
+    return out
+
+
+def _composer_credit(track: dict[str, Any], get_tag_value: Callable[..., Any]) -> str:
+    """The COMPOSER credit, deduplicated and free of non-composer roles.
+
+    ⭐ ``displayComposer`` is a full credit roll: Navidrome appends producers,
+    engineers, mixers and the performing band to it, joined with ``" • "``.
+    Storing that in ``tracks.composer`` (and then writing it to the TCOM/
+    COMPOSER tag) is the reported "Terry Date, Sam Hofstedt … Deftones" bloat.
+    An explicit composer tag is trusted as-is; the display fallback has the
+    other credited roles removed.
+    """
+    explicit = get_tag_value("composer", "composers")
+    source = explicit or _contributor_names(track, "composer")
+    names = dedupe_credit_names(split_credit_names(source))
+
+    if not names:
+        display = get_tag_value("displayComposer")
+        names = dedupe_credit_names(split_credit_names(display))
+        if names:
+            exclude: set[str] = set()
+            for role in (
+                "producer", "engineer", "mixer", "remixer", "performer",
+                "conductor", "djmixer",
+            ):
+                for name in split_credit_names(
+                    get_tag_value(role) or _contributor_names(track, role)
+                ):
+                    exclude.add(credit_name_key(name))
+            for name in split_credit_names(track.get("artist")):
+                exclude.add(credit_name_key(name))
+            for name in split_credit_names(track.get("albumArtist")):
+                exclude.add(credit_name_key(name))
+            names = [n for n in names if credit_name_key(n) not in exclude]
+
+    return ", ".join(names)
+
+
 def _extract_genres(track: dict[str, Any]) -> tuple[str, str]:
     """Return Navidrome genre string and primary genre."""
     genres: list[str] = []
@@ -326,7 +402,7 @@ def extract_track_metadata(
         "movementtotal": get_tag_value("movementtotal", "mvcn") or "",
         "key": get_tag_value("key", "initialkey") or "",
         "explicitstatus": get_tag_value("explicitstatus", "explicitStatus", "explicit", "itunesadvisory") or "",
-        "composer": get_tag_value("composer", "composers", "displayComposer") or _contributor_names(track, "composer") or "",
+        "composer": _composer_credit(track, get_tag_value),
         "lyricist": get_tag_value("lyricist", "lyricists", "textwriter") or "",
         "conductor": get_tag_value("conductor") or "",
         "remixer": get_tag_value("remixer", "mixartist", "tpe4") or "",
@@ -423,3 +499,4 @@ def extract_album_metadata(album: dict[str, Any]) -> dict[str, Any]:
         out["albumversion"] = version
 
     return out
+

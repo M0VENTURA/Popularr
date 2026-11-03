@@ -63,10 +63,20 @@ class _FakeSlskd:
 
 @pytest.fixture(autouse=True)
 def _clean_blocked_peers():
-    """``_blocked_peers`` is module-global by design — isolate every test."""
+    """The peer memories are module-global by design — isolate every test.
+
+    Clearing only ``_blocked_peers`` let the PEER-wide cooldown
+    (``_blocked_usernames``) and the stall history
+    (``_peer_stall_timestamps``) leak from one test into the next, so an
+    earlier stall made later "must be left alone" tests fail.
+    """
     dps._blocked_peers.clear()
+    dps._blocked_usernames.clear()
+    dps._peer_stall_timestamps.clear()
     yield
     dps._blocked_peers.clear()
+    dps._blocked_usernames.clear()
+    dps._peer_stall_timestamps.clear()
 
 
 @pytest.fixture

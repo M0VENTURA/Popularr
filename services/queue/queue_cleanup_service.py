@@ -13,6 +13,7 @@ Architecture:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Mapping, Tuple
 
 import structlog
@@ -117,12 +118,18 @@ def cleanup_stuck_items() -> dict[str, Any]:
                         retry_count = COALESCE(retry_count, 0) + 1,
                         -- Wait before the auto-retry picks it up, instead of
                         -- re-queuing it on the very next cycle.
-                        next_retry_at = CURRENT_TIMESTAMP + make_interval(mins => :delay),
+                        next_retry_at = :now_utc + make_interval(mins => :delay),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'downloading'
                       AND updated_at < CURRENT_TIMESTAMP - make_interval(secs => :seconds)
                 """),
-                {"seconds": _STUCK_DOWNLOAD_SECONDS, "delay": _retry_delay_minutes()},
+                {
+                    "seconds": _STUCK_DOWNLOAD_SECONDS,
+                    "delay": _retry_delay_minutes(),
+                    # ``next_retry_at`` is an explicit UTC wall clock everywhere
+                    # else; the session's CURRENT_TIMESTAMP is not assumed.
+                    "now_utc": datetime.now(timezone.utc).replace(tzinfo=None),
+                },
             )
             downloading_reset = int(result.rowcount or 0)
 

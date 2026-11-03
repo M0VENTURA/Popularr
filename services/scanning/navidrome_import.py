@@ -197,6 +197,11 @@ _PREFETCH_BASE_COLUMNS: tuple[str, ...] = (
     "id", "album", "album_artist", "duration", "track_number", "year",
     "file_path", "title", "artist", "disc_number", "musicbrainz_trackid",
     "recording_mbid", "mbid", "navidrome_genres",
+    # Non-composer roles. The composer comparison removes these names, so a
+    # ``displayComposer`` credit roll with producers/engineers/band in it
+    # compares equal to the cleaned provider value and is healed on import.
+    "producer", "engineer", "mixer", "remixer", "performer",
+    "conductor", "djmixer",
 )
 _PREFETCH_AUTHORITY_COLUMNS: tuple[str, ...] = tuple(
     field
@@ -360,8 +365,10 @@ def _has_various_artist_part(value: str) -> bool:
     component (``"HIM"``), which used to win the resolution and made a VA
     compilation look like HIM's album.
     """
+    # ``;``/``/`` may be written WITHOUT surrounding spaces
+    # ("Various Artists; HIM"), which the old ``\s+...\s+`` required.
     parts = re.split(
-        r"\s*[•·]+\s*|\s+[/|;]+\s+", str(value or "")
+        r"\s*[•·]+\s*|\s*[/|;]+\s*", str(value or "")
     )
     return any(
         part.strip().casefold() in VA_ALBUM_ARTIST_VARIANTS
@@ -569,6 +576,13 @@ def prefetch_artist_state(*, canonical_artist_name: str) -> dict[str, Any]:
                 "recording_mbid": mapping.get("recording_mbid") or "",
                 "mbid": mapping.get("mbid") or "",
                 "navidrome_genres": mapping.get("navidrome_genres") or "",
+                "producer": mapping.get("producer") or "",
+                "engineer": mapping.get("engineer") or "",
+                "mixer": mapping.get("mixer") or "",
+                "remixer": mapping.get("remixer") or "",
+                "performer": mapping.get("performer") or "",
+                "conductor": mapping.get("conductor") or "",
+                "djmixer": mapping.get("djmixer") or "",
                 "local_tags_written_at": mapping.get("local_tags_written_at"),
                 "metadata_dirty_for_navidrome": bool(
                     mapping.get("metadata_dirty_for_navidrome")
@@ -922,6 +936,10 @@ def scan_artist_to_db(
                 )
 
         _albums_matched_filter = 0
+        #: Unchanged albums skipped by the fingerprint cache. Counted so the
+        #: end-of-artist line can explain an index that has no "Importing album"
+        #: line without flooding the log with one line per unchanged album.
+        _cached_skip_count = 0
         # Set False if a stop request breaks the loop: the live-id set below
         # would then be INCOMPLETE (albums never fetched), and running the
         # removed-album cleanup off it would delete tracks that are still in
@@ -943,10 +961,22 @@ def scan_artist_to_db(
                 diff_mode=diff_mode,
                 changed_album_names=changed_album_names,
             ):
+                # ⭐ A skipped index used to vanish from the log entirely: the
+                # report saw 1,2,3,5,6 and could not tell what happened to 4.
+                log_unified(
+                    f"[NAVIDROME_IMPORT] {artist_name}: skipped album "
+                    f"{album_index}/{len(albums)} '{album_name or '?'}' "
+                    "(album filter / nothing to import)"
+                )
                 continue
 
             album_id = album.get("id")
             if not album_id:
+                log_unified(
+                    f"[NAVIDROME_IMPORT] {artist_name}: skipped album "
+                    f"{album_index}/{len(albums)} '{album_name or '?'}' "
+                    "(no Navidrome album id)"
+                )
                 continue
             if dedupe_albums and not _claim_album_id(str(album_id)):
                 logger.debug(
@@ -954,6 +984,11 @@ def scan_artist_to_db(
                     artist=artist_name,
                     album=album_name,
                     album_id=album_id,
+                )
+                log_unified(
+                    f"[NAVIDROME_IMPORT] {artist_name}: skipped album "
+                    f"{album_index}/{len(albums)} '{album_name or '?'}' "
+                    "(already imported under another artist view)"
                 )
                 continue
 
@@ -989,6 +1024,12 @@ def scan_artist_to_db(
                         album=album_name,
                         album_id=album_id,
                         tracks=len(_content_ids),
+                    )
+                    log_unified(
+                        f"[NAVIDROME_IMPORT] {artist_name}: skipped album "
+                        f"{album_index}/{len(albums)} '{album_name or '?'}' "
+                        f"({len(_content_ids)} track(s) already imported under "
+                        "another artist view)"
                     )
                     continue
 
@@ -1153,6 +1194,7 @@ def scan_artist_to_db(
                     metadata_fingerprint=_incoming_fingerprint,
                     scan_marker=scan_marker,
                 )
+                _cached_skip_count += 1
                 continue
 
             album_mbids_seen: set[str] = set()
@@ -1296,6 +1338,17 @@ def scan_artist_to_db(
                     live_track_ids=_ambiguous_old_ids or None,
                     allow_cleanup=allow_cleanup,
                 )
+
+        # Explain any album index that had no "Importing album" line. Fast/
+        # fingerprint skips are the normal case for an unchanged library, so a
+        # per-album line would flood the log; one summary makes the gap visible.
+        _unchanged_total = _cached_skip_count + len(_fast_skip_album_ids)
+        if _unchanged_total:
+            log_unified(
+                f"[NAVIDROME_IMPORT] {artist_name}: skipped "
+                f"{_unchanged_total} unchanged album(s) "
+                "(already imported, no changes)"
+            )
 
         # Deferred cleanup for names that collide once edition markers are
         # stripped.  Runs only when every entry of the name was fetched, so the

@@ -40,8 +40,15 @@ from services.scanning.scan_state import (
 logger = structlog.get_logger("popularr.navidrome_import")
 
 # Default worker count for parallel artist import.
-# Can be overridden via config or env var.
-_PARALLEL_WORKERS = int(os.environ.get("POPULARLR_IMPORT_WORKERS", "4"))
+#
+# ⚠️ KEEP THIS LOW. Each artist worker fetches its album tracklists with up to
+# ``navidrome.album_fetch_workers`` (default 4) threads, so 4 artists could put
+# 16 concurrent requests on a SQLite-backed Navidrome. The reported burst drove
+# `Fetched X album(s)` from 0.0s to 6.7–9.8s. Two artists (2 × 4 = 8 requests)
+# keeps the import moving without the stall. Overridable via env/config.
+_PARALLEL_WORKERS = max(
+    1, min(4, int(os.environ.get("POPULARLR_IMPORT_WORKERS", "2")))
+)
 
 
 def _epoch(value: Any) -> float | None:
