@@ -181,8 +181,13 @@ class TestTheRunnerProcessesEveryAlbumForFinalise:
         "do not search album release" album's list is CSV-sourced, so the MB
         refresh must skip it); the finalise exclusion is unchanged and still
         sits in the same ``if`` condition."""
+        # The recommend-stash runs in BOTH apply and recommend-only modes now
+        # (apply mode offers whatever it could not apply, exactly like a manual
+        # Lookup MBID), so the incident `_stash_only` prefix is gone; the
+        # finalise/popularity/singles exclusions that keep a DB-only pass off the
+        # network are unchanged.
         assert (
-            'if _stash_only and not options.get("popularity_only") '
+            'if not _track_scoped and not options.get("popularity_only") '
             'and not options.get("singles_detection_only") and not _mode_finalise:'
         ) in RUNNER_SOURCE
         idx = RUNNER_SOURCE.index('if not options.get("popularity_only") ')

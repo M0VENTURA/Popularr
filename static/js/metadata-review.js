@@ -536,6 +536,18 @@
     stageTrackChanges(data.track_changes || []);
     renderDurationChecks(data.duration_checks || []);
     showBanner(data.counts || {}, data.release_title);
+
+    // The propose endpoint STASHES this proposal server-side so the review
+    // survives a reload. Mirror that into #pending_recommendations, exactly
+    // like loadPendingRecommendations() does: the Save Metadata handler only
+    // discards the stash when this hidden field is present. Without it the
+    // first save left the stash behind, the reload re-rendered the same review
+    // and marked the form dirty, and the user was asked to save it a second
+    // time.
+    const pendingInput = document.getElementById('pending_recommendations');
+    if (pendingInput) pendingInput.value = JSON.stringify(data);
+
+    renderPendingActions();
     markDirty();
     return data;
   }

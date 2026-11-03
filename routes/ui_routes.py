@@ -3367,10 +3367,14 @@ async def album_detail(album_path: str) -> Any:
         if _cover_embedded:
             await flash("🎨 Album cover art downloaded and embedded into track files.", "success")
 
-        # A saved review means the stashed recommendations were just applied —
-        # clear them so the album page does not keep offering stale suggestions
-        # (the same "clear then re-stash" lifecycle the scan-side writer uses).
-        if _has_pending_recommendations and updated_count > 0:
+        # A submitted review means the stashed recommendations were the values
+        # already loaded into the form — clear them so the album page does not
+        # keep offering stale suggestions (the same "clear then re-stash"
+        # lifecycle the scan-side writer uses). Not gated on ``updated_count``:
+        # a save whose proposal values already matched the DB reported nothing
+        # changed yet left the stash in place, so the reload re-rendered the
+        # same review and prompted to save it again.
+        if _has_pending_recommendations:
             try:
                 from services.metadata.pending_update_service import (
                     discard_album_recommendations,

@@ -4271,29 +4271,29 @@ def run_scan(
                         artist=artist, album=album, tracks=tracks, options=options,
                     ) or set()
 
-                # --- RECOMMEND-INSTEAD-OF-APPLY (metadata_update.apply_during_scan) ---
-                # When the Config page has metadata updating set to "Recommend only",
-                # the scan must NOT write MusicBrainz metadata. Instead it records
-                # the changes it would have made against the album's tracks
-                # (tracks.pending_mb_updates) so the album and artist pages can offer
-                # them with save/discard.
+                # --- OFFER WHATEVER WAS NOT APPLIED FOR REVIEW ---
+                # Record what a metadata import would STILL change on this
+                # album's tracks (``tracks.pending_mb_updates``) so the album and
+                # artist pages can offer it with save/discard.
                 #
-                # Deliberately placed here — after the album stage has resolved and
-                # persisted the album's release MBID, so the proposal is built from a
-                # known release rather than a fresh search — and BEFORE the file-tag
-                # sync below, so the same pass does not then write the very metadata
-                # that was deferred.
-                _stash_only = False
-                try:
-                    from helpers.config_helpers import get_metadata_update_config as _get_mu
-                    _stash_only = not bool((_get_mu() or {}).get("apply_during_scan", True))
-                except Exception as exc:
-                    # Fail OPEN: an unreadable config must not silently stop the
-                    # scan from applying metadata it has always applied.
-                    logger.debug("Could not read metadata_update config", error=str(exc))
-                    _stash_only = False
-
-                if _stash_only and not _track_scoped and not options.get("popularity_only") and not options.get("singles_detection_only") and not _mode_finalise:
+                # This used to run ONLY when metadata updating was set to
+                # "Recommend only". In APPLY mode a track the scan considered
+                # fully resolved short-circuited before the title block, so a
+                # release title that differed from the local one (for example a
+                # local "Parasite (CORERADIO.RU)" against the release's
+                # "Parasite") was neither applied nor offered — the album page
+                # showed nothing until the user ran a manual "Lookup MBID".
+                # Building the SAME proposal the manual lookup builds, against
+                # the DB as it stands after the track jobs, leaves only the
+                # changes the scan could not apply and offers them here. When the
+                # scan applied everything the proposal is empty and the stash is
+                # cleared, so nothing extra is prompted.
+                #
+                # Deliberately placed here — after the album stage resolved and
+                # persisted the release MBID and after the per-track jobs ran —
+                # and BEFORE the file-tag sync below, so it never re-writes what
+                # the scan already applied.
+                if not _track_scoped and not options.get("popularity_only") and not options.get("singles_detection_only") and not _mode_finalise:
                     try:
                         _release_mbid = ""
                         for _ctx in track_contexts:
@@ -4307,7 +4307,63 @@ def run_scan(
                             if _release_mbid:
                                 break
 
-                        if _release_mbid:
+                        # A just-identified album may not have the MBID on the
+                        # loaded rows yet — read the persisted value.
+                        if not _release_mbid:
+                            try:
+                                from services.popularity.stages.album_stage import (
+                                    _resolve_album_release_mbid,
+                                )
+
+                                _release_mbid = _resolve_album_release_mbid(artist, album)
+                            except Exception:
+                                _release_mbid = ""
+
+                        # "Recommend only" stashes every difference, as it always
+                        # has. In APPLY mode we only pay for a proposal (a
+                        # rate-limited release read) when the album release
+                        # actually names a track differently from the local
+                        # title — the one gap a completed scan can leave behind,
+                        # because a fully-resolved track short-circuits before
+                        # the title block. Albums already in sync cost nothing.
+                        _recommend_only = False
+                        try:
+                            from helpers.config_helpers import get_metadata_update_config as _get_mu
+                            _recommend_only = not bool(
+                                (_get_mu() or {}).get("apply_during_scan", True)
+                            )
+                        except Exception as exc:
+                            # Fail OPEN: an unreadable config must not stop the
+                            # scan from offering the changes it has always
+                            # offered in recommend-only mode.
+                            logger.debug("Could not read metadata_update config", error=str(exc))
+                            _recommend_only = False
+
+                        _mb_batch = options.get("mb_batch_metadata") or {}
+                        # No batch identity at all: a title gap cannot be ruled
+                        # out cheaply, so fall back to building the proposal.
+                        _has_title_gap = not _mb_batch
+                        if _release_mbid and not _recommend_only and not _has_title_gap:
+                            for _ctx in track_contexts:
+                                _row = _ctx.get("track") or {}
+                                _local_title = str(_row.get("title") or "").strip()
+                                if not _local_title:
+                                    continue
+                                _entry = _mb_batch.get(album_recording_batch_key(
+                                    str(_row.get("artist") or "").strip(),
+                                    _local_title,
+                                    _row.get("disc_number"),
+                                    _row.get("track_number"),
+                                ))
+                                _release_title = str((_entry or {}).get("title") or "").strip()
+                                if (
+                                    _release_title
+                                    and _release_title.casefold() != _local_title.casefold()
+                                ):
+                                    _has_title_gap = True
+                                    break
+
+                        if _release_mbid and (_recommend_only or _has_title_gap):
                             from services.metadata.metadata_proposal_service import (
                                 propose_album_metadata,
                             )
@@ -4319,9 +4375,14 @@ def run_scan(
                             _stash = stash_album_recommendations(artist, album, _proposal)
                             if _stash.get("stashed"):
                                 logger.debug(
-                                    "[METADATA_REVIEW] stashed recommendations instead of applying",
+                                    "[METADATA_REVIEW] stashed unapplied MusicBrainz changes for review",
                                     artist=artist, album=album, stashed=_stash.get("stashed"),
                                 )
+                        elif _release_mbid:
+                            logger.debug(
+                                "[METADATA_REVIEW] release titles already applied — nothing to offer",
+                                artist=artist, album=album,
+                            )
                         else:
                             logger.debug(
                                 "[METADATA_REVIEW] no release MBID resolved — nothing to recommend",

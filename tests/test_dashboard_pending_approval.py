@@ -236,8 +236,10 @@ class TestApprovingRemovesAnAlbumFromTheList:
         idx = src.index("discard_album_recommendations(")
         window = src[max(0, idx - 700): idx]
         assert "_has_pending_recommendations" in window, (
-            "the clear is gated on there being pending recommendations AND on "
-            "the save having written something"
+            "the clear must be gated on the submitted pending-recommendations "
+            "flag — NOT on updated_count, so a save whose proposal values "
+            "already matched the DB cannot leave the stale review in place and "
+            "prompt for a second save"
         )
 
 
